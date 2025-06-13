@@ -1,0 +1,29 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block content %}
+  <h1>{{ title }}</h1>
+
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit" name="action" value="search" class="default">Search Again</button>
+
+    {% if results %}
+      <h2>Results</h2>
+      <ul>
+        {% for item in results %}
+          <li>
+            <label>
+              <input type="checkbox" name="selected_items" value="{{ item|json_script:'item_data' }}" />
+              <strong>{{ item.name }}</strong> - {{ item.calories }} kcal
+            </label>
+          </li>
+        {% endfor %}
+      </ul>
+      <button type="submit" name="action" value="import" class="default">Import Selected</button>
+    {% else %}
+      <p>No results found.</p>
+    {% endif %}
+  </form>
+{% endblock %}

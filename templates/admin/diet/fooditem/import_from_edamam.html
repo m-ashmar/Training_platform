@@ -1,0 +1,17 @@
+<!-- templates/admin/diet/fooditem/import_from_edamam.html -->
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div class="content-main">
+    <h1>Import Food from Edamam API</h1>
+    <form method="post">
+        {% csrf_token %}
+        <div class="form-row">
+            {{ form.search_query.label_tag }}
+            {{ form.search_query }}
+        </div>
+        <div class="submit-row">
+            <input type="submit" value="Search Edamam" class="default" name="apply">
+        </div>
+    </form>
+</div>
+{% endblock %}

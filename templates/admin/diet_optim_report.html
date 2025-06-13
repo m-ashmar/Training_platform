@@ -1,0 +1,52 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<div class="content-main">
+    <h1>Diet Optimization Report</h1>
+    
+    <div class="report-section">
+        <h2>User Information</h2>
+        <p><strong>User:</strong> {{ report.user }}</p>
+        <p><strong>Goal:</strong> {{ report.goal }}</p>
+        <p><strong>Target Calories:</strong> {{ report.target_calories|floatformat }}</p>
+    </div>
+
+    <div class="report-section">
+        <h2>Optimization Details</h2>
+        <p><strong>Status:</strong> {{ report.status|title }}</p>
+        <p><strong>Available Foods:</strong> {{ report.total_foods }}</p>
+        <p><strong>Used Foods:</strong> {{ report.used_foods }}</p>
+    </div>
+
+    <div class="report-section">
+        <h2>Meal Breakdown</h2>
+        {% for meal_type, foods in report.meal_breakdown.items %}
+        <h3>{{ meal_type }}</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Food</th>
+                    <th>Servings</th>
+                    <th>Calories</th>
+                    <th>Protein</th>
+                    <th>Carbs</th>
+                    <th>Fat</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for food in foods %}
+                <tr>
+                    <td>{{ food.food }}</td>
+                    <td>{{ food.servings|floatformat }}</td>
+                    <td>{{ food.calories|floatformat }}</td>
+                    <td>{{ food.protein|floatformat }}g</td>
+                    <td>{{ food.carbs|floatformat }}g</td>
+                    <td>{{ food.fat|floatformat }}g</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
