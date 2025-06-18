@@ -1,6 +1,6 @@
 # Training Platform
 
-A comprehensive Django-based training platform with advanced subscription management and Syrian bank payment gateway integration.
+A comprehensive Django-based training platform with advanced subscription management and Syrian bank payment gateway integration. This project is currently under active development.
 
 ## Features
 
@@ -10,7 +10,7 @@ A comprehensive Django-based training platform with advanced subscription manage
 - **Workout Routines**: Customizable exercise routines and progress tracking
 - **Challenges**: Interactive fitness challenges and competitions
 
-### Subscription System (v2.0)
+### Subscription System (In Development)
 - **Multi-tier Subscriptions**: Basic, Premium, and Enterprise plans
 - **Syrian Bank Integration**: Native support for Syrian payment gateways
   - Syriatel Cash
@@ -191,40 +191,25 @@ python manage.py test subscription.tests
 - **Rate Limiting**: API rate limiting protection
 - **CORS Configuration**: Cross-origin request security
 
-## Deployment
+## Development Status
 
-### Production Setup
-```bash
-# Collect static files
-python manage.py collectstatic
+### Current Development
+- **Subscription System**: Core functionality implemented, testing in progress
+- **Payment Gateways**: Integration completed, requires real API credentials
+- **Frontend Integration**: Flutter screens created, needs backend integration
+- **Testing**: Comprehensive test suite implemented
+- **Documentation**: Complete documentation available
 
-# Run migrations
-python manage.py migrate
-
-# Start production server
-gunicorn training_platform.wsgi:application
-```
-
-### Docker Deployment
-```bash
-docker-compose up -d
-```
-
-## Monitoring
-
-### Logging
-- Structured logging with JSON format
-- Payment gateway transaction logs
-- Error tracking and alerting
-- Performance monitoring
-
-### Health Checks
-- Database connectivity
-- Payment gateway status
-- Webhook endpoint health
-- System resource monitoring
+### Next Steps
+- Complete frontend-backend integration
+- Implement real payment gateway testing
+- Performance optimization
+- Security audit
+- Production deployment preparation
 
 ## Contributing
+
+This project is currently in active development. For collaboration:
 
 1. Fork the repository
 2. Create a feature branch
@@ -236,7 +221,7 @@ docker-compose up -d
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Version 2.0 - What's New
+## Recent Development Updates
 
 ### Major Features Added
 - **Complete Subscription System**: Multi-tier subscription management
@@ -262,8 +247,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-For support and questions:
-- Email: support@trainingplatform.com
+For development support and questions:
+- Email: dev-support@trainingplatform.com
 - Documentation: [docs.trainingplatform.com](https://docs.trainingplatform.com)
 - Issues: [GitHub Issues](https://github.com/m-ashmar/Training_platform/issues)
 
@@ -272,4 +257,4 @@ For support and questions:
 - Django community for the excellent framework
 - Syrian banking partners for payment gateway integration
 - Flutter team for cross-platform development tools
-- All contributors and beta testers 
+- All contributors and development team members 

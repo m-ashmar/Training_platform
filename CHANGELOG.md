@@ -5,11 +5,11 @@ All notable changes to the Training Platform project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - 2024-12-19
+## [Unreleased] - Development Branch
 
-### Major Release: Subscription System & Syrian Payment Integration
+### Major Development: Subscription System & Syrian Payment Integration
 
-This is a major release introducing a complete subscription management system with native Syrian bank payment gateway integration.
+This development branch introduces a complete subscription management system with native Syrian bank payment gateway integration. The system is currently under active development and testing.
 
 ### Added
 
@@ -247,68 +247,50 @@ This is a major release introducing a complete subscription management system wi
 
 ---
 
-## Version History
+## Development Status
 
-- **v2.0.0**: Major release with subscription system and Syrian payment integration
-- **v1.0.0**: Initial release with core training platform features
+### Current Development Phase
+- **Subscription System**: Core functionality implemented, testing in progress
+- **Payment Gateways**: Integration completed, requires real API credentials
+- **Frontend Integration**: Flutter screens created, needs backend integration
+- **Testing**: Comprehensive test suite implemented
+- **Documentation**: Complete documentation available
 
-## Migration Guide
+### Next Development Steps
+- Complete frontend-backend integration
+- Implement real payment gateway testing
+- Performance optimization
+- Security audit
+- Production deployment preparation
 
-### From v1.0.0 to v2.0.0
+### Known Issues
+- Payment gateways require real API credentials for full testing
+- Frontend-backend integration needs completion
+- Performance optimization pending
+- Security audit required before production
 
-1. **Database Migration**
-   ```bash
-   python manage.py migrate
-   ```
+## Contributing
 
-2. **Environment Configuration**
-   - Add payment gateway environment variables
-   - Configure webhook URLs
-   - Set up logging configuration
+This project is currently in active development. For collaboration:
 
-3. **Dependencies Update**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Payment Gateway Setup**
-   - Configure Syrian bank credentials
-   - Set up webhook endpoints
-   - Test gateway connectivity
-
-5. **Frontend Update**
-   ```bash
-   cd flutter
-   flutter pub get
-   flutter run
-   ```
-
-## Breaking Changes
-
-### v2.0.0
-- **Payment System**: Complete rewrite of payment processing
-- **API Endpoints**: New subscription and payment endpoints
-- **Database Schema**: New subscription-related models
-- **Configuration**: New environment variables required
-
-## Deprecation Notices
-
-### v2.0.0
-- **Legacy Payment Methods**: Removed in favor of new gateway system
-- **Old API Endpoints**: Replaced with new subscription endpoints
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
 ## Support
 
-For support with this release:
+For development support:
 - Check the [documentation](docs/)
-- Review [migration guide](docs/migration.md)
+- Review [development guide](docs/development.md)
 - Open an [issue](https://github.com/m-ashmar/Training_platform/issues)
-- Contact support team
+- Contact development team
 
 ## Contributors
 
-### v2.0.0
-- **Development Team**: Complete subscription system implementation
+### Current Development Team
+- **Backend Development**: Complete subscription system implementation
 - **Payment Integration**: Syrian bank gateway integration
 - **Testing**: Comprehensive test suite development
 - **Documentation**: Complete documentation overhaul 
