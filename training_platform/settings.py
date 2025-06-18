@@ -9,6 +9,8 @@ Optimized Configuration (v3.2)
 """
 
 from pathlib import Path
+import os
+import rest_framework
 
 # ========================
 # Path Configuration
@@ -45,6 +47,7 @@ INSTALLED_APPS = [
     "users",
     "routine",
     "diet",
+    "subscription",
     
     # Third-party
     "rest_framework",
@@ -68,7 +71,10 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     
     # Auth
-    "allauth.account.middleware.AccountMiddleware"
+    "allauth.account.middleware.AccountMiddleware",
+    
+    # Custom
+    # "training_platform.utils.LoggingMiddleware",  # Removed for now
 ]
 
 # ========================
@@ -239,18 +245,139 @@ CACHES = {
 }
 
 # ========================
-# Logging
+# Logging Configuration
 # ========================
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {asctime} {message}',
+            'style': '{',
         },
     },
-    'root': {
-        'handlers': ['console'],
-        'level': 'DEBUG',
+    'filters': {
+        'require_debug_true': {
+            '()': 'django.utils.log.RequireDebugTrue',
+        },
+        'require_debug_false': {
+            '()': 'django.utils.log.RequireDebugFalse',
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'DEBUG',
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+            'filters': ['require_debug_true'],
+        },
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': BASE_DIR / 'logs/django.log',
+            'maxBytes': 1024 * 1024 * 5,  # 5 MB
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
+        'diet_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': BASE_DIR / 'logs/diet.log',
+            'maxBytes': 1024 * 1024 * 5,
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
+        'routine_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': BASE_DIR / 'logs/routine.log',
+            'maxBytes': 1024 * 1024 * 5,
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
+        'users_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': BASE_DIR / 'logs/users.log',
+            'maxBytes': 1024 * 1024 * 5,
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
+        'subscription_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': BASE_DIR / 'logs/subscription.log',
+            'maxBytes': 1024 * 1024 * 5,
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
+        'challenges_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': BASE_DIR / 'logs/challenges.log',
+            'maxBytes': 1024 * 1024 * 5,
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
+        'mail_admins': {
+            'level': 'ERROR',
+            'class': 'django.utils.log.AdminEmailHandler',
+            'formatter': 'verbose',
+            'filters': ['require_debug_false'],
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'file', 'mail_admins'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'django.request': {
+            'handlers': ['console', 'file', 'mail_admins'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'django.server': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.db.backends': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'diet': {
+            'handlers': ['console', 'diet_file', 'mail_admins'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'routine': {
+            'handlers': ['console', 'routine_file', 'mail_admins'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'users': {
+            'handlers': ['console', 'users_file', 'mail_admins'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'subscription': {
+            'handlers': ['console', 'subscription_file', 'mail_admins'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'challenges': {
+            'handlers': ['console', 'challenges_file', 'mail_admins'],
+            'level': 'INFO',
+            'propagate': False,
+        },
     },
 }
+
+# Create logs directory if it doesn't exist
+os.makedirs(BASE_DIR / 'logs', exist_ok=True)

@@ -1,67 +1,52 @@
+"""
+tasks.py - Background Task Management for Diet App
+
+This module provides Celery tasks for generating AI-powered diet plans and daily advice.
+Tasks are designed to run asynchronously and interact with GPTDietPlanner and related services.
+"""
+
 from celery import shared_task
-from .ai_services import DietGenerator
-from .meal_processor import MealProcessor
-from .models import DietPlan, Meal, MealComponent, DailyAdvice
-from users.models import CustomUser
-from django.utils import timezone
-import random
+from django.contrib.auth import get_user_model
+from .models import DietPlan, Meal, DailyAdvice
+from .services import GPTDietPlanner
+from training_platform.utils import get_logger, log_error
+
+logger = get_logger('diet')
 
 @shared_task
 def generate_ai_diet_plan(user_id, meal_count=3):
-    user = CustomUser.objects.get(id=user_id)
-    generator = DietGenerator(user)
-    
+    """
+    Asynchronous task to generate a diet plan for a user using GPTDietPlanner.
+
+    Args:
+        user_id (int): ID of the user for whom to generate the plan.
+        meal_count (int): Number of meals per day (default: 3).
+    """
     try:
-        plan = generator.generate_plan(meal_count)
+        user = get_user_model().objects.get(id=user_id)
+        planner = GPTDietPlanner(user)
+        planner.generate_plan()
+        logger.info(f"Diet plan generated for user {user_id} with {meal_count} meals.")
     except Exception as e:
-        # Fallback to rule-based system
-        return generate_fallback_plan(user_id, meal_count)
-    
-    # Create diet plan
-    diet_plan = DietPlan.objects.create(
-        user=user,
-        goal=user.dietplan.goal if hasattr(user, 'dietplan') else 'Maintain',
-        daily_calories=user.calculate_daily_calories(),
-        start_date=timezone.now().date(),
-        end_date=timezone.now().date() + timezone.timedelta(weeks=4),
-        generation_strategy='GPT'
-    )
-    
-    # Process meals
-    for ai_meal in plan.plan:
-        processor = MealProcessor(ai_meal)
-        ingredients = processor.resolve_ingredients()
-        
-        meal = Meal.objects.create(
-            diet_plan=diet_plan,
-            name=ai_meal.meal_name,
-            description=ai_meal.description,
-            image_url=processor.generate_meal_image(ingredients),
-            is_ai_generated=True
-        )
-        
-        for food, quantity in ingredients:
-            MealComponent.objects.create(
-                meal=meal,
-                food=food,
-                quantity=quantity
-            )
-    
-    return f"Generated {len(plan.plan)} meals for {user.email}"
+        log_error(logger, e, {"user_id": user_id, "task": "generate_ai_diet_plan"})
 
 @shared_task
-def generate_daily_advice():
-    for user in CustomUser.objects.all():
-        advice = generate_user_advice(user)
-        DailyAdvice.objects.create(
-            user=user,
-            text=advice['text'],
-            context_data=advice['context']
-        )
+def generate_daily_advice(user_id=None):
+    """
+    Asynchronous task to generate daily dietary advice for a user.
 
-def generate_user_advice(user):
-    # Simplified example - expand with LangChain
-    return {
-        'text': f"Stay hydrated today! Aim for {int(user.weight/30)} cups of water.",
-        'context': {'weight': user.weight}
-    }
+    Args:
+        user_id (int, optional): ID of the user. If None, advice is generated for all users.
+    """
+    try:
+        if user_id:
+            users = [get_user_model().objects.get(id=user_id)]
+        else:
+            users = get_user_model().objects.all()
+        for user in users:
+            # Placeholder for AI advice generation logic
+            advice_text = f"Stay hydrated and eat balanced meals, {user.username}!"
+            DailyAdvice.objects.create(user=user, text=advice_text, context_data={})
+            logger.info(f"Daily advice generated for user {user.id}.")
+    except Exception as e:
+        log_error(logger, e, {"user_id": user_id, "task": "generate_daily_advice"})

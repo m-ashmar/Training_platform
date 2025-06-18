@@ -17,4 +17,7 @@ urlpatterns = [
 
     # Routine app URLs
     path('api/', include('routine.urls')),
+    
+    # Subscription app URLs
+    path('api/', include('subscription.urls')),
 ]

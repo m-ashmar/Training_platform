@@ -1,0 +1,48 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block content %}
+<div id="content-main">
+    <h1>{{ title }}</h1>
+    
+    <div class="module">
+        <form method="post">
+            {% csrf_token %}
+            <div class="form-row">
+                <label for="user_id">Select User:</label>
+                <select name="user_id" id="user_id" required>
+                    <option value="">---------</option>
+                    {% for user in users %}
+                    <option value="{{ user.id }}">{{ user.email }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div class="submit-row">
+                <input type="submit" value="Generate Plan" class="default" name="_generate">
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+    .form-row {
+        padding: 15px;
+        border-bottom: 1px solid #eee;
+    }
+    .form-row label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+    }
+    .form-row select {
+        width: 100%;
+        max-width: 400px;
+        padding: 8px;
+    }
+    .submit-row {
+        padding: 15px;
+        text-align: right;
+    }
+</style>
+{% endblock %} 

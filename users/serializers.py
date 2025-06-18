@@ -83,3 +83,14 @@ class UserDetailsSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = ['height', 'weight', 'age', 'gender', 'specific_injury']    
+
+class CustomUserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = [
+            'id', 'username', 'email', 'first_name', 'last_name',
+            'phone_number', 'date_joined', 'is_active', 'is_staff', 'is_superuser'
+        ]
+        read_only_fields = [
+            'id', 'date_joined', 'is_active', 'is_staff', 'is_superuser'
+        ]    

@@ -1,0 +1,65 @@
+# Django Core
+Django==4.2.7
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+django-filter==23.5
+
+# Database
+psycopg2-binary==2.9.9
+mysqlclient==2.2.0
+
+# Authentication & Security
+djangorestframework-simplejwt==5.3.0
+django-allauth==0.57.0
+cryptography==41.0.8
+
+# Payment & Financial
+requests==2.31.0
+stripe==7.8.0
+
+# Async & Background Tasks
+celery==5.3.4
+redis==5.0.1
+django-celery-beat==2.5.0
+
+# API & Serialization
+drf-yasg==1.21.7
+django-extensions==3.2.3
+
+# Environment & Configuration
+python-decouple==3.8
+django-environ==0.11.2
+
+# Image Processing
+Pillow==10.1.0
+
+# Date & Time
+python-dateutil==2.8.2
+pytz==2023.3
+
+# HTTP & Networking
+urllib3==2.1.0
+certifi==2023.11.17
+
+# Development & Testing
+pytest==7.4.3
+pytest-django==4.7.0
+factory-boy==3.3.0
+coverage==7.3.2
+
+# Code Quality
+black==23.11.0
+flake8==6.1.0
+isort==5.12.0
+
+# Monitoring & Logging
+sentry-sdk==1.38.0
+structlog==23.2.0
+
+# Production
+gunicorn==21.2.0
+whitenoise==6.6.0
+
+# Utilities
+python-dotenv==1.0.0
+click==8.1.7 
