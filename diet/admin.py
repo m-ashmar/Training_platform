@@ -12,7 +12,7 @@ from django.conf import settings
 from django.http import HttpResponseRedirect, JsonResponse
 from django.urls import path
 from django.shortcuts import render, redirect
-from .models import FoodItem, UserFoodPreference, Meal, DietPlan, FoodCategory, MealComponent, DailyAdvice
+from .models import FoodItem, UserFoodPreference, Meal, DietPlan, FoodCategory, MealComponent, DailyAdvice, DietConfig, UserFoodCategoryPreference
 import requests
 import json
 from django.contrib import messages
@@ -168,8 +168,33 @@ class FoodItemAdmin(admin.ModelAdmin):
         """
         Search Edamam API for food items matching the query.
         """
-        # Placeholder for actual Edamam API integration
-        return []
+        try:
+            from .api import search_food
+            response = search_food(query)
+            hints = response.get('hints', [])
+            
+            results = []
+            for hint in hints:
+                food_data = hint.get('food', {})
+                measures = hint.get('measures', [])
+                
+                if food_data:
+                    results.append({
+                        'food': food_data,
+                        'measures': measures,
+                        'foodId': food_data.get('foodId'),
+                        'name': food_data.get('label'),
+                        'image': food_data.get('image'),
+                        'calories': food_data.get('nutrients', {}).get('ENERC_KCAL'),
+                        'protein': food_data.get('nutrients', {}).get('PROCNT'),
+                        'carbs': food_data.get('nutrients', {}).get('CHOCDF'),
+                        'fat': food_data.get('nutrients', {}).get('FAT')
+                    })
+            
+            return results
+        except Exception as e:
+            print(f"Edamam API error: {str(e)}")
+            return []
     def import_from_edamam(self, request, queryset):
         """
         Redirect to the custom Edamam import view.
@@ -187,7 +212,33 @@ class MealAdmin(admin.ModelAdmin):
     Admin interface for managing meals and their components.
     """
     inlines = [MealComponentInline]
-    list_display = ['template', 'date', 'get_calories']
+    list_display = ['meal_type', 'date', 'diet_user', 'diet_goal', 'total_calories', 'components_count']
+    readonly_fields = []
+    search_fields = ['diet_plan__user__email', 'diet_plan__user__username', 'description']
+    list_filter = ['meal_type', 'date', 'diet_plan__goal']
+    
+    def diet_user(self, obj):
+        return getattr(obj.diet_plan.user, 'email', obj.diet_plan.user_id)
+    diet_user.short_description = 'User'
+    
+    def diet_goal(self, obj):
+        return obj.diet_plan.goal
+    diet_goal.short_description = 'Goal'
+    
+    def total_calories(self, obj):
+        try:
+            n = obj.calculate_nutrition()
+            return round(n.get('calories', 0), 1)
+        except Exception:
+            return 0
+    total_calories.short_description = 'Calories'
+    
+    def components_count(self, obj):
+        try:
+            return obj.components.count()
+        except Exception:
+            return 0
+    components_count.short_description = 'Components'
     def get_calories(self, obj):
         return sum([comp.food.calories * (comp.quantity / 100) for comp in obj.mealcomponent_set.all()])
 
@@ -268,10 +319,53 @@ class DailyAdviceAdmin(admin.ModelAdmin):
     list_display = ['user', 'generated_at', 'text']
     readonly_fields = ['context_data']
 
+# DietConfig Admin
+@admin.register(DietConfig)
+class DietConfigAdmin(admin.ModelAdmin):
+    list_display = ['updated_at']
+    readonly_fields = ['updated_at']
+
 # Register admin classes
 admin.site.register(UserFoodPreference, UserFoodPreferenceAdmin)
 admin.site.register(Meal, MealAdmin)
 admin.site.register(DietPlan, DietPlanAdmin)
 admin.site.register(FoodCategory, FoodCategoryAdmin)
-admin.site.register(MealComponent)
+@admin.register(MealComponent)
+class MealComponentAdmin(admin.ModelAdmin):
+    list_display = ['component_label', 'meal_link', 'diet_link', 'user_email', 'quantity', 'macro_info']
+    search_fields = ['meal__diet_plan__user__email', 'food__name']
+    list_filter = ['meal__meal_type']
+    raw_id_fields = ['meal', 'food']
+
+    def component_label(self, obj):
+        try:
+            return f"{obj.food.name} ({round(obj.quantity,1)}g)"
+        except Exception:
+            return str(obj.pk)
+    component_label.short_description = 'Component'
+    
+    def meal_link(self, obj):
+        return format_html('<a href="/admin/diet/meal/{}/change/">{}</a>', obj.meal.id, obj.meal.meal_type)
+    meal_link.short_description = 'Meal'
+    
+    def diet_link(self, obj):
+        dp = obj.meal.diet_plan
+        return format_html('<a href="/admin/diet/dietplan/{}/change/">Plan #{}</a>', dp.id, dp.id)
+    diet_link.short_description = 'Diet Plan'
+    
+    def user_email(self, obj):
+        return getattr(obj.meal.diet_plan.user, 'email', obj.meal.diet_plan.user_id)
+    user_email.short_description = 'User'
+    
+    def macro_info(self, obj):
+        f = obj.food
+        return f"P:{f.protein}g C:{f.carbs}g F:{f.fat}g per {f.serving_size}"
+    macro_info.short_description = 'Food macros'
 admin.site.register(DailyAdvice, DailyAdviceAdmin)
+
+# UserFoodCategoryPreference Admin
+@admin.register(UserFoodCategoryPreference)
+class UserFoodCategoryPreferenceAdmin(admin.ModelAdmin):
+    list_display = ['user', 'food', 'meal', 'macro', 'updated_at']
+    list_filter = ['meal', 'macro']
+    search_fields = ['user__email', 'food__name']

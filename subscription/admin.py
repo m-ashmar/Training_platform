@@ -9,12 +9,9 @@ from .models import (
 
 @admin.register(SubscriptionPlan)
 class SubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = [
-        'name', 'plan_type', 'price', 'duration_days', 
-        'is_active', 'created_at'
-    ]
-    list_filter = ['plan_type', 'is_active', 'created_at']
-    search_fields = ['name', 'description']
+    list_display = ('name', 'plan_type', 'price', 'duration_days', 'is_active', 'has_diet_access', 'has_routine_access')
+    list_filter = ('plan_type', 'is_active', 'has_diet_access', 'has_routine_access')
+    search_fields = ('name',)
     readonly_fields = ['created_at', 'updated_at']
     
     fieldsets = (
@@ -45,17 +42,14 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
 
 @admin.register(Subscription)
 class SubscriptionAdmin(admin.ModelAdmin):
-    list_display = [
-        'user', 'plan', 'status', 'is_active_display', 
-        'days_remaining_display', 'start_date', 'end_date'
-    ]
-    list_filter = ['status', 'plan', 'auto_renew', 'created_at']
-    search_fields = ['user__username', 'user__email', 'plan__name']
-    readonly_fields = ['id', 'created_at', 'updated_at', 'is_active', 'is_trial', 'days_remaining', 'start_date']
+    list_display = ('user', 'plan', 'is_active', 'start_date', 'end_date')
+    list_filter = ('plan',)
+    search_fields = ('user__email', 'user__username')
+    readonly_fields = ('start_date', 'end_date')
     
     fieldsets = (
         ('User & Plan', {
-            'fields': ('user', 'plan', 'status')
+            'fields': ('user', 'plan')
         }),
         ('Dates', {
             'fields': ('end_date', 'trial_end_date', 'start_date')
@@ -76,22 +70,6 @@ class SubscriptionAdmin(admin.ModelAdmin):
     )
     
     actions = ['activate_subscriptions', 'cancel_subscriptions', 'extend_subscriptions']
-    
-    def is_active_display(self, obj):
-        if obj.is_active:
-            return format_html('<span style="color: green;">✓ Active</span>')
-        return format_html('<span style="color: red;">✗ Inactive</span>')
-    is_active_display.short_description = 'Active'
-    
-    def days_remaining_display(self, obj):
-        days = obj.days_remaining
-        if days > 30:
-            return format_html('<span style="color: green;">{} days</span>', days)
-        elif days > 7:
-            return format_html('<span style="color: orange;">{} days</span>', days)
-        else:
-            return format_html('<span style="color: red;">{} days</span>', days)
-    days_remaining_display.short_description = 'Days Remaining'
     
     def activate_subscriptions(self, request, queryset):
         queryset.update(status='active')

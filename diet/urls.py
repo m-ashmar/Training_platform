@@ -1,64 +1,75 @@
 """
 urls.py - API Routing for Diet App
 
-Defines all RESTful endpoints for food items, categories, user preferences, diet plans,
-meals, meal components, and daily advice. Includes custom actions for AI plan generation,
-Edamam import, and reporting. Uses DRF routers for standard resources and explicit paths
-for custom features. All endpoints are versioned for scalability.
+Defines all RESTful endpoints for diet plan generation and daily advice.
+Uses explicit paths for custom features. All endpoints are versioned for scalability.
+Enhanced to support both AI-generated and trainer-created diet plans.
 """
 
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
+from django.urls import path
 from . import views
 
-router = DefaultRouter()
-
-# --- Food Items ---
-router.register(r'v1/foods', views.FoodItemViewSet, basename='fooditem')
-
-# --- Food Categories ---
-router.register(r'v1/categories', views.FoodCategoryViewSet, basename='foodcategory')
-
-# --- User Food Preferences ---
-router.register(r'v1/preferences', views.UserFoodPreferenceViewSet, basename='userfoodpreference')
-
-# --- Diet Plans ---
-router.register(r'v1/plans', views.DietPlanViewSet, basename='dietplan')
-
-# --- Meals ---
-router.register(r'v1/meals', views.MealViewSet, basename='meal')
-
-# --- Meal Components ---
-router.register(r'v1/meal-components', views.MealComponentViewSet, basename='mealcomponent')
-
-# --- Daily Advice ---
-router.register(r'v1/advice', views.DailyAdviceViewSet, basename='dailyadvice')
+app_name = 'diet'
 
 urlpatterns = [
-    # Core RESTful endpoints
-    path('', include(router.urls)),
-
     # --- Custom/Utility Endpoints ---
 
-    # Food Item Search & Edamam Import
-    path('v1/foods/search/', views.FoodItemSearchView.as_view(), name='fooditem-search'),
-    path('v1/foods/import-edamam/', views.EdamamImportView.as_view(), name='fooditem-import-edamam'),
-
-    # User Preferences: Generate Plan
-    path('v1/preferences/<int:pk>/generate-plan/', views.GenerateDietPlanForPreferenceView.as_view(), name='generate-plan-for-preference'),
-
-    # Diet Plan: Generate, Report, and GPT
+    # Diet Plan: Generate (AI - Clients Only)
     path('v1/plans/generate/', views.GenerateDietPlanView.as_view(), name='generate-diet-plan'),
-    path('v1/plans/<int:pk>/report/', views.DietPlanReportView.as_view(), name='dietplan-report'),
-    path('v1/plans/<int:pk>/gpt/', views.GPTDietPlanView.as_view(), name='gpt-diet-plan'),
-
-    # Meals: Image Generation
-    path('v1/meals/<int:pk>/image/', views.MealImageView.as_view(), name='meal-image'),
 
     # Daily Advice: Latest
-    path('v1/advice/latest/', views.LatestDailyAdviceView.as_view(), name='latest-daily-advice'),
+    path('v1/advice/latest/', views.DailyAdviceView.as_view(), name='latest-daily-advice'),
 
-    # Admin/Utility: Trigger Edamam Import, GPT Plan Generation
-    path('v1/admin/import-edamam/', views.AdminEdamamImportView.as_view(), name='admin-import-edamam'),
-    path('v1/admin/generate-gpt-plan/', views.AdminGenerateGPTPlanView.as_view(), name='admin-generate-gpt-plan'),
+    # Web view for diet plan generation
+    path('generate/', views.generate_diet_plan, name='generate-diet-plan-web'),
+
+    # Web views
+    path('generate-plan/', views.generate_diet_plan, name='generate_plan'),
+    
+    # API endpoints
+    path('api/generate-plan/', views.GenerateDietPlanView.as_view(), name='api_generate_plan'),
+    path('api/daily-advice/', views.DailyAdviceView.as_view(), name='api_daily_advice'),
+    
+    # Food search and import endpoints (Available to all users)
+    path('api/food/search/', views.FoodSearchView.as_view(), name='api_food_search'),
+    path('api/food/list/', views.FoodListView.as_view(), name='api_food_list'),
+    path('api/food/categories/', views.FoodCategoryListView.as_view(), name='api_food_categories'),
+    path('api/food/import/', views.FoodImportView.as_view(), name='api_food_import'),
+    
+    # User preferences endpoints
+    path('api/preferences/', views.UserPreferencesView.as_view(), name='api_preferences'),
+    
+    # --- TRAINER ENDPOINTS ---
+    
+    # Diet plan templates
+    path('api/trainer/templates/', views.TrainerTemplatesView.as_view(), name='api_trainer_templates'),
+    
+    # Diet plan management
+    path('api/trainer/diet-plans/', views.TrainerDietPlanView.as_view(), name='api_trainer_diet_plans'),
+    
+    # Meal management
+    path('api/trainer/meals/', views.TrainerMealView.as_view(), name='api_trainer_meals'),
+    path('api/trainer/meals/<int:meal_id>/', views.TrainerMealView.as_view(), name='api_trainer_meal_detail'),
+    
+    # --- CLIENT ENDPOINTS ---
+    
+    # Progress tracking
+    path('api/client/progress/', views.ClientProgressView.as_view(), name='api_client_progress'),
+    path('api/client/progress/weekly/', views.ClientWeeklyProgressView.as_view(), name='api_client_weekly_progress'),
+    path('api/client/progress/enhanced/', views.EnhancedClientProgressView.as_view(), name='api_client_enhanced_progress'),
+    
+    # Meal interaction
+    path('api/client/meals/interact/', views.ClientMealInteractionView.as_view(), name='api_client_meal_interaction'),
+    path('api/client/meals/<int:meal_id>/', views.ClientMealDetailsView.as_view(), name='api_client_meal_details'),
+    path('api/client/meals/<int:meal_id>/complete/', views.MealCompletionView.as_view(), name='api_client_meal_completion'),
+    
+    # --- ENHANCED NUTRITIONAL TRACKING ENDPOINTS ---
+    
+    # Diet plan nutrition details
+    path('api/nutrition/plan/<int:plan_id>/', views.DietPlanNutritionView.as_view(), name='api_diet_plan_nutrition'),
+    
+    # Meal components details
+    path('api/meals/<int:meal_id>/components/', views.MealComponentsView.as_view(), name='api_meal_components'),
+    path('preferences/food-category/', views.UserFoodCategoryPreferenceView.as_view(), name='user-food-category'),
+    path('preferences/food-category/<int:food_id>/', views.UserFoodCategoryPreferenceDetailView.as_view(), name='user-food-category-detail'),
 ]

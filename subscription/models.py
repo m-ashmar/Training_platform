@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError
 from users.models import CustomUser
 from datetime import timedelta
 import uuid
+from django.utils import timezone
 
 class SubscriptionPlan(models.Model):
     """Subscription plans with different features and pricing"""
@@ -20,7 +21,7 @@ class SubscriptionPlan(models.Model):
     price = models.DecimalField(
         max_digits=10, 
         decimal_places=2,
-        validators=[MinValueValidator(0.01, "Price must be greater than 0")]
+        validators=[MinValueValidator(0, "Price cannot be negative")]
     )
     duration_days = models.IntegerField(
         default=30,
@@ -56,8 +57,8 @@ class SubscriptionPlan(models.Model):
     
     def clean(self):
         """Custom validation"""
-        if self.price <= 0:
-            raise ValidationError("Price must be greater than 0")
+        if self.price < 0:
+            raise ValidationError("Price cannot be negative")
         if self.duration_days <= 0:
             raise ValidationError("Duration must be greater than 0")
     
@@ -66,7 +67,7 @@ class SubscriptionPlan(models.Model):
         super().save(*args, **kwargs)
     
     def __str__(self):
-        return f"{self.name} - ${self.price}"
+        return f"{self.name} - {self.price} SYP"
 
 class Subscription(models.Model):
     """User subscription details"""
@@ -134,6 +135,12 @@ class Subscription(models.Model):
             raise ValidationError("Trial end date must be after start date")
     
     def save(self, *args, **kwargs):
+        from django.utils import timezone
+        
+        # Set start_date if not provided (for new objects)
+        if not self.start_date:
+            self.start_date = timezone.now()
+        
         if not self.end_date and self.plan:
             self.end_date = self.start_date + timedelta(days=self.plan.duration_days)
         
@@ -151,7 +158,6 @@ class Subscription(models.Model):
     @property
     def is_active(self):
         """Check if subscription is currently active"""
-        from django.utils import timezone
         now = timezone.now()
         return (
             self.status == 'active' and 
@@ -162,7 +168,6 @@ class Subscription(models.Model):
     @property
     def is_trial(self):
         """Check if subscription is in trial period"""
-        from django.utils import timezone
         now = timezone.now()
         return (
             self.status == 'trial' and 
@@ -173,7 +178,6 @@ class Subscription(models.Model):
     @property
     def days_remaining(self):
         """Get days remaining in subscription"""
-        from django.utils import timezone
         now = timezone.now()
         if self.trial_end_date and self.trial_end_date > now:
             return (self.trial_end_date - now).days
@@ -326,11 +330,11 @@ class SubscriptionUsage(models.Model):
             raise ValidationError("Limit cannot be negative")
         if self.period_end and self.period_start and self.period_end <= self.period_start:
             raise ValidationError("Period end must be after period start")
-    
+
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
-    
+
     @property
     def usage_percentage(self):
         """Get usage as percentage of limit"""

@@ -11,6 +11,7 @@ Optimized Configuration (v3.2)
 from pathlib import Path
 import os
 import rest_framework
+from datetime import timedelta
 
 # ========================
 # Path Configuration
@@ -22,14 +23,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # ========================
 SECRET_KEY = "django-insecure-l^ub=e^ee47%mee&u9vt#u##q5%1^=6=iy43kd45z+4jddxlzq"
 DEBUG = True
-ALLOWED_HOSTS = ['192.168.1.109', 'localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['*']
 
 CSRF_TRUSTED_ORIGINS = [
     'http://0.0.0.0:8000',
-    'http://192.168.1.111',
+    'http://192.168.1.107',
     'http://localhost'
 ]
 
+CSRF_EXEMPT_URLS = [
+    r'^auth/.*$',
+    r'^api/.*$',
+]
 # ========================
 # Application Definition
 # ========================
@@ -44,23 +49,45 @@ INSTALLED_APPS = [
     "django.contrib.sites",
     
     # Project Apps
+    "drf_yasg",
     "users",
     "routine",
     "diet",
     "subscription",
+    "challenges",
+    "analytics",
+    "social",
+    "admin_dashboard",  # New comprehensive admin dashboard
+    "wallet",
     
     # Third-party
     "rest_framework",
     "rest_framework.authtoken",
+    "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
     "allauth",
     "allauth.account",
     "allauth.socialaccount",
     "dj_rest_auth",
-    "corsheaders"
+    "dj_rest_auth.registration",
+    "corsheaders",
+    "channels",  # Added for WebSocket support
 ]
+
+ASGI_APPLICATION = "training_platform.asgi.application"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [(os.getenv("REDIS_HOST", "127.0.0.1"), int(os.getenv("REDIS_PORT", "6379")))],
+        },
+    },
+}
 
 MIDDLEWARE = [
     # Security & Core
+    "training_platform.middleware.SecurityHeadersMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
@@ -73,8 +100,13 @@ MIDDLEWARE = [
     # Auth
     "allauth.account.middleware.AccountMiddleware",
     
-    # Custom
-    # "training_platform.utils.LoggingMiddleware",  # Removed for now
+    # Custom Security & Performance
+    "training_platform.middleware.RateLimitMiddleware",
+    "training_platform.middleware.RequestLoggingMiddleware",
+    "training_platform.middleware.DatabaseQueryCountMiddleware",
+    "training_platform.middleware.CacheMiddleware",
+    "training_platform.middleware.APIVersionMiddleware",
+    "training_platform.middleware.ErrorHandlingMiddleware",
 ]
 
 # ========================
@@ -144,9 +176,51 @@ REST_AUTH_SERIALIZERS = {
 # REST Framework
 # ========================
 REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',
-    ]
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        # Relax throttling in development
+        'charging': '1000/second' if os.getenv('WALLET_DEV_MODE', 'False') == 'True' or os.getenv('DJANGO_DEBUG', 'True') == 'True' or DEBUG else '10/minute',
+    },
+}
+
+# ========================
+# JWT Configuration
+# ========================
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True,
+    
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'VERIFYING_KEY': None,
+    'AUDIENCE': None,
+    'ISSUER': None,
+    'JWK_URL': None,
+    'LEEWAY': 0,
+    
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+    'USER_AUTHENTICATION_RULE': 'rest_framework_simplejwt.authentication.default_user_authentication_rule',
+    
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
+    'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',
+    
+    'JTI_CLAIM': 'jti',
+    
+    'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
+    'SLIDING_TOKEN_LIFETIME': timedelta(minutes=60),
+    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
 
 # ========================
@@ -162,11 +236,13 @@ CORS_ALLOWED_ORIGINS = [
 # AI Integration
 # ========================
 # OpenAI
-OPENAI_API_KEY = "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"
+OPENAI_API_KEY = "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"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai")
 
 # Celery
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
 
 # ========================
 # Nutrition & AI Chef
@@ -218,7 +294,17 @@ USE_TZ = True
 # ========================
 # Static Files
 # ========================
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = [
+    BASE_DIR / 'static',
+]
+
+# ========================
+# Media Files
+# ========================
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # ========================
 # Default Auto Field
@@ -231,12 +317,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
 
-
-
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "unique-default",
+        "BACKEND": os.getenv('DJANGO_CACHE_BACKEND', "django.core.cache.backends.locmem.LocMemCache"),
+        "LOCATION": os.getenv('DJANGO_CACHE_LOCATION', "unique-default"),
     },
     "edamam": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
@@ -381,3 +465,25 @@ LOGGING = {
 
 # Create logs directory if it doesn't exist
 os.makedirs(BASE_DIR / 'logs', exist_ok=True)
+
+# Hugging Face API token for LLM access (move to environment variable in production!)
+HUGGINGFACE_API_TOKEN = "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"
+
+# --- Production hardening toggles (enable in prod via env) ---
+SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'False') == 'True'
+SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'False') == 'True'
+CSRF_COOKIE_SECURE = os.getenv('CSRF_COOKIE_SECURE', 'False') == 'True'
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
+CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'Lax')
+SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '0'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv('SECURE_HSTS_INCLUDE_SUBDOMAINS', 'False') == 'True'
+SECURE_HSTS_PRELOAD = os.getenv('SECURE_HSTS_PRELOAD', 'False') == 'True'
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') if os.getenv('USE_PROXY_SSL_HEADER', 'False') == 'True' else None
+SECURE_REDIRECT_EXEMPT = [r'^api/.*', r'^admin/.*', r'^swagger/.*', r'^redoc/.*']
+
+# Platform escrow for wallet flows
+PLATFORM_ESCROW_EMAIL = os.getenv('PLATFORM_ESCROW_EMAIL', 'platform_escrow@local')
+PLATFORM_ESCROW_USERNAME = os.getenv('PLATFORM_ESCROW_USERNAME', 'platform_escrow')
+
+# Wallet development mode toggle (relaxes HMAC/IP/timestamp checks for faster local testing)
+WALLET_DEV_MODE = os.getenv('WALLET_DEV_MODE', 'True' if DEBUG else 'False') == 'True'

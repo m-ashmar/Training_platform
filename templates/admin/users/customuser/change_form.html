@@ -1,0 +1,16 @@
+{% extends "admin/change_form.html" %}
+{% load i18n admin_urls %}
+
+{% block submit_buttons_bottom %}
+    {{ block.super }}
+    
+    {% if show_reset_password %}
+    <div class="submit-row">
+        <input type="submit" 
+               value="Reset Password to 'testpass123'" 
+               name="_reset_password" 
+               style="background: #ba2121;"
+               onclick="return confirm('Are you sure you want to reset the password to \'testpass123\'?')" />
+    </div>
+    {% endif %}
+{% endblock %} 
