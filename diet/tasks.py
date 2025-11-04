@@ -17,11 +17,20 @@ from .meal_processor import MealProcessor
 from .data_collection import TrainingDataCollector
 import logging
 import json
+from .exceptions import (
+    HTTPTransientError,
+    HTTPPermanentError,
+    OpenAIError,
+    DietParsingError,
+    PersistenceError,
+    ConstraintViolationError,
+)
+from .utils.logging_utils import log_json
 
 logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0):
+def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0, start_date=None):
     """
     Enhanced asynchronous task to generate a diet plan for a user using DietGenerator.
     Now includes comprehensive data collection for AI training dataset creation.
@@ -46,7 +55,12 @@ def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0):
         plan_output = planner.generate_plan(meal_count, snack_count)
         
         # Save plan to database with full metadata
-        diet_plan = planner.save_plan_to_database(plan_output, meal_count, snack_count)
+        diet_plan = planner.save_plan_to_database(
+            plan_output,
+            meal_count,
+            snack_count,
+            start_date=start_date
+        )
         
         # Initialize data collector
         data_collector = TrainingDataCollector()
@@ -58,18 +72,18 @@ def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0):
         _store_training_data.delay(training_data)
         
         # Log successful generation with comprehensive metrics
-        logger.info(
-            f"Successfully generated and processed diet plan for user {user_id}",
-            extra={
-                "user_id": user_id,
-                "diet_plan_id": diet_plan.id,
-                "meals_generated": len(plan_output.plan),
-                "meal_count": meal_count,
-                "snack_count": snack_count,
-                "data_quality_score": training_data["collection_metadata"]["data_quality_score"],
-                "generation_time": plan_output.generation_metadata["performance_metrics"]["generation_time"],
-                "task_id": self.request.id
-            }
+        log_json(
+            logger,
+            "info",
+            "Diet plan generated and processed",
+            user_id=user_id,
+            diet_plan_id=diet_plan.id,
+            meals_generated=len(plan_output.plan),
+            meal_count=meal_count,
+            snack_count=snack_count,
+            data_quality_score=training_data["collection_metadata"]["data_quality_score"],
+            generation_time=plan_output.generation_metadata["performance_metrics"]["generation_time"],
+            task_id=self.request.id,
         )
         
         return {
@@ -82,29 +96,59 @@ def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0):
             "training_data_id": training_data["entry_id"]
         }
         
-    except Exception as e:
-        logger.error(
-            f"Error generating diet plan for user {user_id}: {str(e)}",
-            extra={
-                "user_id": user_id,
-                "task": "generate_ai_diet_plan",
-                "task_id": self.request.id,
-                "retry_count": self.request.retries,
-                "meal_count": meal_count,
-                "snack_count": snack_count
-            }
+    except (HTTPTransientError, OpenAIError) as e:
+        log_json(
+            logger,
+            "error",
+            "Transient error during plan generation",
+            user_id=user_id,
+            task="generate_ai_diet_plan",
+            task_id=self.request.id,
+            retry_count=self.request.retries,
+            meal_count=meal_count,
+            snack_count=snack_count,
+            error=str(e),
         )
-        
-        # Retry with exponential backoff
         if self.request.retries < self.max_retries:
             raise self.retry(countdown=60 * (2 ** self.request.retries))
-        else:
-            # Log final failure
-            logger.error(
-                f"Final failure generating diet plan for user {user_id} after {self.max_retries} retries",
-                extra={"user_id": user_id, "error": str(e)}
-            )
-            raise
+        log_json(
+            logger,
+            "error",
+            "Final failure after retries for transient error",
+            user_id=user_id,
+            error=str(e),
+        )
+        raise
+    except (HTTPPermanentError, DietParsingError, ConstraintViolationError, PersistenceError, ValueError) as e:
+        # Do not retry permanent or parsing/persistence errors
+        log_json(
+            logger,
+            "error",
+            "Permanent error during plan generation (no retry)",
+            user_id=user_id,
+            task="generate_ai_diet_plan",
+            task_id=self.request.id,
+            meal_count=meal_count,
+            snack_count=snack_count,
+            error=str(e),
+        )
+        raise
+    except Exception as e:
+        log_json(
+            logger,
+            "error",
+            "Unexpected error during plan generation",
+            user_id=user_id,
+            task="generate_ai_diet_plan",
+            task_id=self.request.id,
+            retry_count=self.request.retries,
+            meal_count=meal_count,
+            snack_count=snack_count,
+            error=str(e),
+        )
+        if self.request.retries < self.max_retries:
+            raise self.retry(countdown=60 * (2 ** self.request.retries))
+        raise
 
 @shared_task
 def _store_training_data(training_data):
@@ -130,22 +174,22 @@ def _store_training_data(training_data):
             }
         )
         
-        logger.info(
-            f"Successfully stored training data entry: {training_entry_id}",
-            extra={
-                "training_entry_id": training_entry_id,
-                "user_id": training_data["user_profile"]["user_id"],
-                "data_quality_score": training_data["collection_metadata"]["data_quality_score"]
-            }
+        log_json(
+            logger,
+            "info",
+            "Training data stored",
+            training_entry_id=training_entry_id,
+            user_id=training_data["user_profile"]["user_id"],
+            data_quality_score=training_data["collection_metadata"]["data_quality_score"],
         )
         
     except Exception as e:
-        logger.error(
-            f"Failed to store training data: {str(e)}",
-            extra={
-                "training_entry_id": training_data.get("entry_id", "unknown"),
-                "error": str(e)
-            }
+        log_json(
+            logger,
+            "error",
+            "Failed to store training data",
+            training_entry_id=training_data.get("entry_id", "unknown"),
+            error=str(e),
         )
         raise
 
@@ -243,13 +287,13 @@ def export_training_dataset(start_date=None, end_date=None, output_format='json'
         # Store exported dataset
         _store_exported_dataset.delay(output_data, output_format, start_date, end_date)
         
-        logger.info(
-            f"Training dataset export completed",
-            extra={
-                "dataset_size": len(training_dataset),
-                "output_format": output_format,
-                "quality_summary": quality_summary
-            }
+        log_json(
+            logger,
+            "info",
+            "Training dataset export completed",
+            dataset_size=len(training_dataset),
+            output_format=output_format,
+            quality_summary=quality_summary,
         )
         
         return {
@@ -259,10 +303,7 @@ def export_training_dataset(start_date=None, end_date=None, output_format='json'
         }
         
     except Exception as e:
-        logger.error(
-            f"Error exporting training dataset: {str(e)}",
-            extra={"task": "export_training_dataset"}
-        )
+        log_json(logger, "error", "Error exporting training dataset", task="export_training_dataset", error=str(e))
         raise
 
 @shared_task
@@ -283,20 +324,10 @@ def _store_exported_dataset(output_data, output_format, start_date, end_date):
         filename = f"training_dataset_{start_date}_{end_date}_{timestamp}.{output_format}"
         
         # For now, just log the export
-        logger.info(
-            f"Exported training dataset stored",
-            extra={
-                "filename": filename,
-                "format": output_format,
-                "data_size": len(str(output_data))
-            }
-        )
+        log_json(logger, "info", "Exported training dataset stored", filename=filename, format=output_format, data_size=len(str(output_data)))
         
     except Exception as e:
-        logger.error(
-            f"Failed to store exported dataset: {str(e)}",
-            extra={"error": str(e)}
-        )
+        log_json(logger, "error", "Failed to store exported dataset", error=str(e))
         raise
 
 @shared_task
@@ -346,14 +377,7 @@ def analyze_diet_plan_effectiveness(diet_plan_id):
             }
         )
         
-        logger.info(
-            f"Diet plan effectiveness analysis completed",
-            extra={
-                "diet_plan_id": diet_plan_id,
-                "user_id": diet_plan.user.id,
-                "effectiveness_score": effectiveness_score
-            }
-        )
+        log_json(logger, "info", "Diet plan effectiveness analysis completed", diet_plan_id=diet_plan_id, user_id=diet_plan.user.id, effectiveness_score=effectiveness_score)
         
         return {
             "status": "success",
@@ -367,10 +391,7 @@ def analyze_diet_plan_effectiveness(diet_plan_id):
         }
         
     except Exception as e:
-        logger.error(
-            f"Error analyzing diet plan effectiveness: {str(e)}",
-            extra={"diet_plan_id": diet_plan_id, "task": "analyze_diet_plan_effectiveness"}
-        )
+        log_json(logger, "error", "Error analyzing diet plan effectiveness", diet_plan_id=diet_plan_id, task="analyze_diet_plan_effectiveness", error=str(e))
         raise
 
 def _generate_personalized_advice(user):
@@ -403,7 +424,7 @@ def _generate_personalized_advice(user):
         return advice
         
     except Exception as e:
-        logger.error(f"Error generating personalized advice: {str(e)}")
+        log_json(logger, "error", "Error generating personalized advice", error=str(e))
         return "Stay hydrated and maintain a balanced diet with regular meals."
 
 def _convert_to_csv(training_dataset):

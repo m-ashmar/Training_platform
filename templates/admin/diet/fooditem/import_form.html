@@ -9,29 +9,56 @@
         {% csrf_token %}
         {{ form.as_p }}
         <div class="submit-row">
-            <button type="submit" name="action" value="search" class="default">Search</button>
+            <button type="submit" name="action" value="search" class="default">Search Edamam</button>
         </div>
     </form>
 
     <!-- RESULTS AND IMPORT FORM -->
     {% if results %}
+    <h2>Search Results ({{ results|length }} found)</h2>
     <form method="post">
         {% csrf_token %}
         <input type="hidden" name="action" value="import">
-        <h2>Results</h2>
-        <ul>
-            {% for item in results %}
-                <li>
-                    <label>
-                        <!-- Use forloop.counter directly (starts at 1) -->
-                        <input type="checkbox" name="selected_items" value="{{ forloop.counter }}">
-                        <strong>{{ item.name }}</strong> - {{ item.calories }} kcal
-                    </label>
-                </li>
-            {% endfor %}
-        </ul>
+        <div style="margin: 20px 0;">
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="background: #f0f0f0;">
+                        <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Select</th>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Food Name</th>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Serving</th>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Calories</th>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Protein</th>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Carbs</th>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Fat</th>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Image</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in results %}
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 10px;">
+                            <input type="checkbox" name="selected_items" value="{{ forloop.counter }}">
+                        </td>
+                        <td style="padding: 10px;"><strong>{{ item.name }}</strong></td>
+                        <td style="padding: 10px;">{{ item.serving|default:"100g" }}</td>
+                        <td style="padding: 10px;">{{ item.calories|floatformat:1 }} kcal</td>
+                        <td style="padding: 10px;">{{ item.protein|floatformat:1 }}g</td>
+                        <td style="padding: 10px;">{{ item.carbs|floatformat:1 }}g</td>
+                        <td style="padding: 10px;">{{ item.fat|floatformat:1 }}g</td>
+                        <td style="padding: 10px;">
+                            {% if item.image %}
+                                <img src="{{ item.image }}" style="max-height: 50px; max-width: 50px;" />
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
         <div class="submit-row">
-            <button type="submit" class="default">Import Selected</button>
+            <button type="submit" class="default">Import Selected Items</button>
         </div>
     </form>
     {% endif %}

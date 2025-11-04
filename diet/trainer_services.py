@@ -14,8 +14,9 @@ from django.db.models import Q
 
 from .models import (
     DietPlan, DietPlanTemplate, Meal, MealComponent, 
-    FoodItem, DailyProgress, CustomUser
+    FoodItem, DailyProgress
 )
+from users.models import CustomUser
 
 class TrainerDietPlanService:
     """

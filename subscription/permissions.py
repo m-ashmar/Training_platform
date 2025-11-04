@@ -116,7 +116,13 @@ class SubscriptionUsageLimit(permissions.BasePermission):
             from .models import SubscriptionUsage, SubscriptionFeature
             
             try:
-                feature = SubscriptionFeature.objects.get(name=self.feature_name)
+                feature, _ = SubscriptionFeature.objects.get_or_create(
+                    name=self.feature_name,
+                    defaults={
+                        'description': f'Auto-created feature for {self.feature_name}',
+                        'is_active': True
+                    }
+                )
                 usage, created = SubscriptionUsage.objects.get_or_create(
                     subscription=subscription,
                     feature=feature,

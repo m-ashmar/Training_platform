@@ -141,6 +141,7 @@ class Subscription(models.Model):
         if not self.start_date:
             self.start_date = timezone.now()
         
+        # Only auto-derive end_date if missing; allow admin edits
         if not self.end_date and self.plan:
             self.end_date = self.start_date + timedelta(days=self.plan.duration_days)
         

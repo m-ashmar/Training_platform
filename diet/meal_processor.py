@@ -377,9 +377,9 @@ class MealProcessor:
         Returns:
             Source string ('database', 'ai_generated', 'estimated').
         """
-        if getattr(food_item, 'api_id', '').startswith('AI-'):
+        if str(getattr(food_item, 'api_id', '') or '').startswith('AI-'):
             return 'ai_generated'
-        elif food_item.calories > 0:
+        elif float(getattr(food_item, 'calories', 0) or 0) > 0:
             return 'database'
         else:
             return 'estimated'

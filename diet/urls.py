@@ -28,6 +28,8 @@ urlpatterns = [
     
     # API endpoints
     path('api/generate-plan/', views.GenerateDietPlanView.as_view(), name='api_generate_plan'),
+    path('api/generate-plan-sync/', views.GenerateDietPlanSyncView.as_view(), name='api_generate_plan_sync'),
+    path('api/generate-plan-rule/', views.GenerateDietPlanRuleBasedView.as_view(), name='api_generate_plan_rule'),
     path('api/daily-advice/', views.DailyAdviceView.as_view(), name='api_daily_advice'),
     
     # Food search and import endpoints (Available to all users)

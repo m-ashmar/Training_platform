@@ -9,6 +9,7 @@ Enhanced to support both AI-generated and trainer-created diet plans.
 from django.db import models
 from users.models import CustomUser
 from datetime import date, datetime
+from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 
 class FoodCategory(models.Model):
@@ -47,21 +48,76 @@ class FoodItem(models.Model):
     protein_per_gram = models.FloatField(default=0.0)
     carbs_per_gram = models.FloatField(default=0.0)
     fat_per_gram = models.FloatField(default=0.0)
+    smart_score_weight = models.FloatField(default=1.0, help_text="Adaptive weight for smart macro planner")
     def save(self, *args, **kwargs):
         """
-        Auto-calculate per-gram values on save.
+        Normalize macros to 100g and auto-calculate per-gram values on save.
+        
+        This ensures all foods store macros per 100g for consistency:
+        - If serving_size_grams != 100, normalize macros to 100g
+        - Always calculate per-gram values from normalized 100g values
         """
-        if self.serving_size_grams > 0:
-            self.calories_per_gram = self.calories / self.serving_size_grams
-            self.protein_per_gram = self.protein / self.serving_size_grams
-            self.carbs_per_gram = self.carbs / self.serving_size_grams
-            self.fat_per_gram = self.fat / self.serving_size_grams
-        else:
+        from .validators import DietInputValidator
+        from django.core.exceptions import ValidationError
+        
+        # Cast to float in case incoming values are strings
+        try:
+            self.calories = float(self.calories)
+        except Exception:
+            self.calories = 0.0
+        try:
+            self.protein = float(self.protein)
+        except Exception:
+            self.protein = 0.0
+        try:
+            self.carbs = float(self.carbs)
+        except Exception:
+            self.carbs = 0.0
+        try:
+            self.fat = float(self.fat)
+        except Exception:
+            self.fat = 0.0
+        
+        # BUG FIX: Validate nutritional values are non-negative
+        if self.calories < 0:
+            raise ValidationError("Calories cannot be negative")
+        if self.protein < 0:
+            raise ValidationError("Protein cannot be negative")
+        if self.carbs < 0:
+            raise ValidationError("Carbs cannot be negative")
+        if self.fat < 0:
+            raise ValidationError("Fat cannot be negative")
+        
+        # BUG FIX: Ensure serving size is valid
+        if self.serving_size_grams <= 0:
             self.serving_size_grams = 100
-            self.calories_per_gram = self.calories / 100
-            self.protein_per_gram = self.protein / 100
-            self.carbs_per_gram = self.carbs / 100
-            self.fat_per_gram = self.fat / 100
+        
+        # NORMALIZE: Convert all macros to per-100g standard
+        # If serving_size_grams != 100, normalize the macro values to 100g
+        if self.serving_size_grams != 100:
+            # Calculate normalization factor (how many 100g servings in current serving)
+            normalization_factor = 100.0 / self.serving_size_grams
+            
+            # Normalize macros to 100g
+            self.calories = self.calories * normalization_factor
+            self.protein = self.protein * normalization_factor
+            self.carbs = self.carbs * normalization_factor
+            self.fat = self.fat * normalization_factor
+            
+            # Update serving_size_grams to 100g standard
+            self.serving_size_grams = 100
+            
+            # Update serving_size string to reflect 100g standard
+            if not self.serving_size or '100g' not in self.serving_size.lower():
+                self.serving_size = '100g'
+        
+        # Calculate per-gram values from normalized 100g values
+        # Since serving_size_grams is now always 100, this is: macro_value / 100
+        self.calories_per_gram = self.calories / 100.0
+        self.protein_per_gram = self.protein / 100.0
+        self.carbs_per_gram = self.carbs / 100.0
+        self.fat_per_gram = self.fat / 100.0
+        
         super().save(*args, **kwargs)
     def __str__(self):
         return self.name
@@ -77,6 +133,8 @@ class UserFoodPreference(models.Model):
     protein_choices = models.ManyToManyField(FoodItem, related_name='protein_prefs', limit_choices_to={'category__name': 'Proteins'})
     carb_choices = models.ManyToManyField(FoodItem, related_name='carb_prefs', limit_choices_to={'category__name': 'Carbs'})
     fat_choices = models.ManyToManyField(FoodItem, related_name='fat_prefs', limit_choices_to={'category__name': 'Fats'})
+    vegetable_choices = models.ManyToManyField(FoodItem, related_name='vegetable_prefs', blank=True)
+    fruit_choices = models.ManyToManyField(FoodItem, related_name='fruit_prefs', blank=True)
 
 
 class UserFoodCategoryPreference(models.Model):
@@ -91,13 +149,15 @@ class UserFoodCategoryPreference(models.Model):
         ('carb', 'Carb'),
         ('protein', 'Protein'),
         ('fat', 'Fat'),
+        ('vegetable', 'Vegetable'),
+        ('fruit', 'Fruit'),
     ]
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='food_meal_categories')
     food = models.ForeignKey(FoodItem, on_delete=models.CASCADE)
     meal = models.CharField(max_length=16, choices=MEAL_CHOICES)
     macro = models.CharField(max_length=16, choices=MACRO_CHOICES)
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         unique_together = [('user', 'food')]
@@ -183,6 +243,8 @@ class DietPlan(models.Model):
         help_text="Trainer who created this plan"
     )
     is_active = models.BooleanField(default=True, help_text="Whether this plan is currently active")
+    created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
     
     @property
     def period(self):

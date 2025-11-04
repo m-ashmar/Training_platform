@@ -1,6 +1,5 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from django.urls import reverse
 from django.utils import timezone
 from .models import (
     SubscriptionPlan, Subscription, Payment, 
@@ -45,7 +44,8 @@ class SubscriptionAdmin(admin.ModelAdmin):
     list_display = ('user', 'plan', 'is_active', 'start_date', 'end_date')
     list_filter = ('plan',)
     search_fields = ('user__email', 'user__username')
-    readonly_fields = ('start_date', 'end_date')
+    # Allow extending subscriptions from admin by editing end_date (keep start_date readonly)
+    readonly_fields = ('id', 'start_date', 'created_at', 'updated_at')
     
     fieldsets = (
         ('User & Plan', {
@@ -55,7 +55,7 @@ class SubscriptionAdmin(admin.ModelAdmin):
             'fields': ('end_date', 'trial_end_date', 'start_date')
         }),
         ('Settings', {
-            'fields': ('auto_renew', 'cancelled_at')
+            'fields': ('status', 'auto_renew', 'cancelled_at')
         }),
         ('Access Permissions', {
             'fields': (

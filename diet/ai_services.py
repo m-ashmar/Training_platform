@@ -18,9 +18,11 @@ from difflib import SequenceMatcher
 from datetime import datetime
 from django.conf import settings
 from django.utils import timezone
-from .models import UserFoodPreference, DietPlan, Meal, MealComponent, DailyAdvice, DietPlanTemplate, FoodItem, DietConfig, UserFoodCategoryPreference
-from .meal_processor import MealProcessor
-from .ai_models import AIIngredient, AIMeal, DietPlanOutput
+from .models import UserFoodPreference, DietPlanTemplate, FoodItem, DietPlan, UserFoodCategoryPreference
+from .ai_models import DietPlanOutput, AIMeal
+from .services.prompt_builder import PromptBuilder
+from .services.ai_response_handler import AIResponseHandler
+from .services.diet_persistence import DietPersistenceService
 
 logger = logging.getLogger(__name__)
 
@@ -49,58 +51,10 @@ class DietGenerator:
         self.parser = PydanticOutputParser(pydantic_object=DietPlanOutput)
         self.last_openai_request_id = None
         
-        # Enhanced prompt template with structured per-user categories
-        self.prompt_template = """
-        You're a Michelin-star chef nutritionist creating a personalized meal plan for {user_name}.
-        
-        **User Profile**
-        - BMI: {bmi}
-        - BMR: {bmr}
-        - Age: {age}
-        - Gender: {gender}
-        - Activity Level: {activity_level}
-        - Allergies: {allergies}
-        - Dietary Restrictions: {dietary_restrictions}
-        
-        **Structured User Input (authoritative) - USE STRICTLY**
-        This JSON fully defines goal, macro targets, macro priority, and per-meal allowed foods. Use only items listed for each meal category. Do not invent or swap foods.
-        ```json
-        {user_structured_json}
-        ```
-        
-        **Meal Structure Preferences**
-        - Exactly {meal_count} meals per day
-        - Exactly {snack_count} snacks per day (snacks must be healthy and light)
-        - Total eating occasions: {total_meals} per day
-        
-        **Nutritional Constraints**
-        - Fitness Goal: {fitness_goal}
-        - Macro Priority Policy: {macro_priority_text}
-        - Macronutrient balance: Protein {protein_ratio}%, Carbs {carb_ratio}%, Fat {fat_ratio}%
-        - Daily calorie target: {calories} kcal (acceptable deviation ±200 kcal)
-        - Protein target: {protein_target}g (acceptable deviation ±10g)
-        - Carb target: {carb_target}g (acceptable deviation ±10g)
-        - Fat target: {fat_target}g (acceptable deviation ±10g)
-        
-        **Distribution Guidance (soft)**
-        - Aim for a logical calorie distribution across meals: breakfast and lunch richer, dinner lighter
-        
-        **Hard Constraints**
-        - Use ONLY foods listed under the corresponding user.food_categories for that meal and macro
-        - Do NOT include any other foods; if an item is missing, adjust quantities instead of swapping foods
-        - Output ingredient names exactly as they appear in the lists
-        - For piece-type foods (eggs, fruits, bread slices), prefer pieces (e.g., "2 eggs"); use grams for others
-        
-        **Output Format**
-        {format_instructions}
-        
-        **Additional Instructions**
-        - Each meal should be nutritionally balanced within the macro priority rules
-        - Include estimated preparation time in minutes and difficulty level (Easy/Medium/Hard)
-        - Ensure total daily nutrition meets targets (±200 kcal) and macros within ±10g
-        - Include plan_metadata.daily_totals with aggregate calories, protein, carbs, fat for the day, and plan_metadata.target_calories
-        - IMPORTANT: Return ONLY a JSON object conforming to the schema above. Do NOT include the schema itself or any extra text.
-        """
+        # Template building service
+        self.prompt_builder = PromptBuilder()
+        # AI response handler
+        self.ai = AIResponseHandler()
 
     def _get_user_data(self, meal_count=3, snack_count=0):
         """
@@ -222,118 +176,31 @@ class DietGenerator:
         generation_metadata = self._create_generation_metadata(meal_count, snack_count, user_data)
         
         try:
-            # Build prompt text using PromptTemplate to avoid brace collisions
-            data_for_prompt = dict(user_data)
-            data_for_prompt.pop('meal_count', None)
-            data_for_prompt.pop('snack_count', None)
-            prompt = PromptTemplate(
-                template=self.prompt_template,
-                input_variables=["meal_count", "snack_count"],
-                partial_variables=data_for_prompt
-            )
-            final_prompt = prompt.format(meal_count=meal_count, snack_count=snack_count)
+            # Build prompt via Jinja2 template
+            final_prompt = self.prompt_builder.build({
+                **user_data,
+                "meal_count": meal_count,
+                "snack_count": snack_count,
+            })
 
-            # OpenAI path with model-aware routing
-            chat_url = "https://api.openai.com/v1/chat/completions"
-            resp_url = "https://api.openai.com/v1/responses"
-            headers = {"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"}
-
-            def _post(url, payload, timeout=120):
-                try:
-                    r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-                    if r.status_code >= 400:
-                        try:
-                            logger.error("OpenAI error: %s", r.text)
-                        except Exception:
-                            pass
-                    r.raise_for_status()
-                    self.last_openai_request_id = r.headers.get('x-request-id') or r.headers.get('openai-request-id')
-                    return r.json()
-                except requests.ReadTimeout:
-                    # one quick retry
-                    r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-                    r.raise_for_status()
-                    self.last_openai_request_id = r.headers.get('x-request-id') or r.headers.get('openai-request-id')
-                    return r.json()
-
-            def _parse_output(data: dict) -> str:
-                # Responses API shape
-                if isinstance(data, dict) and "output" in data:
-                    try:
-                        parts = data.get("output", [])
-                        texts = []
-                        for p in parts:
-                            for c in p.get("content", []) or []:
-                                t = c.get("text")
-                                if t:
-                                    texts.append(t)
-                        if texts:
-                            return "\n".join(texts)
-                    except Exception:
-                        pass
-                # Chat Completions shape
-                try:
-                    return data["choices"][0]["message"]["content"]
-                except Exception:
-                    return json.dumps(data)
-
-            model_name = str(self.openai_model)
-
-            if model_name.startswith("gpt-5") or model_name == "gpt-4-nano":
-                # Use Responses API, omit temperature; rely on prompt for JSON output
-                resp_payload = {
-                    "model": model_name,
-                    "input": (
-                        "System: You are a diet planning assistant that outputs strictly structured JSON as instructed.\n\n"
-                        + final_prompt
-                    )
-                }
-                try:
-                    data = _post(resp_url, resp_payload)
-                except requests.HTTPError:
-                    # Fallback to gpt-4-nano via Responses API
-                    fb_model = "gpt-4-nano"
-                    data = _post(resp_url, {"model": fb_model, "input": resp_payload["input"]})
-                    generation_metadata["generation_parameters"]["model"] = fb_model
-            else:
-                # Use Chat Completions for other models
-                cc_payload = {
-                    "model": model_name,
-                    "messages": [
-                        {"role": "system", "content": "You are a diet planning assistant that outputs strictly structured JSON as instructed."},
-                        {"role": "user", "content": final_prompt}
-                    ],
-                    "response_format": {"type": "json_object"}
-                }
-                # include temperature for non-gpt-5
-                cc_payload["temperature"] = 0.3
-                try:
-                    data = _post(chat_url, cc_payload)
-                except requests.HTTPError:
-                    fb_model = "gpt-4-nano"
-                    data = _post(resp_url, {"model": fb_model, "input": cc_payload["messages"][1]["content"]})
-                    generation_metadata["generation_parameters"]["model"] = fb_model
-
-            raw_output = _parse_output(data)
+            # Call AI and parse
+            plan_output = self.ai.generate(final_prompt)
             # Attach request id to generation metadata
             if self.last_openai_request_id:
                 generation_metadata.setdefault("generation_parameters", {})
                 generation_metadata["generation_parameters"]["openai_request_id"] = self.last_openai_request_id
-            
-            # Parse and validate output
-            parsed_output = self.parser.parse(raw_output)
             
             # Add generation metadata
             generation_time = (timezone.now() - generation_start).total_seconds()
             generation_metadata["performance_metrics"].update({
                 "generation_time": generation_time,
                 "success": True,
-                "raw_output_length": len(str(raw_output)),
-                "parsed_meals_count": len(parsed_output.plan)
+                "raw_output_length": 0,
+                "parsed_meals_count": len(plan_output.plan)
             })
             
             # Add metadata to output
-            parsed_output.generation_metadata = generation_metadata
+            plan_output.generation_metadata = generation_metadata
             
             # Log successful generation
             self.logger.info(
@@ -344,11 +211,11 @@ class DietGenerator:
                     "meal_count": meal_count,
                     "snack_count": snack_count,
                     "generation_time": generation_time,
-                    "meals_generated": len(parsed_output.plan)
+                    "meals_generated": len(plan_output.plan)
                 }
             )
             
-            return parsed_output
+            return plan_output
             
         except Exception as e:
             # Update metadata with error information
@@ -389,309 +256,12 @@ class DietGenerator:
             snack_count=template.snacks_per_day
         )
 
-    def save_plan_to_database(self, plan_output: DietPlanOutput, meal_count: int, snack_count: int = 0):
+    def save_plan_to_database(self, plan_output: DietPlanOutput, meal_count: int, snack_count: int = 0, start_date: Optional[str] = None):
         """
-        Save the generated plan to database with comprehensive metadata.
-        This creates the training dataset for future AI models.
-        Enhanced to support meal count and snack preferences.
+        Delegate persistence to the DietPersistenceService.
         """
-        try:
-            import re
-            def _to_grams(q: str | float | int) -> float:
-                if isinstance(q, (int, float)):
-                    return float(q)
-                if not isinstance(q, str):
-                    return 100.0
-                txt = q.strip().lower()
-                m = re.findall(r"\d+\.?\d*", txt)
-                val = float(m[0]) if m else 100.0
-                if "kg" in txt:
-                    return val * 1000.0
-                if "g" in txt:
-                    return val
-                if "lb" in txt:
-                    return val * 453.592
-                if "oz" in txt:
-                    return val * 28.3495
-                if "cup" in txt:
-                    return val * 240.0
-                if "tablespoon" in txt or "tbsp" in txt:
-                    return val * 15.0
-                if "teaspoon" in txt or "tsp" in txt:
-                    return val * 5.0
-                return val
-            
-            # Create diet plan record (3-day window)
-            diet_plan = DietPlan.objects.create(
-                user=self.user,
-                goal=getattr(self.user, 'fitness_goal', 'Maintain'),
-                daily_calories=self.user.calculate_daily_calories(),
-                start_date=timezone.now().date(),
-                end_date=timezone.now().date() + timezone.timedelta(days=3),
-                duration_weeks=1,
-                generated_plan=plan_output.dict(),
-                generation_strategy='GPT'
-            )
-            
-            # Process and save meals
-            meal_processor = MealProcessor(None)
-            
-            # Piece weight mapping
-            piece_weights = {
-                "egg": 50.0,
-                "banana": 118.0,
-                "apple": 182.0,
-                "orange": 131.0,
-                "bread": 28.0,
-                "avocado": 200.0,
-                "tomato": 123.0,
-                "cherry tomato": 17.0,
-            }
-            # Load overrides from DietConfig if present
-            try:
-                cfg = DietConfig.objects.last()
-                if cfg and cfg.piece_weights:
-                    piece_weights.update(cfg.piece_weights)
-            except Exception:
-                pass
-            unit_tokens = (
-                "kg", "g", "lb", "oz", "cup", "cups", "tablespoon", "tbsp",
-                "teaspoon", "tsp", "ml", "l"
-            )
-
-            # Breakfast replacement keywords (allowed at breakfast per culture)
-            breakfast_allowed_keywords = (
-                "oat", "yogurt", "egg", "bread", "potato", "pasta", "cheese",
-                "milk", "banana", "apple", "honey", "butter"
-            )
-            try:
-                cfg = DietConfig.objects.last()
-                if cfg and cfg.breakfast_allowed_keywords:
-                    breakfast_allowed_keywords = tuple(cfg.breakfast_allowed_keywords)
-            except Exception:
-                pass
-            
-            # Proceed to persist meals using categorized foods only
-            
-            # Enforce per-meal category foods: use only categorized foods for this user
-            cat_qs = UserFoodCategoryPreference.objects.filter(user=self.user).select_related('food')
-            def key_for(meal: str, macro: str) -> str:
-                macro_key = 'carbs' if macro == 'carb' else macro
-                return f"{meal.lower()}_{macro_key}"
-            categories: Dict[str, set] = {}
-            for m in ("Breakfast", "Lunch", "Dinner", "Snack"):
-                for mac in ("carb", "protein", "fat"):
-                    categories[key_for(m, mac)] = set()
-            for m in cat_qs:
-                categories[key_for(m.meal, m.macro)].add(m.food.name)
-            # Macro pools across meals as fallback for missing meal-specific categories
-            macro_pool: Dict[str, set] = {"carb": set(), "protein": set(), "fat": set()}
-            for mac in ("carb", "protein", "fat"):
-                for meal_key, names in categories.items():
-                    if meal_key.endswith('carbs') and mac == 'carb':
-                        macro_pool['carb'].update(names)
-                    if meal_key.endswith('protein') and mac == 'protein':
-                        macro_pool['protein'].update(names)
-                    if meal_key.endswith('fat') and mac == 'fat':
-                        macro_pool['fat'].update(names)
-            # Build FoodItem lookup for all category names
-            all_cat_names = set()
-            for s in categories.values():
-                all_cat_names.update(s)
-            name_to_food: Dict[str, FoodItem] = {}
-            if all_cat_names:
-                for f in FoodItem.objects.filter(name__in=list(all_cat_names)):
-                    name_to_food[f.name.lower()] = f
-
-            def _closest_from_pool(name: str, pool_names: set[str]) -> FoodItem | None:
-                name_l = (name or "").lower()
-                # Exact match first
-                if name_l in name_to_food:
-                    if name_to_food[name_l].name in pool_names:
-                        return name_to_food[name_l]
-                # Fuzzy within provided pool
-                best = None
-                best_ratio = 0.0
-                for an in pool_names:
-                    an_l = (an or "").lower()
-                    r = SequenceMatcher(None, name_l, an_l).ratio()
-                    if r > best_ratio:
-                        best_ratio = r
-                        best = an_l
-                if best and best_ratio >= 0.88:
-                    return name_to_food.get(best)
-                return None
-
-            for i, ai_meal in enumerate(plan_output.plan):
-                meal = Meal.objects.create(
-                    diet_plan=diet_plan,
-                    template=self._determine_meal_template(ai_meal),
-                    date=timezone.now().date() + timezone.timedelta(
-                        days=i // (meal_count + snack_count if (meal_count + snack_count) else 1)
-                    ),
-                    description=ai_meal.description,
-                    meal_type=ai_meal.meal_type or 'Lunch',
-                    is_ai_generated=True
-                )
-                
-                resolved_ingredients = meal_processor.resolve_ingredients_from_ai_meal(ai_meal)
-                
-                for food_item, quantity in resolved_ingredients:
-                    # Enforce per-meal categorized foods only
-                    meal_type = ai_meal.meal_type or 'Lunch'
-                    dom_macro = self._dominant_macro_of_food(food_item)
-                    cat_key = key_for(meal_type, dom_macro)
-                    pool = categories.get(cat_key, set())
-                    if pool:
-                        if food_item.name not in pool:
-                            replacement = _closest_from_pool(food_item.name, pool)
-                            if not replacement:
-                                # Fallback to macro pool across meals
-                                replacement = _closest_from_pool(food_item.name, macro_pool.get(dom_macro, set()))
-                            if not replacement:
-                                self.logger.info(
-                                    "Skipping item '%s' not in categorized pool for %s/%s",
-                                    food_item.name, meal_type, dom_macro
-                                )
-                                continue
-                            food_item = replacement
-                    else:
-                        # If no pool for this meal/macro, fallback to macro pool across meals
-                        pool2 = macro_pool.get(dom_macro, set())
-                        if pool2 and food_item.name not in pool2:
-                            replacement = _closest_from_pool(food_item.name, pool2)
-                            if replacement:
-                                food_item = replacement
-                            else:
-                                self.logger.info(
-                                    "Skipping item '%s' (no categorized pool for %s/%s)",
-                                    food_item.name, meal_type, dom_macro
-                                )
-                                continue
-
-                    q_txt = str(quantity).strip().lower()
-                    grams = _to_grams(quantity)
-                    # If quantity explicitly in grams but unrealistically low for piece-type, coerce based on piece map
-                    def _is_piece_food(name_l: str) -> str | None:
-                        for key in piece_weights.keys():
-                            if key in name_l:
-                                return key
-                        # egg synonyms
-                        if any(k in name_l for k in ("poached egg", "hard-boiled", "fried egg", "scrambled egg", "egg,", "eggs")):
-                            return "egg"
-                        return None
-                    name_l = (food_item.name or "").lower()
-                    piece_key = _is_piece_food(name_l)
-                    if piece_key:
-                        # Extract numeric value from the quantity text if present
-                        import re as _re
-                        nums = _re.findall(r"\d+\.?\d*", q_txt) if q_txt else []
-                        num_val = float(nums[0]) if nums else None
-                        # If there is no unit token or grams is tiny (< piece weight * 0.25), treat as piece count
-                        if (not any(tok in q_txt for tok in unit_tokens)) or (("g" in q_txt) and grams < piece_weights[piece_key] * 0.25 and (num_val is not None)):
-                            try:
-                                count = num_val if num_val is not None else 1.0
-                            except Exception:
-                                count = 1.0
-                            grams = max(grams, count * piece_weights[piece_key])
-                    if (
-                        isinstance(quantity, (int, float)) or
-                        (q_txt and q_txt.isdigit()) or
-                        (q_txt and all(ch.isdigit() or ch == '.' for ch in q_txt))
-                    ) and not any(tok in q_txt for tok in unit_tokens):
-                        name_l = (food_item.name or "").lower()
-                        for key, wt in piece_weights.items():
-                            if key in name_l:
-                                try:
-                                    num = float(q_txt) if q_txt else float(quantity)
-                                except Exception:
-                                    num = 1.0
-                                grams = num * wt
-                                break
-                    MealComponent.objects.create(
-                        meal=meal,
-                        food=food_item,
-                        quantity=grams,
-                        meal_time=ai_meal.meal_type or 'Lunch'
-                    )
-            
-            # Training data logging: capture inputs/outputs/repairs for future model training
-            training_data = {
-                "user_profile": {
-                    "user_id": self.user.id,
-                    "bmi": getattr(self.user, 'calculate_bmi', lambda: None)(),
-                    "bmr": getattr(self.user, 'calculate_bmr', lambda: None)(),
-                    "target_calories": diet_plan.daily_calories,
-                    "macro_ratios": {"protein": 30, "carb": 50, "fat": 20},
-                },
-                "categorized_foods": {k: sorted(list(v)) for k, v in categories.items()},
-                "piece_weights": piece_weights,
-                "rules": {"no_rice_breakfast": True},
-                "model": plan_output.generation_metadata.get("generation_parameters", {}).get("model"),
-                "generation_metadata": plan_output.generation_metadata,
-                "final_plan_id": diet_plan.id,
-            }
-            DailyAdvice.objects.create(
-                user=self.user,
-                text=f"AI-generated diet plan created with {meal_count} meals and {snack_count} snacks",
-                context_data={
-                    "generation_metadata": plan_output.generation_metadata,
-                    "training_data": training_data,
-                }
-            )
-
-            # Priority-aware macro rebalancing per day (before kcal scaling)
-            try:
-                self._rebalance_macros_by_goal(diet_plan)
-            except Exception as _:
-                pass
-
-            # Final kcal scaling per day to keep within ±100 kcal
-            try:
-                from collections import defaultdict
-                meals_by_date = defaultdict(list)
-                for m in diet_plan.meals.all():
-                    meals_by_date[m.date].append(m)
-                for d, meals_list in meals_by_date.items():
-                    # compute total calories
-                    total = 0.0
-                    for m in meals_list:
-                        total += m.calculate_nutrition()["calories"]
-                    target = diet_plan.daily_calories
-                    diff = total - target
-                    if abs(diff) > 100 and total > 0:
-                        scale = max(0.8, min(1.2, target / total))
-                        for m in meals_list:
-                            for comp in m.components.all():
-                                comp.quantity = comp.quantity * scale
-                                comp.save(update_fields=["quantity"])
-            except Exception as _:
-                pass
-            
-            self.logger.info(
-                f"Successfully saved diet plan to database",
-                extra={
-                    "user_id": self.user.id,
-                    "diet_plan_id": diet_plan.id,
-                    "meals_created": len(plan_output.plan),
-                    "meal_count": meal_count,
-                    "snack_count": snack_count,
-                    "generation_id": self.generation_id
-                }
-            )
-            
-            return diet_plan
-            
-        except Exception as e:
-            self.logger.error(
-                f"Failed to save diet plan to database: {str(e)}",
-                extra={
-                    "user_id": self.user.id,
-                    "generation_id": self.generation_id,
-                    "plan_output": plan_output.dict() if plan_output else None
-                }
-            )
-            raise
+        service = DietPersistenceService(self.user)
+        return service.save_plan(plan_output, meal_count, snack_count, start_date)
 
     def _determine_meal_template(self, ai_meal: AIMeal) -> str:
         """

@@ -173,7 +173,7 @@ class TrainingDataCollector:
         """
         meals_data = []
         
-        for meal in diet_plan.meal_set.all():
+        for meal in diet_plan.meals.all():
             # Process meal with enhanced processor
             meal_processor = MealProcessor()
             
@@ -221,7 +221,7 @@ class TrainingDataCollector:
         """
         Collect comprehensive nutritional analysis.
         """
-        all_meals = diet_plan.meal_set.all()
+        all_meals = diet_plan.meals.all()
         total_calories = 0
         total_protein = 0
         total_carbs = 0
