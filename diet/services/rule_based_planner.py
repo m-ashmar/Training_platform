@@ -222,8 +222,9 @@ class RuleBasedPlanner:
             current_date = base_date + _timedelta(days=day_idx)
             # Deterministic randomness per user/day for reproducible variety
             try:
+                # uid is user id
                 uid = int(getattr(self.user, 'id', 0) or 0)
-                except Exception:
+            except Exception:
                 uid = 0
             salt = f"rbp:{uid}:{current_date.isoformat()}"
             seed = int(hashlib.sha256(salt.encode('utf-8')).hexdigest()[:12], 16)
@@ -337,31 +338,31 @@ class RuleBasedPlanner:
             recent_names[m] = set(norm_names_by_meal.get(m, set())) | set(used_names_window.get(m, set()))
 
         # Kcal allocation
-            snack_kcal = 200.0 if snack_count else 0.0
-            meal_kcal_budget = max(0.0, daily_kcal - snack_kcal)
-            if getattr(settings, 'DIET_DYNAMIC_MEAL_ALLOCATION', False):
+        snack_kcal = 200.0 if snack_count else 0.0
+        meal_kcal_budget = max(0.0, daily_kcal - snack_kcal)
+        if getattr(settings, 'DIET_DYNAMIC_MEAL_ALLOCATION', False):
             split = goal_meal_kcal_split(ctx.goal)
-                meal_distribution = {m: split.get(m, 1.0/len(meals)) for m in meals}
-            else:
+            meal_distribution = {m: split.get(m, 1.0/len(meals)) for m in meals}
+        else:
             meal_distribution = self._choose_distribution_for_goal_value(ctx.goal, meals)
-                per_meal_kcal = {m: meal_kcal_budget * meal_distribution[m] for m in meals}
+        per_meal_kcal = {m: meal_kcal_budget * meal_distribution[m] for m in meals}
 
         # Macro targets per meal
         ratios = self._macro_ratios_for_goal_value(ctx.goal)
-            protein_target = daily_kcal * ratios["protein"] / 4.0
-            carb_target = daily_kcal * ratios["carb"] / 4.0
-            fat_target = daily_kcal * ratios["fat"] / 9.0
-            meal_targets: Dict[str, MealTarget] = {}
-            for m in meals:
-                meal_targets[m] = MealTarget(
-                    name=m,
-                    kcal_target=per_meal_kcal[m],
-                    macro_targets={
-                        "protein": protein_target * meal_distribution[m],
-                        "carb": carb_target * meal_distribution[m],
-                        "fat": fat_target * meal_distribution[m],
-                    },
-                )
+        protein_target = daily_kcal * ratios["protein"] / 4.0
+        carb_target = daily_kcal * ratios["carb"] / 4.0
+        fat_target = daily_kcal * ratios["fat"] / 9.0
+        meal_targets: Dict[str, MealTarget] = {}
+        for m in meals:
+            meal_targets[m] = MealTarget(
+                name=m,
+                kcal_target=per_meal_kcal[m],
+                macro_targets={
+                    "protein": protein_target * meal_distribution[m],
+                    "carb": carb_target * meal_distribution[m],
+                    "fat": fat_target * meal_distribution[m],
+                },
+            )
         return DayContext(
             date=current_date,
             meal_kcal=per_meal_kcal,
@@ -419,201 +420,205 @@ class RuleBasedPlanner:
         )
         try:
             return StagedMealFiller().fill(meal_name, mt, pools, recent_set)
-            except Exception:
+        except Exception:
             return []
 
     def _plan_meal(self, meal_name: str, ctx: PlannerContext, day_ctx: DayContext) -> AIMeal:
         try:
-                components: List[Tuple[FoodItem, float]] = []
-                used_macro_counts = {"protein": 0, "carb": 0, "fat": 0, "vegetable": 0, "fruit": 0}
-                kcal_consumed = 0.0
-                macro_consumed = {"protein": 0.0, "carb": 0.0, "fat": 0.0}
+            components: List[Tuple[FoodItem, float]] = []
+            used_macro_counts = {"protein": 0, "carb": 0, "fat": 0, "vegetable": 0, "fruit": 0}
+            kcal_consumed = 0.0
+            macro_consumed = {"protein": 0.0, "carb": 0.0, "fat": 0.0}
             meal_existing_ids: Set[int] = set()
             meal_existing_names: Set[str] = set()
 
             # Staged fill
             recent_set = day_ctx.recent_exclusions_ids.get(meal_name, set())
             staged = self._staged_fill(meal_name, ctx, day_ctx, recent_set)
-                    components.extend(staged)
-                    if components:
+            components.extend(staged)
+            if components:
                 kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
-                        for f, _g in components:
-                            meal_existing_ids.add(getattr(f, 'id', 0))
-                            meal_existing_names.add(self._normalize_name_for_repeat(getattr(f, 'name', '') or ''))
-                        for f, _g in components:
-                            dom = self._dominant_macro_of_food(f)
+                for f, _g in components:
+                    meal_existing_ids.add(getattr(f, 'id', 0))
+                    meal_existing_names.add(self._normalize_name_for_repeat(getattr(f, 'name', '') or ''))
+                for f, _g in components:
+                    dom = self._dominant_macro_of_food(f)
                     used_macro_counts[dom] = used_macro_counts.get(dom, 0) + 1
                 day_ctx.recent_exclusions_ids.setdefault(meal_name, set()).update(meal_existing_ids)
                 day_ctx.recent_exclusions_names.setdefault(meal_name, set()).update(meal_existing_names)
-                        for f, _g in components:
+                for f, _g in components:
                     day_ctx.used_in_window.setdefault(meal_name, set()).add(getattr(f, 'id', 0))
                     day_ctx.used_names_window.setdefault(meal_name, set()).add(self._normalize_name_for_repeat(getattr(f, 'name', '')))
 
             # Prefill protein
-                protein_floor_g = 40.0 if meal_name.lower() in ("lunch", "dinner") else 35.0
+            protein_floor_g = 40.0 if meal_name.lower() in ("lunch", "dinner") else 35.0
             carb_floor_g = 50.0 if (ctx.goal in ("gain", "maintain") or meal_name.lower() in ("breakfast", "lunch")) else 0.0
-                protein_present = any(self._dominant_macro_of_food(f) == 'protein' for f, _g in components)
-                pre_need_protein = 0.0 if protein_present else max(0.0, protein_floor_g)
-                if pre_need_protein > 0.0:
+            protein_present = any(self._dominant_macro_of_food(f) == 'protein' for f, _g in components)
+            pre_need_protein = 0.0 if protein_present else max(0.0, protein_floor_g)
+            if pre_need_protein > 0.0:
                 adjusted_kcal_target = day_ctx.meal_targets[meal_name].kcal_target
                 if ctx.goal in ("maintain", "gain") and meal_name == "Dinner":
                     adjusted_kcal_target = max(0.0, adjusted_kcal_target - 50.0 * 4.0)
+                self._add_macro_component(
+                    meal_name,
+                    "protein",
+                    pre_need_protein,
+                    adjusted_kcal_target,
+                    ctx.allowed_map,
+                    used_macro_counts,
+                    macro_consumed,
+                    components,
+                    kcal_consumed,
+                    day_ctx.recent_exclusions_ids,
+                    day_ctx.recent_exclusions_names,
+                    day_ctx.used_names_window,
+                    macro_cap=1,
+                    existing_ids=meal_existing_ids,
+                )
+            kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+
+            # Prefill carb exactly one
+            if carb_floor_g > 0.0:
+                pre_need_carb = max(0.0, carb_floor_g - macro_consumed["carb"])
+                if pre_need_carb > 0.0:
                     self._add_macro_component(
                         meal_name,
-                        "protein",
-                        pre_need_protein,
-                        adjusted_kcal_target,
-                    ctx.allowed_map,
+                        "carb",
+                        pre_need_carb,
+                        day_ctx.meal_targets[meal_name].kcal_target,
+                        ctx.allowed_map,
                         used_macro_counts,
                         macro_consumed,
                         components,
                         kcal_consumed,
-                    day_ctx.recent_exclusions_ids,
-                    day_ctx.recent_exclusions_names,
-                    day_ctx.used_names_window,
-                        macro_cap=1,
-                        existing_ids=meal_existing_ids,
-                    )
-                kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
-
-            # Prefill carb exactly one
-                if carb_floor_g > 0.0:
-                    pre_need_carb = max(0.0, carb_floor_g - macro_consumed["carb"])
-                    if pre_need_carb > 0.0:
-                        self._add_macro_component(
-                            meal_name,
-                            "carb",
-                            pre_need_carb,
-                        day_ctx.meal_targets[meal_name].kcal_target,
-                        ctx.allowed_map,
-                            used_macro_counts,
-                            macro_consumed,
-                            components,
-                            kcal_consumed,
                         day_ctx.recent_exclusions_ids,
                         day_ctx.recent_exclusions_names,
                         day_ctx.used_names_window,
                         macro_cap=1,
-                            existing_ids=meal_existing_ids,
+                        existing_ids=meal_existing_ids,
                         gram_cap_override=350.0,
-                        )
-                    kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
-                
+                    )
+                kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+
             # Vegetables
-                veg_added = self._add_vegetables_to_meal(
+            veg_added = self._add_vegetables_to_meal(
                 meal_name, ctx.allowed_map, components, meal_existing_ids, meal_existing_names,
                 day_ctx.recent_exclusions_ids, day_ctx.recent_exclusions_names, day_ctx.used_in_window,
                 day_ctx.used_names_window
-                )
-                if veg_added:
+            )
+            if veg_added:
                 kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
 
             # Macro selection
             for idx, macro in enumerate(ctx.macro_order):
                 if macro == "carb" and ctx.goal == "lose" and meal_name.lower() == "dinner":
-                            continue
+                    continue
                 target = day_ctx.meal_targets[meal_name].macro_targets[macro]
-                    if idx < 2:
-                        target *= 0.9
-                    remaining = max(0.0, target - macro_consumed[macro])
-                    if remaining <= 0.0:
-                        continue
+                if idx < 2:
+                    target *= 0.9
+                remaining = max(0.0, target - macro_consumed[macro])
+                if remaining <= 0.0:
+                    continue
                 candidates = ctx.allowed_map.get(meal_name, {}).get(macro, [])
-                    if not candidates:
-                        continue
+                if not candidates:
+                    continue
                 exclude_ids = meal_existing_ids | set(day_ctx.recent_exclusions_ids.get(meal_name, set()))
                 exclude_names = meal_existing_names | set(day_ctx.recent_exclusions_names.get(meal_name, set()))
-                    candidates = [f for f in candidates if f.id not in exclude_ids and self._normalize_name_for_repeat(f.name) not in exclude_names]
-                    if not candidates:
-                        continue
-                    use_smart = getattr(settings, 'DIET_SMART_MACRO_PLANNER', False)
-                    if use_smart:
-                        ranked = self._smart_rank_candidates(
-                            meal_name=meal_name,
-                            macro=macro,
-                            candidates=candidates,
-                            macro_consumed=macro_consumed,
+                candidates = [f for f in candidates if f.id not in exclude_ids and self._normalize_name_for_repeat(f.name) not in exclude_names]
+                if not candidates:
+                    continue
+                use_smart = getattr(settings, 'DIET_SMART_MACRO_PLANNER', False)
+                if use_smart:
+                    ranked = self._smart_rank_candidates(
+                        meal_name=meal_name,
+                        macro=macro,
+                        candidates=candidates,
+                        macro_consumed=macro_consumed,
                         meal_target=day_ctx.meal_targets[meal_name],
-                            kcal_consumed=kcal_consumed,
+                        kcal_consumed=kcal_consumed,
                         goal=ctx.goal,
-                        )
-                    else:
-                        ranked = [
+                    )
+                else:
+                    ranked = [
                         {'food': f, 'score': self._macro_density_per_kcal(f, macro), 'penalty': 0.0, 'grams': None}
                         for f in sorted(candidates, key=lambda f: self._macro_density_per_kcal(f, macro), reverse=True)
-                        ]
+                    ]
                 cap_per_macro = {'protein': 1, 'carb': 1, 'fat': 0 if ctx.goal == 'lose' else 1}
                 if cap_per_macro.get(macro, 0) - used_macro_counts.get(macro, 0) <= 0:
-                        continue
-                    selected_name = None
-                    for item in ranked:
-                        food = item['food']
+                    continue
+                selected_name = None
+                for item in ranked:
+                    food = item['food']
                     if ctx.goal == 'lose' and macro == 'fat':
-                            continue
+                        continue
                     if used_macro_counts[macro] >= cap_per_macro.get(macro, 0):
-                            break
-                        macro_per_g = self._macro_per_gram(food, macro)
-                        kcal_per_g = float(getattr(food, "calories_per_gram", 0.0) or 0.0)
-                        if macro_per_g <= 0.0 or kcal_per_g <= 0.0:
-                            continue
-                        if use_smart:
+                        break
+                    macro_per_g = self._macro_per_gram(food, macro)
+                    kcal_per_g = float(getattr(food, "calories_per_gram", 0.0) or 0.0)
+                    if macro_per_g <= 0.0 or kcal_per_g <= 0.0:
+                        continue
+                    if use_smart:
                         grams = item.get('grams') or 0.0
-                        else:
+                    else:
                         remaining_kcal = max(0.0, day_ctx.meal_targets[meal_name].kcal_target - kcal_consumed)
                         grams = self._compute_grams_for_pick(food, macro, remaining, remaining_kcal, ctx.goal, None)
-                        grams = self._snap_to_piece_grams_if_applicable(food, grams)
-                        if grams <= 0:
-                            continue
-                        if any(getattr(f0, 'id', None) == getattr(food, 'id', None) for f0,_ in components):
-                            continue
-                        components.append((food, grams))
-                        used_macro_counts[macro] += 1
-                        selected_name = food.name
-                        meal_existing_ids.add(food.id)
-                        meal_existing_names.add(self._normalize_name_for_repeat(food.name))
+                    grams = self._snap_to_piece_grams_if_applicable(food, grams)
+                    if grams <= 0:
+                        continue
+                    if any(getattr(f0, 'id', None) == getattr(food, 'id', None) for f0, _ in components):
+                        continue
+                    components.append((food, grams))
+                    used_macro_counts[macro] += 1
+                    selected_name = food.name
+                    try:
+                        print(f"[SELECT] meal={meal_name} macro={macro} food={getattr(food,'name','')} grams={round(grams,1)}")
+                    except Exception:
+                        pass
+                    meal_existing_ids.add(food.id)
+                    meal_existing_names.add(self._normalize_name_for_repeat(food.name))
                     day_ctx.used_in_window.setdefault(meal_name, set()).add(food.id)
                     day_ctx.used_names_window.setdefault(meal_name, set()).add(self._normalize_name_for_repeat(food.name))
-                        kcal_add = grams * kcal_per_g
-                        kcal_consumed += kcal_add
-                        macro_consumed[macro] += grams * macro_per_g
+                    kcal_add = grams * kcal_per_g
+                    kcal_consumed += kcal_add
+                    macro_consumed[macro] += grams * macro_per_g
                     macro_consumed['protein'] += grams * self._macro_per_gram(food, 'protein') if macro != 'protein' else 0.0
                     macro_consumed['carb'] += grams * self._macro_per_gram(food, 'carb') if macro != 'carb' else 0.0
                     macro_consumed['fat'] += grams * self._macro_per_gram(food, 'fat') if macro != 'fat' else 0.0
-                        try:
-                            safe_json_log(stage="pick", data={
-                                'meal_type': meal_name,
-                                'macro': macro,
-                                'food': food.name,
-                                'grams': round(grams,1),
-                                'kcal_add': round(kcal_add,1),
-                                'kcal_consumed': round(kcal_consumed,1),
-                                'macro_consumed': {k: round(v,1) for k,v in macro_consumed.items()},
-                                'target': round(target,1),
-                                'remaining': round(max(0.0, target - macro_consumed[macro]),1),
-                            }, logger_name='diet')
-                        except Exception:
-                            pass
-                        remaining = max(0.0, target - macro_consumed[macro])
-                        if remaining <= 0.0:
-                            break
-                    if use_smart and ranked:
-                        top = ranked[:5]
-                        log_payload = {
-                            "meal_type": meal_name,
-                            "macro": macro,
-                            "candidates": [
-                                {"food": it['food'].name, "eff_score": round(float(it.get('score', 0.0)), 4), "penalty": round(float(it.get('penalty', 0.0)), 4)}
-                                for it in top
-                            ],
-                            "selected": selected_name,
+                    try:
+                        safe_json_log(stage="pick", data={
+                            'meal_type': meal_name,
+                            'macro': macro,
+                            'food': food.name,
+                            'grams': round(grams, 1),
+                            'kcal_add': round(kcal_add, 1),
+                            'kcal_consumed': round(kcal_consumed, 1),
+                            'macro_consumed': {k: round(v, 1) for k, v in macro_consumed.items()},
+                            'target': round(target, 1),
+                            'remaining': round(max(0.0, target - macro_consumed[macro]), 1),
+                        }, logger_name='diet')
+                    except Exception:
+                        pass
+                    remaining = max(0.0, target - macro_consumed[macro])
+                    if remaining <= 0.0:
+                        break
+                if use_smart and ranked:
+                    top = ranked[:5]
+                    log_payload = {
+                        "meal_type": meal_name,
+                        "macro": macro,
+                        "candidates": [
+                            {"food": it['food'].name, "eff_score": round(float(it.get('score', 0.0)), 4), "penalty": round(float(it.get('penalty', 0.0)), 4)}
+                            for it in top
+                        ],
+                        "selected": selected_name,
                         "goal": ctx.goal,
-                        }
-                        safe_json_log(stage="macro_selection", data=log_payload, logger_name='diet')
-                        self._smart_summary.append(log_payload)
+                    }
+                    safe_json_log(stage="macro_selection", data=log_payload, logger_name='diet')
+                    self._smart_summary.append(log_payload)
 
             # Dinner safeguard
             if meal_name == "Dinner" and ctx.goal in ("maintain", "gain"):
-                    dinner_carb_floor = 30.0
+                dinner_carb_floor = 30.0
                 if macro_consumed['carb'] < dinner_carb_floor:
                     deficit = dinner_carb_floor - macro_consumed['carb']
                     carb_idx = next((i for i, (f, g) in enumerate(components) if self._dominant_macro_of_food(f) == 'carb'), None)
@@ -636,6 +641,8 @@ class RuleBasedPlanner:
                             kcal_consumed += delta_g * kcal_pg
                             macro_consumed['carb'] += delta_g * c_pg
                     else:
+                        print('am on else ')
+                        print('adding another carb item')
                         self._add_macro_component(
                             meal_name,
                             'carb',
@@ -652,25 +659,25 @@ class RuleBasedPlanner:
                             macro_cap=1,
                             existing_ids=meal_existing_ids,
                         )
-                    kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+                kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
 
             # Fallback if empty
-                if not components and getattr(settings, 'DIET_DYNAMIC_MEAL_ALLOCATION', False):
-                    fallback_items = self._fallback_safe_set(meal_name)
-                    protein_added = False
-                    for food in fallback_items:
-                        dom = self._dominant_macro_of_food(food)
-                        if dom == 'protein' and protein_added:
-                            continue
-                        grams = min(100.0 if dom != 'fat' else 20.0, portion_sanity_cap_grams(dom))
-                        if dom == 'carb':
-                            grams = min(grams, 400.0)
-                        grams = self._round_grams(grams)
-                        components.append((food, grams))
-                        if dom == 'protein':
-                            protein_added = True
-                self._smart_summary.append({"meal_type": meal_name, "used_fallback": True, "fallback_items": [f.name for f,_ in components]})
-                    safe_json_log(stage="fallback_meal", data=self._smart_summary[-1], logger_name='diet')
+            if not components and getattr(settings, 'DIET_DYNAMIC_MEAL_ALLOCATION', False):
+                fallback_items = self._fallback_safe_set(meal_name)
+                protein_added = False
+                for food in fallback_items:
+                    dom = self._dominant_macro_of_food(food)
+                    if dom == 'protein' and protein_added:
+                        continue
+                    grams = min(100.0 if dom != 'fat' else 20.0, portion_sanity_cap_grams(dom))
+                    if dom == 'carb':
+                        grams = min(grams, 400.0)
+                    grams = self._round_grams(grams)
+                    components.append((food, grams))
+                    if dom == 'protein':
+                        protein_added = True
+                self._smart_summary.append({"meal_type": meal_name, "used_fallback": True, "fallback_items": [f.name for f, _ in components]})
+                safe_json_log(stage="fallback_meal", data=self._smart_summary[-1], logger_name='diet')
                 kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
 
             return self._finalize_meal(meal_name, components, day_ctx.meal_targets, kcal_consumed, macro_consumed)
@@ -702,25 +709,25 @@ class RuleBasedPlanner:
             return self._finalize_meal(meal_name, components, day_ctx.meal_targets, kcal_consumed, macro_consumed)
 
     def _finalize_meal(self, meal_name: str, components: List[Tuple[FoodItem, float]], meal_targets: Dict[str, MealTarget], kcal_consumed: float, macro_consumed: Dict[str, float]) -> AIMeal:
-                try:
-                    safe_json_log(stage="meal_summary", data={
-                        'meal_type': meal_name,
-                        'kcal_consumed': round(kcal_consumed,1),
-                        'macro_consumed': {k: round(v,1) for k,v in macro_consumed.items()},
-                        'target_per_macro': {k: round(v,1) for k,v in meal_targets[meal_name].macro_targets.items()},
-                        'kcal_target': round(meal_targets[meal_name].kcal_target,1),
-                        'components': [f"{f.name}:{int(g)}g" for f,g in components],
-                    }, logger_name='diet')
-                except Exception:
-                    pass
-                ingredients = [AIIngredient(name=f.name, quantity=f"{int(g)}g") for (f, g) in components]
+        try:
+            safe_json_log(stage="meal_summary", data={
+                'meal_type': meal_name,
+                'kcal_consumed': round(kcal_consumed, 1),
+                'macro_consumed': {k: round(v, 1) for k, v in macro_consumed.items()},
+                'target_per_macro': {k: round(v, 1) for k, v in meal_targets[meal_name].macro_targets.items()},
+                'kcal_target': round(meal_targets[meal_name].kcal_target, 1),
+                'components': [f"{f.name}:{int(g)}g" for f, g in components],
+            }, logger_name='diet')
+        except Exception:
+            pass
+        ingredients = [AIIngredient(name=f.name, quantity=f"{int(g)}g") for (f, g) in components]
         return AIMeal(
-                        meal_name=meal_name,
-                        description=f"{meal_name} planned by rule-based system",
-                        ingredients=ingredients,
-                        total_nutrition={"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0},
-                        meal_type=meal_name,
-                    )
+            meal_name=meal_name,
+            description=f"{meal_name} planned by rule-based system",
+            ingredients=ingredients,
+            total_nutrition={"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0},
+            meal_type=meal_name,
+        )
     def _macro_ratios_for_goal(self) -> Dict[str, float]:
         goal = self._resolve_goal()
         if "lose" in goal:
@@ -830,6 +837,15 @@ class RuleBasedPlanner:
                         seen.add(f.name)
                         unique.append(f)
                 out[m][mac] = unique
+        try:
+            # DEBUG: Print final allowed foods map
+            print("[ALLOWED_MAP] Final per-meal/macro candidates:")
+            for meal_name, macro_map in out.items():
+                for macro_key, foods in macro_map.items():
+                    names = [getattr(fi, 'name', '') for fi in foods]
+                    print(f"  - {meal_name}:{macro_key} -> {names}")
+        except Exception:
+            pass
         return out
 
     def _get_recent_food_ids(self, meal_type: str, days: int, until) -> Set[int]:
@@ -893,6 +909,11 @@ class RuleBasedPlanner:
         gram_cap_override: float | None = None,
         existing_ids: Set[int] | None = None,
     ) -> None:
+        try:
+            base_cands = allowed.get(meal_name, {}).get(macro, [])
+            print(f"[ADD_MACRO] meal={meal_name} macro={macro} need_g={round(need_grams,1)} kcal_target={round(meal_kcal_target,1)} base_candidates={[getattr(f,'name','') for f in base_cands]}")
+        except Exception:
+            pass
         if need_grams <= 0.0:
             return
         cands = allowed.get(meal_name, {}).get(macro, [])
@@ -921,6 +942,10 @@ class RuleBasedPlanner:
                 goal=self._resolve_goal(),
                 gram_cap_override=gram_cap_override,
             )
+            try:
+                print(f"[ADD_MACRO] consider food={getattr(food,'name','')} grams_calc={round(grams,1)} remaining_kcal={round(remaining_kcal,1)}")
+            except Exception:
+                pass
             if grams <= 0:
                 continue
             # Guard intra-meal duplicates
@@ -931,6 +956,10 @@ class RuleBasedPlanner:
             # Do not mutate caller's exclusion set; rely on existing_ids + used_names_window
             used_names_window.setdefault(meal_name, set()).add(self._normalize_name_for_repeat(food.name))
             macro_consumed[macro] += grams * self._macro_per_gram(food, macro)
+            try:
+                print(f"[ADD_MACRO] SELECTED food={getattr(food,'name','')} grams={round(grams,1)}")
+            except Exception:
+                pass
             break
 
     def _fallback_staples_for_macro(self, meal_name: str, macro: str) -> List[FoodItem]:
@@ -972,34 +1001,74 @@ class RuleBasedPlanner:
         carb_variable: bool = True,
     ) -> float:
         """Compute grams to pick for a food given macro/kcal constraints and caps."""
+        try:
+            print(f"[PICK_CALC] food={getattr(food,'name','')}, macro={macro}, remaining_macro_g={round(remaining_macro_g,2)}, remaining_kcal={round(remaining_kcal,1)}, goal={goal}, gram_cap_override={gram_cap_override}, carb_variable={carb_variable}")
+        except Exception:
+            pass
         macro_per_g = self._macro_per_gram(food, macro)
         kcal_per_g = float(getattr(food, "calories_per_gram", 0.0) or 0.0)
         if macro_per_g <= 0.0 or kcal_per_g <= 0.0:
+            try:
+                print(f"[PICK_CALC] skip (non-positive macro/kcal) mpg={macro_per_g}, kpg={kcal_per_g}")
+            except Exception:
+                pass
             return 0.0
         grams_for_macro = remaining_macro_g / macro_per_g if macro_per_g > 0 else 0.0
         grams_for_kcal = remaining_kcal / kcal_per_g if kcal_per_g > 0 else grams_for_macro
         grams = max(0.0, min(grams_for_macro, grams_for_kcal))
+        try:
+            print(f"[PICK_CALC] base grams_for_macro={round(grams_for_macro,1)}, grams_for_kcal={round(grams_for_kcal,1)}, grams_base={round(grams,1)} (mpg={round(macro_per_g,4)}, kpg={round(kcal_per_g,4)})")
+        except Exception:
+            pass
         # Strict override cap if provided
         if gram_cap_override is not None:
             grams = min(grams, float(gram_cap_override))
+            try:
+                print(f"[PICK_CALC] apply gram_cap_override -> {round(grams,1)}")
+            except Exception:
+                pass
         # Cap oils and overall fat portion size
         if macro == 'fat' and self._is_oil(getattr(food, 'name', '') or ''):
             grams = min(grams, 15.0)
+            try:
+                print(f"[PICK_CALC] oil cap -> {round(grams,1)}")
+            except Exception:
+                pass
         if macro == 'fat':
             grams = min(grams, 50.0)
+            try:
+                print(f"[PICK_CALC] fat cap -> {round(grams,1)}")
+            except Exception:
+                pass
         # Portion sanity by dominant macro
         dom = self._dominant_macro_of_food(food)
         grams = min(grams, portion_sanity_cap_grams(dom))
+        try:
+            print(f"[PICK_CALC] sanity cap ({dom}) -> {round(grams,1)}")
+        except Exception:
+            pass
         # Add variability to carbs to avoid always maxing out
         if carb_variable and macro == 'carb':
             carb_cap = random.uniform(250.0, 350.0)
             grams = min(grams, carb_cap)
+            try:
+                print(f"[PICK_CALC] carb variability cap ({round(carb_cap,1)}) -> {round(grams,1)}")
+            except Exception:
+                pass
         # Apply vegetable-specific cap only for vegetables
         if self._is_vegetable(food):
             grams = min(grams, 300.0)
+            try:
+                print(f"[PICK_CALC] vegetable cap -> {round(grams,1)}")
+            except Exception:
+                pass
         # Round and snap to piece
         grams = self._round_grams(grams)
         grams = self._snap_to_piece_grams_if_applicable(food, grams)
+        try:
+            print(f"[PICK_CALC] final grams -> {round(grams,1)}")
+        except Exception:
+            pass
         return grams
 
     def _round_grams(self, grams: float) -> float:
@@ -1033,8 +1102,8 @@ class RuleBasedPlanner:
         try:
             piece_weights = getattr(self, '_piece_weights', None)
             if piece_weights is None:
-            cfg = DietConfig.objects.last()
-            piece_weights = (cfg.piece_weights if cfg and cfg.piece_weights else {})
+                cfg = DietConfig.objects.last()
+                piece_weights = (cfg.piece_weights if cfg and cfg.piece_weights else {})
             key = is_piece_food_name((food.name or '').lower(), piece_weights)
             if key:
                 pw = float(piece_weights.get(key, 0.0) or 0.0)
