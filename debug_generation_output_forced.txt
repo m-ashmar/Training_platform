@@ -1,0 +1,220 @@
+[ALLOWED_MAP] Final per-meal/macro candidates:
+  - Breakfast:protein -> ['Egg', 'Grilled Chicken Breast', 'Chicken Drumstick', 'Chicken Tikka', 'Egg Whites', 'Syrian Cheese']
+  - Breakfast:carb -> ['Carrot', 'Cherry tomatoes', 'White Rice', 'Arborio Rice', 'Syrian Bread']
+  - Breakfast:fat -> []
+  - Breakfast:vegetable -> []
+  - Breakfast:fruit -> []
+  - Lunch:protein -> ['Salmon', 'Lamb Tikka', 'Grilled Fish', 'Hard-Boiled Eggs', 'Chicken Shawarma']
+  - Lunch:carb -> ['Potato', 'Sweet Potato', 'Potato Gnocchi', 'Avocado Oil, Avocado', 'Cooked quinoa', 'Almonds', 'Cooked White Rice']
+  - Lunch:fat -> ['Olive Oil', 'Cheese, Colby']
+  - Lunch:vegetable -> []
+  - Lunch:fruit -> []
+  - Dinner:protein -> ['Burger', 'Chicken', 'Chicken Breast', 'Beef Shawarma']
+  - Dinner:carb -> ['Green Bean', 'Quinoa', 'Rice', 'Whole grain bread', 'Carnaroli Rice', 'Dark Choclate', 'Fresh Plain Cooked Pasta']
+  - Dinner:fat -> ['Almonds', 'Bacon Fat']
+  - Dinner:vegetable -> ['Asparagus', 'Carrot', 'Spinach', 'Zucchini']
+  - Dinner:fruit -> []
+  - Snack:protein -> ['Avocado']
+  - Snack:carb -> ['Banana', 'Apple']
+  - Snack:fat -> ['Avocado', 'Avocado Salsa']
+  - Snack:vegetable -> []
+  - Snack:fruit -> []
+2025-11-05 02:48:26 [info     ] {"stage": "allocation", "date": "2025-11-05", "daily_kcal": 2319.0, "per_meal_kcal": {"Breakfast": 741.6, "Lunch": 741.6, "Dinner": 635.7}, "targets": {"Breakfast": {"protein": 50.7, "carb": 111.6, "fat": 18.0}, "Lunch": {"protein": 50.7, "carb": 111.6, "fat": 18.0}, "Dinner": {"protein": 43.5, "carb": 95.7, "fat": 15.5}}, "goal": "gain"}
+[ADD_MACRO] meal=Breakfast macro=protein need_g=35.0 kcal_target=741.6 base_candidates=['Egg', 'Grilled Chicken Breast', 'Chicken Drumstick', 'Chicken Tikka', 'Egg Whites', 'Syrian Cheese']
+[PICK_CALC] food=Syrian Cheese, macro=protein, remaining_macro_g=35.0, remaining_kcal=741.6, goal=gain, gram_cap_override=None, carb_variable=True
+[PICK_CALC] base grams_for_macro=163.3, grams_for_kcal=259.3, grams_base=163.3 (mpg=0.2143, kpg=2.86)
+[PICK_CALC] sanity cap (fat) -> 100.0
+[PICK_CALC] final grams -> 100.0
+[ADD_MACRO] consider food=Syrian Cheese grams_calc=100.0 remaining_kcal=741.6
+[ADD_MACRO] SELECTED food=Syrian Cheese grams=100.0
+[ADD_MACRO] meal=Breakfast macro=carb need_g=50.0 kcal_target=741.6 base_candidates=['Carrot', 'Cherry tomatoes', 'White Rice', 'Arborio Rice', 'Syrian Bread']
+2025-11-05 02:48:26 [info     ] {"stage": "meal_summary", "meal_type": "Breakfast", "kcal_consumed": 309.0, "macro_consumed": {"protein": 24.3, "carb": 3.6, "fat": 25.4}, "target_per_macro": {"protein": 50.7, "carb": 111.6, "fat": 18.0}, "kcal_target": 741.6, "components": ["Syrian Cheese:100g", "Spinach:100g"]}
+[ADD_MACRO] meal=Lunch macro=protein need_g=40.0 kcal_target=741.6 base_candidates=['Salmon', 'Lamb Tikka', 'Grilled Fish', 'Hard-Boiled Eggs', 'Chicken Shawarma']
+[PICK_CALC] food=Hard-Boiled Eggs, macro=protein, remaining_macro_g=40.0, remaining_kcal=741.6, goal=gain, gram_cap_override=None, carb_variable=True
+[PICK_CALC] base grams_for_macro=317.5, grams_for_kcal=478.5, grams_base=317.5 (mpg=0.126, kpg=1.55)
+[PICK_CALC] sanity cap (protein) -> 317.5
+[PICK_CALC] final grams -> 315.0
+[ADD_MACRO] consider food=Hard-Boiled Eggs grams_calc=315.0 remaining_kcal=741.6
+[ADD_MACRO] SELECTED food=Hard-Boiled Eggs grams=315.0
+[ADD_MACRO] meal=Lunch macro=carb need_g=46.5 kcal_target=741.6 base_candidates=['Potato', 'Sweet Potato', 'Potato Gnocchi', 'Avocado Oil, Avocado', 'Cooked quinoa', 'Almonds', 'Cooked White Rice']
+[PICK_CALC] food=Cooked quinoa, macro=carb, remaining_macro_g=46.47, remaining_kcal=253.4, goal=gain, gram_cap_override=350.0, carb_variable=True
+[PICK_CALC] base grams_for_macro=119.2, grams_for_kcal=114.1, grams_base=114.1 (mpg=0.39, kpg=2.22)
+[PICK_CALC] apply gram_cap_override -> 114.1
+[PICK_CALC] sanity cap (carb) -> 114.1
+[PICK_CALC] carb variability cap (324.1) -> 114.1
+[PICK_CALC] final grams -> 115.0
+[ADD_MACRO] consider food=Cooked quinoa grams_calc=115.0 remaining_kcal=253.4
+[ADD_MACRO] SELECTED food=Cooked quinoa grams=115.0
+2025-11-05 02:48:26 [info     ] {"stage": "meal_summary", "meal_type": "Lunch", "kcal_consumed": 765.5, "macro_consumed": {"protein": 49.9, "carb": 53.4, "fat": 37.5}, "target_per_macro": {"protein": 50.7, "carb": 111.6, "fat": 18.0}, "kcal_target": 741.6, "components": ["Hard-Boiled Eggs:315g", "Cooked quinoa:115g", "Tomato:100g"]}
+[ADD_MACRO] meal=Dinner macro=protein need_g=40.0 kcal_target=435.7 base_candidates=['Burger', 'Chicken', 'Chicken Breast', 'Beef Shawarma']
+[PICK_CALC] food=Burger, macro=protein, remaining_macro_g=40.0, remaining_kcal=435.7, goal=gain, gram_cap_override=None, carb_variable=True
+[PICK_CALC] base grams_for_macro=148.6, grams_for_kcal=161.9, grams_base=148.6 (mpg=0.2691, kpg=2.6913)
+[PICK_CALC] sanity cap (protein) -> 148.6
+[PICK_CALC] final grams -> 150.0
+[ADD_MACRO] consider food=Burger grams_calc=150.0 remaining_kcal=435.7
+[ADD_MACRO] SELECTED food=Burger grams=150.0
+[ADD_MACRO] meal=Dinner macro=carb need_g=50.0 kcal_target=635.7 base_candidates=['Green Bean', 'Quinoa', 'Rice', 'Whole grain bread', 'Carnaroli Rice', 'Dark Choclate', 'Fresh Plain Cooked Pasta']
+[PICK_CALC] food=Dark Choclate, macro=carb, remaining_macro_g=50.0, remaining_kcal=232.0, goal=gain, gram_cap_override=350.0, carb_variable=True
+[PICK_CALC] base grams_for_macro=100.0, grams_for_kcal=43.3, grams_base=43.3 (mpg=0.5, kpg=5.36)
+[PICK_CALC] apply gram_cap_override -> 43.3
+[PICK_CALC] sanity cap (carb) -> 43.3
+[PICK_CALC] carb variability cap (346.2) -> 43.3
+[PICK_CALC] final grams -> 45.0
+[ADD_MACRO] consider food=Dark Choclate grams_calc=45.0 remaining_kcal=232.0
+[ADD_MACRO] SELECTED food=Dark Choclate grams=45.0
+2025-11-05 02:48:26 [info     ] {"stage": "meal_summary", "meal_type": "Dinner", "kcal_consumed": 685.9, "macro_consumed": {"protein": 44.5, "carb": 32.5, "fat": 42.2}, "target_per_macro": {"protein": 43.5, "carb": 95.7, "fat": 15.5}, "kcal_target": 635.7, "components": ["Burger:150g", "Dark Choclate:45g", "Carrot:100g"]}
+--- PLAN ---
+{
+  "plan": [
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Syrian Cheese",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Spinach",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "127g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Hard-Boiled Eggs",
+          "quantity": "315g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Cooked quinoa",
+          "quantity": "115g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Tomato",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Apple",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Burger",
+          "quantity": "150g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Dark Choclate",
+          "quantity": "45g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Carrot",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Avocado",
+          "quantity": "125g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    }
+  ],
+  "plan_metadata": {},
+  "generation_metadata": {}
+}

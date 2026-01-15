@@ -1,0 +1,166 @@
+🚀 STARTING COMPREHENSIVE PLATFORM TEST
+================================================================================
+============================================================
+TESTING USER REGISTRATION
+============================================================
+✅ PASS Trainer Registration
+   Details: Trainer ID: 264
+
+✅ PASS Client Registration
+   Details: Client ID: 265
+
+============================================================
+TESTING USER LOGIN
+============================================================
+✅ PASS Trainer Login
+   Details: Token: eyJhbGciOiJIUzI1NiIs...
+
+Updating trainer profile to set available, active, and verified...
+✅ PASS Trainer Profile Update
+   Details: Trainer is now available and verified.
+
+✅ PASS Client Login
+   Details: Token: eyJhbGciOiJIUzI1NiIs...
+
+============================================================
+TESTING SUBSCRIPTION CREATION
+============================================================
+✅ PASS Fetch Subscription Plans
+   Details: Using plan_id: 3
+
+✅ PASS Trainer Subscription Creation
+   Details: Subscription ID: None
+
+✅ PASS Trainer Payment Confirmation
+   Details: Payment ID: 6ba1d080-690a-470c-9360-d6d7dc9f3b11
+
+✅ PASS Client Subscription Creation
+   Details: Subscription ID: None
+
+✅ PASS Client Payment Confirmation
+   Details: Payment ID: e2adbae6-9957-432c-9d58-3f04a03d1049
+
+============================================================
+TESTING TRAINER-CLIENT RELATIONSHIP
+============================================================
+✅ PASS Fetch Available Trainers
+   Details: Using trainer_id: 264
+
+✅ PASS Client Trainer Request
+   Details: Request ID: None
+
+✅ PASS Trainer Client Approval
+   Details: Relation ID: None
+
+✅ PASS Trainer Diet Access
+   Details: Trainer has active diet subscription.
+
+✅ PASS Client Diet Access
+   Details: Client has active diet subscription.
+
+✅ PASS Client Assigned Trainer
+   Details: Client assigned_trainer: 264
+
+============================================================
+TESTING DIET PLAN CREATION
+============================================================
+✅ PASS Fetch Diet Plan Templates
+   Details: Using template_id: 5
+
+✅ PASS Diet Plan Creation
+   Details: Plan ID: 127
+
+
+DEBUG: Food items used for meal creation:
+  1. African Cherry Orange (ID: 218) - Calories: 53.0, Protein: 0.81, Carbs: 13.3, Fat: 0.31
+  2. Alouette Double cr????me Garlic & Herbs Baby Brie Garlic & Hebs (ID: 327) - Calories: 388.01358144538455, Protein: 17.636980974790205, Carbs: 3.5273961949580412, Fat: 35.27396194958041
+  3. Apple Mint (ID: 345) - Calories: 44.0, Protein: 3.29, Carbs: 8.41, Fat: 0.73
+  4. Ara (Fish) (ID: 296) - Calories: 184.0, Protein: 18.4, Carbs: 0.0, Fat: 11.7
+  5. Arborio Rice (ID: 208) - Calories: 358.0, Protein: 6.5, Carbs: 79.2, Fat: 0.52
+  6. Avocado (ID: 373) - Calories: 160.0, Protein: 2.0, Carbs: 9.0, Fat: 15.0
+✅ PASS Meal Creation - Breakfast
+
+✅ PASS Meal Creation - Lunch
+
+✅ PASS Meal Creation - Dinner
+
+
+DEBUG: Meals created and their components:
+  No meals found in plan nutrition response.
+============================================================
+TESTING TRAINING ROUTINE CREATION
+============================================================
+✅ PASS Routine Creation
+   Details: Routine ID: 106
+
+✅ PASS Exercise Addition - Day 1 - Exercise 1
+
+✅ PASS Exercise Addition - Day 1 - Exercise 2
+
+============================================================
+TESTING DIET PROGRESS TRACKING
+============================================================
+✅ PASS Diet Plan Nutrition Details
+
+❌ FAIL Meal Component Completion
+   Details: No meals found
+
+================================================================================
+📊 TEST SUMMARY
+================================================================================
+Total Tests: 26
+Passed: 25
+Failed: 1
+Success Rate: 96.2%
+
+❌ SOME TESTS FAILED. Please check the details above.
+
+📋 DETAILED RESULTS:
+✅ PASS Trainer Registration
+   Details: Trainer ID: 264
+✅ PASS Client Registration
+   Details: Client ID: 265
+✅ PASS Trainer Login
+   Details: Token: eyJhbGciOiJIUzI1NiIs...
+✅ PASS Trainer Profile Update
+   Details: Trainer is now available and verified.
+✅ PASS Client Login
+   Details: Token: eyJhbGciOiJIUzI1NiIs...
+✅ PASS Fetch Subscription Plans
+   Details: Using plan_id: 3
+✅ PASS Trainer Subscription Creation
+   Details: Subscription ID: None
+✅ PASS Trainer Payment Confirmation
+   Details: Payment ID: 6ba1d080-690a-470c-9360-d6d7dc9f3b11
+✅ PASS Client Subscription Creation
+   Details: Subscription ID: None
+✅ PASS Client Payment Confirmation
+   Details: Payment ID: e2adbae6-9957-432c-9d58-3f04a03d1049
+✅ PASS Fetch Available Trainers
+   Details: Using trainer_id: 264
+✅ PASS Client Trainer Request
+   Details: Request ID: None
+✅ PASS Trainer Client Approval
+   Details: Relation ID: None
+✅ PASS Trainer Diet Access
+   Details: Trainer has active diet subscription.
+✅ PASS Client Diet Access
+   Details: Client has active diet subscription.
+✅ PASS Client Assigned Trainer
+   Details: Client assigned_trainer: 264
+✅ PASS Fetch Diet Plan Templates
+   Details: Using template_id: 5
+✅ PASS Diet Plan Creation
+   Details: Plan ID: 127
+✅ PASS Meal Creation - Breakfast
+✅ PASS Meal Creation - Lunch
+✅ PASS Meal Creation - Dinner
+✅ PASS Routine Creation
+   Details: Routine ID: 106
+✅ PASS Exercise Addition - Day 1 - Exercise 1
+✅ PASS Exercise Addition - Day 1 - Exercise 2
+✅ PASS Diet Plan Nutrition Details
+❌ FAIL Meal Component Completion
+   Details: No meals found
+
+⚠️  SOME TESTS FAILED. Please review the errors above.

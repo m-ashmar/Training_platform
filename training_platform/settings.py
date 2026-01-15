@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "subscription",
     "challenges",
     "analytics",
+    "achievements",  # New dedicated achievements app
     "social",
     "admin_dashboard",  # New comprehensive admin dashboard
     "wallet",
@@ -322,16 +323,55 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
 
-CACHES = {
-    "default": {
-        "BACKEND": os.getenv('DJANGO_CACHE_BACKEND', "django.core.cache.backends.locmem.LocMemCache"),
-        "LOCATION": os.getenv('DJANGO_CACHE_LOCATION', "unique-default"),
-    },
-    "edamam": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "unique-edamam",
-    },
-}
+# ========================
+# Cache Configuration
+# ========================
+# Use Redis in production for shared cache across workers
+# Falls back to LocMemCache for local development
+_REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/1")
+
+# Check if we should use Redis (production) or LocMemCache (development)
+_USE_REDIS = os.getenv("USE_REDIS_CACHE", "False") == "True" or not DEBUG
+
+if _USE_REDIS:
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": _REDIS_URL,
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                "SOCKET_CONNECT_TIMEOUT": 5,
+                "SOCKET_TIMEOUT": 5,
+                "RETRY_ON_TIMEOUT": True,
+                "CONNECTION_POOL_KWARGS": {"max_connections": 50},
+                "IGNORE_EXCEPTIONS": True,  # Fail gracefully if Redis is down
+            },
+            "KEY_PREFIX": "tp",
+            "TIMEOUT": 300,  # 5 minutes default
+        },
+        "edamam": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": os.getenv("REDIS_URL", "redis://127.0.0.1:6379/2"),
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                "IGNORE_EXCEPTIONS": True,
+            },
+            "KEY_PREFIX": "edamam",
+            "TIMEOUT": 86400,  # 24 hours for API responses
+        },
+    }
+else:
+    # Development fallback - use local memory cache
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "unique-default",
+        },
+        "edamam": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "unique-edamam",
+        },
+    }
 
 # ========================
 # Logging Configuration

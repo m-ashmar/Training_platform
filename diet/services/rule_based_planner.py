@@ -217,6 +217,8 @@ class RuleBasedPlanner:
         # Track foods chosen in this generation window to prevent reuse within next 3 days
         used_in_window: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
         used_names_window: Dict[str, Set[str]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
+        # Maintain per-day sliding windows of chosen FoodItem IDs (ID-only)
+        day_windows: List[Dict[str, Set[int]]] = []
 
         for day_idx in range(max(1, duration_days)):
             current_date = base_date + _timedelta(days=day_idx)
@@ -230,7 +232,18 @@ class RuleBasedPlanner:
             seed = int(hashlib.sha256(salt.encode('utf-8')).hexdigest()[:12], 16)
             random.seed(seed)
             day_start_idx = len(planned_meals)
-            # Recency handled via DayContext (built below)
+            # Rebuild in-run recency from last `no_repeat_days` day windows
+            try:
+                rebuilt: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
+                # Union of previous day windows
+                for w in day_windows[-int(no_repeat_days):]:
+                    for _m in rebuilt:
+                        rebuilt[_m].update(w.get(_m, set()))
+                used_in_window = rebuilt
+                # Always exclude by id only (names unused)
+                used_names_window = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
+            except Exception:
+                pass
 
             # Per-day allocations and macro targets are computed via DayContext
             # Build DayContext mirroring current per-day calculations (read-only usage for now)
@@ -283,6 +296,36 @@ class RuleBasedPlanner:
                     )
                 )
 
+            # Note: rebalancing now occurs inside _plan_meal on (FoodItem, grams) components before finalization.
+
+            # After finishing the full day, accumulate recency from actual meals
+            try:
+                today_meals = planned_meals[day_start_idx:]
+                today_used: Dict[str, Set[int]] = {m: set() for m in ("Breakfast","Lunch","Dinner","Snack")}
+                from diet.models import FoodItem as _FoodItem
+                for m in today_meals:
+                    meal_key = m.meal_name if m.meal_name in today_used else (m.meal_type or "")
+                    if meal_key not in today_used:
+                        meal_key = "Snack" if (m.meal_type == "Snack" or m.meal_name == "Snack") else "Dinner"
+                    for ing in m.ingredients:
+                        try:
+                            fi = _FoodItem.objects.filter(name=ing.name).first() or _FoodItem.objects.filter(name__iexact=ing.name).first()
+                            if fi and getattr(fi, "id", None):
+                                today_used[meal_key].add(int(fi.id))
+                        except Exception:
+                            continue
+                day_windows.append(today_used)
+                # Prune to last `no_repeat_days`
+                while len(day_windows) > int(no_repeat_days):
+                    day_windows.pop(0)
+                try:
+                    dbg_counts = {k: len(v) for k,v in today_used.items()}
+                    print(f"[RECENCY] accumulated actual ids for day {current_date}: {dbg_counts}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         output = DietPlanOutput(plan=planned_meals)
         if getattr(settings, 'DIET_SMART_MACRO_PLANNER', False):
             try:
@@ -290,6 +333,375 @@ class RuleBasedPlanner:
             except Exception:
                 pass
         return output
+
+    # ------------------------ meal rebalancer utilities ------------------------
+    def _grams_from_qty(self, qty: str) -> float:
+        try:
+            import re
+            m = re.search(r"(\d+(?:\.\d+)?)\s*g", qty or "")
+            return float(m.group(1)) if m else 0.0
+        except Exception:
+            return 0.0
+
+    def _set_qty(self, ing, grams: float) -> None:
+        g = max(0.0, float(grams))
+        ing.quantity = f"{int(round(g))}g"
+
+    def _compute_meal_nutrition(self, ingredients) -> dict:
+        from diet.models import FoodItem
+        kcal = p = c = f = 0.0
+        for ing in ingredients:
+            fi = FoodItem.objects.filter(name=ing.name).first() or FoodItem.objects.filter(name__iexact=ing.name).first()
+            if not fi:
+                continue
+            g = self._grams_from_qty(getattr(ing, 'quantity', '') or '')
+            if g <= 0.0:
+                continue
+            kcal += g * float(getattr(fi, 'calories_per_gram', 0.0) or 0.0)
+            p    += g * float(getattr(fi, 'protein_per_gram', 0.0) or 0.0)
+            c    += g * float(getattr(fi, 'carbs_per_gram', 0.0) or 0.0)
+            f    += g * float(getattr(fi, 'fat_per_gram', 0.0) or 0.0)
+        return {'calories': kcal, 'protein': p, 'carbs': c, 'fat': f}
+
+    def _is_oil_like(self, name: str) -> bool:
+        nm = (name or '').lower()
+        return ('oil' in nm) or ('ghee' in nm) or ('butter' in nm)
+
+    def _scale_by_macro(self, ingredients, macro: str, factor: float) -> None:
+        from diet.models import FoodItem
+        factor = float(factor)
+        for ing in ingredients:
+            fi = FoodItem.objects.filter(name=ing.name).first() or FoodItem.objects.filter(name__iexact=ing.name).first()
+            if not fi:
+                continue
+            # Choose items whose dominant macro matches
+            dom = self._dominant_macro_of_food(fi)
+            if dom != macro:
+                continue
+            g = self._grams_from_qty(ing.quantity)
+            if g <= 0.0:
+                continue
+            new_g = g * factor
+            # Floors to avoid absurd tiny portions
+            min_g = 5.0 if self._is_oil_like(getattr(fi, 'name', '')) else 25.0
+            try:
+                print(f"[REBALANCE_SCALE] item={getattr(fi,'name','')} macro={macro} dom={dom} old_g={round(g,1)} factor={round(factor,3)} target_g={round(new_g,1)} min_floor={min_g}")
+            except Exception:
+                pass
+            self._set_qty(ing, max(min_g, new_g))
+
+    def _within_band(self, actual: float, target: float, band: float) -> bool:
+        if target <= 0.0:
+            return True
+        lo = (1.0 - band) * target
+        hi = (1.0 + band) * target
+        return (actual >= lo) and (actual <= hi)
+
+    def _rebalance_meal_accept(self, meal: AIMeal, kcal_target: float, macro_targets: dict) -> AIMeal:
+        # Iteratively nudge by 10% towards acceptance bands
+        band = 0.09
+        max_iter = 10
+        try:
+            print(f"[REBALANCE] start meal={meal.meal_name} kcal_t={round(kcal_target,1)} tp={round(float(macro_targets.get('protein',0.0) or 0.0),1)} tc={round(float(macro_targets.get('carb',0.0) or 0.0),1)} tf={round(float(macro_targets.get('fat',0.0) or 0.0),1)} band=±{int(band*100)}%")
+        except Exception:
+            pass
+        accepted = False
+        for it in range(max_iter):
+            totals = self._compute_meal_nutrition(meal.ingredients)
+            kcal = totals['calories']; p = totals['protein']; c = totals['carbs']; f = totals['fat']
+            tp = float(macro_targets.get('protein', 0.0) or 0.0)
+            tc = float(macro_targets.get('carb', 0.0) or 0.0)
+            tf = float(macro_targets.get('fat', 0.0) or 0.0)
+
+            # Acceptance check
+            if (self._within_band(kcal, kcal_target, band)
+                and self._within_band(p, tp, band)
+                and self._within_band(c, tc, band)
+                and self._within_band(f, tf, band)):
+                accepted = True
+                try:
+                    print(f"[ACCEPT] meal={meal.meal_name} iter={it} kcal={round(kcal,1)} p={round(p,1)} c={round(c,1)} f={round(f,1)}")
+                except Exception:
+                    pass
+                break
+
+            # Hard triggers
+            if kcal > 1.10 * kcal_target or (tf > 0.0 and f > 1.30 * tf):
+                try:
+                    print(f"[REBALANCE] iter={it} trigger=over_kcal_or_fat kcal={round(kcal,1)}>{round(1.10*kcal_target,1)} or fat={round(f,1)}>{round(1.30*tf,1)} -> scale fat x0.9")
+                except Exception:
+                    pass
+                self._scale_by_macro(meal.ingredients, 'fat', 0.9)
+                continue
+            if tp > 0.0 and p > 1.10 * tp:
+                try:
+                    print(f"[REBALANCE] iter={it} trigger=over_protein p={round(p,1)}>{round(1.10*tp,1)} -> scale protein x0.9")
+                except Exception:
+                    pass
+                self._scale_by_macro(meal.ingredients, 'protein', 0.9)
+                continue
+            if tc > 0.0 and c > 1.10 * tc:
+                try:
+                    print(f"[REBALANCE] iter={it} trigger=over_carb c={round(c,1)}>{round(1.10*tc,1)} -> scale carb x0.9")
+                except Exception:
+                    pass
+                self._scale_by_macro(meal.ingredients, 'carb', 0.9)
+                continue
+
+            # Under targets with kcal headroom
+            if tp > 0.0 and p < 0.90 * tp and kcal < 1.09 * kcal_target:
+                try:
+                    print(f"[REBALANCE] iter={it} trigger=under_protein p={round(p,1)}<{round(0.90*tp,1)} and kcal={round(kcal,1)}<{round(1.09*kcal_target,1)} -> scale protein x1.1")
+                except Exception:
+                    pass
+                self._scale_by_macro(meal.ingredients, 'protein', 1.1)
+                continue
+            if tc > 0.0 and c < 0.90 * tc and kcal < 1.09 * kcal_target:
+                try:
+                    print(f"[REBALANCE] iter={it} trigger=under_carb c={round(c,1)}<{round(0.90*tc,1)} and kcal={round(kcal,1)}<{round(1.09*kcal_target,1)} -> scale carb x1.1")
+                except Exception:
+                    pass
+                self._scale_by_macro(meal.ingredients, 'carb', 1.1)
+                continue
+            # If none matched, gently scale down overall calories if high
+            if kcal > 1.09 * kcal_target:
+                try:
+                    print(f"[REBALANCE] iter={it} trigger=kcal_high_gentle kcal={round(kcal,1)}>{round(1.09*kcal_target,1)} -> scale fat x0.95, carb x0.97, protein x0.98")
+                except Exception:
+                    pass
+                self._scale_by_macro(meal.ingredients, 'fat', 0.95)
+                self._scale_by_macro(meal.ingredients, 'carb', 0.97)
+                self._scale_by_macro(meal.ingredients, 'protein', 0.98)
+                continue
+            else:
+                try:
+                    print(f"[REBALANCE] iter={it} trigger=no_change break kcal={round(kcal,1)} p={round(p,1)} c={round(c,1)} f={round(f,1)}")
+                except Exception:
+                    pass
+                break
+
+        # Update totals into the meal
+        totals = self._compute_meal_nutrition(meal.ingredients)
+        meal.total_nutrition = {
+            'calories': float(round(totals['calories'], 1)),
+            'protein': float(round(totals['protein'], 1)),
+            'carbs': float(round(totals['carbs'], 1)),
+            'fat': float(round(totals['fat'], 1)),
+        }
+        try:
+            if not accepted:
+                print(f"[ACCEPT_FAIL] meal={meal.meal_name} final kcal={round(totals['calories'],1)} p={round(totals['protein'],1)} c={round(totals['carbs'],1)} f={round(totals['fat'],1)} vs targets kcal={round(kcal_target,1)} tp={round(float(macro_targets.get('protein',0.0) or 0.0),1)} tc={round(float(macro_targets.get('carb',0.0) or 0.0),1)} tf={round(float(macro_targets.get('fat',0.0) or 0.0),1)} band=±{int(band*100)}%")
+            else:
+                print(f"[REBALANCE_DONE] meal={meal.meal_name} kcal={round(totals['calories'],1)} p={round(totals['protein'],1)} c={round(totals['carbs'],1)} f={round(totals['fat'],1)}")
+        except Exception:
+            pass
+        return meal
+    
+    # New: component-level rebalancer operating on (FoodItem, grams) before finalization
+    def _components_contributions(self, components: List[Tuple[FoodItem, float]]) -> List[Dict]:
+        out: List[Dict] = []
+        for idx, (f, g) in enumerate(components):
+            p_pg = float(getattr(f, 'protein_per_gram', 0.0) or 0.0)
+            c_pg = float(getattr(f, 'carbs_per_gram', 0.0) or 0.0)
+            f_pg = float(getattr(f, 'fat_per_gram', 0.0) or 0.0)
+            k_pg = float(getattr(f, 'calories_per_gram', 0.0) or 0.0)
+            out.append({
+                'idx': idx, 'food': f, 'grams': g,
+                'p_pg': p_pg, 'c_pg': c_pg, 'f_pg': f_pg, 'k_pg': k_pg,
+                'p': p_pg * g, 'c': c_pg * g, 'f': f_pg * g, 'kcal': k_pg * g,
+            })
+        return out
+    
+    def _apply_grams(self, components: List[Tuple[FoodItem, float]], idx: int, new_g: float) -> None:
+        f, _ = components[idx]
+        g2 = max(0.0, float(new_g))
+        components[idx] = (f, self._round_grams(g2))
+    
+    def _min_floor_for(self, food: FoodItem) -> float:
+        name = (getattr(food, 'name', '') or '').lower()
+        if 'oil' in name or 'ghee' in name or 'butter' in name:
+            return 5.0
+        return 25.0
+    
+    def _reduce_macro_over(self, components: List[Tuple[FoodItem, float]], macro: str, reduce_g: float) -> float:
+        contrib = self._components_contributions(components)
+        key = {'protein': 'p', 'carb':'c', 'fat':'f'}[macro]
+        pg_key = {'protein': 'p_pg', 'carb':'c_pg', 'fat':'f_pg'}[macro]
+        # Restrict to items whose dominant macro matches the target macro
+        dom_matched = []
+        for x in contrib:
+            if self._dominant_macro_of_food(x['food']) == macro:
+                dom_matched.append(x)
+        if not dom_matched:
+            try:
+                if macro == 'fat':
+                    print("[REBAL2_SKIP_FAT_NO_FAT_ITEM] reason=no_fat_dominant_item")
+                else:
+                    print(f"[REBAL2_SKIP_REDUCE_NO_DOM_MATCH] macro={macro}")
+            except Exception:
+                pass
+            return reduce_g
+        total_macro = sum(x[key] for x in dom_matched)
+        if total_macro <= 0.0 or reduce_g <= 0.0:
+            return 0.0
+        remaining = float(reduce_g)
+        # Iterative proportional reduction with floors
+        for _ in range(3):
+            if remaining <= 0.0:
+                break
+            shares = []
+            avail_total = 0.0
+            for x in dom_matched:
+                pg = x[pg_key]
+                if pg <= 0.0 or x['grams'] <= 0.0:
+                    continue
+                floor_g = self._min_floor_for(x['food'])
+                reducible_g = max(0.0, x['grams'] - floor_g)
+                reducible_macro = reducible_g * pg
+                if reducible_macro > 0.0:
+                    shares.append((x, reducible_macro))
+                    avail_total += reducible_macro
+            if avail_total <= 0.0:
+                break
+            for x, avail_macro in shares:
+                if remaining <= 0.0:
+                    break
+                take_macro = min(avail_macro, remaining * (avail_macro / avail_total))
+                delta_g = take_macro / max(1e-9, x[pg_key])
+                new_g = max(self._min_floor_for(x['food']), x['grams'] - delta_g)
+                self._apply_grams(components, x['idx'], new_g)
+                try:
+                    print(f"[REBAL2_MACRO_REDUCE] macro={macro} item={getattr(x['food'],'name','')} old_g={round(x['grams'],1)} new_g={round(new_g,1)} delta_g={round(x['grams']-new_g,1)}")
+                except Exception:
+                    pass
+                remaining -= (x['grams'] - new_g) * x[pg_key]
+                x['grams'] = new_g
+            contrib = self._components_contributions(components)
+            dom_matched = [x for x in contrib if self._dominant_macro_of_food(x['food']) == macro]
+        return max(0.0, remaining)
+    
+    def _increase_macro_under(self, components: List[Tuple[FoodItem, float]], macro: str, add_g: float, kcal_headroom: float, meal_name: str) -> float:
+        contrib = self._components_contributions(components)
+        key = {'protein': 'p', 'carb':'c', 'fat':'f'}[macro]
+        pg_key = {'protein': 'p_pg', 'carb':'c_pg', 'fat':'f_pg'}[macro]
+        if add_g <= 0.0 or kcal_headroom <= 0.0:
+            return 0.0
+        # Prefer items with higher macro per kcal, restricted to dominant macro == target
+        cand = [x for x in contrib if x[pg_key] > 0.0 and x['k_pg'] > 0.0 and self._dominant_macro_of_food(x['food']) == macro]
+        if not cand:
+            try:
+                print(f"[REBAL2_SKIP_INCREASE_NO_DOM_MATCH] macro={macro}")
+            except Exception:
+                pass
+            return add_g
+        cand.sort(key=lambda x: (x[pg_key] / x['k_pg']), reverse=True)
+        remaining_macro = float(add_g)
+        remaining_kcal = float(kcal_headroom)
+        for x in cand:
+            if remaining_macro <= 0.0 or remaining_kcal <= 0.0:
+                break
+            pg = x[pg_key]; kpg = x['k_pg']
+            # Rough cap: do not exceed portion sanity for dominant macro
+            dom = self._dominant_macro_of_food(x['food'])
+            cap = portion_sanity_cap_grams(dom)
+            max_g = max(0.0, cap - x['grams'])
+            if max_g <= 0.0:
+                continue
+            need_g_by_macro = remaining_macro / pg
+            need_g_by_kcal = remaining_kcal / kpg
+            add_here = min(max_g, need_g_by_macro, need_g_by_kcal)
+            if add_here <= 0.0:
+                continue
+            new_g = x['grams'] + add_here
+            self._apply_grams(components, x['idx'], new_g)
+            try:
+                print(f"[REBAL2_MACRO_INCREASE] macro={macro} item={getattr(x['food'],'name','')} old_g={round(x['grams'],1)} new_g={round(new_g,1)} add_g={round(add_here,1)}")
+            except Exception:
+                pass
+            remaining_macro -= add_here * pg
+            remaining_kcal -= add_here * kpg
+            x['grams'] = new_g
+        return remaining_macro
+    
+    def _reduce_kcal_over(
+        self,
+        components: List[Tuple[FoodItem, float]],
+        over_kcal: float,
+        macro_consumed: Dict[str, float] | None = None,
+        macro_targets: Dict[str, float] | None = None,
+    ) -> float:
+        contrib = self._components_contributions(components)
+        if over_kcal <= 0.0:
+            return 0.0
+        remaining = float(over_kcal)
+        # Determine which dominant macros are over target (if provided)
+        over_macros: Set[str] = set()
+        if macro_consumed and macro_targets:
+            try:
+                if macro_consumed.get('protein', 0.0) > (macro_targets.get('protein', 0.0) or 0.0):
+                    over_macros.add('protein')
+                if macro_consumed.get('carb', 0.0) > (macro_targets.get('carb', 0.0) or 0.0):
+                    over_macros.add('carb')
+                if macro_consumed.get('fat', 0.0) > (macro_targets.get('fat', 0.0) or 0.0):
+                    over_macros.add('fat')
+            except Exception:
+                over_macros = set()
+        # Weight fat-dominant items slightly higher; limit to overage macro sources when possible
+        weights = []
+        avail_total = 0.0
+        for x in contrib:
+            kpg = x['k_pg']
+            if kpg <= 0.0 or x['grams'] <= 0.0:
+                continue
+            floor_g = self._min_floor_for(x['food'])
+            reducible_g = max(0.0, x['grams'] - floor_g)
+            reducible_kcal = reducible_g * kpg
+            if reducible_kcal <= 0.0:
+                continue
+            dom = self._dominant_macro_of_food(x['food'])
+            # If over_macros is non-empty, only consider items whose dominant macro is over
+            if over_macros and dom not in over_macros:
+                continue
+            w = 1.25 if dom == 'fat' else 1.0
+            weights.append((x, reducible_kcal, w))
+            avail_total += reducible_kcal * w
+        if avail_total <= 0.0:
+            # Fallback: if no overage macro sources, try fat-dominant only
+            weights = []
+            avail_total = 0.0
+            for x in contrib:
+                if self._dominant_macro_of_food(x['food']) != 'fat':
+                    continue
+                kpg = x['k_pg']
+                if kpg <= 0.0 or x['grams'] <= 0.0:
+                    continue
+                floor_g = self._min_floor_for(x['food'])
+                reducible_g = max(0.0, x['grams'] - floor_g)
+                reducible_kcal = reducible_g * kpg
+                if reducible_kcal <= 0.0:
+                    continue
+                weights.append((x, reducible_kcal, 1.25))
+                avail_total += reducible_kcal * 1.25
+            if avail_total <= 0.0:
+                try:
+                    print("[REBAL2_SKIP_KCAL_NO_OVERAGE_SOURCES]")
+                except Exception:
+                    pass
+                return remaining
+        for x, avail_k, w in weights:
+            if remaining <= 0.0:
+                break
+            take_k = min(avail_k, remaining * ((avail_k * w) / avail_total))
+            delta_g = take_k / max(1e-9, x['k_pg'])
+            new_g = max(self._min_floor_for(x['food']), x['grams'] - delta_g)
+            self._apply_grams(components, x['idx'], new_g)
+            try:
+                print(f"[REBAL2_KCAL_REDUCE] item={getattr(x['food'],'name','')} old_g={round(x['grams'],1)} new_g={round(new_g,1)} delta_g={round(x['grams']-new_g,1)}")
+            except Exception:
+                pass
+            remaining -= (x['grams'] - new_g) * x['k_pg']
+            x['grams'] = new_g
+        return max(0.0, remaining)
 
     # ------------------------ helpers ------------------------
     def _build_planner_context(
@@ -475,7 +887,7 @@ class RuleBasedPlanner:
                     macro_cap=1,
                     existing_ids=meal_existing_ids,
                 )
-            kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+                kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
 
             # Prefill carb exactly one
             if carb_floor_g > 0.0:
@@ -498,13 +910,19 @@ class RuleBasedPlanner:
                         existing_ids=meal_existing_ids,
                         gram_cap_override=350.0,
                     )
-                kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
-
+                    kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+                
             # Vegetables
             veg_added = self._add_vegetables_to_meal(
-                meal_name, ctx.allowed_map, components, meal_existing_ids, meal_existing_names,
-                day_ctx.recent_exclusions_ids, day_ctx.recent_exclusions_names, day_ctx.used_in_window,
-                day_ctx.used_names_window
+                meal_name,
+                ctx.allowed_map,
+                components,
+                meal_existing_ids,
+                meal_existing_names,
+                day_ctx.recent_exclusions_ids,
+                day_ctx.recent_exclusions_names,
+                day_ctx.used_in_window,
+                day_ctx.used_names_window,
             )
             if veg_added:
                 kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
@@ -523,8 +941,8 @@ class RuleBasedPlanner:
                 if not candidates:
                     continue
                 exclude_ids = meal_existing_ids | set(day_ctx.recent_exclusions_ids.get(meal_name, set()))
-                exclude_names = meal_existing_names | set(day_ctx.recent_exclusions_names.get(meal_name, set()))
-                candidates = [f for f in candidates if f.id not in exclude_ids and self._normalize_name_for_repeat(f.name) not in exclude_names]
+                # ID-only recency filtering (no name-based exclusions)
+                candidates = [f for f in candidates if f.id not in exclude_ids]
                 if not candidates:
                     continue
                 use_smart = getattr(settings, 'DIET_SMART_MACRO_PLANNER', False)
@@ -565,18 +983,15 @@ class RuleBasedPlanner:
                     grams = self._snap_to_piece_grams_if_applicable(food, grams)
                     if grams <= 0:
                         continue
-                    if any(getattr(f0, 'id', None) == getattr(food, 'id', None) for f0, _ in components):
+                    if any(getattr(f0, 'id', None) == getattr(food, 'id', None) for f0,_ in components):
                         continue
                     components.append((food, grams))
                     used_macro_counts[macro] += 1
                     selected_name = food.name
-                    try:
-                        print(f"[SELECT] meal={meal_name} macro={macro} food={getattr(food,'name','')} grams={round(grams,1)}")
-                    except Exception:
-                        pass
                     meal_existing_ids.add(food.id)
                     meal_existing_names.add(self._normalize_name_for_repeat(food.name))
                     day_ctx.used_in_window.setdefault(meal_name, set()).add(food.id)
+                    # Keep names window for observability, but do not use for filtering
                     day_ctx.used_names_window.setdefault(meal_name, set()).add(self._normalize_name_for_repeat(food.name))
                     kcal_add = grams * kcal_per_g
                     kcal_consumed += kcal_add
@@ -589,12 +1004,12 @@ class RuleBasedPlanner:
                             'meal_type': meal_name,
                             'macro': macro,
                             'food': food.name,
-                            'grams': round(grams, 1),
-                            'kcal_add': round(kcal_add, 1),
-                            'kcal_consumed': round(kcal_consumed, 1),
-                            'macro_consumed': {k: round(v, 1) for k, v in macro_consumed.items()},
-                            'target': round(target, 1),
-                            'remaining': round(max(0.0, target - macro_consumed[macro]), 1),
+                            'grams': round(grams,1),
+                            'kcal_add': round(kcal_add,1),
+                            'kcal_consumed': round(kcal_consumed,1),
+                            'macro_consumed': {k: round(v,1) for k,v in macro_consumed.items()},
+                            'target': round(target,1),
+                            'remaining': round(max(0.0, target - macro_consumed[macro]),1),
                         }, logger_name='diet')
                     except Exception:
                         pass
@@ -641,8 +1056,6 @@ class RuleBasedPlanner:
                             kcal_consumed += delta_g * kcal_pg
                             macro_consumed['carb'] += delta_g * c_pg
                     else:
-                        print('am on else ')
-                        print('adding another carb item')
                         self._add_macro_component(
                             meal_name,
                             'carb',
@@ -659,7 +1072,109 @@ class RuleBasedPlanner:
                             macro_cap=1,
                             existing_ids=meal_existing_ids,
                         )
+                    kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+
+            # Post-pass rebalancing on components (gradient-based, ID-centric)
+            try:
+                mt = day_ctx.meal_targets[meal_name]
+                band = 0.09
+                for it in range(6):
+                    kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+                    kcal_t = float(mt.kcal_target or 0.0)
+                    tp = float(mt.macro_targets.get('protein', 0.0) or 0.0)
+                    tc = float(mt.macro_targets.get('carb', 0.0) or 0.0)
+                    tf = float(mt.macro_targets.get('fat', 0.0) or 0.0)
+                    ok = (
+                        self._within_band(kcal_consumed, kcal_t, band) and
+                        self._within_band(macro_consumed['protein'], tp, band) and
+                        self._within_band(macro_consumed['carb'], tc, band) and
+                        self._within_band(macro_consumed['fat'], tf, band)
+                    )
+                    try:
+                        print(f"[REBAL2_START] meal={meal_name} iter={it} kcal={round(kcal_consumed,1)} p={round(macro_consumed['protein'],1)} c={round(macro_consumed['carb'],1)} f={round(macro_consumed['fat'],1)} targets kcal={round(kcal_t,1)} tp={round(tp,1)} tc={round(tc,1)} tf={round(tf,1)} band=±{int(band*100)}%")
+                    except Exception:
+                        pass
+                    if ok:
+                        print(f"[REBAL2_ACCEPT] meal={meal_name} iter={it}")
+                        break
+                    # Overages first: choose biggest deviation by Kcal among macros, then overall kcal
+                    over_k_p = max(0.0, macro_consumed['protein'] - tp) * 4.0
+                    over_k_c = max(0.0, macro_consumed['carb'] - tc) * 4.0
+                    over_k_f = max(0.0, macro_consumed['fat'] - tf) * 9.0
+                    dev_over = [('protein', over_k_p), ('carb', over_k_c), ('fat', over_k_f)]
+                    dev_over.sort(key=lambda x: x[1], reverse=True)
+                    acted = False
+                    did_reduce = False
+                    if dev_over and dev_over[0][1] > 0.0:
+                        mac = dev_over[0][0]
+                        try:
+                            print(f"[REBAL2_CHOSEN_MACRO] meal={meal_name} iter={it} chosen={mac} over_k={round(dev_over[0][1],1)} pk={round(over_k_p,1)} ck={round(over_k_c,1)} fk={round(over_k_f,1)}")
+                        except Exception:
+                            pass
+                        # Reduce grams for the macro with largest kcal overage
+                        over_g = macro_consumed[mac] - {'protein': tp, 'carb': tc, 'fat': tf}[mac]
+                        if over_g > 0.0:
+                            _ = self._reduce_macro_over(components, mac, over_g * 0.7)
+                            acted = True
+                            did_reduce = True
+                    # If no macro selected OR still over total kcal, reduce kcal using overage sources only
+                    if not acted and kcal_consumed > 1.10 * kcal_t:
+                        _ = self._reduce_kcal_over(
+                            components,
+                            (kcal_consumed - kcal_t) * 0.7,
+                            macro_consumed={'protein': macro_consumed['protein'], 'carb': macro_consumed['carb'], 'fat': macro_consumed['fat']},
+                            macro_targets={'protein': tp, 'carb': tc, 'fat': tf},
+                        )
+                        acted = True
+                    # Recompute after any reductions to evaluate deficits
+                    if did_reduce:
+                        kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+                    # Under targets with headroom (allow increase even if a reduction happened in this iteration)
+                    # Trigger increase if kcal is below lower band OR any key macro is below 90% target
+                    if (kcal_consumed < (1.0 - band) * kcal_t) or (macro_consumed['protein'] < 0.90 * tp) or (macro_consumed['carb'] < 0.90 * tc):
+                        # Choose biggest kcal deficit among macros
+                        def_k_p = max(0.0, tp - macro_consumed['protein']) * 4.0
+                        def_k_c = max(0.0, tc - macro_consumed['carb']) * 4.0
+                        def_k_f = max(0.0, tf - macro_consumed['fat']) * 9.0
+                        dev_under = [('protein', def_k_p), ('carb', def_k_c), ('fat', def_k_f)]
+                        dev_under.sort(key=lambda x: x[1], reverse=True)
+                        
+                        # FIX: Try all under-target macros in order if previous one can't be increased
+                        for macu, deficit_kcal in dev_under:
+                            if deficit_kcal <= 0.0:
+                                continue
+                            try:
+                                print(f"[REBAL2_CHOSEN_INCREASE] meal={meal_name} iter={it} chosen={macu} under_k={round(deficit_kcal,1)} pk={round(def_k_p,1)} ck={round(def_k_c,1)} fk={round(def_k_f,1)}")
+                            except Exception:
+                                pass
+                            
+                            # FIX: Target 100% of target, not 90%
+                            target_map = {'protein': tp, 'carb': tc, 'fat': tf}
+                            macro_deficit = max(0.0, target_map[macu] - macro_consumed[macu])
+                            kcal_headroom = max(0.0, kcal_t - kcal_consumed)
+                            
+                            if macro_deficit > 0.0 and kcal_headroom > 0.0:
+                                result = self._increase_macro_under(
+                                    components,
+                                    macu,
+                                    macro_deficit * 0.8,  # Try to fill 80% of deficit
+                                    kcal_headroom,
+                                    meal_name
+                                )
+                                # If we successfully increased something (result < input), mark acted
+                                if result < macro_deficit * 0.8:
+                                    acted = True
+                                    break  # Successfully increased, move to next iteration
+                                else:
+                                    print(f"[REBAL2_INCREASE_FAILED] meal={meal_name} iter={it} macro={macu} - no items to increase, trying next macro")
+                    if not acted:
+                        print(f"[REBAL2_STOP] meal={meal_name} iter={it} no_action")
+                        break
+                # recompute after rebalancing
                 kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
+                print(f"[REBAL2_DONE] meal={meal_name} kcal={round(kcal_consumed,1)} p={round(macro_consumed['protein'],1)} c={round(macro_consumed['carb'],1)} f={round(macro_consumed['fat'],1)}")
+            except Exception:
+                pass
 
             # Fallback if empty
             if not components and getattr(settings, 'DIET_DYNAMIC_MEAL_ALLOCATION', False):
@@ -676,7 +1191,7 @@ class RuleBasedPlanner:
                     components.append((food, grams))
                     if dom == 'protein':
                         protein_added = True
-                self._smart_summary.append({"meal_type": meal_name, "used_fallback": True, "fallback_items": [f.name for f, _ in components]})
+                self._smart_summary.append({"meal_type": meal_name, "used_fallback": True, "fallback_items": [f.name for f,_ in components]})
                 safe_json_log(stage="fallback_meal", data=self._smart_summary[-1], logger_name='diet')
                 kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
 
@@ -712,11 +1227,11 @@ class RuleBasedPlanner:
         try:
             safe_json_log(stage="meal_summary", data={
                 'meal_type': meal_name,
-                'kcal_consumed': round(kcal_consumed, 1),
-                'macro_consumed': {k: round(v, 1) for k, v in macro_consumed.items()},
-                'target_per_macro': {k: round(v, 1) for k, v in meal_targets[meal_name].macro_targets.items()},
-                'kcal_target': round(meal_targets[meal_name].kcal_target, 1),
-                'components': [f"{f.name}:{int(g)}g" for f, g in components],
+                'kcal_consumed': round(kcal_consumed,1),
+                'macro_consumed': {k: round(v,1) for k,v in macro_consumed.items()},
+                'target_per_macro': {k: round(v,1) for k,v in meal_targets[meal_name].macro_targets.items()},
+                'kcal_target': round(meal_targets[meal_name].kcal_target,1),
+                'components': [f"{f.name}:{int(g)}g" for f,g in components],
             }, logger_name='diet')
         except Exception:
             pass
@@ -837,15 +1352,6 @@ class RuleBasedPlanner:
                         seen.add(f.name)
                         unique.append(f)
                 out[m][mac] = unique
-        try:
-            # DEBUG: Print final allowed foods map
-            print("[ALLOWED_MAP] Final per-meal/macro candidates:")
-            for meal_name, macro_map in out.items():
-                for macro_key, foods in macro_map.items():
-                    names = [getattr(fi, 'name', '') for fi in foods]
-                    print(f"  - {meal_name}:{macro_key} -> {names}")
-        except Exception:
-            pass
         return out
 
     def _get_recent_food_ids(self, meal_type: str, days: int, until) -> Set[int]:
@@ -909,11 +1415,6 @@ class RuleBasedPlanner:
         gram_cap_override: float | None = None,
         existing_ids: Set[int] | None = None,
     ) -> None:
-        try:
-            base_cands = allowed.get(meal_name, {}).get(macro, [])
-            print(f"[ADD_MACRO] meal={meal_name} macro={macro} need_g={round(need_grams,1)} kcal_target={round(meal_kcal_target,1)} base_candidates={[getattr(f,'name','') for f in base_cands]}")
-        except Exception:
-            pass
         if need_grams <= 0.0:
             return
         cands = allowed.get(meal_name, {}).get(macro, [])
@@ -923,9 +1424,9 @@ class RuleBasedPlanner:
             if not cands:
                 return
         exclude_ids_local = set(recent_exclusions.get(meal_name, set()))
-        exclude_names = set(recent_exclusions_names.get(meal_name, set()))
         existing_ids = existing_ids or set()
-        cands = [f for f in cands if f.id not in exclude_ids_local and f.id not in existing_ids and self._normalize_name_for_repeat(f.name) not in exclude_names]
+        # ID-only recency filtering
+        cands = [f for f in cands if f.id not in exclude_ids_local and f.id not in existing_ids]
         if not cands:
             return
         # Sort by macro density per kcal
@@ -942,10 +1443,6 @@ class RuleBasedPlanner:
                 goal=self._resolve_goal(),
                 gram_cap_override=gram_cap_override,
             )
-            try:
-                print(f"[ADD_MACRO] consider food={getattr(food,'name','')} grams_calc={round(grams,1)} remaining_kcal={round(remaining_kcal,1)}")
-            except Exception:
-                pass
             if grams <= 0:
                 continue
             # Guard intra-meal duplicates
@@ -956,10 +1453,6 @@ class RuleBasedPlanner:
             # Do not mutate caller's exclusion set; rely on existing_ids + used_names_window
             used_names_window.setdefault(meal_name, set()).add(self._normalize_name_for_repeat(food.name))
             macro_consumed[macro] += grams * self._macro_per_gram(food, macro)
-            try:
-                print(f"[ADD_MACRO] SELECTED food={getattr(food,'name','')} grams={round(grams,1)}")
-            except Exception:
-                pass
             break
 
     def _fallback_staples_for_macro(self, meal_name: str, macro: str) -> List[FoodItem]:
@@ -1001,74 +1494,34 @@ class RuleBasedPlanner:
         carb_variable: bool = True,
     ) -> float:
         """Compute grams to pick for a food given macro/kcal constraints and caps."""
-        try:
-            print(f"[PICK_CALC] food={getattr(food,'name','')}, macro={macro}, remaining_macro_g={round(remaining_macro_g,2)}, remaining_kcal={round(remaining_kcal,1)}, goal={goal}, gram_cap_override={gram_cap_override}, carb_variable={carb_variable}")
-        except Exception:
-            pass
         macro_per_g = self._macro_per_gram(food, macro)
         kcal_per_g = float(getattr(food, "calories_per_gram", 0.0) or 0.0)
         if macro_per_g <= 0.0 or kcal_per_g <= 0.0:
-            try:
-                print(f"[PICK_CALC] skip (non-positive macro/kcal) mpg={macro_per_g}, kpg={kcal_per_g}")
-            except Exception:
-                pass
             return 0.0
         grams_for_macro = remaining_macro_g / macro_per_g if macro_per_g > 0 else 0.0
         grams_for_kcal = remaining_kcal / kcal_per_g if kcal_per_g > 0 else grams_for_macro
         grams = max(0.0, min(grams_for_macro, grams_for_kcal))
-        try:
-            print(f"[PICK_CALC] base grams_for_macro={round(grams_for_macro,1)}, grams_for_kcal={round(grams_for_kcal,1)}, grams_base={round(grams,1)} (mpg={round(macro_per_g,4)}, kpg={round(kcal_per_g,4)})")
-        except Exception:
-            pass
         # Strict override cap if provided
         if gram_cap_override is not None:
             grams = min(grams, float(gram_cap_override))
-            try:
-                print(f"[PICK_CALC] apply gram_cap_override -> {round(grams,1)}")
-            except Exception:
-                pass
         # Cap oils and overall fat portion size
         if macro == 'fat' and self._is_oil(getattr(food, 'name', '') or ''):
             grams = min(grams, 15.0)
-            try:
-                print(f"[PICK_CALC] oil cap -> {round(grams,1)}")
-            except Exception:
-                pass
         if macro == 'fat':
             grams = min(grams, 50.0)
-            try:
-                print(f"[PICK_CALC] fat cap -> {round(grams,1)}")
-            except Exception:
-                pass
         # Portion sanity by dominant macro
         dom = self._dominant_macro_of_food(food)
         grams = min(grams, portion_sanity_cap_grams(dom))
-        try:
-            print(f"[PICK_CALC] sanity cap ({dom}) -> {round(grams,1)}")
-        except Exception:
-            pass
         # Add variability to carbs to avoid always maxing out
         if carb_variable and macro == 'carb':
             carb_cap = random.uniform(250.0, 350.0)
             grams = min(grams, carb_cap)
-            try:
-                print(f"[PICK_CALC] carb variability cap ({round(carb_cap,1)}) -> {round(grams,1)}")
-            except Exception:
-                pass
         # Apply vegetable-specific cap only for vegetables
         if self._is_vegetable(food):
             grams = min(grams, 300.0)
-            try:
-                print(f"[PICK_CALC] vegetable cap -> {round(grams,1)}")
-            except Exception:
-                pass
         # Round and snap to piece
         grams = self._round_grams(grams)
         grams = self._snap_to_piece_grams_if_applicable(food, grams)
-        try:
-            print(f"[PICK_CALC] final grams -> {round(grams,1)}")
-        except Exception:
-            pass
         return grams
 
     def _round_grams(self, grams: float) -> float:

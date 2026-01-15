@@ -56,7 +56,7 @@ class SubscriptionUsageSerializer(serializers.ModelSerializer):
 class SubscriptionSerializer(serializers.ModelSerializer):
     """Serializer for user subscriptions"""
     plan = SubscriptionPlanSerializer(read_only=True)
-    plan_id = serializers.UUIDField(write_only=True, required=False)
+    plan_id = serializers.IntegerField(write_only=True, required=False)
     user = CustomUserSerializer(read_only=True)
     is_active = serializers.ReadOnlyField()
     is_trial = serializers.ReadOnlyField()
@@ -93,7 +93,7 @@ class SubscriptionSerializer(serializers.ModelSerializer):
 
 class SubscriptionCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating new subscriptions"""
-    plan_id = serializers.UUIDField()
+    plan_id = serializers.IntegerField()
     
     class Meta:
         model = Subscription

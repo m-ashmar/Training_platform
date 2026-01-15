@@ -1,0 +1,1013 @@
+{
+  "plan": [
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Cod",
+          "quantity": "65g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Pepeao, Dried",
+          "quantity": "60g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Tomato",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "136g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Cod",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Pepeao, Dried",
+          "quantity": "60g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Asparagus",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Apple",
+          "quantity": "142g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Cod",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Pepeao, Dried",
+          "quantity": "60g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Green Bean",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Test Chicken",
+          "quantity": "115g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Longans, Dried",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Asparagus",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "112g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Test Chicken",
+          "quantity": "130g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Longans, Dried",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Green Bean",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "109g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Test Chicken",
+          "quantity": "130g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Longans, Dried",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Carrot",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Chike, High Protein Original Iced Coffe",
+          "quantity": "65g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Arborio Rice",
+          "quantity": "45g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Carrot",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "135g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Chike, High Protein Original Iced Coffe",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Arborio Rice",
+          "quantity": "40g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Spinach",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Apple",
+          "quantity": "107g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Chike, High Protein Original Iced Coffe",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Arborio Rice",
+          "quantity": "40g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Asparagus",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Select e/e Strips",
+          "quantity": "125g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Caramels",
+          "quantity": "65g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Bell Pepper",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "113g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Select e/e Strips",
+          "quantity": "140g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Caramels",
+          "quantity": "65g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Asparagus",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "107g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Select e/e Strips",
+          "quantity": "140g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Caramels",
+          "quantity": "55g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Asparagus",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Snackers, b-b-q",
+          "quantity": "60g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Rolled Oats",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Spinach",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "139g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Snackers, b-b-q",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Rolled Oats",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Carrot",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Apple",
+          "quantity": "126g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Snackers, b-b-q",
+          "quantity": "65g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Rolled Oats",
+          "quantity": "50g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Tomato",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Salmon fillet",
+          "quantity": "80g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Minis",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Broccoli",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "129g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Salmon fillet",
+          "quantity": "90g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Minis",
+          "quantity": "70g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Tomato",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "141g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Salmon fillet",
+          "quantity": "75g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Minis",
+          "quantity": "45g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Bell Pepper",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Burger",
+          "quantity": "130g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Spinach",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "101g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Burger",
+          "quantity": "150g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Spinach",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Apple",
+          "quantity": "116g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Burger",
+          "quantity": "110g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Spinach",
+          "quantity": "400g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    }
+  ],
+  "plan_metadata": {
+    "smart_macro_summary": []
+  },
+  "generation_metadata": {}
+}

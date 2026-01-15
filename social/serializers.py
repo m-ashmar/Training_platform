@@ -151,6 +151,10 @@ class ChallengeSerializer(serializers.ModelSerializer):
     
     def get_is_joined(self, obj):
         """Check if current user has joined this challenge"""
+        # Prefer annotated field to avoid N+1 queries
+        annotated = getattr(obj, 'is_joined_anno', None)
+        if annotated is not None:
+            return bool(annotated)
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             return ChallengeParticipation.objects.filter(
@@ -161,6 +165,15 @@ class ChallengeSerializer(serializers.ModelSerializer):
     
     def get_user_progress(self, obj):
         """Get current user's progress in this challenge"""
+        # Prefer annotated fields if present
+        if hasattr(obj, 'cur_value_anno') or hasattr(obj, 'prog_pct_anno') or hasattr(obj, 'rank_anno'):
+            if getattr(obj, 'cur_value_anno', None) is None and getattr(obj, 'prog_pct_anno', None) is None and getattr(obj, 'rank_anno', None) is None:
+                return None
+            return {
+                'current_value': getattr(obj, 'cur_value_anno', None) or 0.0,
+                'progress_percentage': getattr(obj, 'prog_pct_anno', None) or 0.0,
+                'rank': getattr(obj, 'rank_anno', None),
+            }
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             try:

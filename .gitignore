@@ -1,106 +1,62 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Django
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-media/
-staticfiles/
-
-# Environment variables
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# IDE
-.vscode/
-.idea/
+# OS and editor files
+.DS_Store
 *.swp
 *.swo
-*~
+.idea/
+.vscode/
 
-# OS
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
 
-# Flutter
-flutter/.dart_tool/
-flutter/build/
-flutter/.flutter-plugins
-flutter/.flutter-plugins-dependencies
-flutter/.packages
-flutter/pubspec.lock
+# Virtual environments
+.env
+.venv/
+venv/
+ENV/
+.env.local
+*.env
 
-# Logs
-logs/
+# Django/Logs/Runtime
+media/
 *.log
-
-# Database
-*.db
-*.sqlite
 *.sqlite3
 
-# Cache
-.cache/
-.pytest_cache/
+# Node/Flutter/Other
+node_modules/
+flutter/
+
+# Tests and fixtures
+# /tests/
+# *_test.py
+# *test_*.py
+# **/tests/**
+
+# Local scripts and debug
+**/management/commands/test_*.py
+scripts/
+*.ipynb
+
+# Large/binary files
+*.mov
+*.mp4
+*.avi
+*.zip
+*.tar
+*.gz
+*.rdb
+
+# Coverage and reports
 .coverage
 htmlcov/
+TEST-*.xml
+coverage.xml
 
-# Temporary files
-*.tmp
-*.temp
-*.bak
-*.backup
+# Migrations cache (keep migrations but ignore pycache)
+**/migrations/__pycache__/
 
-# Payment gateway test files
-test_payments/
-payment_test_data/
-
-# Documentation build
-docs/_build/
-docs/build/
-
-# Node modules (if any)
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Redis dump
-dump.rdb
-
-# Celery
-celerybeat-schedule
-celerybeat.pid
-
-# Sentry
-.sentryclirc 
+# Exclude Django app test modules named tests.py
+**/tests.py

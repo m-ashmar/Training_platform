@@ -1,0 +1,30 @@
+## Block 5: Permissions ✅ COMPLETED
+
+- **IsTrainerOrAdmin**: New permission for trainer-only endpoints
+- **IsClientOrTrainerOrAdmin**: Permission for client-trainer relationships
+- **IsTrainerForClient**: Permission for trainers to access client data
+- **IsClientOrAssignedTrainer**: Permission for shared client-trainer access
+- **IsRoutineOwnerOrAssigned**: Permission for routine access control
+- **IsExerciseOwnerOrGlobal**: Permission for exercise access (creators + global)
+- All permissions include proper role validation and trainer-client relationship handling
+
+---
+
+## Block 6: Routing & Endpoints ✅ COMPLETED
+
+- **Users URLs**: Added trainer-specific endpoints (/trainer/profile/, /trainer/clients/, etc.)
+- **Users URLs**: Added client-specific endpoints (/client/profile/, /client/available-trainers/)
+- **Routine URLs**: Using DRF router - automatically includes new ViewSet actions
+- **All endpoints**: Properly named and follow REST conventions
+- **URL patterns**: Include proper app_name and namespacing
+
+---
+
+## Block 7: Flutter API Readiness
+- [IN PROGRESS]
+- Ensure all endpoints return consistent JSON structure
+- Add proper error handling and status codes
+- Verify all required fields are exposed in responses
+- Add pagination for list endpoints
+- Ensure authentication tokens work properly
+- Test all endpoints with Flutter-compatible data formats

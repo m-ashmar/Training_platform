@@ -12,7 +12,7 @@ from django.core.cache import cache
 from django.http import JsonResponse
 from django.utils.deprecation import MiddlewareMixin
 from django.conf import settings
-from django.db import connection
+from django.db import connection, reset_queries
 from django.utils import timezone
 from django.shortcuts import redirect
 import re
@@ -290,20 +290,38 @@ class RequestLoggingMiddleware(MiddlewareMixin):
 
 class DatabaseQueryCountMiddleware(MiddlewareMixin):
     """
-    Monitor database query count for performance optimization
+    Monitor database query count for performance optimization.
+    Only active in DEBUG mode to avoid overhead in production.
     """
+    
+    def __init__(self, get_response=None):
+        super().__init__(get_response)
+        # Only enable in DEBUG mode
+        self.enabled = settings.DEBUG
     
     def process_request(self, request):
         """
-        Reset query count
+        Reset query count (only in DEBUG)
         """
-        connection.queries_log.clear()
+        if not self.enabled:
+            return None
+            
+        try:
+            reset_queries()
+        except Exception:
+            try:
+                connection.queries.clear()
+            except Exception:
+                pass
         return None
     
     def process_response(self, request, response):
         """
-        Log query count and slow queries
+        Log query count and slow queries (only in DEBUG)
         """
+        if not self.enabled:
+            return response
+            
         query_count = len(connection.queries)
         
         # Log high query count
@@ -324,15 +342,20 @@ class DatabaseQueryCountMiddleware(MiddlewareMixin):
 
 class CacheMiddleware(MiddlewareMixin):
     """
-    Cache commonly requested data
+    Cache commonly requested data for performance optimization.
+    Caches GET requests to static or semi-static endpoints.
     """
     
     def __init__(self, get_response=None):
         super().__init__(get_response)
+        # Expanded list of cacheable paths
         self.cacheable_paths = [
             '/api/food/categories/',
             '/api/exercises/',
             '/api/subscription/plans/',
+            '/api/food/',  # Food list (frequently accessed)
+            '/api/diet/templates/',  # Diet plan templates (mostly static)
+            '/api/routine/templates/',  # Routine templates
         ]
         self.cache_duration = 300  # 5 minutes
     

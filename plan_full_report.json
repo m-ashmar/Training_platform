@@ -1,0 +1,415 @@
+{
+  "goal": "maintain",
+  "daily_kcal": 2200.0,
+  "meal_distribution": {
+    "Breakfast": 0.35,
+    "Lunch": 0.4,
+    "Dinner": 0.25
+  },
+  "macro_ratios": {
+    "protein": 0.3,
+    "carb": 0.5,
+    "fat": 0.2
+  },
+  "days": [
+    {
+      "meals": [
+        {
+          "meal_name": "Breakfast",
+          "ingredients": [
+            {
+              "name": "Tuna",
+              "quantity_g": 45.0
+            },
+            {
+              "name": "Lemon Segment",
+              "quantity_g": 5.0
+            },
+            {
+              "name": "Zucchini",
+              "quantity_g": 100.0
+            },
+            {
+              "name": "Apple",
+              "quantity_g": 118.0
+            }
+          ],
+          "totals": {
+            "calories": 357.5,
+            "protein": 41.8,
+            "carbs": 59.3,
+            "fat": 2.0
+          },
+          "targets": {
+            "calories": 700.0,
+            "protein": 57.7,
+            "carbs": 96.2,
+            "fat": 17.1
+          },
+          "percent_of_target": {
+            "calories": 51.1,
+            "protein": 72.4,
+            "carbs": 61.6,
+            "fat": 11.7
+          }
+        },
+        {
+          "meal_name": "Lunch",
+          "ingredients": [
+            {
+              "name": "Tuna",
+              "quantity_g": 50.0
+            },
+            {
+              "name": "Lemon Segment",
+              "quantity_g": 5.0
+            },
+            {
+              "name": "Green Bean",
+              "quantity_g": 100.0
+            },
+            {
+              "name": "Banana",
+              "quantity_g": 141.0
+            }
+          ],
+          "totals": {
+            "calories": 455.7,
+            "protein": 47.8,
+            "carbs": 79.4,
+            "fat": 2.2
+          },
+          "targets": {
+            "calories": 800.0,
+            "protein": 66.0,
+            "carbs": 110.0,
+            "fat": 19.6
+          },
+          "percent_of_target": {
+            "calories": 57.0,
+            "protein": 72.4,
+            "carbs": 72.2,
+            "fat": 11.3
+          }
+        },
+        {
+          "meal_name": "Dinner",
+          "ingredients": [
+            {
+              "name": "Tuna",
+              "quantity_g": 50.0
+            },
+            {
+              "name": "Lemon Segment",
+              "quantity_g": 5.0
+            },
+            {
+              "name": "Bell Pepper",
+              "quantity_g": 100.0
+            }
+          ],
+          "totals": {
+            "calories": 559.2,
+            "protein": 54.3,
+            "carbs": 100.3,
+            "fat": 4.6
+          },
+          "targets": {
+            "calories": 500.0,
+            "protein": 41.2,
+            "carbs": 68.8,
+            "fat": 12.2
+          },
+          "percent_of_target": {
+            "calories": 111.8,
+            "protein": 131.7,
+            "carbs": 145.9,
+            "fat": 37.4
+          }
+        },
+        {
+          "meal_name": "Snack",
+          "ingredients": [],
+          "totals": {
+            "calories": 0.0,
+            "protein": 0.0,
+            "carbs": 0.0,
+            "fat": 0.0
+          },
+          "targets": {
+            "calories": 200.0
+          },
+          "percent_of_target": {
+            "calories": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "meals": [
+        {
+          "meal_name": "Breakfast",
+          "ingredients": [
+            {
+              "name": "Cod",
+              "quantity_g": 65.0
+            },
+            {
+              "name": "Mega Mallows, Vanilla",
+              "quantity_g": 20.0
+            },
+            {
+              "name": "Bell Pepper",
+              "quantity_g": 100.0
+            },
+            {
+              "name": "Banana",
+              "quantity_g": 114.0
+            }
+          ],
+          "totals": {
+            "calories": 721.0,
+            "protein": 51.0,
+            "carbs": 131.5,
+            "fat": 5.0
+          },
+          "targets": {
+            "calories": 700.0,
+            "protein": 57.7,
+            "carbs": 96.2,
+            "fat": 17.1
+          },
+          "percent_of_target": {
+            "calories": 103.0,
+            "protein": 88.3,
+            "carbs": 136.6,
+            "fat": 29.0
+          }
+        },
+        {
+          "meal_name": "Lunch",
+          "ingredients": [
+            {
+              "name": "Cod",
+              "quantity_g": 70.0
+            },
+            {
+              "name": "Mega Mallows, Vanilla",
+              "quantity_g": 20.0
+            },
+            {
+              "name": "Bell Pepper",
+              "quantity_g": 100.0
+            },
+            {
+              "name": "Banana",
+              "quantity_g": 109.0
+            }
+          ],
+          "totals": {
+            "calories": 729.6,
+            "protein": 53.8,
+            "carbs": 130.4,
+            "fat": 5.1
+          },
+          "targets": {
+            "calories": 800.0,
+            "protein": 66.0,
+            "carbs": 110.0,
+            "fat": 19.6
+          },
+          "percent_of_target": {
+            "calories": 91.2,
+            "protein": 81.5,
+            "carbs": 118.5,
+            "fat": 26.0
+          }
+        },
+        {
+          "meal_name": "Dinner",
+          "ingredients": [
+            {
+              "name": "Cod",
+              "quantity_g": 70.0
+            },
+            {
+              "name": "Mega Mallows, Vanilla",
+              "quantity_g": 20.0
+            },
+            {
+              "name": "Carrot",
+              "quantity_g": 100.0
+            }
+          ],
+          "totals": {
+            "calories": 433.6,
+            "protein": 43.6,
+            "carbs": 59.4,
+            "fat": 1.9
+          },
+          "targets": {
+            "calories": 500.0,
+            "protein": 41.2,
+            "carbs": 68.8,
+            "fat": 12.2
+          },
+          "percent_of_target": {
+            "calories": 86.7,
+            "protein": 105.6,
+            "carbs": 86.4,
+            "fat": 16.0
+          }
+        },
+        {
+          "meal_name": "Snack",
+          "ingredients": [],
+          "totals": {
+            "calories": 0.0,
+            "protein": 0.0,
+            "carbs": 0.0,
+            "fat": 0.0
+          },
+          "targets": {
+            "calories": 200.0
+          },
+          "percent_of_target": {
+            "calories": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "meals": [
+        {
+          "meal_name": "Breakfast",
+          "ingredients": [
+            {
+              "name": "Test Chicken",
+              "quantity_g": 115.0
+            },
+            {
+              "name": "Lentils",
+              "quantity_g": 25.0
+            },
+            {
+              "name": "Bell Pepper",
+              "quantity_g": 100.0
+            },
+            {
+              "name": "Banana",
+              "quantity_g": 123.0
+            }
+          ],
+          "totals": {
+            "calories": 763.5,
+            "protein": 63.2,
+            "carbs": 135.5,
+            "fat": 8.5
+          },
+          "targets": {
+            "calories": 700.0,
+            "protein": 57.7,
+            "carbs": 96.2,
+            "fat": 17.1
+          },
+          "percent_of_target": {
+            "calories": 109.1,
+            "protein": 109.5,
+            "carbs": 140.8,
+            "fat": 49.9
+          }
+        },
+        {
+          "meal_name": "Lunch",
+          "ingredients": [
+            {
+              "name": "Test Chicken",
+              "quantity_g": 130.0
+            },
+            {
+              "name": "Lentils",
+              "quantity_g": 25.0
+            },
+            {
+              "name": "Bell Pepper",
+              "quantity_g": 100.0
+            },
+            {
+              "name": "Apple",
+              "quantity_g": 122.0
+            }
+          ],
+          "totals": {
+            "calories": 742.2,
+            "protein": 66.9,
+            "carbs": 124.3,
+            "fat": 8.9
+          },
+          "targets": {
+            "calories": 800.0,
+            "protein": 66.0,
+            "carbs": 110.0,
+            "fat": 19.6
+          },
+          "percent_of_target": {
+            "calories": 92.8,
+            "protein": 101.4,
+            "carbs": 113.0,
+            "fat": 45.7
+          }
+        },
+        {
+          "meal_name": "Dinner",
+          "ingredients": [
+            {
+              "name": "Test Chicken",
+              "quantity_g": 130.0
+            },
+            {
+              "name": "Lentils",
+              "quantity_g": 25.0
+            },
+            {
+              "name": "Zucchini",
+              "quantity_g": 100.0
+            }
+          ],
+          "totals": {
+            "calories": 434.0,
+            "protein": 57.7,
+            "carbs": 49.7,
+            "fat": 6.0
+          },
+          "targets": {
+            "calories": 500.0,
+            "protein": 41.2,
+            "carbs": 68.8,
+            "fat": 12.2
+          },
+          "percent_of_target": {
+            "calories": 86.8,
+            "protein": 139.9,
+            "carbs": 72.3,
+            "fat": 49.0
+          }
+        },
+        {
+          "meal_name": "Snack",
+          "ingredients": [],
+          "totals": {
+            "calories": 0.0,
+            "protein": 0.0,
+            "carbs": 0.0,
+            "fat": 0.0
+          },
+          "targets": {
+            "calories": 200.0
+          },
+          "percent_of_target": {
+            "calories": 0.0
+          }
+        }
+      ]
+    }
+  ]
+}

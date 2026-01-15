@@ -23,6 +23,7 @@ from .models import (
 )
 from .api import search_food
 from .trainer_services import TrainerDietPlanService, ClientProgressService
+from .data_collection import TrainingDataCollector
 import json
 import logging
 from django.shortcuts import render
@@ -32,6 +33,7 @@ from django.views.decorators.http import require_http_methods
 from .ai_services import DietGenerator
 from django.core.exceptions import PermissionDenied
 from datetime import date, time, datetime
+from django.db import models
 
 # Import subscription permissions
 from subscription.permissions import HasDietAccess, MealUsageLimit
@@ -533,7 +535,19 @@ class UserPreferencesView(APIView):
     
     def get(self, request):
         try:
-            preferences, created = UserFoodPreference.objects.get_or_create(user=request.user)
+            # Optimize: Prefetch all related ManyToMany fields to prevent N+1 queries
+            try:
+                preferences = UserFoodPreference.objects.prefetch_related(
+                    'liked_foods', 
+                    'disliked_foods', 
+                    'protein_choices', 
+                    'carb_choices', 
+                    'fat_choices'
+                ).get(user=request.user)
+                created = False
+            except UserFoodPreference.DoesNotExist:
+                preferences = UserFoodPreference.objects.create(user=request.user)
+                created = True
             
             return Response({
                 'liked_foods': [
@@ -745,7 +759,18 @@ class GenerateDietPlanRuleBasedView(APIView):
             duration_days = int(request.data.get('duration_days', 1))
             start_date = request.data.get('start_date')
             # Reserve 200 kcal for snack from daily calories by giving planner full daily calories; planner subtracts snack internally
-            daily_kcal = float(getattr(request.user, 'calculate_daily_calories')() or 0.0)
+            try:
+                daily_kcal = float(request.user.calculate_daily_calories() or 0.0)
+            except ValueError as e:
+                return Response(
+                    {"error": "Incomplete profile for calorie calculation", "detail": str(e)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            except Exception:
+                return Response(
+                    {"error": "Failed to calculate daily calories"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
             planner = RuleBasedPlanner(request.user)
             plan_output = planner.generate(
@@ -765,10 +790,79 @@ class GenerateDietPlanRuleBasedView(APIView):
                 start_date=start_date
             )
 
+            # FIX #5: Collect training data for rule-based plans (was only done for AI plans)
+            try:
+                data_collector = TrainingDataCollector()
+                data_collector.collect_diet_plan_data(diet_plan)
+                logger.info(f"Training data collected for rule-based plan {diet_plan.id}")
+            except Exception as e:
+                logger.warning(f"Failed to collect training data for plan {diet_plan.id}: {e}")
+
+            # Build rich payload for mobile to display immediately
+            try:
+                # Determine which date to present (start_date if provided, else plan start date or today)
+                present_date = parse_date(start_date) if start_date else (diet_plan.start_date or date.today())
+                meals_qs = diet_plan.meals.filter(date=present_date).order_by('scheduled_time')
+                # Plan-level daily nutrition for the date
+                plan_nutrition = diet_plan.calculate_daily_nutrition(present_date)
+                # Meal targets (match MealComponentsView logic)
+                daily_cal = float(diet_plan.daily_calories or 0.0)
+                day_snack_count = meals_qs.filter(meal_type='Snack').count()
+                non_snack_count = max(1, meals_qs.exclude(meal_type='Snack').count())
+                snack_kcal_target = 200.0
+                snacks_total_target = day_snack_count * snack_kcal_target
+                base_kcal_for_meals = max(0.0, daily_cal - snacks_total_target)
+
+                meals_payload = []
+                for meal in meals_qs:
+                    meal_nutrition = meal.calculate_nutrition()
+                    if meal.meal_type == 'Snack':
+                        meal_calorie_target = snack_kcal_target
+                    else:
+                        meal_calorie_target = base_kcal_for_meals / non_snack_count
+                    meal_protein_target = (meal_calorie_target * 0.30) / 4
+                    meal_carbs_target = (meal_calorie_target * 0.50) / 4
+                    meal_fat_target = (meal_calorie_target * 0.20) / 9
+                    meals_payload.append({
+                        "id": meal.id,
+                        "meal_type": meal.meal_type,
+                        "scheduled_time": meal.scheduled_time,
+                        "description": meal.description,
+                        "is_completed": meal.is_completed,
+                        "components_count": meal.components.count(),
+                        "nutrition": meal_nutrition,
+                        "targets": {
+                            "calories": meal_calorie_target,
+                            "protein": meal_protein_target,
+                            "carbs": meal_carbs_target,
+                            "fat": meal_fat_target,
+                        }
+                    })
+            except Exception:
+                # If anything fails in rich payload, fallback to minimal response
+                meals_payload = []
+                plan_nutrition = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+                present_date = start_date or date.today()
+
             return Response({
                 "status": "ok",
                 "diet_plan_id": diet_plan.id,
                 "meals_count": len(plan_output.plan),
+                "date": present_date,
+                "plan_nutrition": {
+                    "calories": plan_nutrition.get("calories", 0.0),
+                    "protein": plan_nutrition.get("protein", 0.0),
+                    "carbs": plan_nutrition.get("carbs", 0.0),
+                    "fat": plan_nutrition.get("fat", 0.0),
+                    "targets": {
+                        "calories": diet_plan.daily_calories,
+                        "protein": (diet_plan.daily_calories * 0.30) / 4 if diet_plan.daily_calories else 0.0,
+                        "carbs": (diet_plan.daily_calories * 0.50) / 4 if diet_plan.daily_calories else 0.0,
+                        "fat": (diet_plan.daily_calories * 0.20) / 9 if diet_plan.daily_calories else 0.0,
+                    }
+                },
+                "meals": meals_payload,
+                "smart_macro_summary": plan_output.plan_metadata.get("smart_macro_summary") if hasattr(plan_output, "plan_metadata") else None
             }, status=status.HTTP_201_CREATED)
         except PersistenceError as e:
             logger.error(f"Rule-based persistence error: {str(e)}")
@@ -1701,3 +1795,117 @@ class ClientMealDetailsView(APIView):
                 {"error": str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+# ============================================================================
+# CLIENT-SIDE PLAN LISTING AND MEAL+INGREDIENTS FETCH
+# ============================================================================
+
+class MyDietPlansView(APIView):
+    """
+    List all diet plans for the authenticated client user.
+    """
+    permission_classes = [IsAuthenticated, HasDietAccess]
+    
+    def get(self, request):
+        try:
+            plans = (DietPlan.objects
+                     .filter(user=request.user)
+                     .only('id', 'goal', 'daily_calories', 'start_date', 'end_date', 'is_active', 'created_at', 'template_id')
+                     .order_by('-created_at'))
+            results = []
+            plan_ids = list(plans.values_list('id', flat=True))
+            meal_counts = {}
+            if plan_ids:
+                for row in (Meal.objects
+                            .filter(diet_plan_id__in=plan_ids)
+                            .values('diet_plan_id')
+                            .annotate(cnt=models.Count('id'))):
+                    meal_counts[row['diet_plan_id']] = row['cnt']
+            template_ids = [p.template_id for p in plans if p.template_id]
+            templates = {t.id: t.name for t in DietPlanTemplate.objects.filter(id__in=template_ids)} if template_ids else {}
+            for p in plans:
+                results.append({
+                    'id': p.id,
+                    'goal': p.goal,
+                    'daily_calories': p.daily_calories,
+                    'start_date': p.start_date,
+                    'end_date': p.end_date,
+                    'is_active': p.is_active,
+                    'template_name': templates.get(p.template_id),
+                    'meals_count': meal_counts.get(p.id, 0),
+                })
+            return Response({'results': results, 'total_count': len(results)})
+        except Exception as e:
+            logger.error(f"MyDietPlansView error: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class DietPlanMealsWithIngredientsView(APIView):
+    """
+    Fetch all meals and ingredients for a given diet plan.
+    Clients can access their own plans; trainers can access plans they created.
+    """
+    permission_classes = [IsAuthenticated, HasDietAccess]
+    
+    def get(self, request, plan_id: int):
+        try:
+            plan = get_object_or_404(DietPlan, id=plan_id)
+            # Permission checks
+            if request.user.is_client and plan.user_id != request.user.id:
+                return Response({'error': 'You can only view your own diet plans'}, status=status.HTTP_403_FORBIDDEN)
+            if request.user.is_trainer and plan.created_by_id not in (None, request.user.id):
+                return Response({'error': 'You can only view plans you created'}, status=status.HTTP_403_FORBIDDEN)
+            
+            meals = (Meal.objects
+                     .filter(diet_plan=plan)
+                     .prefetch_related('components__food')
+                     .order_by('date', 'scheduled_time'))
+            
+            out_meals = []
+            for m in meals:
+                components = []
+                for c in m.components.all():
+                    f = c.food
+                    components.append({
+                        'id': c.id,
+                        'food_id': f.id,
+                        'food_name': f.name,
+                        'quantity_grams': c.quantity,
+                        'image_url': f.image_url,
+                        'macros': c.calculate_nutrition(),
+                        'is_completed': c.is_completed,
+                        'completed_at': c.completed_at,
+                        'actual_quantity_consumed': c.actual_quantity_consumed,
+                    })
+                out_meals.append({
+                    'id': m.id,
+                    'date': m.date,
+                    'meal_type': m.meal_type,
+                    'scheduled_time': m.scheduled_time,
+                    'description': m.description,
+                    'image_url': m.image_url,
+                    'is_ai_generated': m.is_ai_generated,
+                    'nutrition': m.calculate_nutrition(),
+                    'components': components,
+                    'is_completed': m.is_completed,
+                    'completion_percentage': m.completion_percentage,
+                })
+            
+            payload = {
+                'plan': {
+                    'id': plan.id,
+                    'goal': plan.goal,
+                    'daily_calories': plan.daily_calories,
+                    'start_date': plan.start_date,
+                    'end_date': plan.end_date,
+                    'is_active': plan.is_active,
+                    'generation_strategy': plan.generation_strategy,
+                    'template_name': plan.template.name if plan.template else None,
+                },
+                'meals': out_meals,
+                'meals_count': len(out_meals),
+            }
+            return Response(payload)
+        except Exception as e:
+            logger.error(f"DietPlanMealsWithIngredientsView error: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

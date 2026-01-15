@@ -28,11 +28,12 @@ class ExerciseSerializer(serializers.ModelSerializer):
     Output: Serialized Exercise data for API responses
     """
     media = ExerciseMediaSerializer(many=True, read_only=True)
-    image = serializers.SerializerMethodField()
+    thumbnail = serializers.SerializerMethodField()
+    difficulty_level = serializers.CharField(read_only=True)
 
     class Meta:
         model = Exercise
-        fields = ['id', 'name', 'description', 'target_muscle', 'image', 'media']
+        fields = ['id', 'name', 'description', 'target_muscle', 'difficulty_level', 'image', 'thumbnail', 'media']
 
     def get_image(self, obj):
         request = self.context.get('request')
@@ -41,6 +42,15 @@ class ExerciseSerializer(serializers.ModelSerializer):
             if request is not None:
                 return request.build_absolute_uri(url)
             return url
+        return None
+
+    def get_thumbnail(self, obj):
+        """Get first image/video thumbnail from media"""
+        # optimization: iterate if prefetched
+        all_media = obj.media.all()
+        for media in all_media:
+             if media.media_type in ['photo', 'video']:
+                 return media.content
         return None
 
 
@@ -77,15 +87,47 @@ class ExerciseCreateWithImageSerializer(serializers.ModelSerializer):
 
 
 class RoutineExerciseSerializer(serializers.ModelSerializer):
-    """Serializer for Routine Exercises."""
-    exercise = serializers.PrimaryKeyRelatedField(queryset=Exercise.objects.all())
+    """
+    Serializer for routine exercises.
+    Uses nested ExerciseSerializer for read operations to provide full details.
+    Uses PrimaryKeyRelatedField for write operations.
+    """
+    exercise = ExerciseSerializer(read_only=True)
+    exercise_id = serializers.PrimaryKeyRelatedField(
+        queryset=Exercise.objects.all(), 
+        source='exercise', 
+        write_only=True
+    )
     routine = serializers.PrimaryKeyRelatedField(queryset=Routine.objects.all())
 
     class Meta:
         model = RoutineExercise
-        fields = '__all__'  # Expose all fields for now; restrict as needed
-        read_only_fields = ['id', 'created_at', 'updated_at']
-    # TODO: Add custom validation if needed
+        fields = ['id', 'routine', 'exercise', 'exercise_id', 'sets', 'reps', 'rest_time', 'day', 'order', 'notes', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+        routine = attrs.get('routine')
+        exercise = attrs.get('exercise')
+
+        if user.is_trainer:
+            # 1. Validation: Trainer owns the routine
+            # Check if routine exists (for updates) or is being set
+            if routine and routine.created_by != user:
+                raise serializers.ValidationError({
+                    "routine": "You can only add exercises to routines you created."
+                })
+            
+            # 2. Validation: Exercise is accessible (Global or Own)
+            if exercise:
+                is_own = exercise.created_by == user
+                is_global = exercise.created_by is None
+                if not (is_own or is_global):
+                    raise serializers.ValidationError({
+                        "exercise": "You can only assign your own exercises or global exercises."
+                    })
+        
+        return attrs
 
 
 class RoutineSerializer(serializers.ModelSerializer):
@@ -107,15 +149,52 @@ class RoutineSerializer(serializers.ModelSerializer):
     assigned_usernames = serializers.SerializerMethodField()
     created_by = serializers.StringRelatedField(read_only=True)
     client_count = serializers.SerializerMethodField()
+    estimated_duration_minutes = serializers.SerializerMethodField()
+    target_muscles = serializers.SerializerMethodField()
 
     class Meta:
         model = Routine
         fields = [
-            'id', 'name', 'description', 'is_active', 'days', 'start_date', 'end_date',
+            'id', 'name', 'description', 'difficulty_level', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
-            'created_by', 'client_count'
+            'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles'
         ]
         read_only_fields = ['created_at', 'updated_at', 'created_by']
+
+    def get_estimated_duration_minutes(self, obj):
+        """
+        Calculate estimated duration based on sets, reps (4s/rep), and rest times.
+        Formula: sum(sets * reps * 4s) + sum((sets - 1) * rest_time)
+        """
+        total_seconds = 0
+        # Use all() to leverage prefetch_related
+        exercises = obj.routine_exercises.all()
+        for ex in exercises:
+            sets = ex.sets or 3
+            reps = ex.reps or 10
+            rest = ex.rest_time or 60
+            
+            # Work time (approx 4s per rep)
+            work_time = sets * reps * 4
+            # Rest time
+            rest_time = (sets - 1) * rest if sets > 1 else 0
+            
+            total_seconds += work_time + rest_time
+            
+        # Add transition time (e.g., 2 mins between exercises)
+        if len(exercises) > 1:
+            total_seconds += (len(exercises) - 1) * 120
+            
+        return round(total_seconds / 60)
+
+    def get_target_muscles(self, obj):
+        """Get list of unique target muscles in this routine."""
+        # Avoid select_related here as it conflicts with prefetch_related
+        # iterate over all() instead which should be prefetched
+        return list(set(
+            ex.exercise.target_muscle 
+            for ex in obj.routine_exercises.all()
+        ))
 
     def get_assigned_usernames(self, obj):
         """Retrieve assigned user names."""
@@ -123,6 +202,9 @@ class RoutineSerializer(serializers.ModelSerializer):
 
     def get_client_count(self, obj):
         """Get count of clients assigned to this routine."""
+        # Use annotated value if available
+        if hasattr(obj, 'client_count'):
+            return obj.client_count
         return obj.assigned_to.filter(user_type='client').count()
 
     def validate(self, attrs):
@@ -216,14 +298,94 @@ class UserExerciseProgressSerializer(serializers.ModelSerializer):
         fields = ['id', 'user', 'exercise', 'date', 'completed_sets', 'target_sets', 'skipped']
 
 
-class RoutineProgressSerializer(serializers.ModelSerializer):
-    """Serializer for tracking progress of routines for each user."""
-    user = serializers.StringRelatedField(read_only=True)  # Display user's name
-    routine = RoutineSerializer(read_only=True)
 
+
+
+class RoutineProgressSerializer(serializers.ModelSerializer):
+    """
+    Enhanced serializer with rich progress data.
+    Provides completion percentage, exercise summary, and next action suggestions.
+    """
+    user = serializers.StringRelatedField(read_only=True)
+    routine_name = serializers.CharField(source='routine.name', read_only=True)
+    routine_id = serializers.IntegerField(source='routine.id', read_only=True)
+    completion_percentage = serializers.SerializerMethodField()
+    exercises_summary = serializers.SerializerMethodField()
+    next_suggested_action = serializers.SerializerMethodField()
+    
     class Meta:
         model = RoutineProgress
-        fields = ['id', 'user', 'routine', 'day', 'status', 'updated_at']
+        fields = [
+            'id', 'user', 'routine_id', 'routine_name', 
+            'day', 'status', 'exercises_completed', 'total_exercises',
+            'completion_percentage', 'exercises_summary', 
+            'next_suggested_action', 'updated_at'
+        ]
+    
+    def get_completion_percentage(self, obj):
+        if obj.total_exercises == 0:
+            return 0.0
+        return round((obj.exercises_completed / obj.total_exercises) * 100, 1)
+    
+    def get_exercises_summary(self, obj):
+        """Get summary of exercises for this day with optimized queries."""
+        from .models import RoutineExercise, UserExerciseProgress
+        
+        routine_exercises = RoutineExercise.objects.filter(
+            routine=obj.routine, 
+            day=obj.day
+        ).select_related('exercise')
+        
+        # Optimization: Batch query all progress for this user/date instead of N queries
+        exercise_ids = [re.exercise_id for re in routine_exercises]
+        progress_date = obj.updated_at.date() if obj.updated_at else None
+        
+        # Single query to get all relevant progress entries
+        progress_map = {}
+        if progress_date and exercise_ids:
+            progress_entries = UserExerciseProgress.objects.filter(
+                user=obj.user,
+                exercise_id__in=exercise_ids,
+                date=progress_date
+            ).order_by('exercise_id', '-updated_at')
+            
+            # Build map of exercise_id -> latest progress (first in ordered results)
+            for p in progress_entries:
+                if p.exercise_id not in progress_map:
+                    progress_map[p.exercise_id] = p
+        
+        summary = []
+        for re in routine_exercises:
+            # Check if completed using cached progress
+            is_completed = False
+            progress = progress_map.get(re.exercise_id)
+            
+            if progress and not progress.skipped:
+                if progress.target_sets > 0:
+                    is_completed = progress.completed_sets >= progress.target_sets
+                else:
+                    is_completed = progress.completed_sets > 0
+
+            summary.append({
+                'exercise_id': re.exercise.id,
+                'exercise_name': re.exercise.name,
+                'target_muscle': re.exercise.target_muscle,
+                'target_sets': re.sets,
+                'target_reps': re.reps,
+                'completed': is_completed
+            })
+            
+        return summary
+    
+    def get_next_suggested_action(self, obj):
+        """Suggest what user should do next."""
+        if obj.status == 'Completed':
+            return "Great job! You've finished this day's workout. Rest up for the next one."
+        elif obj.status == 'In Progress':
+            remaining = obj.total_exercises - obj.exercises_completed
+            return f"Keep pushing! You have {remaining} exercises remaining to complete Day {obj.day}."
+        else:
+            return f"Ready to start? Begin your Day {obj.day} workout now."
 
 
 class UserRoutineSerializer(serializers.ModelSerializer):
@@ -245,10 +407,15 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     """
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
+    one_rep_max_estimate = serializers.SerializerMethodField()
 
     class Meta:
         model = ExerciseSetLog
-        fields = ['id', 'user_exercise_progress', 'workout_session', 'set_number', 'weight', 'reps', 'volume', 'date', 'notes', 'rest_time', 'rpe']
+        fields = [
+            'id', 'user_exercise_progress', 'workout_session', 'set_number', 
+            'weight', 'reps', 'volume', 'one_rep_max_estimate', 
+            'date', 'notes', 'rest_time', 'rpe'
+        ]
         # TODO: Add more fields as needed for analytics/reporting
 
     def get_volume(self, obj):
@@ -256,6 +423,57 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         weight = obj.weight or 0
         reps = obj.reps or 0
         return weight * reps
+
+    def get_one_rep_max_estimate(self, obj):
+        """
+        Estimate 1RM using Brzycki Formula: weight * (36 / (37 - reps))
+        Only valid for reps <= 10 roughly, but we return for all.
+        """
+        if not obj.weight or not obj.reps or obj.reps == 0:
+            return 0.0
+        # If reps are very high, formula breaks down, but useful as metric
+        return round(obj.weight * (36 / (37 - obj.reps)), 1)
+
+
+
+
+class UserDailySummarySerializer(serializers.ModelSerializer):
+    """
+    Detailed summary of a user's progress on a specific exercise for a given day.
+    Includes full exercise details and all set logs.
+    """
+    exercise = ExerciseSerializer(read_only=True)
+    set_logs = ExerciseSetLogSerializer(many=True, read_only=True)
+    total_volume = serializers.SerializerMethodField()
+    avg_intensity = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserExerciseProgress
+        fields = [
+            'id', 'exercise', 'date', 'status', 
+            'completed_sets', 'target_sets', 'skipped',
+            'total_volume', 'avg_intensity',
+            'set_logs', 'notes'
+        ]
+
+    def get_total_volume(self, obj):
+        return sum(log.weight * log.reps for log in obj.set_logs.all() if log.weight and log.reps)
+
+    def get_avg_intensity(self, obj):
+        rpes = [log.rpe for log in obj.set_logs.all() if log.rpe]
+        if not rpes:
+            return None
+        return round(sum(rpes) / len(rpes), 1)
+
+    def get_status(self, obj):
+        if obj.skipped:
+            return 'Skipped'
+        elif obj.completed_sets >= obj.target_sets and obj.target_sets > 0:
+            return 'Completed'
+        elif obj.completed_sets > 0:
+            return 'In Progress'
+        return 'Not Started'
 
 
 class TrainerRoutineSerializer(serializers.ModelSerializer):
@@ -292,17 +510,29 @@ class TrainerRoutineSerializer(serializers.ModelSerializer):
 
     def get_client_count(self, obj):
         """Get count of clients assigned to this routine."""
+        if hasattr(obj, 'client_count'):
+            return obj.client_count
         return obj.assigned_to.filter(user_type='client').count()
 
     def get_completion_rate(self, obj):
         """
         Calculate completion rate for this routine.
-        
-        TODO: Implement actual completion rate calculation
-        TODO: Add progress tracking and analytics
+        Returns the percentage of days marked as 'Completed' across all assigned users.
         """
-        # Placeholder for completion rate calculation
-        return 0.0
+        from .models import RoutineProgress
+        
+        # Get all progress entries for this routine
+        # Use all() to leverage prefetch_related
+        progress_entries = obj.progress.all()
+        
+        # Calculate manually in python to avoid DB hit
+        total_entries = len(progress_entries)
+        completed_entries = sum(1 for p in progress_entries if p.status == 'Completed')
+        
+        if total_entries == 0:
+            return 0.0
+            
+        return round((completed_entries / total_entries) * 100, 1)
 
     def validate(self, attrs):
         """
@@ -398,11 +628,14 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
         return attrs
 
 
+
+
+
 class WorkoutSessionSerializer(serializers.ModelSerializer):
     class Meta:
         model = WorkoutSession
         fields = '__all__'  # Expose all fields for now; restrict as needed
-        read_only_fields = ['id', 'start_time', 'end_time']
+        read_only_fields = ['id', 'user']
     # TODO: Add custom validation if needed
 
 
@@ -481,14 +714,33 @@ class WorkoutSessionDetailSerializer(serializers.ModelSerializer):
     routine_id = serializers.IntegerField(source='routine.id', read_only=True)
     duration_minutes = serializers.SerializerMethodField()
     total_volume = serializers.SerializerMethodField()
+    intensity_score = serializers.SerializerMethodField()
+    muscles_worked = serializers.SerializerMethodField()
     exercises_completed = serializers.SerializerMethodField()
     
     class Meta:
         model = WorkoutSession
         fields = [
             'id', 'routine_name', 'routine_id', 'start_time', 'end_time',
-            'status', 'duration_minutes', 'total_volume', 'exercises_completed'
+            'status', 'duration_minutes', 'total_volume', 'intensity_score', 
+            'muscles_worked', 'exercises_completed'
         ]
+    
+    def _get_set_logs(self, obj):
+        """Cache set logs to avoid duplicate queries across methods."""
+        if not hasattr(self, '_set_logs_cache'):
+            self._set_logs_cache = {}
+        
+        if obj.id not in self._set_logs_cache:
+            # Use prefetched data if available, otherwise query with optimization
+            if hasattr(obj, '_prefetched_objects_cache') and 'set_logs' in obj._prefetched_objects_cache:
+                self._set_logs_cache[obj.id] = list(obj.set_logs.all())
+            else:
+                self._set_logs_cache[obj.id] = list(
+                    ExerciseSetLog.objects.filter(workout_session=obj)
+                    .select_related('user_exercise_progress__exercise')
+                )
+        return self._set_logs_cache[obj.id]
     
     def get_duration_minutes(self, obj):
         if obj.start_time and obj.end_time:
@@ -497,8 +749,8 @@ class WorkoutSessionDetailSerializer(serializers.ModelSerializer):
         return None
     
     def get_total_volume(self, obj):
-        # Calculate total volume from set logs in this session
-        set_logs = ExerciseSetLog.objects.filter(workout_session=obj)
+        # Use cached set logs
+        set_logs = self._get_set_logs(obj)
         total_volume = sum(
             (log.weight * log.reps) for log in set_logs 
             if log.weight and log.reps
@@ -506,39 +758,58 @@ class WorkoutSessionDetailSerializer(serializers.ModelSerializer):
         return total_volume
     
     def get_exercises_completed(self, obj):
-        # Get unique exercises completed in this session
-        set_logs = ExerciseSetLog.objects.filter(workout_session=obj)
-        exercises = set_logs.values(
-            'user_exercise_progress__exercise__name',
-            'user_exercise_progress__exercise__id'
-        ).distinct()
+        """Get exercises completed in this session with optimized queries."""
+        set_logs = self._get_set_logs(obj)
         
-        exercise_details = []
-        for exercise in exercises:
-            exercise_logs = set_logs.filter(
-                user_exercise_progress__exercise__id=exercise['user_exercise_progress__exercise__id']
-            )
+        # Group logs by exercise
+        exercise_map = {}
+        for log in set_logs:
+            if not log.user_exercise_progress or not log.user_exercise_progress.exercise:
+                continue
+            exercise = log.user_exercise_progress.exercise
+            if exercise.id not in exercise_map:
+                exercise_map[exercise.id] = {
+                    'exercise_name': exercise.name,
+                    'exercise_id': exercise.id,
+                    'sets_data': [],
+                    'total_volume': 0
+                }
             
-            sets_data = []
-            for log in exercise_logs:
-                sets_data.append({
-                    'set_number': log.set_number,
-                    'weight': log.weight,
-                    'reps': log.reps,
-                    'volume': log.weight * log.reps if log.weight and log.reps else 0,
-                    'rpe': log.rpe,
-                    'notes': log.notes
-                })
-            
-            exercise_details.append({
-                'exercise_name': exercise['user_exercise_progress__exercise__name'],
-                'exercise_id': exercise['user_exercise_progress__exercise__id'],
-                'sets_completed': len(exercise_logs),
-                'sets_data': sets_data,
-                'total_volume': sum(set_data['volume'] for set_data in sets_data)
+            volume = (log.weight * log.reps) if log.weight and log.reps else 0
+            exercise_map[exercise.id]['sets_data'].append({
+                'set_number': log.set_number,
+                'weight': log.weight,
+                'reps': log.reps,
+                'volume': volume,
+                'rpe': log.rpe,
+                'notes': log.notes
             })
+            exercise_map[exercise.id]['total_volume'] += volume
+        
+        # Build result with sets_completed count
+        exercise_details = []
+        for data in exercise_map.values():
+            data['sets_completed'] = len(data['sets_data'])
+            exercise_details.append(data)
         
         return exercise_details
+
+    def get_intensity_score(self, obj):
+        """Calculate intensity (Volume / Duration in minutes)."""
+        duration = self.get_duration_minutes(obj)
+        volume = self.get_total_volume(obj)
+        if duration and duration > 0 and volume:
+            return round(volume / duration, 1)
+        return 0.0
+
+    def get_muscles_worked(self, obj):
+        """Return list of muscles targeted in this session."""
+        set_logs = self._get_set_logs(obj)
+        return list(set(
+            log.user_exercise_progress.exercise.target_muscle 
+            for log in set_logs
+            if log.user_exercise_progress and log.user_exercise_progress.exercise
+        ))
 
 
 class DetailedClientProgressSerializer(serializers.ModelSerializer):

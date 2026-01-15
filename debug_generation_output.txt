@@ -1,0 +1,212 @@
+[ALLOWED_MAP] Final per-meal/macro candidates:
+  - Breakfast:protein -> ['Egg', 'Grilled Chicken Breast', 'Chicken Drumstick', 'Chicken Tikka', 'Egg Whites', 'Syrian Cheese']
+  - Breakfast:carb -> ['Carrot', 'Cherry tomatoes', 'White Rice', 'Arborio Rice', 'Syrian Bread']
+  - Breakfast:fat -> []
+  - Breakfast:vegetable -> []
+  - Breakfast:fruit -> []
+  - Lunch:protein -> ['Salmon', 'Lamb Tikka', 'Grilled Fish', 'Hard-Boiled Eggs', 'Chicken Shawarma']
+  - Lunch:carb -> ['Potato', 'Sweet Potato', 'Potato Gnocchi', 'Avocado Oil, Avocado', 'Cooked quinoa', 'Almonds', 'Cooked White Rice']
+  - Lunch:fat -> ['Olive Oil', 'Cheese, Colby']
+  - Lunch:vegetable -> []
+  - Lunch:fruit -> []
+  - Dinner:protein -> ['Burger', 'Chicken', 'Chicken Breast', 'Beef Shawarma']
+  - Dinner:carb -> ['Green Bean', 'Quinoa', 'Rice', 'Whole grain bread', 'Carnaroli Rice', 'Dark Choclate', 'Fresh Plain Cooked Pasta']
+  - Dinner:fat -> ['Almonds', 'Bacon Fat']
+  - Dinner:vegetable -> ['Asparagus', 'Carrot', 'Spinach', 'Zucchini']
+  - Dinner:fruit -> []
+  - Snack:protein -> ['Avocado']
+  - Snack:carb -> ['Banana', 'Apple']
+  - Snack:fat -> ['Avocado', 'Avocado Salsa']
+  - Snack:vegetable -> []
+  - Snack:fruit -> []
+2025-11-05 02:47:54 [info     ] {"stage": "allocation", "date": "2025-11-05", "daily_kcal": 2319.0, "per_meal_kcal": {"Breakfast": 741.6, "Lunch": 741.6, "Dinner": 635.7}, "targets": {"Breakfast": {"protein": 50.7, "carb": 111.6, "fat": 18.0}, "Lunch": {"protein": 50.7, "carb": 111.6, "fat": 18.0}, "Dinner": {"protein": 43.5, "carb": 95.7, "fat": 15.5}}, "goal": "gain"}
+2025-11-05 02:47:54 [info     ] {"stage": "meal_summary", "meal_type": "Breakfast", "kcal_consumed": 717.8, "macro_consumed": {"protein": 57.2, "carb": 61.5, "fat": 27.0}, "target_per_macro": {"protein": 50.7, "carb": 111.6, "fat": 18.0}, "kcal_target": 741.6, "components": ["Chicken Drumstick:280g", "Carrot:400g", "Spinach:100g"]}
+2025-11-05 02:47:54 [info     ] {"stage": "meal_summary", "meal_type": "Lunch", "kcal_consumed": 1047.7, "macro_consumed": {"protein": 59.0, "carb": 74.6, "fat": 55.0}, "target_per_macro": {"protein": 50.7, "carb": 111.6, "fat": 18.0}, "kcal_target": 741.6, "components": ["Salmon:255g", "Sweet Potato:245g", "Cooked quinoa:40g", "Olive Oil:20g", "Carrot:100g"]}
+2025-11-05 02:47:54 [info     ] {"stage": "meal_summary", "meal_type": "Dinner", "kcal_consumed": 894.0, "macro_consumed": {"protein": 51.1, "carb": 74.8, "fat": 42.6}, "target_per_macro": {"protein": 43.5, "carb": 95.7, "fat": 15.5}, "kcal_target": 635.7, "components": ["Burger:160g", "Rice:160g", "Dark Choclate:40g", "Carrot:100g"]}
+--- PLAN ---
+{
+  "plan": [
+    {
+      "meal_name": "Breakfast",
+      "description": "Breakfast planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Chicken Drumstick",
+          "quantity": "280g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Carrot",
+          "quantity": "400g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Spinach",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Apple",
+          "quantity": "138g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Breakfast",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Lunch",
+      "description": "Lunch planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Salmon",
+          "quantity": "255g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Sweet Potato",
+          "quantity": "245g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Cooked quinoa",
+          "quantity": "40g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Olive Oil",
+          "quantity": "20g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Carrot",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Banana",
+          "quantity": "143g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Lunch",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Dinner",
+      "description": "Dinner planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Burger",
+          "quantity": "160g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Rice",
+          "quantity": "160g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Dark Choclate",
+          "quantity": "40g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        },
+        {
+          "name": "Carrot",
+          "quantity": "100g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Dinner",
+      "preparation_time": null,
+      "difficulty_level": null
+    },
+    {
+      "meal_name": "Snack",
+      "description": "Snack planned by rule-based system",
+      "ingredients": [
+        {
+          "name": "Avocado",
+          "quantity": "125g",
+          "estimated_calories": null,
+          "estimated_protein": null,
+          "estimated_carbs": null,
+          "estimated_fat": null
+        }
+      ],
+      "total_nutrition": {
+        "calories": 0.0,
+        "protein": 0.0,
+        "carbs": 0.0,
+        "fat": 0.0
+      },
+      "meal_type": "Snack",
+      "preparation_time": null,
+      "difficulty_level": null
+    }
+  ],
+  "plan_metadata": {},
+  "generation_metadata": {}
+}

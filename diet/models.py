@@ -246,6 +246,14 @@ class DietPlan(models.Model):
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'is_active']),
+            models.Index(fields=['user', 'start_date']),
+            models.Index(fields=['is_active']),
+        ]
+        ordering = ['-created_at']
+    
     @property
     def period(self):
         """
@@ -415,6 +423,12 @@ class MealComponent(models.Model):
             'carbs': round(self.food.carbs * scale_factor, 1),
             'fat': round(self.food.fat * scale_factor, 1)
         }
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['meal']),
+            models.Index(fields=['food']),
+        ]
 
 class DailyProgress(models.Model):
     """

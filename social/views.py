@@ -13,6 +13,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
 from django.utils import timezone
 from django.contrib.contenttypes.models import ContentType
+from django.core.cache import cache
 
 from .models import (
     UserFollow, Post, PostLike, Comment, CommentLike, Challenge,
@@ -368,7 +369,53 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return Challenge.objects.all().order_by('-created_at')
+        # Optimize to avoid N+1 queries:
+        # - select_related('creator') to load creator in one query
+        # - annotate current user's participation data using EXISTS/Subquery
+        #   so the serializer does not issue queries per challenge
+        from django.db.models import Exists, OuterRef, Subquery
+        qs = (
+            Challenge.objects.all()
+            .select_related('creator')
+            .only(
+                'id', 'title', 'description', 'challenge_type',
+                'target_value', 'unit', 'start_date', 'end_date',
+                'max_participants', 'participants_count', 'status',
+                'created_at', 'rules', 'reward_description', 'image',
+                'creator__id', 'creator__username', 'creator__email',
+                'creator__user_type', 'creator__profile_picture',
+            )
+            .order_by('-created_at')
+        )
+        user = getattr(self, 'request', None).user if getattr(self, 'request', None) else None
+        if user and user.is_authenticated:
+            part_qs = ChallengeParticipation.objects.filter(user=user, challenge=OuterRef('pk'))
+            qs = qs.annotate(
+                is_joined_anno=Exists(part_qs),
+                cur_value_anno=Subquery(part_qs.values('current_value')[:1]),
+                prog_pct_anno=Subquery(part_qs.values('progress_percentage')[:1]),
+                rank_anno=Subquery(part_qs.values('rank')[:1]),
+            )
+        return qs
+    
+    def list(self, request, *args, **kwargs):
+        """
+        Per-user short-lived cache for the challenges list to reduce repeated DB work.
+        Cached for 30 seconds keyed by user and querystring.
+        """
+        try:
+            user_part = f"user:{request.user.id}" if request.user and request.user.is_authenticated else "anon"
+            # Ignore querystring noise to maximize cache hits for mobile polling
+            key = f"challenges_list:{user_part}"
+            cached = cache.get(key)
+            if cached is not None:
+                return Response(cached)
+            response = super().list(request, *args, **kwargs)
+            if response.status_code == 200 and isinstance(response.data, (list, dict)):
+                cache.set(key, response.data, timeout=120)
+            return response
+        except Exception:
+            return super().list(request, *args, **kwargs)
     
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)

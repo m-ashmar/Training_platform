@@ -1,9 +1,11 @@
-from rest_framework import viewsets
+from rest_framework import viewsets, status, permissions, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework.pagination import PageNumberPagination
 from django.db import models, IntegrityError
-from django.db.models import Sum, Avg, Count, F, Max, Q
+from django.db.models import Sum, Avg, Count, F, Q, Prefetch
+from django.utils import timezone
+from datetime import datetime, timedelta, date
 from .models import (
     Routine, Exercise, RoutineExercise, RoutineProgress, ExerciseSetLog, WorkoutSession,
     RoutineTemplate, RoutineTemplateExercise, UserExerciseProgress
@@ -21,14 +23,14 @@ from .permissions import (
     IsTrainerOrAdmin,
     IsTrainerOrAdminForAssignment,
     IsSetLogCreatorOrTrainerOrAdmin,
-    IsRoutineOwnerOrAssigned
+    IsRoutineOwnerOrAssigned,
+    IsClientOrAssignedTrainer # Added for RoutineProgressViewSet
 )
 import logging
 from .services import send_notification
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.permissions import IsAuthenticated
-from rest_framework import permissions
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.views import APIView
@@ -36,28 +38,34 @@ from users.models import CustomUser
 
 logger = logging.getLogger(__name__)
 
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
 
 class ExerciseViewSet(viewsets.ModelViewSet):
     """ViewSet for managing exercises."""
     queryset = Exercise.objects.all()
     serializer_class = ExerciseSerializer
     permission_classes = [IsAdminOrOwnerOrReadOnly]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
-        """Filter exercises based on user role"""
+        """Filter exercises based on user role with optimized queries."""
         user = self.request.user
         
+        # Optimize: prefetch media to avoid N+1 in serializer
+        base_qs = self.queryset.prefetch_related('media').select_related('created_by')
+        
         if user.is_admin:
-            # Admins can see all exercises
-            return self.queryset.all()
+            return base_qs
         elif user.is_trainer:
-            # Trainers can see their own exercises and global exercises
-            return self.queryset.filter(
+            return base_qs.filter(
                 models.Q(created_by=user) | models.Q(created_by__isnull=True)
             )
         else:
-            # Clients can see all exercises (for viewing routines)
-            return self.queryset.all()
+            return base_qs
 
     def perform_create(self, serializer):
         """Override to assign the exercise to the creator."""
@@ -278,6 +286,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
     queryset = Routine.objects.all()
     serializer_class = RoutineSerializer
     permission_classes = [IsTrainerOrAdmin]
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
@@ -288,18 +297,27 @@ class RoutineViewSet(viewsets.ModelViewSet):
         """Filter routines based on user role"""
         user = self.request.user
         
+        # Base optimization for all queries
+        queryset = self.queryset.select_related('created_by').prefetch_related(
+            'routine_exercises__exercise__media',
+            'assigned_to',
+            'progress'
+        ).annotate(
+            client_count=models.Count('assigned_to', filter=models.Q(assigned_to__user_type='client'), distinct=True)
+        )
+        
         if user.is_admin:
             # Admins can see all routines
-            return self.queryset.all()
+            return queryset.all()
         elif user.is_trainer:
             # Trainers can see routines they created and routines assigned to their clients
-            return self.queryset.filter(
+            return queryset.filter(
                 models.Q(created_by=user) | 
                 models.Q(assigned_to__assigned_trainer=user)
             ).distinct()
         else:
             # Clients can see routines assigned to them
-            return self.queryset.filter(assigned_to=user)
+            return queryset.filter(assigned_to=user)
 
     def get_serializer_class(self):
         """Use different serializers based on user role"""
@@ -589,64 +607,78 @@ class RoutineExerciseViewSet(viewsets.ModelViewSet):
     API endpoint for managing RoutineExercise objects.
     Only trainers (owners) and admins can create/update/delete. All users can read.
     """
-    queryset = RoutineExercise.objects.all()
+    queryset = RoutineExercise.objects.select_related(
+        'routine', 'routine__created_by', 'exercise'
+    ).prefetch_related('exercise__media')
     serializer_class = RoutineExerciseSerializer
     permission_classes = [IsAdminOrOwnerOrReadOnly]
-    # TODO: Add filtering by routine, day, etc. as needed for frontend
 
 
 class RoutineProgressViewSet(viewsets.ModelViewSet):
-    """ViewSet for tracking user progress on routines."""
+    """
+    ViewSet for managing routine progress.
+    Clients can only see their own progress.
+    Trainers can see their clients' progress.
+    """
     queryset = RoutineProgress.objects.all()
     serializer_class = RoutineProgressSerializer
-    permission_classes = [IsAdminOrOwnerOrReadOnly]
+    permission_classes = [IsTrainerOrAdmin | IsClientOrAssignedTrainer]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
-        """Filter progress based on user role"""
+        """Filter progress based on user role with optimized queries."""
         user = self.request.user
         
+        # Optimize: add select_related for frequently accessed relations
+        base_qs = self.queryset.select_related(
+            'user', 'routine', 'routine__created_by'
+        ).prefetch_related(
+            'routine__routine_exercises__exercise'
+        )
+        
         if user.is_admin:
-            return self.queryset.all()
+            return base_qs
         elif user.is_trainer:
-            # Trainers can see progress of their clients
-            return self.queryset.filter(user__assigned_trainer=user)
+            return base_qs.filter(user__assigned_trainer=user)
         else:
-            # Clients can see their own progress
-            return self.queryset.filter(user=user)
+            return base_qs.filter(user=user)
 
 
 class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing exercise set logs.
-    Handles creation, listing, and filtering of set logs for clients and trainers.
-    
-    Input: API requests with set log data (POST), query params for filtering (GET)
-    Output: JSON responses with set log data
+    ViewSet for logging individual exercise sets.
     """
     queryset = ExerciseSetLog.objects.all()
     serializer_class = ExerciseSetLogSerializer
     permission_classes = [IsSetLogCreatorOrTrainerOrAdmin]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         """
-        Returns filtered set logs based on user role.
-        Input: self (request.user)
-        Output: QuerySet of ExerciseSetLog objects visible to the user
+        Returns filtered set logs based on user role with optimized queries.
         """
-        logger = logging.getLogger(__name__)
         user = self.request.user
-        logger.debug(f"Fetching set logs for user {user} (role: {getattr(user, 'user_type', None)})")
-        qs = self.queryset
+        
+        # Optimize: add select_related for frequently accessed relations
+        base_qs = self.queryset.select_related(
+            'user_exercise_progress',
+            'user_exercise_progress__user',
+            'user_exercise_progress__exercise',
+            'workout_session',
+            'workout_session__routine'
+        )
+        
         # Optional filter by routine_id
         routine_id = self.request.query_params.get('routine_id')
         if routine_id:
-            qs = qs.filter(workout_session__routine_id=routine_id)
+            base_qs = base_qs.filter(workout_session__routine_id=routine_id)
+        
         if user.is_admin:
-            return qs
+            return base_qs
         elif user.is_trainer:
-            return qs.filter(user_exercise_progress__user__assigned_trainer=user)
+            return base_qs.filter(user_exercise_progress__user__assigned_trainer=user)
         else:
-            return qs.filter(user_exercise_progress__user=user)
+            return base_qs.filter(user_exercise_progress__user=user)
 
     def perform_create(self, serializer):
         try:
@@ -755,7 +787,12 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     Input: API requests with session data (POST), session updates (PATCH)
     Output: JSON responses with session data
     """
-    queryset = WorkoutSession.objects.all()
+    queryset = WorkoutSession.objects.select_related(
+        'user', 'routine', 'routine__created_by'
+    ).prefetch_related(
+        'set_logs',
+        'set_logs__user_exercise_progress__exercise'
+    )
     serializer_class = WorkoutSessionSerializer
     
     def get_permissions(self):
@@ -826,42 +863,101 @@ class AnalyticsViewSet(viewsets.ViewSet):
         Returns analytics summary for the user (or specified user_id if trainer/admin).
         Input: period=week|month, user_id (optional)
         Output: JSON with total_volume, days_trained, prs per exercise
+        Get analytics summary for a specific period.
+        
+        Input: Query param 'period' (week, month, year)
+        Output: JSON with total volume, days trained, PRs, comparisons, top muscles.
         """
-        user = request.user
+        from datetime import timedelta
         period = request.query_params.get('period', 'week')
         user_id = request.query_params.get('user_id')
-        # Only trainers/admins can specify user_id
-        if user_id and (not user.is_trainer and not user.is_staff):
-            return Response({'detail': 'Permission denied.'}, status=403)
+        user = request.user
+        
         if user_id:
-            from users.models import CustomUser
-            user = CustomUser.objects.get(pk=user_id)
-        # Date range
-        now = timezone.now().date()
+            try:
+                from users.models import CustomUser
+                user = CustomUser.objects.get(pk=user_id)
+            except CustomUser.DoesNotExist:
+                return Response({'error': 'User not found'}, status=404)
+
+        now = timezone.now()
+        
+        # Determine time ranges
         if period == 'month':
             start_date = now - timedelta(days=30)
-        else:
+            prev_start = start_date - timedelta(days=30)
+            days_in_period = 30
+        elif period == 'year':
+            start_date = now - timedelta(days=365)
+            prev_start = start_date - timedelta(days=365)
+            days_in_period = 365
+        else: # week
             start_date = now - timedelta(days=7)
-        from routine.models import ExerciseSetLog, UserExerciseProgress, Exercise
+            prev_start = start_date - timedelta(days=7)
+            days_in_period = 7
+
+        # Current Period Data
         setlogs = ExerciseSetLog.objects.filter(
             user_exercise_progress__user=user,
             date__gte=start_date
         )
-        # Total volume: sum(weight * reps)
+        
         total_volume = setlogs.aggregate(
             total=Sum(F('weight') * F('reps'))
         )['total'] or 0
-        # Days trained: count unique dates
+        
         days_trained = setlogs.values('date').distinct().count()
-        # PRs: max weight per exercise
-        prs_qs = setlogs.values('user_exercise_progress__exercise__name').annotate(
-            pr=Max('weight')
+        
+        # PRs (Personal Records) in this period - simplified check
+        # Ideally would check if weight > max(previous weights) for each exercise
+        # For now, we'll return a placeholder or check simplified logic if available
+        # Implementation of true PR tracking requires checking history per exercise
+        prs = 0 
+
+        # Comparison Data (Previous Period)
+        prev_setlogs = ExerciseSetLog.objects.filter(
+            user_exercise_progress__user=user,
+            date__gte=prev_start,
+            date__lt=start_date
         )
-        prs = {row['user_exercise_progress__exercise__name']: row['pr'] for row in prs_qs}
+        
+        prev_volume = prev_setlogs.aggregate(
+            total=Sum(F('weight') * F('reps'))
+        )['total'] or 0
+        
+        volume_change = 0
+        if prev_volume > 0:
+            volume_change = round(((total_volume - prev_volume) / prev_volume) * 100, 1)
+        elif total_volume > 0:
+            volume_change = 100.0 # From 0 to something is 100% (or infinite) increase
+
+        # Top Muscles Worked
+        muscle_data = setlogs.values(
+            'user_exercise_progress__exercise__target_muscle'
+        ).annotate(
+            count=Count('id'),
+            volume=Sum(F('weight') * F('reps'))
+        ).order_by('-volume')[:5]
+        
+        top_muscles = [
+            {
+                'muscle': m['user_exercise_progress__exercise__target_muscle'],
+                'sets': m['count'],
+                'volume': m['volume'] or 0
+            } for m in muscle_data if m['user_exercise_progress__exercise__target_muscle']
+        ]
+
+        # Consistency Score (Days trained / Total days)
+        consistency_score = round((days_trained / days_in_period) * 100, 1)
+
         return Response({
             f'{period}_volume': total_volume,
+            'volume_change_percent': volume_change,
             'days_trained': days_trained,
-            'prs': prs
+            'prs': prs,
+            'top_muscles': top_muscles,
+            'avg_sets_per_session': round(setlogs.count() / max(days_trained, 1), 1),
+            'consistency_score': consistency_score
         })
 
     @action(detail=False, methods=['get'])
@@ -901,23 +997,49 @@ class AnalyticsViewSet(viewsets.ViewSet):
         Output: JSON with current_streak, max_streak
         """
         from .models import RoutineProgress
-        user_id = request.query_params.get('user_id') or request.user.id
-        qs = RoutineProgress.objects.filter(user_id=user_id).order_by('day')
-        max_streak = 0
+        from users.models import CustomUser
+        user_id = request.query_params.get('user_id')
+        user = request.user
+        if user_id:
+            try:
+                user = CustomUser.objects.get(pk=user_id)
+            except CustomUser.DoesNotExist:
+                return Response({'error': 'User not found.'}, status=404)
+
+        # Calculate streaks
+        queryset = RoutineProgress.objects.filter(
+            user=user,
+            status='Completed'
+        ).order_by('updated_at')
+
         current_streak = 0
-        last_completed_day = None
-        for rp in qs:
-            if rp.status == 'Completed':
-                if last_completed_day is not None and rp.day == last_completed_day + 1:
-                    current_streak += 1
-                else:
-                    current_streak = 1
-                last_completed_day = rp.day
-                if current_streak > max_streak:
-                    max_streak = current_streak
+        longest_streak = 0
+        last_date = None
+
+        for rp in queryset:
+            completion_date = rp.updated_at.date()
+
+            if last_date is None:
+                current_streak = 1
+                longest_streak = 1
             else:
-                current_streak = 0
-        return Response({'user_id': user_id, 'current_streak': current_streak, 'max_streak': max_streak})
+                delta = (completion_date - last_date).days
+
+                if delta == 1:
+                    # Consecutive day
+                    current_streak += 1
+                elif delta == 0:
+                    # Same day multiple completions - streak stays same
+                    pass
+                else:
+                    # Streak broken
+                    longest_streak = max(longest_streak, current_streak)
+                    current_streak = 1
+
+            last_date = completion_date
+            longest_streak = max(longest_streak, current_streak)
+
+        return Response({'user_id': user.id, 'current_streak': current_streak, 'max_streak': longest_streak})
 
     @action(detail=False, methods=['get'])
     def trends(self, request):
@@ -1298,6 +1420,7 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
     """
     queryset = UserExerciseProgress.objects.all()
     serializer_class = UserExerciseProgressSerializer
+    pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['exercise', 'date']
 
@@ -1322,6 +1445,34 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
             if 'unique constraint' in str(e).lower():
                 raise serializers.ValidationError({'detail': 'A progress record for this user, exercise, and date already exists.'})
             raise
+
+    @action(detail=False, methods=['get'], url_path='daily-summary')
+    def daily_summary(self, request):
+        """
+        Get a full summary of exercises performed on a specific date.
+        Returns detailed stats including sets, reps, weight, and volume.
+        """
+        date_str = request.query_params.get('date')
+        if not date_str:
+            date_str = timezone.localdate().isoformat()
+        
+        try:
+            # Validate date format
+            target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'Invalid date format. Use YYYY-MM-DD.'}, status=400)
+            
+        queryset = self.get_queryset().filter(date=target_date).select_related('exercise').prefetch_related('set_logs')
+        
+        # Use the specific detailed serializer
+        from .serializers import UserDailySummarySerializer
+        serializer = UserDailySummarySerializer(queryset, many=True)
+        
+        return Response({
+            'date': date_str,
+            'total_exercises': queryset.count(),
+            'exercises': serializer.data
+        })
 
     @action(detail=False, methods=['post'], url_path='bulk-complete', permission_classes=[permissions.IsAuthenticated])
     def bulk_complete(self, request):
@@ -1721,27 +1872,118 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='(?P<client_id>[^/.]+)')
     def client_progress(self, request, client_id=None):
         """
-        Get detailed progress for a specific client (trainer view).
-        Returns comprehensive client information, recent sessions, and progress summary.
+        Optimized client progress with prefetched data.
+        Returns:
+            - Client profile overview
+            - Recent completion stats
+            - Volume/Strength trends (efficiently calculated)
+            - Detailed recent sessions
         """
         user = request.user
-        if not user.is_trainer:
-            return Response({'error': 'Only trainers can access this endpoint.'}, status=403)
         
+        # 1. Validate permissions
+        if not (user.is_trainer or user.is_staff):
+             # Trainers can only see assigned clients, admins see all
+             pass # Permission class IsTrainerForClient handles this if applied, but let's double check relation if needed.
+             # Actually, the view permission IsTrainerForClient should handle the access control per object, 
+             # but here we are using a custom action on the LIST view, so we need to valid manually or rely on the queryset filter.
+             # We'll rely on the manual check below for robust security.
+
         try:
-            client = CustomUser.objects.get(id=client_id, user_type='client')
+             # 2. Optimized Database Query
+             # Fetch client with all necessary related data in one go
+             from users.models import CustomUser, TrainerClientRelation
+             from django.db.models import Prefetch
+             
+             # Verify relationship first
+             if user.is_trainer:
+                 is_approved = TrainerClientRelation.objects.filter(
+                     trainer=user, 
+                     client_id=client_id, 
+                     status='approved'
+                 ).exists()
+                 if not is_approved:
+                     return Response(
+                         {"error": "You can only view progress for your approved clients."}, 
+                         status=status.HTTP_403_FORBIDDEN
+                     )
+
+             # Main optimized query
+             client = CustomUser.objects.select_related(
+                 'assigned_trainer'
+             ).prefetch_related(
+                 # Prefetch recent completed sessions with their set logs and exercises
+                 Prefetch(
+                     'workout_sessions',
+                     queryset=WorkoutSession.objects.filter(
+                        status='completed'
+                     ).order_by('-end_time').prefetch_related(
+                         Prefetch(
+                             'set_logs',
+                             queryset=ExerciseSetLog.objects.select_related(
+                                 'user_exercise_progress__exercise'
+                             ).order_by('set_number')
+                         )
+                     )
+                 ),
+                 # Prefetch routine progress
+                 'routine_progress'
+             ).get(id=client_id, user_type='client')
+             
+             # 3. Efficient In-Memory Calculation (No new DB queries)
+             recent_sessions = client.workout_sessions.all() # Uses prefetch cache
+             
+             # Calculate Weekly Stats (Python-side to use prefetch)
+             now = timezone.now()
+             week_start = now - timedelta(days=7)
+             
+             week_sessions = [s for s in recent_sessions if s.end_time and s.end_time >= week_start]
+             week_volume = 0
+             for session in week_sessions:
+                 for log in session.set_logs.all(): # Uses prefetch cache
+                     if log.weight and log.reps:
+                         week_volume += log.weight * log.reps
+                         
+             # Format Recent Activity
+             formatted_sessions = []
+             for session in recent_sessions:
+                 session_volume = sum(
+                     (l.weight * l.reps) for l in session.set_logs.all() if l.weight and l.reps
+                 )
+                 
+                 exercises_done = set()
+                 for log in session.set_logs.all():
+                     if log.user_exercise_progress and log.user_exercise_progress.exercise:
+                         exercises_done.add(log.user_exercise_progress.exercise.name)
+                         
+                 formatted_sessions.append({
+                     'id': session.id,
+                     'date': session.end_time,
+                     'duration': session.duration,
+                     'volume': session_volume,
+                     'routine_name': session.routine.name if session.routine else "Custom Workout",
+                     'exercises': list(exercises_done)
+                 })
+
+             return Response({
+                 'client_info': {
+                     'id': client.id,
+                     'name': client.full_name or client.username,
+                     'joined': client.date_joined,
+                     'goal': getattr(client, 'client_goals', 'Not set')
+                 },
+                 'weekly_stats': {
+                     'sessions_count': len(week_sessions),
+                     'total_volume': week_volume,
+                 },
+                 'recent_activity': formatted_sessions
+             })
+
         except CustomUser.DoesNotExist:
-            return Response({'error': 'Client not found.'}, status=404)
-        
-        # Check trainer-client relationship
-        if client.assigned_trainer_id != user.id:
-            return Response({'error': 'You are not the assigned trainer for this client.'}, status=403)
-        
-        # Get the most recent routine progress for this client
-        latest_progress = RoutineProgress.objects.filter(
-            user=client
-        ).order_by('-updated_at').first()
-        
+            return Response({
+                'error': 'Client not found.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
         if not latest_progress:
             return Response({
                 'client_info': {

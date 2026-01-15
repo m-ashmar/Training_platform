@@ -40,6 +40,7 @@ urlpatterns = [
     
     # New Feature APIs
     path('', include('analytics.urls')),  # Analytics API
+    path('api/', include('achievements.urls')),  # Achievements API
     path('', include('social.urls')),     # Social Features API
     path('api/wallet/', include('wallet.urls', namespace='wallet')),
     

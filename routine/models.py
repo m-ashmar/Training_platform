@@ -440,7 +440,7 @@ class UserExerciseProgress(models.Model):
     exercise = models.ForeignKey(Exercise, on_delete=models.CASCADE, related_name='progress')
     
     # Progress data
-    date = models.DateField(default=now, help_text="Date the progress is recorded")
+    date = models.DateField(default=timezone.localdate, help_text="Date the progress is recorded")
     completed_sets = models.PositiveIntegerField(default=0, help_text="Number of sets completed")
     target_sets = models.PositiveIntegerField(default=0, help_text="Total sets required for the exercise")
     skipped = models.BooleanField(default=False, help_text="Whether the exercise was skipped")
@@ -578,6 +578,13 @@ class WorkoutSession(models.Model):
     def __str__(self):
         return f"Session for {self.user.username} ({self.routine.name}) at {self.start_time}"
 
+    @property
+    def duration(self):
+        """Calculate duration of the session."""
+        if self.start_time and self.end_time:
+            return self.end_time - self.start_time
+        return None
+
 
 class ExerciseSetLog(models.Model):
     """
@@ -616,11 +623,16 @@ class ExerciseSetLog(models.Model):
     # Notes
     notes = models.TextField(blank=True, help_text="Notes about this specific set")
     
-    date = models.DateField(auto_now_add=True, null=True, blank=True, help_text="Date of the set")  # TODO: Backfill and make non-nullable if desired
+    date = models.DateField(default=timezone.localdate, null=True, blank=True, help_text="Date of the set")  # TODO: Backfill and make non-nullable if desired
 
     class Meta:
         verbose_name = "Exercise Set Log"
         verbose_name_plural = "Exercise Set Logs"
+        indexes = [
+            models.Index(fields=['workout_session']),
+            models.Index(fields=['date']),
+            models.Index(fields=['user_exercise_progress']),
+        ]
         ordering = ['set_number']
 
     def __str__(self):
@@ -742,44 +754,92 @@ class RoutineTemplateExercise(models.Model):
 def update_routine_progress_on_exercise_progress(sender, instance, created, **kwargs):
     """
     When a UserExerciseProgress is created or updated, update the corresponding RoutineProgress.
+    Correctly handles completion logic even when target_sets is 0.
     """
     from .models import Routine, RoutineProgress, RoutineExercise
     user = instance.user
     exercise = instance.exercise
-    date = instance.date
-    # Find all routines assigned to this user that include this exercise
-    routines = Routine.objects.filter(assigned_to=user, exercises=exercise)
+    progress_date = instance.date
+    
+    # Find all active routines assigned to this user that include this exercise
+    routines = Routine.objects.filter(
+        assigned_to=user, 
+        exercises=exercise,
+        is_active=True
+    ).distinct()
+    
     for routine in routines:
-        # Determine the day for this exercise in the routine
-        routine_ex = RoutineExercise.objects.filter(routine=routine, exercise=exercise).first()
-        if not routine_ex:
-            continue
-        day = routine_ex.day
-        # Count completed exercises for this day
-        day_exercises = RoutineExercise.objects.filter(routine=routine, day=day)
-        completed = 0
-        for rex in day_exercises:
-            prog = UserExerciseProgress.objects.filter(user=user, exercise=rex.exercise, date=date, skipped=False).first()
-            if prog and prog.completed_sets >= prog.target_sets and not prog.skipped:
-                completed += 1
-        total = day_exercises.count()
-        status = 'Completed' if completed == total and total > 0 else ('In Progress' if completed > 0 else 'Not Started')
-        RoutineProgress.objects.update_or_create(
-            user=user, routine=routine, day=day,
-            defaults={
-                'status': status,
-                'exercises_completed': completed,
-                'total_exercises': total
-            }
-        )
+        # Find which days this exercise appears in this routine
+        routine_exercises = RoutineExercise.objects.filter(routine=routine, exercise=exercise)
+        
+        for routine_ex in routine_exercises:
+            day = routine_ex.day
+            
+            # Get all exercises scheduled for this specific day in the routine
+            day_exercise_items = RoutineExercise.objects.filter(routine=routine, day=day)
+            total_exercises_count = day_exercise_items.count()
+            
+            if total_exercises_count == 0:
+                continue
+
+            completed_count = 0
+            
+            # Check completion status for each exercise in this day
+            for day_ex in day_exercise_items:
+                # Find the user's progress for this exercise on this date
+                prog = UserExerciseProgress.objects.filter(
+                    user=user, 
+                    exercise=day_ex.exercise, 
+                    date=progress_date, 
+                    skipped=False
+                ).order_by('-updated_at').first()
+                
+                if prog:
+                    if prog.target_sets > 0:
+                        if prog.completed_sets >= prog.target_sets:
+                            completed_count += 1
+                    else:
+                        if prog.completed_sets > 0:
+                            completed_count += 1
+            
+            # Determine status based on counts
+            if completed_count == 0:
+                status = 'Not Started'
+            elif completed_count == total_exercises_count:
+                status = 'Completed'
+            else:
+                status = 'In Progress'
+            
+            # Update or create the RoutineProgress record
+            RoutineProgress.objects.update_or_create(
+                user=user, 
+                routine=routine, 
+                day=day,
+                defaults={
+                    'status': status,
+                    'exercises_completed': completed_count,
+                    'total_exercises': total_exercises_count,
+                    'updated_at': timezone.now()
+                }
+            )
 
 @receiver(post_save, sender=ExerciseSetLog)
 def update_routine_progress_on_set_log(sender, instance, created, **kwargs):
     """
-    When an ExerciseSetLog is created or updated, update the corresponding RoutineProgress.
+    When an ExerciseSetLog is created or updated, trigger the RoutineProgress update.
+    This ensures that adding sets (which updates completed_sets in UserExerciseProgress)
+    propagates to the overall routine status.
     """
     progress = instance.user_exercise_progress
     if not progress:
         return
-    # Trigger the same logic as above
-    update_routine_progress_on_exercise_progress(UserExerciseProgress, progress, False)
+        
+    # Recalculate completed_sets for the parent UserExerciseProgress
+    completed_sets_count = progress.set_logs.count()
+    
+    # Only update if the count has changed
+    if progress.completed_sets != completed_sets_count:
+        progress.completed_sets = completed_sets_count
+        progress.save()
+        
+    # Removed redundant explicit call: progress.save() already triggers the signal above.

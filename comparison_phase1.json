@@ -1,0 +1,62 @@
+{
+  "baseline": [
+    {
+      "calories": 1376.5,
+      "protein": 144.9,
+      "carbs": 239.7,
+      "fat": 8.7
+    },
+    {
+      "calories": 1470.7,
+      "protein": 132.2,
+      "carbs": 228.7,
+      "fat": 6.3
+    },
+    {
+      "calories": 1649.2,
+      "protein": 180.9,
+      "carbs": 239.0,
+      "fat": 20.5
+    }
+  ],
+  "phase1": [
+    {
+      "calories": 1101.4,
+      "protein": 136.7,
+      "carbs": 174.1,
+      "fat": 5.2
+    },
+    {
+      "calories": 1319.7,
+      "protein": 128.1,
+      "carbs": 191.4,
+      "fat": 6.1
+    },
+    {
+      "calories": 1527.5,
+      "protein": 175.6,
+      "carbs": 211.9,
+      "fat": 17.3
+    }
+  ],
+  "diff": [
+    {
+      "calories": -275.1,
+      "protein": -8.2,
+      "carbs": -65.6,
+      "fat": -3.5
+    },
+    {
+      "calories": -151.0,
+      "protein": -4.1,
+      "carbs": -37.3,
+      "fat": -0.2
+    },
+    {
+      "calories": -121.7,
+      "protein": -5.3,
+      "carbs": -27.1,
+      "fat": -3.2
+    }
+  ]
+}
