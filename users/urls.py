@@ -3,7 +3,7 @@ from .views import (
     CustomLoginView, CustomRegisterView, UpdateUserDetailsView, 
     UserDetailsView, JWTAuthLogoutView, TrainerProfileView, TrainerClientsView,
     AssignClientView, UnassignClientView, ClientProfileView, AvailableTrainersView,
-    ClientProfileViewSet, DeviceTokenRegisterView, CustomTokenObtainPairView,
+    PublicTrainersListView, PublicTrainerClientStatsView, ClientProfileViewSet, DeviceTokenRegisterView, CustomTokenObtainPairView,
     ClientRequestTrainerView, TrainerPendingRequestsView, TrainerRespondToRequestView,
     ClientRequestStatusView, ProfilePictureUploadView
 )
@@ -37,6 +37,10 @@ urlpatterns = [
     # Client-specific endpoints
     path('client/profile/', ClientProfileView.as_view(), name='client_profile'),
     path('client/available-trainers/', AvailableTrainersView.as_view(), name='available_trainers'),
+    
+    # Public endpoints (no authentication required)
+    path('trainers/public/', PublicTrainersListView.as_view(), name='public_trainers_list'),
+    path('trainers/stats/', PublicTrainerClientStatsView.as_view(), name='public_trainer_client_stats'),
     
     # Client-Trainer Request System endpoints
     path('client/request-trainer/', ClientRequestTrainerView.as_view(), name='client_request_trainer'),

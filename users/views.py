@@ -382,6 +382,65 @@ class ClientProfileView(APIView):
             return Response({'message': 'Client profile updated successfully!'}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+class PublicTrainersListView(APIView):
+    """Public view to get all available trainers without authentication"""
+    permission_classes = [AllowAny]
+    
+    def get(self, request):
+        """Get all available trainers (public endpoint)"""
+        # Get all available trainers
+        trainers = CustomUser.objects.filter(
+            user_type='trainer',
+            trainer_is_available=True,
+            is_active=True
+        )
+        
+        trainer_data = []
+        for trainer in trainers:
+            trainer_data.append({
+                'id': trainer.id,
+                'username': trainer.username,
+                'first_name': trainer.first_name,
+                'last_name': trainer.last_name,
+                'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                'trainer_bio': trainer.trainer_bio,
+                'trainer_specializations': trainer.trainer_specializations,
+                'trainer_certifications': trainer.trainer_certifications,
+                'trainer_experience_years': trainer.trainer_experience_years,
+                'trainer_hourly_rate': trainer.trainer_hourly_rate,
+                'trainer_is_verified': trainer.trainer_is_verified,
+                'client_count': trainer.get_client_count(),
+            })
+        
+        return Response({
+            'available_trainers': trainer_data,
+            'trainer_count': len(trainer_data)
+        }, status=status.HTTP_200_OK)
+
+class PublicTrainerClientStatsView(APIView):
+    """Public view to get statistics about clients with trainers and total trainers"""
+    permission_classes = [AllowAny]
+    
+    def get(self, request):
+        """Get statistics: number of clients with trainers and total number of trainers"""
+        # Count clients who have assigned trainers
+        clients_with_trainers_count = CustomUser.objects.filter(
+            user_type='client',
+            assigned_trainer__isnull=False,
+            is_active=True
+        ).count()
+        
+        # Count total active trainers
+        total_trainers_count = CustomUser.objects.filter(
+            user_type='trainer',
+            is_active=True
+        ).count()
+        
+        return Response({
+            'clients_with_trainers_count': clients_with_trainers_count,
+            'total_trainers_count': total_trainers_count
+        }, status=status.HTTP_200_OK)
+
 class AvailableTrainersView(APIView):
     """View for clients to see available trainers"""
     permission_classes = [IsAuthenticated]
