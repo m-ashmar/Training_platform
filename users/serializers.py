@@ -54,6 +54,8 @@ class CustomRegisterSerializer(RegisterSerializer):
             user = super().save(request)
             user.phone_number = self.validated_data.get('phone_number')
             user.user_type = self.validated_data.get('user_type', 'client')
+            # Set user as inactive until email is verified
+            user.is_active = False
             user.save()
             return user
         except IntegrityError as e:
@@ -82,6 +84,16 @@ class CustomLoginSerializer(LoginSerializer):
             if not self.user:
                 raise serializers.ValidationError(
                     {"non_field_errors": ["Unable to log in with provided credentials."]}
+                )
+            
+            # Check if user account is active (email verified)
+            if not self.user.is_active:
+                raise serializers.ValidationError(
+                    {
+                        "non_field_errors": ["Please verify your email address before logging in. Check your inbox for the OTP code."],
+                        "requires_verification": True,
+                        "email": self.user.email
+                    }
                 )
         else:
             raise serializers.ValidationError(

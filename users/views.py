@@ -125,9 +125,36 @@ class UserDetailsView(APIView):
 class CustomRegisterView(RegisterView):
     serializer_class = CustomRegisterSerializer
     permission_classes = [AllowAny]
+    
+    def perform_create(self, serializer):
+        """
+        Override perform_create to bypass allauth's complete_signup
+        which tries to redirect inactive users to account_inactive URL.
+        """
+        user = serializer.save(self.request)
+        # User is already set to is_active=False in the serializer
+        return user
+    
     def create(self, request, *args, **kwargs):
-        response = super().create(request, *args, **kwargs)
-        user = self.serializer_class.Meta.model.objects.get(email=request.data['email'])
+        """
+        Override create to handle registration without allauth's complete_signup flow.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Create user (will be inactive)
+        user = self.perform_create(serializer)
+        
+        # Generate and send OTP for email verification
+        from .utils import create_otp
+        try:
+            create_otp(user)
+            logger.info(f"OTP sent to {user.email} for user {user.id}")
+        except Exception as e:
+            logger.error(f"Failed to send OTP to {user.email}: {str(e)}")
+            # Continue even if OTP sending fails (user can request resend)
+        
+        # Return response without tokens (user needs to verify OTP first)
         user_info = {
             'id': user.id,
             'username': user.username,
@@ -137,8 +164,136 @@ class CustomRegisterView(RegisterView):
             'user_type': user.user_type,
             'profile_picture': user.profile_picture.url if user.profile_picture else None,
         }
-        response.data['user'] = user_info
-        return response
+        
+        headers = self.get_success_headers(serializer.data)
+        
+        return Response({
+            'user': user_info,
+            'message': 'Registration successful. Please check your email for OTP verification code.',
+            'requires_verification': True
+        }, status=status.HTTP_201_CREATED, headers=headers)
+
+class OTPVerificationView(APIView):
+    """
+    View to verify OTP code and activate user account.
+    After successful verification, returns JWT tokens.
+    """
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        """Verify OTP code and activate user"""
+        email = request.data.get('email')
+        otp_code = request.data.get('otp_code')
+        
+        if not email or not otp_code:
+            return Response(
+                {'error': 'Email and OTP code are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        from .utils import verify_otp
+        from rest_framework_simplejwt.tokens import RefreshToken
+        
+        success, otp_instance, error_message = verify_otp(email, otp_code)
+        
+        if not success:
+            return Response(
+                {'error': error_message},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Activate user
+        user = otp_instance.user
+        user.is_active = True
+        user.save()
+        
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(user)
+        
+        user_info = {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'user_type': user.user_type,
+            'profile_picture': user.profile_picture.url if user.profile_picture else None,
+        }
+        
+        logger.info(f"User {user.id} ({email}) verified and activated")
+        
+        return Response({
+            'message': 'Email verified successfully. Your account has been activated.',
+            'user': user_info,
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+        }, status=status.HTTP_200_OK)
+
+class ResendOTPView(APIView):
+    """
+    View to resend OTP code to user's email.
+    Rate limited to 3 requests per hour per email.
+    """
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        """Resend OTP code"""
+        email = request.data.get('email')
+        
+        if not email:
+            return Response(
+                {'error': 'Email is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        from .models import CustomUser
+        from .utils import create_otp
+        from django.core.cache import cache
+        from django.utils import timezone
+        
+        try:
+            user = CustomUser.objects.get(email=email)
+        except CustomUser.DoesNotExist:
+            return Response(
+                {'error': 'User with this email does not exist'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check if user is already verified
+        if user.is_active:
+            return Response(
+                {'error': 'This account is already verified'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Rate limiting: max 3 resends per hour per email
+        cache_key = f'otp_resend_{email}'
+        resend_count = cache.get(cache_key, 0)
+        
+        if resend_count >= 3:
+            return Response(
+                {'error': 'Too many OTP requests. Please wait 1 hour before requesting again.'},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+        
+        # Increment counter and set expiration (1 hour)
+        cache.set(cache_key, resend_count + 1, 3600)
+        
+        # Create and send new OTP
+        try:
+            create_otp(user)
+            logger.info(f"OTP resent to {email} for user {user.id}")
+            
+            return Response({
+                'message': 'OTP code has been resent to your email. Please check your inbox.',
+                'email': email,
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Failed to resend OTP to {email}: {str(e)}")
+            return Response(
+                {'error': 'Failed to send OTP. Please try again later.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 # ============================================================================
 # TRAINER-SPECIFIC VIEWS
@@ -607,6 +762,29 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Custom JWT token serializer that includes user information"""
     
     def validate(self, attrs):
+        # Authenticate user first
+        from django.contrib.auth import authenticate
+        from .models import CustomUser
+        
+        email = attrs.get('email') or attrs.get('username')  # Support both email and username
+        password = attrs.get('password')
+        
+        if email and password:
+            try:
+                user = CustomUser.objects.get(email=email)
+            except CustomUser.DoesNotExist:
+                user = None
+            
+            if user and not user.is_active:
+                from rest_framework import serializers
+                raise serializers.ValidationError(
+                    {
+                        "detail": "Please verify your email address before logging in. Check your inbox for the OTP code.",
+                        "requires_verification": True,
+                        "email": user.email
+                    }
+                )
+        
         # Call the parent validate method to get the standard token response
         data = super().validate(attrs)
         

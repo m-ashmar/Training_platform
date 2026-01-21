@@ -5,7 +5,7 @@ from .views import (
     AssignClientView, UnassignClientView, ClientProfileView, AvailableTrainersView,
     PublicTrainersListView, PublicTrainerClientStatsView, ClientProfileViewSet, DeviceTokenRegisterView, CustomTokenObtainPairView,
     ClientRequestTrainerView, TrainerPendingRequestsView, TrainerRespondToRequestView,
-    ClientRequestStatusView, ProfilePictureUploadView
+    ClientRequestStatusView, ProfilePictureUploadView, OTPVerificationView, ResendOTPView
 )
 from django.contrib.auth import views as auth_views
 from rest_framework_simplejwt.views import TokenRefreshView
@@ -22,6 +22,8 @@ urlpatterns = [
     # Custom authentication endpoints
     path('login/', CustomLoginView.as_view(), name='custom_login'),
     path('register/', CustomRegisterView.as_view(), name='custom_register'),
+    path('verify-otp/', OTPVerificationView.as_view(), name='verify_otp'),
+    path('resend-otp/', ResendOTPView.as_view(), name='resend_otp'),
     
     # User management endpoints
     path('user/update/', UpdateUserDetailsView.as_view(), name='update_user_details'),
