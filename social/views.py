@@ -215,7 +215,16 @@ class PostViewSet(viewsets.ModelViewSet):
                 # If author_id is not a valid integer, return empty queryset
                 queryset = Post.objects.none()
         
-        return queryset
+        # Optimize: Prefetch related data to avoid N+1
+        from django.db.models import Exists, OuterRef
+        
+        # Annotate whether user liked the post
+        if user.is_authenticated:
+            queryset = queryset.annotate(
+                is_liked_anno=Exists(PostLike.objects.filter(post=OuterRef('pk'), user=user))
+            )
+
+        return queryset.select_related('author')
     
     def perform_create(self, serializer):
         serializer.save(author=self.request.user)

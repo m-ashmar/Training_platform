@@ -251,6 +251,24 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         return self.user_type == 'agent'
 
     @property
+    def is_onboarding_completed(self):
+        """
+        Check if user has completed onboarding (filled basic profile).
+        
+        Criteria:
+        - All users: First Name, Last Name
+        - Clients: Height, Weight, Age, Gender
+        """
+        basic_info = bool(self.first_name and self.last_name)
+        if not basic_info:
+            return False
+            
+        if self.is_client:
+            return all([self.height, self.weight, self.age, self.gender])
+            
+        return True
+
+    @property
     def full_name(self):
         """Get user's full name."""
         if self.first_name and self.last_name:

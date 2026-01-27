@@ -218,6 +218,8 @@ class OTPVerificationView(APIView):
             'last_name': user.last_name,
             'user_type': user.user_type,
             'profile_picture': user.profile_picture.url if user.profile_picture else None,
+            'is_active': user.is_active,
+            'onboarding_completed': user.is_onboarding_completed,
         }
         
         logger.info(f"User {user.id} ({email}) verified and activated")
@@ -543,11 +545,14 @@ class PublicTrainersListView(APIView):
     
     def get(self, request):
         """Get all available trainers (public endpoint)"""
-        # Get all available trainers
+        # Get all available trainers with client count annotated
+        from django.db.models import Count
         trainers = CustomUser.objects.filter(
             user_type='trainer',
             trainer_is_available=True,
             is_active=True
+        ).annotate(
+            client_count_anno=Count('clients')
         )
         
         trainer_data = []
@@ -564,7 +569,7 @@ class PublicTrainersListView(APIView):
                 'trainer_experience_years': trainer.trainer_experience_years,
                 'trainer_hourly_rate': trainer.trainer_hourly_rate,
                 'trainer_is_verified': trainer.trainer_is_verified,
-                'client_count': trainer.get_client_count(),
+                'client_count': trainer.client_count_anno,
             })
         
         return Response({
@@ -608,11 +613,16 @@ class AvailableTrainersView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # Get all available trainers
+        # Get all available trainers with client count annotated
+        # Use Count('clients') to get the number of reverse relationships
+        from django.db.models import Count
+        
         trainers = CustomUser.objects.filter(
             user_type='trainer',
             trainer_is_available=True,
             is_active=True
+        ).annotate(
+            client_count_anno=Count('clients')
         )
         
         trainer_data = []
@@ -620,7 +630,7 @@ class AvailableTrainersView(APIView):
             trainer_data.append({
                 'id': trainer.id,
                 'username': trainer.username,
-                'email': trainer.email,  # Added email field for debugging
+                'email': trainer.email,
                 'first_name': trainer.first_name,
                 'last_name': trainer.last_name,
                 'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
@@ -630,7 +640,7 @@ class AvailableTrainersView(APIView):
                 'trainer_experience_years': trainer.trainer_experience_years,
                 'trainer_hourly_rate': trainer.trainer_hourly_rate,
                 'trainer_is_verified': trainer.trainer_is_verified,
-                'client_count': trainer.get_client_count(),
+                'client_count': trainer.client_count_anno, # Use annotated value
             })
         
         return Response({
@@ -797,6 +807,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'first_name': user.first_name,
             'last_name': user.last_name,
             'user_type': user.user_type,
+            'is_active': user.is_active,
+            'onboarding_completed': user.is_onboarding_completed,
         }
         
         # Add user info to the response
