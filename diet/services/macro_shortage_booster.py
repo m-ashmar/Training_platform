@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict
 
 from ..models import DietPlan, MealComponent, FoodItem
-from ..utils.nutrition import get_macro_ratios
+from ..utils.nutrition import get_macro_ratios, dominant_macro_of_food, macro_per_gram
 
 
 class MacroShortageBooster:
@@ -14,7 +14,7 @@ class MacroShortageBooster:
     """
 
     def boost(self, diet_plan: DietPlan, max_passes: int = 6) -> None:
-        ratios = self._macro_ratios_for_goal(diet_plan.goal or 'Maintain')
+        ratios = get_macro_ratios(diet_plan.goal or 'Maintain')
         target_kcal = float(diet_plan.daily_calories or 0.0)
         if target_kcal <= 0:
             return
@@ -73,23 +73,18 @@ class MacroShortageBooster:
         # Skip fat-only items and prefer high-density staples by macro_per_gram
         items = []  # (comp, macro_per_g)
         for comp in components:
-            dom = self._dominant_macro_of_food(comp.food)
+            dom = dominant_macro_of_food(comp.food)
             if dom != macro:
                 continue
             # BUG FIX: Handle all three macros, not just protein and carbs
-            if macro == 'protein':
-                mg = float(getattr(comp.food, 'protein_per_gram', 0.0) or 0.0)
-            elif macro == 'carb':
-                mg = float(getattr(comp.food, 'carbs_per_gram', 0.0) or 0.0)
-            else:  # fat
-                mg = float(getattr(comp.food, 'fat_per_gram', 0.0) or 0.0)
+            mg = macro_per_gram(comp.food, macro)
             if mg > 0.0:
                 items.append((comp, mg))
         items.sort(key=lambda x: x[1], reverse=True)
         for comp, _ in items:
             comp.quantity = comp.quantity * (1.0 + amount_ratio)
             # Clamp per-item quantity to caps
-            dom = self._dominant_macro_of_food(comp.food)
+            dom = dominant_macro_of_food(comp.food)
             from ..utils.nutrition import portion_sanity_cap_grams
             cap = portion_sanity_cap_grams(dom)
             if dom == 'carb':
@@ -105,29 +100,5 @@ class MacroShortageBooster:
             if comp.quantity > cap:
                 comp.quantity = cap
             comp.save(update_fields=['quantity'])
-
-    def _macro_ratios_for_goal(self, goal: str) -> Dict[str, float]:
-        """Use centralized macro ratios from utils/nutrition.py"""
-        return get_macro_ratios(goal)
-
-    def _dominant_macro_of_food(self, food: FoodItem) -> str:
-        try:
-            if food.category:
-                if getattr(food.category, 'is_protein', False):
-                    return 'protein'
-                if getattr(food.category, 'is_carb', False):
-                    return 'carb'
-                if getattr(food.category, 'is_fat', False):
-                    return 'fat'
-        except Exception:
-            pass
-        p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0))
-        c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0))
-        f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0))
-        if p_cals >= c_cals and p_cals >= f_cals:
-            return 'protein'
-        if c_cals >= p_cals and c_cals >= f_cals:
-            return 'carb'
-        return 'fat'
 
 

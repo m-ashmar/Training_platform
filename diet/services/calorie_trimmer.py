@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict
 
 from ..models import DietPlan, MealComponent, FoodItem
+from ..utils.nutrition import dominant_macro_of_food
 
 
 class CalorieTrimmer:
@@ -55,32 +56,12 @@ class CalorieTrimmer:
     # ------------------------ helpers ------------------------
     def _scale_components(self, components, macro_filter: str | None, scale: float) -> None:
         for comp in components:
-            if macro_filter is not None and self._dominant_macro_of_food(comp.food) != macro_filter:
+            if macro_filter is not None and dominant_macro_of_food(comp.food) != macro_filter:
                 continue
             new_qty = comp.quantity * scale
             if new_qty <= 0:
                 continue
             comp.quantity = new_qty
             comp.save(update_fields=['quantity'])
-
-    def _dominant_macro_of_food(self, food: FoodItem) -> str:
-        try:
-            if food.category:
-                if getattr(food.category, 'is_protein', False):
-                    return 'protein'
-                if getattr(food.category, 'is_carb', False):
-                    return 'carb'
-                if getattr(food.category, 'is_fat', False):
-                    return 'fat'
-        except Exception:
-            pass
-        p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0))
-        c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0))
-        f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0))
-        if p_cals >= c_cals and p_cals >= f_cals:
-            return 'protein'
-        if c_cals >= p_cals and c_cals >= f_cals:
-            return 'carb'
-        return 'fat'
 
 

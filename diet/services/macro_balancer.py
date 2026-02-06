@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ..models import DietPlan, MealComponent, FoodItem
 from ..utils.logging_utils import log_day_macros
-from ..utils.nutrition import get_macro_ratios
+from ..utils.nutrition import get_macro_ratios, dominant_macro_of_food, macro_per_gram
 
 
 class MacroBalancer:
@@ -80,7 +80,7 @@ class MacroBalancer:
         contribs = []  # (comp, macro_per_g, contrib_macro_g)
         total_macro = 0.0
         for comp in components:
-            mg = self._macro_per_gram(comp.food, macro)
+            mg = macro_per_gram(comp.food, macro)
             if mg <= 0.0:
                 continue
             contrib_macro = float(comp.quantity) * mg
@@ -109,7 +109,7 @@ class MacroBalancer:
                 new_qty = orig_qty * scale_by
                 
                 # Apply per-item caps to prevent unrealistic quantities
-                dom = self._dominant_macro_of_food(comp.food)
+                dom = dominant_macro_of_food(comp.food)
                 from ..utils.nutrition import portion_sanity_cap_grams
                 cap = portion_sanity_cap_grams(dom)
                 if dom == 'carb':
@@ -145,7 +145,7 @@ class MacroBalancer:
                 
                 # Even when reducing, ensure we don't create unrealistic quantities
                 # (though reduction shouldn't cause cap issues, good to be consistent)
-                dom = self._dominant_macro_of_food(comp.food)
+                dom = dominant_macro_of_food(comp.food)
                 from ..utils.nutrition import portion_sanity_cap_grams
                 cap = portion_sanity_cap_grams(dom)
                 if dom == 'carb':
@@ -161,36 +161,5 @@ class MacroBalancer:
                 comp.quantity = min(new_qty, cap)
                 comp.save(update_fields=['quantity'])
                 remaining -= macro_reduce
-
-    def _dominant_macro_of_food(self, food: FoodItem) -> str:
-        try:
-            if food.category:
-                if getattr(food.category, 'is_protein', False):
-                    return 'protein'
-                if getattr(food.category, 'is_carb', False):
-                    return 'carb'
-                if getattr(food.category, 'is_fat', False):
-                    return 'fat'
-        except Exception:
-            pass
-        p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0))
-        c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0))
-        f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0))
-        if p_cals >= c_cals and p_cals >= f_cals:
-            return 'protein'
-        if c_cals >= p_cals and c_cals >= f_cals:
-            return 'carb'
-        return 'fat'
-
-    def _macro_ratios_for_goal(self, goal: str) -> dict[str, float]:
-        """Use centralized macro ratios from utils/nutrition.py"""
-        return get_macro_ratios(goal)
-
-    def _macro_per_gram(self, food: FoodItem, macro: str) -> float:
-        if macro == 'protein':
-            return float(getattr(food, 'protein_per_gram', 0.0) or 0.0)
-        if macro == 'carb':
-            return float(getattr(food, 'carbs_per_gram', 0.0) or 0.0)
-        return float(getattr(food, 'fat_per_gram', 0.0) or 0.0)
 
 

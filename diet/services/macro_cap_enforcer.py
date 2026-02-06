@@ -4,7 +4,7 @@ from typing import Dict
 
 from ..models import DietPlan, MealComponent, FoodItem
 from ..utils.logging_utils import log_day_macros
-from ..utils.nutrition import get_macro_ratios
+from ..utils.nutrition import get_macro_ratios, dominant_macro_of_food, macro_per_gram
 
 
 class MacroCapEnforcer:
@@ -16,7 +16,7 @@ class MacroCapEnforcer:
 
     def enforce(self, diet_plan: DietPlan) -> None:
         goal = (diet_plan.goal or 'Maintain')
-        ratios = self._macro_ratios_for_goal(goal)
+        ratios = get_macro_ratios(goal)
         target_kcal = float(diet_plan.daily_calories or 0.0)
         if target_kcal <= 0:
             return
@@ -65,7 +65,7 @@ class MacroCapEnforcer:
         contribs = []  # (comp, macro_per_g, macro_contrib_g)
         total_macro = 0.0
         for comp in components:
-            mg = self._macro_per_gram(comp.food, macro)
+            mg = macro_per_gram(comp.food, macro)
             if mg <= 0.0:
                 continue
             contrib = comp.quantity * mg
@@ -92,9 +92,9 @@ class MacroCapEnforcer:
         items = []  # (comp, macro_per_g)
         for comp in components:
             # skip fat-only items when boosting anything
-            if self._dominant_macro_of_food(comp.food) == 'fat':
+            if dominant_macro_of_food(comp.food) == 'fat':
                 continue
-            mg = self._macro_per_gram(comp.food, macro)
+            mg = macro_per_gram(comp.food, macro)
             if mg > 0.0:
                 items.append((comp, mg))
         items.sort(key=lambda x: x[1], reverse=True)
@@ -103,7 +103,7 @@ class MacroCapEnforcer:
         for comp, _ in items:
             comp.quantity = comp.quantity * (1.0 + amount_ratio)
             # Clamp per-item quantity to caps
-            dom = self._dominant_macro_of_food(comp.food)
+            dom = dominant_macro_of_food(comp.food)
             from ..utils.nutrition import portion_sanity_cap_grams
             cap = portion_sanity_cap_grams(dom)
             if dom == 'carb':
@@ -118,36 +118,5 @@ class MacroCapEnforcer:
             if comp.quantity > cap:
                 comp.quantity = cap
             comp.save(update_fields=['quantity'])
-
-    def _macro_ratios_for_goal(self, goal: str) -> Dict[str, float]:
-        """Use centralized macro ratios from utils/nutrition.py"""
-        return get_macro_ratios(goal)
-
-    def _macro_per_gram(self, food: FoodItem, macro: str) -> float:
-        if macro == 'protein':
-            return float(getattr(food, 'protein_per_gram', 0.0) or 0.0)
-        if macro == 'carb':
-            return float(getattr(food, 'carbs_per_gram', 0.0) or 0.0)
-        return float(getattr(food, 'fat_per_gram', 0.0) or 0.0)
-
-    def _dominant_macro_of_food(self, food: FoodItem) -> str:
-        try:
-            if food.category:
-                if getattr(food.category, 'is_protein', False):
-                    return 'protein'
-                if getattr(food.category, 'is_carb', False):
-                    return 'carb'
-                if getattr(food.category, 'is_fat', False):
-                    return 'fat'
-        except Exception:
-            pass
-        p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0))
-        c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0))
-        f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0))
-        if p_cals >= c_cals and p_cals >= f_cals:
-            return 'protein'
-        if c_cals >= p_cals and c_cals >= f_cals:
-            return 'carb'
-        return 'fat'
 
 

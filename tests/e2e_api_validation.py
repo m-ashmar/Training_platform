@@ -41,14 +41,25 @@ def test_api_performance():
     # BUT, let's try to complete it if we can find the OTP in DB via a management command or similar?
     # Actually, for "Real World", let's use the API as a client would.
     
-    # For the sake of this test, we might need a 'verified' user. 
-    # Let's create one directly in DB using run_command to ensure we have a clean test subject.
-    log("Preparing verified test user via management script...")
+    # 4. Prepare verified test user and subscription via management script
+    log("Preparing verified test user and subscription via management script...")
     import os
-    cmd = f"python manage.py shell -c \"from users.models import CustomUser; u=CustomUser.objects.get(email='{email}'); u.is_active=True; u.save()\""
+    cmd = (
+        f"python manage.py shell -c \""
+        f"from users.models import CustomUser; "
+        f"from subscription.models import SubscriptionPlan, Subscription; "
+        f"from django.utils import timezone; "
+        f"from datetime import timedelta; "
+        f"u = CustomUser.objects.get(email='{email}'); "
+        f"u.is_active = True; "
+        f"u.save(); "
+        f"plan, _ = SubscriptionPlan.objects.get_or_create(name='E2E Plan', defaults={{'price': 0, 'has_diet_access': True, 'plan_type': 'basic', 'description': 'E2E Test Plan'}}); "
+        f"Subscription.objects.update_or_create(user=u, defaults={{'plan': plan, 'status': 'active', 'end_date': timezone.now() + timedelta(days=30), 'has_diet_access': True}});"
+        "\""
+    )
     os.system(cmd)
 
-    # 4. Login and Verify Auth Response Fields
+    # 5. Login and Verify Auth Response Fields
     log("Testing Token Login response fields...")
     login_url = f"{BASE_URL}/api/auth/token/"
     login_data = {"email": email, "password": password}

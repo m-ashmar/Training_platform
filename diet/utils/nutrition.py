@@ -261,3 +261,92 @@ def get_macro_priority_order(goal: str) -> list:
     return ['protein', 'carb', 'fat']
 
 
+# =============================
+# Shared Macro Utility Functions
+# =============================
+
+def dominant_macro_of_food(food: Optional[object]) -> str:
+    """
+    CENTRALIZED function to determine the dominant macro of a food item.
+    
+    All service files should import and use this instead of duplicating the logic.
+    
+    Args:
+        food: A FoodItem model instance (or any object with category and per_gram attrs).
+              Can be None for safety.
+    
+    Returns:
+        'protein', 'carb', or 'fat' based on:
+        1. Category flags (is_protein, is_carb, is_fat) - preferred
+        2. Caloric contribution from per-gram values - fallback
+        3. Defaults to 'carb' if no data available
+    """
+    if food is None:
+        return 'carb'  # Safe default
+    
+    try:
+        # Prefer category flags if available
+        category = getattr(food, 'category', None)
+        if category is not None:
+            if getattr(category, 'is_protein', False):
+                return 'protein'
+            if getattr(category, 'is_carb', False):
+                return 'carb'
+            if getattr(category, 'is_fat', False):
+                return 'fat'
+    except Exception:
+        pass
+    
+    # Fallback to caloric contribution from per-gram values
+    try:
+        p_pg = float(getattr(food, 'protein_per_gram', 0.0) or 0.0)
+        c_pg = float(getattr(food, 'carbs_per_gram', 0.0) or 0.0)
+        f_pg = float(getattr(food, 'fat_per_gram', 0.0) or 0.0)
+        
+        # Calculate caloric contribution per gram
+        p_cals = 4.0 * p_pg
+        c_cals = 4.0 * c_pg
+        f_cals = 9.0 * f_pg
+        
+        # Return macro with highest caloric contribution
+        if p_cals >= c_cals and p_cals >= f_cals:
+            return 'protein'
+        if c_cals >= p_cals and c_cals >= f_cals:
+            return 'carb'
+        return 'fat'
+    except Exception:
+        return 'carb'  # Safe default
+
+
+def macro_per_gram(food: Optional[object], macro: str) -> float:
+    """
+    CENTRALIZED function to get the per-gram density of a specific macro.
+    
+    All service files should import and use this instead of duplicating the logic.
+    
+    Args:
+        food: A FoodItem model instance (or any object with per_gram attrs).
+              Can be None for safety.
+        macro: One of 'protein', 'carb', or 'fat'
+    
+    Returns:
+        The per-gram value for the specified macro, or 0.0 if unavailable.
+    """
+    if food is None:
+        return 0.0
+    
+    try:
+        if macro == 'protein':
+            return float(getattr(food, 'protein_per_gram', 0.0) or 0.0)
+        if macro == 'carb':
+            return float(getattr(food, 'carbs_per_gram', 0.0) or 0.0)
+        if macro == 'fat':
+            return float(getattr(food, 'fat_per_gram', 0.0) or 0.0)
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+# Alias for backward compatibility with some service files
+macro_ratios_for_goal = get_macro_ratios
+

@@ -4,7 +4,7 @@ from typing import Dict, List
 
 from ..models import DietPlan, Meal, MealComponent, FoodItem
 from ..utils.logging_utils import get_logger
-from ..utils.nutrition import get_macro_ratios
+from ..utils.nutrition import get_macro_ratios, dominant_macro_of_food
 
 
 class PerMealFatCapper:
@@ -29,7 +29,7 @@ class PerMealFatCapper:
             return
 
         goal = (diet_plan.goal or "Maintain").lower()
-        ratios = self._macro_ratios_for_goal(goal)
+        ratios = get_macro_ratios(goal)
         fat_target_g = daily_kcal * ratios["fat"] / 9.0
 
         dates = sorted({m.date for m in diet_plan.meals.all()})
@@ -69,7 +69,7 @@ class PerMealFatCapper:
                     changed = False
                     for comp in meal.components.all():
                         fat_pg = float(getattr(comp.food, "fat_per_gram", 0.0) or 0.0)
-                        if fat_pg <= 0.0 and self._dominant_macro_of_food(comp.food) != 'fat':
+                        if fat_pg <= 0.0 and dominant_macro_of_food(comp.food) != 'fat':
                             continue
                         new_qty = float(comp.quantity or 0.0) * scale
                         comp.quantity = new_qty
@@ -94,10 +94,6 @@ class PerMealFatCapper:
                             pass
 
     # ------------------------ helpers ------------------------
-    def _macro_ratios_for_goal(self, goal: str) -> Dict[str, float]:
-        """Use centralized macro ratios from utils/nutrition.py"""
-        return get_macro_ratios(goal)
-
     def _choose_distribution_for_goal(self, goal: str, meal_types: List[str]) -> Dict[str, float]:
         # Normalize common meals
         normalized: List[str] = []
@@ -118,26 +114,6 @@ class PerMealFatCapper:
         n = max(1, len(meal_types))
         equal = 1.0 / n
         return {m: equal for m in meal_types}
-
-    def _dominant_macro_of_food(self, food: FoodItem) -> str:
-        try:
-            if food.category:
-                if getattr(food.category, 'is_protein', False):
-                    return 'protein'
-                if getattr(food.category, 'is_carb', False):
-                    return 'carb'
-                if getattr(food.category, 'is_fat', False):
-                    return 'fat'
-        except Exception:
-            pass
-        p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0) or 0.0)
-        c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0) or 0.0)
-        f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0) or 0.0)
-        if p_cals >= c_cals and p_cals >= f_cals:
-            return 'protein'
-        if c_cals >= p_cals and c_cals >= f_cals:
-            return 'carb'
-        return 'fat'
 
     def _is_oil(self, food: FoodItem) -> bool:
         try:
