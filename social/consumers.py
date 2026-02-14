@@ -1,7 +1,10 @@
+import logging
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 from urllib.parse import parse_qs
 from channels.db import database_sync_to_async
+
+logger = logging.getLogger(__name__)
 
 
 class SocialConsumer(AsyncWebsocketConsumer):
@@ -10,6 +13,9 @@ class SocialConsumer(AsyncWebsocketConsumer):
         if self.user is None or not self.user.is_authenticated:
             await self.close()
             return
+            
+        logger.warning(f"User {self.user.id} connected to legacy WebSocket. This endpoint is deprecated.")
+            
         self.user_group_name = f"user_{self.user.id}"
         await self.channel_layer.group_add(
             self.user_group_name, self.channel_name
@@ -19,7 +25,7 @@ class SocialConsumer(AsyncWebsocketConsumer):
         await self.send(
             text_data=json.dumps({
                 "type": "connection",
-                "message": "WebSocket connected."
+                "message": "WebSocket connected. DEPRECATED: Please migrate to Firebase Cloud Messaging."
             })
         )
 

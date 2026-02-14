@@ -129,6 +129,17 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
         
         return attrs
 
+    def create(self, validated_data):
+        """Override create to sync the M2M exercises field on the routine."""
+        routine_exercise = super().create(validated_data)
+        
+        # Ensure the exercise is added to the routine's ManyToMany field
+        routine = routine_exercise.routine
+        exercise = routine_exercise.exercise
+        routine.exercises.add(exercise)
+        
+        return routine_exercise
+
 
 class RoutineSerializer(serializers.ModelSerializer):
     """
@@ -296,6 +307,18 @@ class UserExerciseProgressSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserExerciseProgress
         fields = ['id', 'user', 'exercise', 'date', 'completed_sets', 'target_sets', 'skipped']
+
+
+class UserExerciseProgressDetailSerializer(UserExerciseProgressSerializer):
+    """
+    Detailed serializer for UserExerciseProgress.
+    Includes full exercise details instead of just ID.
+    Used for read operations (GET).
+    """
+    exercise = ExerciseSerializer(read_only=True)
+
+    class Meta(UserExerciseProgressSerializer.Meta):
+        fields = UserExerciseProgressSerializer.Meta.fields
 
 
 

@@ -24,7 +24,9 @@ from .serializers import (
     ChallengeSerializer, AchievementSerializer, UserAchievementSerializer,
     NotificationSerializer, PublicUserProfileSerializer
 )
+
 from users.models import CustomUser
+from .tasks import dispatch_notification
 
 # Use IsAuthenticated from rest_framework.permissions
 IsAuthenticated = permissions.IsAuthenticated
@@ -81,10 +83,18 @@ class UserFollowViewSet(viewsets.ModelViewSet):
                     sender=request.user,
                     notification_type='follow',
                     title='New Follower',
-                                     message=(
-                     f'{request.user.username} started following you'
-                 )
+                    message=f'{request.user.username} started following you'
                 )
+                
+                # Send Push Notification
+                # Emit Domain Event
+                from notifications.domain.dispatcher import emit_event
+                from notifications.domain.events import UserFollowedEvent
+                
+                emit_event(UserFollowedEvent(
+                    actor_id=request.user.id,
+                    target_user_id=user_to_follow.id
+                ))
                 
                 return Response(
                     {'message': 'Successfully followed user'}, 
@@ -258,6 +268,17 @@ class PostViewSet(viewsets.ModelViewSet):
                     message=f'{request.user.username} liked your post',
                     related_object=post
                 )
+                
+                # Send Push Notification
+                # Emit Domain Event
+                from notifications.domain.dispatcher import emit_event
+                from notifications.domain.events import PostLikedEvent
+                
+                emit_event(PostLikedEvent(
+                    actor_id=request.user.id,
+                    target_post_id=post.id,
+                    post_author_id=post.author.id
+                ))
             
             return Response({'message': 'Post liked'})
         else:
@@ -344,6 +365,19 @@ class CommentViewSet(viewsets.ModelViewSet):
                 message=f'{self.request.user.username} commented on your post',
                 related_object=comment
             )
+            
+            # Send Push Notification
+            # Emit Domain Event
+            from notifications.domain.dispatcher import emit_event
+            from notifications.domain.events import CommentCreatedEvent
+            
+            emit_event(CommentCreatedEvent(
+                actor_id=self.request.user.id,
+                target_post_id=post.id,
+                comment_id=comment.id,
+                post_author_id=post.author.id,
+                comment_text=comment.content
+            ))
     
     @action(detail=True, methods=['post'])
     def like(self, request, pk=None):
@@ -575,6 +609,19 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                     content_type=ContentType.objects.get_for_model(Challenge),
                     object_id=challenge.id
                 )
+                
+                # Send Push Notification
+                # Emit Domain Event
+                from notifications.domain.dispatcher import emit_event
+                from notifications.domain.events import ChallengeProgressEvent
+                
+                emit_event(ChallengeProgressEvent(
+                    user_id=user.id,
+                    challenge_id=challenge.id,
+                    challenge_title=challenge.title,
+                    progress=progress_increase,
+                    unit=challenge.unit
+                ))
         
         return Response({
             'message': 'Progress updated successfully',
@@ -649,7 +696,7 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return Notification.objects.filter(
+        return Notification.objects.select_related('actor').filter(
             recipient=self.request.user
         ).order_by('-created_at')
     

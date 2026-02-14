@@ -8,7 +8,7 @@ from django.utils import timezone
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from datetime import date
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, m2m_changed
 from django.dispatch import receiver
 
 
@@ -467,7 +467,10 @@ class UserExerciseProgress(models.Model):
 
     def calculate_training_volume(self):
         """Calculate total training volume based on set logs."""
-        total_volume = sum(log.weight for log in self.set_logs.all())
+        total_volume = sum(
+            (log.weight or 0) * (log.reps or 0) 
+            for log in self.set_logs.all()
+        )
         return total_volume
 
     def can_be_accessed_by(self, user):
@@ -762,9 +765,11 @@ def update_routine_progress_on_exercise_progress(sender, instance, created, **kw
     progress_date = instance.date
     
     # Find all active routines assigned to this user that include this exercise
+    # FIX: Use routine_exercises__exercise instead of exercises M2M field
+    # This ensures we catch exercises added via RoutineExercise even if M2M is out of sync
     routines = Routine.objects.filter(
         assigned_to=user, 
-        exercises=exercise,
+        routine_exercises__exercise=exercise,
         is_active=True
     ).distinct()
     
@@ -843,3 +848,52 @@ def update_routine_progress_on_set_log(sender, instance, created, **kwargs):
         progress.save()
         
     # Removed redundant explicit call: progress.save() already triggers the signal above.
+
+# --- M2M SIGNAL FOR AUTOMATIC ROUTINEPROGRESS CREATION ---
+
+@receiver(m2m_changed, sender=Routine.assigned_to.through)
+def create_routine_progress_on_assignment(sender, instance, action, pk_set, **kwargs):
+    """
+    Automatically create RoutineProgress records when users are assigned to routines.
+    
+    This signal handles all M2M changes to Routine.assigned_to field:
+    - post_add: Users added to routine -> Create RoutineProgress for each day
+    - post_remove: Users removed from routine -> Optionally clean up progress
+    
+    This ensures RoutineProgress records exist regardless of how the assignment happens
+    (views, admin, shell, etc.).
+    """
+    if action == 'post_add' and pk_set:
+        from users.models import CustomUser
+        
+        routine = instance
+        
+        # Get newly added users
+        new_users = CustomUser.objects.filter(pk__in=pk_set)
+        
+        for user in new_users:
+            for day in range(1, routine.days + 1):
+                # Get count of exercises for this day
+                exercises_count = routine.routine_exercises.filter(day=day).count()
+                
+                # Create progress record if it doesn't exist
+                RoutineProgress.objects.get_or_create(
+                    user=user,
+                    routine=routine,
+                    day=day,
+                    defaults={
+                        'status': 'Not Started',
+                        'exercises_completed': 0,
+                        'total_exercises': exercises_count
+                    }
+                )
+    
+    elif action == 'post_remove' and pk_set:
+        # Optional: Clean up RoutineProgress when users are unassigned
+        # Currently keeping progress records for historical data
+        # Uncomment below to delete progress on unassignment:
+        # RoutineProgress.objects.filter(
+        #     user_id__in=pk_set,
+        #     routine=instance
+        # ).delete()
+        pass

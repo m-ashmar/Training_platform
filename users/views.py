@@ -955,6 +955,158 @@ class ClientRequestTrainerView(APIView):
             )
 
 
+class ClientUnassignTrainerView(APIView):
+    """
+    View for clients to unassign themselves from their current trainer.
+    
+    Features:
+    - Client can remove their assigned trainer
+    - Cleans up TrainerClientRelation records
+    - Sends notification to the trainer
+    - Invalidates relevant caches
+    
+    Endpoint: POST /api/users/client/unassign-trainer/
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """Client unassigns their current trainer"""
+        if not request.user.is_client:
+            return Response(
+                {'error': 'This endpoint is only for clients'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        try:
+            from .models import TrainerClientRelation
+            
+            # Check if client has an assigned trainer
+            if not request.user.assigned_trainer:
+                return Response(
+                    {'error': 'You do not have an assigned trainer'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            trainer = request.user.assigned_trainer
+            trainer_id = trainer.id
+            trainer_name = trainer.full_name or trainer.username
+            
+            # Remove the TrainerClientRelation record
+            try:
+                relation = TrainerClientRelation.objects.get(
+                    trainer=trainer,
+                    client=request.user,
+                    status='approved'
+                )
+                relation.delete()
+            except TrainerClientRelation.DoesNotExist:
+                # Relation may not exist, but we still proceed to clear assigned_trainer
+                pass
+            
+            # Clear assigned trainer
+            request.user.assigned_trainer = None
+            request.user.save()
+            
+            # Send notification to the trainer
+            send_push_notification(
+                user=trainer,
+                title="Client Unassignment",
+                message=f"Client {request.user.full_name or request.user.username} has unassigned themselves from you.",
+                data={
+                    "client_id": request.user.id,
+                    "client_name": request.user.full_name or request.user.username
+                }
+            )
+            
+            logger.info(f"Client {request.user.id} unassigned from trainer {trainer_id}")
+            
+            # Invalidate caches
+            ClientProfileViewSet.invalidate_client_cache(request.user.id, trainer_id)
+            
+            return Response({
+                'message': f'Successfully unassigned from trainer {trainer_name}',
+                'previous_trainer_id': trainer_id,
+                'previous_trainer_name': trainer_name
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error unassigning trainer: {str(e)}")
+            return Response(
+                {'error': 'An error occurred while unassigning the trainer'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class ClientCancelTrainerRequestView(APIView):
+    """
+    View for clients to cancel their pending trainer request.
+    
+    Features:
+    - Client can cancel a pending request to a trainer
+    - Allows client to request a different trainer after cancelling
+    - Sends notification to the trainer about cancellation
+    
+    Endpoint: POST /api/users/client/cancel-trainer-request/
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """Client cancels their pending trainer request"""
+        if not request.user.is_client:
+            return Response(
+                {'error': 'This endpoint is only for clients'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        try:
+            from .models import TrainerClientRelation
+            
+            # Find pending request for this client
+            pending_request = TrainerClientRelation.objects.filter(
+                client=request.user,
+                status='pending'
+            ).select_related('trainer').first()
+            
+            if not pending_request:
+                return Response(
+                    {'error': 'You do not have a pending trainer request'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            trainer = pending_request.trainer
+            trainer_id = trainer.id
+            trainer_name = trainer.full_name or trainer.username
+            
+            # Delete the pending request
+            pending_request.delete()
+            
+            # Send notification to the trainer
+            send_push_notification(
+                user=trainer,
+                title="Request Cancelled",
+                message=f"Client {request.user.full_name or request.user.username} has cancelled their request.",
+                data={
+                    "client_id": request.user.id,
+                    "client_name": request.user.full_name or request.user.username
+                }
+            )
+            
+            logger.info(f"Client {request.user.id} cancelled pending request to trainer {trainer_id}")
+            
+            return Response({
+                'message': f'Successfully cancelled request to trainer {trainer_name}',
+                'cancelled_trainer_id': trainer_id,
+                'cancelled_trainer_name': trainer_name
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error cancelling trainer request: {str(e)}")
+            return Response(
+                {'error': 'An error occurred while cancelling the request'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 class TrainerPendingRequestsView(APIView):
     """
     Enhanced view for trainers to see pending client requests.

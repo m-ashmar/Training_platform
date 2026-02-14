@@ -41,7 +41,10 @@ class DietPersistenceService:
     ) -> DietPlan:
         try:
             sd = self._resolve_start_date(start_date)
-            ed = sd + _timedelta(days=3)
+            total_meals = len(plan_output.plan)
+            daily_meals = meal_count + snack_count
+            duration_days = total_meals // daily_meals if daily_meals > 0 else 1
+            ed = sd + _timedelta(days=duration_days - 1)
 
             with transaction.atomic():
                 # Validate AI ingredients are in-DB and allowed by per-meal lists
@@ -55,7 +58,7 @@ class DietPersistenceService:
                     daily_calories=self.user.calculate_daily_calories(),
                     start_date=sd,
                     end_date=ed,
-                    duration_weeks=1,
+                    duration_weeks=(duration_days + 6) // 7,
                     generated_plan=plan_output.dict(),
                     generation_strategy='GPT',
                 )

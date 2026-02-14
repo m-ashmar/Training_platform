@@ -1424,6 +1424,15 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['exercise', 'date']
 
+    def get_serializer_class(self):
+        """
+        Use detailed serializer for read operations to avoid N+1 queries on client.
+        """
+        if self.action in ['list', 'retrieve']:
+            from .serializers import UserExerciseProgressDetailSerializer
+            return UserExerciseProgressDetailSerializer
+        return UserExerciseProgressSerializer
+
     def get_permissions(self):
         if self.action == 'create':
             return [IsAuthenticated()]

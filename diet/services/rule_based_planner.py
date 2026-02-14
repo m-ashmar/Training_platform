@@ -1685,71 +1685,82 @@ class RuleBasedPlanner:
         self, meals: List[str], allowed: Dict, 
         today_meals: List[AIMeal], used_in_window: Dict
     ) -> None:
-        """Add 2 portions of fruits across today's meals (100-150g each)."""
-        # Get fruit candidates from preferences
-        all_fruit_candidates = []
-        for meal_name in meals:
-            meal_fruits = allowed.get(meal_name, {}).get('fruit', [])
-            all_fruit_candidates.extend(meal_fruits)
-        
-        # Remove duplicates and filter out fruits already used today across any meal
-        seen_ids = set()
-        unique_fruits = []
-        for fruit in all_fruit_candidates:
-            if fruit.id not in seen_ids:
-                seen_ids.add(fruit.id)
-                unique_fruits.append(fruit)
-        try:
-            used_all = set().union(*(used_in_window.get(k, set()) for k in ("Breakfast","Lunch","Dinner","Snack")))
-        except Exception:
-            used_all = set()
-        unique_fruits = [f for f in unique_fruits if f.id not in used_all]
-        
-        # Fallback to common fruits if no preferences (preloaded)
-        if not unique_fruits:
-            common_f = getattr(self, '_common_fruits', [])
-            unique_fruits = common_f[:5] if common_f else []
-        
-        if len(unique_fruits) < 2:
-            return  # Not enough fruits available
-        
-        # Select 2 different fruits randomly
+        """Add 2 portions of fruits across today's meals (100-150g each), respecting meal allowances."""
         import random
-        selected_fruits = random.sample(unique_fruits, min(2, len(unique_fruits)))
         
-        # Use the provided today_meals slice (pre-snack)
-        if len(today_meals) < 2:
-            return  # Not enough meals to add fruits
+        # Identify target meals (Breakfast > Lunch > Dinner)
+        candidates = [m for m in today_meals if m.meal_name in ('Breakfast', 'Lunch', 'Dinner')]
+        candidates.sort(key=lambda m: {'Breakfast':0, 'Lunch':1, 'Dinner':2}.get(m.meal_name, 99))
         
-        # Prioritize breakfast, then lunch for fruit addition
-        target_indices = []
-        meal_names_today = [m.meal_name for m in today_meals]
+        # Target up to 2 meals
+        targets = candidates[:2]
         
-        for preferred in ['Breakfast', 'Lunch', 'Dinner']:
-            if preferred in meal_names_today and len(target_indices) < 2:
-                idx = meal_names_today.index(preferred)
-                target_indices.append(idx)
-        
-        # Add fruits to selected meals
-        for i, meal_idx in enumerate(target_indices[:2]):
-            if i < len(selected_fruits) and meal_idx < len(today_meals):
-                fruit = selected_fruits[i]
-                meal = today_meals[meal_idx]
+        for meal in targets:
+            meal_name = meal.meal_name
+            
+            # Get allowed fruits SPECIFICALLY for this meal
+            allowed_candidates = allowed.get(meal_name, {}).get('fruit', [])
+            
+            # Filter logic (recency, used today)
+            # Used today across all meals
+            try:
+                used_all = set().union(*(used_in_window.get(k, set()) for k in ("Breakfast","Lunch","Dinner","Snack")))
+            except Exception:
+                used_all = set()
+            
+            valid_fruits = [f for f in allowed_candidates if f.id not in used_all]
+            
+            # Fallback ONLY if we have safe common fruits allowed for this meal?
+            # Actually, we can't easily know which common fruits are allowed for this meal unless we check preferences.
+            # But the 'allowed' dict ALREADY contains preferences.
+            # So if valid_fruits is empty, we effectively have NO allowed fruits for this meal.
+            # We should SKIP to avoid PersistenceError.
+            
+            if not valid_fruits:
+                # Try to use any candidate even if used recently?
+                valid_fruits = allowed_candidates
                 
-                # Check if this fruit is already in the meal
-                existing_names = {ing.name.lower() for ing in meal.ingredients}
-                if fruit.name.lower() in existing_names:
-                    continue
+            if not valid_fruits:
+                continue
                 
-                # Calculate portion size (100-150g)
-                portion = random.uniform(100.0, 150.0)
+            # Pick one
+            fruit = random.choice(valid_fruits)
+            
+            # Check if fruit already in meal?
+            existing_names = {ing.name.lower() for ing in meal.ingredients}
+            if fruit.name.lower() in existing_names:
+                continue
                 
-                # Add fruit to meal's ingredients
-                meal.ingredients.append(
-                    AIIngredient(name=fruit.name, quantity=f"{int(portion)}g")
-                )
-                
-                # Track usage
-                used_in_window.setdefault(meal.meal_name, set()).add(fruit.id)
-
-
+            # Add to meal
+            grams = random.uniform(100.0, 150.0)
+            grams = self._round_grams(grams)
+            
+            # Convert FoodItem to ingredient
+            # Warning: meal.ingredients is list of AIIngredient
+            meal.ingredients.append(AIIngredient(name=fruit.name, quantity=f"{int(grams)}g"))
+            
+            # Update Nutrition
+            # We need to calculate kcal/macros for the added fruit
+            # approximate values from food object
+            f_cal = float(fruit.calories) / 100.0 * grams
+            f_pro = float(fruit.protein) / 100.0 * grams
+            f_carb = float(fruit.carbs) / 100.0 * grams
+            f_fat = float(fruit.fat) / 100.0 * grams
+            
+            if not meal.total_nutrition:
+                meal.total_nutrition = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+            
+            meal.total_nutrition["calories"] += f_cal
+            meal.total_nutrition["protein"] += f_pro
+            meal.total_nutrition["carbs"] += f_carb
+            meal.total_nutrition["fat"] += f_fat
+            
+            # Mark as used (id is int)
+            try:
+                fid = int(fruit.id)
+                used_in_window.setdefault(meal_name, set()).add(fid)
+                # Also prevent reuse in same day (handled by 'used_in_window' updates?)
+                # We need to update user_all for next iteration
+                used_in_window.setdefault("Snack", set()).add(fid) # Add to dummy to ensure global exclusion for today
+            except Exception:
+                pass

@@ -5,8 +5,10 @@ from .views import (
     AssignClientView, UnassignClientView, ClientProfileView, AvailableTrainersView,
     PublicTrainersListView, PublicTrainerClientStatsView, ClientProfileViewSet, DeviceTokenRegisterView, CustomTokenObtainPairView,
     ClientRequestTrainerView, TrainerPendingRequestsView, TrainerRespondToRequestView,
-    ClientRequestStatusView, ProfilePictureUploadView, OTPVerificationView, ResendOTPView
+    ClientRequestStatusView, ProfilePictureUploadView, OTPVerificationView, ResendOTPView,
+    ClientUnassignTrainerView, ClientCancelTrainerRequestView
 )
+from .device_token_views import FCMTokenView
 from django.contrib.auth import views as auth_views
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.routers import DefaultRouter
@@ -39,6 +41,8 @@ urlpatterns = [
     # Client-specific endpoints
     path('client/profile/', ClientProfileView.as_view(), name='client_profile'),
     path('client/available-trainers/', AvailableTrainersView.as_view(), name='available_trainers'),
+    path('client/unassign-trainer/', ClientUnassignTrainerView.as_view(), name='client_unassign_trainer'),
+    path('client/cancel-trainer-request/', ClientCancelTrainerRequestView.as_view(), name='client_cancel_trainer_request'),
     
     # Public endpoints (no authentication required)
     path('trainers/public/', PublicTrainersListView.as_view(), name='public_trainers_list'),
@@ -58,7 +62,8 @@ urlpatterns = [
     
     # TODO: Add phone-based password reset endpoint for SMS in the future
     # TODO: Ensure email/phone verification is implemented before enabling in production
-    path('device-token/', DeviceTokenRegisterView.as_view(), name='devicetokenregisterview'),
+    # Device Token Management (FCM)
+    path('device-token/', FCMTokenView.as_view(), name='fcm_token_manage'),
 ]
 
 router = DefaultRouter()

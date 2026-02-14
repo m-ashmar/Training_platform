@@ -69,6 +69,7 @@ INSTALLED_APPS = [
     "social",
     "admin_dashboard",  # New comprehensive admin dashboard
     "wallet",
+    "notifications",
     
     # Third-party
     "rest_framework",
@@ -274,6 +275,11 @@ AI_PROVIDER = os.getenv("AI_PROVIDER", "openai")
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
 
+# When True, Celery tasks run synchronously in-process (no worker required).
+# Set to False in production when a dedicated Celery worker is running.
+CELERY_TASK_ALWAYS_EAGER = os.getenv('CELERY_TASK_ALWAYS_EAGER', 'True' if DEBUG else 'False') == 'True'
+CELERY_TASK_EAGER_PROPAGATES = True  # Propagate exceptions in eager mode for debugging
+
 # ========================
 # Nutrition & AI Chef
 # ========================
@@ -317,6 +323,13 @@ DIET_STAGED_MEAL_FILL = True
 # Edamam API
 EDAMAM_APP_ID = "291502d0"
 EDAMAM_APP_KEY = "3d9ebc3df89fa042bb6ca7088d532265"
+
+# ========================
+# Firebase / Push Notifications
+# ========================
+# Path to the Firebase Admin SDK service account JSON file
+FIREBASE_CREDENTIALS_PATH = os.getenv('FIREBASE_CREDENTIALS_PATH', str(BASE_DIR / 'yalla-gym-f6a67-firebase-adminsdk-fbsvc-fb99d3a33f.json'))
+FIREBASE_PROJECT_ID = os.getenv('FIREBASE_PROJECT_ID', '')
 
 # ========================
 # Internationalization

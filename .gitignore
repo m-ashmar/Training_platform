@@ -60,3 +60,11 @@ coverage.xml
 
 # Exclude Django app test modules named tests.py
 **/tests.py
+
+# Firebase Credentials
+yalla-gym-f6a67-firebase-adminsdk-fbsvc-fb99d3a33f.json
+firebase-credentials.json
+
+# Redis
+*.rdb
+dump.rdb

@@ -1828,7 +1828,7 @@ class MyDietPlansView(APIView):
             plans = (DietPlan.objects
                      .filter(user=request.user)
                      .only('id', 'goal', 'daily_calories', 'start_date', 'end_date', 'is_active', 'created_at', 'template_id')
-                     .order_by('-created_at'))
+                     .order_by('-start_date', '-created_at'))
             results = []
             plan_ids = list(plans.values_list('id', flat=True))
             meal_counts = {}

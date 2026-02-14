@@ -443,13 +443,32 @@ class TrainerClientRelation(models.Model):
         return f"{self.trainer.username} ↔ {self.client.username} ({self.status})"
 
 class DeviceToken(models.Model):
+    PLATFORM_CHOICES = [
+        ('android', 'Android'),
+        ('ios', 'iOS'),
+        ('web', 'Web'),
+    ]
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='device_tokens')
-    token = models.CharField(max_length=255, unique=True)
+    token = models.CharField(max_length=255, unique=True, db_index=True)
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES, default='android')
+    app_version = models.CharField(max_length=50, blank=True, null=True)
+    device_id = models.CharField(max_length=255, blank=True, null=True)
+    is_active = models.BooleanField(default=True, help_text="Soft delete for invalid tokens")
+    last_used_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'is_active']),
+        ]
 
     def __str__(self):
-        return f"{self.user.username} - {self.token[:10]}..."
+        return f"{self.user.username} - {self.token[:10]}... ({'Active' if self.is_active else 'Inactive'})"
+
+    def mark_inactive(self):
+        """Soft delete the token."""
+        self.is_active = False
+        self.save(update_fields=['is_active'])
 
 class OTPVerification(models.Model):
     """

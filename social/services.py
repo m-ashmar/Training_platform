@@ -308,13 +308,32 @@ class AchievementService:
     def _send_achievement_notification(cls, user, achievement):
         """Send notification to user about new achievement."""
         try:
+            # Create in-app notification
+            title = 'Achievement Unlocked! 🏆'
+            message = f'You earned the "{achievement.name}" achievement! +{achievement.points} points'
+            
             Notification.objects.create(
                 recipient=user,
                 notification_type='achievement',
-                title='Achievement Unlocked! 🏆',
-                message=f'You earned the "{achievement.name}" achievement! '
-                       f'+{achievement.points} points'
+                title=title,
+                message=message
             )
+            
+            # Send Push Notification via FCM
+            try:
+                # Emit Domain Event
+                from notifications.domain.dispatcher import emit_event
+                from notifications.domain.events import AchievementAwardedEvent
+                
+                emit_event(AchievementAwardedEvent(
+                    user_id=user.id,
+                    achievement_id=achievement.id,
+                    achievement_name=achievement.name,
+                    points=achievement.points
+                ))
+            except Exception as e:
+                logger.error(f"Failed to trigger FCM for achievement: {e}")
+                
         except Exception as e:
             logger.error(f"Error sending achievement notification: {e}")
     

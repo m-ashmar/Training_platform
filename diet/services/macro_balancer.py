@@ -13,7 +13,7 @@ class MacroBalancer:
 
     def rebalance(self, diet_plan: DietPlan) -> None:
         user_goal = diet_plan.goal or 'Maintain'
-        ratios = self._macro_ratios_for_goal(user_goal)
+        ratios = get_macro_ratios(user_goal)
         daily_target_cals = float(diet_plan.daily_calories or 0)
         if daily_target_cals <= 0:
             return

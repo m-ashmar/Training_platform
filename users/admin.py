@@ -183,10 +183,10 @@ try:
         
     @admin.register(DeviceToken)
     class DeviceTokenAdmin(admin.ModelAdmin):
-        list_display = ('user', 'token', 'created_at', 'updated_at')
-        list_filter = ('created_at', 'updated_at')
+        list_display = ('user', 'token', 'platform', 'last_used_at', 'is_active')
+        list_filter = ('platform', 'is_active', 'last_used_at')
         search_fields = ('user__email', 'token')
-        readonly_fields = ('created_at', 'updated_at')
+        readonly_fields = ('created_at', 'last_used_at')
         
 except ImportError:
     pass

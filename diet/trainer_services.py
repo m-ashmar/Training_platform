@@ -693,10 +693,12 @@ class ClientProgressService:
         # Use new optimized method that doesn't iterate
         daily_progress.update_progress()
         
+        total_components = MealComponent.objects.filter(meal=meal).count()
+        
         return {
             'meal_id': meal.id,
-            'components_completed': completed_count,
-            'total_components': components.count(),
+            'components_completed': total_components,
+            'total_components': total_components,
             'completed_at': timezone.now(),
             'meal_completion_percentage': 100.0
         }
