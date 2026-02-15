@@ -754,7 +754,9 @@ class GenerateDietPlanRuleBasedView(APIView):
             if request.user.is_trainer:
                 return Response({"error": "Trainers cannot generate client plans here."}, status=status.HTTP_403_FORBIDDEN)
 
-            meal_count = int(request.data.get('meal_count', 3))
+            # Rule-Based Planner only supports Breakfast/Lunch/Dinner (max 3 meals)
+            requested_meals = int(request.data.get('meal_count', 3))
+            meal_count = min(3, requested_meals)
             snack_count = int(request.data.get('snack_count', 1))
             duration_days = int(request.data.get('duration_days', 1))
             start_date = request.data.get('start_date')
@@ -793,7 +795,7 @@ class GenerateDietPlanRuleBasedView(APIView):
             # FIX #5: Collect training data for rule-based plans (was only done for AI plans)
             try:
                 data_collector = TrainingDataCollector()
-                data_collector.collect_diet_plan_data(diet_plan)
+                data_collector.collect_diet_plan_data(diet_plan, plan_output)
                 logger.info(f"Training data collected for rule-based plan {diet_plan.id}")
             except Exception as e:
                 logger.warning(f"Failed to collect training data for plan {diet_plan.id}: {e}")

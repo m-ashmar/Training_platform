@@ -42,8 +42,12 @@ class DietPersistenceService:
         try:
             sd = self._resolve_start_date(start_date)
             total_meals = len(plan_output.plan)
+            # Safely handle excessive meal request vs generated: enforce minimum 1 day duration
             daily_meals = meal_count + snack_count
-            duration_days = total_meals // daily_meals if daily_meals > 0 else 1
+            if daily_meals > 0:
+                duration_days = max(1, total_meals // daily_meals)
+            else:
+                duration_days = 1
             ed = sd + _timedelta(days=duration_days - 1)
 
             with transaction.atomic():
