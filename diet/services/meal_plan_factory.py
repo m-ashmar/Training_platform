@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Iterable, Tuple, List
 from ..ai_models import AIMeal
 from ..models import Meal, MealComponent, FoodItem, DietPlan
-from ..utils.nutrition import convert_to_grams, piece_based_grams_if_appropriate
+from ..utils.nutrition import convert_to_grams, piece_based_grams_if_appropriate, dominant_macro_of_food
 
 
 class MealPlanFactory:
@@ -47,7 +47,7 @@ class MealPlanFactory:
                 existing.quantity = float(existing.quantity or 0.0) + float(grams or 0.0)
                 # Clamp per-item cap
                 from ..utils.nutrition import portion_sanity_cap_grams
-                dom = self._dominant_macro_of_food(existing.food)  # Use existing food for consistency
+                dom = dominant_macro_of_food(existing.food)  # Use existing food for consistency
                 cap = portion_sanity_cap_grams(dom)
                 if dom == 'carb':
                     cap = min(cap, 400.0)
@@ -114,30 +114,5 @@ class MealPlanFactory:
             if key in n:
                 return base
         return n
-    
-    def _dominant_macro_of_food(self, food: FoodItem) -> str:
-        """Return the dominant macro based on food category or caloric contribution."""
-        try:
-            # Prefer category flags if available
-            if food.category:
-                if getattr(food.category, 'is_protein', False):
-                    return 'protein'
-                if getattr(food.category, 'is_carb', False):
-                    return 'carb'
-                if getattr(food.category, 'is_fat', False):
-                    return 'fat'
-        except Exception:
-            pass
-        
-        # Fallback to per-gram macro calories
-        p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0) or 0.0)
-        c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0) or 0.0)
-        f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0) or 0.0)
-        
-        if p_cals >= c_cals and p_cals >= f_cals:
-            return 'protein'
-        if c_cals >= p_cals and c_cals >= f_cals:
-            return 'carb'
-        return 'fat'
 
 

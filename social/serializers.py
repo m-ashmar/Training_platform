@@ -94,6 +94,10 @@ class PostSerializer(serializers.ModelSerializer):
     
     def get_is_liked(self, obj):
         """Check if current user has liked this post"""
+        # Prefer annotated field to avoid N+1 queries
+        if hasattr(obj, 'is_liked_anno'):
+            return obj.is_liked_anno
+            
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             return PostLike.objects.filter(

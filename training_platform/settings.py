@@ -11,12 +11,21 @@ Optimized Configuration (v3.2)
 from pathlib import Path
 import os
 import rest_framework
+import logging
 from datetime import timedelta
 
 # ========================
 # Path Configuration
 # ========================
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / '.env')
+except ImportError:
+    # python-dotenv not installed, environment variables must be set manually
+    pass
 
 # ========================
 # Security Configuration
@@ -138,9 +147,14 @@ TEMPLATES = [
 # ========================
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": "training_platform",
+        "USER": "postgres",
+        "PASSWORD": "postgres",
+        "HOST": "localhost",
+        "PORT": "5433",
     }
+
 }
 
 # ========================
@@ -158,8 +172,23 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-# Email
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+# Email Configuration
+# Use SMTP for production, console backend for development (when EMAIL_HOST_USER is not set)
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')  # Gmail App Password
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@trainingplatform.com')
+
+if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
+    # Use SMTP backend when credentials are provided
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    EMAIL_HOST = 'smtp.gmail.com'
+    EMAIL_PORT = 587
+    EMAIL_USE_TLS = True
+else:
+    # Fallback to console backend for development
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    logger = logging.getLogger(__name__)
+    logger.warning("Email credentials not configured. Using console backend. Emails will be printed to console.")
 
 # Allauth
 ACCOUNT_EMAIL_VERIFICATION = 'none'

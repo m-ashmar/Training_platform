@@ -251,6 +251,24 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         return self.user_type == 'agent'
 
     @property
+    def is_onboarding_completed(self):
+        """
+        Check if user has completed onboarding (filled basic profile).
+        
+        Criteria:
+        - All users: First Name, Last Name
+        - Clients: Height, Weight, Age, Gender
+        """
+        basic_info = bool(self.first_name and self.last_name)
+        if not basic_info:
+            return False
+            
+        if self.is_client:
+            return all([self.height, self.weight, self.age, self.gender])
+            
+        return True
+
+    @property
     def full_name(self):
         """Get user's full name."""
         if self.first_name and self.last_name:
@@ -432,3 +450,43 @@ class DeviceToken(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.token[:10]}..."
+
+class OTPVerification(models.Model):
+    """
+    Model to store OTP codes for email verification during registration.
+    OTP expires after 10 minutes and can only be used once.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='otp_verifications'
+    )
+    otp_code = models.CharField(max_length=6, help_text="6-digit OTP code")
+    email = models.EmailField(help_text="Email address for lookup")
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(help_text="OTP expiration time (10 minutes from creation)")
+    is_verified = models.BooleanField(default=False, help_text="Whether this OTP has been used")
+    verified_at = models.DateTimeField(null=True, blank=True, help_text="When OTP was verified")
+
+    class Meta:
+        verbose_name = "OTP Verification"
+        verbose_name_plural = "OTP Verifications"
+        indexes = [
+            models.Index(fields=['email', 'otp_code', 'is_verified']),
+            models.Index(fields=['expires_at']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'otp_code'],
+                condition=models.Q(is_verified=False),
+                name='unique_unverified_otp_per_user'
+            ),
+        ]
+
+    def __str__(self):
+        return f"OTP for {self.email} - {self.otp_code} ({'verified' if self.is_verified else 'pending'})"
+
+    def is_valid(self):
+        """Check if OTP is still valid (not expired and not used)."""
+        from django.utils import timezone
+        return not self.is_verified and timezone.now() < self.expires_at

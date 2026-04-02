@@ -484,8 +484,29 @@ class ClientProgressService:
         if target_date is None:
             target_date = date.today()
         
-        # Get active diet plan
-        active_plan = self._get_active_diet_plan()
+        # Get active diet plan with optimized prefetching
+        # We need to fetch everything in 3-4 queries max
+        today = date.today()
+        from django.db.models import Prefetch
+        
+        active_plan = DietPlan.objects.filter(
+            user=self.client,
+            is_active=True,
+            start_date__lte=today,
+            end_date__gte=today
+        ).order_by('-start_date', '-id').prefetch_related(
+            Prefetch(
+                'meals',
+                queryset=Meal.objects.filter(date=target_date)
+                    .order_by('scheduled_time')
+                    .prefetch_related(
+                        'components',
+                        'components__food',
+                        'components__food__category'
+                    )
+            )
+        ).first()
+
         if not active_plan:
             return {
                 'date': target_date,
@@ -508,17 +529,53 @@ class ClientProgressService:
             }
         )
         
-        # Update progress
+        # Update progress (using optimized Aggregation)
+        # Pass the pre-fetched meals to update_progress to allow it to use them?
+        # Actually our new update_progress uses its own efficient query, so we just call it.
         daily_progress.update_progress()
         
-        # Get meals for the date with detailed information
-        meals = active_plan.meals.filter(date=target_date).order_by('scheduled_time')
+        # Processing meals in-memory using prefetched data
+        meals = active_plan.meals.all() # This uses the Prefetch from above!
         meals_data = []
         
         for meal in meals:
-            meal_nutrition = meal.calculate_nutrition()
-            components = meal.components.all()
+            # Calculate nutrition in-memory
+            # (Duplicate logic from Meal.calculate_nutrition but strictly in-memory)
+            total_calories = 0
+            total_protein = 0
+            total_carbs = 0
+            total_fat = 0
             
+            components_data = []
+            # Access related components (Already prefetched)
+            for component in meal.components.all():
+                food = component.food
+                scale_factor = component.quantity / food.serving_size_grams
+                
+                comp_cals = round(food.calories * scale_factor, 1)
+                comp_prot = round(food.protein * scale_factor, 1)
+                comp_carbs = round(food.carbs * scale_factor, 1)
+                comp_fat = round(food.fat * scale_factor, 1)
+                
+                total_calories += comp_cals
+                total_protein += comp_prot
+                total_carbs += comp_carbs
+                total_fat += comp_fat
+                
+                components_data.append({
+                    'id': component.id,
+                    'food_name': food.name,
+                    'quantity': component.quantity,
+                    'is_completed': component.is_completed,
+                    'completed_at': component.completed_at,
+                    'nutrition': {
+                        'calories': comp_cals,
+                        'protein': comp_prot,
+                        'carbs': comp_carbs,
+                        'fat': comp_fat
+                    }
+                })
+
             meal_data = {
                 'id': meal.id,
                 'meal_type': meal.meal_type,
@@ -526,26 +583,37 @@ class ClientProgressService:
                 'description': meal.description,
                 'is_completed': meal.is_completed,
                 'completion_percentage': meal.completion_percentage,
-                'nutrition': meal_nutrition,
-                'components': []
+                'nutrition': {
+                    'calories': round(total_calories, 1),
+                    'protein': round(total_protein, 1),
+                    'carbs': round(total_carbs, 1),
+                    'fat': round(total_fat, 1)
+                },
+                'components': components_data
             }
-            
-            # Add component details
-            for component in components:
-                component_nutrition = component.calculate_nutrition()
-                meal_data['components'].append({
-                    'id': component.id,
-                    'food_name': component.food.name,
-                    'quantity': component.quantity,
-                    'is_completed': component.is_completed,
-                    'completed_at': component.completed_at,
-                    'nutrition': component_nutrition
-                })
-            
             meals_data.append(meal_data)
         
-        # Calculate plan nutrition
-        plan_nutrition = active_plan.calculate_daily_nutrition(target_date)
+        # Calculate plan nutrition in-memory from the meals we just processed
+        # This avoids calling active_plan.calculate_daily_nutrition which would trigger new DB queries
+        plan_nutrition = {
+            'calories': 0,
+            'protein': 0,
+            'carbs': 0,
+            'fat': 0
+        }
+        
+        for m_data in meals_data:
+            nutrition = m_data['nutrition']
+            plan_nutrition['calories'] += nutrition['calories']
+            plan_nutrition['protein'] += nutrition['protein']
+            plan_nutrition['carbs'] += nutrition['carbs']
+            plan_nutrition['fat'] += nutrition['fat']
+            
+        # Round final values
+        plan_nutrition['calories'] = round(plan_nutrition['calories'], 1)
+        plan_nutrition['protein'] = round(plan_nutrition['protein'], 1)
+        plan_nutrition['carbs'] = round(plan_nutrition['carbs'], 1)
+        plan_nutrition['fat'] = round(plan_nutrition['fat'], 1)
         
         return {
             'date': target_date,
@@ -600,16 +668,17 @@ class ClientProgressService:
         if meal.diet_plan.user != self.client:
             raise ValidationError("You can only complete your own meals")
         
-        # Complete all components
-        components = meal.components.all()
-        completed_count = 0
+        # Complete all components efficiently with bulk update
+        MealComponent.objects.filter(meal=meal).update(
+            is_completed=True,
+            completed_at=timezone.now()
+        )
         
-        for component in components:
-            if not component.is_completed:
-                component.complete()
-                completed_count += 1
+        # Update parent meal status explicitly
+        Meal.objects.filter(id=meal.id).update(is_completed=True)
+        meal.is_completed = True # Update local instance for consistency
         
-        # Update daily progress
+        # Update daily progress efficiently
         daily_progress, created = DailyProgress.objects.get_or_create(
             user=self.client,
             diet_plan=meal.diet_plan,
@@ -621,6 +690,7 @@ class ClientProgressService:
                 'target_fat': (meal.diet_plan.daily_calories * 0.20) / 9
             }
         )
+        # Use new optimized method that doesn't iterate
         daily_progress.update_progress()
         
         return {
@@ -634,14 +704,16 @@ class ClientProgressService:
     def _get_active_diet_plan(self) -> Optional[DietPlan]:
         """
         Get the client's active diet plan.
+        Optimized to fetch latest plan deterministically.
         
         Returns:
             Active DietPlan instance or None
         """
         today = date.today()
+        # strictly order by start_date descending to get the latest one
         return DietPlan.objects.filter(
             user=self.client,
             is_active=True,
             start_date__lte=today,
             end_date__gte=today
-        ).first() 
+        ).order_by('-start_date', '-id').first() 

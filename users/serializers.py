@@ -54,6 +54,8 @@ class CustomRegisterSerializer(RegisterSerializer):
             user = super().save(request)
             user.phone_number = self.validated_data.get('phone_number')
             user.user_type = self.validated_data.get('user_type', 'client')
+            # Set user as inactive until email is verified
+            user.is_active = False
             user.save()
             return user
         except IntegrityError as e:
@@ -83,6 +85,16 @@ class CustomLoginSerializer(LoginSerializer):
                 raise serializers.ValidationError(
                     {"non_field_errors": ["Unable to log in with provided credentials."]}
                 )
+            
+            # Check if user account is active (email verified)
+            if not self.user.is_active:
+                raise serializers.ValidationError(
+                    {
+                        "non_field_errors": ["Please verify your email address before logging in. Check your inbox for the OTP code."],
+                        "requires_verification": True,
+                        "email": self.user.email
+                    }
+                )
         else:
             raise serializers.ValidationError(
                 {"non_field_errors": ["Must include 'email' and 'password'."]}
@@ -93,6 +105,8 @@ class CustomLoginSerializer(LoginSerializer):
     
 class UserDetailsSerializer(serializers.ModelSerializer):
     profile_picture = serializers.SerializerMethodField()
+    onboarding_completed = serializers.BooleanField(source='is_onboarding_completed', read_only=True)
+    
     class Meta:
         model = CustomUser
         fields = [
@@ -100,9 +114,10 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             'activity_level', 'user_type', 'first_name', 'last_name', 'profile_picture',
             'trainer_bio', 'trainer_specializations', 'trainer_certifications',
             'trainer_experience_years', 'trainer_hourly_rate', 'trainer_is_verified',
-            'trainer_is_available', 'assigned_trainer', 'client_goals', 'client_preferences'
+            'trainer_is_available', 'assigned_trainer', 'client_goals', 'client_preferences',
+            'is_active', 'onboarding_completed'
         ]
-        read_only_fields = ['user_type', 'trainer_is_verified']
+        read_only_fields = ['user_type', 'trainer_is_verified', 'is_active', 'onboarding_completed']
 
     def get_profile_picture(self, obj):
         request = self.context.get('request')
@@ -142,15 +157,17 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
     client_count = serializers.SerializerMethodField()
     profile_picture = serializers.SerializerMethodField()
     
+    onboarding_completed = serializers.BooleanField(source='is_onboarding_completed', read_only=True)
+
     class Meta:
         model = CustomUser
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name', 'profile_picture',
             'trainer_bio', 'trainer_specializations', 'trainer_certifications',
             'trainer_experience_years', 'trainer_hourly_rate', 'trainer_is_verified',
-            'trainer_is_available', 'client_count'
+            'trainer_is_available', 'client_count', 'is_active', 'onboarding_completed'
         ]
-        read_only_fields = ['id', 'username', 'email', 'trainer_is_verified']
+        read_only_fields = ['id', 'username', 'email', 'trainer_is_verified', 'is_active', 'onboarding_completed']
 
     def get_client_count(self, obj):
         return obj.get_client_count()

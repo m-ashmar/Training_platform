@@ -1373,7 +1373,13 @@ class MealComponentsView(APIView):
     def get(self, request, meal_id):
         """Get detailed components of a specific meal."""
         try:
-            meal = get_object_or_404(Meal, id=meal_id)
+            # Optimize: Prefetch all components and their food/category in single query
+            meal = Meal.objects.select_related('diet_plan', 'diet_plan__user', 'diet_plan__created_by')\
+                .prefetch_related(
+                    'components',
+                    'components__food',
+                    'components__food__category'
+                ).get(id=meal_id)
             
             # Check permissions
             if request.user.is_trainer:
@@ -1389,24 +1395,35 @@ class MealComponentsView(APIView):
                         status=status.HTTP_403_FORBIDDEN
                     )
             
-            # Get meal components with detailed information
+            # Get meal components - No new DB query due to prefetch
             components = meal.components.all()
             components_data = []
             
+            # Optimize: Calculate component nutrition in-memory to avoid DB calls
             for component in components:
-                component_nutrition = component.calculate_nutrition()
+                # Use methods that don't trigger DB calls if data is present
+                food = component.food
+                scale_factor = component.quantity / food.serving_size_grams
+                
+                component_nutrition = {
+                    'calories': round(food.calories * scale_factor, 1),
+                    'protein': round(food.protein * scale_factor, 1),
+                    'carbs': round(food.carbs * scale_factor, 1),
+                    'fat': round(food.fat * scale_factor, 1)
+                }
+
                 components_data.append({
                     'id': component.id,
                     'food': {
-                        'id': component.food.id,
-                        'name': component.food.name,
-                        'calories': component.food.calories,
-                        'protein': component.food.protein,
-                        'carbs': component.food.carbs,
-                        'fat': component.food.fat,
-                        'serving_size': component.food.serving_size,
-                        'image_url': component.food.image_url,
-                        'category': component.food.category.name if component.food.category else None
+                        'id': food.id,
+                        'name': food.name,
+                        'calories': food.calories,
+                        'protein': food.protein,
+                        'carbs': food.carbs,
+                        'fat': food.fat,
+                        'serving_size': food.serving_size,
+                        'image_url': food.image_url,
+                        'category': food.category.name if food.category else None
                     },
                     'quantity': component.quantity,
                     'is_completed': component.is_completed,

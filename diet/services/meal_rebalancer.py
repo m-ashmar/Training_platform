@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..models import DietPlan
-from ..utils.nutrition import get_macro_ratios
+from ..utils.nutrition import get_macro_ratios, dominant_macro_of_food
 
 
 class MealRebalancer:
@@ -12,28 +12,8 @@ class MealRebalancer:
     def rebalance(self, diet_plan: DietPlan) -> None:
         from collections import defaultdict
 
-        def dominant_macro_of_food(food) -> str:
-            try:
-                if food.category:
-                    if getattr(food.category, 'is_protein', False):
-                        return 'protein'
-                    if getattr(food.category, 'is_carb', False):
-                        return 'carb'
-                    if getattr(food.category, 'is_fat', False):
-                        return 'fat'
-            except Exception:
-                pass
-            p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0))
-            c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0))
-            f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0))
-            if p_cals >= c_cals and p_cals >= f_cals:
-                return 'protein'
-            if c_cals >= p_cals and c_cals >= f_cals:
-                return 'carb'
-            return 'fat'
-
         user_goal = diet_plan.goal or 'Maintain'
-        ratios = self._macro_ratios_for_goal(user_goal)
+        ratios = get_macro_ratios(user_goal)
         daily_target_cals = float(diet_plan.daily_calories or 0)
         if daily_target_cals <= 0:
             return
@@ -104,9 +84,5 @@ class MealRebalancer:
                 elif cur_f > upper_f:
                     scale = max(0.85, (fat_target / max(cur_f, 1e-6)))
                     apply_scale_to_components('fat', scale)
-
-    def _macro_ratios_for_goal(self, goal: str) -> dict[str, float]:
-        """Use centralized macro ratios from utils/nutrition.py"""
-        return get_macro_ratios(goal)
 
 

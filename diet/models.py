@@ -339,6 +339,10 @@ class Meal(models.Model):
     class Meta:
         ordering = ['date', 'scheduled_time']
         unique_together = ['diet_plan', 'date', 'meal_type', 'scheduled_time']
+        indexes = [
+            models.Index(fields=['is_completed']),
+            models.Index(fields=['diet_plan', 'date']),
+        ]
     
     def calculate_nutrition(self):
         """
@@ -365,13 +369,19 @@ class Meal(models.Model):
             'fat': round(total_fat, 1)
         }
     
-    @property
-    def is_completed(self):
-        """Check if all components of this meal are completed."""
+    # Denormalized completion status for performance
+    is_completed = models.BooleanField(default=False, help_text="Whether all components are completed")
+    
+    def update_completion_status(self):
+        """
+        Update is_completed status based on components.
+        """
         components = self.components.all()
         if not components.exists():
-            return False
-        return all(component.is_completed for component in components)
+            self.is_completed = False
+        else:
+            self.is_completed = all(c.is_completed for c in components)
+        self.save(update_fields=['is_completed'])
     
     @property
     def completion_percentage(self):
@@ -411,6 +421,12 @@ class MealComponent(models.Model):
         if actual_quantity is not None:
             self.actual_quantity_consumed = actual_quantity
         self.save()
+        
+        # Update parent meal status
+        try:
+            self.meal.update_completion_status()
+        except Exception:
+            pass
     
     def calculate_nutrition(self):
         """
@@ -495,41 +511,56 @@ class DailyProgress(models.Model):
             return 0
         return round((self.fat_consumed / self.target_fat) * 100, 1)
     
-    def update_progress(self):
+    def update_progress(self, meals_qs=None):
         """
         Update progress based on completed meals.
+        Uses aggregation to avoid N+1 queries.
+        
+        Args:
+            meals_qs: Optional queryset of meals to reuse existing data if available.
         """
-        from django.utils import timezone
+        from django.db.models import Sum, F, Count, Q
         
-        # Get all meals for this day
-        meals = self.diet_plan.meals.filter(date=self.date)
-        self.total_meals = meals.count()
-        self.meals_completed = sum(1 for meal in meals if meal.is_completed)
+        # Use provided queryset or fetch efficient queryset
+        if meals_qs is None:
+            meals_qs = self.diet_plan.meals.filter(date=self.date)
+            
+        # 1. Update basic meal counters (single query)
+        counts = meals_qs.aggregate(
+            total=Count('id'),
+            completed=Count('id', filter=Q(is_completed=True))
+        )
+        self.total_meals = counts['total'] or 0
+        self.meals_completed = counts['completed'] or 0
         
-        # Calculate consumed nutrition
-        total_calories = 0
-        total_protein = 0
-        total_carbs = 0
-        total_fat = 0
+        # 2. Calculate nutrition via database aggregation (Single Complex Query)
+        # We need to aggregate across all components of completed meals
+        # This avoids iterating thousands of components in Python
+        stats = MealComponent.objects.filter(
+            meal__diet_plan=self.diet_plan, 
+            meal__date=self.date, 
+            meal__is_completed=True
+        ).aggregate(
+            total_calories=Sum(F('quantity') / F('food__serving_size_grams') * F('food__calories')),
+            total_protein=Sum(F('quantity') / F('food__serving_size_grams') * F('food__protein')),
+            total_carbs=Sum(F('quantity') / F('food__serving_size_grams') * F('food__carbs')),
+            total_fat=Sum(F('quantity') / F('food__serving_size_grams') * F('food__fat'))
+        )
         
-        for meal in meals:
-            if meal.is_completed:
-                nutrition = meal.calculate_nutrition()
-                total_calories += nutrition['calories']
-                total_protein += nutrition['protein']
-                total_carbs += nutrition['carbs']
-                total_fat += nutrition['fat']
+        self.calories_consumed = round(stats['total_calories'] or 0, 1)
+        self.protein_consumed = round(stats['total_protein'] or 0, 1)
+        self.carbs_consumed = round(stats['total_carbs'] or 0, 1)
+        self.fat_consumed = round(stats['total_fat'] or 0, 1)
         
-        self.calories_consumed = total_calories
-        self.protein_consumed = total_protein
-        self.carbs_consumed = total_carbs
-        self.fat_consumed = total_fat
+        # Check completion status
+        self.is_day_completed = (self.total_meals > 0 and self.meals_completed == self.total_meals)
         
-        # Check if day is completed
-        if self.meals_completed == self.total_meals and self.total_meals > 0:
-            self.is_day_completed = True
+        if self.is_day_completed and not self.completed_at:
+            from django.utils import timezone
             self.completed_at = timezone.now()
-        
+        elif not self.is_day_completed:
+            self.completed_at = None
+            
         self.save()
 
 class DailyAdvice(models.Model):
