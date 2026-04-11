@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction
+from django.utils.translation import gettext as _
 from django.core.exceptions import ValidationError
 from django.http import Http404, HttpResponse
 from datetime import timedelta
@@ -62,7 +63,7 @@ class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             logger.error(f"Error fetching available plans: {str(e)}")
             return Response(
-                {'error': 'Failed to fetch subscription plans'},
+                {'error': _('Failed to fetch subscription plans')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -144,7 +145,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
                 logger.info(f"Cancelled subscription {subscription.id} for user {request.user.id}")
                 
                 return Response({
-                    'message': 'Subscription cancelled successfully',
+                    'message': _('Subscription cancelled successfully'),
                     'status': subscription.status
                 })
             
@@ -153,7 +154,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
         except Exception as e:
             logger.error(f"Error cancelling subscription: {str(e)}")
             return Response(
-                {'error': 'Failed to cancel subscription'},
+                {'error': _('Failed to cancel subscription')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -165,7 +166,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             
             if subscription.status not in ['active', 'expired']:
                 return Response(
-                    {'error': 'Subscription cannot be renewed'},
+                    {'error': _('Subscription cannot be renewed')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -188,14 +189,14 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             logger.info(f"Renewed subscription {subscription.id} for user {request.user.id}")
             
             return Response({
-                'message': 'Subscription renewed successfully',
+                'message': _('Subscription renewed successfully'),
                 'new_end_date': subscription.end_date
             })
             
         except Exception as e:
             logger.error(f"Error renewing subscription: {str(e)}")
             return Response(
-                {'error': 'Failed to renew subscription'},
+                {'error': _('Failed to renew subscription')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -208,13 +209,13 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
         except Subscription.DoesNotExist:
             return Response(
-                {'message': 'No active subscription'},
+                {'message': _('No active subscription')},
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
             logger.error(f"Error fetching current subscription: {str(e)}")
             return Response(
-                {'error': 'Failed to fetch subscription'},
+                {'error': _('Failed to fetch subscription')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -229,7 +230,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
         except Exception as e:
             logger.error(f"Error fetching usage statistics: {str(e)}")
             return Response(
-                {'error': 'Failed to fetch usage statistics'},
+                {'error': _('Failed to fetch usage statistics')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -258,7 +259,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             # Validate payment can be confirmed
             if payment.status not in ['pending', 'failed']:
                 return Response(
-                    {'error': 'Payment cannot be confirmed'},
+                    {'error': _('Payment cannot be confirmed')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -273,12 +274,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
             
             logger.info(f"Confirmed payment {payment.id} for subscription {subscription.id}")
             
-            return Response({'message': 'Payment confirmed'})
+            return Response({'message': _('Payment confirmed')})
             
         except Exception as e:
             logger.error(f"Error confirming payment: {str(e)}")
             return Response(
-                {'error': 'Failed to confirm payment'},
+                {'error': _('Failed to confirm payment')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -324,7 +325,7 @@ class SubscriptionManagementView(APIView):
         except Exception as e:
             logger.error(f"Error fetching subscription statistics: {str(e)}")
             return Response(
-                {'error': 'Failed to fetch statistics'},
+                {'error': _('Failed to fetch statistics')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -337,7 +338,7 @@ class SubscriptionManagementView(APIView):
             
             if not user_id or not plan_id:
                 return Response(
-                    {'error': 'user_id and plan_id are required'},
+                    {'error': _('user_id and plan_id are required')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -346,7 +347,7 @@ class SubscriptionManagementView(APIView):
                 plan = SubscriptionPlan.objects.get(id=plan_id)
             except (CustomUser.DoesNotExist, SubscriptionPlan.DoesNotExist):
                 return Response(
-                    {'error': 'Invalid user or plan ID'},
+                    {'error': _('Invalid user or plan ID')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -380,7 +381,7 @@ class SubscriptionManagementView(APIView):
         except Exception as e:
             logger.error(f"Error creating trial subscription: {str(e)}")
             return Response(
-                {'error': 'Failed to create trial subscription'},
+                {'error': _('Failed to create trial subscription')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -396,7 +397,7 @@ class SubscriptionAccessView(APIView):
             
             if not isinstance(features, list):
                 return Response(
-                    {'error': 'features must be a list'},
+                    {'error': _('features must be a list')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -405,7 +406,7 @@ class SubscriptionAccessView(APIView):
                 if not subscription.is_active:
                     return Response({
                         'has_access': False,
-                        'message': 'No active subscription'
+                        'message': _('No active subscription')
                     })
                 
                 access_results = {}
@@ -433,13 +434,13 @@ class SubscriptionAccessView(APIView):
             except Subscription.DoesNotExist:
                 return Response({
                     'has_access': False,
-                    'message': 'No subscription found'
+                    'message': _('No subscription found')
                 })
                 
         except Exception as e:
             logger.error(f"Error checking subscription access: {str(e)}")
             return Response(
-                {'error': 'Failed to check access'},
+                {'error': _('Failed to check access')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -577,7 +578,7 @@ class PaymentGatewayView(APIView):
         except Exception as e:
             logger.error(f"Error getting available gateways: {str(e)}")
             return Response(
-                {'error': 'Failed to get available gateways'},
+                {'error': _('Failed to get available gateways')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -602,7 +603,7 @@ class PaymentGatewayView(APIView):
             # Validate inputs
             if not all([gateway_name, amount, subscription_id]):
                 return Response(
-                    {'error': 'Missing required fields'},
+                    {'error': _('Missing required fields')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -614,7 +615,7 @@ class PaymentGatewayView(APIView):
                 )
             except Subscription.DoesNotExist:
                 return Response(
-                    {'error': 'Subscription not found'},
+                    {'error': _('Subscription not found')},
                     status=status.HTTP_404_NOT_FOUND
                 )
             
@@ -667,7 +668,7 @@ class PaymentGatewayView(APIView):
         except Exception as e:
             logger.error(f"Error initiating payment: {str(e)}")
             return Response(
-                {'error': 'Failed to initiate payment'},
+                {'error': _('Failed to initiate payment')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -693,7 +694,7 @@ class PaymentStatusView(APIView):
                 )
             except Payment.DoesNotExist:
                 return Response(
-                    {'error': 'Payment not found'},
+                    {'error': _('Payment not found')},
                     status=status.HTTP_404_NOT_FOUND
                 )
             
@@ -735,6 +736,6 @@ class PaymentStatusView(APIView):
         except Exception as e:
             logger.error(f"Error checking payment status: {str(e)}")
             return Response(
-                {'error': 'Failed to check payment status'},
+                {'error': _('Failed to check payment status')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

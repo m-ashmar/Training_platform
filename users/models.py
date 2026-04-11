@@ -128,6 +128,19 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     
+    # User Preferences
+    preferred_language = models.CharField(
+        max_length=10, 
+        choices=settings.LANGUAGES, 
+        default=settings.LANGUAGE_CODE,
+        help_text="User's preferred language for notifications and API responses"
+    )
+    preferred_timezone = models.CharField(
+        max_length=50, 
+        default=getattr(settings, 'TIME_ZONE', 'UTC'),
+        help_text="User's preferred timezone for localized dates and times"
+    )
+    
     # Physical attributes (migrated from old fields - preserved for backward compatibility)
     height = models.FloatField(null=True, blank=True, help_text="Height in cm")
     weight = models.FloatField(null=True, blank=True, help_text="Weight in kg")
@@ -472,9 +485,14 @@ class DeviceToken(models.Model):
 
 class OTPVerification(models.Model):
     """
-    Model to store OTP codes for email verification during registration.
+    Model to store OTP codes for email verification and password reset.
     OTP expires after 10 minutes and can only be used once.
     """
+    PURPOSE_CHOICES = [
+        ('registration', 'Registration'),
+        ('password_reset', 'Password Reset'),
+    ]
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -482,6 +500,12 @@ class OTPVerification(models.Model):
     )
     otp_code = models.CharField(max_length=6, help_text="6-digit OTP code")
     email = models.EmailField(help_text="Email address for lookup")
+    purpose = models.CharField(
+        max_length=20,
+        choices=PURPOSE_CHOICES,
+        default='registration',
+        help_text="Purpose of this OTP (registration or password_reset)"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(help_text="OTP expiration time (10 minutes from creation)")
     is_verified = models.BooleanField(default=False, help_text="Whether this OTP has been used")
@@ -493,6 +517,7 @@ class OTPVerification(models.Model):
         indexes = [
             models.Index(fields=['email', 'otp_code', 'is_verified']),
             models.Index(fields=['expires_at']),
+            models.Index(fields=['purpose', 'is_verified']),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -503,9 +528,42 @@ class OTPVerification(models.Model):
         ]
 
     def __str__(self):
-        return f"OTP for {self.email} - {self.otp_code} ({'verified' if self.is_verified else 'pending'})"
+        return f"OTP ({self.purpose}) for {self.email} - {self.otp_code} ({'verified' if self.is_verified else 'pending'})"
 
     def is_valid(self):
         """Check if OTP is still valid (not expired and not used)."""
         from django.utils import timezone
         return not self.is_verified and timezone.now() < self.expires_at
+
+
+class PasswordResetToken(models.Model):
+    """
+    Single-use token issued after successful OTP verification for password reset.
+    The token is consumed when the user submits a new password.
+    Expires after 15 minutes.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='password_reset_tokens'
+    )
+    token = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(help_text="Token expiration time (15 minutes from creation)")
+    is_used = models.BooleanField(default=False, help_text="Whether this token has been consumed")
+    used_at = models.DateTimeField(null=True, blank=True, help_text="When the token was consumed")
+
+    class Meta:
+        verbose_name = "Password Reset Token"
+        verbose_name_plural = "Password Reset Tokens"
+        indexes = [
+            models.Index(fields=['token', 'is_used']),
+            models.Index(fields=['expires_at']),
+        ]
+
+    def __str__(self):
+        return f"Reset token for {self.user.email} ({'used' if self.is_used else 'active'})"
+
+    def is_valid(self):
+        """Check if token is still valid (not expired and not used)."""
+        return not self.is_used and timezone.now() < self.expires_at

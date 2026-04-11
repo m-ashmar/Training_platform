@@ -3,9 +3,55 @@ from celery import shared_task
 from django.contrib.auth import get_user_model
 from .firebase_service import FirebaseNotificationService
 from users.models import DeviceToken
+from .feed_cache import push_post_to_global_stream, get_redis_client
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+
+@shared_task
+def fan_out_post_root(author_id, post_id, timestamp):
+    from .models import Follow
+    
+    follower_count = Follow.objects.filter(following_id=author_id).count()
+    
+    # HYBRID FAN-OUT: If > 10K followers, push globally.
+    if follower_count > 10000:
+        push_post_to_global_stream(post_id, timestamp)
+        return
+
+    # Chunk over followers to drop memory overhead
+    followers_iter = Follow.objects.filter(following_id=author_id).values_list('follower_id', flat=True).iterator(chunk_size=1000)
+    
+    batch = [author_id]  # Push to their own feed
+    for f_id in followers_iter:
+        batch.append(f_id)
+        if len(batch) >= 500:
+            fan_out_batch.delay(batch, post_id, timestamp)
+            batch = []
+            
+    if batch:
+        fan_out_batch.delay(batch, post_id, timestamp)
+
+
+@shared_task
+def fan_out_batch(user_ids, post_id, timestamp):
+    redis_cli = get_redis_client()
+    if not redis_cli:
+        return
+        
+    pipeline = redis_cli.pipeline()
+    for uid in user_ids:
+        key = f"feed:v1:{uid}"
+        pipeline.zadd(key, {str(post_id): timestamp})
+        pipeline.zremrangebyrank(key, 0, -501)
+        pipeline.expire(key, 86400)  # 24h expiration
+        
+    try:
+        pipeline.execute()
+    except Exception as e:
+        logger.error(f"Redis pipeline batch execute failed: {e}")
+
 
 @shared_task
 def send_firebase_notification(user_id, title, body, data=None):

@@ -1,0 +1,1906 @@
+# Arabic translations for Training Platform
+# Copyright (C) 2026 Training Platform
+# This file is distributed under the same license as the PACKAGE package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Training Platform 1.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-04 02:54+0000\n"
+"PO-Revision-Date: 2026-03-01 23:30+0400\n"
+"Last-Translator: Training Platform Team\n"
+"Language-Team: Arabic\n"
+"Language: ar\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=6; plural=n==0 ? 0 : n==1 ? 1 : n==2 ? 2 : n%100>=3 "
+"&& n%100<=10 ? 3 : n%100>=11 && n%100<=99 ? 4 : 5;\n"
+
+#: achievements/views.py:232
+msgid "Achievement check complete."
+msgstr ""
+
+#: achievements/views.py:277
+msgid "Achievement featured"
+msgstr ""
+
+#: achievements/views.py:277
+msgid "Achievement unfeatured"
+msgstr ""
+
+#: ai_assistant/consumers.py:76
+msgid "Connected to AI Assistant. How can I help you today?"
+msgstr ""
+
+#: ai_assistant/consumers.py:103
+#, fuzzy
+#| msgid "Invalid meal or macro"
+msgid "Invalid message format."
+msgstr "وجبة غير صالحة أو ماكرو"
+
+#: ai_assistant/consumers.py:118
+#, python-format
+msgid "Unknown message type: %(type)s"
+msgstr ""
+
+#: ai_assistant/consumers.py:132 ai_assistant/services/chat_service.py:72
+#, fuzzy
+#| msgid "Usage count cannot be negative"
+msgid "Message cannot be empty."
+msgstr "عدد الاستخدامات لا يمكن أن يكون سالباً"
+
+#: ai_assistant/consumers.py:142
+#, python-format
+msgid "Daily message limit reached. Resets at %(time)s."
+msgstr ""
+
+#: ai_assistant/consumers.py:170
+#, fuzzy
+#| msgid "Failed to send OTP. Please try again later."
+msgid "Something went wrong. Please try again."
+msgstr "فشل في إرسال رمز التحقق. يرجى المحاولة مرة أخرى لاحقاً."
+
+#: ai_assistant/consumers.py:183
+msgid "Feedback must be 'positive' or 'negative'."
+msgstr ""
+
+#: ai_assistant/consumers.py:191
+#, fuzzy
+#| msgid "api_id is required"
+msgid "message_id is required."
+msgstr "api_id مطلوب"
+
+#: ai_assistant/consumers.py:199
+msgid "Thanks for the feedback!"
+msgstr ""
+
+#: ai_assistant/consumers.py:199
+msgid "Could not save feedback."
+msgstr ""
+
+#: ai_assistant/services/chat_service.py:76
+msgid "Getting ready..."
+msgstr ""
+
+#: ai_assistant/services/chat_service.py:319
+msgid "This data took too long to fetch."
+msgstr ""
+
+#: ai_assistant/services/chat_service.py:322
+msgid "Could not fetch this data right now."
+msgstr ""
+
+#: ai_assistant/tools/diet_tools.py:22
+msgid "No active diet plan found."
+msgstr ""
+
+#: ai_assistant/tools/diet_tools.py:60 ai_assistant/tools/diet_tools.py:108
+#, fuzzy
+#| msgid "No active subscription"
+msgid "No active diet plan."
+msgstr "لا يوجد اشتراك نشط"
+
+#: ai_assistant/tools/routine_tools.py:25
+#, fuzzy
+#| msgid "Routine not found."
+msgid "No active routines found."
+msgstr "البرنامج التدريبي غير موجود."
+
+#: ai_assistant/views.py:122
+msgid "Feedback saved. Thank you!"
+msgstr ""
+
+#: ai_assistant/views.py:158
+msgid "All AI data has been deleted."
+msgstr ""
+
+#: diet/models.py:100
+#, fuzzy
+#| msgid "Price cannot be negative"
+msgid "Calories cannot be negative"
+msgstr "لا يمكن أن يكون السعر سالباً"
+
+#: diet/models.py:102
+#, fuzzy
+#| msgid "Price cannot be negative"
+msgid "Protein cannot be negative"
+msgstr "لا يمكن أن يكون السعر سالباً"
+
+#: diet/models.py:104
+#, fuzzy
+#| msgid "Price cannot be negative"
+msgid "Carbs cannot be negative"
+msgstr "لا يمكن أن يكون السعر سالباً"
+
+#: diet/models.py:106
+#, fuzzy
+#| msgid "Limit cannot be negative"
+msgid "Fat cannot be negative"
+msgstr "الحد لا يمكن أن يكون سالباً"
+
+#: diet/trainer_services.py:35
+msgid "User must be a trainer to use this service"
+msgstr ""
+
+#: diet/trainer_services.py:93
+#, fuzzy
+#| msgid "You can only view plans you created"
+msgid "You can only create diet plans for your assigned clients"
+msgstr "يمكنك فقط عرض الخطط التي أنشأتها"
+
+#: diet/trainer_services.py:142
+#, fuzzy
+#| msgid "You can only view plans you created"
+msgid "You can only modify diet plans you created"
+msgstr "يمكنك فقط عرض الخطط التي أنشأتها"
+
+#: diet/trainer_services.py:187
+#, fuzzy
+#| msgid "You can only view plans you created"
+msgid "You can only modify meals in plans you created"
+msgstr "يمكنك فقط عرض الخطط التي أنشأتها"
+
+#: diet/trainer_services.py:225
+#, fuzzy
+#| msgid "You can only view plans you created"
+msgid "You can only delete meals in plans you created"
+msgstr "يمكنك فقط عرض الخطط التي أنشأتها"
+
+#: diet/trainer_services.py:241
+#, fuzzy
+#| msgid "You can only view plans you created"
+msgid "You can only view diet plans for your assigned clients"
+msgstr "يمكنك فقط عرض الخطط التي أنشأتها"
+
+#: diet/trainer_services.py:313
+msgid "User must be a client to use this service"
+msgstr ""
+
+#: diet/trainer_services.py:333
+#, fuzzy
+#| msgid "You can only view your own diet plans"
+msgid "You can only complete your own meal components"
+msgstr "يمكنك فقط عرض خطط النظام الغذائي الخاصة بك"
+
+#: diet/trainer_services.py:352
+#, fuzzy
+#| msgid "You can only view your own diet plans"
+msgid "You can only rate your own meals"
+msgstr "يمكنك فقط عرض خطط النظام الغذائي الخاصة بك"
+
+#: diet/trainer_services.py:447
+#, fuzzy
+#| msgid "You can only view your own diet plans"
+msgid "You can only view your own meals"
+msgstr "يمكنك فقط عرض خطط النظام الغذائي الخاصة بك"
+
+#: diet/trainer_services.py:670
+#, fuzzy
+#| msgid "You can only view your own diet plans"
+msgid "You can only complete your own meals"
+msgstr "يمكنك فقط عرض خطط النظام الغذائي الخاصة بك"
+
+#: diet/validators.py:29
+#, fuzzy
+#| msgid "current_value must be a valid number"
+msgid "Daily calories must be a number."
+msgstr "القيمة الحالية يجب أن تكون رقماً صحيحاً"
+
+#: diet/validators.py:34
+#, python-format
+msgid "Daily calories too low. Minimum is %(min)s kcal."
+msgstr ""
+
+#: diet/validators.py:40
+#, python-format
+msgid "Daily calories too high. Maximum is %(max)s kcal."
+msgstr ""
+
+#: diet/validators.py:53
+#, fuzzy
+#| msgid "Target must be a client"
+msgid "Meal count must be an integer."
+msgstr "يجب أن يكون الهدف عميلاً"
+
+#: diet/validators.py:58
+#, fuzzy
+#| msgid "Duration must be at least 1 day"
+msgid "Meal count must be at least 1."
+msgstr "مدة الاشتراك يجب أن تكون يوماً واحداً على الأقل"
+
+#: diet/validators.py:63
+#, fuzzy
+#| msgid "Usage count cannot be negative"
+msgid "Meal count cannot exceed 6."
+msgstr "عدد الاستخدامات لا يمكن أن يكون سالباً"
+
+#: diet/validators.py:75
+#, fuzzy
+#| msgid "Duration must be greater than 0"
+msgid "Duration days must be an integer."
+msgstr "المدة يجب أن تكون أكبر من 0"
+
+#: diet/validators.py:80
+#, fuzzy
+#| msgid "Duration must be at least 1 day"
+msgid "Duration must be at least 1 day."
+msgstr "مدة الاشتراك يجب أن تكون يوماً واحداً على الأقل"
+
+#: diet/validators.py:85
+#, fuzzy
+#| msgid "Trainers cannot generate AI diet plans."
+msgid "Duration cannot exceed 30 days."
+msgstr "لا يمكن للمدربين إنشاء خطط النظام الغذائي باستخدام الذكاء الاصطناعي."
+
+#: diet/validators.py:97
+#, fuzzy
+#| msgid "current_value must be a valid number"
+msgid "Quantity must be a number."
+msgstr "القيمة الحالية يجب أن تكون رقماً صحيحاً"
+
+#: diet/validators.py:102
+#, python-format
+msgid "Quantity too low. Minimum is %(min)sg."
+msgstr ""
+
+#: diet/validators.py:108
+#, python-format
+msgid "Quantity too high. Maximum is %(max)sg."
+msgstr ""
+
+#: diet/validators.py:123
+#, fuzzy
+#| msgid "current_value must be a valid number"
+msgid "Macro targets must be numbers."
+msgstr "القيمة الحالية يجب أن تكون رقماً صحيحاً"
+
+#: diet/validators.py:129
+#, fuzzy
+#| msgid "Max routines cannot be negative"
+msgid "Macro targets cannot be negative."
+msgstr "الحد الأقصى للتمارين لا يمكن أن يكون سالباً"
+
+#: diet/validators.py:135
+msgid "Protein target too low. Minimum is 30g per day."
+msgstr ""
+
+#: diet/validators.py:140
+msgid "Carb target too low. Minimum is 20g per day."
+msgstr ""
+
+#: diet/validators.py:145
+msgid "Fat target too low. Minimum is 20g per day."
+msgstr ""
+
+#: diet/validators.py:151
+msgid "Protein target too high. Maximum is 400g per day."
+msgstr ""
+
+#: diet/validators.py:156
+msgid "Carb target too high. Maximum is 800g per day."
+msgstr ""
+
+#: diet/validators.py:161
+msgid "Fat target too high. Maximum is 200g per day."
+msgstr ""
+
+#: diet/validators.py:168
+msgid "Total calories from macros is too low."
+msgstr ""
+
+#: diet/validators.py:173
+msgid "Total calories from macros is too high."
+msgstr ""
+
+#: diet/validators.py:186
+#, fuzzy, python-format
+#| msgid "Missing required fields"
+msgid "Missing required field: %(field)s"
+msgstr "حقول مطلوبة مفقودة"
+
+#: diet/validators.py:193
+msgid "Food name cannot be empty."
+msgstr ""
+
+#: diet/validators.py:198
+msgid "Food name too long (max 255 characters)."
+msgstr ""
+
+#: diet/validators.py:210
+#, fuzzy
+#| msgid "current_value must be a valid number"
+msgid "Nutritional values must be numbers."
+msgstr "القيمة الحالية يجب أن تكون رقماً صحيحاً"
+
+#: diet/validators.py:216
+#, fuzzy
+#| msgid "Max meals cannot be negative"
+msgid "Nutritional values cannot be negative."
+msgstr "الحد الأقصى للوجبات لا يمكن أن يكون سالباً"
+
+#: diet/validators.py:222
+msgid "Serving size too small."
+msgstr ""
+
+#: diet/validators.py:227
+msgid "Serving size too large."
+msgstr ""
+
+#: diet/validators.py:236
+msgid "Calories don't match macros. Check if values are correct."
+msgstr ""
+
+#: diet/validators.py:249
+msgid "Food ID must be an integer."
+msgstr ""
+
+#: diet/validators.py:254
+msgid "Food ID must be positive."
+msgstr ""
+
+#: diet/validators.py:280
+msgid "Snack count must be an integer."
+msgstr ""
+
+#: diet/validators.py:285
+msgid "Snack count must be between 0 and 3."
+msgstr ""
+
+#: diet/validators.py:302
+#, fuzzy
+#| msgid "Invalid start_date format. Use YYYY-MM-DD."
+msgid "Invalid start date format. Use YYYY-MM-DD."
+msgstr "تنسيق start_date غير صالح. استخدم YYYY-MM-DD."
+
+#: diet/views.py:322
+msgid "Failed to load category preferences"
+msgstr "فشل تحميل تفضيلات الفئة"
+
+#: diet/views.py:331
+msgid "food_id, meal, and macro are required"
+msgstr "مطلوبة food_id، ووجبة، وماكرو"
+
+#: diet/views.py:337
+msgid "Invalid meal or macro"
+msgstr "وجبة غير صالحة أو ماكرو"
+
+#: diet/views.py:344
+msgid "Food must be liked before categorization"
+msgstr "يجب أن يكون الطعام محبوبًا قبل التصنيف"
+
+#: diet/views.py:361
+msgid "Failed to set category preference"
+msgstr "فشل في تعيين تفضيلات الفئة"
+
+#: diet/views.py:372
+msgid "Provide meal and/or macro to update"
+msgstr "توفير وجبة و/أو ماكرو للتحديث"
+
+#: diet/views.py:377
+msgid "Invalid meal"
+msgstr "وجبة غير صالحة"
+
+#: diet/views.py:379
+msgid "Invalid macro"
+msgstr "ماكرو غير صالح"
+
+#: diet/views.py:395
+msgid "Failed to update category preference"
+msgstr "فشل تحديث تفضيلات الفئة"
+
+#: diet/views.py:401
+msgid "Category preference deleted"
+msgstr "تم حذف تفضيلات الفئة"
+
+#: diet/views.py:404
+msgid "Failed to delete category preference"
+msgstr "فشل في حذف تفضيلات الفئة"
+
+#: diet/views.py:418
+msgid "api_id is required"
+msgstr "api_id مطلوب"
+
+#: diet/views.py:424
+msgid "Food item already exists"
+msgstr "العنصر الغذائي موجود بالفعل"
+
+#: diet/views.py:460
+msgid "Food item imported successfully"
+msgstr "تم استيراد المادة الغذائية بنجاح"
+
+#: diet/views.py:469
+msgid "Failed to import food item"
+msgstr "فشل استيراد المواد الغذائية"
+
+#: diet/views.py:580
+msgid "Failed to retrieve user preferences"
+msgstr "فشل في استرداد تفضيلات المستخدم"
+
+#: diet/views.py:591
+msgid "food_id is required"
+msgstr "مطلوب food_id"
+
+#: diet/views.py:595 diet/views.py:631
+msgid "Food not found"
+msgstr "لم يتم العثور على الطعام"
+
+#: diet/views.py:599 diet/views.py:603
+msgid "Preference updated"
+msgstr "تم تحديث التفضيل"
+
+#: diet/views.py:604 diet/views.py:638
+msgid "Invalid action"
+msgstr "إجراء غير صالح"
+
+#: diet/views.py:618
+msgid "Preferences updated successfully"
+msgstr "تم تحديث التفضيلات بنجاح"
+
+#: diet/views.py:621
+msgid "Failed to update preferences"
+msgstr "فشل في تحديث التفضيلات"
+
+#: diet/views.py:634
+msgid "Removed from likes"
+msgstr "تمت الإزالة من الإعجابات"
+
+#: diet/views.py:637
+msgid "Removed from dislikes"
+msgstr "تمت الإزالة من عدم الإعجاب"
+
+#: diet/views.py:645
+msgid "Preferences cleared successfully"
+msgstr "تم مسح التفضيلات بنجاح"
+
+#: diet/views.py:648
+msgid "Failed to clear preferences"
+msgstr "فشل في مسح التفضيلات"
+
+#: diet/views.py:690
+msgid "Diet plan generation started"
+msgstr ""
+
+#: diet/views.py:713
+msgid "Trainers cannot generate AI diet plans."
+msgstr "لا يمكن للمدربين إنشاء خطط النظام الغذائي باستخدام الذكاء الاصطناعي."
+
+#: diet/views.py:721
+msgid "Invalid start_date format. Use YYYY-MM-DD."
+msgstr "تنسيق start_date غير صالح. استخدم YYYY-MM-DD."
+
+#: diet/views.py:735
+msgid "OpenAI provider error"
+msgstr ""
+
+#: diet/views.py:738
+msgid "AI output parsing error"
+msgstr ""
+
+#: diet/views.py:741 diet/views.py:874
+msgid "Persistence error"
+msgstr ""
+
+#: diet/views.py:744
+msgid "Failed to generate plan"
+msgstr "فشل في إنشاء الخطة"
+
+#: diet/views.py:756
+msgid "Trainers cannot generate client plans here."
+msgstr "لا يمكن للمدربين إنشاء خطط العميل هنا."
+
+#: diet/views.py:877
+msgid "Failed to generate rule-based plan"
+msgstr "فشل في إنشاء خطة مستندة إلى القواعد"
+
+#: diet/views.py:892
+msgid "No advice available"
+msgstr ""
+
+#: diet/views.py:1025
+#, fuzzy
+#| msgid "Details updated successfully!"
+msgid "Diet plan created successfully"
+msgstr "تم تحديث البيانات بنجاح!"
+
+#: diet/views.py:1203
+#, fuzzy
+#| msgid "Details updated successfully!"
+msgid "Meal added successfully"
+msgstr "تم تحديث البيانات بنجاح!"
+
+#: diet/views.py:1248
+#, fuzzy
+#| msgid "Details updated successfully!"
+msgid "Meal updated successfully"
+msgstr "تم تحديث البيانات بنجاح!"
+
+#: diet/views.py:1283
+#, fuzzy
+#| msgid "Details updated successfully!"
+msgid "Meal deleted successfully"
+msgstr "تم تحديث البيانات بنجاح!"
+
+#: diet/views.py:1666
+#, fuzzy
+#| msgid "Details updated successfully!"
+msgid "Meal completed successfully"
+msgstr "تم تحديث البيانات بنجاح!"
+
+#: diet/views.py:1691 diet/views.py:1819
+#, fuzzy
+#| msgid "Client profile updated successfully!"
+msgid "Component completed successfully"
+msgstr "تم تحديث ملف العميل بنجاح!"
+
+#: diet/views.py:1843
+#, fuzzy
+#| msgid "Details updated successfully!"
+msgid "Meal rated successfully"
+msgstr "تم تحديث البيانات بنجاح!"
+
+#: diet/views.py:1936
+#, fuzzy
+#| msgid "An error occurred while listing client profiles"
+msgid "An error occurred while loading your plans."
+msgstr "حدث خطأ أثناء عرض ملفات العملاء"
+
+#: diet/views.py:1951
+msgid "You can only view your own diet plans"
+msgstr "يمكنك فقط عرض خطط النظام الغذائي الخاصة بك"
+
+#: diet/views.py:1953
+msgid "You can only view plans you created"
+msgstr "يمكنك فقط عرض الخطط التي أنشأتها"
+
+#: diet/views.py:2083
+#, fuzzy
+#| msgid "An error occurred while listing client profiles"
+msgid "An error occurred while loading meal details."
+msgstr "حدث خطأ أثناء عرض ملفات العملاء"
+
+#: notifications/domain/events.py:44
+msgid "New Like"
+msgstr ""
+
+#: notifications/domain/events.py:45
+#, python-format
+msgid "%(actor)s liked your post."
+msgstr ""
+
+#: notifications/domain/events.py:54
+msgid "New Comment"
+msgstr ""
+
+#: notifications/domain/events.py:55
+#, python-format
+msgid "%(actor)s commented on your post: %(preview)s"
+msgstr ""
+
+#: notifications/domain/events.py:66
+#, fuzzy
+#| msgid "Not allowed"
+msgid "New Follower"
+msgstr "غير مسموح"
+
+#: notifications/domain/events.py:67
+#, python-format
+msgid "%(actor)s started following you."
+msgstr ""
+
+#: notifications/domain/events.py:75
+msgid "Achievement Unlocked! 🏆"
+msgstr ""
+
+#: notifications/domain/events.py:76
+#, python-format
+msgid "You earned the \"%(name)s\" achievement! +%(points)s points"
+msgstr ""
+
+#: notifications/domain/events.py:86
+msgid "Challenge Progress Update"
+msgstr ""
+
+#: notifications/domain/events.py:87
+#, python-format
+msgid "Great job! You made progress in \"%(title)s\" — %(progress)s %(unit)s"
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:23
+msgid "Trainer Assignment Request"
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:24
+#, python-format
+msgid "Trainer %(name)s has requested to assign you as a client."
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:35
+msgid "Trainer Unassignment"
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:36
+#, python-format
+msgid "Trainer %(name)s has unassigned you."
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:47
+msgid "New Client Request"
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:48
+#, python-format
+msgid "%(name)s has requested to join your training."
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:59
+msgid "Request Approved"
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:60
+#, python-format
+msgid "Your request to trainer %(name)s has been approved."
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:71
+msgid "Request Rejected"
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:72
+#, python-format
+msgid "Your request to trainer %(name)s has been rejected."
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:83
+msgid "Request Cancelled"
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:84
+#, python-format
+msgid "%(name)s has cancelled their trainer request."
+msgstr ""
+
+#: notifications/domain/trainer_client_events.py:95
+#, fuzzy
+#| msgid "Client is not assigned to you"
+msgid "Client Unassigned"
+msgstr "العميل غير مُعيّن لك"
+
+#: notifications/domain/trainer_client_events.py:96
+#, python-format
+msgid "%(name)s has unassigned from your training."
+msgstr ""
+
+#: notifications/template_resolver.py:71
+#, fuzzy
+#| msgid "New Notification"
+msgid "You have a new notification."
+msgstr "إشعار جديد"
+
+#: notifications/template_resolver.py:87 notifications/template_resolver.py:113
+#: notifications/template_resolver.py:129
+#, fuzzy
+#| msgid "New Notification"
+msgid "Notification"
+msgstr "إشعار جديد"
+
+#: routine/models.py:126
+#, fuzzy
+#| msgid "Only trainers and admins can create routines"
+msgid "Only trainers can create exercises"
+msgstr "يمكن للمدربين والمسؤولين فقط إنشاء البرامج التدريبية"
+
+#: routine/models.py:295
+#, fuzzy
+#| msgid "Only trainers and admins can create routines"
+msgid "Only trainers can create routines"
+msgstr "يمكن للمدربين والمسؤولين فقط إنشاء البرامج التدريبية"
+
+#: routine/models.py:300
+#, python-format
+msgid "User %(username)s is not a client"
+msgstr ""
+
+#: routine/models.py:302
+#, fuzzy, python-format
+#| msgid "Client is already assigned to another trainer"
+msgid "User %(username)s is not assigned to trainer %(trainer)s"
+msgstr "تم تعيين العميل بالفعل لمدرب آخر"
+
+#: routine/models.py:432
+#, python-format
+msgid "Day %(day)s exceeds routine duration of %(days)s days"
+msgstr ""
+
+#: routine/models.py:436
+#, python-format
+msgid "Exercise %(name)s is not accessible to routine creator"
+msgstr ""
+
+#: routine/models.py:655
+msgid "RPE must be between 1 and 10"
+msgstr ""
+
+#: routine/models.py:745
+#, fuzzy
+#| msgid "Only trainers and admins can create routines"
+msgid "Only trainers can create templates"
+msgstr "يمكن للمدربين والمسؤولين فقط إنشاء البرامج التدريبية"
+
+#: routine/serializers.py:83
+msgid "Exercise image size must be under 5MB."
+msgstr "يجب أن يكون حجم صورة التمرين أقل من 5 ميغابايت."
+
+#: routine/serializers.py:86 users/serializers.py:136 users/serializers.py:189
+#: users/serializers.py:233 users/serializers.py:269
+msgid "Only JPEG, PNG, and WebP images are allowed."
+msgstr "يُسمح فقط بصور JPEG و PNG و WebP."
+
+#: routine/serializers.py:119
+msgid "You can only add exercises to routines you created."
+msgstr "يمكنك فقط إضافة تمارين إلى البرامج التي أنشأتها."
+
+#: routine/serializers.py:128
+msgid "You can only assign your own exercises or global exercises."
+msgstr "يمكنك فقط تعيين تمارينك الخاصة أو التمارين العامة."
+
+#: routine/serializers.py:240
+msgid "Only trainers and admins can create routines"
+msgstr "يمكن للمدربين والمسؤولين فقط إنشاء البرامج التدريبية"
+
+#: routine/serializers.py:575 users/serializers.py:195
+msgid "This serializer is only for trainers"
+msgstr "هذا الكائن خاص بالمدربين فقط"
+
+#: routine/serializers.py:655
+msgid "This serializer is only for client profiles"
+msgstr "هذا الكائن خاص بالعملاء فقط"
+
+#: routine/views.py:254
+#, fuzzy
+#| msgid "Preferences cleared successfully"
+msgid "Exercise created successfully"
+msgstr "تم مسح التفضيلات بنجاح"
+
+#: routine/views.py:424
+#, fuzzy
+#| msgid "Token reassigned successfully"
+msgid "Routine assigned successfully."
+msgstr "تمت إعادة تعيين الرمز المميز بنجاح"
+
+#: routine/views.py:535
+msgid "You are not authorized to update this routine."
+msgstr "غير مصرح لك بتحديث هذا البرنامج التدريبي."
+
+#: routine/views.py:538
+msgid "Day and status are required."
+msgstr "اليوم والحالة مطلوبان."
+
+#: routine/views.py:543
+#, python-format
+msgid "Day %(day)s is not part of the routine."
+msgstr "اليوم %(day)s ليس جزءًا من الروتين."
+
+#: routine/views.py:548
+#, fuzzy
+#| msgid "Invalid refresh token"
+msgid "Invalid progress update."
+msgstr "رمز التحديث غير صالح"
+
+#: routine/views.py:551
+#, fuzzy
+#| msgid "Progress updated successfully"
+msgid "Progress updated successfully."
+msgstr "تم تحديث التقدم بنجاح"
+
+#: routine/views.py:578
+msgid "Progress tracking endpoint - implementation pending"
+msgstr ""
+
+#: routine/views.py:690
+msgid "A set log for this progress, set number, and date already exists."
+msgstr "سجل المجموعة لهذا التقدم ورقم المجموعة والتاريخ موجود بالفعل."
+
+#: routine/views.py:704
+msgid "Only clients can view their own progress."
+msgstr "يمكن للعملاء فقط عرض تقدمهم الشخصي."
+
+#: routine/views.py:752 routine/views.py:1541
+msgid "routine_id, day, and date are required."
+msgstr "معرف البرنامج واليوم والتاريخ مطلوبون."
+
+#: routine/views.py:757 routine/views.py:1546
+msgid "Routine not found."
+msgstr "البرنامج التدريبي غير موجود."
+
+#: routine/views.py:883 social/views.py:103 social/views.py:133
+#: social/views.py:788
+msgid "User not found"
+msgstr "المستخدم غير موجود"
+
+#: routine/views.py:1009
+msgid "User not found."
+msgstr "المستخدم غير موجود."
+
+#: routine/views.py:1095 users/test_i18n.py:118
+msgid "Permission denied."
+msgstr "تم رفض الإذن."
+
+#: routine/views.py:1306
+msgid "client_id required"
+msgstr "معرف العميل مطلوب"
+
+#: routine/views.py:1312 users/views.py:705
+msgid "Client not found"
+msgstr "العميل غير موجود"
+
+#: routine/views.py:1316
+msgid "Permission denied. You can only assign routines to your own clients."
+msgstr "تم رفض الإذن. يمكنك فقط تعيين البرامج التدريبية لعملائك."
+
+#: routine/views.py:1365
+msgid "Can only copy public templates"
+msgstr "يمكن نسخ القوالب العامة فقط"
+
+#: routine/views.py:1368
+msgid "Cannot copy your own template"
+msgstr "لا يمكنك نسخ القالب الخاص بك"
+
+#: routine/views.py:1401
+msgid "Only trainers can access this endpoint"
+msgstr "يمكن للمدربين فقط الوصول إلى هذه النقطة"
+
+#: routine/views.py:1496
+msgid "A progress record for this user, exercise, and date already exists."
+msgstr "سجل التقدم لهذا المستخدم والتمرين والتاريخ موجود بالفعل."
+
+#: routine/views.py:1513
+msgid "Invalid date format. Use YYYY-MM-DD."
+msgstr "تنسيق التاريخ غير صالح. استخدم YYYY-MM-DD."
+
+#: routine/views.py:1628
+#, fuzzy
+#| msgid "Profile picture uploaded successfully"
+msgid "Exercise image uploaded successfully"
+msgstr "تم تحميل الصورة الشخصية بنجاح"
+
+#: routine/views.py:1670
+#, fuzzy
+#| msgid "Profile picture removed successfully"
+msgid "Exercise image removed successfully"
+msgstr "تمت إزالة الصورة الشخصية بنجاح"
+
+#: routine/views.py:1674
+#, fuzzy
+#| msgid "No profile picture to remove"
+msgid "No image to remove"
+msgstr "لا توجد صورة للملف الشخصي لإزالتها"
+
+#: social/consumers.py:29
+msgid ""
+"WebSocket connected. DEPRECATED: Please migrate to Firebase Cloud Messaging."
+msgstr ""
+
+#: social/models.py:54
+#, fuzzy
+#| msgid "Cannot follow yourself"
+msgid "Users cannot follow themselves"
+msgstr "لا يمكنك متابعة نفسك"
+
+#: social/views.py:71 users/test_i18n.py:111
+msgid "Cannot follow yourself"
+msgstr "لا يمكنك متابعة نفسك"
+
+#: social/views.py:92
+msgid "Successfully followed user"
+msgstr "تمت متابعة المستخدم بنجاح"
+
+#: social/views.py:97
+msgid "Already following this user"
+msgstr "أنت تتابع هذا المستخدم بالفعل"
+
+#: social/views.py:127
+msgid "Successfully unfollowed user"
+msgstr "تم إلغاء متابعة المستخدم بنجاح"
+
+#: social/views.py:269
+msgid "Post liked"
+msgstr "تم الإعجاب بالمنشور"
+
+#: social/views.py:277
+msgid "Post unliked"
+msgstr "تم إلغاء الإعجاب بالمنشور"
+
+#: social/views.py:392
+msgid "Comment liked"
+msgstr "تم الإعجاب بالتعليق"
+
+#: social/views.py:397
+msgid "Comment unliked"
+msgstr "تم إلغاء الإعجاب بالتعليق"
+
+#: social/views.py:472
+msgid "Challenge is full"
+msgstr "التحدي ممتلئ"
+
+#: social/views.py:486
+msgid "Successfully joined challenge"
+msgstr "تم الانضمام للتحدي بنجاح"
+
+#: social/views.py:491
+msgid "Already participating in this challenge"
+msgstr "أنت مشارك بالفعل في هذا التحدي"
+
+#: social/views.py:545
+msgid "You are not participating in this challenge. Join first!"
+msgstr "أنت غير مشارك في هذا التحدي. انضم أولاً!"
+
+#: social/views.py:552
+msgid "This challenge is not currently active"
+msgstr "هذا التحدي غير نشط حالياً"
+
+#: social/views.py:561
+msgid "current_value is required"
+msgstr "القيمة الحالية مطلوبة"
+
+#: social/views.py:569
+msgid "current_value must be a valid number"
+msgstr "القيمة الحالية يجب أن تكون رقماً صحيحاً"
+
+#: social/views.py:613
+msgid "Progress updated successfully"
+msgstr "تم تحديث التقدم بنجاح"
+
+#: social/views.py:742
+msgid "Notification marked as read"
+msgstr "تم تحديد الإشعار كمقروء"
+
+#: social/views.py:755
+msgid "All notifications marked as read"
+msgstr "تم تحديد جميع الإشعارات كمقروءة"
+
+#: social/views.py:782
+msgid "username is required"
+msgstr "اسم المستخدم مطلوب"
+
+#: subscription/gateways/baraka.py:91 subscription/gateways/bemo.py:91
+#: subscription/gateways/syriatel.py:90
+#, fuzzy
+#| msgid "Token unregistered successfully"
+msgid "Payment initiated successfully"
+msgstr "تم إلغاء تسجيل الرمز المميز بنجاح"
+
+#: subscription/gateways/baraka.py:188 subscription/gateways/bemo.py:188
+#: subscription/gateways/syriatel.py:183
+#, fuzzy
+#| msgid "Profile picture removed successfully"
+msgid "Payment status retrieved successfully"
+msgstr "تمت إزالة الصورة الشخصية بنجاح"
+
+#: subscription/gateways/baraka.py:247 subscription/gateways/bemo.py:247
+#: subscription/gateways/syriatel.py:241
+#, fuzzy
+#| msgid "Details updated successfully!"
+msgid "API call simulated successfully"
+msgstr "تم تحديث البيانات بنجاح!"
+
+#: subscription/models.py:25 subscription/models.py:62 users/test_i18n.py:90
+#: users/test_i18n.py:125
+msgid "Price cannot be negative"
+msgstr "لا يمكن أن يكون السعر سالباً"
+
+#: subscription/models.py:29
+msgid "Duration must be at least 1 day"
+msgstr "مدة الاشتراك يجب أن تكون يوماً واحداً على الأقل"
+
+#: subscription/models.py:43
+msgid "Max meals cannot be negative"
+msgstr "الحد الأقصى للوجبات لا يمكن أن يكون سالباً"
+
+#: subscription/models.py:47
+msgid "Max routines cannot be negative"
+msgstr "الحد الأقصى للتمارين لا يمكن أن يكون سالباً"
+
+#: subscription/models.py:64
+msgid "Duration must be greater than 0"
+msgstr "المدة يجب أن تكون أكبر من 0"
+
+#: subscription/models.py:134
+msgid "End date must be after start date"
+msgstr "تاريخ الانتهاء يجب أن يكون بعد تاريخ البدء"
+
+#: subscription/models.py:136
+msgid "Trial end date must be after start date"
+msgstr "تاريخ انتهاء الفترة التجريبية يجب أن يكون بعد تاريخ البدء"
+
+#: subscription/models.py:224
+msgid "Amount cannot be negative"
+msgstr "المبلغ لا يمكن أن يكون سالباً"
+
+#: subscription/models.py:270
+msgid "Payment amount cannot be negative"
+msgstr "مبلغ الدفع لا يمكن أن يكون سالباً"
+
+#: subscription/models.py:309 subscription/models.py:330
+msgid "Usage count cannot be negative"
+msgstr "عدد الاستخدامات لا يمكن أن يكون سالباً"
+
+#: subscription/models.py:313 subscription/models.py:332
+msgid "Limit cannot be negative"
+msgstr "الحد لا يمكن أن يكون سالباً"
+
+#: subscription/models.py:334
+msgid "Period end must be after period start"
+msgstr "نهاية الفترة يجب أن تكون بعد بداية الفترة"
+
+#: subscription/serializers.py:91
+msgid "Invalid plan ID"
+msgstr "معرف الخطة غير صالح"
+
+#: subscription/serializers.py:108
+msgid "Invalid or inactive plan"
+msgstr "خطة غير صالحة أو غير نشطة"
+
+#: subscription/serializers.py:117
+msgid "User already has a subscription"
+msgstr "المستخدم لديه اشتراك بالفعل"
+
+#: subscription/serializers.py:134
+msgid "Cannot update inactive subscription"
+msgstr "لا يمكن تحديث اشتراك غير نشط"
+
+#: subscription/serializers.py:145 subscription/utils.py:196
+#: subscription/views.py:437
+msgid "No subscription found"
+msgstr "لم يتم العثور على اشتراك"
+
+#: subscription/serializers.py:148
+msgid "Subscription is already cancelled or expired"
+msgstr "الاشتراك ملغى أو منتهي الصلاحية بالفعل"
+
+#: subscription/serializers.py:167
+msgid "Invalid subscription"
+msgstr "اشتراك غير صالح"
+
+#: subscription/utils.py:160 subscription/views.py:212
+#: subscription/views.py:409
+msgid "No active subscription"
+msgstr "لا يوجد اشتراك نشط"
+
+#: subscription/views.py:66
+msgid "Failed to fetch subscription plans"
+msgstr "فشل في جلب خطط الاشتراك"
+
+#: subscription/views.py:148
+msgid "Subscription cancelled successfully"
+msgstr "تم إلغاء الاشتراك بنجاح"
+
+#: subscription/views.py:157
+msgid "Failed to cancel subscription"
+msgstr "فشل في إلغاء الاشتراك"
+
+#: subscription/views.py:169
+msgid "Subscription cannot be renewed"
+msgstr "لا يمكن تجديد الاشتراك"
+
+#: subscription/views.py:192
+msgid "Subscription renewed successfully"
+msgstr "تم تجديد الاشتراك بنجاح"
+
+#: subscription/views.py:199
+msgid "Failed to renew subscription"
+msgstr "فشل في تجديد الاشتراك"
+
+#: subscription/views.py:218
+msgid "Failed to fetch subscription"
+msgstr "فشل في جلب الاشتراك"
+
+#: subscription/views.py:233
+msgid "Failed to fetch usage statistics"
+msgstr "فشل في جلب إحصائيات الاستخدام"
+
+#: subscription/views.py:262
+msgid "Payment cannot be confirmed"
+msgstr "لا يمكن تأكيد الدفع"
+
+#: subscription/views.py:277
+msgid "Payment confirmed"
+msgstr "تم تأكيد الدفع"
+
+#: subscription/views.py:282
+msgid "Failed to confirm payment"
+msgstr "فشل في تأكيد الدفع"
+
+#: subscription/views.py:328
+msgid "Failed to fetch statistics"
+msgstr "فشل في جلب الإحصائيات"
+
+#: subscription/views.py:341
+msgid "user_id and plan_id are required"
+msgstr "معرف المستخدم ومعرف الخطة مطلوبان"
+
+#: subscription/views.py:350
+msgid "Invalid user or plan ID"
+msgstr "معرف المستخدم أو الخطة غير صالح"
+
+#: subscription/views.py:384
+msgid "Failed to create trial subscription"
+msgstr "فشل في إنشاء الاشتراك التجريبي"
+
+#: subscription/views.py:400
+msgid "features must be a list"
+msgstr "يجب أن تكون الميزات قائمة"
+
+#: subscription/views.py:443
+msgid "Failed to check access"
+msgstr "فشل في التحقق من الصلاحية"
+
+#: subscription/views.py:581
+msgid "Failed to get available gateways"
+msgstr "فشل في جلب بوابات الدفع المتاحة"
+
+#: subscription/views.py:606
+msgid "Missing required fields"
+msgstr "حقول مطلوبة مفقودة"
+
+#: subscription/views.py:618
+msgid "Subscription not found"
+msgstr "الاشتراك غير موجود"
+
+#: subscription/views.py:671
+msgid "Failed to initiate payment"
+msgstr "فشل في بدء الدفع"
+
+#: subscription/views.py:697
+msgid "Payment not found"
+msgstr "الدفعة غير موجودة"
+
+#: subscription/views.py:739
+msgid "Failed to check payment status"
+msgstr "فشل في التحقق من حالة الدفع"
+
+#: templates/emails/otp_verification.html:8
+msgid "Email Verification - Training Platform"
+msgstr ""
+
+#: templates/emails/otp_verification.html:92
+#: templates/emails/password_reset_otp.html:88
+msgid "Training Platform"
+msgstr ""
+
+#: templates/emails/otp_verification.html:96
+msgid "Email Verification"
+msgstr ""
+
+#: templates/emails/otp_verification.html:97
+#: templates/emails/password_reset_otp.html:93
+msgid "Hello"
+msgstr ""
+
+#: templates/emails/otp_verification.html:106
+msgid "Enter this code in the verification page to activate your account."
+msgstr ""
+
+#: templates/emails/otp_verification.html:109
+#: templates/emails/password_reset_otp.html:105
+msgid "Important:"
+msgstr ""
+
+#: templates/emails/otp_verification.html:113
+msgid "If you didn't create an account with us, please disregard this email."
+msgstr ""
+
+#: templates/emails/otp_verification.html:117
+#: templates/emails/password_reset_otp.html:114
+msgid "This is an automated message. Please do not reply to this email."
+msgstr ""
+
+#: templates/emails/otp_verification.html:118
+#: templates/emails/password_reset_otp.html:115
+msgid "Training Platform. All rights reserved."
+msgstr ""
+
+#: templates/emails/password_reset_otp.html:8 users/utils.py:207
+msgid "Password Reset - Training Platform"
+msgstr ""
+
+#: templates/emails/password_reset_otp.html:92
+msgid "Password Reset"
+msgstr ""
+
+#: templates/emails/password_reset_otp.html:95
+msgid ""
+"We received a request to reset your password. Use the verification code "
+"below to proceed:"
+msgstr ""
+
+#: templates/emails/password_reset_otp.html:102
+msgid "Enter this code in the app to reset your password."
+msgstr ""
+
+#: training_platform/error_handlers.py:34
+#, fuzzy
+#| msgid "Payment not found"
+msgid "Page not found."
+msgstr "الدفعة غير موجودة"
+
+#: training_platform/error_handlers.py:66 training_platform/middleware.py:194
+msgid "An unexpected error occurred. Please try again later."
+msgstr "حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى لاحقاً."
+
+#: training_platform/file_security.py:122
+#, fuzzy
+#| msgid "Signature verification failed"
+msgid "File validation failed."
+msgstr "فشل التحقق من التوقيع"
+
+#: training_platform/file_security.py:127
+msgid "No file provided"
+msgstr ""
+
+#: training_platform/file_security.py:130
+#, fuzzy
+#| msgid "Invalid refresh token"
+msgid "Invalid file object"
+msgstr "رمز التحديث غير صالح"
+
+#: training_platform/file_security.py:133
+#, fuzzy
+#| msgid "IP not allowed"
+msgid "Empty file not allowed"
+msgstr "IP غير مسموح به"
+
+#: training_platform/file_security.py:141
+msgid "File size exceeds maximum allowed size."
+msgstr ""
+
+#: training_platform/file_security.py:148
+msgid "File must have a name"
+msgstr ""
+
+#: training_platform/file_security.py:153
+msgid "File extension is not allowed."
+msgstr ""
+
+#: training_platform/file_security.py:176
+msgid "Could not determine file type"
+msgstr ""
+
+#: training_platform/file_security.py:185
+msgid "Unknown file type."
+msgstr ""
+
+#: training_platform/file_security.py:189
+#, fuzzy
+#| msgid "IP not allowed"
+msgid "File type not allowed."
+msgstr "IP غير مسموح به"
+
+#: training_platform/file_security.py:210
+msgid "Image dimensions exceed maximum allowed."
+msgstr ""
+
+#: training_platform/file_security.py:217
+#, fuzzy
+#| msgid "Invalid agent auth"
+msgid "Invalid image aspect ratio"
+msgstr "مصادقة الوكيل غير صالحة"
+
+#: training_platform/file_security.py:225
+#, fuzzy
+#| msgid "Invalid or inactive plan"
+msgid "Invalid or corrupted image file"
+msgstr "خطة غير صالحة أو غير نشطة"
+
+#: training_platform/file_security.py:273
+#, fuzzy
+#| msgid "Potential SQL injection detected"
+msgid "Potentially malicious content detected."
+msgstr "تم اكتشاف حقن SQL محتمل"
+
+#: training_platform/file_security.py:290
+msgid "Executable files are not allowed"
+msgstr ""
+
+#: training_platform/file_security.py:366
+#, fuzzy
+#| msgid "Invalid meal"
+msgid "Invalid file."
+msgstr "وجبة غير صالحة"
+
+#: training_platform/middleware.py:63
+#, fuzzy
+#| msgid "Failed to send OTP. Please try again later."
+msgid "Too many requests. Please try again later."
+msgstr "فشل في إرسال رمز التحقق. يرجى المحاولة مرة أخرى لاحقاً."
+
+#: training_platform/middleware.py:166 users/test_i18n.py:104
+msgid "Invalid input data"
+msgstr "بيانات الإدخال غير صالحة"
+
+#: training_platform/middleware.py:175
+msgid "You do not have permission to perform this action"
+msgstr "ليس لديك صلاحية لتنفيذ هذا الإجراء"
+
+#: training_platform/middleware.py:181
+msgid "The requested resource was not found"
+msgstr "المورد المطلوب غير موجود"
+
+#: training_platform/settings.py:383
+msgid "English"
+msgstr "الإنجليزية"
+
+#: training_platform/settings.py:384
+msgid "Arabic"
+msgstr "العربية"
+
+#: training_platform/validators.py:34
+msgid ""
+"Password must contain at least 8 characters, including uppercase, lowercase, "
+"number, and special character"
+msgstr ""
+"يجب أن تحتوي كلمة المرور على 8 أحرف على الأقل، بما في ذلك أحرف كبيرة وصغيرة "
+"ورقم وحرف خاص"
+
+#: training_platform/validators.py:41
+msgid "Password must be at least 8 characters long"
+msgstr "يجب أن تتكون كلمة المرور من 8 أحرف على الأقل"
+
+#: training_platform/validators.py:46
+msgid "Password must contain at least one uppercase letter"
+msgstr "يجب أن تحتوي كلمة المرور على حرف كبير واحد على الأقل"
+
+#: training_platform/validators.py:51
+msgid "Password must contain at least one lowercase letter"
+msgstr "يجب أن تحتوي كلمة المرور على حرف صغير واحد على الأقل"
+
+#: training_platform/validators.py:56
+msgid "Password must contain at least one number"
+msgstr "يجب أن تحتوي كلمة المرور على رقم واحد على الأقل"
+
+#: training_platform/validators.py:61
+msgid "Password must contain at least one special character"
+msgstr "يجب أن تحتوي كلمة المرور على حرف خاص واحد على الأقل"
+
+#: training_platform/validators.py:69
+#, fuzzy
+#| msgid "Invalid user type."
+msgid "Invalid file type"
+msgstr "نوع المستخدم غير صالح."
+
+#: training_platform/validators.py:82
+#, python-format
+msgid "File size exceeds %(size)s bytes"
+msgstr ""
+
+#: training_platform/validators.py:91
+#, python-format
+msgid "File type %(type)s not allowed. Allowed types: %(allowed)s"
+msgstr ""
+
+#: training_platform/validators.py:100
+#, fuzzy
+#| msgid "Invalid meal"
+msgid "Invalid image file"
+msgstr "وجبة غير صالحة"
+
+#: training_platform/validators.py:116
+msgid "Invalid phone number format"
+msgstr "تنسيق رقم الهاتف غير صالح"
+
+#: training_platform/validators.py:135
+msgid "Value out of range"
+msgstr ""
+
+#: training_platform/validators.py:144
+#, fuzzy, python-format
+#| msgid "features must be a list"
+msgid "Value must be at least %(min)s"
+msgstr "يجب أن تكون الميزات قائمة"
+
+#: training_platform/validators.py:147
+#, fuzzy, python-format
+#| msgid "features must be a list"
+msgid "Value must be at most %(max)s"
+msgstr "يجب أن تكون الميزات قائمة"
+
+#: training_platform/validators.py:154
+msgid "Script tags and JavaScript are not allowed"
+msgstr "علامات البرمجة النصية وجافا سكريبت غير مسموح بها"
+
+#: training_platform/validators.py:177
+msgid "Potential SQL injection detected"
+msgstr "تم اكتشاف حقن SQL محتمل"
+
+#: training_platform/validators.py:268
+msgid "Email address too long"
+msgstr ""
+
+#: training_platform/validators.py:279
+#, fuzzy
+#| msgid "Invalid meal or macro"
+msgid "Invalid email format"
+msgstr "وجبة غير صالحة أو ماكرو"
+
+#: training_platform/validators.py:307
+msgid ""
+"Username can only contain letters, numbers, dots, hyphens, and underscores."
+msgstr ""
+
+#: users/device_token_views.py:33 users/device_token_views.py:74
+msgid "Token is required"
+msgstr "الرمز المميز مطلوب"
+
+#: users/device_token_views.py:46
+msgid "Token reassigned successfully"
+msgstr "تمت إعادة تعيين الرمز المميز بنجاح"
+
+#: users/device_token_views.py:49
+msgid "Token already registered"
+msgstr "الرمز المميز مسجل بالفعل"
+
+#: users/device_token_views.py:54
+msgid "Token registered successfully"
+msgstr "تم تسجيل الرمز المميز بنجاح"
+
+#: users/device_token_views.py:58
+msgid "Failed to register token"
+msgstr "فشل في تسجيل الرمز المميز"
+
+#: users/device_token_views.py:84
+msgid "Token unregistered successfully"
+msgstr "تم إلغاء تسجيل الرمز المميز بنجاح"
+
+#: users/device_token_views.py:86
+msgid "Token not found"
+msgstr "لم يتم العثور على الرمز المميز"
+
+#: users/device_token_views.py:90
+msgid "Failed to unregister token"
+msgstr "فشل إلغاء تسجيل الرمز المميز"
+
+#: users/serializers.py:26
+msgid ""
+"Phone number must be entered in the format: '+999999999'. Up to 15 digits "
+"allowed."
+msgstr "يجب إدخال رقم الهاتف بصيغة: '+999999999'. يُسمح بحد أقصى 15 رقماً."
+
+#: users/serializers.py:35
+msgid "Only admins can create admin users."
+msgstr "يمكن للمسؤولين فقط إنشاء مستخدمين مسؤولين."
+
+#: users/serializers.py:38
+msgid "Invalid user type."
+msgstr "نوع المستخدم غير صالح."
+
+#: users/serializers.py:43 users/serializers.py:62
+msgid "A user with this email already exists."
+msgstr "يوجد مستخدم مسجل بهذا البريد الإلكتروني."
+
+#: users/serializers.py:64
+msgid "A user with this phone number already exists."
+msgstr "يوجد مستخدم مسجل برقم الهاتف هذا."
+
+#: users/serializers.py:85 users/test_i18n.py:97
+msgid "Unable to log in with provided credentials."
+msgstr "تعذر تسجيل الدخول باستخدام بيانات الاعتماد المقدمة."
+
+#: users/serializers.py:92 users/views.py:803
+msgid ""
+"Please verify your email address before logging in. Check your inbox for the "
+"OTP code."
+msgstr ""
+"يرجى التحقق من عنوان بريدك الإلكتروني قبل تسجيل الدخول. تحقق من صندوق الوارد "
+"الخاص بك للحصول على رمز التحقق."
+
+#: users/serializers.py:99
+msgid "Must include 'email' and 'password'."
+msgstr "يجب تضمين 'email' و 'password'."
+
+#: users/serializers.py:133 users/serializers.py:186 users/serializers.py:230
+#: users/serializers.py:266
+msgid "Profile picture size must be under 2MB."
+msgstr "يجب أن يكون حجم صورة الملف الشخصي أقل من 2 ميغابايت."
+
+#: users/serializers.py:239
+msgid "This serializer is only for clients"
+msgstr "هذا الكائن خاص بالعملاء فقط"
+
+#: users/serializers.py:295
+#, fuzzy
+#| msgid "current_value must be a valid number"
+msgid "OTP code must be a 6-digit number."
+msgstr "القيمة الحالية يجب أن تكون رقماً صحيحاً"
+
+#: users/utils.py:78
+msgid "Verify Your Email - Training Platform"
+msgstr ""
+
+#: users/utils.py:88 users/utils.py:92
+#, python-format
+msgid ""
+"Your OTP verification code is: %(code)s\n"
+"\n"
+"This code will expire in 10 minutes.\n"
+"\n"
+"If you didn't request this code, please ignore this email."
+msgstr ""
+
+#: users/utils.py:217 users/utils.py:225
+#, python-format
+msgid ""
+"Your password reset code is: %(code)s\n"
+"\n"
+"This code will expire in 10 minutes.\n"
+"\n"
+"If you didn't request a password reset, please ignore this email."
+msgstr ""
+
+#: users/views.py:75
+msgid "Refresh token is required"
+msgstr "رمز التحديث مطلوب"
+
+#: users/views.py:84
+msgid "Successfully logged out"
+msgstr "تم تسجيل الخروج بنجاح"
+
+#: users/views.py:90
+msgid "Invalid refresh token"
+msgstr "رمز التحديث غير صالح"
+
+#: users/views.py:95
+msgid "Logout failed"
+msgstr "فشل تسجيل الخروج"
+
+#: users/views.py:115
+msgid "Details updated successfully!"
+msgstr "تم تحديث البيانات بنجاح!"
+
+#: users/views.py:182
+msgid ""
+"Registration successful. Please check your email for OTP verification code."
+msgstr ""
+"تم التسجيل بنجاح. يرجى التحقق من بريدك الإلكتروني للحصول على رمز التحقق."
+
+#: users/views.py:200
+msgid "Email and OTP code are required"
+msgstr "البريد الإلكتروني ورمز التحقق مطلوبان"
+
+#: users/views.py:238
+msgid "Email verified successfully. Your account has been activated."
+msgstr "تم التحقق من البريد الإلكتروني بنجاح. تم تفعيل حسابك."
+
+#: users/views.py:257
+msgid "Email is required"
+msgstr "البريد الإلكتروني مطلوب"
+
+#: users/views.py:270
+msgid "User with this email does not exist"
+msgstr "لا يوجد مستخدم بهذا البريد الإلكتروني"
+
+#: users/views.py:277
+msgid "This account is already verified"
+msgstr "هذا الحساب تم التحقق منه بالفعل"
+
+#: users/views.py:287
+msgid "Too many OTP requests. Please wait 1 hour before requesting again."
+msgstr ""
+"طلبات رمز التحقق كثيرة جداً. يرجى الانتظار ساعة واحدة قبل المحاولة مرة أخرى."
+
+#: users/views.py:300
+msgid "OTP code has been resent to your email. Please check your inbox."
+msgstr ""
+"تم إعادة إرسال رمز التحقق إلى بريدك الإلكتروني. يرجى التحقق من صندوق الوارد."
+
+#: users/views.py:306
+msgid "Failed to send OTP. Please try again later."
+msgstr "فشل في إرسال رمز التحقق. يرجى المحاولة مرة أخرى لاحقاً."
+
+#: users/views.py:322 users/views.py:333 users/views.py:351 users/views.py:1128
+#: users/views.py:1195
+msgid "This endpoint is only for trainers"
+msgstr "هذه النقطة مخصصة للمدربين فقط"
+
+#: users/views.py:340
+msgid "Trainer profile updated successfully!"
+msgstr "تم تحديث ملف المدرب بنجاح!"
+
+#: users/views.py:398 users/views.py:467
+msgid "client_id is required"
+msgstr "معرف العميل مطلوب"
+
+#: users/views.py:416
+msgid "Client is already assigned to you"
+msgstr "العميل مُعيّن لك بالفعل"
+
+#: users/views.py:421
+msgid "Client assignment request is already pending"
+msgstr "طلب تعيين العميل قيد الانتظار بالفعل"
+
+#: users/views.py:441
+#, fuzzy
+#| msgid "Token reassigned successfully"
+msgid "Assignment request sent successfully."
+msgstr "تمت إعادة تعيين الرمز المميز بنجاح"
+
+#: users/views.py:501
+#, fuzzy
+#| msgid "Token reassigned successfully"
+msgid "Client unassigned successfully."
+msgstr "تمت إعادة تعيين الرمز المميز بنجاح"
+
+#: users/views.py:507
+msgid "Client is not assigned to you"
+msgstr "العميل غير مُعيّن لك"
+
+#: users/views.py:529 users/views.py:540 users/views.py:620 users/views.py:858
+#: users/views.py:982 users/views.py:1059 users/views.py:1337
+msgid "This endpoint is only for clients"
+msgstr "هذه النقطة مخصصة للعملاء فقط"
+
+#: users/views.py:547
+msgid "Client profile updated successfully!"
+msgstr "تم تحديث ملف العميل بنجاح!"
+
+#: users/views.py:709
+msgid "Forbidden"
+msgstr "محظور"
+
+#: users/views.py:755
+msgid "An error occurred while listing client profiles"
+msgstr "حدث خطأ أثناء عرض ملفات العملاء"
+
+#: users/views.py:774
+msgid "Token is required."
+msgstr "الرمز مطلوب."
+
+#: users/views.py:867
+msgid "trainer_id is required"
+msgstr "معرف_المدرب مطلوب"
+
+#: users/views.py:882
+msgid "Insufficient wallet balance to request this trainer"
+msgstr "رصيد المحفظة غير كافي لطلب هذا المدرب"
+
+#: users/views.py:891
+msgid "This trainer is not currently accepting new clients"
+msgstr "هذا المدرب لا يقبل حاليا عملاء جدد"
+
+#: users/views.py:898
+msgid ""
+"You are already assigned to a trainer. Unassign first to request another "
+"trainer."
+msgstr "لقد تم تعيينك بالفعل للمدرب. قم بإلغاء التعيين أولاً لطلب مدرب آخر."
+
+#: users/views.py:909
+msgid ""
+"You already have a pending request with another trainer. Please wait for a "
+"response or cancel it first."
+msgstr "لديك بالفعل طلب معلق مع مدرب آخر. يرجى انتظار الرد أو إلغاؤه أولاً."
+
+#: users/views.py:923
+msgid "You are already assigned to this trainer"
+msgstr "لقد تم تعيينك بالفعل لهذا المدرب"
+
+#: users/views.py:928
+msgid "Request is already pending with this trainer"
+msgstr "الطلب معلق بالفعل مع هذا المدرب"
+
+#: users/views.py:946
+#, fuzzy
+#| msgid "Token reassigned successfully"
+msgid "Request sent to trainer successfully."
+msgstr "تمت إعادة تعيين الرمز المميز بنجاح"
+
+#: users/views.py:953
+msgid "Trainer not found"
+msgstr "لم يتم العثور على المدرب"
+
+#: users/views.py:959
+msgid "An error occurred while sending the request"
+msgstr "حدث خطأ أثناء إرسال الطلب"
+
+#: users/views.py:992
+msgid "You do not have an assigned trainer"
+msgstr "ليس لديك مدرب معين"
+
+#: users/views.py:1029
+#, fuzzy
+#| msgid "Successfully joined challenge"
+msgid "Successfully unassigned from trainer."
+msgstr "تم الانضمام للتحدي بنجاح"
+
+#: users/views.py:1037
+msgid "An error occurred while unassigning the trainer"
+msgstr "حدث خطأ أثناء إلغاء تعيين المدرب"
+
+#: users/views.py:1074
+msgid "You do not have a pending trainer request"
+msgstr "ليس لديك طلب مدرب معلق"
+
+#: users/views.py:1095
+#, fuzzy
+#| msgid "Subscription cancelled successfully"
+msgid "Request cancelled successfully."
+msgstr "تم إلغاء الاشتراك بنجاح"
+
+#: users/views.py:1103
+msgid "An error occurred while cancelling the request"
+msgstr "حدث خطأ أثناء إلغاء الطلب"
+
+#: users/views.py:1169
+msgid "An error occurred while fetching pending requests"
+msgstr "حدث خطأ أثناء جلب الطلبات المعلقة"
+
+#: users/views.py:1205
+msgid "request_id is required"
+msgstr "request_id مطلوب"
+
+#: users/views.py:1211
+msgid "action must be either \"approve\" or \"reject\""
+msgstr "يجب أن يكون الإجراء إما \"الموافقة\" أو \"الرفض\""
+
+#: users/views.py:1231
+msgid "Client is already assigned to another trainer"
+msgstr "تم تعيين العميل بالفعل لمدرب آخر"
+
+#: users/views.py:1241
+msgid "Client already has an approved relation with another trainer"
+msgstr "العميل لديه بالفعل علاقة معتمدة مع مدرب آخر"
+
+#: users/views.py:1261
+msgid "Insufficient client wallet balance for trainer charge hold"
+msgstr "رصيد محفظة العميل غير كافٍ لحجز رسوم المدرب"
+
+#: users/views.py:1279
+#, fuzzy
+#| msgid "Token unregistered successfully"
+msgid "Request approved successfully."
+msgstr "تم إلغاء تسجيل الرمز المميز بنجاح"
+
+#: users/views.py:1299
+msgid "Request rejected."
+msgstr ""
+
+#: users/views.py:1306
+msgid "Request not found or already processed"
+msgstr "لم يتم العثور على الطلب أو تمت معالجته بالفعل"
+
+#: users/views.py:1312
+msgid "An error occurred while processing the request"
+msgstr "حدث خطأ أثناء معالجة الطلب"
+
+#: users/views.py:1376
+msgid "An error occurred while fetching requests"
+msgstr "حدث خطأ أثناء جلب الطلبات"
+
+#: users/views.py:1396
+msgid ""
+"No image file provided. Please include a file with key \"profile_picture\""
+msgstr ""
+"لم يتم توفير ملف الصورة. يرجى تضمين ملف يحتوي على المفتاح \"profile_picture\""
+
+#: users/views.py:1411
+msgid "File size too large. Maximum size is 2MB"
+msgstr "حجم الملف كبير جدًا. الحد الأقصى للحجم هو 2 ميجابايت"
+
+#: users/views.py:1422
+msgid "Profile picture uploaded successfully"
+msgstr "تم تحميل الصورة الشخصية بنجاح"
+
+#: users/views.py:1452
+msgid "Profile picture removed successfully"
+msgstr "تمت إزالة الصورة الشخصية بنجاح"
+
+#: users/views.py:1456
+msgid "No profile picture to remove"
+msgstr "لا توجد صورة للملف الشخصي لإزالتها"
+
+#: users/views.py:1496
+#, fuzzy
+#| msgid "Too many OTP requests. Please wait 1 hour before requesting again."
+msgid ""
+"Too many password reset requests. Please wait 1 hour before trying again."
+msgstr ""
+"طلبات رمز التحقق كثيرة جداً. يرجى الانتظار ساعة واحدة قبل المحاولة مرة أخرى."
+
+#: users/views.py:1513
+msgid ""
+"If an account with this email exists, a password reset code has been sent."
+msgstr ""
+
+#: users/views.py:1564
+msgid ""
+"OTP verified successfully. Use the reset token to set your new password."
+msgstr ""
+
+#: users/views.py:1592
+#, fuzzy
+#| msgid "Invalid refresh token"
+msgid "Invalid or expired reset token."
+msgstr "رمز التحديث غير صالح"
+
+#: users/views.py:1598
+msgid ""
+"This reset token has already been used or has expired. Please request a new "
+"one."
+msgstr ""
+
+#: users/views.py:1616
+msgid ""
+"Your password has been reset successfully. You can now log in with your new "
+"password."
+msgstr ""
+
+#: wallet/views.py:85
+msgid "Invalid agent auth"
+msgstr "مصادقة الوكيل غير صالحة"
+
+#: wallet/views.py:97
+msgid "Invalid credentials"
+msgstr "بيانات اعتماد غير صالحة"
+
+#: wallet/views.py:102
+msgid "IP not allowed"
+msgstr "IP غير مسموح به"
+
+#: wallet/views.py:107
+msgid "Signature verification failed"
+msgstr "فشل التحقق من التوقيع"
+
+#: wallet/views.py:115 wallet/views.py:185 wallet/views.py:220
+#: wallet/views.py:368
+msgid "Duplicate request"
+msgstr "طلب مكرر"
+
+#: wallet/views.py:124 wallet/views.py:376
+msgid "Target must be a client"
+msgstr "يجب أن يكون الهدف عميلاً"
+
+#: wallet/views.py:138 wallet/views.py:342
+msgid "Agent not active"
+msgstr "الوكيل غير نشط"
+
+#: wallet/views.py:147 wallet/views.py:387
+msgid "Daily limit exceeded"
+msgstr "تم تجاوز الحد اليومي"
+
+#: wallet/views.py:150 wallet/views.py:390
+msgid "Monthly limit exceeded"
+msgstr "تم تجاوز الحد الشهري"
+
+#: wallet/views.py:188
+msgid "Only clients can initiate transfers"
+msgstr "يمكن للعملاء فقط بدء عمليات النقل"
+
+#: wallet/views.py:347
+msgid "No active API key"
+msgstr "لا يوجد مفتاح API نشط"
+
+#: wallet/views.py:454
+msgid "Not allowed"
+msgstr "غير مسموح"
+
+#: wallet/views.py:459
+msgid "email is required"
+msgstr "البريد الإلكتروني مطلوب"

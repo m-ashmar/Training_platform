@@ -1,7 +1,5 @@
 # users/serializers.py
 
-# NOTE: Password reset is handled by Django's built-in views. Email/phone verification is required for production use.
-
 from dj_rest_auth.registration.serializers import RegisterSerializer
 from dj_rest_auth.serializers import LoginSerializer
 from .models import CustomUser, DeviceToken
@@ -11,6 +9,7 @@ import re  # Add this import
 from django.db import IntegrityError
 from django.conf import settings
 from django.core.files.images import get_image_dimensions
+from django.utils.translation import gettext_lazy as _
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +23,7 @@ class CustomRegisterSerializer(RegisterSerializer):
         phone_regex = re.compile(r'^\+?1?\d{9,15}$')
         if not phone_regex.match(value):
             raise serializers.ValidationError(
-                "Phone number must be entered in the format: '+999999999'. Up to 15 digits allowed."
+                _("Phone number must be entered in the format: '+999999999'. Up to 15 digits allowed.")
             )
         return value
     
@@ -33,15 +32,15 @@ class CustomRegisterSerializer(RegisterSerializer):
         if value == 'admin':
             # Only allow admin creation by superusers
             if not request or not request.user.is_authenticated or not request.user.is_superuser:
-                raise serializers.ValidationError("Only admins can create admin users.")
+                raise serializers.ValidationError(_("Only admins can create admin users."))
         # Allow client, trainer, agent for self-service registration
         if value not in ['client', 'trainer', 'agent', 'admin']:
-            raise serializers.ValidationError("Invalid user type.")
+            raise serializers.ValidationError(_("Invalid user type."))
         return value
 
     def validate_email(self, value):
         if CustomUser.objects.filter(email=value).exists():
-            raise serializers.ValidationError("A user with this email already exists.")
+            raise serializers.ValidationError(_("A user with this email already exists."))
         return value
 
     class Meta:
@@ -60,14 +59,14 @@ class CustomRegisterSerializer(RegisterSerializer):
             return user
         except IntegrityError as e:
             if "UNIQUE constraint failed: users_customuser.email" in str(e):
-                raise serializers.ValidationError({"email": "A user with this email already exists."})
+                raise serializers.ValidationError({"email": _("A user with this email already exists.")})
             if "UNIQUE constraint failed: users_customuser.phone_number" in str(e):
-                raise serializers.ValidationError({"phone_number": "A user with this phone number already exists."})
+                raise serializers.ValidationError({"phone_number": _("A user with this phone number already exists.")})
             raise e  # Re-raise other exceptions if not related to unique constraintsr
     
     
     
-    
+
 class CustomLoginSerializer(LoginSerializer):
     username = None  # Remove the username field
 
@@ -83,21 +82,21 @@ class CustomLoginSerializer(LoginSerializer):
             self.user = self.authenticate(email=email, password=password)
             if not self.user:
                 raise serializers.ValidationError(
-                    {"non_field_errors": ["Unable to log in with provided credentials."]}
+                    {"non_field_errors": [_("Unable to log in with provided credentials.")]}
                 )
             
             # Check if user account is active (email verified)
             if not self.user.is_active:
                 raise serializers.ValidationError(
                     {
-                        "non_field_errors": ["Please verify your email address before logging in. Check your inbox for the OTP code."],
+                        "non_field_errors": [_("Please verify your email address before logging in. Check your inbox for the OTP code.")],
                         "requires_verification": True,
                         "email": self.user.email
                     }
                 )
         else:
             raise serializers.ValidationError(
-                {"non_field_errors": ["Must include 'email' and 'password'."]}
+                {"non_field_errors": [_("Must include 'email' and 'password'.")]}
             )
 
         attrs['user'] = self.user
@@ -131,10 +130,10 @@ class UserDetailsSerializer(serializers.ModelSerializer):
     def validate_profile_picture(self, value):
         if value:
             if value.size > 2 * 1024 * 1024:
-                raise serializers.ValidationError('Profile picture size must be under 2MB.')
+                raise serializers.ValidationError(_('Profile picture size must be under 2MB.'))
             valid_types = ['image/jpeg', 'image/png', 'image/webp']
             if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError('Only JPEG, PNG, and WebP images are allowed.')
+                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
         return value
 
     def validate(self, attrs):
@@ -184,16 +183,16 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
     def validate_profile_picture(self, value):
         if value:
             if value.size > 2 * 1024 * 1024:
-                raise serializers.ValidationError('Profile picture size must be under 2MB.')
+                raise serializers.ValidationError(_('Profile picture size must be under 2MB.'))
             valid_types = ['image/jpeg', 'image/png', 'image/webp']
             if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError('Only JPEG, PNG, and WebP images are allowed.')
+                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
         return value
 
     def validate(self, attrs):
         # Ensure only trainers can use this serializer
         if self.instance and not self.instance.is_trainer:
-            raise serializers.ValidationError("This serializer is only for trainers")
+            raise serializers.ValidationError(_("This serializer is only for trainers"))
         return attrs
 
 class ClientProfileSerializer(serializers.ModelSerializer):
@@ -228,16 +227,16 @@ class ClientProfileSerializer(serializers.ModelSerializer):
     def validate_profile_picture(self, value):
         if value:
             if value.size > 2 * 1024 * 1024:
-                raise serializers.ValidationError('Profile picture size must be under 2MB.')
+                raise serializers.ValidationError(_('Profile picture size must be under 2MB.'))
             valid_types = ['image/jpeg', 'image/png', 'image/webp']
             if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError('Only JPEG, PNG, and WebP images are allowed.')
+                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
         return value
 
     def validate(self, attrs):
         # Ensure only clients can use this serializer
         if self.instance and not self.instance.is_client:
-            raise serializers.ValidationError("This serializer is only for clients")
+            raise serializers.ValidationError(_("This serializer is only for clients"))
         return attrs
 
 class CustomUserSerializer(serializers.ModelSerializer):
@@ -264,10 +263,10 @@ class CustomUserSerializer(serializers.ModelSerializer):
     def validate_profile_picture(self, value):
         if value:
             if value.size > 2 * 1024 * 1024:
-                raise serializers.ValidationError('Profile picture size must be under 2MB.')
+                raise serializers.ValidationError(_('Profile picture size must be under 2MB.'))
             valid_types = ['image/jpeg', 'image/png', 'image/webp']
             if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError('Only JPEG, PNG, and WebP images are allowed.')
+                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
         return value
 
 class DeviceTokenSerializer(serializers.ModelSerializer):
@@ -275,3 +274,34 @@ class DeviceTokenSerializer(serializers.ModelSerializer):
         model = DeviceToken
         fields = ['id', 'user', 'token', 'created_at', 'updated_at']
         read_only_fields = ['id', 'user', 'created_at', 'updated_at']    
+
+
+# ============================================================================
+# PASSWORD RESET SERIALIZERS
+# ============================================================================
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    """Serializer for requesting a password reset OTP."""
+    email = serializers.EmailField(required=True)
+
+
+class PasswordResetVerifySerializer(serializers.Serializer):
+    """Serializer for verifying the password reset OTP."""
+    email = serializers.EmailField(required=True)
+    otp_code = serializers.CharField(max_length=6, min_length=6, required=True)
+
+    def validate_otp_code(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError(_("OTP code must be a 6-digit number."))
+        return value
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """Serializer for setting a new password using the reset token."""
+    reset_token = serializers.UUIDField(required=True)
+    new_password = serializers.CharField(min_length=8, required=True, write_only=True)
+
+    def validate_new_password(self, value):
+        from django.contrib.auth.password_validation import validate_password
+        validate_password(value)
+        return value

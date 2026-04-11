@@ -1,4 +1,5 @@
 import logging
+from django.utils.translation import gettext as _
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 from urllib.parse import parse_qs
@@ -25,7 +26,7 @@ class SocialConsumer(AsyncWebsocketConsumer):
         await self.send(
             text_data=json.dumps({
                 "type": "connection",
-                "message": "WebSocket connected. DEPRECATED: Please migrate to Firebase Cloud Messaging."
+                "message": _("WebSocket connected. DEPRECATED: Please migrate to Firebase Cloud Messaging.")
             })
         )
 

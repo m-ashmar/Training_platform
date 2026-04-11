@@ -16,6 +16,7 @@ class NotificationsConfig(AppConfig):
         # Register listeners
         try:
             import notifications.listeners.social_listeners
+            import notifications.listeners.trainer_client_listeners
         except ImportError:
             pass
 

@@ -3,6 +3,7 @@ Achievement Views - Rich API endpoints for achievement system.
 """
 
 from rest_framework import viewsets, status, permissions
+from django.utils.translation import gettext as _
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -228,7 +229,7 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         awarded = AchievementEngine.bulk_check_for_user(user)
         
         return Response({
-            'message': f'Achievement check complete. {len(awarded)} new achievements awarded.',
+            'message': _('Achievement check complete.'),
             'newly_awarded': awarded
         })
     
@@ -273,7 +274,7 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         
         return Response({
             'is_featured': user_achievement.is_featured,
-            'message': 'Achievement featured' if user_achievement.is_featured else 'Achievement unfeatured'
+            'message': _('Achievement featured') if user_achievement.is_featured else _('Achievement unfeatured')
         })
 
 

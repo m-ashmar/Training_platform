@@ -59,8 +59,15 @@ class FoodItem(models.Model):
         """
         from .validators import DietInputValidator
         from django.core.exceptions import ValidationError
+        from django.utils.translation import gettext_lazy as _
         
         # Cast to float in case incoming values are strings
+        
+        # Hydrate missing api_id to prevent Unique Constraint violations in tests and ad-hoc generation
+        if not self.api_id:
+            import uuid
+            self.api_id = uuid.uuid4().hex
+            
         try:
             self.calories = float(self.calories)
         except Exception:
@@ -77,16 +84,26 @@ class FoodItem(models.Model):
             self.fat = float(self.fat)
         except Exception:
             self.fat = 0.0
+            
+        # Reverse initialization: compute from per_gram if base macros are not provided (0.0)
+        if self.calories == 0.0 and (getattr(self, 'calories_per_gram', 0.0) or 0.0) > 0:
+            self.calories = self.calories_per_gram * 100.0
+        if self.protein == 0.0 and (getattr(self, 'protein_per_gram', 0.0) or 0.0) > 0:
+            self.protein = self.protein_per_gram * 100.0
+        if self.carbs == 0.0 and (getattr(self, 'carbs_per_gram', 0.0) or 0.0) > 0:
+            self.carbs = self.carbs_per_gram * 100.0
+        if self.fat == 0.0 and (getattr(self, 'fat_per_gram', 0.0) or 0.0) > 0:
+            self.fat = self.fat_per_gram * 100.0
         
         # BUG FIX: Validate nutritional values are non-negative
         if self.calories < 0:
-            raise ValidationError("Calories cannot be negative")
+            raise ValidationError(_("Calories cannot be negative"), code="negative_calories")
         if self.protein < 0:
-            raise ValidationError("Protein cannot be negative")
+            raise ValidationError(_("Protein cannot be negative"), code="negative_protein")
         if self.carbs < 0:
-            raise ValidationError("Carbs cannot be negative")
+            raise ValidationError(_("Carbs cannot be negative"), code="negative_carbs")
         if self.fat < 0:
-            raise ValidationError("Fat cannot be negative")
+            raise ValidationError(_("Fat cannot be negative"), code="negative_fat")
         
         # BUG FIX: Ensure serving size is valid
         if self.serving_size_grams <= 0:
@@ -321,6 +338,14 @@ class Meal(models.Model):
     diet_plan = models.ForeignKey(DietPlan, on_delete=models.CASCADE, related_name='meals')
     image_url = models.URLField(max_length=500, blank=True, null=True)
     description = models.TextField(blank=True)
+    
+    # Translations for user-generated content
+    translations = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="JSON translations for dynamic user content (e.g., {'ar': {'description': '...'}})"
+    )
+    
     is_ai_generated = models.BooleanField(default=False)
     
     # New fields for meal scheduling

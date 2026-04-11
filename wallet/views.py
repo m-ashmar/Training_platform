@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
+from django.utils.translation import gettext as _
 from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditLog, IdempotencyKey, move_funds_atomic
 from .serializers import (
     WalletSerializer,
@@ -66,11 +67,7 @@ class AgentTopUpView(APIView):
     permission_classes = [IsAuthenticated, IsAgent]
     throttle_classes = [ChargingRateThrottle]
 
-    def get_permissions(self):
-        # In development, allow any authenticated user to hit top-up for testing
-        if getattr(settings, 'WALLET_DEV_MODE', False):
-            return [IsAuthenticated()]
-        return super().get_permissions()
+
 
     def post(self, request):
         serializer = TopUpRequestSerializer(data=request.data)
@@ -78,32 +75,25 @@ class AgentTopUpView(APIView):
 
         auth_header = request.META.get("HTTP_X_AGENT_AUTH")
         parsed = parse_agent_auth_header(auth_header)
-        # In dev mode, bypass strict auth freshness
-        if not parsed or (not is_fresh_timestamp(parsed.timestamp) and not getattr(settings, 'WALLET_DEV_MODE', False)):
+        if not parsed or not is_fresh_timestamp(parsed.timestamp):
             audit("wallet.topup.auth_failed", request, {"reason": "invalid_or_stale_auth"})
-            return Response({"error": "Invalid agent auth"}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response({"error": _("Invalid agent auth")}, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
             api_key = AgentAPIKey.objects.select_related("agent").get(key_id=parsed.key_id, is_active=True)
         except AgentAPIKey.DoesNotExist:
-            if getattr(settings, 'WALLET_DEV_MODE', False):
-                agent_profile, _ = AgentProfile.objects.get_or_create(user=request.user)
-                class _ApiKey:
-                    agent = agent_profile
-                api_key = _ApiKey()
-            else:
-                audit("wallet.topup.auth_failed", request, {"reason": "unknown_key"})
-                return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+            audit("wallet.topup.auth_failed", request, {"reason": "unknown_key"})
+            return Response({"error": _("Invalid credentials")}, status=status.HTTP_401_UNAUTHORIZED)
 
         ip = request.META.get("REMOTE_ADDR")
-        if api_key.agent.ip_allowlist and ip not in api_key.agent.ip_allowlist and not getattr(settings, 'WALLET_DEV_MODE', False):
+        if api_key.agent.ip_allowlist and ip not in api_key.agent.ip_allowlist:
             audit("wallet.topup.denied_ip", request, {"ip": ip})
-            return Response({"error": "IP not allowed"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": _("IP not allowed")}, status=status.HTTP_403_FORBIDDEN)
 
         message = f"{serializer.validated_data['client_identifier']}|{serializer.validated_data['amount']}|{serializer.validated_data['timestamp']}|{serializer.validated_data['idempotency_key']}"
-        if not verify_hmac_signature(api_key.hashed_key, message, parsed.signature) and not getattr(settings, 'WALLET_DEV_MODE', False):
+        if not verify_hmac_signature(api_key.hashed_key, message, parsed.signature):
             audit("wallet.topup.auth_failed", request, {"reason": "bad_signature"})
-            return Response({"error": "Signature verification failed"}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response({"error": _("Signature verification failed")}, status=status.HTTP_401_UNAUTHORIZED)
 
         idem_key = serializer.validated_data["idempotency_key"]
         idem, created = IdempotencyKey.objects.get_or_create(key=idem_key, defaults={"request_hash": parsed.signature, "created_by": request.user})
@@ -111,7 +101,7 @@ class AgentTopUpView(APIView):
             if idem.processed and idem.response_snapshot:
                 audit("wallet.topup.idempotent_hit", request, {"key": idem_key})
                 return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": "Duplicate request"}, status=status.HTTP_409_CONFLICT)
+            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
         ident = serializer.validated_data["client_identifier"]
         client = None
@@ -120,7 +110,7 @@ class AgentTopUpView(APIView):
         else:
             client = get_object_or_404(User, email=ident)
         if getattr(client, "user_type", None) != "client":
-            return Response({"error": "Target must be a client"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
 
         client_wallet, _ = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
 
@@ -134,7 +124,7 @@ class AgentTopUpView(APIView):
             },
         )
         if agent_profile.status != "active":
-            return Response({"error": "Agent not active"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
 
         amount = serializer.validated_data["amount"]
         today = timezone.now().date()
@@ -143,10 +133,10 @@ class AgentTopUpView(APIView):
         month_total = Transaction.objects.filter(actor=request.user, tx_type="topup", created_at__date__gte=month_start).aggregate(Sum("amount"))["amount__sum"] or 0
         if agent_profile.daily_limit and day_total + amount > agent_profile.daily_limit:
             audit("wallet.topup.limit_block", request, {"scope": "daily", "attempt": float(amount), "used": float(day_total)})
-            return Response({"error": "Daily limit exceeded"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"error": _("Daily limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         if agent_profile.monthly_limit and month_total + amount > agent_profile.monthly_limit:
             audit("wallet.topup.limit_block", request, {"scope": "monthly", "attempt": float(amount), "used": float(month_total)})
-            return Response({"error": "Monthly limit exceeded"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"error": _("Monthly limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
         tx = move_funds_atomic(
             None,
@@ -181,10 +171,10 @@ class ClientTransferToTrainerView(APIView):
             if idem.processed and idem.response_snapshot:
                 audit("wallet.transfer.idempotent_hit", request, {"key": idem_key})
                 return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": "Duplicate request"}, status=status.HTTP_409_CONFLICT)
+            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
         if getattr(request.user, "user_type", None) != "client":
-            return Response({"error": "Only clients can initiate transfers"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": _("Only clients can initiate transfers")}, status=status.HTTP_403_FORBIDDEN)
 
         trainer = get_object_or_404(User, id=serializer.validated_data["trainer_id"], user_type="trainer")
         client_wallet, _ = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
@@ -216,7 +206,7 @@ class AdminReversalView(APIView):
             if idem.processed and idem.response_snapshot:
                 audit("wallet.reversal.idempotent_hit", request, {"key": idem_key})
                 return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": "Duplicate request"}, status=status.HTTP_409_CONFLICT)
+            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
         original = get_object_or_404(Transaction, reference_id=serializer.validated_data["reference_id"])
         tx = move_funds_atomic(original.destination_wallet, original.source_wallet, original.amount, actor_id=request.user.id, tx_type="reversal", metadata={"original_reference": original.reference_id, "reason": serializer.validated_data.get("reason", "")})
@@ -231,16 +221,13 @@ class AdminReversalView(APIView):
 class AgentApiKeyCreateView(APIView):
     permission_classes = [IsAuthenticated, IsAgent]
 
-    def get_permissions(self):
-        if getattr(settings, 'WALLET_DEV_MODE', False):
-            return [IsAuthenticated()]
-        return super().get_permissions()
-
     def post(self, request):
         """
         Allows an authenticated agent to create a new API key.
-        Returns key_id and secret (only shown once). Store secret server-side for HMAC verification.
+        Returns key_id and secret (shown ONCE — never stored in plaintext).
+        The SHA-256 hash of the secret is stored in DB for HMAC verification.
         """
+        import hashlib
         agent_profile, _ = AgentProfile.objects.get_or_create(
             user=request.user,
             defaults={
@@ -251,19 +238,20 @@ class AgentApiKeyCreateView(APIView):
             },
         )
         key_id = uuid.uuid4().hex[:16]
+        # Generate high-entropy secret (64 hex chars = 256 bits)
         secret = uuid.uuid4().hex + uuid.uuid4().hex
-        # Deactivate existing active keys to ensure a single active key policy
+        # Store only the SHA-256 hash — the raw secret is NEVER persisted
+        hashed_key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+        # Deactivate any existing active keys (single active key policy)
         prev_ids = list(AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).values_list("key_id", flat=True))
         if prev_ids:
             AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).update(is_active=False)
             audit("wallet.agent.apikey.rotated", request, {"deactivated": prev_ids})
-        # Single active key policy for ensure as well
-        prev_ids = list(AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).values_list("key_id", flat=True))
-        if prev_ids:
-            AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).update(is_active=False)
-            audit("wallet.agent.apikey.rotated", request, {"deactivated": prev_ids})
-        AgentAPIKey.objects.create(agent=agent_profile, key_id=key_id, hashed_key=secret, is_active=True)
+
+        AgentAPIKey.objects.create(agent=agent_profile, key_id=key_id, hashed_key=hashed_key, is_active=True)
         audit("wallet.agent.apikey.create", request, {"key_id": key_id})
+        # Return secret ONCE — client must store it securely
         return Response({"key_id": key_id, "secret": secret}, status=status.HTTP_201_CREATED)
 
 
@@ -296,6 +284,7 @@ class AgentApiKeyEnsureView(APIView):
     permission_classes = [IsAuthenticated, IsAgent]
 
     def post(self, request):
+        import hashlib
         agent_profile, _ = AgentProfile.objects.get_or_create(
             user=request.user,
             defaults={
@@ -311,7 +300,8 @@ class AgentApiKeyEnsureView(APIView):
         # Create without returning secret (kept server-side only)
         key_id = uuid.uuid4().hex[:16]
         secret = uuid.uuid4().hex + uuid.uuid4().hex
-        AgentAPIKey.objects.create(agent=agent_profile, key_id=key_id, hashed_key=secret, is_active=True)
+        hashed_key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+        AgentAPIKey.objects.create(agent=agent_profile, key_id=key_id, hashed_key=hashed_key, is_active=True)
         audit("wallet.agent.apikey.ensure", request, {"key_id": key_id})
         return Response({"created": True}, status=status.HTTP_201_CREATED)
 
@@ -338,12 +328,12 @@ class AgentTopUpProxyView(APIView):
             },
         )
         if agent_profile.status != "active":
-            return Response({"error": "Agent not active"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
 
         # Use latest active API key for this agent
         api_key = AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).order_by("-created_at").first()
         if not api_key:
-            return Response({"error": "No active API key"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": _("No active API key")}, status=status.HTTP_400_BAD_REQUEST)
 
         client_identifier = serializer.validated_data["client_identifier"]
         amount = serializer.validated_data["amount"]
@@ -364,7 +354,7 @@ class AgentTopUpProxyView(APIView):
             if idem.processed and idem.response_snapshot:
                 audit("wallet.topup.idempotent_hit", request, {"key": idempotency_key})
                 return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": "Duplicate request"}, status=status.HTTP_409_CONFLICT)
+            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
         # Resolve client by id or email
         if str(client_identifier).isdigit():
@@ -372,7 +362,7 @@ class AgentTopUpProxyView(APIView):
         else:
             client = get_object_or_404(User, email=client_identifier)
         if getattr(client, "user_type", None) != "client":
-            return Response({"error": "Target must be a client"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
 
         client_wallet, _ = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
 
@@ -383,10 +373,10 @@ class AgentTopUpProxyView(APIView):
         month_total = Transaction.objects.filter(actor=request.user, tx_type="topup", created_at__date__gte=month_start).aggregate(Sum("amount"))["amount__sum"] or 0
         if agent_profile.daily_limit and day_total + amount > agent_profile.daily_limit:
             audit("wallet.topup.limit_block", request, {"scope": "daily", "attempt": float(amount), "used": float(day_total)})
-            return Response({"error": "Daily limit exceeded"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"error": _("Daily limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         if agent_profile.monthly_limit and month_total + amount > agent_profile.monthly_limit:
             audit("wallet.topup.limit_block", request, {"scope": "monthly", "attempt": float(amount), "used": float(month_total)})
-            return Response({"error": "Monthly limit exceeded"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"error": _("Monthly limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
         # Move funds
         tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id, tx_type="topup", metadata={"agent_id": request.user.id})
@@ -443,33 +433,5 @@ class AdminSuspiciousActivityView(APIView):
                 alerts.append({"type": "rapid_topups", "actor_id": row["actor_id"], "count": row["cnt"]})
         return Response({"alerts": alerts})
 
-
-class AdminDevCreateAgentView(APIView):
-    permission_classes = [IsAuthenticated, IsAdmin]
-
-    def post(self, request):
-        # Only allow in development mode
-        if not getattr(settings, 'WALLET_DEV_MODE', False):
-            return Response({"error": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
-        email = request.data.get("email")
-        username = request.data.get("username") or (email.split('@')[0] if email else None)
-        password = request.data.get("password") or "testpass123"
-        if not email:
-            return Response({"error": "email is required"}, status=status.HTTP_400_BAD_REQUEST)
-        from django.contrib.auth import get_user_model
-        from django.contrib.auth.hashers import make_password
-        User = get_user_model()
-        user, created = User.objects.get_or_create(email=email, defaults={
-            "username": username or email,
-            "user_type": "agent",
-            "phone_number": "0000000000",
-            "password": make_password(password),
-        })
-        if not created:
-            user.user_type = "agent"
-            user.password = make_password(password)
-            user.save()
-        audit("wallet.admin.dev.create_agent", request, {"user_id": user.id})
-        return Response({"id": user.id, "email": user.email, "username": user.username}, status=status.HTTP_201_CREATED)
 
 

@@ -7,8 +7,8 @@ Enhanced with comprehensive data collection for future AI model training.
 Now supports meal count preferences, snack preferences, and template-based generation.
 """
 
-from langchain.prompts import PromptTemplate
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 from typing import List, Optional, Dict, Any
 import requests
 import json

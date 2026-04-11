@@ -6,6 +6,13 @@ import sys
 
 def main():
     """Run administrative tasks."""
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path
+        load_dotenv(Path(__file__).resolve().parent / '.env')
+    except ImportError:
+        pass
+
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "training_platform.settings")
     try:
         from django.core.management import execute_from_command_line

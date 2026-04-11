@@ -3,7 +3,7 @@ import os
 from celery import Celery
 from celery.schedules import crontab
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'training_platform.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'training_platform.settings_production')
 app = Celery('training_platform')
 app.config_from_object('django.conf:settings', namespace='CELERY')
 app.autodiscover_tasks()

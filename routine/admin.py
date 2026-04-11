@@ -6,6 +6,7 @@ from .models import (
 )
 from django.db.models import Sum
 from django.contrib import messages
+from modeltranslation.admin import TranslationAdmin
 import matplotlib
 matplotlib.use('Agg')
 
@@ -25,7 +26,7 @@ class RoutineExerciseInline(admin.TabularInline):
 
 
 @admin.register(Exercise)
-class ExerciseAdmin(admin.ModelAdmin):
+class ExerciseAdmin(TranslationAdmin):
     list_display = ('name', 'target_muscle', 'description', 'created_by', 'has_image')
     inlines = [ExerciseMediaInline]
     search_fields = ('name', 'target_muscle', 'description')
@@ -157,7 +158,7 @@ class RoutineTemplateExerciseInline(admin.TabularInline):
     extra = 1
 
 @admin.register(RoutineTemplate)
-class RoutineTemplateAdmin(admin.ModelAdmin):
+class RoutineTemplateAdmin(TranslationAdmin):
     list_display = ('name', 'goal', 'created_by', 'is_public', 'created_at')
     search_fields = ('name', 'goal', 'description')
     list_filter = ('goal', 'is_public')

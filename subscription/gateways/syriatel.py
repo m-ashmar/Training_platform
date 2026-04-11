@@ -5,6 +5,7 @@ Syriatel Cash Payment Gateway
 This module implements the Syriatel Cash payment gateway integration.
 Currently contains placeholder implementations that can be replaced with real API calls.
 """
+from django.utils.translation import gettext as _
 
 import json
 import logging
@@ -86,7 +87,7 @@ class SyriatelCashGateway:
                 'expires_at': int(time.time()) + 1800,  # 30 minutes
                 'gateway_response': {
                     'code': '200',
-                    'message': 'Payment initiated successfully',
+                    'message': _('Payment initiated successfully'),
                     'data': {
                         'transaction_id': transaction_id,
                         'payment_url': f"https://syriatel.sy/pay/{transaction_id}"
@@ -179,7 +180,7 @@ class SyriatelCashGateway:
                 'timestamp': int(time.time()),
                 'gateway_response': {
                     'code': '200',
-                    'message': 'Payment status retrieved successfully'
+                    'message': _('Payment status retrieved successfully')
                 }
             }
             
@@ -237,7 +238,7 @@ class SyriatelCashGateway:
         # Placeholder implementation
         return {
             'success': True,
-            'message': 'API call simulated successfully'
+            'message': _('API call simulated successfully')
         }
     
     def _generate_mock_qr(self) -> str:

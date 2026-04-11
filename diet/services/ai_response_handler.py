@@ -4,7 +4,7 @@ from typing import Dict, Any
 from ..exceptions import OpenAIError, DietParsingError
 from ..utils.logging_utils import get_logger, log_json
 from django.conf import settings
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 from ..ai_models import DietPlanOutput
 from ..utils.http import post_json_with_retry
 

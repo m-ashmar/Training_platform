@@ -1,1 +1,32 @@
-{"error":"Failed to generate rule-based plan"}
+{
+    "error": "Failed to generate rule-based plan"
+}
+
+
+I have updated the HomeActivitiesSection! It now displays an "Active Time" chart using the Icons.timer_rounded icon and plots data in min (minutes) instead of kcal. I also added the proper translation strings to both the English and Arabic localization files.
+
+Now the widget accurately tracks workout consistency, which solves the complex physics/calorie-burning problem elegantly!
+
+📝 Here is what you should tell the Backend Developer:
+"Hey backend team, for the Home Screen activities section, we are going to plot the user's daily workout duration (in minutes) instead of calories.
+
+We need an endpoint (e.g., GET /api/v1/activities/recent-progress/) that returns a 7-day array of the user's active minutes. Here is the exact JSON structure the mobile app expects:"
+
+json
+{
+    "recent_progress": [
+        {
+            "date": "2026-03-24T00:00:00Z", // Date of the activity
+            "duration": 2700 // Total Active Time in SECONDS
+        },
+        {
+            "date": "2026-03-23T00:00:00Z",
+            "duration": 3600 // Which equals 60 minutes
+        },
+        {
+            "date": "2026-03-22T00:00:00Z",
+            "duration": 0 // Include days with 0 for the chart
+        }
+    ]
+}
+(Note for the backend: we expect the duration to be returned in seconds, as that is what the HomeDataService model currently dictates, but the UI automatically converts it to minutes for the chart).

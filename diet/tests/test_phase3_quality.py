@@ -13,7 +13,7 @@ from diet.services.ai_response_handler import AIResponseHandler
 from diet.services.diet_persistence import DietPersistenceService
 from diet.services.meal_validator import MealValidator
 from diet.ai_models import DietPlanOutput, AIMeal, AIIngredient
-from diet.models import FoodItem
+from diet.models import FoodItem, FoodCategory
 
 
 class HttpRetryTests(TestCase):
@@ -73,11 +73,16 @@ class LoggingRedactionTests(TestCase):
 
 class PersistenceFlowTests(TestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(email="t@t.com", password="x")
+        self.user = get_user_model().objects.create_user(
+            username="testuser", email="t@t.com", password="x", phone_number="+1234567890",
+            age=30, gender="M", height=180, weight=80
+        )
+        cat = FoodCategory.objects.create(name="Proteins")
         # Minimal food setup
         self.chicken = FoodItem.objects.create(
             api_id="test_chicken_breast",
             name="Chicken Breast",
+            category=cat,
             calories=165,
             protein=31,
             carbs=0,
@@ -85,8 +90,15 @@ class PersistenceFlowTests(TestCase):
             serving_size="100g",
             serving_size_grams=100,
         )
+        from diet.models import UserFoodCategoryPreference
+        UserFoodCategoryPreference.objects.create(
+            user=self.user,
+            meal="Lunch",
+            macro="protein",
+            food=self.chicken
+        )
 
-    @patch("diet.services.diet_persistence.MealProcessor")
+    @patch("diet.meal_processor.MealProcessor")
     def test_save_plan_persists_meal_and_components(self, MockMP):
         # Fake resolver returns one known FoodItem
         instance = MockMP.return_value

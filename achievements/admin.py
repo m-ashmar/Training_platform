@@ -3,11 +3,12 @@ Achievement Admin - Admin interface for managing achievements.
 """
 
 from django.contrib import admin
+from modeltranslation.admin import TranslationAdmin
 from .models import Achievement, UserAchievement, AchievementProgress
 
 
 @admin.register(Achievement)
-class AchievementAdmin(admin.ModelAdmin):
+class AchievementAdmin(TranslationAdmin):
     """Admin interface for Achievement model."""
     
     list_display = [

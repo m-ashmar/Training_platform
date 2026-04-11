@@ -2,6 +2,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.utils.translation import gettext as _
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from .models import DeviceToken
@@ -29,7 +30,7 @@ class FCMTokenView(APIView):
     def post(self, request):
         token = request.data.get('token')
         if not token:
-            return Response({'error': 'Token is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': _('Token is required')}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
             # Check if token exists
@@ -42,19 +43,19 @@ class FCMTokenView(APIView):
                     device_token.user = request.user
                     device_token.save()
                     logger.info(f"Reassigned FCM token from user {previous_user.id} to user {request.user.id}")
-                    return Response({'message': 'Token reassigned successfully'}, status=status.HTTP_200_OK)
+                    return Response({'message': _('Token reassigned successfully')}, status=status.HTTP_200_OK)
                 else:
                     # Token exists and belongs to current user
-                    return Response({'message': 'Token already registered'}, status=status.HTTP_200_OK)
+                    return Response({'message': _('Token already registered')}, status=status.HTTP_200_OK)
             else:
                 # Token does not exist - create new
                 DeviceToken.objects.create(user=request.user, token=token)
                 logger.info(f"Registered new FCM token for user {request.user.id}")
-                return Response({'message': 'Token registered successfully'}, status=status.HTTP_201_CREATED)
+                return Response({'message': _('Token registered successfully')}, status=status.HTTP_201_CREATED)
                 
         except Exception as e:
             logger.error(f"Error registering FCM token: {e}")
-            return Response({'error': 'Failed to register token'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': _('Failed to register token')}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @swagger_auto_schema(
         operation_description="Unregister an FCM device token",
@@ -70,20 +71,20 @@ class FCMTokenView(APIView):
     def delete(self, request):
         token = request.data.get('token')
         if not token:
-            return Response({'error': 'Token is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': _('Token is required')}, status=status.HTTP_400_BAD_REQUEST)
             
         try:
-            deleted_count, _ = DeviceToken.objects.filter(
+            deleted_count, deleted_info = DeviceToken.objects.filter(
                 user=request.user,
                 token=token
             ).delete()
             
             if deleted_count > 0:
                 logger.info(f"Unregistered FCM token for user {request.user.id}")
-                return Response({'message': 'Token unregistered successfully'}, status=status.HTTP_200_OK)
+                return Response({'message': _('Token unregistered successfully')}, status=status.HTTP_200_OK)
             else:
-                return Response({'error': 'Token not found'}, status=status.HTTP_404_NOT_FOUND)
+                return Response({'error': _('Token not found')}, status=status.HTTP_404_NOT_FOUND)
                 
         except Exception as e:
             logger.error(f"Error unregistering FCM token: {e}")
-            return Response({'error': 'Failed to unregister token'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': _('Failed to unregister token')}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

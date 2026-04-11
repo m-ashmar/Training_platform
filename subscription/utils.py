@@ -1,4 +1,5 @@
 from django.utils import timezone
+from django.utils.translation import gettext as _
 from django.db import transaction
 from datetime import timedelta
 from .models import Subscription, SubscriptionPlan, Payment, SubscriptionUsage, SubscriptionFeature
@@ -156,7 +157,7 @@ def check_subscription_access(user, required_features=None):
         if not subscription.is_active:
             return {
                 'has_access': False,
-                'message': 'No active subscription',
+                'message': _('No active subscription'),
                 'access_details': {}
             }
         
@@ -192,7 +193,7 @@ def check_subscription_access(user, required_features=None):
     except Subscription.DoesNotExist:
         return {
             'has_access': False,
-            'message': 'No subscription found',
+            'message': _('No subscription found'),
             'access_details': {}
         }
 

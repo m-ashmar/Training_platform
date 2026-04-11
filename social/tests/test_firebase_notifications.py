@@ -36,47 +36,38 @@ class FirebaseNotificationTests(APITestCase):
         self.assertTrue(result)
         mock_messaging.send.assert_called_once()
 
-    @patch('social.tasks.FirebaseNotificationService')
-    def test_follow_notification_trigger(self, MockService):
-        """Test that following a user triggers FCM notification task"""
-        mock_instance = MockService.return_value
-        mock_instance.send_each_for_multicast.return_value = MagicMock(success_count=1, failure_count=0)
-        
+    @patch('notifications.domain.dispatcher.emit_event')
+    def test_follow_notification_trigger(self, mock_emit):
+        """Test that following a user emits UserFollowedEvent"""
         url = reverse('social:follow-follow-user')
         data = {'user_id': self.user.id}
         
-        # We need to run celery tasks synchronously for investigation, 
-        # but here we are mocking the service inside the task or mocking the task itself.
-        # Let's patch the task directly in the view to verify it's called.
-        with patch('social.views.dispatch_notification') as mock_task:
-            response = self.client.post(url, data)
-            self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-            mock_task.assert_called_once()
-            
-            # Verify arguments
-            call_kwargs = mock_task.call_args[1]
-            self.assertEqual(call_kwargs['user_id'], self.user.id)
-            self.assertEqual(call_kwargs['title'], 'New Follower')
-            self.assertEqual(call_kwargs['data']['type'], 'follow')
+        response = self.client.post(url, data)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        mock_emit.assert_called_once()
+        
+        event = mock_emit.call_args[0][0]
+        self.assertEqual(event.__class__.__name__, 'UserFollowedEvent')
+        self.assertEqual(event.target_user_id, self.user.id)
 
-    @patch('social.views.dispatch_notification')
-    def test_like_notification_trigger(self, mock_task):
-        """Test that liking a post triggers FCM notification"""
+    @patch('notifications.domain.dispatcher.emit_event')
+    def test_like_notification_trigger(self, mock_emit):
+        """Test that liking a post emits PostLikedEvent"""
         post = Post.objects.create(author=self.user, content="Test Post", visibility='public')
         
         url = reverse('social:post-like', kwargs={'pk': post.id})
         response = self.client.post(url)
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        mock_task.assert_called_once()
+        mock_emit.assert_called_once()
         
-        call_kwargs = mock_task.call_args[1]
-        self.assertEqual(call_kwargs['user_id'], self.user.id)
-        self.assertEqual(call_kwargs['title'], 'Post Liked')
+        event = mock_emit.call_args[0][0]
+        self.assertEqual(event.__class__.__name__, 'PostLikedEvent')
+        self.assertEqual(event.target_post_id, post.id)
 
-    @patch('social.views.dispatch_notification')
-    def test_comment_notification_trigger(self, mock_task):
-        """Test that commenting on a post triggers FCM notification"""
+    @patch('notifications.domain.dispatcher.emit_event')
+    def test_comment_notification_trigger(self, mock_emit):
+        """Test that commenting on a post emits PostCommentedEvent"""
         post = Post.objects.create(author=self.user, content="Test Post", visibility='public')
         
         url = reverse('social:comment-list')
@@ -87,11 +78,11 @@ class FirebaseNotificationTests(APITestCase):
         response = self.client.post(url, data)
         
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        mock_task.assert_called_once()
+        mock_emit.assert_called_once()
         
-        call_kwargs = mock_task.call_args[1]
-        self.assertEqual(call_kwargs['user_id'], self.user.id)
-        self.assertEqual(call_kwargs['title'], 'New Comment')
+        event = mock_emit.call_args[0][0]
+        self.assertEqual(event.__class__.__name__, 'CommentCreatedEvent')
+        self.assertEqual(event.target_post_id, post.id)
 
 class DeviceTokenTests(APITestCase):
     def setUp(self):

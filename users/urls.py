@@ -6,10 +6,10 @@ from .views import (
     PublicTrainersListView, PublicTrainerClientStatsView, ClientProfileViewSet, DeviceTokenRegisterView, CustomTokenObtainPairView,
     ClientRequestTrainerView, TrainerPendingRequestsView, TrainerRespondToRequestView,
     ClientRequestStatusView, ProfilePictureUploadView, OTPVerificationView, ResendOTPView,
-    ClientUnassignTrainerView, ClientCancelTrainerRequestView
+    ClientUnassignTrainerView, ClientCancelTrainerRequestView,
+    PasswordResetRequestView, PasswordResetVerifyView, PasswordResetConfirmView,
 )
 from .device_token_views import FCMTokenView
-from django.contrib.auth import views as auth_views
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.routers import DefaultRouter
 
@@ -54,14 +54,11 @@ urlpatterns = [
     path('trainer/pending-requests/', TrainerPendingRequestsView.as_view(), name='trainer_pending_requests'),
     path('trainer/respond-to-request/', TrainerRespondToRequestView.as_view(), name='trainer_respond_to_request'),
     
-    # Password reset endpoints (email-based)
-    path('password-reset/', auth_views.PasswordResetView.as_view(), name='password_reset'),
-    path('password-reset/done/', auth_views.PasswordResetDoneView.as_view(), name='password_reset_done'),
-    path('reset/<uidb64>/<token>/', auth_views.PasswordResetConfirmView.as_view(), name='password_reset_confirm'),
-    path('reset/done/', auth_views.PasswordResetCompleteView.as_view(), name='password_reset_complete'),
+    # Password reset endpoints (OTP-based REST API)
+    path('forgot-password/', PasswordResetRequestView.as_view(), name='password_reset_request'),
+    path('forgot-password/verify/', PasswordResetVerifyView.as_view(), name='password_reset_verify'),
+    path('forgot-password/confirm/', PasswordResetConfirmView.as_view(), name='password_reset_confirm'),
     
-    # TODO: Add phone-based password reset endpoint for SMS in the future
-    # TODO: Ensure email/phone verification is implemented before enabling in production
     # Device Token Management (FCM)
     path('device-token/', FCMTokenView.as_view(), name='fcm_token_manage'),
 ]

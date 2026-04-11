@@ -1,0 +1,73 @@
+name: Security Gates
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install bandit safety semgrep
+
+      # Layer 1: Static Analysis — Bandit (Python security linter)
+      - name: Bandit Security Scan
+        run: |
+          bandit -r . \
+            --exclude './.venv,./tests,./node_modules' \
+            -f json -o bandit-report.json \
+            --severity-level medium || true
+          bandit -r . \
+            --exclude './.venv,./tests,./node_modules' \
+            --severity-level high
+
+      # Layer 2: Dependency Vulnerability Scan — Safety
+      - name: Safety Dependency Check
+        run: |
+          safety check --full-report || true
+
+      # Layer 3: Pattern-based Analysis — Semgrep
+      - name: Semgrep Security Scan
+        run: |
+          semgrep --config=auto \
+            --exclude='*.pyc' \
+            --exclude='.venv' \
+            --exclude='node_modules' \
+            --error \
+            --severity ERROR
+
+      # Layer 4: Secrets Detection — prevent credential leaks
+      - name: Secret Scanning
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+
+      # Layer 5: Zero hardcoded secrets verification
+      - name: Verify No Hardcoded Secrets
+        run: |
+          echo "Checking for hardcoded secrets patterns..."
+          PATTERNS="sk-proj-|hf_V|django-insecure|txwswzyykyowghxa|3d9ebc3df89fa042"
+          if grep -rn "$PATTERNS" --include="*.py" .; then
+            echo "::error::Hardcoded secrets detected in Python files!"
+            exit 1
+          fi
+          echo "No hardcoded secrets found."
+
+      - name: Upload Bandit Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json

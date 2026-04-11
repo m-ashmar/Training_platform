@@ -1,3 +1,13 @@
+"""
+notifications/listeners/social_listeners.py — Handlers for social domain events.
+
+Each listener passes **context-only metadata** to NotificationService.
+No pre-evaluated title/body strings.
+
+Template resolution happens at delivery time in FCMChannel inside
+LanguageContext.for_user_id(recipient_id).
+"""
+
 import logging
 from django.contrib.auth import get_user_model
 from notifications.domain.dispatcher import subscribe
@@ -20,8 +30,7 @@ def handle_post_liked(event: PostLikedEvent):
             return  # Don't notify self
 
         metadata = {
-            'title': 'New Like',
-            'body': f'{actor.username} liked your post.',
+            'context': {'actor': actor.username},
             'data': {'type': 'like', 'post_id': event.target_post_id}
         }
         
@@ -48,8 +57,10 @@ def handle_comment_created(event: CommentCreatedEvent):
             return
 
         metadata = {
-            'title': 'New Comment',
-            'body': f'{actor.username} commented on your post: {event.comment_text[:30]}...',
+            'context': {
+                'actor': actor.username,
+                'preview': event.comment_text[:30] + '...' if len(event.comment_text) > 30 else event.comment_text,
+            },
             'data': {'type': 'comment', 'post_id': event.target_post_id, 'comment_id': event.comment_id}
         }
         
@@ -73,8 +84,7 @@ def handle_user_followed(event: UserFollowedEvent):
         recipient = User.objects.get(id=event.target_user_id)
         
         metadata = {
-            'title': 'New Follower',
-            'body': f'{actor.username} started following you.',
+            'context': {'actor': actor.username},
             'data': {'type': 'follow', 'follower_id': actor.id}
         }
         
@@ -95,8 +105,10 @@ def handle_achievement_awarded(event: AchievementAwardedEvent):
         recipient = User.objects.get(id=event.user_id)
         
         metadata = {
-            'title': 'Achievement Unlocked! 🏆',
-            'body': f'You earned the "{event.achievement_name}" achievement! +{event.points} points',
+            'context': {
+                'name': event.achievement_name,
+                'points': str(event.points),
+            },
             'data': {'type': 'achievement', 'achievement_id': event.achievement_id}
         }
         
@@ -116,8 +128,11 @@ def handle_challenge_progress(event: ChallengeProgressEvent):
         recipient = User.objects.get(id=event.user_id)
         
         metadata = {
-            'title': 'Challenge Progress Update',
-            'body': f'Great job! You made progress in "{event.challenge_title}" - {event.progress:.1f} {event.unit}',
+            'context': {
+                'title': event.challenge_title,
+                'progress': f"{event.progress:.1f}",
+                'unit': event.unit,
+            },
             'data': {'type': 'challenge_progress', 'challenge_id': event.challenge_id}
         }
         

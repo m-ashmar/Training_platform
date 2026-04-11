@@ -5,6 +5,7 @@ Al-Baraka Bank Payment Gateway
 This module implements the Al-Baraka Bank payment gateway integration.
 Currently contains placeholder implementations that can be replaced with real API calls.
 """
+from django.utils.translation import gettext as _
 
 import json
 import logging
@@ -87,7 +88,7 @@ class BarakaBankGateway:
                 'expires_at': int(time.time()) + 3600,  # 1 hour
                 'gateway_response': {
                     'code': '200',
-                    'message': 'Payment initiated successfully',
+                    'message': _('Payment initiated successfully'),
                     'data': {
                         'transaction_id': transaction_id,
                         'payment_url': f"https://baraka.sy/pay/{transaction_id}",
@@ -184,7 +185,7 @@ class BarakaBankGateway:
                 'bank_reference': f"BARAKA_REF_{reference}",
                 'gateway_response': {
                     'code': '200',
-                    'message': 'Payment status retrieved successfully'
+                    'message': _('Payment status retrieved successfully')
                 }
             }
             
@@ -243,7 +244,7 @@ class BarakaBankGateway:
         # Placeholder implementation
         return {
             'success': True,
-            'message': 'API call simulated successfully'
+            'message': _('API call simulated successfully')
         }
     
     def _validate_webhook_signature(self, payload: bytes, signature: str) -> bool:

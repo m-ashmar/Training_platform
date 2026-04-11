@@ -1,6 +1,5 @@
 # users/views.py
-# NOTE: Password reset endpoints are handled by Django's built-in auth views in urls.py.
-# TODO: Implement email/phone verification for production readiness.
+# Password reset is handled via OTP-based REST API endpoints (PasswordResetRequestView, etc.).
 from dj_rest_auth.views import LoginView
 from dj_rest_auth.registration.views import RegisterView  # Correct import
 from .serializers import (
@@ -14,6 +13,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+from django.utils.translation import gettext as _
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from .models import CustomUser, DeviceToken
@@ -22,8 +22,18 @@ from routine.permissions import IsTrainerOfApprovedClient
 from routine.serializers import ClientProfileViewSerializer
 import logging
 from rest_framework.exceptions import PermissionDenied
-from users.utils import send_push_notification
+from notifications.domain.dispatcher import emit_event
+from notifications.domain.trainer_client_events import (
+    TrainerAssignmentRequestEvent,
+    TrainerUnassignmentEvent,
+    ClientRequestReceivedEvent,
+    ClientRequestApprovedEvent,
+    ClientRequestRejectedEvent,
+    ClientRequestCancelledEvent,
+    ClientUnassignedTrainerEvent,
+)
 from django.core.cache import cache
+from training_platform.i18n import LanguageContext, CACHE_VERSION
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -62,7 +72,7 @@ class JWTAuthLogoutView(APIView):
             
             if not refresh_token:
                 return Response(
-                    {'error': 'Refresh token is required'}, 
+                    {'error': _('Refresh token is required')}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -71,18 +81,18 @@ class JWTAuthLogoutView(APIView):
             token.blacklist()
             
             return Response(
-                {'message': 'Successfully logged out'}, 
+                {'message': _('Successfully logged out')}, 
                 status=status.HTTP_200_OK
             )
             
         except TokenError:
             return Response(
-                {'error': 'Invalid refresh token'}, 
+                {'error': _('Invalid refresh token')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
             return Response(
-                {'error': 'Logout failed'}, 
+                {'error': _('Logout failed')}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -102,7 +112,7 @@ class UpdateUserDetailsView(APIView):
         serializer = UserDetailsSerializer(user, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response({'message': 'Details updated successfully!'}, status=status.HTTP_200_OK)
+            return Response({'message': _('Details updated successfully!')}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
     
@@ -169,7 +179,7 @@ class CustomRegisterView(RegisterView):
         
         return Response({
             'user': user_info,
-            'message': 'Registration successful. Please check your email for OTP verification code.',
+            'message': _('Registration successful. Please check your email for OTP verification code.'),
             'requires_verification': True
         }, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -187,7 +197,7 @@ class OTPVerificationView(APIView):
         
         if not email or not otp_code:
             return Response(
-                {'error': 'Email and OTP code are required'},
+                {'error': _('Email and OTP code are required')},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -225,7 +235,7 @@ class OTPVerificationView(APIView):
         logger.info(f"User {user.id} ({email}) verified and activated")
         
         return Response({
-            'message': 'Email verified successfully. Your account has been activated.',
+            'message': _('Email verified successfully. Your account has been activated.'),
             'user': user_info,
             'access': str(refresh.access_token),
             'refresh': str(refresh),
@@ -234,68 +244,77 @@ class OTPVerificationView(APIView):
 class ResendOTPView(APIView):
     """
     View to resend OTP code to user's email.
-    Rate limited to 3 requests per hour per email.
+    Rate limited to 3 requests per hour per IP (django-ratelimit) + soft cache counter.
+    Anti-enumeration: always returns 200 with the same message.
     """
     permission_classes = [AllowAny]
-    
+
     def post(self, request):
         """Resend OTP code"""
-        email = request.data.get('email')
-        
-        if not email:
-            return Response(
-                {'error': 'Email is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
+        from django_ratelimit.decorators import ratelimit
+        from django_ratelimit.exceptions import Ratelimited
         from .models import CustomUser
         from .utils import create_otp
         from django.core.cache import cache
-        from django.utils import timezone
-        
+        import hashlib
+
+        _GENERIC_MSG = _('If this email is registered and unverified, a new OTP has been sent.')
+
+        email = request.data.get('email')
+        if not email:
+            return Response(
+                {'error': _('Email is required')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # --- Layer 1: ratelimit_cache (DB1, Redis-backed, survives app cache flush) ---
+        # Key: sha256 of email+IP so we don't store PII in Redis keys
+        client_ip = (
+            request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
+            or request.META.get('REMOTE_ADDR', 'unknown')
+        )
+        rate_key = hashlib.sha256(f"{email}:{client_ip}".encode()).hexdigest()[:32]
+        rl_cache_key = f"rl:otp_resend:{rate_key}"
+        from training_platform.cache import ratelimit_cache
+        rl = ratelimit_cache()
+        rl_count = rl.get(rl_cache_key, 0)
+        if rl_count >= 3:
+            logger.warning(f"OTP resend rate limit hit for hash {rate_key}")
+            return Response(
+                {'error': _('Too many OTP requests. Please wait 1 hour before requesting again.')},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+        try:
+            rl.incr(rl_cache_key)
+        except ValueError:
+            rl.set(rl_cache_key, 1, 3600)
+
+        # --- Anti-enumeration: look up user silently ---
         try:
             user = CustomUser.objects.get(email=email)
         except CustomUser.DoesNotExist:
-            return Response(
-                {'error': 'User with this email does not exist'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Check if user is already verified
+            # Do NOT reveal whether the email exists
+            logger.info(f"OTP resend requested for unknown email (hash: {rate_key})")
+            return Response({'message': _GENERIC_MSG}, status=status.HTTP_200_OK)
+
+        # Already verified accounts: still return 200 (don't confirm email status)
         if user.is_active:
-            return Response(
-                {'error': 'This account is already verified'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Rate limiting: max 3 resends per hour per email
-        cache_key = f'otp_resend_{email}'
-        resend_count = cache.get(cache_key, 0)
-        
-        if resend_count >= 3:
-            return Response(
-                {'error': 'Too many OTP requests. Please wait 1 hour before requesting again.'},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
-        
-        # Increment counter and set expiration (1 hour)
-        cache.set(cache_key, resend_count + 1, 3600)
-        
+            logger.info(f"OTP resend requested for already-active user {user.id}")
+            return Response({'message': _GENERIC_MSG}, status=status.HTTP_200_OK)
+
         # Create and send new OTP
         try:
             create_otp(user)
-            logger.info(f"OTP resent to {email} for user {user.id}")
-            
-            return Response({
-                'message': 'OTP code has been resent to your email. Please check your inbox.',
-                'email': email,
-            }, status=status.HTTP_200_OK)
+            logger.info(f"OTP resent for user {user.id}")
         except Exception as e:
-            logger.error(f"Failed to resend OTP to {email}: {str(e)}")
+            logger.error(f"Failed to resend OTP for user {user.id}: {str(e)}")
             return Response(
-                {'error': 'Failed to send OTP. Please try again later.'},
+                {'error': _('Failed to send OTP. Please try again later.')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+        return Response({'message': _GENERIC_MSG}, status=status.HTTP_200_OK)
+
 
 # ============================================================================
 # TRAINER-SPECIFIC VIEWS
@@ -309,7 +328,7 @@ class TrainerProfileView(APIView):
         """Get trainer profile data"""
         if not request.user.is_trainer:
             return Response(
-                {'error': 'This endpoint is only for trainers'}, 
+                {'error': _('This endpoint is only for trainers')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -320,14 +339,14 @@ class TrainerProfileView(APIView):
         """Update trainer profile"""
         if not request.user.is_trainer:
             return Response(
-                {'error': 'This endpoint is only for trainers'}, 
+                {'error': _('This endpoint is only for trainers')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
         serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response({'message': 'Trainer profile updated successfully!'}, status=status.HTTP_200_OK)
+            return Response({'message': _('Trainer profile updated successfully!')}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class TrainerClientsView(APIView):
@@ -338,7 +357,7 @@ class TrainerClientsView(APIView):
         """Get all clients assigned to this trainer"""
         if not request.user.is_trainer:
             return Response(
-                {'error': 'This endpoint is only for trainers'}, 
+                {'error': _('This endpoint is only for trainers')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -385,7 +404,7 @@ class AssignClientView(APIView):
         client_id = request.data.get('client_id')
         if not client_id:
             return Response(
-                {'error': 'client_id is required'}, 
+                {'error': _('client_id is required')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -403,12 +422,12 @@ class AssignClientView(APIView):
             if not created:
                 if relation.status == 'approved':
                     return Response(
-                        {'error': 'Client is already assigned to you'}, 
+                        {'error': _('Client is already assigned to you')}, 
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'pending':
                     return Response(
-                        {'error': 'Client assignment request is already pending'}, 
+                        {'error': _('Client assignment request is already pending')}, 
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'rejected':
@@ -416,20 +435,19 @@ class AssignClientView(APIView):
                     relation.status = 'pending'
                     relation.save()
             
-            # TODO: Send notification to client about assignment request
-            send_push_notification(
-                user=client,
-                title="Trainer Assignment Request",
-                message=f"Trainer {getattr(request.user, 'full_name', None) or request.user.username} has requested to assign you as a client.",
-                data={"trainer_id": request.user.id}
-            )
+            # Emit domain event — notification handled at delivery boundary
+            emit_event(TrainerAssignmentRequestEvent(
+                actor_id=request.user.id,
+                recipient_id=client.id,
+                trainer_name=getattr(request.user, 'full_name', None) or request.user.username,
+            ))
             logger.info(f"Trainer {request.user.id} requested assignment of client {client.id}")
             
             # Invalidate client cache
             ClientProfileViewSet.invalidate_client_cache(client.id, request.user.id)
             
             return Response({
-                'message': f'Assignment request sent to {client.username}',
+                'message': _('Assignment request sent successfully.'),
                 'client_id': client.id,
                 'status': 'pending'
             }, status=status.HTTP_200_OK)
@@ -455,7 +473,7 @@ class UnassignClientView(APIView):
         client_id = request.data.get('client_id')
         if not client_id:
             return Response(
-                {'error': 'client_id is required'}, 
+                {'error': _('client_id is required')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -477,26 +495,25 @@ class UnassignClientView(APIView):
                 # Delete the relation
                 relation.delete()
                 
-                # TODO: Send notification to client about unassignment
-                send_push_notification(
-                    user=client,
-                    title="Trainer Unassignment",
-                    message=f"Trainer {getattr(request.user, 'full_name', None) or request.user.username} has unassigned you.",
-                    data={"trainer_id": request.user.id}
-                )
+                # Emit domain event — notification handled at delivery boundary
+                emit_event(TrainerUnassignmentEvent(
+                    actor_id=request.user.id,
+                    recipient_id=client.id,
+                    trainer_name=getattr(request.user, 'full_name', None) or request.user.username,
+                ))
                 logger.info(f"Trainer {request.user.id} unassigned client {client.id}")
                 
                 # Invalidate client cache
                 ClientProfileViewSet.invalidate_client_cache(client.id, request.user.id)
                 
                 return Response({
-                    'message': f'Client {client.username} unassigned successfully',
+                    'message': _('Client unassigned successfully.'),
                     'client_id': client.id
                 }, status=status.HTTP_200_OK)
                 
             except TrainerClientRelation.DoesNotExist:
                 return Response(
-                    {'error': 'Client is not assigned to you'}, 
+                    {'error': _('Client is not assigned to you')}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -518,7 +535,7 @@ class ClientProfileView(APIView):
         """Get client profile data"""
         if not request.user.is_client:
             return Response(
-                {'error': 'This endpoint is only for clients'}, 
+                {'error': _('This endpoint is only for clients')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -529,14 +546,14 @@ class ClientProfileView(APIView):
         """Update client profile"""
         if not request.user.is_client:
             return Response(
-                {'error': 'This endpoint is only for clients'}, 
+                {'error': _('This endpoint is only for clients')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
         serializer = ClientProfileSerializer(request.user, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response({'message': 'Client profile updated successfully!'}, status=status.HTTP_200_OK)
+            return Response({'message': _('Client profile updated successfully!')}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class PublicTrainersListView(APIView):
@@ -544,9 +561,10 @@ class PublicTrainersListView(APIView):
     permission_classes = [AllowAny]
     
     def get(self, request):
-        """Get all available trainers (public endpoint)"""
-        # Get all available trainers with client count annotated
-        from django.db.models import Count
+        """Get all available trainers (public endpoint). Supports ?search=name to filter by name."""
+        from django.db.models import Count, Q
+        from routine.views import StandardResultsSetPagination
+        
         trainers = CustomUser.objects.filter(
             user_type='trainer',
             trainer_is_available=True,
@@ -555,6 +573,43 @@ class PublicTrainersListView(APIView):
             client_count_anno=Count('clients')
         )
         
+        # Name search filter: ?search=<name>
+        search_query = request.query_params.get('search', '').strip()
+        if search_query:
+            trainers = trainers.filter(
+                Q(first_name__icontains=search_query) |
+                Q(last_name__icontains=search_query) |
+                Q(username__icontains=search_query)
+            )
+        
+        trainers = trainers.order_by('id')
+
+        
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(trainers, request, view=self)
+        
+        if page is not None:
+            trainer_data = []
+            for trainer in page:
+                trainer_data.append({
+                    'id': trainer.id,
+                    'username': trainer.username,
+                    'first_name': trainer.first_name,
+                    'last_name': trainer.last_name,
+                    'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                    'trainer_bio': trainer.trainer_bio,
+                    'trainer_specializations': trainer.trainer_specializations,
+                    'trainer_certifications': trainer.trainer_certifications,
+                    'trainer_experience_years': trainer.trainer_experience_years,
+                    'trainer_hourly_rate': trainer.trainer_hourly_rate,
+                    'trainer_is_verified': trainer.trainer_is_verified,
+                    'client_count': trainer.client_count_anno,
+                })
+            return paginator.get_paginated_response({
+                'available_trainers': trainer_data,
+                'trainer_count': trainers.count()
+            })
+            
         trainer_data = []
         for trainer in trainers:
             trainer_data.append({
@@ -609,13 +664,14 @@ class AvailableTrainersView(APIView):
         """Get all available trainers"""
         if not request.user.is_client:
             return Response(
-                {'error': 'This endpoint is only for clients'}, 
+                {'error': _('This endpoint is only for clients')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
         # Get all available trainers with client count annotated
         # Use Count('clients') to get the number of reverse relationships
-        from django.db.models import Count
+        from django.db.models import Count, Q
+        from routine.views import StandardResultsSetPagination
         
         trainers = CustomUser.objects.filter(
             user_type='trainer',
@@ -624,6 +680,45 @@ class AvailableTrainersView(APIView):
         ).annotate(
             client_count_anno=Count('clients')
         )
+        
+        # Name search filter: ?search=<name>
+        search_query = request.query_params.get('search', '').strip()
+        if search_query:
+            trainers = trainers.filter(
+                Q(first_name__icontains=search_query) |
+                Q(last_name__icontains=search_query) |
+                Q(username__icontains=search_query)
+            )
+        
+        trainers = trainers.order_by('id')
+
+        
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(trainers, request, view=self)
+        
+        if page is not None:
+            trainer_data = []
+            for trainer in page:
+                trainer_data.append({
+                    'id': trainer.id,
+                    'username': trainer.username,
+                    'email': trainer.email,
+                    'first_name': trainer.first_name,
+                    'last_name': trainer.last_name,
+                    'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                    'trainer_bio': trainer.trainer_bio,
+                    'trainer_specializations': trainer.trainer_specializations,
+                    'trainer_certifications': trainer.trainer_certifications,
+                    'trainer_experience_years': trainer.trainer_experience_years,
+                    'trainer_hourly_rate': trainer.trainer_hourly_rate,
+                    'trainer_is_verified': trainer.trainer_is_verified,
+                    'client_count': trainer.client_count_anno,
+                })
+            return paginator.get_paginated_response({
+                'client_id': request.user.id,
+                'available_trainers': trainer_data,
+                'trainer_count': trainers.count()
+            })
         
         trainer_data = []
         for trainer in trainers:
@@ -640,7 +735,7 @@ class AvailableTrainersView(APIView):
                 'trainer_experience_years': trainer.trainer_experience_years,
                 'trainer_hourly_rate': trainer.trainer_hourly_rate,
                 'trainer_is_verified': trainer.trainer_is_verified,
-                'client_count': trainer.client_count_anno, # Use annotated value
+                'client_count': trainer.client_count_anno,
             })
         
         return Response({
@@ -670,9 +765,10 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        cache_key = f"trainer_{user.id}_approved_clients"
-        queryset = cache.get(cache_key)
-        if queryset is None:
+        cache_key = LanguageContext.cache_key("trainer", user.id, "approved_clients")
+        from training_platform.cache import private_cache
+        cached = private_cache().get(cache_key)
+        if cached is None:
             if user.is_admin:
                 queryset = self.queryset.all()
             elif user.is_trainer:
@@ -684,8 +780,11 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
                 queryset = self.queryset.filter(id__in=approved_clients)
             else:
                 queryset = self.queryset.none()
-            cache.set(cache_key, queryset, timeout=300)  # 5 min
-        return queryset
+            # Serialize to plain list of PKs — never cache raw QuerySet objects
+            cached = list(queryset.values_list('id', flat=True))
+            private_cache().set(cache_key, cached, timeout=300)  # 5 min
+        # Reconstruct queryset from cached IDs so DRF can apply further filters
+        return self.queryset.filter(id__in=cached)
 
     def retrieve(self, request, *args, **kwargs):
         pk = kwargs.get('pk')
@@ -694,18 +793,19 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
         try:
             obj = self.queryset.get(pk=pk)
         except self.queryset.model.DoesNotExist:
-            return Response({'error': 'Client not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': _('Client not found')}, status=status.HTTP_404_NOT_FOUND)
         # Object permission is already enforced by permission_classes but ensure 403 explicitly
         has_perm = all(perm().has_object_permission(request, self, obj) for perm in self.permission_classes)
         if not has_perm:
-            return Response({'error': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
-        cache_key = f"client_profile_{pk}"
-        data = cache.get(cache_key)
+            return Response({'error': _('Forbidden')}, status=status.HTTP_403_FORBIDDEN)
+        from training_platform.cache import private_cache
+        cache_key = LanguageContext.cache_key("client_profile", pk)
+        data = private_cache().get(cache_key)
         if data is not None:
             return Response(data)
         serializer = self.get_serializer(obj)
         data = serializer.data
-        cache.set(cache_key, data, timeout=300)
+        private_cache().set(cache_key, data, timeout=300)
         return Response(data)
 
     def list(self, request, *args, **kwargs):
@@ -744,15 +844,18 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
         except Exception as e:
             logger.error(f"Error listing client profiles: {str(e)}")
             return Response(
-                {'error': 'An error occurred while listing client profiles'}, 
+                {'error': _('An error occurred while listing client profiles')}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
     @staticmethod
     def invalidate_client_cache(client_id, trainer_id=None):
-        cache.delete(f"client_profile_{client_id}")
-        if trainer_id:
-            cache.delete(f"trainer_{trainer_id}_approved_clients")
+        """Invalidate cache for all language variants."""
+        from django.conf import settings
+        for lang_code, _ in settings.LANGUAGES:
+            cache.delete(f"client_profile:{client_id}:{lang_code}:{CACHE_VERSION}")
+            if trainer_id:
+                cache.delete(f"trainer:{trainer_id}:approved_clients:{lang_code}:{CACHE_VERSION}")
 
 class DeviceTokenRegisterView(APIView):
     permission_classes = [IsAuthenticated]
@@ -760,7 +863,7 @@ class DeviceTokenRegisterView(APIView):
     def post(self, request):
         token = request.data.get('token')
         if not token:
-            return Response({'error': 'Token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': _('Token is required.')}, status=status.HTTP_400_BAD_REQUEST)
         device_token, created = DeviceToken.objects.update_or_create(
             user=request.user, token=token,
             defaults={}
@@ -789,7 +892,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 from rest_framework import serializers
                 raise serializers.ValidationError(
                     {
-                        "detail": "Please verify your email address before logging in. Check your inbox for the OTP code.",
+                        "detail": _("Please verify your email address before logging in. Check your inbox for the OTP code."),
                         "requires_verification": True,
                         "email": user.email
                     }
@@ -844,7 +947,7 @@ class ClientRequestTrainerView(APIView):
         """Client requests to be assigned to a trainer"""
         if not request.user.is_client:
             return Response(
-                {'error': 'This endpoint is only for clients'}, 
+                {'error': _('This endpoint is only for clients')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -853,7 +956,7 @@ class ClientRequestTrainerView(APIView):
         
         if not trainer_id:
             return Response(
-                {'error': 'trainer_id is required'}, 
+                {'error': _('trainer_id is required')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -868,7 +971,7 @@ class ClientRequestTrainerView(APIView):
                     client_wallet, _ = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
                     if client_wallet.balance < trainer_charge:
                         return Response(
-                            {'error': 'Insufficient wallet balance to request this trainer', 'required': str(trainer_charge), 'balance': str(client_wallet.balance)},
+                            {'error': _('Insufficient wallet balance to request this trainer'), 'required': str(trainer_charge), 'balance': str(client_wallet.balance)},
                             status=status.HTTP_402_PAYMENT_REQUIRED
                         )
             except Exception:
@@ -877,14 +980,14 @@ class ClientRequestTrainerView(APIView):
             # Check if trainer is available
             if not trainer.trainer_is_available:
                 return Response(
-                    {'error': 'This trainer is not currently accepting new clients'}, 
+                    {'error': _('This trainer is not currently accepting new clients')}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
             # Enforce single-trainer rule: if client already assigned, block new requests
             if request.user.assigned_trainer is not None and request.user.assigned_trainer_id != trainer.id:
                 return Response(
-                    {'error': 'You are already assigned to a trainer. Unassign first to request another trainer.'},
+                    {'error': _('You are already assigned to a trainer. Unassign first to request another trainer.')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -895,7 +998,7 @@ class ClientRequestTrainerView(APIView):
             ).exclude(trainer_id=trainer.id).exists()
             if has_pending_elsewhere:
                 return Response(
-                    {'error': 'You already have a pending request with another trainer. Please wait for a response or cancel it first.'},
+                    {'error': _('You already have a pending request with another trainer. Please wait for a response or cancel it first.')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -909,12 +1012,12 @@ class ClientRequestTrainerView(APIView):
             if not created:
                 if relation.status == 'approved':
                     return Response(
-                        {'error': 'You are already assigned to this trainer'}, 
+                        {'error': _('You are already assigned to this trainer')}, 
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'pending':
                     return Response(
-                        {'error': 'Request is already pending with this trainer'}, 
+                        {'error': _('Request is already pending with this trainer')}, 
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'rejected':
@@ -922,35 +1025,30 @@ class ClientRequestTrainerView(APIView):
                     relation.status = 'pending'
                     relation.save()
             
-            # Send notification to trainer
-            send_push_notification(
-                user=trainer,
-                title="New Client Request",
-                message=f"Client {request.user.full_name or request.user.username} has requested to work with you.",
-                data={
-                    "client_id": request.user.id,
-                    "client_name": request.user.full_name or request.user.username,
-                    "message": message
-                }
-            )
+            # Emit domain event — notification handled at delivery boundary
+            emit_event(ClientRequestReceivedEvent(
+                actor_id=request.user.id,
+                recipient_id=trainer.id,
+                client_name=request.user.full_name or request.user.username,
+            ))
             
             logger.info(f"Client {request.user.id} requested trainer {trainer.id}")
             
             return Response({
-                'message': f'Request sent to trainer {trainer.full_name or trainer.username}',
+                'message': _('Request sent to trainer successfully.'),
                 'trainer_id': trainer.id,
                 'status': 'pending'
             }, status=status.HTTP_200_OK)
             
         except CustomUser.DoesNotExist:
             return Response(
-                {'error': 'Trainer not found'}, 
+                {'error': _('Trainer not found')}, 
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
             logger.error(f"Error in client request: {str(e)}")
             return Response(
-                {'error': 'An error occurred while sending the request'}, 
+                {'error': _('An error occurred while sending the request')}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -973,7 +1071,7 @@ class ClientUnassignTrainerView(APIView):
         """Client unassigns their current trainer"""
         if not request.user.is_client:
             return Response(
-                {'error': 'This endpoint is only for clients'}, 
+                {'error': _('This endpoint is only for clients')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -983,7 +1081,7 @@ class ClientUnassignTrainerView(APIView):
             # Check if client has an assigned trainer
             if not request.user.assigned_trainer:
                 return Response(
-                    {'error': 'You do not have an assigned trainer'}, 
+                    {'error': _('You do not have an assigned trainer')}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1007,16 +1105,12 @@ class ClientUnassignTrainerView(APIView):
             request.user.assigned_trainer = None
             request.user.save()
             
-            # Send notification to the trainer
-            send_push_notification(
-                user=trainer,
-                title="Client Unassignment",
-                message=f"Client {request.user.full_name or request.user.username} has unassigned themselves from you.",
-                data={
-                    "client_id": request.user.id,
-                    "client_name": request.user.full_name or request.user.username
-                }
-            )
+            # Emit domain event — notification handled at delivery boundary
+            emit_event(ClientUnassignedTrainerEvent(
+                actor_id=request.user.id,
+                recipient_id=trainer.id,
+                client_name=request.user.full_name or request.user.username,
+            ))
             
             logger.info(f"Client {request.user.id} unassigned from trainer {trainer_id}")
             
@@ -1024,7 +1118,7 @@ class ClientUnassignTrainerView(APIView):
             ClientProfileViewSet.invalidate_client_cache(request.user.id, trainer_id)
             
             return Response({
-                'message': f'Successfully unassigned from trainer {trainer_name}',
+                'message': _('Successfully unassigned from trainer.'),
                 'previous_trainer_id': trainer_id,
                 'previous_trainer_name': trainer_name
             }, status=status.HTTP_200_OK)
@@ -1032,7 +1126,7 @@ class ClientUnassignTrainerView(APIView):
         except Exception as e:
             logger.error(f"Error unassigning trainer: {str(e)}")
             return Response(
-                {'error': 'An error occurred while unassigning the trainer'}, 
+                {'error': _('An error occurred while unassigning the trainer')}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1054,7 +1148,7 @@ class ClientCancelTrainerRequestView(APIView):
         """Client cancels their pending trainer request"""
         if not request.user.is_client:
             return Response(
-                {'error': 'This endpoint is only for clients'}, 
+                {'error': _('This endpoint is only for clients')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -1069,7 +1163,7 @@ class ClientCancelTrainerRequestView(APIView):
             
             if not pending_request:
                 return Response(
-                    {'error': 'You do not have a pending trainer request'}, 
+                    {'error': _('You do not have a pending trainer request')}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1080,21 +1174,17 @@ class ClientCancelTrainerRequestView(APIView):
             # Delete the pending request
             pending_request.delete()
             
-            # Send notification to the trainer
-            send_push_notification(
-                user=trainer,
-                title="Request Cancelled",
-                message=f"Client {request.user.full_name or request.user.username} has cancelled their request.",
-                data={
-                    "client_id": request.user.id,
-                    "client_name": request.user.full_name or request.user.username
-                }
-            )
+            # Emit domain event — notification handled at delivery boundary
+            emit_event(ClientRequestCancelledEvent(
+                actor_id=request.user.id,
+                recipient_id=trainer.id,
+                client_name=request.user.full_name or request.user.username,
+            ))
             
             logger.info(f"Client {request.user.id} cancelled pending request to trainer {trainer_id}")
             
             return Response({
-                'message': f'Successfully cancelled request to trainer {trainer_name}',
+                'message': _('Request cancelled successfully.'),
                 'cancelled_trainer_id': trainer_id,
                 'cancelled_trainer_name': trainer_name
             }, status=status.HTTP_200_OK)
@@ -1102,7 +1192,7 @@ class ClientCancelTrainerRequestView(APIView):
         except Exception as e:
             logger.error(f"Error cancelling trainer request: {str(e)}")
             return Response(
-                {'error': 'An error occurred while cancelling the request'}, 
+                {'error': _('An error occurred while cancelling the request')}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1127,7 +1217,7 @@ class TrainerPendingRequestsView(APIView):
         """Get all pending client requests for this trainer"""
         if not request.user.is_trainer:
             return Response(
-                {'error': 'This endpoint is only for trainers'}, 
+                {'error': _('This endpoint is only for trainers')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -1168,7 +1258,7 @@ class TrainerPendingRequestsView(APIView):
         except Exception as e:
             logger.error(f"Error fetching pending requests: {str(e)}")
             return Response(
-                {'error': 'An error occurred while fetching pending requests'}, 
+                {'error': _('An error occurred while fetching pending requests')}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1194,7 +1284,7 @@ class TrainerRespondToRequestView(APIView):
         """Trainer responds to a client request (approve/reject)"""
         if not request.user.is_trainer:
             return Response(
-                {'error': 'This endpoint is only for trainers'}, 
+                {'error': _('This endpoint is only for trainers')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -1204,13 +1294,13 @@ class TrainerRespondToRequestView(APIView):
         
         if not request_id:
             return Response(
-                {'error': 'request_id is required'}, 
+                {'error': _('request_id is required')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         if action not in ['approve', 'reject']:
             return Response(
-                {'error': 'action must be either "approve" or "reject"'}, 
+                {'error': _('action must be either "approve" or "reject"')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1230,7 +1320,7 @@ class TrainerRespondToRequestView(APIView):
                 # Prevent approving if client already assigned to another trainer
                 if client.assigned_trainer and client.assigned_trainer_id != request.user.id:
                     return Response(
-                        {'error': 'Client is already assigned to another trainer'},
+                        {'error': _('Client is already assigned to another trainer')},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 # Prevent multiple approved relations for same client
@@ -1240,7 +1330,7 @@ class TrainerRespondToRequestView(APIView):
                 ).exclude(trainer=request.user).exists()
                 if already_approved_elsewhere:
                     return Response(
-                        {'error': 'Client already has an approved relation with another trainer'},
+                        {'error': _('Client already has an approved relation with another trainer')},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 # Approve the request
@@ -1260,7 +1350,7 @@ class TrainerRespondToRequestView(APIView):
                         client_wallet, _ = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
                         if client_wallet.balance < trainer_charge:
                             return Response(
-                                {'error': 'Insufficient client wallet balance for trainer charge hold'},
+                                {'error': _('Insufficient client wallet balance for trainer charge hold')},
                                 status=status.HTTP_402_PAYMENT_REQUIRED
                             )
                         escrow = get_escrow_wallet()
@@ -1268,22 +1358,17 @@ class TrainerRespondToRequestView(APIView):
                 except Exception as e:
                     logger.error(f"Wallet hold failed: {str(e)}")
                 
-                # Send approval notification to client
-                send_push_notification(
-                    user=client,
-                    title="Trainer Request Approved!",
-                    message=f"Trainer {request.user.full_name or request.user.username} has approved your request!",
-                    data={
-                        "trainer_id": request.user.id,
-                        "trainer_name": request.user.full_name or request.user.username,
-                        "status": "approved"
-                    }
-                )
+                # Emit domain event — notification handled at delivery boundary
+                emit_event(ClientRequestApprovedEvent(
+                    actor_id=request.user.id,
+                    recipient_id=client.id,
+                    trainer_name=request.user.full_name or request.user.username,
+                ))
                 
                 logger.info(f"Trainer {request.user.id} approved client {client.id}")
                 
                 return Response({
-                    'message': f'Request from {client.full_name or client.username} approved successfully',
+                    'message': _('Request approved successfully.'),
                     'client_id': client.id,
                     'status': 'approved'
                 }, status=status.HTTP_200_OK)
@@ -1293,40 +1378,30 @@ class TrainerRespondToRequestView(APIView):
                 relation.status = 'rejected'
                 relation.save()
                 
-                # Send rejection notification to client
-                rejection_message = f"Trainer {request.user.full_name or request.user.username} has declined your request."
-                if reason:
-                    rejection_message += f" Reason: {reason}"
-                
-                send_push_notification(
-                    user=client,
-                    title="Trainer Request Declined",
-                    message=rejection_message,
-                    data={
-                        "trainer_id": request.user.id,
-                        "trainer_name": request.user.full_name or request.user.username,
-                        "status": "rejected",
-                        "reason": reason
-                    }
-                )
+                # Emit domain event — notification handled at delivery boundary
+                emit_event(ClientRequestRejectedEvent(
+                    actor_id=request.user.id,
+                    recipient_id=client.id,
+                    trainer_name=request.user.full_name or request.user.username,
+                ))
                 
                 logger.info(f"Trainer {request.user.id} rejected client {client.id}")
                 
                 return Response({
-                    'message': f'Request from {client.full_name or client.username} rejected',
+                    'message': _('Request rejected.'),
                     'client_id': client.id,
                     'status': 'rejected'
                 }, status=status.HTTP_200_OK)
                 
         except TrainerClientRelation.DoesNotExist:
             return Response(
-                {'error': 'Request not found or already processed'}, 
+                {'error': _('Request not found or already processed')}, 
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
             logger.error(f"Error responding to request: {str(e)}")
             return Response(
-                {'error': 'An error occurred while processing the request'}, 
+                {'error': _('An error occurred while processing the request')}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1351,7 +1426,7 @@ class ClientRequestStatusView(APIView):
         """Get all requests made by this client"""
         if not request.user.is_client:
             return Response(
-                {'error': 'This endpoint is only for clients'}, 
+                {'error': _('This endpoint is only for clients')}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -1390,7 +1465,7 @@ class ClientRequestStatusView(APIView):
         except Exception as e:
             logger.error(f"Error fetching client requests: {str(e)}")
             return Response(
-                {'error': 'An error occurred while fetching requests'}, 
+                {'error': _('An error occurred while fetching requests')}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1410,7 +1485,7 @@ class ProfilePictureUploadView(APIView):
             
             if not image_file:
                 return Response(
-                    {'error': 'No image file provided. Please include a file with key "profile_picture"'},
+                    {'error': _('No image file provided. Please include a file with key "profile_picture"')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -1425,7 +1500,7 @@ class ProfilePictureUploadView(APIView):
             # Validate file size (2MB limit)
             if image_file.size > 2 * 1024 * 1024:
                 return Response(
-                    {'error': 'File size too large. Maximum size is 2MB'},
+                    {'error': _('File size too large. Maximum size is 2MB')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -1436,7 +1511,7 @@ class ProfilePictureUploadView(APIView):
 
             # Return the updated user info
             return Response({
-                'message': 'Profile picture uploaded successfully',
+                'message': _('Profile picture uploaded successfully'),
                 'profile_picture_url': user.profile_picture.url if user.profile_picture else None,
                 'user': {
                     'id': user.id,
@@ -1466,11 +1541,11 @@ class ProfilePictureUploadView(APIView):
                 user.save()
                 
                 return Response({
-                    'message': 'Profile picture removed successfully'
+                    'message': _('Profile picture removed successfully')
                 }, status=status.HTTP_200_OK)
             else:
                 return Response({
-                    'message': 'No profile picture to remove'
+                    'message': _('No profile picture to remove')
                 }, status=status.HTTP_404_NOT_FOUND)
                 
         except Exception as e:
@@ -1480,3 +1555,155 @@ class ProfilePictureUploadView(APIView):
             )
 
  
+
+# ============================================================================
+# PASSWORD RESET (OTP-BASED) VIEWS
+# ============================================================================
+
+class PasswordResetRequestView(APIView):
+    """
+    Step 1: Request a password reset OTP.
+    
+    Sends a 6-digit OTP to the user's email. Returns a generic success message
+    regardless of whether the email exists (prevents user enumeration).
+    
+    Rate limited: 3 requests per hour per email via cache.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from .serializers import PasswordResetRequestSerializer
+        from .utils import create_password_reset_otp
+        from django.core.cache import cache
+
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+
+        # Rate limiting: max 3 requests per hour per email
+        cache_key = f'pwd_reset_req_{email}'
+        request_count = cache.get(cache_key, 0)
+        if request_count >= 3:
+            return Response(
+                {'error': _('Too many password reset requests. Please wait 1 hour before trying again.')},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+
+        try:
+            user = CustomUser.objects.get(email=email, is_active=True)
+            create_password_reset_otp(user)
+        except CustomUser.DoesNotExist:
+            # Do NOT reveal whether the email exists
+            pass
+
+        # Increment rate limit counter regardless of user existence
+        cache.set(cache_key, request_count + 1, 3600)
+
+        logger.info(f"Password reset requested for email: {email}")
+
+        return Response({
+            'message': _('If an account with this email exists, a password reset code has been sent.'),
+            'email': email,
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetVerifyView(APIView):
+    """
+    Step 2: Verify the password reset OTP.
+    
+    On success, returns a single-use UUID reset token (valid for 15 minutes)
+    that must be submitted with the new password.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from .serializers import PasswordResetVerifySerializer
+        from .models import PasswordResetToken
+        from .utils import verify_otp
+        from datetime import timedelta
+
+        serializer = PasswordResetVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        email = serializer.validated_data['email']
+        otp_code = serializer.validated_data['otp_code']
+
+        success, otp_instance, error_message = verify_otp(email, otp_code, purpose='password_reset')
+
+        if not success:
+            return Response(
+                {'error': error_message},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user = otp_instance.user
+
+        # Invalidate any existing unused reset tokens for this user
+        PasswordResetToken.objects.filter(
+            user=user, is_used=False
+        ).update(is_used=True)
+
+        # Create a new single-use token
+        from django.utils import timezone
+        reset_token = PasswordResetToken.objects.create(
+            user=user,
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+
+        logger.info(f"Password reset OTP verified for user {user.id} ({email})")
+
+        return Response({
+            'message': _('OTP verified successfully. Use the reset token to set your new password.'),
+            'reset_token': str(reset_token.token),
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(APIView):
+    """
+    Step 3: Set a new password using the reset token.
+    
+    Consumes the single-use token and updates the user's password.
+    Django password validators are enforced.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from .serializers import PasswordResetConfirmSerializer
+        from .models import PasswordResetToken
+
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        token_uuid = serializer.validated_data['reset_token']
+        new_password = serializer.validated_data['new_password']
+
+        try:
+            reset_token = PasswordResetToken.objects.select_related('user').get(token=token_uuid)
+        except PasswordResetToken.DoesNotExist:
+            return Response(
+                {'error': _('Invalid or expired reset token.')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not reset_token.is_valid():
+            return Response(
+                {'error': _('This reset token has already been used or has expired. Please request a new one.')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Consume the token
+        from django.utils import timezone
+        reset_token.is_used = True
+        reset_token.used_at = timezone.now()
+        reset_token.save()
+
+        # Set the new password
+        user = reset_token.user
+        user.set_password(new_password)
+        user.save()
+
+        logger.info(f"Password reset completed for user {user.id} ({user.email})")
+
+        return Response({
+            'message': _('Your password has been reset successfully. You can now log in with your new password.'),
+        }, status=status.HTTP_200_OK)

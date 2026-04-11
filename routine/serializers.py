@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.conf import settings
+from django.utils.translation import gettext_lazy as _
 from django.contrib.auth import get_user_model
 from .models import (
     Routine, Exercise, RoutineExercise,ExerciseMedia,
@@ -79,10 +80,10 @@ class ExerciseCreateWithImageSerializer(serializers.ModelSerializer):
     def validate_image(self, value):
         if value:
             if value.size > 5 * 1024 * 1024:  # 5MB limit for exercise images
-                raise serializers.ValidationError('Exercise image size must be under 5MB.')
+                raise serializers.ValidationError(_('Exercise image size must be under 5MB.'))
             valid_types = ['image/jpeg', 'image/png', 'image/webp']
             if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError('Only JPEG, PNG, and WebP images are allowed.')
+                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
         return value
 
 
@@ -115,7 +116,7 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
             # Check if routine exists (for updates) or is being set
             if routine and routine.created_by != user:
                 raise serializers.ValidationError({
-                    "routine": "You can only add exercises to routines you created."
+                    "routine": _("You can only add exercises to routines you created.")
                 })
             
             # 2. Validation: Exercise is accessible (Global or Own)
@@ -124,7 +125,7 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
                 is_global = exercise.created_by is None
                 if not (is_own or is_global):
                     raise serializers.ValidationError({
-                        "exercise": "You can only assign your own exercises or global exercises."
+                        "exercise": _("You can only assign your own exercises or global exercises.")
                     })
         
         return attrs
@@ -141,7 +142,9 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
         return routine_exercise
 
 
-class RoutineSerializer(serializers.ModelSerializer):
+from training_platform.utils.serializers import TranslatedJSONFieldMixin
+
+class RoutineSerializer(TranslatedJSONFieldMixin, serializers.ModelSerializer):
     """
     Enhanced Serializer for Routines with improved assignment validation.
     
@@ -162,6 +165,8 @@ class RoutineSerializer(serializers.ModelSerializer):
     client_count = serializers.SerializerMethodField()
     estimated_duration_minutes = serializers.SerializerMethodField()
     target_muscles = serializers.SerializerMethodField()
+
+    translated_fields = ['name', 'description']
 
     class Meta:
         model = Routine
@@ -232,7 +237,7 @@ class RoutineSerializer(serializers.ModelSerializer):
             # Only trainers and admins can create routines
             if not request.user.is_trainer and not request.user.is_admin:
                 logger.warning(f"User {request.user.id} attempted to create routine without permission")
-                raise serializers.ValidationError("Only trainers and admins can create routines")
+                raise serializers.ValidationError(_("Only trainers and admins can create routines"))
             
             # Enhanced assignment validation for trainers
             if request.user.is_trainer:
@@ -567,7 +572,7 @@ class TrainerRoutineSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and not request.user.is_trainer:
             logger.warning(f"Non-trainer user {request.user.id} attempted to use TrainerRoutineSerializer")
-            raise serializers.ValidationError("This serializer is only for trainers")
+            raise serializers.ValidationError(_("This serializer is only for trainers"))
         return attrs
 
 
@@ -647,7 +652,7 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
         TODO: Implement data privacy checks
         """
         if self.instance and not self.instance.is_client:
-            raise serializers.ValidationError("This serializer is only for client profiles")
+            raise serializers.ValidationError(_("This serializer is only for client profiles"))
         return attrs
 
 
@@ -655,11 +660,22 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
 
 
 class WorkoutSessionSerializer(serializers.ModelSerializer):
+    duration = serializers.SerializerMethodField()
+
     class Meta:
         model = WorkoutSession
-        fields = '__all__'  # Expose all fields for now; restrict as needed
-        read_only_fields = ['id', 'user']
-    # TODO: Add custom validation if needed
+        fields = ['id', 'user', 'routine', 'start_time', 'end_time', 'status', 'duration']
+        read_only_fields = ['id', 'user', 'start_time', 'duration']
+    
+    def get_duration(self, obj):
+        if obj.start_time and obj.end_time:
+            # Return duration in seconds
+            return int((obj.end_time - obj.start_time).total_seconds())
+        elif obj.start_time:
+            # If session is still active, return duration so far in seconds
+            from django.utils import timezone
+            return int((timezone.now() - obj.start_time).total_seconds())
+        return None
 
 
 class RoutineTemplateExerciseSerializer(serializers.ModelSerializer):

@@ -5,6 +5,7 @@ Prevents invalid data from entering the system and causing calculation errors.
 
 from typing import Dict, Any, List, Tuple
 from django.core.exceptions import ValidationError
+from django.utils.translation import gettext_lazy as _
 
 
 class DietInputValidator:
@@ -24,16 +25,20 @@ class DietInputValidator:
         try:
             calories = float(calories)
         except (ValueError, TypeError):
-            raise ValidationError(f"Daily calories must be a number, got: {calories}")
+            raise ValidationError(
+                _("Daily calories must be a number."), code="invalid_calories_type"
+            )
         
         if calories < DietInputValidator.MIN_CALORIES:
             raise ValidationError(
-                f"Daily calories too low ({calories}). Minimum is {DietInputValidator.MIN_CALORIES} kcal"
+                _("Daily calories too low. Minimum is %(min)s kcal.") % {"min": int(DietInputValidator.MIN_CALORIES)},
+                code="calories_too_low",
             )
         
         if calories > DietInputValidator.MAX_CALORIES:
             raise ValidationError(
-                f"Daily calories too high ({calories}). Maximum is {DietInputValidator.MAX_CALORIES} kcal"
+                _("Daily calories too high. Maximum is %(max)s kcal.") % {"max": int(DietInputValidator.MAX_CALORIES)},
+                code="calories_too_high",
             )
         
         return calories
@@ -44,13 +49,19 @@ class DietInputValidator:
         try:
             meal_count = int(meal_count)
         except (ValueError, TypeError):
-            raise ValidationError(f"Meal count must be an integer, got: {meal_count}")
+            raise ValidationError(
+                _("Meal count must be an integer."), code="invalid_meal_count_type"
+            )
         
         if meal_count < 1:
-            raise ValidationError("Meal count must be at least 1")
+            raise ValidationError(
+                _("Meal count must be at least 1."), code="meal_count_too_low"
+            )
         
         if meal_count > 6:
-            raise ValidationError("Meal count cannot exceed 6")
+            raise ValidationError(
+                _("Meal count cannot exceed 6."), code="meal_count_too_high"
+            )
         
         return meal_count
     
@@ -60,13 +71,19 @@ class DietInputValidator:
         try:
             duration_days = int(duration_days)
         except (ValueError, TypeError):
-            raise ValidationError(f"Duration days must be an integer, got: {duration_days}")
+            raise ValidationError(
+                _("Duration days must be an integer."), code="invalid_duration_type"
+            )
         
         if duration_days < 1:
-            raise ValidationError("Duration must be at least 1 day")
+            raise ValidationError(
+                _("Duration must be at least 1 day."), code="duration_too_short"
+            )
         
         if duration_days > 30:
-            raise ValidationError("Duration cannot exceed 30 days")
+            raise ValidationError(
+                _("Duration cannot exceed 30 days."), code="duration_too_long"
+            )
         
         return duration_days
     
@@ -76,16 +93,20 @@ class DietInputValidator:
         try:
             quantity = float(quantity)
         except (ValueError, TypeError):
-            raise ValidationError(f"{context} must be a number, got: {quantity}")
+            raise ValidationError(
+                _("Quantity must be a number."), code="invalid_quantity_type"
+            )
         
         if quantity < DietInputValidator.MIN_QUANTITY:
             raise ValidationError(
-                f"{context} too low ({quantity}g). Minimum is {DietInputValidator.MIN_QUANTITY}g"
+                _("Quantity too low. Minimum is %(min)sg.") % {"min": DietInputValidator.MIN_QUANTITY},
+                code="quantity_too_low",
             )
         
         if quantity > DietInputValidator.MAX_QUANTITY:
             raise ValidationError(
-                f"{context} too high ({quantity}g). Maximum is {DietInputValidator.MAX_QUANTITY}g"
+                _("Quantity too high. Maximum is %(max)sg.") % {"max": DietInputValidator.MAX_QUANTITY},
+                code="quantity_too_high",
             )
         
         return quantity
@@ -98,42 +119,58 @@ class DietInputValidator:
             carb_g = float(carb_g)
             fat_g = float(fat_g)
         except (ValueError, TypeError):
-            raise ValidationError("Macro targets must be numbers")
+            raise ValidationError(
+                _("Macro targets must be numbers."), code="invalid_macro_type"
+            )
         
         # Check non-negative
         if protein_g < 0 or carb_g < 0 or fat_g < 0:
-            raise ValidationError("Macro targets cannot be negative")
+            raise ValidationError(
+                _("Macro targets cannot be negative."), code="negative_macros"
+            )
         
         # Check minimum values
         if protein_g < 30:
-            raise ValidationError("Protein target too low. Minimum is 30g per day")
+            raise ValidationError(
+                _("Protein target too low. Minimum is 30g per day."), code="protein_too_low"
+            )
         
         if carb_g < 20:
-            raise ValidationError("Carb target too low. Minimum is 20g per day")
+            raise ValidationError(
+                _("Carb target too low. Minimum is 20g per day."), code="carbs_too_low"
+            )
         
         if fat_g < 20:
-            raise ValidationError("Fat target too low. Minimum is 20g per day")
+            raise ValidationError(
+                _("Fat target too low. Minimum is 20g per day."), code="fat_too_low"
+            )
         
         # Check maximum values
         if protein_g > 400:
-            raise ValidationError("Protein target too high. Maximum is 400g per day")
+            raise ValidationError(
+                _("Protein target too high. Maximum is 400g per day."), code="protein_too_high"
+            )
         
         if carb_g > 800:
-            raise ValidationError("Carb target too high. Maximum is 800g per day")
+            raise ValidationError(
+                _("Carb target too high. Maximum is 800g per day."), code="carbs_too_high"
+            )
         
         if fat_g > 200:
-            raise ValidationError("Fat target too high. Maximum is 200g per day")
+            raise ValidationError(
+                _("Fat target too high. Maximum is 200g per day."), code="fat_too_high"
+            )
         
         # Check total calories make sense (not too extreme)
         total_kcal = (protein_g * 4) + (carb_g * 4) + (fat_g * 9)
         if total_kcal < DietInputValidator.MIN_CALORIES:
             raise ValidationError(
-                f"Total calories from macros ({total_kcal:.0f}) is too low. Minimum is {DietInputValidator.MIN_CALORIES}"
+                _("Total calories from macros is too low."), code="macro_calories_too_low"
             )
         
         if total_kcal > DietInputValidator.MAX_CALORIES:
             raise ValidationError(
-                f"Total calories from macros ({total_kcal:.0f}) is too high. Maximum is {DietInputValidator.MAX_CALORIES}"
+                _("Total calories from macros is too high."), code="macro_calories_too_high"
             )
         
         return protein_g, carb_g, fat_g
@@ -145,14 +182,21 @@ class DietInputValidator:
         
         for field in required_fields:
             if field not in food_data:
-                raise ValidationError(f"Missing required field: {field}")
+                raise ValidationError(
+                    _("Missing required field: %(field)s") % {"field": field},
+                    code="missing_field",
+                )
         
         # Validate name
         if not food_data['name'] or not food_data['name'].strip():
-            raise ValidationError("Food name cannot be empty")
+            raise ValidationError(
+                _("Food name cannot be empty."), code="empty_food_name"
+            )
         
         if len(food_data['name']) > 255:
-            raise ValidationError("Food name too long (max 255 characters)")
+            raise ValidationError(
+                _("Food name too long (max 255 characters)."), code="food_name_too_long"
+            )
         
         # Validate nutritional values
         try:
@@ -162,38 +206,36 @@ class DietInputValidator:
             fat = float(food_data['fat'])
             serving_size_grams = int(food_data['serving_size_grams'])
         except (ValueError, TypeError):
-            raise ValidationError("Nutritional values must be numbers")
+            raise ValidationError(
+                _("Nutritional values must be numbers."), code="invalid_nutrition_type"
+            )
         
         # Check non-negative
         if any(v < 0 for v in [calories, protein, carbs, fat]):
-            raise ValidationError("Nutritional values cannot be negative")
+            raise ValidationError(
+                _("Nutritional values cannot be negative."), code="negative_nutrition"
+            )
         
         # Check serving size
         if serving_size_grams < DietInputValidator.MIN_SERVING_SIZE:
             raise ValidationError(
-                f"Serving size too small ({serving_size_grams}g). Minimum is {DietInputValidator.MIN_SERVING_SIZE}g"
+                _("Serving size too small."), code="serving_too_small"
             )
         
         if serving_size_grams > DietInputValidator.MAX_SERVING_SIZE:
             raise ValidationError(
-                f"Serving size too large ({serving_size_grams}g). Maximum is {DietInputValidator.MAX_SERVING_SIZE}g"
+                _("Serving size too large."), code="serving_too_large"
             )
         
         # Check calories make sense relative to macros
-        # Theoretical max from macros
         theoretical_kcal = (protein * 4) + (carbs * 4) + (fat * 9)
         
         # Allow 20% margin for fiber, alcohol, etc.
         if calories > theoretical_kcal * 1.2:
             raise ValidationError(
-                f"Calories ({calories}) don't match macros (theoretical: {theoretical_kcal:.1f}). "
-                "Check if values are correct."
+                _("Calories don't match macros. Check if values are correct."),
+                code="calorie_macro_mismatch",
             )
-        
-        # Warn if calories significantly lower (might indicate missing macros)
-        if calories < theoretical_kcal * 0.7 and calories > 0:
-            # This is a warning, not an error - some foods have fiber that reduces calories
-            pass
         
         return food_data
     
@@ -203,10 +245,14 @@ class DietInputValidator:
         try:
             food_id = int(food_id)
         except (ValueError, TypeError):
-            raise ValidationError(f"Food ID must be an integer, got: {food_id}")
+            raise ValidationError(
+                _("Food ID must be an integer."), code="invalid_food_id_type"
+            )
         
         if food_id <= 0:
-            raise ValidationError("Food ID must be positive")
+            raise ValidationError(
+                _("Food ID must be positive."), code="invalid_food_id"
+            )
         
         quantity = DietInputValidator.validate_quantity(quantity, "Component quantity")
         
@@ -230,10 +276,14 @@ class DietInputValidator:
             try:
                 snack_count = int(params['snack_count'])
             except (ValueError, TypeError):
-                raise ValidationError("Snack count must be an integer")
+                raise ValidationError(
+                    _("Snack count must be an integer."), code="invalid_snack_count_type"
+                )
             
             if snack_count < 0 or snack_count > 3:
-                raise ValidationError("Snack count must be between 0 and 3")
+                raise ValidationError(
+                    _("Snack count must be between 0 and 3."), code="snack_count_out_of_range"
+                )
             
             validated['snack_count'] = snack_count
         
@@ -248,7 +298,9 @@ class DietInputValidator:
                 if isinstance(params['start_date'], str):
                     date.fromisoformat(params['start_date'])
             except ValueError:
-                raise ValidationError("Invalid start date format. Use YYYY-MM-DD")
+                raise ValidationError(
+                    _("Invalid start date format. Use YYYY-MM-DD."), code="invalid_date_format"
+                )
         
         return validated
 
@@ -264,6 +316,3 @@ def validate_diet_generation(daily_calories: float, meal_count: int, duration_da
 def validate_component_quantity(quantity: float) -> float:
     """Validate meal component quantity."""
     return DietInputValidator.validate_quantity(quantity)
-
-
-

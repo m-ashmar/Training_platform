@@ -11,7 +11,12 @@ import logging
 from django.core.cache import cache
 from django.http import JsonResponse
 from django.utils.deprecation import MiddlewareMixin
+from django.utils.translation import gettext as _
 from django.conf import settings
+from django.utils import timezone
+import secrets
+# Named-backend accessors — routes to the correct Redis DB segment
+from training_platform.cache import ratelimit_cache, public_cache
 from django.db import connection, reset_queries
 from django.utils import timezone
 from django.shortcuts import redirect
@@ -27,13 +32,14 @@ class RateLimitMiddleware(MiddlewareMixin):
     
     def __init__(self, get_response=None):
         super().__init__(get_response)
-        # Relax limits in development to avoid throttling during testing
-        if getattr(settings, 'WALLET_DEV_MODE', False) or settings.DEBUG:
+        # Rate limits are always enforced. In DEBUG mode, limits are higher
+        # for development convenience but never disabled entirely.
+        if settings.DEBUG:
             self.rate_limits = {
-                'anonymous': {'requests': 1000000, 'window': 60},
-                'client': {'requests': 1000000, 'window': 60},
-                'trainer': {'requests': 1000000, 'window': 60},
-                'admin': {'requests': 1000000, 'window': 60},
+                'anonymous': {'requests': 10000, 'window': 60},
+                'client': {'requests': 10000, 'window': 60},
+                'trainer': {'requests': 10000, 'window': 60},
+                'admin': {'requests': 10000, 'window': 60},
             }
         else:
             self.rate_limits = {
@@ -59,7 +65,7 @@ class RateLimitMiddleware(MiddlewareMixin):
         if self._is_rate_limited(client_id, user_type):
             return JsonResponse({
                 'error': 'Rate limit exceeded',
-                'message': 'Too many requests. Please try again later.',
+                'message': _('Too many requests. Please try again later.'),
                 'retry_after': 3600
             }, status=429)
         
@@ -105,34 +111,35 @@ class RateLimitMiddleware(MiddlewareMixin):
     
     def _is_rate_limited(self, client_id, user_type):
         """
-        Check if client is rate limited
+        Check if client is rate limited.
+        Uses atomic incr to prevent race conditions.
+        Uses ratelimit_cache (DB1) — isolated from session store.
         """
         limits = self.rate_limits.get(user_type, self.rate_limits['anonymous'])
-        
-        # Use Redis for rate limiting if available
         cache_key = f"rate_limit:{client_id}"
-        
+        rl = ratelimit_cache()
+
         try:
-            # Get current request count
-            current_requests = cache.get(cache_key, 0)
-            
-            # Check if limit exceeded
-            if current_requests >= limits['requests']:
-                return True
-            
-            # Increment counter
-            cache.set(cache_key, current_requests + 1, limits['window'])
+            # Atomic increment — no race condition between read and write
+            current = rl.incr(cache_key)
+        except ValueError:
+            # Key does not exist yet — initialise with TTL
+            rl.set(cache_key, 1, limits['window'])
             return False
-            
         except Exception as e:
             logger.error(f"Rate limiting error: {e}")
-            # Fail open - don't block requests if rate limiting fails
-            return False
+            return False  # Fail open
+
+        # If this is the first request, set TTL on the newly created key
+        if current == 1:
+            rl.expire(cache_key, limits['window']) if hasattr(rl, 'expire') else None
+
+        return current > limits['requests']
 
 
 class ErrorHandlingMiddleware(MiddlewareMixin):
     """
-    Standardized error handling middleware
+    Standardized error handling middleware with i18n support.
     """
     
     def process_exception(self, request, exception):
@@ -157,11 +164,12 @@ class ErrorHandlingMiddleware(MiddlewareMixin):
         from django.core.exceptions import ValidationError, PermissionDenied
         from django.http import Http404
         from rest_framework.exceptions import APIException
+        from django.utils.translation import gettext as _
         
         if isinstance(exception, ValidationError):
             return {
                 'error': 'validation_error',
-                'message': 'Invalid input data',
+                'message': _('Invalid input data'),
                 'details': (exception.message_dict 
                            if hasattr(exception, 'message_dict') 
                            else str(exception)),
@@ -170,13 +178,13 @@ class ErrorHandlingMiddleware(MiddlewareMixin):
         elif isinstance(exception, PermissionDenied):
             return {
                 'error': 'permission_denied',
-                'message': 'You do not have permission to perform this action',
+                'message': _('You do not have permission to perform this action'),
                 'status': 403
             }
         elif isinstance(exception, Http404):
             return {
                 'error': 'not_found',
-                'message': 'The requested resource was not found',
+                'message': _('The requested resource was not found'),
                 'status': 404
             }
         elif isinstance(exception, APIException):
@@ -189,28 +197,50 @@ class ErrorHandlingMiddleware(MiddlewareMixin):
             # Generic server error
             return {
                 'error': 'internal_server_error',
-                'message': 'An unexpected error occurred. Please try again later.',
+                'message': _('An unexpected error occurred. Please try again later.'),
                 'status': 500
             }
 
 
 class SecurityHeadersMiddleware(MiddlewareMixin):
     """
-    Add security headers to all responses
+    Add security headers to all responses.
+    Generates a per-request CSP nonce to replace unsafe-inline.
+    Templates should use: <script nonce="{{ request.csp_nonce }}">
     """
-    
+
+    def process_request(self, request):
+        """
+        Generate a cryptographically secure per-request nonce for CSP.
+        Store on request so views/templates can reference it.
+        """
+        import secrets as _secrets
+        request.csp_nonce = _secrets.token_urlsafe(16)
+        return None
+
     def process_response(self, request, response):
         """
-        Add security headers to response
+        Add security headers to response.
         """
         # Security headers
         response['X-Content-Type-Options'] = 'nosniff'
         response['X-Frame-Options'] = 'DENY'
         response['X-XSS-Protection'] = '1; mode=block'
         response['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-        
-        # Content Security Policy
+
+        # Content Security Policy — nonce-based, no unsafe-inline
+        nonce = getattr(request, 'csp_nonce', '')
         if not settings.DEBUG:
+            response['Content-Security-Policy'] = (
+                f"default-src 'self'; "
+                f"script-src 'self' 'nonce-{nonce}'; "
+                f"style-src 'self' 'nonce-{nonce}'; "
+                f"img-src 'self' data: https:; "
+                f"connect-src 'self'; "
+                f"frame-ancestors 'none'"
+            )
+        else:
+            # In DEBUG, allow unsafe-inline for dev convenience only
             response['Content-Security-Policy'] = (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline'; "
@@ -218,13 +248,12 @@ class SecurityHeadersMiddleware(MiddlewareMixin):
                 "img-src 'self' data: https:; "
                 "connect-src 'self'"
             )
-        
+
         return response
 
-    def process_request(self, request):
+    def _handle_ssl_redirect(self, request):
         """
-        If SECURE_SSL_REDIRECT is enabled in prod, allow exemptions for API paths to ease local testing
-        when requests are made over HTTP.
+        If SECURE_SSL_REDIRECT is enabled, allow exemptions for API paths.
         """
         try:
             if getattr(settings, 'SECURE_SSL_REDIRECT', False):
@@ -348,50 +377,71 @@ class CacheMiddleware(MiddlewareMixin):
     
     def __init__(self, get_response=None):
         super().__init__(get_response)
-        # Expanded list of cacheable paths
+        # Expanded list of cacheable paths — now securely routes dynamically
+        # to DB2 (public) or DB3 (private) based on user identity.
         self.cacheable_paths = [
             '/api/food/categories/',
             '/api/exercises/',
             '/api/subscription/plans/',
-            '/api/food/',  # Food list (frequently accessed)
-            '/api/diet/templates/',  # Diet plan templates (mostly static)
-            '/api/routine/templates/',  # Routine templates
+            '/api/food/',  # Food list (public)
+            '/api/achievements/',
+            '/api/routine/templates/',
         ]
         self.cache_duration = 300  # 5 minutes
     
     def process_request(self, request):
         """
-        Check if response is cached
+        Check if response is cached. Uses DB2 (public) for anon, DB3 (private) for auth.
         """
         if request.method == 'GET' and self._is_cacheable(request):
             cache_key = self._get_cache_key(request)
-            cached_response = cache.get(cache_key)
             
-            if cached_response:
-                logger.debug(f"Cache hit for {request.path}")
-                return JsonResponse(cached_response)
-        
+            # Determine correct cache segment based on key prefix
+            if cache_key.startswith("custom_cache:"):
+                # Extract identity part from cache key (typically last segment)
+                if ":user:" in cache_key:
+                    cache_backend = private_cache()
+                else:
+                    cache_backend = public_cache()
+                    
+                cached_response = cache_backend.get(cache_key)
+
+                if cached_response is not None:
+                    logger.debug(f"Cache hit for {request.path} (from {'private' if ':user:' in cache_key else 'public'} cache)")
+                    return JsonResponse(cached_response, safe=False)
+
         return None
     
     def process_response(self, request, response):
         """
-        Cache successful GET responses
+        Cache successful GET responses.
+        Writes to private_cache (DB3) if authenticated, public_cache (DB2) if anonymous.
+        Sets Vary header so CDNs know which dimensions affect the response.
         """
-        if (request.method == 'GET' and 
-            response.status_code == 200 and 
+        if (request.method == 'GET' and
+            response.status_code == 200 and
             self._is_cacheable(request)):
-            
+
             cache_key = self._get_cache_key(request)
-            
+
             try:
                 # Only cache JSON responses
                 if response.get('Content-Type', '').startswith('application/json'):
                     response_data = json.loads(response.content)
-                    cache.set(cache_key, response_data, self.cache_duration)
-                    logger.debug(f"Cached response for {request.path}")
+                    
+                    # Route to correct segment
+                    if ":user:" in cache_key:
+                        private_cache().set(cache_key, response_data, self.cache_duration)
+                        logger.debug(f"Cached response for {request.path} into private_cache")
+                    else:
+                        public_cache().set(cache_key, response_data, self.cache_duration)
+                        logger.debug(f"Cached response for {request.path} into public_cache")
+                        
+                    # Inform CDN / proxies of dimensions that affect this response
+                    response['Vary'] = 'Accept-Language, Authorization'
             except (json.JSONDecodeError, AttributeError):
                 pass
-        
+
         return response
     
     def _is_cacheable(self, request):
@@ -402,14 +452,78 @@ class CacheMiddleware(MiddlewareMixin):
     
     def _get_cache_key(self, request):
         """
-        Generate cache key for request
+        Generate cache key for request.
+
+        Dimensions included:
+        - user identity (JWT user_id or anon:{ip}) — prevents cross-user leakage
+        - Accept-Language — i18n safety
+        - path + querystring — distinct paginated endpoints get distinct keys
+
+        User-Agent intentionally excluded: public food/exercise data does not
+        differ by device; including it creates one entry per browser version
+        and destroys cache hit rate.
         """
+        from django.utils import translation as trans
+        from rest_framework_simplejwt.tokens import AccessToken
+
+        user_identity = "anon"
+
+        # 1. Try to extract user ID from JWT Token.
+        # DRF authenticates in the view, so request.user is usually AnonymousUser here.
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            try:
+                token_str = auth_header.split(' ', 1)[1]
+                token = AccessToken(token_str)
+                user_id = token.get('user_id')
+                if user_id:
+                    user_identity = f"user:{user_id}"
+            except Exception:
+                pass
+
+        # 2. Check session authentication as fallback
+        if user_identity == "anon" and hasattr(request, 'user') and request.user.is_authenticated:
+            user_identity = f"user:{request.user.id}"
+
+        # 3. Handle Anonymous - Use IP to prevent cache poisoning across clients
+        if user_identity == "anon":
+            client_ip = (
+                request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
+                or request.META.get('REMOTE_ADDR', 'unknown')
+            )
+            user_identity = f"anon:{client_ip}"
+
+        qs = request.GET.urlencode()
         key_parts = [
             'api_cache',
+            trans.get_language() or 'en',
+            user_identity,
             request.path,
-            request.GET.urlencode()
+            qs,
         ]
-        return ':'.join(filter(None, key_parts))
+        
+        # Determine global version based on route prefix
+        version = 1
+        model_name = ""
+        if "/api/exercises/" in request.path:
+            model_name = "EXERCISE"
+        elif "/api/achievements/" in request.path:
+            model_name = "ACHIEVEMENT"
+        elif "/api/subscription/plans/" in request.path:
+            model_name = "SUBSCRIPTIONPLAN"
+        elif "/api/routine/templates/" in request.path:
+            model_name = "ROUTINETEMPLATE"
+            
+        if model_name:
+            v_cache = public_cache().get(f"CACHE_VERSION_{model_name}")
+            if v_cache:
+                version = v_cache
+
+        import hashlib
+        raw = ':'.join(filter(None, [str(p) for p in key_parts]))
+        key_hash = hashlib.sha256(raw.encode()).hexdigest()
+        
+        return f"custom_cache:v{version}:{key_hash}"
 
 
 class APIVersionMiddleware(MiddlewareMixin):
@@ -426,11 +540,82 @@ class APIVersionMiddleware(MiddlewareMixin):
         return None
 
 
+from django.utils import translation
+
+
+class LanguageResolutionMiddleware(MiddlewareMixin):
+    """
+    Language resolution: Accept-Language header → JWT user preference → default.
+
+    DRF authentication runs inside the view, not in Django middleware.
+    So we do the JWT lookup ourselves in process_request.
+    """
+
+    def process_request(self, request):
+        """Resolve language from header or user preference."""
+        language = None
+
+        # 1. Accept-Language header
+        accept_lang = request.headers.get("Accept-Language")
+        if accept_lang:
+            language = translation.get_language_from_request(request)
+
+        # 2. Authenticated user's preferred_language via JWT
+        if not language:
+            language = self._get_language_from_jwt(request)
+
+        # 3. Session-authenticated user
+        if not language:
+            user = getattr(request, 'user', None)
+            if user and getattr(user, 'is_authenticated', False):
+                user_lang = getattr(user, 'preferred_language', None)
+                if user_lang:
+                    language = user_lang
+
+        # 4. Default
+        if not language:
+            language = settings.LANGUAGE_CODE
+
+        translation.activate(language)
+        request.LANGUAGE_CODE = translation.get_language()
+
+    def _get_language_from_jwt(self, request):
+        """Extract preferred_language from JWT bearer token if present."""
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return None
+        try:
+            from rest_framework_simplejwt.tokens import AccessToken
+            from django.contrib.auth import get_user_model
+            token = AccessToken(auth_header.split(' ', 1)[1])
+            user_id = token.get('user_id')
+            if user_id:
+                User = get_user_model()
+                lang = (
+                    User.objects
+                    .filter(id=user_id)
+                    .values_list('preferred_language', flat=True)
+                    .first()
+                )
+                return lang or None
+        except Exception:
+            return None
+        return None
+
+    def process_response(self, request, response):
+        from django.utils.cache import patch_vary_headers
+        lang = translation.get_language() or settings.LANGUAGE_CODE
+        response['Content-Language'] = lang
+        patch_vary_headers(response, ['Accept-Language', 'Cookie'])
+        return response
+
+
 # Middleware order is important for proper functionality
 MIDDLEWARE_ORDER = [
     'training_platform.middleware.SecurityHeadersMiddleware',
     'training_platform.middleware.RateLimitMiddleware',
     'training_platform.middleware.RequestLoggingMiddleware',
+    'training_platform.middleware.LanguageResolutionMiddleware',
     'training_platform.middleware.DatabaseQueryCountMiddleware',
     'training_platform.middleware.CacheMiddleware',
     'training_platform.middleware.APIVersionMiddleware',

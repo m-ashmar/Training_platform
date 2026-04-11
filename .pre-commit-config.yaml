@@ -1,0 +1,26 @@
+repos:
+  # Detect secrets before they enter git history
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: '\.env\.example|requirements.*\.txt'
+
+  # Python security linter
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.7
+    hooks:
+      - id: bandit
+        args: ['-r', '--severity-level', 'medium', '--exclude', 'tests']
+        files: '\.py$'
+
+  # Prevent large files from being committed
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-json
+      - id: check-yaml
+      - id: detect-private-key

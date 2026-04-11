@@ -11,6 +11,7 @@ from django.urls import path, reverse
 from django.shortcuts import redirect, render
 from django.contrib import messages
 from django.http import HttpResponse, HttpResponseRedirect
+from modeltranslation.admin import TranslationAdmin as TranslAdmin
 from django import forms
 import csv
 from datetime import datetime, timedelta
@@ -79,7 +80,7 @@ class CalorieRangeFilter(SimpleListFilter):
 
 # Improved FoodItem Admin
 @admin.register(FoodItem)
-class ImprovedFoodItemAdmin(admin.ModelAdmin):
+class ImprovedFoodItemAdmin(TranslAdmin):
     list_display = [
         'name', 'category_badge', 'calories_display', 'macro_display',
         'serving_info', 'per_gram_info', 'has_image'
@@ -594,7 +595,7 @@ class MealComponentInline(admin.TabularInline):
 
 # Food Category - Minimal
 @admin.register(FoodCategory)
-class ImprovedFoodCategoryAdmin(admin.ModelAdmin):
+class ImprovedFoodCategoryAdmin(TranslAdmin):
     list_display = ['name', 'macro_type', 'item_count']
     
     def macro_type(self, obj):
@@ -634,6 +635,16 @@ try:
     admin.site.unregister(UserFoodPreference)  # Keep in database but hide from admin
 except admin.sites.NotRegistered:
     pass
+
+
+# DietPlanTemplate Admin with translation support
+@admin.register(DietPlanTemplate)
+class DietPlanTemplateAdmin(TranslAdmin):
+    """Admin for DietPlanTemplate with multilingual name/description."""
+    list_display = ['name', 'meals_per_day', 'snacks_per_day', 'days_variation', 'is_active', 'created_at']
+    list_filter = ['is_active', 'meals_per_day']
+    search_fields = ['name', 'description']
+    readonly_fields = ['created_at']
 
 
 # Custom admin dashboard

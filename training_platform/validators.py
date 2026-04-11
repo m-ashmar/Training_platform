@@ -66,7 +66,7 @@ class FileTypeValidator(BaseValidator):
     """
     Validates file types using python-magic for accurate detection
     """
-    default_message = "Invalid file type"
+    default_message = _("Invalid file type")
     
     def __init__(self, allowed_types, max_size=None, message=None):
         self.allowed_types = allowed_types
@@ -79,7 +79,7 @@ class FileTypeValidator(BaseValidator):
         
         # Check file size
         if file.size > self.max_size:
-            raise ValidationError(f"File size exceeds {self.max_size} bytes")
+            raise ValidationError(_("File size exceeds %(size)s bytes") % {"size": self.max_size}, code="file_too_large")
         
         # Check file type using magic
         file_type = magic.from_buffer(file.read(1024), mime=True)
@@ -88,7 +88,8 @@ class FileTypeValidator(BaseValidator):
         if file_type not in self.allowed_types:
             allowed_str = ', '.join(self.allowed_types)
             raise ValidationError(
-                f"File type {file_type} not allowed. Allowed types: {allowed_str}"
+                _("File type %(type)s not allowed. Allowed types: %(allowed)s") % {"type": file_type, "allowed": allowed_str},
+                code="invalid_file_type"
             )
 
 
@@ -96,7 +97,7 @@ class ImageFileValidator(FileTypeValidator):
     """
     Specific validator for image files
     """
-    default_message = "Invalid image file"
+    default_message = _("Invalid image file")
     
     def __init__(self, max_size=None, message=None):
         allowed_types = [
@@ -131,7 +132,7 @@ class NumericRangeValidator(BaseValidator):
     """
     Validates numeric values within a specific range
     """
-    default_message = "Value out of range"
+    default_message = _("Value out of range")
     
     def __init__(self, min_value=None, max_value=None, message=None):
         self.min_value = min_value
@@ -140,10 +141,10 @@ class NumericRangeValidator(BaseValidator):
     
     def validate(self, value):
         if self.min_value is not None and value < self.min_value:
-            raise ValidationError(f"Value must be at least {self.min_value}")
+            raise ValidationError(_("Value must be at least %(min)s") % {"min": self.min_value}, code="value_too_low")
         
         if self.max_value is not None and value > self.max_value:
-            raise ValidationError(f"Value must be at most {self.max_value}")
+            raise ValidationError(_("Value must be at most %(max)s") % {"max": self.max_value}, code="value_too_high")
 
 
 class NoScriptValidator(BaseValidator):
@@ -264,7 +265,7 @@ class ValidatedEmailField(serializers.EmailField):
         
         # Additional email validation
         if value and len(value) > 254:
-            raise serializers.ValidationError("Email address too long")
+            raise serializers.ValidationError(_("Email address too long"), code="email_too_long")
         
         # Check for suspicious patterns
         suspicious_patterns = [
@@ -275,7 +276,7 @@ class ValidatedEmailField(serializers.EmailField):
         
         for pattern in suspicious_patterns:
             if re.search(pattern, value, re.IGNORECASE):
-                raise serializers.ValidationError("Invalid email format")
+                raise serializers.ValidationError(_("Invalid email format"), code="invalid_email")
 
 
 class SecureImageField(serializers.ImageField):
@@ -303,7 +304,7 @@ alphanumeric_validator = RegexValidator(
 
 username_validator = RegexValidator(
     regex=r'^[a-zA-Z0-9_.-]+$',
-    message='Username can only contain letters, numbers, dots, hyphens, and underscores.'
+    message=_('Username can only contain letters, numbers, dots, hyphens, and underscores.')
 )
 
 # Pre-configured validators for common use cases

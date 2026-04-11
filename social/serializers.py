@@ -222,18 +222,72 @@ class UserAchievementSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'user', 'earned_at']
 
 
+from notifications.models import Notification
+
 class NotificationSerializer(serializers.ModelSerializer):
-    """Serializer for notifications"""
-    
-    sender = UserMinimalSerializer(read_only=True)
+    """
+    Serializer for notifications (New System).
+
+    Resolves title/message at read-time from the event template
+    using the active language context. Falls back to metadata keys
+    for backward-compatible notifications that stored title/body.
+    """
+
+    sender = UserMinimalSerializer(source='actor', read_only=True)
     recipient = UserMinimalSerializer(read_only=True)
-    
+    notification_type = serializers.CharField(source='event_type', read_only=True)
+    title = serializers.SerializerMethodField()
+    message = serializers.SerializerMethodField()
+    data = serializers.SerializerMethodField()
+
     class Meta:
         model = Notification
         fields = [
             'id', 'recipient', 'sender', 'notification_type',
-            'title', 'message', 'is_read', 'created_at', 'read_at'
+            'title', 'message', 'data', 'is_read', 'created_at', 'event_id'
         ]
-        read_only_fields = [
-            'id', 'recipient', 'sender', 'created_at', 'read_at'
-        ] 
+        read_only_fields = fields
+
+    def _resolve_template(self, obj):
+        """Lazily resolve and cache the template render for this notification."""
+        cache_attr = '_resolved_template'
+        if hasattr(obj, cache_attr):
+            return getattr(obj, cache_attr)
+
+        # Try template resolution first (new architecture)
+        try:
+            from notifications.channels.fcm import _resolve_event_template
+            from notifications.template_resolver import NotificationTemplateResolver
+
+            template = _resolve_event_template(obj.event_type)
+            if template:
+                context = obj.metadata.get('context', {})
+                title, body = NotificationTemplateResolver.render(
+                    event_type=obj.event_type,
+                    template=template,
+                    context=context,
+                    recipient_id=obj.recipient_id,
+                )
+                result = (title, body)
+                setattr(obj, cache_attr, result)
+                return result
+        except Exception:
+            pass
+
+        # Fallback: legacy notifications that stored title/body in metadata
+        title = obj.metadata.get('title', '')
+        body = obj.metadata.get('body', '')
+        result = (title, body)
+        setattr(obj, cache_attr, result)
+        return result
+
+    def get_title(self, obj):
+        title, _ = self._resolve_template(obj)
+        return title
+
+    def get_message(self, obj):
+        _, body = self._resolve_template(obj)
+        return body
+
+    def get_data(self, obj):
+        return obj.metadata.get('data', {}) 

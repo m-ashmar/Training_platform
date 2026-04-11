@@ -12,12 +12,13 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.translation import gettext as _
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 
 from .models import (
     UserFollow, Post, PostLike, Comment, CommentLike, Challenge,
-    ChallengeParticipation, Achievement, UserAchievement, Notification
+    ChallengeParticipation, Achievement, UserAchievement
 )
 from .serializers import (
     UserFollowSerializer, PostSerializer, CommentSerializer,
@@ -67,7 +68,7 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             
             if user_to_follow == request.user:
                 return Response(
-                    {'error': 'Cannot follow yourself'}, 
+                    {'error': _('Cannot follow yourself')}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -77,15 +78,6 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             )
             
             if created:
-                # Create notification
-                Notification.objects.create(
-                    recipient=user_to_follow,
-                    sender=request.user,
-                    notification_type='follow',
-                    title='New Follower',
-                    message=f'{request.user.username} started following you'
-                )
-                
                 # Send Push Notification
                 # Emit Domain Event
                 from notifications.domain.dispatcher import emit_event
@@ -97,18 +89,18 @@ class UserFollowViewSet(viewsets.ModelViewSet):
                 ))
                 
                 return Response(
-                    {'message': 'Successfully followed user'}, 
+                    {'message': _('Successfully followed user')}, 
                     status=status.HTTP_201_CREATED
                 )
             else:
                 return Response(
-                    {'message': 'Already following this user'}, 
+                    {'message': _('Already following this user')}, 
                     status=status.HTTP_200_OK
                 )
                 
         except CustomUser.DoesNotExist:
             return Response(
-                {'error': 'User not found'}, 
+                {'error': _('User not found')}, 
                 status=status.HTTP_404_NOT_FOUND
             )
     
@@ -132,13 +124,13 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             ).delete()
             
             return Response(
-                {'message': 'Successfully unfollowed user'}, 
+                {'message': _('Successfully unfollowed user')}, 
                 status=status.HTTP_200_OK
             )
             
         except CustomUser.DoesNotExist:
             return Response(
-                {'error': 'User not found'}, 
+                {'error': _('User not found')}, 
                 status=status.HTTP_404_NOT_FOUND
             )
     
@@ -237,12 +229,18 @@ class PostViewSet(viewsets.ModelViewSet):
         return queryset.select_related('author')
     
     def perform_create(self, serializer):
-        serializer.save(author=self.request.user)
+        post = serializer.save(author=self.request.user)
+        # ⚡️ Cache Implementation Phase 3: Push to Fan-Out Queue
+        try:
+            from .tasks import fan_out_post_root
+            fan_out_post_root.delay(post.author.id, post.id, post.created_at.timestamp())
+        except Exception:
+            pass # Failsafe allowing standard DB commit if Celery broker is offline
     
     @action(detail=True, methods=['post'])
     def like(self, request, pk=None):
         """
-        Like/unlike a post
+        Like/Unlike post
         
         POST /api/social/posts/{id}/like/
         """
@@ -253,62 +251,99 @@ class PostViewSet(viewsets.ModelViewSet):
             post=post
         )
         
+        from django.db.models import F
+        
         if created:
-            # Update post likes count
-            post.likes_count = post.likes.count()
-            post.save()
+            # Atomic update to avoid race conditions and extra query
+            Post.objects.filter(pk=post.pk).update(likes_count=F('likes_count') + 1)
             
-            # Create notification
-            if post.author != request.user:
-                Notification.objects.create(
-                    recipient=post.author,
-                    sender=request.user,
-                    notification_type='like',
-                    title='Post Liked',
-                    message=f'{request.user.username} liked your post',
-                    related_object=post
-                )
-                
-                # Send Push Notification
-                # Emit Domain Event
-                from notifications.domain.dispatcher import emit_event
-                from notifications.domain.events import PostLikedEvent
-                
+            # Logic moved to event dispatcher
+            
+            # Send Push Notification
+            # Emit Domain Event
+            from notifications.domain.dispatcher import emit_event
+            from notifications.domain.events import PostLikedEvent
+            
+            # Only emit event if not self-like
+            if post.author_id != request.user.id:
                 emit_event(PostLikedEvent(
                     actor_id=request.user.id,
                     target_post_id=post.id,
-                    post_author_id=post.author.id
+                    post_author_id=post.author_id
                 ))
             
-            return Response({'message': 'Post liked'})
+            return Response({'message': _('Post liked')})
         else:
             # Unlike the post
             like.delete()
-            post.likes_count = post.likes.count()
-            post.save()
             
-            return Response({'message': 'Post unliked'})
+            # Atomic decrement
+            Post.objects.filter(pk=post.pk).update(likes_count=F('likes_count') - 1)
+            
+            return Response({'message': _('Post unliked')})
     
     @action(detail=False, methods=['get'])
     def feed(self, request):
         """
-        Get user's social feed
+        Get user's social feed utilizing Hybrid ZSET Fan-Out merging.
         
         GET /api/social/posts/feed/?page=1&limit=10
         """
         page = int(request.query_params.get('page', 1))
         limit = min(int(request.query_params.get('limit', 10)), 50)
         offset = (page - 1) * limit
+        user_id = request.user.id
         
-        posts = self.get_queryset()[offset:offset + limit]
-        serializer = self.get_serializer(posts, many=True)
+        import logging
+        logger = logging.getLogger(__name__)
+        from .feed_cache import get_user_feed
         
-        return Response({
-            'posts': serializer.data,
-            'page': page,
-            'limit': limit,
-            'has_more': len(posts) == limit
-        })
+        try:
+            # 1. Ask Redis for native hybrid global/personal feeds
+            post_ids = get_user_feed(user_id, offset, limit)
+            
+            if not post_ids:
+                return Response({'posts': [], 'page': page, 'limit': limit, 'has_more': False})
+                
+            # 2. Leverage get_queryset matching to respect N+1 guards and auth restrictions
+            posts_query = self.get_queryset().filter(id__in=post_ids)
+            posts_dict = {p.id: p for p in posts_query}
+            
+            # 3. Order the SQL response precisely mirroring the ZSET temporal sorting
+            ordered_posts = [posts_dict[int(i)] for i in post_ids if int(i) in posts_dict]
+            
+            serializer = self.get_serializer(ordered_posts, many=True)
+            return Response({
+                'posts': serializer.data,
+                'page': page,
+                'limit': limit,
+                'has_more': len(ordered_posts) == limit
+            })
+            
+        except Exception as e:
+            # GRACEFUL FALLBACK if Redis is unavailable or corrupted
+            logger.error(f"Redis ZSET Feed fallback triggered natively to SQL: {e}")
+            posts = self.get_queryset()[offset:offset + limit]
+            serializer = self.get_serializer(posts, many=True)
+            
+            return Response({
+                'posts': serializer.data,
+                'page': page,
+                'limit': limit,
+                'has_more': len(posts) == limit
+            })
+
+
+from rest_framework.pagination import CursorPagination
+
+class CommentCursorPagination(CursorPagination):
+    """
+    Cursor-based pagination for social comments to prevent page drift.
+    """
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 50
+    ordering = '-created_at'
 
 
 class CommentViewSet(viewsets.ModelViewSet):
@@ -317,6 +352,7 @@ class CommentViewSet(viewsets.ModelViewSet):
     """
     serializer_class = CommentSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = CommentCursorPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['post', 'author', 'parent_comment']
     search_fields = ['content']
@@ -357,14 +393,7 @@ class CommentViewSet(viewsets.ModelViewSet):
         
         # Create notification
         if post.author != self.request.user:
-            Notification.objects.create(
-                recipient=post.author,
-                sender=self.request.user,
-                notification_type='comment',
-                title='New Comment',
-                message=f'{self.request.user.username} commented on your post',
-                related_object=comment
-            )
+            pass # Logic moved to event dispatcher
             
             # Send Push Notification
             # Emit Domain Event
@@ -396,13 +425,15 @@ class CommentViewSet(viewsets.ModelViewSet):
         if created:
             comment.likes_count = comment.likes.count()
             comment.save()
-            return Response({'message': 'Comment liked'})
+            return Response({'message': _('Comment liked')})
         else:
             like.delete()
             comment.likes_count = comment.likes.count()
             comment.save()
-            return Response({'message': 'Comment unliked'})
+            return Response({'message': _('Comment unliked')})
 
+
+from routine.views import StandardResultsSetPagination
 
 class ChallengeViewSet(viewsets.ModelViewSet):
     """
@@ -410,6 +441,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     """
     serializer_class = ChallengeSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
     
     def get_queryset(self):
         # Optimize to avoid N+1 queries:
@@ -447,9 +479,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         Cached for 30 seconds keyed by user and querystring.
         """
         try:
+            from django.utils.translation import get_language
+            from training_platform.i18n import CACHE_VERSION
             user_part = f"user:{request.user.id}" if request.user and request.user.is_authenticated else "anon"
-            # Ignore querystring noise to maximize cache hits for mobile polling
-            key = f"challenges_list:{user_part}"
+            lang = get_language() or 'en'
+            key = f"challenges_list:{user_part}:{lang}:{CACHE_VERSION}"
             cached = cache.get(key)
             if cached is not None:
                 return Response(cached)
@@ -459,41 +493,57 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             return response
         except Exception:
             return super().list(request, *args, **kwargs)
-    
+
+    def _challenges_cache_key(self, user):
+        """Return the challenges_list cache key for a given user."""
+        from django.utils.translation import get_language
+        from training_platform.i18n import CACHE_VERSION
+        user_part = f"user:{user.id}" if user and user.is_authenticated else "anon"
+        lang = get_language() or 'en'
+        return f"challenges_list:{user_part}:{lang}:{CACHE_VERSION}"
+
+    def _invalidate_challenges_cache(self, request):
+        """Delete this user's challenges list cache entry."""
+        try:
+            cache.delete(self._challenges_cache_key(request.user))
+        except Exception:
+            pass
+
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)
+        self._invalidate_challenges_cache(self.request)
     
     @action(detail=True, methods=['post'])
     def join(self, request, pk=None):
         """
         Join a challenge
-        
+
         POST /api/social/challenges/{id}/join/
         """
         challenge = self.get_object()
-        
+
         if challenge.max_participants and challenge.participants_count >= challenge.max_participants:
             return Response(
-                {'error': 'Challenge is full'}, 
+                {'error': _('Challenge is full')},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         participation, created = ChallengeParticipation.objects.get_or_create(
             user=request.user,
             challenge=challenge
         )
-        
+
         if created:
             challenge.participants_count = challenge.participations.count()
             challenge.save()
-            
+            self._invalidate_challenges_cache(request)
             return Response(
-                {'message': 'Successfully joined challenge'}, 
+                {'message': _('Successfully joined challenge')},
                 status=status.HTTP_201_CREATED
             )
         else:
             return Response(
-                {'message': 'Already participating in this challenge'}, 
+                {'message': _('Already participating in this challenge')},
                 status=status.HTTP_200_OK
             )
     
@@ -547,14 +597,14 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             )
         except ChallengeParticipation.DoesNotExist:
             return Response(
-                {'error': 'You are not participating in this challenge. Join first!'}, 
+                {'error': _('You are not participating in this challenge. Join first!')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         # Check if challenge is active
         if not challenge.is_active:
             return Response(
-                {'error': 'This challenge is not currently active'}, 
+                {'error': _('This challenge is not currently active')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -563,7 +613,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         
         if current_value is None:
             return Response(
-                {'error': 'current_value is required'}, 
+                {'error': _('current_value is required')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -571,7 +621,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             current_value = float(current_value)
         except (ValueError, TypeError):
             return Response(
-                {'error': 'current_value must be a valid number'}, 
+                {'error': _('current_value must be a valid number')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -601,15 +651,6 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         if current_value > old_value:
             progress_increase = current_value - old_value
             if progress_increase > 0:
-                Notification.objects.create(
-                    recipient=user,
-                    notification_type='challenge_progress',
-                    title=f'Challenge Progress Update',
-                    message=f'Great job! You made progress in "{challenge.title}" - {progress_increase:.1f} {challenge.unit}',
-                    content_type=ContentType.objects.get_for_model(Challenge),
-                    object_id=challenge.id
-                )
-                
                 # Send Push Notification
                 # Emit Domain Event
                 from notifications.domain.dispatcher import emit_event
@@ -624,7 +665,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 ))
         
         return Response({
-            'message': 'Progress updated successfully',
+            'message': _('Progress updated successfully'),
             'participation': {
                 'current_value': participation.current_value,
                 'progress_percentage': participation.progress_percentage,
@@ -688,17 +729,58 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         })
 
 
+from notifications.models import Notification
+from rest_framework.pagination import CursorPagination
+
+
+class NotificationCursorPagination(CursorPagination):
+    """
+    Cursor-based pagination for notifications.
+    
+    Cursor pagination is preferred over offset/limit for notifications because:
+    1. No page drift when new notifications arrive between page loads.
+    2. O(1) keyset seek via the indexed created_at column.
+    3. Stable ordering guaranteed by the cursor token.
+    
+    Query params:
+        - page_size: items per page (default 20, max 50)
+        - cursor: opaque cursor token from previous response
+    """
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 50
+    ordering = '-created_at'
+
+
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    API endpoints for notifications
+    API endpoints for notifications.
+    
+    Paginated via cursor-based pagination.
+    
+    GET /api/social/notifications/?page_size=20
+    GET /api/social/notifications/?cursor=<token>&page_size=20
     """
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = NotificationCursorPagination
     
     def get_queryset(self):
-        return Notification.objects.select_related('actor').filter(
+        qs = Notification.objects.select_related('actor').filter(
             recipient=self.request.user
         ).order_by('-created_at')
+        
+        # Optional filter by notification type
+        notification_type = self.request.query_params.get('type')
+        if notification_type:
+            qs = qs.filter(event_type=notification_type)
+        
+        # Optional filter by read status
+        is_read = self.request.query_params.get('is_read')
+        if is_read is not None:
+            qs = qs.filter(is_read=is_read.lower() in ('true', '1', 'yes'))
+        
+        return qs
     
     @action(detail=True, methods=['post'])
     def mark_read(self, request, pk=None):
@@ -708,9 +790,11 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         POST /api/social/notifications/{id}/mark_read/
         """
         notification = self.get_object()
-        notification.mark_as_read()
+        if not notification.is_read:
+            notification.is_read = True
+            notification.save(update_fields=['is_read'])
         
-        return Response({'message': 'Notification marked as read'})
+        return Response({'message': _('Notification marked as read')})
     
     @action(detail=False, methods=['post'])
     def mark_all_read(self, request):
@@ -720,11 +804,10 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         POST /api/social/notifications/mark_all_read/
         """
         self.get_queryset().filter(is_read=False).update(
-            is_read=True,
-            read_at=timezone.now()
+            is_read=True
         )
         
-        return Response({'message': 'All notifications marked as read'})
+        return Response({'message': _('All notifications marked as read')})
     
     @action(detail=False, methods=['get'])
     def unread_count(self, request):
@@ -734,7 +817,7 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         GET /api/social/notifications/unread_count/
         """
         count = self.get_queryset().filter(is_read=False).count()
-        return Response({'unread_count': count}) 
+        return Response({'unread_count': count})
 
 
 class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
@@ -751,10 +834,10 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         """Fetch public profile by username: /api/social/users/public-profile/by_username/?username=..."""
         username = request.query_params.get('username')
         if not username:
-            return Response({'error': 'username is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': _('username is required')}, status=status.HTTP_400_BAD_REQUEST)
         try:
             user = CustomUser.objects.get(username=username, is_active=True)
             serializer = self.get_serializer(user)
             return Response(serializer.data)
         except CustomUser.DoesNotExist:
-            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': _('User not found')}, status=status.HTTP_404_NOT_FOUND)

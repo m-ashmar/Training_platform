@@ -107,7 +107,10 @@ class Transaction(models.Model):
 
 
 class WalletAuditLog(models.Model):
-    """Append-only audit log for wallet operations and security events."""
+    """
+    Append-only audit log for wallet operations and security events.
+    Tamper-proof: each entry contains a hash chain from the previous entry.
+    """
     event_type = models.CharField(max_length=64)
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="wallet_audit_events")
     request_id = models.CharField(max_length=64, null=True, blank=True)
@@ -117,9 +120,30 @@ class WalletAuditLog(models.Model):
     payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Tamper-proof hash chain fields
+    prev_hash = models.CharField(max_length=64, default="0" * 64, help_text="SHA-256 hash of the previous audit entry")
+    entry_hash = models.CharField(max_length=64, default="", help_text="SHA-256 hash of this entry (prev_hash + event data)")
+
     class Meta:
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["event_type", "created_at"])]
+
+    def save(self, *args, **kwargs):
+        """Compute tamper-proof hash chain on save."""
+        import hashlib
+        import json
+
+        if not self.entry_hash:
+            # Get the hash of the most recent log entry
+            last_entry = WalletAuditLog.objects.order_by("-id").values_list("entry_hash", flat=True).first()
+            self.prev_hash = last_entry or ("0" * 64)
+
+            # Compute entry hash: H(prev_hash || event_type || actor_id || payload)
+            payload_str = json.dumps(self.payload, sort_keys=True, default=str)
+            hash_input = f"{self.prev_hash}|{self.event_type}|{self.actor_id}|{payload_str}"
+            self.entry_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
+
+        super().save(*args, **kwargs)
 
 
 def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount, actor_id=None, tx_type="transfer", metadata=None) -> Transaction:

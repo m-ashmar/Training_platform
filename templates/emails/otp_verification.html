@@ -1,9 +1,11 @@
+{% load i18n %}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ LANGUAGE_CODE }}" dir="{{ LANGUAGE_BIDI|yesno:'rtl,ltr' }}">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Email Verification - Training Platform</title>
+    <title>{% trans "Email Verification - Training Platform" %}</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -14,20 +16,30 @@
             padding: 20px;
             background-color: #f4f4f4;
         }
+
+        /* RTL override — applied via dir= on <html>,
+           no inline Django tags needed inside CSS */
+        [dir="rtl"] body {
+            text-align: right;
+        }
+
         .container {
             background-color: #ffffff;
             padding: 30px;
             border-radius: 10px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
+
         .header {
             text-align: center;
             margin-bottom: 30px;
         }
+
         .header h1 {
             color: #2c3e50;
             margin: 0;
         }
+
         .otp-code {
             background-color: #3498db;
             color: #ffffff;
@@ -38,10 +50,15 @@
             border-radius: 5px;
             letter-spacing: 5px;
             margin: 30px 0;
+            /* OTP numbers always render LTR regardless of page direction */
+            direction: ltr;
+            unicode-bidi: isolate;
         }
+
         .content {
             margin: 20px 0;
         }
+
         .footer {
             margin-top: 30px;
             padding-top: 20px;
@@ -50,44 +67,57 @@
             color: #777;
             text-align: center;
         }
+
         .warning {
             background-color: #fff3cd;
-            border-left: 4px solid #ffc107;
             padding: 15px;
             margin: 20px 0;
             border-radius: 4px;
         }
+
+        /* LTR: left border accent, RTL: right border accent */
+        [dir="ltr"] .warning {
+            border-left: 4px solid #ffc107;
+        }
+
+        [dir="rtl"] .warning {
+            border-right: 4px solid #ffc107;
+        }
     </style>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
-            <h1>Training Platform</h1>
+            <h1>{% trans "Training Platform" %}</h1>
         </div>
-        
+
         <div class="content">
-            <h2>Email Verification</h2>
-            <p>Hello{% if user.first_name %} {{ user.first_name }}{% endif %},</p>
-            
-            <p>Thank you for registering with Training Platform! To complete your registration and activate your account, please use the verification code below:</p>
-            
+            <h2>{% trans "Email Verification" %}</h2>
+            <p>{% trans "Hello" %}{% if user.first_name %} {{ user.first_name }}{% endif %},</p>
+
+            <p>{% trans "Thank you for registering with Training Platform! To complete your registration and activate
+                your account, please use the verification code below:" %}</p>
+
             <div class="otp-code">
                 {{ otp_code }}
             </div>
-            
-            <p>Enter this code in the verification page to activate your account.</p>
-            
+
+            <p>{% trans "Enter this code in the verification page to activate your account." %}</p>
+
             <div class="warning">
-                <strong>Important:</strong> This code will expire in 10 minutes. If you didn't request this code, please ignore this email.
+                <strong>{% trans "Important:" %}</strong> {% trans "This code will expire in 10 minutes. If you didn't
+                request this code, please ignore this email." %}
             </div>
-            
-            <p>If you didn't create an account with us, please disregard this email.</p>
+
+            <p>{% trans "If you didn't create an account with us, please disregard this email." %}</p>
         </div>
-        
+
         <div class="footer">
-            <p>This is an automated message. Please do not reply to this email.</p>
-            <p>&copy; {{ "now"|date:"Y" }} Training Platform. All rights reserved.</p>
+            <p>{% trans "This is an automated message. Please do not reply to this email." %}</p>
+            <p>&copy; {{ "now"|date:"Y" }} {% trans "Training Platform. All rights reserved." %}</p>
         </div>
     </div>
 </body>
+
 </html>

@@ -12,6 +12,7 @@ import logging
 from PIL import Image
 from django.core.exceptions import ValidationError
 from django.conf import settings
+from django.utils.translation import gettext_lazy as _
 from typing import Dict, Any
 
 # Try to import magic, with fallback
@@ -118,18 +119,18 @@ class FileSecurityValidator:
         except Exception as e:
             logger.error(f"File validation error: {file.name} - {e}")
             self._quarantine_file(file)
-            raise ValidationError(f"File validation failed: {str(e)}")
+            raise ValidationError(_("File validation failed."), code="file_validation_error")
     
     def _validate_file_existence(self, file):
         """Check if file exists and is readable"""
         if not file:
-            raise ValidationError("No file provided")
+            raise ValidationError(_("No file provided"), code="no_file")
         
         if not hasattr(file, 'read'):
-            raise ValidationError("Invalid file object")
+            raise ValidationError(_("Invalid file object"), code="invalid_file_object")
         
         if file.size == 0:
-            raise ValidationError("Empty file not allowed")
+            raise ValidationError(_("Empty file not allowed"), code="empty_file")
     
     def _validate_file_size(self, file, file_type):
         """Validate file size based on type"""
@@ -137,19 +138,19 @@ class FileSecurityValidator:
         
         if file.size > max_size:
             raise ValidationError(
-                f"File size ({file.size} bytes) exceeds maximum allowed "
-                f"size ({max_size} bytes)"
+                _("File size exceeds maximum allowed size."),
+                code="file_too_large",
             )
     
     def _validate_file_extension(self, file):
         """Check for dangerous file extensions"""
         if not hasattr(file, 'name') or not file.name:
-            raise ValidationError("File must have a name")
+            raise ValidationError(_("File must have a name"), code="no_filename")
         
         file_ext = os.path.splitext(file.name)[1].lower()
         
         if file_ext in self.DANGEROUS_EXTENSIONS:
-            raise ValidationError(f"File extension {file_ext} is not allowed")
+            raise ValidationError(_("File extension is not allowed."), code="dangerous_extension")
     
     def _get_file_mime_type(self, file):
         """Get actual MIME type using python-magic or fallback"""
@@ -172,7 +173,7 @@ class FileSecurityValidator:
             
         except Exception as e:
             logger.error(f"MIME type detection failed: {e}")
-            raise ValidationError("Could not determine file type")
+            raise ValidationError(_("Could not determine file type"), code="mime_detection_failed")
     
     def _validate_mime_type(self, mime_type, file_type):
         """Validate MIME type against allowed types"""
@@ -181,12 +182,12 @@ class FileSecurityValidator:
         elif file_type == 'document':
             allowed_types = self.ALLOWED_DOCUMENT_TYPES
         else:
-            raise ValidationError(f"Unknown file type: {file_type}")
+            raise ValidationError(_("Unknown file type."), code="unknown_file_type")
         
         if mime_type not in allowed_types:
             raise ValidationError(
-                f"File type {mime_type} not allowed. "
-                f"Allowed types: {', '.join(allowed_types)}"
+                _("File type not allowed."),
+                code="invalid_mime_type",
             )
     
     def _validate_image_content(self, file):
@@ -206,14 +207,14 @@ class FileSecurityValidator:
                 max_dimension = 4096  # 4K resolution
                 if width > max_dimension or height > max_dimension:
                     raise ValidationError(
-                        f"Image dimensions ({width}x{height}) exceed "
-                        f"maximum allowed ({max_dimension}x{max_dimension})"
+                        _("Image dimensions exceed maximum allowed."),
+                        code="image_too_large",
                     )
                 
                 # Check for reasonable aspect ratio
                 aspect_ratio = max(width, height) / min(width, height)
                 if aspect_ratio > 10:  # Very unusual aspect ratio
-                    raise ValidationError("Invalid image aspect ratio")
+                    raise ValidationError(_("Invalid image aspect ratio"), code="invalid_aspect_ratio")
             
             file.seek(0)  # Reset file pointer
             
@@ -221,7 +222,7 @@ class FileSecurityValidator:
             raise
         except Exception as e:
             logger.warning(f"Image validation failed: {e}")
-            raise ValidationError("Invalid or corrupted image file")
+            raise ValidationError(_("Invalid or corrupted image file"), code="corrupt_image")
     
     def _generate_file_hash(self, file):
         """Generate SHA-256 hash of file content"""
@@ -269,7 +270,8 @@ class FileSecurityValidator:
             for pattern in malicious_patterns:
                 if pattern in content:
                     raise ValidationError(
-                        f"Potentially malicious content detected: {pattern.decode()}"
+                        _("Potentially malicious content detected."),
+                        code="malicious_content",
                     )
             
             # Check for executable signatures
@@ -285,7 +287,7 @@ class FileSecurityValidator:
                     logger.warning(f"Executable signature detected: {signature}")
                     # Don't automatically reject ZIP files as they might be valid
                     if signature != b'PK\x03\x04':
-                        raise ValidationError("Executable files are not allowed")
+                        raise ValidationError(_("Executable files are not allowed"), code="executable_file")
             
         except ValidationError:
             raise
@@ -361,7 +363,7 @@ class SecureFileUploadMixin:
         if file:
             validation_result = self.file_validator.validate_file(file, file_type)
             if not validation_result['is_valid']:
-                raise ValidationError(f"Invalid {file_type} file")
+                raise ValidationError(_("Invalid file."), code="invalid_file")
     
     def save(self, *args, **kwargs):
         """

@@ -5,7 +5,8 @@ from .views import (
     RoutineProgressViewSet, ExerciseSetLogViewSet, 
     RoutineExerciseViewSet, WorkoutSessionViewSet, AnalyticsViewSet, 
     RoutineTemplateViewSet, UserExerciseProgressViewSet, 
-    ExerciseImageUploadView, ExerciseAddMediaView, TrainerClientProgressViewSet
+    ExerciseImageUploadView, ExerciseAddMediaView, TrainerClientProgressViewSet,
+    RoutineTemplateExerciseViewSet, RecentActivityProgressView
 )
 
 app_name = 'routine'
@@ -16,10 +17,12 @@ router.register(r'exercises', ExerciseViewSet, basename='exercise')
 router.register(r'routines', RoutineViewSet, basename='routine')
 router.register(r'routine-progress', RoutineProgressViewSet, basename='routine_progress')  # Fixed quote issue
 router.register(r'set-logs', ExerciseSetLogViewSet, basename='set_logs')
+router.register(r'exercisesetlogs', ExerciseSetLogViewSet, basename='exercisesetlogs')  # Added for mobile app backwards compatibility
 router.register(r'routine-exercises', RoutineExerciseViewSet, basename='routineexercise')  # Added for full test coverage
 router.register(r'workout-sessions', WorkoutSessionViewSet, basename='workoutsession')  # Added for full test coverage
 router.register(r'analytics', AnalyticsViewSet, basename='analytics')
 router.register(r'templates', RoutineTemplateViewSet, basename='templatetemplate')
+router.register(r'template-exercises', RoutineTemplateExerciseViewSet, basename='templateexercise')
 router.register(r'user-exercise-progress', UserExerciseProgressViewSet, basename='userexerciseprogress')
 
 # Register router URLs
@@ -33,5 +36,7 @@ urlpatterns = [
     # Trainer client progress endpoints
     path('trainer/client-progress/<int:client_id>/', TrainerClientProgressViewSet.as_view({'get': 'client_progress'}), name='trainer-client-progress'),
     path('trainer/client-progress/recent/', TrainerClientProgressViewSet.as_view({'get': 'recent_progress'}), name='trainer-client-recent-progress'),
+    # Recent activity progress (7-day workout duration chart)
+    path('v1/analytics/recent-progress/', RecentActivityProgressView.as_view(), name='recent-activity-progress'),
     path('', include(router.urls)),  # Registers all ViewSets
 ]

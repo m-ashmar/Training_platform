@@ -1,10 +1,11 @@
-from rest_framework import viewsets, status, permissions, generics
+from rest_framework import viewsets, status, permissions, generics, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.db import models, IntegrityError
 from django.db.models import Sum, Avg, Count, F, Q, Prefetch
 from django.utils import timezone
+from django.utils.translation import gettext as _
 from datetime import datetime, timedelta, date
 from .models import (
     Routine, Exercise, RoutineExercise, RoutineProgress, ExerciseSetLog, WorkoutSession,
@@ -44,7 +45,80 @@ class StandardResultsSetPagination(PageNumberPagination):
     max_page_size = 100
 
 
+class RecentActivityProgressView(APIView):
+    """
+    GET /api/routine/v1/analytics/recent-progress/
+
+    Returns the last 7 calendar days of the authenticated user's active workout
+    time (in seconds), including days with 0 duration.
+
+    Implementation details:
+    - Duration is aggregated at DB level via TruncDate + Sum (no Python loops)
+    - Day boundaries are computed in the server's local timezone (timezone-aware)
+    - Only completed sessions with a valid end_time are counted
+    - Results are cached per-user in private_cache (Redis DB3) for 120s
+    - Cache is busted on WorkoutSession completion via post_save signal
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db.models import ExpressionWrapper, DurationField
+        from django.db.models.functions import TruncDate
+        from training_platform.cache_backends import private_cache
+        from datetime import timedelta, date
+
+        cache_key = f"recent_progress:{request.user.id}"
+        cached = private_cache().get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
+        # Timezone-aware 7-day window aligned to local calendar days
+        now = timezone.localtime()
+        start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_start = start_of_today - timedelta(days=6)
+
+        # DB-level aggregation: push all computation to Postgres
+        qs = (
+            WorkoutSession.objects
+            .filter(
+                user=request.user,
+                status='completed',
+                end_time__isnull=False,       # guard against active/null sessions
+                start_time__gte=window_start,
+            )
+            .annotate(
+                day=TruncDate('start_time'),
+                session_duration=ExpressionWrapper(
+                    F('end_time') - F('start_time'),
+                    output_field=DurationField()
+                )
+            )
+            .values('day')
+            .annotate(total_duration=Sum('session_duration'))
+        )
+
+        # Build a lookup map: date → total seconds
+        results_map = {}
+        for entry in qs:
+            total_secs = entry['total_duration'].total_seconds() if entry['total_duration'] else 0
+            results_map[entry['day']] = int(total_secs)
+
+        # Deterministic 7-day output — always include every day, even zeros
+        recent_progress = []
+        for i in range(7):
+            day: date = (window_start + timedelta(days=i)).date()
+            recent_progress.append({
+                "date": day.isoformat(),          # "2026-04-11" — clean, unambiguous
+                "duration": results_map.get(day, 0)
+            })
+
+        data = {"recent_progress": recent_progress}
+        private_cache().set(cache_key, data, 120)
+        return Response(data)
+
+
 class ExerciseViewSet(viewsets.ModelViewSet):
+
     """ViewSet for managing exercises."""
     queryset = Exercise.objects.all()
     serializer_class = ExerciseSerializer
@@ -250,7 +324,7 @@ class ExerciseCreateWithImageView(APIView):
             serializer = ExerciseCreateWithImageSerializer(exercise, context={'request': request})
             
             return Response({
-                'message': 'Exercise created successfully',
+                'message': _('Exercise created successfully'),
                 'exercise': serializer.data,
                 'media_created': len(media_created),
                 'media_breakdown': {
@@ -281,7 +355,6 @@ class RoutineViewSet(viewsets.ModelViewSet):
     TODO: Add routine templates and cloning functionality
     TODO: Implement routine sharing between trainers
     TODO: Add routine analytics and performance tracking
-    TODO: Consider adding routine difficulty progression
     """
     queryset = Routine.objects.all()
     serializer_class = RoutineSerializer
@@ -420,7 +493,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
             )
             
             return Response({
-                "message": f"Routine '{routine.name}' successfully assigned to {client.username}",
+                "message": _("Routine assigned successfully."),
                 "routine_id": routine.id,
                 "client_id": client.id,
                 "assignment_date": routine.updated_at
@@ -531,23 +604,23 @@ class RoutineViewSet(viewsets.ModelViewSet):
         status = request.data.get("status")
 
         if user not in routine.assigned_to.all():
-            return Response({"error": "You are not authorized to update this routine."}, status=403)
+            return Response({"error": _("You are not authorized to update this routine.")}, status=403)
 
         if not day or not status:
-            return Response({"error": "Day and status are required."}, status=400)
+            return Response({"error": _("Day and status are required.")}, status=400)
 
         # Validate if the day exists in the routine's exercises
         valid_days = [exercise.day for exercise in routine.routine_exercises.all()]
         if int(day) not in valid_days:
-            return Response({"error": f"Day {day} is not part of the routine."}, status=400)
+            return Response({"error": _("Day %(day)s is not part of the routine.") % {"day": day}}, status=400)
 
         try:
             updated_progress = routine.update_progress(user=user, day=int(day), status=status)
         except ValueError as e:
-            return Response({"error": str(e)}, status=400)
+            return Response({"error": _("Invalid progress update.")}, status=400)
 
         return Response(
-            {"message": "Progress updated successfully.", "updated_progress": updated_progress},
+            {"message": _("Progress updated successfully."), "updated_progress": updated_progress},
             status=200
         )
 
@@ -574,7 +647,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
             "trainer_id": request.user.id,
             "client_count": clients.count(),
             "routine_count": trainer_routines.count(),
-            "message": "Progress tracking endpoint - implementation pending"
+            "message": _("Progress tracking endpoint - implementation pending")
         }, status=status.HTTP_200_OK)
 
     def _send_assignment_notification(self, client, routine):
@@ -612,6 +685,7 @@ class RoutineExerciseViewSet(viewsets.ModelViewSet):
     ).prefetch_related('exercise__media')
     serializer_class = RoutineExerciseSerializer
     permission_classes = [IsAdminOrOwnerOrReadOnly]
+    pagination_class = StandardResultsSetPagination
 
 
 class RoutineProgressViewSet(viewsets.ModelViewSet):
@@ -624,6 +698,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
     serializer_class = RoutineProgressSerializer
     permission_classes = [IsTrainerOrAdmin | IsClientOrAssignedTrainer]
     pagination_class = StandardResultsSetPagination
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['routine', 'user', 'day', 'status']
 
     def get_queryset(self):
         """Filter progress based on user role with optimized queries."""
@@ -652,6 +728,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     serializer_class = ExerciseSetLogSerializer
     permission_classes = [IsSetLogCreatorOrTrainerOrAdmin]
     pagination_class = StandardResultsSetPagination
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['workout_session', 'date']
 
     def get_queryset(self):
         """
@@ -685,7 +763,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             serializer.save()
         except IntegrityError as e:
             if 'unique constraint' in str(e).lower():
-                raise serializers.ValidationError({'detail': 'A set log for this progress, set number, and date already exists.'})
+                raise serializers.ValidationError({'detail': _('A set log for this progress, set number, and date already exists.')})
             raise
 
     @action(detail=False, methods=['get'], url_path='my-progress')
@@ -699,7 +777,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         if not user.is_authenticated or not user.is_client:
-            return Response({'error': 'Only clients can view their own progress.'}, status=403)
+            return Response({'error': _('Only clients can view their own progress.')}, status=403)
         group_by = request.query_params.get('group_by')
         routine_id = request.query_params.get('routine_id')
         qs = self.get_queryset().filter(user_exercise_progress__user=user)
@@ -747,12 +825,12 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         weight = float(request.data.get('weight', 0))
         reps = int(request.data.get('reps', 10))
         if not routine_id or not day or not date:
-            return Response({'error': 'routine_id, day, and date are required.'}, status=400)
+            return Response({'error': _('routine_id, day, and date are required.')}, status=400)
         from .models import Routine, RoutineExercise, UserExerciseProgress, ExerciseSetLog
         try:
             routine = Routine.objects.get(id=routine_id)
         except Routine.DoesNotExist:
-            return Response({'error': 'Routine not found.'}, status=404)
+            return Response({'error': _('Routine not found.')}, status=404)
         exercises = RoutineExercise.objects.filter(routine=routine, day=day)
         results = []
         errors = []
@@ -794,6 +872,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         'set_logs__user_exercise_progress__exercise'
     )
     serializer_class = WorkoutSessionSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['user', 'routine', 'status']
     
     def get_permissions(self):
         from .permissions import IsSessionOwnerOrTrainerOrAdmin, IsRoutineOwnerOrAssigned
@@ -878,7 +958,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 from users.models import CustomUser
                 user = CustomUser.objects.get(pk=user_id)
             except CustomUser.DoesNotExist:
-                return Response({'error': 'User not found'}, status=404)
+                return Response({'error': _('User not found')}, status=404)
 
         now = timezone.now()
         
@@ -1004,7 +1084,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
             try:
                 user = CustomUser.objects.get(pk=user_id)
             except CustomUser.DoesNotExist:
-                return Response({'error': 'User not found.'}, status=404)
+                return Response({'error': _('User not found.')}, status=404)
 
         # Calculate streaks
         queryset = RoutineProgress.objects.filter(
@@ -1090,7 +1170,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         from datetime import timedelta
         
         if not (request.user.is_trainer or request.user.is_admin):
-            return Response({'error': 'Permission denied.'}, status=403)
+            return Response({'error': _('Permission denied.')}, status=403)
         
         # Get all clients for this trainer/admin with optimized queries
         if request.user.is_trainer:
@@ -1231,6 +1311,7 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
     queryset = RoutineTemplate.objects.all()
     serializer_class = RoutineTemplateSerializer
     permission_classes = [IsTrainerOrReadOnly]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         """
@@ -1243,8 +1324,12 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         - Other users: Public templates only
         """
         user = self.request.user
-        qs = super().get_queryset()
-        
+        qs = super().get_queryset().select_related('created_by').prefetch_related(
+            'routinetemplateexercise_set',
+            'routinetemplateexercise_set__exercise',
+            'routinetemplateexercise_set__exercise__media'
+        )
+
         # Apply role-based filtering
         if user.is_admin:
             # Admins can see all templates
@@ -1301,42 +1386,76 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         client_id = request.data.get('client_id')
         
         if not client_id:
-            return Response({'detail': 'client_id required'}, status=400)
+            return Response({'detail': _('client_id required')}, status=400)
         
         from users.models import CustomUser
         try:
             client = CustomUser.objects.get(pk=client_id)
         except CustomUser.DoesNotExist:
-            return Response({'detail': 'Client not found'}, status=404)
+            return Response({'detail': _('Client not found')}, status=404)
         
         # Security check: Only trainers can assign to their own clients
         if not (request.user.is_trainer and client.assigned_trainer_id == request.user.id):
-            return Response({'detail': 'Permission denied. You can only assign routines to your own clients.'}, status=403)
+            return Response({'detail': _('Permission denied. You can only assign routines to your own clients.')}, status=403)
         
+        # Determine total duration for the routine
+        start_date = request.data.get('start_date')
+        end_date = request.data.get('end_date')
+        routine_days = request.data.get('days')
+
+        if start_date and end_date and not routine_days:
+            from datetime import datetime
+            d1 = datetime.strptime(start_date, '%Y-%m-%d').date()
+            d2 = datetime.strptime(end_date, '%Y-%m-%d').date()
+            routine_days = max(1, (d2 - d1).days + 1)
+        elif routine_days:
+            routine_days = int(routine_days)
+        else:
+            routine_days = template.days
+
         # Create Routine for client
         from .models import Routine, RoutineExercise
-        routine = Routine.objects.create(
-            name=template.name,
-            description=f"{template.description} (Goal: {template.goal})",
-            days=template.days,  # Copy days from template
-            created_by=request.user
-        )
+        routine_data = {
+            'name': template.name,
+            'description': f"{template.description} (Goal: {template.goal})",
+            'days': routine_days,
+            'created_by': request.user
+        }
+        if start_date:
+            routine_data['start_date'] = start_date
+        if end_date:
+            routine_data['end_date'] = end_date
+
+        routine = Routine.objects.create(**routine_data)
         routine.assigned_to.set([client])
         
-        # Copy exercises, allow customizations
+        # Copy exercises with expansion loop
         customizations = request.data.get('customizations', {})
-        for t_ex in template.routinetemplateexercise_set.all():
-            ex_id = str(t_ex.exercise_id)
-            ex_custom = customizations.get(ex_id, {})
-            RoutineExercise.objects.create(
-                routine=routine,
-                exercise=t_ex.exercise,
-                sets=ex_custom.get('sets', t_ex.sets),
-                reps=ex_custom.get('reps', t_ex.reps),
-                rest_time=ex_custom.get('rest_time', t_ex.rest_time),
-                day=t_ex.day,  # Copy day from template exercise
-                order=t_ex.order
-            )
+        template_exercises = list(template.routinetemplateexercise_set.select_related('exercise').all())
+        new_routine_exercises = []
+        cycle_length = template.days or 1
+        
+        for client_day in range(1, routine_days + 1):
+            cycle_day = ((client_day - 1) % cycle_length) + 1
+            exercises_for_day = [ex for ex in template_exercises if ex.day == cycle_day]
+            
+            for t_ex in exercises_for_day:
+                ex_id = str(t_ex.exercise_id)
+                ex_custom = customizations.get(ex_id, {})
+                new_routine_exercises.append(
+                    RoutineExercise(
+                        routine=routine,
+                        exercise=t_ex.exercise,
+                        sets=ex_custom.get('sets', t_ex.sets),
+                        reps=ex_custom.get('reps', t_ex.reps),
+                        rest_time=ex_custom.get('rest_time', t_ex.rest_time),
+                        day=client_day,
+                        order=t_ex.order
+                    )
+                )
+                
+        if new_routine_exercises:
+            RoutineExercise.objects.bulk_create(new_routine_exercises)
         
         # Send notification to client
         from .services import send_notification
@@ -1360,10 +1479,10 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         
         # Only allow copying public templates from other trainers
         if not template.is_public:
-            return Response({'detail': 'Can only copy public templates'}, status=400)
+            return Response({'detail': _('Can only copy public templates')}, status=400)
         
         if template.created_by == request.user:
-            return Response({'detail': 'Cannot copy your own template'}, status=400)
+            return Response({'detail': _('Cannot copy your own template')}, status=400)
         
         # Create a copy
         new_template = RoutineTemplate.objects.create(
@@ -1396,7 +1515,7 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         Only for trainers.
         """
         if not request.user.is_trainer:
-            return Response({'detail': 'Only trainers can access this endpoint'}, status=403)
+            return Response({'detail': _('Only trainers can access this endpoint')}, status=403)
         
         templates = self.get_queryset().filter(created_by=request.user)
         serializer = self.get_serializer(templates, many=True)
@@ -1411,6 +1530,45 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         templates = self.get_queryset().filter(is_public=True)
         serializer = self.get_serializer(templates, many=True)
         return Response(serializer.data)
+
+
+class RoutineTemplateExerciseSerializer(serializers.ModelSerializer):
+    """
+    Serializer for routine template exercises. Uses the original model's fields.
+    """
+    from .serializers import ExerciseSerializer
+    exercise_details = ExerciseSerializer(source='exercise', read_only=True)
+
+    class Meta:
+        model = RoutineTemplateExercise
+        fields = ['id', 'template', 'exercise', 'exercise_details', 'sets', 'reps', 'rest_time', 'day', 'order']
+
+
+class RoutineTemplateExerciseViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint for viewing RoutineTemplateExercise objects with pagination.
+    ReadOnly since trainers usually manage these via the template or custom actions.
+    """
+    queryset = RoutineTemplateExercise.objects.select_related('exercise').prefetch_related('exercise__media')
+    serializer_class = RoutineTemplateExerciseSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['template', 'day']
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        
+        # Security: restrict to own templates or public templates
+        if user.is_admin:
+            return qs
+        if user.is_trainer:
+            return qs.filter(
+                models.Q(template__created_by=user) | 
+                models.Q(template__is_public=True)
+            )
+        return qs.filter(template__is_public=True)
 
 
 class UserExerciseProgressViewSet(viewsets.ModelViewSet):
@@ -1452,7 +1610,7 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
             serializer.save(user=self.request.user)
         except IntegrityError as e:
             if 'unique constraint' in str(e).lower():
-                raise serializers.ValidationError({'detail': 'A progress record for this user, exercise, and date already exists.'})
+                raise serializers.ValidationError({'detail': _('A progress record for this user, exercise, and date already exists.')})
             raise
 
     @action(detail=False, methods=['get'], url_path='daily-summary')
@@ -1469,7 +1627,7 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
             # Validate date format
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
-            return Response({'error': 'Invalid date format. Use YYYY-MM-DD.'}, status=400)
+            return Response({'error': _('Invalid date format. Use YYYY-MM-DD.')}, status=400)
             
         queryset = self.get_queryset().filter(date=target_date).select_related('exercise').prefetch_related('set_logs')
         
@@ -1497,12 +1655,12 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         target_sets = request.data.get('target_sets', 1)
         skipped = request.data.get('skipped', False)
         if not routine_id or not day or not date:
-            return Response({'error': 'routine_id, day, and date are required.'}, status=400)
+            return Response({'error': _('routine_id, day, and date are required.')}, status=400)
         from .models import Routine, RoutineExercise, UserExerciseProgress
         try:
             routine = Routine.objects.get(id=routine_id)
         except Routine.DoesNotExist:
-            return Response({'error': 'Routine not found.'}, status=404)
+            return Response({'error': _('Routine not found.')}, status=404)
         exercises = RoutineExercise.objects.filter(routine=routine, day=day)
         results = []
         errors = []
@@ -1584,7 +1742,7 @@ class ExerciseImageUploadView(APIView):
 
             # Return the updated exercise info
             return Response({
-                'message': 'Exercise image uploaded successfully',
+                'message': _('Exercise image uploaded successfully'),
                 'exercise': {
                     'id': exercise.id,
                     'name': exercise.name,
@@ -1626,11 +1784,11 @@ class ExerciseImageUploadView(APIView):
                 exercise.save()
                 
                 return Response({
-                    'message': 'Exercise image removed successfully'
+                    'message': _('Exercise image removed successfully')
                 }, status=status.HTTP_200_OK)
             else:
                 return Response({
-                    'message': 'No image to remove'
+                    'message': _('No image to remove')
                 }, status=status.HTTP_404_NOT_FOUND)
                 
         except Exception as e:

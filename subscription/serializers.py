@@ -4,6 +4,7 @@ from .models import (
     SubscriptionFeature, SubscriptionUsage
 )
 from users.serializers import CustomUserSerializer
+from django.utils.translation import gettext_lazy as _
 
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
     """Serializer for subscription plans"""
@@ -87,7 +88,7 @@ class SubscriptionSerializer(serializers.ModelSerializer):
                 plan = SubscriptionPlan.objects.get(id=plan_id)
                 validated_data['plan'] = plan
             except SubscriptionPlan.DoesNotExist:
-                raise serializers.ValidationError("Invalid plan ID")
+                raise serializers.ValidationError(_("Invalid plan ID"))
         
         return super().create(validated_data)
 
@@ -104,7 +105,7 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
             plan = SubscriptionPlan.objects.get(id=value, is_active=True)
             return value
         except SubscriptionPlan.DoesNotExist:
-            raise serializers.ValidationError("Invalid or inactive plan")
+            raise serializers.ValidationError(_("Invalid or inactive plan"))
     
     def create(self, validated_data):
         plan_id = validated_data.pop('plan_id')
@@ -113,7 +114,7 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
         
         # Check if user already has a subscription
         if hasattr(user, 'subscription'):
-            raise serializers.ValidationError("User already has a subscription")
+            raise serializers.ValidationError(_("User already has a subscription"))
         
         validated_data['user'] = user
         validated_data['plan'] = plan
@@ -130,7 +131,7 @@ class SubscriptionUpdateSerializer(serializers.ModelSerializer):
     def validate(self, data):
         # Only allow updating auto_renew for active subscriptions
         if self.instance and self.instance.status not in ['active', 'trial']:
-            raise serializers.ValidationError("Cannot update inactive subscription")
+            raise serializers.ValidationError(_("Cannot update inactive subscription"))
         return data
 
 class SubscriptionCancelSerializer(serializers.Serializer):
@@ -141,10 +142,10 @@ class SubscriptionCancelSerializer(serializers.Serializer):
     def validate(self, data):
         subscription = self.context.get('subscription')
         if not subscription:
-            raise serializers.ValidationError("No subscription found")
+            raise serializers.ValidationError(_("No subscription found"))
         
         if subscription.status in ['cancelled', 'expired']:
-            raise serializers.ValidationError("Subscription is already cancelled or expired")
+            raise serializers.ValidationError(_("Subscription is already cancelled or expired"))
         
         return data
 
@@ -163,7 +164,7 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
         # Ensure the subscription belongs to the current user
         user = self.context['request'].user
         if value.user != user:
-            raise serializers.ValidationError("Invalid subscription")
+            raise serializers.ValidationError(_("Invalid subscription"))
         return value
 
 class SubscriptionPlanListSerializer(serializers.ModelSerializer):

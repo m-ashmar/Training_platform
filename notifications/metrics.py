@@ -38,3 +38,23 @@ invalid_tokens_total = Counter(
     'Total number of tokens marked as invalid',
     ['platform']
 )
+
+# ── i18n observability ──
+
+notification_template_missing_total = Counter(
+    'notification_template_missing_total',
+    'Events processed without a bound NotificationTemplate',
+    ['event_type']
+)
+
+notification_context_error_total = Counter(
+    'notification_context_error_total',
+    'Template renders that failed due to missing/invalid context keys',
+    ['event_type', 'error_kind']
+)
+
+language_fallback_total = Counter(
+    'notification_language_fallback_total',
+    'Times a stored preferred_language was invalid and fell back to LANGUAGE_CODE',
+    ['invalid_value']
+)

@@ -11,6 +11,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
 
 from .models import (
     DietPlan, DietPlanTemplate, Meal, MealComponent, 
@@ -31,7 +32,7 @@ class TrainerDietPlanService:
             trainer: The trainer user instance
         """
         if not trainer.is_trainer:
-            raise ValidationError("User must be a trainer to use this service")
+            raise ValidationError(_("User must be a trainer to use this service"), code="not_trainer")
         self.trainer = trainer
     
     def get_available_templates(self) -> List[DietPlanTemplate]:
@@ -89,7 +90,7 @@ class TrainerDietPlanService:
         """
         # Validate trainer-client relationship
         if not self._can_manage_client(client):
-            raise ValidationError("You can only create diet plans for your assigned clients")
+            raise ValidationError(_("You can only create diet plans for your assigned clients"), code="not_assigned_client")
         
         # Calculate daily calories if not provided
         if daily_calories is None:
@@ -138,7 +139,7 @@ class TrainerDietPlanService:
         """
         # Validate trainer can manage this plan
         if diet_plan.created_by != self.trainer:
-            raise ValidationError("You can only modify diet plans you created")
+            raise ValidationError(_("You can only modify diet plans you created"), code="not_plan_owner")
         
         # Create the meal
         meal = Meal.objects.create(
@@ -183,7 +184,7 @@ class TrainerDietPlanService:
         """
         # Validate trainer can manage this meal
         if meal.diet_plan.created_by != self.trainer:
-            raise ValidationError("You can only modify meals in plans you created")
+            raise ValidationError(_("You can only modify meals in plans you created"), code="not_meal_owner")
         
         # Update meal fields
         if scheduled_time is not None:
@@ -221,7 +222,7 @@ class TrainerDietPlanService:
         """
         # Validate trainer can manage this meal
         if meal.diet_plan.created_by != self.trainer:
-            raise ValidationError("You can only delete meals in plans you created")
+            raise ValidationError(_("You can only delete meals in plans you created"), code="not_meal_delete_owner")
         
         meal.delete()
         return True
@@ -237,7 +238,7 @@ class TrainerDietPlanService:
             List of diet plans for the client
         """
         if not self._can_manage_client(client):
-            raise ValidationError("You can only view diet plans for your assigned clients")
+            raise ValidationError(_("You can only view diet plans for your assigned clients"), code="not_assigned_view")
         
         return DietPlan.objects.filter(
             user=client,
@@ -309,7 +310,7 @@ class ClientProgressService:
             client: The client user instance
         """
         if not client.is_client:
-            raise ValidationError("User must be a client to use this service")
+            raise ValidationError(_("User must be a client to use this service"), code="not_client")
         self.client = client
     
     def complete_meal_component(
@@ -329,7 +330,7 @@ class ClientProgressService:
         """
         # Validate client owns this component
         if component.meal.diet_plan.user != self.client:
-            raise ValidationError("You can only complete your own meal components")
+            raise ValidationError(_("You can only complete your own meal components"), code="not_component_owner")
         
         component.complete(actual_quantity)
         return component
@@ -348,7 +349,7 @@ class ClientProgressService:
         """
         # Validate client owns this meal
         if meal.diet_plan.user != self.client:
-            raise ValidationError("You can only rate your own meals")
+            raise ValidationError(_("You can only rate your own meals"), code="not_rating_owner")
         
         meal.is_liked = is_liked
         meal.notes = notes
@@ -443,7 +444,7 @@ class ClientProgressService:
         """
         # Validate client owns this meal
         if meal.diet_plan.user != self.client:
-            raise ValidationError("You can only view your own meals")
+            raise ValidationError(_("You can only view your own meals"), code="not_meal_viewer")
         
         components = []
         for component in meal.components.all():
@@ -666,7 +667,7 @@ class ClientProgressService:
         """
         # Validate client owns this meal
         if meal.diet_plan.user != self.client:
-            raise ValidationError("You can only complete your own meals")
+            raise ValidationError(_("You can only complete your own meals"), code="not_meal_completion_owner")
         
         # Complete all components efficiently with bulk update
         MealComponent.objects.filter(meal=meal).update(

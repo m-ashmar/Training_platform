@@ -49,8 +49,9 @@ class UserFollow(models.Model):
     def clean(self):
         """Prevent users from following themselves"""
         from django.core.exceptions import ValidationError
+        from django.utils.translation import gettext_lazy as _
         if self.follower == self.following:
-            raise ValidationError("Users cannot follow themselves")
+            raise ValidationError(_("Users cannot follow themselves"), code="self_follow")
 
 
 class Post(models.Model):

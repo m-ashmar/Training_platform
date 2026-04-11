@@ -25,25 +25,24 @@ class FirebaseNotificationService:
             self._initialized = True
 
     def initialize(self):
-        """Initialize Firebase Admin SDK with credentials from settings."""
+        """
+        Initialize Firebase Admin SDK with credentials from settings.
+        Fails closed: crashes if credentials are missing or invalid.
+        """
         try:
             if not firebase_admin._apps:
                 cred_path = getattr(settings, 'FIREBASE_CREDENTIALS_PATH', None)
-                if cred_path:
-                    cred = credentials.Certificate(cred_path)
-                    firebase_admin.initialize_app(cred)
-                    logger.info("Firebase Admin SDK initialized successfully.")
-                else:
-                    # Try default credentials (e.g. environment variables)
-                    # or check if already initialized externally
-                    logger.warning("FIREBASE_CREDENTIALS_PATH not set. Attempting default initialization.")
-                    try:
-                        firebase_admin.initialize_app()
-                        logger.info("Firebase Admin SDK initialized with default credentials.")
-                    except Exception as e:
-                        logger.error(f"Failed to initialize Firebase with default credentials: {e}")
+                if not cred_path:
+                    raise ValueError(
+                        "FIREBASE_CREDENTIALS_PATH is not configured. "
+                        "Push notifications will not work."
+                    )
+                cred = credentials.Certificate(cred_path)
+                firebase_admin.initialize_app(cred)
+                logger.info("Firebase Admin SDK initialized successfully.")
         except Exception as e:
             logger.error(f"Error initializing Firebase Admin SDK: {e}")
+            raise  # Fail closed: do not silently swallow initialization errors
 
     def send_to_token(self, token: str, title: str, body: str, data: Optional[Dict[str, str]] = None) -> bool:
         """

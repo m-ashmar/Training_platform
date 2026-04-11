@@ -9,6 +9,6 @@ class SocialConfig(AppConfig):
     def ready(self):
         # Import signal handlers
         try:
-            import social.signals
+            import training_platform.signals
         except ImportError:
             pass 

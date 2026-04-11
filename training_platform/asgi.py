@@ -12,14 +12,16 @@ from channels.routing import ProtocolTypeRouter, URLRouter
 from django.core.asgi import get_asgi_application
 from channels.auth import AuthMiddlewareStack
 import social.routing
+import ai_assistant.routing
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "training_platform.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "training_platform.settings_production")
 
 application = ProtocolTypeRouter({
     "http": get_asgi_application(),
     "websocket": AuthMiddlewareStack(
         URLRouter(
             social.routing.websocket_urlpatterns
+            + ai_assistant.routing.websocket_urlpatterns
         )
     ),
 })

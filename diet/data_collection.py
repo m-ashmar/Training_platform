@@ -173,7 +173,7 @@ class TrainingDataCollector:
         """
         meals_data = []
         
-        for meal in diet_plan.meals.all():
+        for meal in diet_plan.meals.prefetch_related('mealcomponent_set__food').all():
             # Process meal with enhanced processor
             meal_processor = MealProcessor()
             
@@ -221,7 +221,7 @@ class TrainingDataCollector:
         """
         Collect comprehensive nutritional analysis.
         """
-        all_meals = diet_plan.meals.all()
+        all_meals = diet_plan.meals.prefetch_related('mealcomponent_set__food').all()
         total_calories = 0
         total_protein = 0
         total_carbs = 0
@@ -329,10 +329,18 @@ class TrainingDataCollector:
     
     def _store_training_entry(self, training_entry: Dict[str, Any]):
         """
-        Store training entry in cache for batch processing.
+        Stage training entry for batch processing.
+
+        Uses edamam_cache (DB4) as a temporary staging store, which is
+        isolated from the session store (DB0) and the app response cache (DB2/3).
+        TTL: 24 hours — enough for a nightly export job.
+
+        NOTE for production: replace with a proper pipeline store (S3 / Celery task)
+        so large JSON blobs don't consume Redis memory.
         """
+        from training_platform.cache import edamam_cache
         cache_key = f"training_data_{training_entry['entry_id']}"
-        cache.set(cache_key, training_entry, timeout=86400)  # 24 hours
+        edamam_cache().set(cache_key, training_entry, timeout=86400)  # 24 hours
     
     def export_training_dataset(self, start_date: Optional[datetime] = None, 
                                end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:

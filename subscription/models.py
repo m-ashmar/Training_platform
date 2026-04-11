@@ -5,6 +5,7 @@ from users.models import CustomUser
 from datetime import timedelta
 import uuid
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
 class SubscriptionPlan(models.Model):
     """Subscription plans with different features and pricing"""
@@ -21,11 +22,11 @@ class SubscriptionPlan(models.Model):
     price = models.DecimalField(
         max_digits=10, 
         decimal_places=2,
-        validators=[MinValueValidator(0, "Price cannot be negative")]
+        validators=[MinValueValidator(0, _("Price cannot be negative"))]
     )
     duration_days = models.IntegerField(
         default=30,
-        validators=[MinValueValidator(1, "Duration must be at least 1 day")]
+        validators=[MinValueValidator(1, _("Duration must be at least 1 day"))]
     )
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -39,11 +40,11 @@ class SubscriptionPlan(models.Model):
     has_priority_support = models.BooleanField(default=False, db_index=True)
     max_meals_per_day = models.IntegerField(
         default=3,
-        validators=[MinValueValidator(0, "Max meals cannot be negative")]
+        validators=[MinValueValidator(0, _("Max meals cannot be negative"))]
     )
     max_routines = models.IntegerField(
         default=5,
-        validators=[MinValueValidator(0, "Max routines cannot be negative")]
+        validators=[MinValueValidator(0, _("Max routines cannot be negative"))]
     )
     
     class Meta:
@@ -58,9 +59,9 @@ class SubscriptionPlan(models.Model):
     def clean(self):
         """Custom validation"""
         if self.price < 0:
-            raise ValidationError("Price cannot be negative")
+            raise ValidationError(_("Price cannot be negative"))
         if self.duration_days <= 0:
-            raise ValidationError("Duration must be greater than 0")
+            raise ValidationError(_("Duration must be greater than 0"))
     
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -130,9 +131,9 @@ class Subscription(models.Model):
     def clean(self):
         """Custom validation"""
         if self.end_date and self.start_date and self.end_date <= self.start_date:
-            raise ValidationError("End date must be after start date")
+            raise ValidationError(_("End date must be after start date"))
         if self.trial_end_date and self.start_date and self.trial_end_date <= self.start_date:
-            raise ValidationError("Trial end date must be after start date")
+            raise ValidationError(_("Trial end date must be after start date"))
     
     def save(self, *args, **kwargs):
         from django.utils import timezone
@@ -220,7 +221,7 @@ class Payment(models.Model):
     amount = models.DecimalField(
         max_digits=10, 
         decimal_places=2,
-        validators=[MinValueValidator(0, "Amount cannot be negative")]
+        validators=[MinValueValidator(0, _("Amount cannot be negative"))]
     )
     currency = models.CharField(max_length=3, default='USD', db_index=True)
     status = models.CharField(
@@ -266,7 +267,7 @@ class Payment(models.Model):
     def clean(self):
         """Custom validation"""
         if self.amount < 0:
-            raise ValidationError("Payment amount cannot be negative")
+            raise ValidationError(_("Payment amount cannot be negative"))
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -305,11 +306,11 @@ class SubscriptionUsage(models.Model):
     )
     usage_count = models.IntegerField(
         default=0,
-        validators=[MinValueValidator(0, "Usage count cannot be negative")]
+        validators=[MinValueValidator(0, _("Usage count cannot be negative"))]
     )
     limit = models.IntegerField(
         default=0,  # 0 means unlimited
-        validators=[MinValueValidator(0, "Limit cannot be negative")]
+        validators=[MinValueValidator(0, _("Limit cannot be negative"))]
     )
     period_start = models.DateTimeField(auto_now_add=True, db_index=True)
     period_end = models.DateTimeField(db_index=True)
@@ -326,11 +327,11 @@ class SubscriptionUsage(models.Model):
     def clean(self):
         """Custom validation"""
         if self.usage_count < 0:
-            raise ValidationError("Usage count cannot be negative")
+            raise ValidationError(_("Usage count cannot be negative"))
         if self.limit < 0:
-            raise ValidationError("Limit cannot be negative")
+            raise ValidationError(_("Limit cannot be negative"))
         if self.period_end and self.period_start and self.period_end <= self.period_start:
-            raise ValidationError("Period end must be after period start")
+            raise ValidationError(_("Period end must be after period start"))
 
     def save(self, *args, **kwargs):
         self.full_clean()

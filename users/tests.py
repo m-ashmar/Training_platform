@@ -569,3 +569,186 @@ class FullWorkflowIntegrationTestCase(APITestCase):
         # Admin can see and create diet plans for any client
         self.client.force_authenticate(user=admin_user)
         self.assertTrue(DietPlan.objects.filter(user=client_user, goal='Gain').exists())
+
+
+class PasswordResetTestCase(APITestCase):
+    """
+    Test suite for the OTP-based password reset flow.
+    
+    Tests:
+    - Request OTP for valid/invalid emails
+    - Rate limiting on OTP requests
+    - Verify correct / wrong / expired OTP
+    - Confirm password with valid / used / expired token
+    - Weak password rejection via Django validators
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='reset_user',
+            email='reset@test.com',
+            password='OldPassword123!',
+            phone_number='+1234500000',
+            user_type='client',
+        )
+        # Ensure user is active
+        self.user.is_active = True
+        self.user.save()
+        # Clear cache to avoid rate-limit pollution between tests
+        from django.core.cache import cache
+        cache.clear()
+
+    # ------------------------------------------------------------------
+    # Step 1: Request OTP
+    # ------------------------------------------------------------------
+    @patch('users.utils.send_password_reset_email')
+    def test_request_otp_valid_email(self, mock_send):
+        """Valid email → 200 with generic message."""
+        mock_send.return_value = True
+        url = reverse('users:password_reset_request')
+        response = self.client.post(url, {'email': 'reset@test.com'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('password reset code', str(response.data['message']).lower())
+
+    def test_request_otp_nonexistent_email(self):
+        """Non-existent email → still 200 (no user enumeration)."""
+        url = reverse('users:password_reset_request')
+        response = self.client.post(url, {'email': 'nobody@test.com'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    @patch('users.utils.send_password_reset_email')
+    def test_request_otp_rate_limit(self, mock_send):
+        """4th request within 1 hour → 429."""
+        mock_send.return_value = True
+        url = reverse('users:password_reset_request')
+        for _ in range(3):
+            self.client.post(url, {'email': 'reset@test.com'}, format='json')
+        response = self.client.post(url, {'email': 'reset@test.com'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    # ------------------------------------------------------------------
+    # Step 2: Verify OTP
+    # ------------------------------------------------------------------
+    @patch('users.utils.send_password_reset_email')
+    def test_verify_correct_otp(self, mock_send):
+        """Correct OTP → 200 with reset_token."""
+        mock_send.return_value = True
+        from users.utils import create_password_reset_otp
+        otp = create_password_reset_otp(self.user)
+
+        url = reverse('users:password_reset_verify')
+        response = self.client.post(url, {
+            'email': 'reset@test.com',
+            'otp_code': otp.otp_code,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('reset_token', response.data)
+
+    @patch('users.utils.send_password_reset_email')
+    def test_verify_wrong_otp(self, mock_send):
+        """Wrong OTP code → 400."""
+        mock_send.return_value = True
+        from users.utils import create_password_reset_otp
+        create_password_reset_otp(self.user)
+
+        url = reverse('users:password_reset_verify')
+        response = self.client.post(url, {
+            'email': 'reset@test.com',
+            'otp_code': '000000',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch('users.utils.send_password_reset_email')
+    def test_verify_expired_otp(self, mock_send):
+        """Expired OTP → 400."""
+        mock_send.return_value = True
+        from users.utils import create_password_reset_otp
+        from django.utils import timezone
+        otp = create_password_reset_otp(self.user)
+        # Force expire
+        otp.expires_at = timezone.now() - timedelta(minutes=1)
+        otp.is_verified = False
+        otp.save()
+
+        url = reverse('users:password_reset_verify')
+        response = self.client.post(url, {
+            'email': 'reset@test.com',
+            'otp_code': otp.otp_code,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('expired', response.data['error'].lower())
+
+    # ------------------------------------------------------------------
+    # Step 3: Confirm new password
+    # ------------------------------------------------------------------
+    @patch('users.utils.send_password_reset_email')
+    def test_confirm_valid_token_strong_password(self, mock_send):
+        """Valid token + strong password → 200, login succeeds."""
+        mock_send.return_value = True
+        from users.utils import create_password_reset_otp
+        otp = create_password_reset_otp(self.user)
+
+        # Verify OTP to get token
+        verify_url = reverse('users:password_reset_verify')
+        verify_resp = self.client.post(verify_url, {
+            'email': 'reset@test.com',
+            'otp_code': otp.otp_code,
+        }, format='json')
+        reset_token = verify_resp.data['reset_token']
+
+        # Confirm password
+        confirm_url = reverse('users:password_reset_confirm')
+        response = self.client.post(confirm_url, {
+            'reset_token': reset_token,
+            'new_password': 'NewSecureP@ss99',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Verify login works with new password
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('NewSecureP@ss99'))
+
+    @patch('users.utils.send_password_reset_email')
+    def test_confirm_used_token(self, mock_send):
+        """Already-used token → 400."""
+        mock_send.return_value = True
+        from users.utils import create_password_reset_otp
+        otp = create_password_reset_otp(self.user)
+
+        # Verify OTP
+        verify_resp = self.client.post(reverse('users:password_reset_verify'), {
+            'email': 'reset@test.com',
+            'otp_code': otp.otp_code,
+        }, format='json')
+        reset_token = verify_resp.data['reset_token']
+
+        # First confirm — should succeed
+        confirm_url = reverse('users:password_reset_confirm')
+        self.client.post(confirm_url, {
+            'reset_token': reset_token,
+            'new_password': 'NewSecureP@ss99',
+        }, format='json')
+
+        # Second confirm — should fail
+        response = self.client.post(confirm_url, {
+            'reset_token': reset_token,
+            'new_password': 'AnotherPassword1!',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_confirm_weak_password(self):
+        """Weak password (common/short) → 400 from Django validators."""
+        from users.models import PasswordResetToken
+        from django.utils import timezone
+        token = PasswordResetToken.objects.create(
+            user=self.user,
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        confirm_url = reverse('users:password_reset_confirm')
+        response = self.client.post(confirm_url, {
+            'reset_token': str(token.token),
+            'new_password': 'password',  # too common
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+

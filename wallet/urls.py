@@ -10,7 +10,6 @@ from .views import (
     AgentApiKeyCreateView,
     AgentApiKeyStatusView,
     AgentApiKeyEnsureView,
-    AdminDevCreateAgentView,
     AgentTopUpProxyView,
 )
 
@@ -29,7 +28,6 @@ urlpatterns = [
     path("admin/reversal/", AdminReversalView.as_view(), name="admin-reversal"),
     path("admin/audit/export/", AdminAuditExportView.as_view(), name="admin-audit-export"),
     path("admin/alerts/suspicious/", AdminSuspiciousActivityView.as_view(), name="admin-suspicious-activity"),
-    path("admin/dev/create-agent/", AdminDevCreateAgentView.as_view(), name="admin-dev-create-agent"),
 ]
 
 

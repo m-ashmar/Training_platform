@@ -6,6 +6,7 @@ from django.conf import settings
 from django.utils.timezone import now
 from django.utils import timezone
 from django.core.exceptions import ValidationError
+from django.utils.translation import gettext_lazy as _
 from django.core.validators import MinValueValidator, MaxValueValidator
 from datetime import date
 from django.db.models.signals import post_save, m2m_changed
@@ -122,7 +123,7 @@ class Exercise(models.Model):
     def clean(self):
         """Validate exercise data."""
         if self.created_by and not self.created_by.is_trainer:
-            raise ValidationError("Only trainers can create exercises")
+            raise ValidationError(_("Only trainers can create exercises"), code="trainer_required")
         
         if self.created_by and self.is_global:
             # If a trainer creates an exercise, it should not be global by default
@@ -216,6 +217,13 @@ class Routine(models.Model):
     name = models.CharField(max_length=255, help_text="Routine name")
     description = models.TextField(blank=True, null=True, help_text="Optional description")
     
+    # Translations for user-generated content
+    translations = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="JSON translations for dynamic user content (e.g., {'ar': {'name': '...', 'description': '...'}})"
+    )
+    
     # Trainer scoping - routines belong to specific trainers
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -284,14 +292,14 @@ class Routine(models.Model):
     def clean(self):
         """Validate routine data."""
         if not self.created_by.is_trainer:
-            raise ValidationError("Only trainers can create routines")
+            raise ValidationError(_("Only trainers can create routines"), code="trainer_required")
         
         # Ensure assigned users are clients of the trainer
         for user in self.assigned_to.all():
             if not user.is_client:
-                raise ValidationError(f"User {user.username} is not a client")
+                raise ValidationError(_("User %(username)s is not a client") % {"username": user.username}, code="not_client")
             if user.assigned_trainer != self.created_by:
-                raise ValidationError(f"User {user.username} is not assigned to trainer {self.created_by.username}")
+                raise ValidationError(_("User %(username)s is not assigned to trainer %(trainer)s") % {"username": user.username, "trainer": self.created_by.username}, code="not_assigned")
 
     def get_assigned_users(self):
         """Return a comma-separated list of usernames assigned to this routine."""
@@ -421,11 +429,11 @@ class RoutineExercise(models.Model):
     def clean(self):
         """Validate routine exercise data."""
         if self.day > self.routine.days:
-            raise ValidationError(f"Day {self.day} exceeds routine duration of {self.routine.days} days")
+            raise ValidationError(_("Day %(day)s exceeds routine duration of %(days)s days") % {"day": self.day, "days": self.routine.days}, code="day_exceeded")
         
         # Ensure exercise is accessible to routine creator
         if not self.exercise.can_be_accessed_by(self.routine.created_by):
-            raise ValidationError(f"Exercise {self.exercise.name} is not accessible to routine creator")
+            raise ValidationError(_("Exercise %(name)s is not accessible to routine creator") % {"name": self.exercise.name}, code="exercise_not_accessible")
 
 
 class UserExerciseProgress(models.Model):
@@ -575,6 +583,8 @@ class WorkoutSession(models.Model):
             models.Index(fields=['user', 'start_time']),
             models.Index(fields=['routine']),
             models.Index(fields=['status']),
+            # Composite index for recent-progress aggregation query
+            models.Index(fields=['user', 'status', 'start_time'], name='ws_user_status_start_idx'),
         ]
         ordering = ['-start_time']
     
@@ -644,7 +654,7 @@ class ExerciseSetLog(models.Model):
     def clean(self):
         """Validate set log data."""
         if self.rpe and (self.rpe < 1 or self.rpe > 10):
-            raise ValidationError("RPE must be between 1 and 10")
+            raise ValidationError(_("RPE must be between 1 and 10"), code="rpe_out_of_range")
 
 
 class Notification(models.Model):
@@ -734,7 +744,7 @@ class RoutineTemplate(models.Model):
     def clean(self):
         """Validate template data."""
         if not self.created_by.is_trainer:
-            raise ValidationError("Only trainers can create templates")
+            raise ValidationError(_("Only trainers can create templates"), code="trainer_required")
 
 
 class RoutineTemplateExercise(models.Model):
@@ -758,53 +768,62 @@ def update_routine_progress_on_exercise_progress(sender, instance, created, **kw
     """
     When a UserExerciseProgress is created or updated, update the corresponding RoutineProgress.
     Correctly handles completion logic even when target_sets is 0.
+    Optimized to avoid N+1 queries.
     """
-    from .models import Routine, RoutineProgress, RoutineExercise
     user = instance.user
     exercise = instance.exercise
     progress_date = instance.date
     
-    # Find all active routines assigned to this user that include this exercise
-    # FIX: Use routine_exercises__exercise instead of exercises M2M field
-    # This ensures we catch exercises added via RoutineExercise even if M2M is out of sync
+    # Pre-fetch the related routine_exercises to avoid N+1 down the line
     routines = Routine.objects.filter(
         assigned_to=user, 
         routine_exercises__exercise=exercise,
         is_active=True
-    ).distinct()
+    ).prefetch_related('routine_exercises', 'routine_exercises__exercise').distinct()
     
     for routine in routines:
-        # Find which days this exercise appears in this routine
-        routine_exercises = RoutineExercise.objects.filter(routine=routine, exercise=exercise)
+        # All routine exercises are loaded in memory now
+        exercises_in_routine = list(routine.routine_exercises.all())
         
-        for routine_ex in routine_exercises:
-            day = routine_ex.day
-            
-            # Get all exercises scheduled for this specific day in the routine
-            day_exercise_items = RoutineExercise.objects.filter(routine=routine, day=day)
-            total_exercises_count = day_exercise_items.count()
+        # Find which days this exercise appears in this routine
+        days_with_exercise = {rex.day for rex in exercises_in_routine if rex.exercise_id == exercise.id}
+        
+        for day in days_with_exercise:
+            # Get all exercises scheduled for this specific day in the routine (from memory)
+            day_exercises = [rex.exercise for rex in exercises_in_routine if rex.day == day]
+            total_exercises_count = len(day_exercises)
             
             if total_exercises_count == 0:
                 continue
 
             completed_count = 0
             
+            # Bulk fetch progress for all exercises in this day for the user
+            day_exercise_ids = [ex.id for ex in day_exercises]
+            progress_records = list(UserExerciseProgress.objects.filter(
+                user=user, 
+                exercise_id__in=day_exercise_ids, 
+                date=progress_date, 
+                skipped=False
+            ).order_by('-updated_at'))
+            
+            # Assuming newest updated record for each exercise is what we want,
+            # we build a dict mapping exercise_id to its most recent progress record
+            progress_by_exercise = {}
+            for record in progress_records:
+                if record.exercise_id not in progress_by_exercise:
+                    progress_by_exercise[record.exercise_id] = record
+
             # Check completion status for each exercise in this day
-            for day_ex in day_exercise_items:
-                # Find the user's progress for this exercise on this date
-                prog = UserExerciseProgress.objects.filter(
-                    user=user, 
-                    exercise=day_ex.exercise, 
-                    date=progress_date, 
-                    skipped=False
-                ).order_by('-updated_at').first()
+            for day_ex in day_exercises:
+                user_prog = progress_by_exercise.get(day_ex.id)
                 
-                if prog:
-                    if prog.target_sets > 0:
-                        if prog.completed_sets >= prog.target_sets:
+                if user_prog is not None:
+                    if user_prog.target_sets > 0:
+                        if user_prog.completed_sets >= user_prog.target_sets:
                             completed_count += 1
                     else:
-                        if prog.completed_sets > 0:
+                        if user_prog.completed_sets > 0:
                             completed_count += 1
             
             # Determine status based on counts
@@ -839,12 +858,27 @@ def update_routine_progress_on_set_log(sender, instance, created, **kwargs):
     if not progress:
         return
         
-    # Recalculate completed_sets for the parent UserExerciseProgress
-    completed_sets_count = progress.set_logs.count()
+    # Recalculate metrics for the parent UserExerciseProgress
+    from django.db.models import Sum
     
-    # Only update if the count has changed
-    if progress.completed_sets != completed_sets_count:
+    metrics = progress.set_logs.aggregate(
+        sets_count=models.Count('id'),
+        total_w=models.Sum('weight'),
+        total_r=models.Sum('reps')
+    )
+    
+    completed_sets_count = metrics['sets_count'] or 0
+    total_weight = metrics['total_w'] or 0.0
+    total_reps = metrics['total_r'] or 0
+    
+    # Only update if the metrics have changed
+    if (progress.completed_sets != completed_sets_count or 
+        progress.total_weight != total_weight or 
+        progress.total_repetitions != total_reps):
+        
         progress.completed_sets = completed_sets_count
+        progress.total_weight = total_weight
+        progress.total_repetitions = total_reps
         progress.save()
         
     # Removed redundant explicit call: progress.save() already triggers the signal above.
