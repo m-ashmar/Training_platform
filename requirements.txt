@@ -61,7 +61,9 @@ structlog==25.4.0
 
 # Production
 gunicorn==24.1.1
+daphne>=4.0.0
 whitenoise==6.8.2
+dj-database-url>=2.1.0
 
 # Utilities
 python-dotenv==1.0.1

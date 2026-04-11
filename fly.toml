@@ -1,0 +1,39 @@
+# fly.toml — Training Platform
+# Generated for fly.io free tier deployment
+# Branch: noti-system
+
+app = "training-platform-api"   # CHANGE THIS to your unique fly app name
+primary_region = "ams"          # Amsterdam — closest free-tier region to Middle East
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DJANGO_SETTINGS_MODULE = "training_platform.settings_production"
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = true    # Free tier: machines stop when idle
+  auto_start_machines = true
+  min_machines_running = 0     # Free tier: scale to zero
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+# Health check
+[[services.http_checks]]
+  interval = "30s"
+  timeout = "10s"
+  grace_period = "30s"
+  method = "GET"
+  path = "/api/auth/health/"
+  protocol = "https"
