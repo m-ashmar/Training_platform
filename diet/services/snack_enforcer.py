@@ -4,6 +4,9 @@ from typing import Optional
 
 from ..models import DietPlan, Meal
 from ..utils.logging_utils import get_logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class SnackCalorieEnforcer:
@@ -53,6 +56,8 @@ class SnackCalorieEnforcer:
                     },
                 )
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
 

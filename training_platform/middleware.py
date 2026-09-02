@@ -16,13 +16,34 @@ from django.conf import settings
 from django.utils import timezone
 import secrets
 # Named-backend accessors — routes to the correct Redis DB segment
-from training_platform.cache import ratelimit_cache, public_cache
+from training_platform.cache import ratelimit_cache, public_cache, private_cache
 from django.db import connection, reset_queries
 from django.utils import timezone
 from django.shortcuts import redirect
 import re
 
 logger = logging.getLogger(__name__)
+
+
+def get_trusted_client_ip(request):
+    """
+    Derive the client IP from the trusted proxy chain.
+
+    X-Forwarded-For is attacker-controllable: a client may inject arbitrary
+    entries on the LEFT of the header. Our own proxies append the true upstream
+    IP on the RIGHT, so the reliable client IP is the entry `NUM_PROXIES` from
+    the right. Trusting the leftmost entry (the previous behaviour) let an
+    attacker rotate the rate-limit key at will and bypass throttling entirely.
+
+    Falls back to REMOTE_ADDR when the header is absent or malformed.
+    """
+    num_proxies = getattr(settings, 'NUM_PROXIES', 1) or 1
+    xff = request.META.get('HTTP_X_FORWARDED_FOR', '')
+    if xff:
+        parts = [p.strip() for p in xff.split(',') if p.strip()]
+        if len(parts) >= num_proxies:
+            return parts[-num_proxies]
+    return request.META.get('REMOTE_ADDR', 'unknown')
 
 
 class RateLimitMiddleware(MiddlewareMixin):
@@ -43,7 +64,19 @@ class RateLimitMiddleware(MiddlewareMixin):
             }
         else:
             self.rate_limits = {
-                'anonymous': {'requests': 100, 'window': 3600},
+                # Anonymous callers are keyed by IP (see _get_client_id). Syrian mobile
+                # carriers run carrier-grade NAT, so thousands of real users share a
+                # handful of public addresses — at 100/hour one carrier's entire
+                # subscriber base shares a bucket that a few dozen signups exhaust,
+                # locking everyone else out of login, registration and OTP.
+                #
+                # This bucket is a coarse DoS ceiling, NOT the brute-force control. The
+                # real limits are identity-scoped and unaffected by NAT: OTP resend is
+                # 3/hour per email+IP, password reset 3/hour per email, and OTP verify
+                # locks after 5 attempts on the record itself. Raising this does not
+                # weaken any of them.
+                'anonymous': {'requests': 2000, 'window': 3600},
+                # Authenticated buckets are keyed by user id, so NAT does not apply.
                 'client': {'requests': 500, 'window': 3600},
                 'trainer': {'requests': 1000, 'window': 3600},
                 'admin': {'requests': 5000, 'window': 3600},
@@ -63,11 +96,16 @@ class RateLimitMiddleware(MiddlewareMixin):
         
         # Check rate limit
         if self._is_rate_limited(client_id, user_type):
+            # This response never reaches the DRF exception handler, so it carries
+            # the contract keys itself: every error in the API has detail/error/code.
+            _msg = _('Too many requests. Please try again later.')
             return JsonResponse({
-                'error': 'Rate limit exceeded',
-                'message': _('Too many requests. Please try again later.'),
-                'retry_after': 3600
-            }, status=429)
+                'detail': _msg,
+                'error': _msg,
+                'code': 'rate_limited',
+                'message': _msg,          # kept: existing key
+                'retry_after': 3600,
+            }, status=429, headers={'Retry-After': '3600'})
         
         return None
     
@@ -77,6 +115,9 @@ class RateLimitMiddleware(MiddlewareMixin):
         """
         skip_paths = [
             '/health/',
+            # Fly polls this every 30s = 120 req/hour, which would blow the
+            # anonymous 100/hour limit and start returning 429 -> machine unhealthy.
+            '/api/auth/health/',
             '/admin/',
             '/static/',
             '/media/',
@@ -94,12 +135,9 @@ class RateLimitMiddleware(MiddlewareMixin):
     
     def _get_client_ip(self, request):
         """
-        Get client IP address
+        Get client IP address from the trusted proxy chain (spoof-resistant).
         """
-        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-        if x_forwarded_for:
-            return x_forwarded_for.split(',')[0].strip()
-        return request.META.get('REMOTE_ADDR', 'unknown')
+        return get_trusted_client_ip(request)
     
     def _get_user_type(self, request):
         """
@@ -137,10 +175,40 @@ class RateLimitMiddleware(MiddlewareMixin):
         return current > limits['requests']
 
 
+def normalize_error_envelope(response):
+    """
+    Give every error response ONE shape.
+
+    DRF emits {"detail": ...} for 401/403/404/405 while the project's own views emit
+    {"error": ...}. A mobile client had to branch on both. This adds the missing key
+    as a mirror (keeping the original for backward compatibility) so clients can read
+    `error` everywhere.
+    """
+    try:
+        if not (400 <= response.status_code < 600):
+            return response
+        data = getattr(response, 'data', None)
+        if not isinstance(data, dict):
+            return response
+        if 'error' not in data and 'detail' in data:
+            data['error'] = data['detail']
+            if hasattr(response, '_is_rendered'):
+                response._is_rendered = False
+                response.render()
+    except Exception:
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
+    return response
+
+
 class ErrorHandlingMiddleware(MiddlewareMixin):
     """
     Standardized error handling middleware with i18n support.
     """
+
+    def process_response(self, request, response):
+        return normalize_error_envelope(response)
     
     def process_exception(self, request, exception):
         """
@@ -271,28 +339,28 @@ class RequestLoggingMiddleware(MiddlewareMixin):
     Log all requests for monitoring and analytics
     """
     
-    def __init__(self, get_response=None):
-        super().__init__(get_response)
-        self.start_time = None
-    
     def process_request(self, request):
         """
-        Log request start and set start time
+        Log request start and set start time.
+        Timing is stored on the request (not on self) — the middleware instance is
+        shared across concurrent requests under ASGI, so per-request state on self
+        would race and mis-report durations.
         """
-        self.start_time = time.time()
+        request._log_start_time = time.time()
         request.id = self._generate_request_id()
-        
+
         # Log request details
         logger.info(f"Request {request.id}: {request.method} {request.path}")
-        
+
         return None
-    
+
     def process_response(self, request, response):
         """
         Log response details and performance metrics
         """
-        if self.start_time:
-            duration = time.time() - self.start_time
+        start_time = getattr(request, '_log_start_time', None)
+        if start_time:
+            duration = time.time() - start_time
             
             # Log response
             logger.info(
@@ -341,7 +409,9 @@ class DatabaseQueryCountMiddleware(MiddlewareMixin):
             try:
                 connection.queries.clear()
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
         return None
     
     def process_response(self, request, response):
@@ -375,41 +445,27 @@ class CacheMiddleware(MiddlewareMixin):
     Caches GET requests to static or semi-static endpoints.
     """
     
-    def __init__(self, get_response=None):
-        super().__init__(get_response)
-        # Expanded list of cacheable paths — now securely routes dynamically
-        # to DB2 (public) or DB3 (private) based on user identity.
-        self.cacheable_paths = [
-            '/api/food/categories/',
-            '/api/exercises/',
-            '/api/subscription/plans/',
-            '/api/food/',  # Food list (public)
-            '/api/achievements/',
-            '/api/routine/templates/',
-        ]
-        self.cache_duration = 300  # 5 minutes
+    # WHAT gets cached, in which segment, for how long, and which model invalidates
+    # it, is declared once in training_platform/cache_config.py. Both this middleware
+    # and the invalidation signals read that registry, so they cannot drift apart —
+    # previously four of six configured paths pointed at routes that did not exist.
     
     def process_request(self, request):
         """
-        Check if response is cached. Uses DB2 (public) for anon, DB3 (private) for auth.
+        Check if response is cached. Routes to DB3 (private) for authenticated
+        callers and DB2 (public) for anonymous — decided by real identity, never
+        by inspecting the hashed key.
         """
-        if request.method == 'GET' and self._is_cacheable(request):
-            cache_key = self._get_cache_key(request)
-            
-            # Determine correct cache segment based on key prefix
-            if cache_key.startswith("custom_cache:"):
-                # Extract identity part from cache key (typically last segment)
-                if ":user:" in cache_key:
-                    cache_backend = private_cache()
-                else:
-                    cache_backend = public_cache()
-                    
-                cached_response = cache_backend.get(cache_key)
-
-                if cached_response is not None:
-                    logger.debug(f"Cache hit for {request.path} (from {'private' if ':user:' in cache_key else 'public'} cache)")
-                    return JsonResponse(cached_response, safe=False)
-
+        from training_platform.cache_config import match_route
+        rule = match_route(request.path) if request.method == 'GET' else None
+        if rule:
+            identity, is_private = self._scope_for(request, rule)
+            cache_key = self._build_key(request, identity, rule)
+            cache_backend = private_cache() if is_private else public_cache()
+            cached_response = cache_backend.get(cache_key)
+            if cached_response is not None:
+                logger.debug(f"Cache hit for {request.path} (from {'private' if is_private else 'public'} cache)")
+                return JsonResponse(cached_response, safe=False)
         return None
     
     def process_response(self, request, response):
@@ -422,107 +478,98 @@ class CacheMiddleware(MiddlewareMixin):
             response.status_code == 200 and
             self._is_cacheable(request)):
 
-            cache_key = self._get_cache_key(request)
+            from training_platform.cache_config import match_route
+            rule = match_route(request.path)
+            identity, is_private = self._scope_for(request, rule)
+            cache_key = self._build_key(request, identity, rule)
 
             try:
                 # Only cache JSON responses
                 if response.get('Content-Type', '').startswith('application/json'):
                     response_data = json.loads(response.content)
-                    
-                    # Route to correct segment
-                    if ":user:" in cache_key:
-                        private_cache().set(cache_key, response_data, self.cache_duration)
-                        logger.debug(f"Cached response for {request.path} into private_cache")
-                    else:
-                        public_cache().set(cache_key, response_data, self.cache_duration)
-                        logger.debug(f"Cached response for {request.path} into public_cache")
-                        
+                    backend = private_cache() if is_private else public_cache()
+                    backend.set(cache_key, response_data, rule['ttl'])
+                    logger.debug(f"Cached response for {request.path} into {'private' if is_private else 'public'} cache")
                     # Inform CDN / proxies of dimensions that affect this response
                     response['Vary'] = 'Accept-Language, Authorization'
             except (json.JSONDecodeError, AttributeError):
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
         return response
     
     def _is_cacheable(self, request):
-        """
-        Check if request is cacheable
-        """
-        return any(request.path.startswith(path) for path in self.cacheable_paths)
+        """Cacheable only if the path is declared in the registry."""
+        from training_platform.cache_config import match_route
+        return match_route(request.path) is not None
     
-    def _get_cache_key(self, request):
+    def _scope_for(self, request, rule):
         """
-        Generate cache key for request.
+        Decide the cache identity + segment from the route's declared scope.
 
-        Dimensions included:
-        - user identity (JWT user_id or anon:{ip}) — prevents cross-user leakage
-        - Accept-Language — i18n safety
-        - path + querystring — distinct paginated endpoints get distinct keys
-
-        User-Agent intentionally excluded: public food/exercise data does not
-        differ by device; including it creates one entry per browser version
-        and destroys cache hit rate.
+        public  -> one shared entry, key carries NO user identity. Only valid where the
+                   response is identical for every viewer (verified per route).
+        private -> per-user entry in DB3. Required whenever the view scopes its
+                   queryset by request.user, e.g. /api/routine/exercises/.
         """
-        from django.utils import translation as trans
+        if rule and rule.get('scope') == 'public':
+            return 'public', False
+        return self._resolve_identity(request)
+
+    def _resolve_identity(self, request):
+        """
+        Return (identity, is_private).
+        Authenticated (verified JWT or session) → ("user:<id>", True) → DB3.
+        Anonymous → ("anon:<trusted_ip>", False) → DB2.
+        """
         from rest_framework_simplejwt.tokens import AccessToken
 
-        user_identity = "anon"
-
-        # 1. Try to extract user ID from JWT Token.
-        # DRF authenticates in the view, so request.user is usually AnonymousUser here.
+        # 1. Verified JWT user id (DRF auth runs in the view, so do it here).
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
             try:
-                token_str = auth_header.split(' ', 1)[1]
-                token = AccessToken(token_str)
+                token = AccessToken(auth_header.split(' ', 1)[1])
                 user_id = token.get('user_id')
                 if user_id:
-                    user_identity = f"user:{user_id}"
+                    return f"user:{user_id}", True
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
-        # 2. Check session authentication as fallback
-        if user_identity == "anon" and hasattr(request, 'user') and request.user.is_authenticated:
-            user_identity = f"user:{request.user.id}"
+        # 2. Session-authenticated fallback.
+        user = getattr(request, 'user', None)
+        if user is not None and getattr(user, 'is_authenticated', False):
+            return f"user:{user.id}", True
 
-        # 3. Handle Anonymous - Use IP to prevent cache poisoning across clients
-        if user_identity == "anon":
-            client_ip = (
-                request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
-                or request.META.get('REMOTE_ADDR', 'unknown')
-            )
-            user_identity = f"anon:{client_ip}"
+        # 3. Anonymous — trusted proxy-chain IP (spoof-resistant), not raw XFF.
+        return f"anon:{get_trusted_client_ip(request)}", False
+
+    def _build_key(self, request, identity, rule=None):
+        """
+        Build a versioned, hashed cache key.
+        Dimensions: identity + Accept-Language + path + querystring. User-Agent is
+        intentionally excluded (public catalog data does not vary by device).
+        """
+        from django.utils import translation as trans
+        import hashlib
 
         qs = request.GET.urlencode()
-        key_parts = [
-            'api_cache',
-            trans.get_language() or 'en',
-            user_identity,
-            request.path,
-            qs,
-        ]
-        
-        # Determine global version based on route prefix
+        key_parts = ['api_cache', trans.get_language() or 'en', identity, request.path, qs]
+
+        # Version bucket comes from the registry entry, so it can never point at a
+        # different resource than the caching rule itself (the old if/elif chain
+        # matched paths that no longer existed).
         version = 1
-        model_name = ""
-        if "/api/exercises/" in request.path:
-            model_name = "EXERCISE"
-        elif "/api/achievements/" in request.path:
-            model_name = "ACHIEVEMENT"
-        elif "/api/subscription/plans/" in request.path:
-            model_name = "SUBSCRIPTIONPLAN"
-        elif "/api/routine/templates/" in request.path:
-            model_name = "ROUTINETEMPLATE"
-            
+        model_name = (rule or {}).get('model')
         if model_name:
             v_cache = public_cache().get(f"CACHE_VERSION_{model_name}")
             if v_cache:
                 version = v_cache
 
-        import hashlib
         raw = ':'.join(filter(None, [str(p) for p in key_parts]))
         key_hash = hashlib.sha256(raw.encode()).hexdigest()
-        
         return f"custom_cache:v{version}:{key_hash}"
 
 
@@ -621,3 +668,43 @@ MIDDLEWARE_ORDER = [
     'training_platform.middleware.APIVersionMiddleware',
     'training_platform.middleware.ErrorHandlingMiddleware',
 ] 
+
+class RequestSizeLimitMiddleware:
+    """Reject oversized request bodies before Django buffers them to disk.
+
+    Nothing in this stack caps request size: there is no reverse proxy in front of
+    Daphne (no nginx `client_max_body_size`), and Django's MultiPartParser streams the
+    ENTIRE body into FILE_UPLOAD_TEMP_DIR before any view runs — so the per-file size
+    check in `process_uploaded_image` only fires once the bytes are already on disk.
+    On a 1 GB Fly volume a single large POST fills the machine.
+
+    Content-Length is client-supplied, but a client that lies low still gets stopped by
+    the per-file checks downstream; this guard exists to stop the disk write, not to be
+    the only size control.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.max_bytes = getattr(settings, 'MAX_REQUEST_BODY_BYTES', 15 * 1024 * 1024)
+
+    def __call__(self, request):
+        if request.method in ('POST', 'PUT', 'PATCH'):
+            length = request.META.get('CONTENT_LENGTH') or 0
+            try:
+                length = int(length)
+            except (TypeError, ValueError):
+                length = 0
+            if length > self.max_bytes:
+                logger.warning(
+                    "Rejected %s %s: body %d bytes exceeds cap %d",
+                    request.method, request.path, length, self.max_bytes,
+                )
+                return JsonResponse(
+                    {
+                        'error': 'request_too_large',
+                        'message': f'Request body exceeds {self.max_bytes // (1024 * 1024)} MB.',
+                        'status': 413,
+                    },
+                    status=413,
+                )
+        return self.get_response(request)

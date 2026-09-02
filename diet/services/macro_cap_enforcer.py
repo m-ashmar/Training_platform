@@ -5,6 +5,9 @@ from typing import Dict
 from ..models import DietPlan, MealComponent, FoodItem
 from ..utils.logging_utils import log_day_macros
 from ..utils.nutrition import get_macro_ratios, dominant_macro_of_food, macro_per_gram
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class MacroCapEnforcer:
@@ -36,7 +39,9 @@ class MacroCapEnforcer:
             try:
                 log_day_macros('caps_before', diet_plan, d)
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             totals = diet_plan.calculate_daily_nutrition(d)
             cur = {
                 'protein': float(totals.get('protein', 0.0)),
@@ -55,7 +60,9 @@ class MacroCapEnforcer:
             try:
                 log_day_macros('caps_after', diet_plan, d)
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
     # ------------------------ helpers ------------------------
     def _reduce_macro_for_day(self, diet_plan: DietPlan, day, macro: str, reduce_grams: float) -> None:

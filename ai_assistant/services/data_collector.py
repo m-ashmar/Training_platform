@@ -23,6 +23,7 @@ class DataCollector:
         ai_response: str,
         tools_called: list,
         tool_results: list,
+        message=None,
         response_tokens: int = 0,
         response_latency_ms: int = 0,
     ):
@@ -32,15 +33,31 @@ class DataCollector:
         This method is called asynchronously via Celery so it doesn't
         block the chat response.
         """
+        from datetime import timedelta
+
+        from django.conf import settings as dj_settings
+        from django.utils import timezone
+
         from ai_assistant.models import AITrainingData
+
+        # Consent gate. The snapshot below carries injury/condition text, weight and
+        # goals — special-category health data — so it is retained only when the user
+        # has explicitly opted in. Previously every turn was stored unconditionally.
+        if not getattr(user, 'ai_training_consent', False):
+            return
 
         # Build user context snapshot
         context = self._build_context_snapshot(user)
+
+        retention_days = getattr(dj_settings, 'AI_TRAINING_RETENTION_DAYS', 365)
 
         try:
             AITrainingData.objects.create(
                 user=user,
                 session=session,
+                message=message,
+                consented=True,
+                retain_until=timezone.now() + timedelta(days=retention_days),
                 user_context_snapshot=context,
                 user_message=user_message,
                 tools_called=tools_called,
@@ -89,6 +106,8 @@ class DataCollector:
                 snapshot["diet_goal"] = plan.goal
                 snapshot["daily_calories"] = plan.daily_calories
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
         return snapshot

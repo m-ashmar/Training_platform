@@ -26,9 +26,12 @@ def send_push_notification(user, title, message, data=None):
     from social.firebase_service import FirebaseNotificationService
     
     try:
-        # Get all tokens for the user
-        tokens = list(DeviceToken.objects.filter(user=user).values_list('token', flat=True))
-        
+        # Only send to ACTIVE tokens — inactive rows are soft-deleted invalid
+        # tokens; sending to them wastes FCM quota and returns errors.
+        tokens = list(
+            DeviceToken.objects.filter(user=user, is_active=True).values_list('token', flat=True)
+        )
+
         if not tokens:
             logger.info(f"No device tokens found for user {user.id}")
             return False
@@ -62,8 +65,21 @@ def generate_otp():
 
 
 def _hash_otp(otp_code: str) -> str:
-    """Hash OTP with SHA-256 for secure storage. Never store plaintext OTPs."""
-    return hashlib.sha256(otp_code.strip().encode('utf-8')).hexdigest()
+    """Keyed hash of an OTP.
+
+    A bare sha256 over a 6-digit code is reversible instantly from a database dump —
+    the whole domain is 10^6 values, so a precomputed table breaks every stored code.
+    HMAC with SECRET_KEY means a dump alone is not enough.
+    """
+    import hmac
+
+    from django.conf import settings
+
+    return hmac.new(
+        settings.SECRET_KEY.encode('utf-8'),
+        (otp_code or '').strip().encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
 
 def send_otp_email(user, otp_code):
     """
@@ -143,7 +159,7 @@ def create_otp(user):
     
     otp = OTPVerification.objects.create(
         user=user,
-        otp_code=otp_hash,  # Store SHA-256 hash, not plaintext
+        otp_code=otp_hash,  # keyed HMAC-SHA256, never the plaintext code
         email=user.email,
         purpose='registration',
         expires_at=expires_at
@@ -183,7 +199,7 @@ def create_password_reset_otp(user):
     
     otp = OTPVerification.objects.create(
         user=user,
-        otp_code=otp_hash,  # Store SHA-256 hash, not plaintext
+        otp_code=otp_hash,  # keyed HMAC-SHA256, never the plaintext code
         email=user.email,
         purpose='password_reset',
         expires_at=expires_at
@@ -302,6 +318,47 @@ def _clear_otp_attempts(email: str, purpose: str):
     """Clear OTP attempt counter after successful verification."""
     from training_platform.cache import ratelimit_cache
     ratelimit_cache().delete(_get_otp_attempt_cache_key(email, purpose))
+
+
+def _get_login_attempt_cache_key(email: str) -> str:
+    """Cache key for login brute-force tracking (hashed email — no PII in keys)."""
+    email_hash = hashlib.sha256(email.strip().lower().encode('utf-8')).hexdigest()[:32]
+    return f"login_attempts:{email_hash}"
+
+
+def check_login_lockout(email: str) -> tuple:
+    """
+    Return (is_locked_out: bool, attempts_remaining: int) for login.
+    Lockout after 5 failed attempts within the cooldown window — matches the
+    project auth standard (5-attempt lockout, 15-minute cooldown).
+    Uses ratelimit_cache (DB1) — isolated from session store.
+    """
+    from training_platform.cache import ratelimit_cache
+    attempts = ratelimit_cache().get(_get_login_attempt_cache_key(email), 0)
+    max_attempts = 5
+    if attempts >= max_attempts:
+        return True, 0
+    return False, max_attempts - attempts
+
+
+def record_login_failure(email: str) -> int:
+    """Record a failed login attempt (15-min cooldown). Returns new total count."""
+    from training_platform.cache import ratelimit_cache
+    key = _get_login_attempt_cache_key(email)
+    rl = ratelimit_cache()
+    lockout_seconds = 15 * 60
+    try:
+        attempts = rl.incr(key)
+    except ValueError:
+        rl.set(key, 1, lockout_seconds)
+        attempts = 1
+    return attempts
+
+
+def clear_login_attempts(email: str):
+    """Clear the login attempt counter after a successful login."""
+    from training_platform.cache import ratelimit_cache
+    ratelimit_cache().delete(_get_login_attempt_cache_key(email))
 
 
 def verify_otp(email, otp_code, purpose='registration'):

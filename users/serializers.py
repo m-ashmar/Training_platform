@@ -29,11 +29,13 @@ class CustomRegisterSerializer(RegisterSerializer):
     
     def validate_user_type(self, value):
         request = self.context.get('request')
-        if value == 'admin':
-            # Only allow admin creation by superusers
+        # Privileged roles cannot be self-provisioned. 'agent' has wallet +
+        # API-key access; 'admin' is a superuser. Both require an authenticated
+        # superuser to create.
+        if value in ('admin', 'agent'):
             if not request or not request.user.is_authenticated or not request.user.is_superuser:
-                raise serializers.ValidationError(_("Only admins can create admin users."))
-        # Allow client, trainer, agent for self-service registration
+                raise serializers.ValidationError(_("This user type cannot be self-registered."))
+        # Only client/trainer are valid for self-service registration
         if value not in ['client', 'trainer', 'agent', 'admin']:
             raise serializers.ValidationError(_("Invalid user type."))
         return value
@@ -78,13 +80,23 @@ class CustomLoginSerializer(LoginSerializer):
         password = attrs.get('password')
 
         if email and password:
+            from .utils import check_login_lockout, record_login_failure, clear_login_attempts
+
+            # Per-account brute-force lockout (10 failures → 15-min cooldown)
+            is_locked, _remaining = check_login_lockout(email)
+            if is_locked:
+                raise serializers.ValidationError(
+                    {"non_field_errors": [_("Too many failed login attempts. Please try again in 15 minutes.")]}
+                )
+
             # Authenticate using email and password
             self.user = self.authenticate(email=email, password=password)
             if not self.user:
+                record_login_failure(email)
                 raise serializers.ValidationError(
                     {"non_field_errors": [_("Unable to log in with provided credentials.")]}
                 )
-            
+
             # Check if user account is active (email verified)
             if not self.user.is_active:
                 raise serializers.ValidationError(
@@ -94,6 +106,9 @@ class CustomLoginSerializer(LoginSerializer):
                         "email": self.user.email
                     }
                 )
+
+            # Successful auth — reset the failure counter
+            clear_login_attempts(email)
         else:
             raise serializers.ValidationError(
                 {"non_field_errors": [_("Must include 'email' and 'password'.")]}
@@ -116,7 +131,9 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             'trainer_is_available', 'assigned_trainer', 'client_goals', 'client_preferences',
             'is_active', 'onboarding_completed'
         ]
-        read_only_fields = ['user_type', 'trainer_is_verified', 'is_active', 'onboarding_completed']
+        # assigned_trainer is read-only here: trainer assignment must go through
+        # the request/approval + wallet-escrow flow, never self-service update.
+        read_only_fields = ['user_type', 'trainer_is_verified', 'is_active', 'onboarding_completed', 'assigned_trainer']
 
     def get_profile_picture(self, obj):
         request = self.context.get('request')
@@ -128,13 +145,21 @@ class UserDetailsSerializer(serializers.ModelSerializer):
         return None
 
     def validate_profile_picture(self, value):
-        if value:
-            if value.size > 2 * 1024 * 1024:
-                raise serializers.ValidationError(_('Profile picture size must be under 2MB.'))
-            valid_types = ['image/jpeg', 'image/png', 'image/webp']
-            if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
-        return value
+        # Content-based validation. The previous check trusted `content_type`, an
+        # attacker-controlled header, so this second upload path (/api/auth/user/update/)
+        # bypassed the hardening applied to the dedicated profile-picture endpoint.
+        if not value:
+            return value
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from training_platform.file_security import process_uploaded_image
+        import os as _os
+        try:
+            safe_file, ext = process_uploaded_image(value, max_bytes=2 * 1024 * 1024)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
+        base = _os.path.splitext(getattr(value, 'name', 'profile'))[0][:60] or 'profile'
+        safe_file.name = f"{base}.{ext}"
+        return safe_file
 
     def validate(self, attrs):
         user = self.instance
@@ -181,13 +206,21 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
         return None
 
     def validate_profile_picture(self, value):
-        if value:
-            if value.size > 2 * 1024 * 1024:
-                raise serializers.ValidationError(_('Profile picture size must be under 2MB.'))
-            valid_types = ['image/jpeg', 'image/png', 'image/webp']
-            if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
-        return value
+        # Content-based validation. The previous check trusted `content_type`, an
+        # attacker-controlled header, so this second upload path (/api/auth/user/update/)
+        # bypassed the hardening applied to the dedicated profile-picture endpoint.
+        if not value:
+            return value
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from training_platform.file_security import process_uploaded_image
+        import os as _os
+        try:
+            safe_file, ext = process_uploaded_image(value, max_bytes=2 * 1024 * 1024)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
+        base = _os.path.splitext(getattr(value, 'name', 'profile'))[0][:60] or 'profile'
+        safe_file.name = f"{base}.{ext}"
+        return safe_file
 
     def validate(self, attrs):
         # Ensure only trainers can use this serializer
@@ -225,13 +258,21 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         return None
 
     def validate_profile_picture(self, value):
-        if value:
-            if value.size > 2 * 1024 * 1024:
-                raise serializers.ValidationError(_('Profile picture size must be under 2MB.'))
-            valid_types = ['image/jpeg', 'image/png', 'image/webp']
-            if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
-        return value
+        # Content-based validation. The previous check trusted `content_type`, an
+        # attacker-controlled header, so this second upload path (/api/auth/user/update/)
+        # bypassed the hardening applied to the dedicated profile-picture endpoint.
+        if not value:
+            return value
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from training_platform.file_security import process_uploaded_image
+        import os as _os
+        try:
+            safe_file, ext = process_uploaded_image(value, max_bytes=2 * 1024 * 1024)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
+        base = _os.path.splitext(getattr(value, 'name', 'profile'))[0][:60] or 'profile'
+        safe_file.name = f"{base}.{ext}"
+        return safe_file
 
     def validate(self, attrs):
         # Ensure only clients can use this serializer
@@ -261,13 +302,21 @@ class CustomUserSerializer(serializers.ModelSerializer):
         return None
 
     def validate_profile_picture(self, value):
-        if value:
-            if value.size > 2 * 1024 * 1024:
-                raise serializers.ValidationError(_('Profile picture size must be under 2MB.'))
-            valid_types = ['image/jpeg', 'image/png', 'image/webp']
-            if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
-        return value
+        # Content-based validation. The previous check trusted `content_type`, an
+        # attacker-controlled header, so this second upload path (/api/auth/user/update/)
+        # bypassed the hardening applied to the dedicated profile-picture endpoint.
+        if not value:
+            return value
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from training_platform.file_security import process_uploaded_image
+        import os as _os
+        try:
+            safe_file, ext = process_uploaded_image(value, max_bytes=2 * 1024 * 1024)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
+        base = _os.path.splitext(getattr(value, 'name', 'profile'))[0][:60] or 'profile'
+        safe_file.name = f"{base}.{ext}"
+        return safe_file
 
 class DeviceTokenSerializer(serializers.ModelSerializer):
     class Meta:
@@ -298,7 +347,9 @@ class PasswordResetVerifySerializer(serializers.Serializer):
 
 class PasswordResetConfirmSerializer(serializers.Serializer):
     """Serializer for setting a new password using the reset token."""
-    reset_token = serializers.UUIDField(required=True)
+    # A url-safe random string now, not a UUID: the raw token is generated by
+    # PasswordResetToken.issue() and only its keyed hash is stored.
+    reset_token = serializers.CharField(required=True, max_length=128)
     new_password = serializers.CharField(min_length=8, required=True, write_only=True)
 
     def validate_new_password(self, value):

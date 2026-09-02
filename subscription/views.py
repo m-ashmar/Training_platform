@@ -36,7 +36,17 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 from .services.payment_gateways import PaymentGatewayService, PaymentGatewayError
-from .settings.gateway_config import get_available_gateways
+from .services.payment_service import (
+    PaymentService, PaymentError, InvalidPaymentTransition, PaymentVerificationError,
+)
+# NOTE: use PaymentGatewayManager.get_available_gateways() (returns a dict of
+# gateway_name -> info). The same-named helper in settings.gateway_config returns
+# a plain LIST of names; calling .items() on it raised
+# "'list' object has no attribute 'items'" and 500'd this endpoint.
+from .services.payment_gateways import PaymentGatewayManager
+from rest_framework.permissions import AllowAny
+import uuid
+from rest_framework.exceptions import NotFound, PermissionDenied, NotAuthenticated
 
 class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for subscription plans (read-only for users)"""
@@ -60,6 +70,11 @@ class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
             plans = self.get_queryset().order_by('price')
             serializer = self.get_serializer(plans, many=True)
             return Response(serializer.data)
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error fetching available plans: {str(e)}")
             return Response(
@@ -151,6 +166,11 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Error cancelling subscription: {str(e)}")
             return Response(
@@ -160,39 +180,61 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def renew(self, request, pk=None):
-        """Renew a subscription with proper validation"""
+        """
+        Start a renewal. This creates a PENDING payment and initiates the gateway;
+        it does NOT extend or activate the subscription. Activation happens only
+        after the gateway confirms funds (webhook or verified reconcile), via
+        PaymentService.complete_payment.
+        """
         try:
             subscription = self.get_object()
-            
-            if subscription.status not in ['active', 'expired']:
-                return Response(
-                    {'error': _('Subscription cannot be renewed')},
-                    status=status.HTTP_400_BAD_REQUEST
+
+            try:
+                payment = PaymentService.start_renewal(subscription)
+            except PaymentError as e:
+                return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
+
+            gateway_name = request.data.get('gateway', 'shamcash')
+            try:
+                gateway_service = PaymentGatewayService(gateway_name)
+                reference = gateway_service._generate_reference()
+                init = gateway_service.initiate_payment(
+                    amount=payment.amount,
+                    currency=payment.currency,
+                    user_data={
+                        'email': request.user.email,
+                        'phone': request.user.phone_number,
+                        'name': f"{request.user.first_name} {request.user.last_name}".strip(),
+                    },
+                    reference=reference,
+                    metadata={'subscription_id': str(subscription.id), 'kind': 'renewal',
+                              'description': f"Renewal for {subscription.plan.name}"},
+                    callback_url=request.build_absolute_uri(f"/api/subscription/webhook/{gateway_name}/"),
                 )
-            
-            with transaction.atomic():
-                # Extend the subscription
-                subscription.end_date = subscription.end_date + timedelta(days=subscription.plan.duration_days)
-                subscription.status = 'active'
-                subscription.auto_renew = True
-                subscription.save()
-                
-                # Create payment record
-                Payment.objects.create(
-                    subscription=subscription,
-                    amount=subscription.plan.price,
-                    currency='USD',
-                    status='completed',
-                    description=f"Renewal for {subscription.plan.name}"
-                )
-            
-            logger.info(f"Renewed subscription {subscription.id} for user {request.user.id}")
-            
+                payment.payment_method = gateway_name
+                payment.gateway_transaction_reference = reference
+                payment.gateway_response = init.get('response', {})
+                payment.save()
+            except PaymentGatewayError as e:
+                PaymentService.fail_payment(payment.id, str(e))
+                return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
+
+            logger.info(f"Renewal payment {payment.id} initiated for subscription {subscription.id}")
+            resp = init.get('response', {})
             return Response({
-                'message': _('Subscription renewed successfully'),
-                'new_end_date': subscription.end_date
+                'message': _('Renewal payment initiated. Complete payment to extend your subscription.'),
+                'payment_id': str(payment.id),
+                'reference': reference,
+                'status': 'pending',
+                'payment_url': resp.get('payment_url'),
+                'instructions': resp.get('instructions'),
             })
-            
+
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Error renewing subscription: {str(e)}")
             return Response(
@@ -212,6 +254,11 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
                 {'message': _('No active subscription')},
                 status=status.HTTP_404_NOT_FOUND
             )
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error fetching current subscription: {str(e)}")
             return Response(
@@ -227,6 +274,11 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             usage = subscription.usage.all().select_related('feature')
             serializer = SubscriptionUsageSerializer(usage, many=True)
             return Response(serializer.data)
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Error fetching usage statistics: {str(e)}")
             return Response(
@@ -234,54 +286,20 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-class PaymentViewSet(viewsets.ModelViewSet):
-    """ViewSet for payment management"""
+class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only view of the caller's payments. Payments are created only through the
+    gateway-initiate flow, and completed only by PaymentService (webhook/reconcile).
+    There is deliberately no create/update/confirm surface here — clients can never
+    mutate payment state.
+    """
     serializer_class = PaymentSerializer
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get_queryset(self):
-        """Optimized queryset with select_related"""
         return Payment.objects.filter(
             subscription__user=self.request.user
         ).select_related('subscription', 'subscription__plan')
-    
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return PaymentCreateSerializer
-        return PaymentSerializer
-    
-    @action(detail=True, methods=['post'])
-    def confirm(self, request, pk=None):
-        """Confirm a payment (webhook from payment provider) with proper validation"""
-        try:
-            payment = self.get_object()
-            
-            # Validate payment can be confirmed
-            if payment.status not in ['pending', 'failed']:
-                return Response(
-                    {'error': _('Payment cannot be confirmed')},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            with transaction.atomic():
-                payment.status = 'completed'
-                payment.save()
-                
-                # Update subscription status
-                subscription = payment.subscription
-                subscription.status = 'active'
-                subscription.save()
-            
-            logger.info(f"Confirmed payment {payment.id} for subscription {subscription.id}")
-            
-            return Response({'message': _('Payment confirmed')})
-            
-        except Exception as e:
-            logger.error(f"Error confirming payment: {str(e)}")
-            return Response(
-                {'error': _('Failed to confirm payment')},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
 
 class SubscriptionFeatureViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for subscription features"""
@@ -322,6 +340,11 @@ class SubscriptionManagementView(APIView):
                 'trial_subscriptions': trial_subscriptions,
                 'expired_subscriptions': expired_subscriptions
             })
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error fetching subscription statistics: {str(e)}")
             return Response(
@@ -375,9 +398,14 @@ class SubscriptionManagementView(APIView):
         except ValidationError as e:
             logger.error(f"Validation error creating trial subscription: {str(e)}")
             return Response(
-                {'error': str(e)},
+                {'error': _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error creating trial subscription: {str(e)}")
             return Response(
@@ -437,6 +465,11 @@ class SubscriptionAccessView(APIView):
                     'message': _('No subscription found')
                 })
                 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error checking subscription access: {str(e)}")
             return Response(
@@ -447,11 +480,14 @@ class SubscriptionAccessView(APIView):
 class PaymentWebhookView(APIView):
     """
     Webhook endpoint for payment gateway notifications.
-    
-    This view handles webhook notifications from all payment gateways.
-    Supports dynamic routing: /api/webhook/<gateway_name>/
+
+    Unauthenticated by design (called by the external gateway) but protected by
+    signature + timestamp verification inside the gateway's verify_webhook, and
+    idempotent completion via PaymentService. Route: /webhook/<gateway_name>/
     """
-    
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
     @method_decorator(csrf_exempt)
     def dispatch(self, request, *args, **kwargs):
         return super().dispatch(request, *args, **kwargs)
@@ -501,54 +537,42 @@ class PaymentWebhookView(APIView):
     
     def _process_payment_update(self, payment_data: dict, gateway_name: str):
         """
-        Process payment status update from webhook.
-        
-        Args:
-            payment_data: Parsed payment data from webhook
-            gateway_name: Name of the gateway
+        Route a verified webhook to the single authority (PaymentService). This
+        method never sets payment/subscription state directly.
         """
+        # Idempotency: a replayed event id that already landed is a no-op.
+        event_id = payment_data.get('event_id')
+        if event_id and Payment.objects.filter(gateway_event_id=event_id, status='completed').exists():
+            logger.info(f"Webhook event {event_id} already processed; ignoring replay")
+            return
+
+        payment = Payment.objects.filter(
+            gateway_transaction_reference=payment_data['reference']
+        ).first()
+        if not payment:
+            logger.warning(f"Payment not found for reference: {payment_data['reference']}")
+            return
+
+        gateway_status = str(payment_data.get('status', '')).lower()
         try:
-            # Find payment by reference
-            payment = Payment.objects.filter(
-                gateway_transaction_reference=payment_data['reference']
-            ).first()
-            
-            if not payment:
-                logger.warning(f"Payment not found for reference: {payment_data['reference']}")
-                return
-            
-            # Update payment status
-            gateway_status = payment_data['status']
-            if gateway_status == 'completed':
-                payment.status = 'completed'
-                payment.gateway_response = payment_data.get('gateway_data', {})
-                payment.save()
-                
-                # Activate subscription
-                subscription = payment.subscription
-                subscription.status = 'active'
-                subscription.save()
-                
-                logger.info(f"Payment {payment.id} completed, subscription {subscription.id} activated")
-                
-            elif gateway_status == 'failed':
-                payment.status = 'failed'
-                payment.gateway_error = payment_data.get('error_message', 'Payment failed')
-                payment.gateway_response = payment_data.get('gateway_data', {})
-                payment.save()
-                
-                logger.info(f"Payment {payment.id} failed")
-            
-        except Exception as e:
-            logger.error(f"Error processing payment update: {str(e)}")
-            raise
+            if gateway_status in ('completed', 'success', 'succeeded', 'paid'):
+                PaymentService.complete_payment(payment.id, payment_data)
+                logger.info(f"Webhook completed payment {payment.id} via {gateway_name}")
+            elif gateway_status in ('failed', 'declined', 'error'):
+                PaymentService.fail_payment(payment.id, payment_data.get('error_message', 'Payment failed'))
+                logger.info(f"Webhook marked payment {payment.id} failed")
+        except (PaymentVerificationError, InvalidPaymentTransition) as e:
+            # Do not activate on mismatched/illegal data; surface as a bad webhook.
+            logger.warning(f"Webhook rejected for payment {payment.id}: {str(e)}")
+            raise PaymentGatewayError(str(e))
 
 
 class PaymentGatewayView(APIView):
     """
     API endpoint for payment gateway operations.
     """
-    
+    permission_classes = [permissions.IsAuthenticated]
+
     def get(self, request):
         """
         Get available payment gateways.
@@ -557,7 +581,7 @@ class PaymentGatewayView(APIView):
             List of available gateways with their capabilities
         """
         try:
-            available_gateways = get_available_gateways()
+            available_gateways = PaymentGatewayManager.get_available_gateways()
             
             gateway_list = []
             for gateway_name, gateway_info in available_gateways.items():
@@ -575,6 +599,11 @@ class PaymentGatewayView(APIView):
                 'gateways': gateway_list
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error getting available gateways: {str(e)}")
             return Response(
@@ -621,50 +650,62 @@ class PaymentGatewayView(APIView):
             
             # Initialize gateway service
             gateway_service = PaymentGatewayService(gateway_name)
-            
+            reference = gateway_service._generate_reference()
+
             # Prepare user data
             user_data = {
                 'email': request.user.email,
                 'phone': request.user.phone_number,
                 'name': f"{request.user.first_name} {request.user.last_name}".strip()
             }
-            
-            # Initiate payment
+
+            # Initiate payment (caller owns the reference, tied to the Payment row)
             payment_result = gateway_service.initiate_payment(
                 amount=amount,
                 currency=currency,
                 user_data=user_data,
-                metadata={'subscription_id': str(subscription_id)}
+                reference=reference,
+                metadata={'subscription_id': str(subscription_id),
+                          'description': f"Payment for {subscription.plan.name}"},
+                callback_url=request.build_absolute_uri(f"/api/subscription/webhook/{gateway_name}/"),
             )
-            
-            # Create payment record
+
+            # Create the PENDING payment record. It becomes 'completed' only via
+            # PaymentService after gateway confirmation.
             payment = Payment.objects.create(
                 subscription=subscription,
                 amount=amount,
                 currency=currency,
                 status='pending',
                 payment_method=gateway_name,
-                gateway_transaction_reference=payment_result['reference'],
+                gateway_transaction_reference=reference,
                 gateway_response=payment_result['response'],
                 description=f"Payment for {subscription.plan.name}"
             )
-            
+
             logger.info(f"Payment initiated: {payment.id} via {gateway_name}")
-            
+
+            resp = payment_result['response']
             return Response({
                 'success': True,
                 'payment_id': str(payment.id),
-                'reference': payment_result['reference'],
-                'payment_url': payment_result['response'].get('payment_url'),
-                'expires_at': payment_result['response'].get('expires_at')
+                'reference': reference,
+                'payment_url': resp.get('payment_url'),
+                'instructions': resp.get('instructions'),
+                'expires_at': resp.get('expires_at')
             })
             
         except PaymentGatewayError as e:
             logger.error(f"Payment gateway error: {str(e)}")
             return Response(
-                {'error': str(e)},
+                {'error': _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error initiating payment: {str(e)}")
             return Response(
@@ -675,67 +716,76 @@ class PaymentGatewayView(APIView):
 
 class PaymentStatusView(APIView):
     """
-    API endpoint for checking payment status.
+    Read-only payment status. A GET is a safe method and NEVER changes state —
+    it only reports the stored status. To reconcile a pending payment against the
+    gateway, use POST .../reconcile/ (PaymentReconcileView).
     """
-    
+    permission_classes = [permissions.IsAuthenticated]
+
     def get(self, request, payment_id):
-        """
-        Get payment status.
-        
-        Args:
-            payment_id: Payment UUID
-        """
         try:
-            # Get payment
-            try:
-                payment = Payment.objects.get(
-                    id=payment_id,
-                    subscription__user=request.user
-                )
-            except Payment.DoesNotExist:
-                return Response(
-                    {'error': _('Payment not found')},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # If payment is still pending, check with gateway
-            if payment.status == 'pending' and payment.gateway_transaction_reference:
-                try:
-                    gateway_service = PaymentGatewayService(payment.payment_method)
-                    status_result = gateway_service.get_payment_status(
-                        payment.gateway_transaction_reference
-                    )
-                    
-                    # Update payment if status changed
-                    if status_result['status'] != payment.status:
-                        payment.status = status_result['status']
-                        payment.gateway_response = status_result.get('gateway_response', {})
-                        payment.save()
-                        
-                        # Activate subscription if payment completed
-                        if status_result['status'] == 'completed':
-                            subscription = payment.subscription
-                            subscription.status = 'active'
-                            subscription.save()
-                
-                except PaymentGatewayError as e:
-                    logger.warning(f"Could not check payment status: {str(e)}")
-            
-            # Return payment status
-            return Response({
-                'success': True,
-                'payment_id': str(payment.id),
-                'status': payment.status,
-                'amount': str(payment.amount),
-                'currency': payment.currency,
-                'payment_method': payment.payment_method,
-                'created_at': payment.created_at,
-                'updated_at': payment.updated_at
-            })
-            
-        except Exception as e:
-            logger.error(f"Error checking payment status: {str(e)}")
-            return Response(
-                {'error': _('Failed to check payment status')},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            payment = Payment.objects.get(id=payment_id, subscription__user=request.user)
+        except Payment.DoesNotExist:
+            return Response({'error': _('Payment not found')}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            'success': True,
+            'payment_id': str(payment.id),
+            'status': payment.status,
+            'amount': str(payment.amount),
+            'currency': payment.currency,
+            'payment_method': payment.payment_method,
+            'invoice_number': payment.invoice_number,
+            'created_at': payment.created_at,
+            'updated_at': payment.updated_at,
+        })
+
+
+class PaymentReconcileView(APIView):
+    """
+    Reconcile a PENDING payment against the gateway (fallback for missed webhooks).
+    Non-safe method: it authoritatively verifies the transaction at the provider
+    and, only on a verified match, completes it via PaymentService. It never
+    trusts a bare status flag and never activates on unverified data.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, payment_id):
+        try:
+            payment = Payment.objects.get(id=payment_id, subscription__user=request.user)
+        except Payment.DoesNotExist:
+            return Response({'error': _('Payment not found')}, status=status.HTTP_404_NOT_FOUND)
+
+        if payment.status == 'completed':
+            return Response({'success': True, 'status': 'completed',
+                             'invoice_number': payment.invoice_number})
+
+        if not payment.gateway_transaction_reference:
+            return Response({'error': _('Payment has no gateway reference to reconcile')},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            gateway_service = PaymentGatewayService(payment.payment_method)
+            result = gateway_service.fetch_payment_status(
+                payment.gateway_transaction_reference,
+                expected={'amount': payment.amount, 'currency': payment.currency},
             )
+        except PaymentGatewayError as e:
+            logger.warning(f"Reconcile lookup failed for {payment.id}: {str(e)}")
+            return Response({'error': _('Could not verify payment with gateway')},
+                            status=status.HTTP_502_BAD_GATEWAY)
+
+        if str(result.get('status', '')).lower() in ('completed', 'success', 'succeeded', 'paid'):
+            try:
+                PaymentService.complete_payment(payment.id, result)
+                payment.refresh_from_db()
+            except (PaymentVerificationError, InvalidPaymentTransition) as e:
+                logger.warning(f"Reconcile rejected for {payment.id}: {str(e)}")
+                return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'success': True,
+            'payment_id': str(payment.id),
+            'status': payment.status,
+            'invoice_number': payment.invoice_number,
+        })

@@ -279,22 +279,6 @@ class ValidatedEmailField(serializers.EmailField):
                 raise serializers.ValidationError(_("Invalid email format"), code="invalid_email")
 
 
-class SecureImageField(serializers.ImageField):
-    """
-    ImageField with security validation
-    """
-    
-    def __init__(self, **kwargs):
-        self.max_size = kwargs.pop('max_size', 5 * 1024 * 1024)  # 5MB default
-        super().__init__(**kwargs)
-    
-    def validate(self, value):
-        super().validate(value)
-        
-        if value:
-            # Validate file type and security
-            ImageFileValidator(max_size=self.max_size)(value)
-
 
 # Common regex validators
 alphanumeric_validator = RegexValidator(

@@ -4,7 +4,7 @@ from dj_rest_auth.views import LoginView
 from dj_rest_auth.registration.views import RegisterView  # Correct import
 from .serializers import (
     CustomLoginSerializer, CustomRegisterSerializer, UserDetailsSerializer,
-    TrainerProfileSerializer, ClientProfileSerializer, DeviceTokenSerializer
+    TrainerProfileSerializer, ClientProfileSerializer
 )
 from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes
@@ -16,7 +16,7 @@ from rest_framework import status
 from django.utils.translation import gettext as _
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-from .models import CustomUser, DeviceToken
+from .models import CustomUser
 from rest_framework import viewsets, mixins
 from routine.permissions import IsTrainerOfApprovedClient
 from routine.serializers import ClientProfileViewSerializer
@@ -37,6 +37,10 @@ from training_platform.i18n import LanguageContext, CACHE_VERSION
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.parsers import MultiPartParser, FormParser
+from django.db import transaction
+from django.http import Http404
+from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
+                                       ValidationError as DRFValidationError)
 
 logger = logging.getLogger(__name__)
 
@@ -44,18 +48,41 @@ class CustomLoginView(LoginView):
     serializer_class = CustomLoginSerializer
     permission_classes = [AllowAny]
     def get_response(self):
+        """Return JWTs, because JWT is the only thing this API accepts.
+
+        dj-rest-auth's LoginView answers with {"key": "<DRF Token>"}, and
+        DEFAULT_AUTHENTICATION_CLASSES contains JWTAuthentication ONLY — no
+        TokenAuthentication anywhere. The key therefore authenticated nothing: every
+        subsequent request came back 401 whether the client sent it as `Token …`,
+        `Bearer …` or bare. Login, the primary entry point, handed out a dead
+        credential while /api/auth/verify-otp/ two endpoints away returned working
+        access/refresh pairs.
+
+        `key` is kept in the response, equal to the access token, so nothing that
+        already reads that field breaks.
+        """
+        from rest_framework_simplejwt.tokens import RefreshToken
+
         original_response = super().get_response()
-        user = self.request.user  # Retrieve the authenticated user
-        user_info = {
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            'user_type': user.user_type,
-            'profile_picture': user.profile_picture.url if user.profile_picture else None,
-        }
-        original_response.data.update({'user': user_info})  # Add user info to the response
+        user = self.request.user
+
+        refresh = RefreshToken.for_user(user)
+        access = str(refresh.access_token)
+
+        original_response.data.update({
+            'access': access,
+            'refresh': str(refresh),
+            'key': access,  # legacy field, now a usable credential
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'user_type': user.user_type,
+                'profile_picture': user.profile_picture.url if user.profile_picture else None,
+            },
+        })
         return original_response
 
 class JWTAuthLogoutView(APIView):
@@ -90,6 +117,11 @@ class JWTAuthLogoutView(APIView):
                 {'error': _('Invalid refresh token')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             return Response(
                 {'error': _('Logout failed')}, 
@@ -268,11 +300,10 @@ class ResendOTPView(APIView):
             )
 
         # --- Layer 1: ratelimit_cache (DB1, Redis-backed, survives app cache flush) ---
-        # Key: sha256 of email+IP so we don't store PII in Redis keys
-        client_ip = (
-            request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
-            or request.META.get('REMOTE_ADDR', 'unknown')
-        )
+        # Key: sha256 of email+IP so we don't store PII in Redis keys.
+        # Use trusted proxy-chain IP — raw X-Forwarded-For is client-spoofable.
+        from training_platform.middleware import get_trusted_client_ip
+        client_ip = get_trusted_client_ip(request)
         rate_key = hashlib.sha256(f"{email}:{client_ip}".encode()).hexdigest()[:32]
         rl_cache_key = f"rl:otp_resend:{rate_key}"
         from training_platform.cache import ratelimit_cache
@@ -306,6 +337,11 @@ class ResendOTPView(APIView):
         try:
             create_otp(user)
             logger.info(f"OTP resent for user {user.id}")
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Failed to resend OTP for user {user.id}: {str(e)}")
             return Response(
@@ -841,6 +877,11 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
                 'clients': serializer.data
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error listing client profiles: {str(e)}")
             return Response(
@@ -857,19 +898,11 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
             if trainer_id:
                 cache.delete(f"trainer:{trainer_id}:approved_clients:{lang_code}:{CACHE_VERSION}")
 
-class DeviceTokenRegisterView(APIView):
-    permission_classes = [IsAuthenticated]
+# NOTE: DeviceTokenRegisterView was removed — it was never routed (users/urls.py
+# maps device-token/ to FCMTokenView) and its update_or_create never reactivated
+# a soft-deleted token. FCMTokenView in users/device_token_views.py is the single
+# device-token registration entry point.
 
-    def post(self, request):
-        token = request.data.get('token')
-        if not token:
-            return Response({'error': _('Token is required.')}, status=status.HTTP_400_BAD_REQUEST)
-        device_token, created = DeviceToken.objects.update_or_create(
-            user=request.user, token=token,
-            defaults={}
-        )
-        serializer = DeviceTokenSerializer(device_token)
-        return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Custom JWT token serializer that includes user information"""
@@ -878,18 +911,28 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         # Authenticate user first
         from django.contrib.auth import authenticate
         from .models import CustomUser
-        
+        from .utils import check_login_lockout, record_login_failure, clear_login_attempts
+        from rest_framework_simplejwt.exceptions import AuthenticationFailed
+        from rest_framework import serializers
+
         email = attrs.get('email') or attrs.get('username')  # Support both email and username
         password = attrs.get('password')
-        
+
+        # Per-account brute-force lockout (10 failures → 15-min cooldown)
+        if email:
+            is_locked, _remaining = check_login_lockout(email)
+            if is_locked:
+                raise serializers.ValidationError(
+                    {"detail": _("Too many failed login attempts. Please try again in 15 minutes.")}
+                )
+
         if email and password:
             try:
                 user = CustomUser.objects.get(email=email)
             except CustomUser.DoesNotExist:
                 user = None
-            
+
             if user and not user.is_active:
-                from rest_framework import serializers
                 raise serializers.ValidationError(
                     {
                         "detail": _("Please verify your email address before logging in. Check your inbox for the OTP code."),
@@ -897,9 +940,18 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                         "email": user.email
                     }
                 )
-        
+
         # Call the parent validate method to get the standard token response
-        data = super().validate(attrs)
+        try:
+            data = super().validate(attrs)
+        except AuthenticationFailed:
+            if email:
+                record_login_failure(email)
+            raise
+
+        # Successful auth — reset the failure counter
+        if email:
+            clear_login_attempts(email)
         
         # Add user information to the response
         user = self.user
@@ -943,6 +995,10 @@ class ClientRequestTrainerView(APIView):
     """
     permission_classes = [IsAuthenticated]
     
+    # Atomic: these writes were independent, so a failure part-way left the
+    # records inconsistent (a half-applied password reset either locks the
+    # user out or leaves a consumed token usable).
+    @transaction.atomic
     def post(self, request):
         """Client requests to be assigned to a trainer"""
         if not request.user.is_client:
@@ -968,14 +1024,16 @@ class ClientRequestTrainerView(APIView):
                 from wallet.models import Wallet
                 trainer_charge = getattr(trainer, 'trainer_hourly_rate', None) or 0
                 if trainer_charge and trainer_charge > 0:
-                    client_wallet, _ = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
+                    client_wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
                     if client_wallet.balance < trainer_charge:
                         return Response(
                             {'error': _('Insufficient wallet balance to request this trainer'), 'required': str(trainer_charge), 'balance': str(client_wallet.balance)},
                             status=status.HTTP_402_PAYMENT_REQUIRED
                         )
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             
             # Check if trainer is available
             if not trainer.trainer_is_available:
@@ -1045,6 +1103,11 @@ class ClientRequestTrainerView(APIView):
                 {'error': _('Trainer not found')}, 
                 status=status.HTTP_404_NOT_FOUND
             )
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error in client request: {str(e)}")
             return Response(
@@ -1099,7 +1162,9 @@ class ClientUnassignTrainerView(APIView):
                 relation.delete()
             except TrainerClientRelation.DoesNotExist:
                 # Relation may not exist, but we still proceed to clear assigned_trainer
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             
             # Clear assigned trainer
             request.user.assigned_trainer = None
@@ -1123,6 +1188,11 @@ class ClientUnassignTrainerView(APIView):
                 'previous_trainer_name': trainer_name
             }, status=status.HTTP_200_OK)
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error unassigning trainer: {str(e)}")
             return Response(
@@ -1189,6 +1259,11 @@ class ClientCancelTrainerRequestView(APIView):
                 'cancelled_trainer_name': trainer_name
             }, status=status.HTTP_200_OK)
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error cancelling trainer request: {str(e)}")
             return Response(
@@ -1255,6 +1330,11 @@ class TrainerPendingRequestsView(APIView):
                 'pending_requests': requests_data
             }, status=status.HTTP_200_OK)
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error fetching pending requests: {str(e)}")
             return Response(
@@ -1347,7 +1427,7 @@ class TrainerRespondToRequestView(APIView):
                     from wallet.utils import get_escrow_wallet
                     trainer_charge = getattr(request.user, 'trainer_hourly_rate', None) or 0
                     if trainer_charge and trainer_charge > 0:
-                        client_wallet, _ = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
+                        client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
                         if client_wallet.balance < trainer_charge:
                             return Response(
                                 {'error': _('Insufficient client wallet balance for trainer charge hold')},
@@ -1398,6 +1478,11 @@ class TrainerRespondToRequestView(APIView):
                 {'error': _('Request not found or already processed')}, 
                 status=status.HTTP_404_NOT_FOUND
             )
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error responding to request: {str(e)}")
             return Response(
@@ -1462,6 +1547,11 @@ class ClientRequestStatusView(APIView):
                 'requests': requests_data
             }, status=status.HTTP_200_OK)
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error fetching client requests: {str(e)}")
             return Response(
@@ -1489,24 +1579,24 @@ class ProfilePictureUploadView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Validate file type
-            allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
-            if image_file.content_type not in allowed_types:
+            # Validate CONTENT, not the client-supplied Content-Type header (which is
+            # trivially spoofed — PHP/HTML/SVG payloads were previously accepted and
+            # stored with those extensions). This also caps pixel dimensions and
+            # re-encodes, which strips EXIF/GPS and neutralises polyglot files.
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            from training_platform.file_security import process_uploaded_image
+            try:
+                safe_file, ext = process_uploaded_image(image_file, max_bytes=2 * 1024 * 1024)
+            except DjangoValidationError as e:
                 return Response(
-                    {'error': f'Invalid file type. Allowed types: {", ".join(allowed_types)}'},
+                    {'error': e.messages[0] if getattr(e, 'messages', None) else str(e)},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Validate file size (2MB limit)
-            if image_file.size > 2 * 1024 * 1024:
-                return Response(
-                    {'error': _('File size too large. Maximum size is 2MB')},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Update user's profile picture
+            # Update user's profile picture. The name uses the DETECTED format's
+            # extension, never the uploaded filename.
             user = request.user
-            user.profile_picture = image_file
+            user.profile_picture.save(f"profile.{ext}", safe_file, save=False)
             user.save()
 
             # Return the updated user info
@@ -1524,6 +1614,11 @@ class ProfilePictureUploadView(APIView):
                 }
             }, status=status.HTTP_200_OK)
 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             return Response(
                 {'error': f'Upload failed: {str(e)}'},
@@ -1535,8 +1630,9 @@ class ProfilePictureUploadView(APIView):
         try:
             user = request.user
             if user.profile_picture:
-                # Delete the file from storage
-                user.profile_picture.delete(save=False)
+                # Clearing the field is enough: the post-commit receiver in
+                # training_platform.signals removes the stored file once the row
+                # actually persists.
                 user.profile_picture = None
                 user.save()
                 
@@ -1548,6 +1644,11 @@ class ProfilePictureUploadView(APIView):
                     'message': _('No profile picture to remove')
                 }, status=status.HTTP_404_NOT_FOUND)
                 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             return Response(
                 {'error': f'Failed to remove profile picture: {str(e)}'},
@@ -1574,15 +1675,20 @@ class PasswordResetRequestView(APIView):
     def post(self, request):
         from .serializers import PasswordResetRequestSerializer
         from .utils import create_password_reset_otp
-        from django.core.cache import cache
+        from training_platform.cache import ratelimit_cache
+        import hashlib
 
         serializer = PasswordResetRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data['email']
 
-        # Rate limiting: max 3 requests per hour per email
-        cache_key = f'pwd_reset_req_{email}'
-        request_count = cache.get(cache_key, 0)
+        # Rate limiting: max 3 requests per hour per email.
+        # Use ratelimit_cache (DB1) — isolated from the session store and not
+        # flushable via app cache clear. Hash the email so no PII lands in keys.
+        rl = ratelimit_cache()
+        email_hash = hashlib.sha256(email.strip().lower().encode('utf-8')).hexdigest()[:32]
+        cache_key = f'pwd_reset_req:{email_hash}'
+        request_count = rl.get(cache_key, 0)
         if request_count >= 3:
             return Response(
                 {'error': _('Too many password reset requests. Please wait 1 hour before trying again.')},
@@ -1594,10 +1700,15 @@ class PasswordResetRequestView(APIView):
             create_password_reset_otp(user)
         except CustomUser.DoesNotExist:
             # Do NOT reveal whether the email exists
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
         # Increment rate limit counter regardless of user existence
-        cache.set(cache_key, request_count + 1, 3600)
+        try:
+            rl.incr(cache_key)
+        except ValueError:
+            rl.set(cache_key, 1, 3600)
 
         logger.info(f"Password reset requested for email: {email}")
 
@@ -1643,18 +1754,15 @@ class PasswordResetVerifyView(APIView):
             user=user, is_used=False
         ).update(is_used=True)
 
-        # Create a new single-use token
-        from django.utils import timezone
-        reset_token = PasswordResetToken.objects.create(
-            user=user,
-            expires_at=timezone.now() + timedelta(minutes=15),
-        )
+        # Create a new single-use token. `issue()` returns the raw value once; only its
+        # keyed hash is stored, so the table cannot be read to reset someone's password.
+        reset_token, raw_reset_token = PasswordResetToken.issue(user, minutes=15)
 
         logger.info(f"Password reset OTP verified for user {user.id} ({email})")
 
         return Response({
             'message': _('OTP verified successfully. Use the reset token to set your new password.'),
-            'reset_token': str(reset_token.token),
+            'reset_token': raw_reset_token,
         }, status=status.HTTP_200_OK)
 
 
@@ -1667,6 +1775,10 @@ class PasswordResetConfirmView(APIView):
     """
     permission_classes = [AllowAny]
 
+    # Atomic: these writes were independent, so a failure part-way left the
+    # records inconsistent (a half-applied password reset either locks the
+    # user out or leaves a consumed token usable).
+    @transaction.atomic
     def post(self, request):
         from .serializers import PasswordResetConfirmSerializer
         from .models import PasswordResetToken
@@ -1677,9 +1789,8 @@ class PasswordResetConfirmView(APIView):
         token_uuid = serializer.validated_data['reset_token']
         new_password = serializer.validated_data['new_password']
 
-        try:
-            reset_token = PasswordResetToken.objects.select_related('user').get(token=token_uuid)
-        except PasswordResetToken.DoesNotExist:
+        reset_token = PasswordResetToken.verify(str(token_uuid))
+        if reset_token is None:
             return Response(
                 {'error': _('Invalid or expired reset token.')},
                 status=status.HTTP_400_BAD_REQUEST
@@ -1701,6 +1812,16 @@ class PasswordResetConfirmView(APIView):
         user = reset_token.user
         user.set_password(new_password)
         user.save()
+
+        # Revoke all outstanding refresh tokens — a password reset is exactly the
+        # moment (account recovery/compromise) when previously-issued tokens must
+        # stop working. Access tokens still expire on their own short TTL.
+        try:
+            from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+            for _t in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=_t)
+        except Exception as e:
+            logger.error(f"Failed to blacklist tokens after password reset for user {user.id}: {e}")
 
         logger.info(f"Password reset completed for user {user.id} ({user.email})")
 

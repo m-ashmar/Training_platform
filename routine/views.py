@@ -2,14 +2,15 @@ from rest_framework import viewsets, status, permissions, generics, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-from django.db import models, IntegrityError
+from django.db import models, IntegrityError, transaction
 from django.db.models import Sum, Avg, Count, F, Q, Prefetch
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django.utils.translation import gettext as _
 from datetime import datetime, timedelta, date
 from .models import (
     Routine, Exercise, RoutineExercise, RoutineProgress, ExerciseSetLog, WorkoutSession,
-    RoutineTemplate, RoutineTemplateExercise, UserExerciseProgress
+    RoutineTemplate, RoutineTemplateExercise, UserExerciseProgress, ExerciseMedia
 )
 from .serializers import (
     ExerciseSerializer, ExerciseCreateWithImageSerializer, RoutineSerializer, 
@@ -36,8 +37,22 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.views import APIView
 from users.models import CustomUser
+from rest_framework.exceptions import PermissionDenied
+from django.db import transaction
+from django.http import Http404
+from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
+                                       ValidationError as DRFValidationError)
 
 logger = logging.getLogger(__name__)
+
+# --- Real-world bounds for workout logging -----------------------------------
+# Heaviest sanctioned powerlifting total is well under 600 kg; 1000 leaves head-room
+# while rejecting typos and junk. Backlog window allows correcting a missed session.
+MAX_SETS_PER_REQUEST = 50
+MAX_WEIGHT_KG = 1000
+MAX_REPS_PER_SET = 1000
+MAX_BACKLOG_DAYS = 365
+
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
@@ -64,7 +79,9 @@ class RecentActivityProgressView(APIView):
     def get(self, request):
         from django.db.models import ExpressionWrapper, DurationField
         from django.db.models.functions import TruncDate
-        from training_platform.cache_backends import private_cache
+        # NOTE: the module is training_platform.cache — there is no cache_backends
+        # module. The wrong import raised ImportError on every request here.
+        from training_platform.cache import private_cache
         from datetime import timedelta, date
 
         cache_key = f"recent_progress:{request.user.id}"
@@ -139,11 +156,34 @@ class ExerciseViewSet(viewsets.ModelViewSet):
                 models.Q(created_by=user) | models.Q(created_by__isnull=True)
             )
         else:
-            return base_qs
+            # Clients: global exercises, plus anything their own trainer created,
+            # plus anything appearing in a routine assigned to them.
+            # This branch previously returned base_qs unfiltered, so every client
+            # could see every trainer's private custom exercises.
+            return base_qs.filter(
+                models.Q(created_by__isnull=True)
+                | models.Q(created_by=user.assigned_trainer)
+                | models.Q(routine_exercises__routine__assigned_to=user)
+            ).distinct()
 
     def perform_create(self, serializer):
         """Override to assign the exercise to the creator."""
         serializer.save(created_by=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Refuse to delete a routine that has recorded progress — deleting it would
+        erase the client's training history. Deactivate it instead.
+        """
+        from django.db.models import ProtectedError
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            return Response(
+                {'error': _('This routine has recorded client progress and cannot be '
+                            'deleted. Set is_active=false to retire it instead.')},
+                status=status.HTTP_409_CONFLICT,
+            )
 
 
 class ExerciseCreateWithImageView(APIView):
@@ -171,6 +211,10 @@ class ExerciseCreateWithImageView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
+    # Atomic: these writes were independent, so a failure part-way left the
+    # records inconsistent (a half-applied password reset either locks the
+    # user out or leaves a consumed token usable).
+    @transaction.atomic
     def post(self, request):
         """Create a new exercise with optional image and media content"""
         from .models import ExerciseMedia
@@ -192,32 +236,44 @@ class ExerciseCreateWithImageView(APIView):
             # Validate main image file if provided
             if image_file:
                 # Validate file type
-                allowed_image_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
-                if image_file.content_type not in allowed_image_types:
-                    return Response(
-                        {'error': f'Invalid image file type. Allowed types: {", ".join(allowed_image_types)}'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                # Validate CONTENT (magic bytes), cap pixel dimensions and re-encode.
 
-                # Validate file size (5MB limit)
-                if image_file.size > 5 * 1024 * 1024:
+                # The client Content-Type header was the only previous check and is
+
+                # spoofable — PHP/SVG payloads were accepted and stored as .php/.svg.
+
+                from training_platform.file_security import process_uploaded_image
+
+                from django.core.exceptions import ValidationError as DjangoValidationError
+
+                try:
+
+                    image_file, _img_ext = process_uploaded_image(image_file, max_bytes=5 * 1024 * 1024)
+
+                except DjangoValidationError as e:
+
                     return Response(
-                        {'error': 'Main image file size too large. Maximum size is 5MB'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+
+                        {'error': e.messages[0] if getattr(e, 'messages', None) else str(e)},
+
+                        status=status.HTTP_400_BAD_REQUEST)
 
             # Validate additional media photos if provided
             media_photos = request.FILES.getlist('media_photos')
             if media_photos:
+                from training_platform.file_security import process_uploaded_image
+                from django.core.exceptions import ValidationError as DjangoValidationError
+                validated_photos = []
                 for i, photo in enumerate(media_photos):
-                    if photo.content_type not in allowed_image_types:
+                    # Same content validation as the main image — header checks alone
+                    # let arbitrary payloads through.
+                    try:
+                        safe_photo, _ext = process_uploaded_image(photo, max_bytes=5 * 1024 * 1024)
+                        validated_photos.append(safe_photo)
+                    except DjangoValidationError as e:
+                        msg = e.messages[0] if getattr(e, 'messages', None) else str(e)
                         return Response(
-                            {'error': f'Invalid media photo {i+1} file type. Allowed types: {", ".join(allowed_image_types)}'},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-                    if photo.size > 5 * 1024 * 1024:
-                        return Response(
-                            {'error': f'Media photo {i+1} file size too large. Maximum size is 5MB'},
+                            {'error': f'Media photo {i+1}: {msg}'},
                             status=status.HTTP_400_BAD_REQUEST
                         )
 
@@ -334,6 +390,11 @@ class ExerciseCreateWithImageView(APIView):
                 }
             }, status=status.HTTP_201_CREATED)
 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error creating exercise with media: {str(e)}")
             return Response(
@@ -377,7 +438,12 @@ class RoutineViewSet(viewsets.ModelViewSet):
             'progress'
         ).annotate(
             client_count=models.Count('assigned_to', filter=models.Q(assigned_to__user_type='client'), distinct=True)
-        )
+        # annotate() with an aggregate adds a GROUP BY, and Django then drops
+        # Meta.ordering from the SQL entirely — the query came back with GROUP BY and
+        # no ORDER BY at all. Paging a routine list in whatever order Postgres felt
+        # like meant page 2 could repeat a routine from page 1 and skip another
+        # outright. Re-apply the model's total order explicitly.
+        ).order_by('-created_at', '-id')
         
         if user.is_admin:
             # Admins can see all routines
@@ -474,7 +540,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
                 trainer_charge = getattr(request.user, 'trainer_hourly_rate', None) or 0
                 if trainer_charge and trainer_charge > 0:
                     escrow = get_escrow_wallet()
-                    trainer_wallet, _ = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "trainer"})
+                    trainer_wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "trainer"})
                     move_funds_atomic(escrow, trainer_wallet, trainer_charge, actor_id=request.user.id, tx_type='transfer', metadata={'purpose': 'trainer_assignment_settlement', 'client_id': client.id, 'routine_id': routine.id})
             except Exception as e:
                 logger.error(f"Escrow settlement failed: {str(e)}")
@@ -504,6 +570,11 @@ class RoutineViewSet(viewsets.ModelViewSet):
                 {"error": "Client not found"}, 
                 status=status.HTTP_404_NOT_FOUND
             )
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error assigning routine {routine.id} to client {client_id}: {str(e)}")
             return Response(
@@ -588,6 +659,11 @@ class RoutineViewSet(viewsets.ModelViewSet):
                 {"error": "Client not found"}, 
                 status=status.HTTP_404_NOT_FOUND
             )
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Error unassigning routine {routine.id} from client {client_id}: {str(e)}")
             return Response(
@@ -687,6 +763,19 @@ class RoutineExerciseViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminOrOwnerOrReadOnly]
     pagination_class = StandardResultsSetPagination
 
+    def get_queryset(self):
+        """
+        Restrict to routines the caller is assigned to or created (admins see all).
+        Previously unscoped: IsAdminOrOwnerOrReadOnly returns True for all reads, so
+        any authenticated user could list every routine's exercise composition.
+        """
+        user = self.request.user
+        if getattr(user, 'is_admin', False):
+            return self.queryset
+        return self.queryset.filter(
+            Q(routine__assigned_to=user) | Q(routine__created_by=user)
+        ).distinct()
+
 
 class RoutineProgressViewSet(viewsets.ModelViewSet):
     """
@@ -700,6 +789,33 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['routine', 'user', 'day', 'status']
+
+    def perform_create(self, serializer):
+        """Stamp the owner and refuse progress against someone else's routine.
+
+        `user` is NOT NULL and was never writable nor injected, so every POST here
+        died with an IntegrityError (500). Taking it from the request (rather than the
+        payload) also prevents logging progress on another user's behalf.
+        """
+        routine = serializer.validated_data.get('routine')
+        user = self.request.user
+        if routine is not None and not (
+            getattr(user, 'is_admin', False)
+            or routine.created_by_id == user.id
+            or routine.assigned_to.filter(pk=user.pk).exists()
+        ):
+            raise PermissionDenied('This routine is not assigned to you.')
+        # (user, routine, day, date) is UNIQUE. Re-logging the same day is a normal
+        # client action (correcting a set, finishing later), so upsert instead of
+        # letting the constraint surface as a 500.
+        data = dict(serializer.validated_data)
+        routine_obj = data.pop('routine', None)
+        day = data.pop('day', None)
+        date = data.pop('date', None) or timezone.localdate()
+        obj, _created = RoutineProgress.objects.update_or_create(
+            user=user, routine=routine_obj, day=day, date=date, defaults=data,
+        )
+        serializer.instance = obj
 
     def get_queryset(self):
         """Filter progress based on user role with optimized queries."""
@@ -821,39 +937,124 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         routine_id = request.data.get('routine_id')
         day = request.data.get('day')
         date = request.data.get('date')
-        sets = int(request.data.get('sets', 1))
-        weight = float(request.data.get('weight', 0))
-        reps = int(request.data.get('reps', 10))
         if not routine_id or not day or not date:
             return Response({'error': _('routine_id, day, and date are required.')}, status=400)
+
+        # --- Real-world input validation -------------------------------------
+        # Previously unvalidated: negative weight (-500 kg), 100000 reps, dates in
+        # 2030 or 1900, and an uncapped `sets` (500 sets => 502 rows, ~11s request).
+        try:
+            sets = int(request.data.get('sets', 1))
+            weight = float(request.data.get('weight', 0))
+            reps = int(request.data.get('reps', 10))
+        except (TypeError, ValueError):
+            return Response({'error': _('sets, weight and reps must be numeric.')},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if not (1 <= sets <= MAX_SETS_PER_REQUEST):
+            return Response(
+                {'error': _('sets must be between 1 and %(max)d.') % {'max': MAX_SETS_PER_REQUEST}},
+                status=status.HTTP_400_BAD_REQUEST)
+        if not (0 <= weight <= MAX_WEIGHT_KG):
+            return Response(
+                {'error': _('weight must be between 0 and %(max)d kg.') % {'max': MAX_WEIGHT_KG}},
+                status=status.HTTP_400_BAD_REQUEST)
+        if not (1 <= reps <= MAX_REPS_PER_SET):
+            return Response(
+                {'error': _('reps must be between 1 and %(max)d.') % {'max': MAX_REPS_PER_SET}},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        parsed_date = parse_date(str(date))
+        if parsed_date is None:
+            return Response({'error': _('date must be in YYYY-MM-DD format.')},
+                            status=status.HTTP_400_BAD_REQUEST)
+        today = timezone.localdate()
+        if parsed_date > today:
+            return Response({'error': _('Cannot log a workout in the future.')},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if (today - parsed_date).days > MAX_BACKLOG_DAYS:
+            return Response(
+                {'error': _('Cannot log a workout more than %(d)d days in the past.') % {'d': MAX_BACKLOG_DAYS}},
+                status=status.HTTP_400_BAD_REQUEST)
+        date = parsed_date
         from .models import Routine, RoutineExercise, UserExerciseProgress, ExerciseSetLog
         try:
             routine = Routine.objects.get(id=routine_id)
         except Routine.DoesNotExist:
             return Response({'error': _('Routine not found.')}, status=404)
+
+        # AUTHORIZATION: the caller must be entitled to this routine. Without this,
+        # any authenticated user could pass an arbitrary routine_id and both create
+        # progress rows against a routine never assigned to them AND read back every
+        # exercise name of another trainer's private routine from the response.
+        if not (routine.assigned_to.filter(id=user.id).exists()
+                or routine.created_by_id == user.id
+                or user.is_admin):
+            return Response({'error': _('You do not have access to this routine.')},
+                            status=status.HTTP_403_FORBIDDEN)
+
         exercises = RoutineExercise.objects.filter(routine=routine, day=day)
+        if not exercises.exists():
+            # Previously a nonexistent day returned 200 {"count": 0} — a silent
+            # no-op. update_progress() validates the day, so this is now consistent.
+            return Response(
+                {'error': _('Day %(day)s is not part of this routine.') % {'day': day}},
+                status=status.HTTP_400_BAD_REQUEST)
         results = []
         errors = []
-        for rex in exercises:
-            progress, _ = UserExerciseProgress.objects.get_or_create(
-                user=user,
-                exercise=rex.exercise,
-                date=date,
-                defaults={'completed_sets': sets, 'target_sets': sets}
-            )
-            for set_num in range(1, sets+1):
-                try:
-                    log, created = ExerciseSetLog.objects.get_or_create(
-                        user_exercise_progress=progress,
-                        set_number=set_num,
-                        defaults={'weight': weight, 'reps': reps, 'date': date}
-                    )
-                    results.append({'exercise': rex.exercise.name, 'set_number': set_num, 'created': created, 'id': log.id})
-                except IntegrityError as e:
-                    if 'unique constraint' in str(e).lower():
-                        errors.append({'exercise': rex.exercise.name, 'set_number': set_num, 'error': 'Duplicate set log for this progress, set number, and date.'})
-                    else:
-                        errors.append({'exercise': rex.exercise.name, 'set_number': set_num, 'error': str(e)})
+        # ATOMIC: previously each progress row and set log was written outside any
+        # transaction, so a mid-loop failure committed partial data while still
+        # returning 200 with a partial `errors` array.
+        from .models import suspend_progress_recalc, recalc_progress_for
+        touched_progress = []
+        # PERFORMANCE: the post_save receiver on ExerciseSetLog recomputes the whole
+        # RoutineProgress tree (~16 queries) for EVERY set log. Logging 10 sets across
+        # 3 exercises cost 493 queries. Suppress it during the bulk write and run it
+        # once per affected progress row afterwards.
+        with transaction.atomic(), suspend_progress_recalc():
+            for rex in exercises.select_related('exercise'):
+                progress, _created = UserExerciseProgress.objects.get_or_create(
+                    user=user,
+                    exercise=rex.exercise,
+                    date=date,
+                    defaults={'completed_sets': sets, 'target_sets': sets}
+                )
+                # Keep the progress row in sync with what was actually logged.
+                # target_sets previously went stale (5 logged against a target of 3).
+                if not _created and (progress.completed_sets != sets or progress.target_sets != sets):
+                    progress.completed_sets = sets
+                    progress.target_sets = sets
+                    progress.save(update_fields=['completed_sets', 'target_sets'])
+
+                touched_progress.append(progress)
+
+                for set_num in range(1, sets + 1):
+                    try:
+                        # update_or_create, not get_or_create: re-submitting a set with a
+                        # corrected weight/reps previously returned success while silently
+                        # discarding the correction, so users could never fix a mistake.
+                        log, created = ExerciseSetLog.objects.update_or_create(
+                            user_exercise_progress=progress,
+                            set_number=set_num,
+                            date=date,
+                            defaults={'weight': weight, 'reps': reps}
+                        )
+                        results.append({'exercise': rex.exercise.name, 'set_number': set_num,
+                                        'created': created, 'id': log.id})
+                    except IntegrityError as e:
+                        if 'unique constraint' in str(e).lower():
+                            errors.append({'exercise': rex.exercise.name, 'set_number': set_num,
+                                           'error': 'Duplicate set log for this progress, set number, and date.'})
+                        else:
+                            logger.exception("bulk set-log failed for %s set %s", rex.exercise_id, set_num)
+                            errors.append({'exercise': rex.exercise.name, 'set_number': set_num,
+                                           'error': _('Could not record this set.')})
+
+        # Run the suppressed recomputation ONCE per affected progress row — outside
+        # the suspension block, otherwise it would be muted along with the rest.
+        for prog in touched_progress:
+            recalc_progress_for(prog)
+
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
 
@@ -881,6 +1082,19 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
             return [IsRoutineOwnerOrAssigned()]
         return [IsSessionOwnerOrTrainerOrAdmin()]
 
+    def get_queryset(self):
+        """
+        Scope sessions to the caller. Previously this viewset exposed
+        WorkoutSession.objects.all() with no filtering, and `filterset_fields`
+        includes `user`, so any authenticated account could list or enumerate
+        every user's workout history via ?user=<id>.
+        """
+        from .permissions import accessible_user_ids
+        allowed_ids = accessible_user_ids(self.request.user)
+        if allowed_ids is None:  # admin
+            return self.queryset
+        return self.queryset.filter(user_id__in=allowed_ids)
+
     def perform_create(self, serializer):
         """
         Handles creation of a workout session, assigning to the correct user.
@@ -893,6 +1107,11 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
             user_id = self.request.data.get('user')
             if user_id:
                 from users.models import CustomUser
+                from .permissions import can_access_user_data
+                from rest_framework.exceptions import PermissionDenied
+                # A trainer may only create sessions for their OWN approved clients.
+                if not can_access_user_data(self.request.user, user_id):
+                    raise PermissionDenied(_('You may only create sessions for your approved clients.'))
                 user_obj = CustomUser.objects.get(pk=user_id)
                 serializer.save(user=user_obj)
                 logger.debug(f"WorkoutSession assigned to user {user_obj}")
@@ -909,6 +1128,12 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         # If session is marked as completed, notify trainer and client
         if 'status' in request.data and request.data['status'] == 'completed':
+            # Stamp end_time so `duration` is computable. Nothing set this before,
+            # so every completed session reported duration = None forever.
+            if instance.end_time is None:
+                instance.end_time = timezone.now()
+                instance.save(update_fields=['end_time'])
+                response.data['end_time'] = instance.end_time
             # Notify client (self)
             send_notification(
                 user=instance.user,
@@ -925,7 +1150,29 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                     message=f"Your client {instance.user.username} completed a workout session for routine: {instance.routine.name}",
                     related_object=instance
                 )
+
+            # Milestones. Deferred to on_commit so a rolled-back completion cannot
+            # congratulate anyone, and pushed to the worker because computing a streak
+            # walks backwards day by day through the activity log.
+            from django.db import transaction
+
+            _user_id = instance.user_id
+            transaction.on_commit(lambda: _queue_milestones(_user_id))
         return response
+
+
+def _queue_milestones(user_id):
+    """Hand milestone evaluation to the worker, never to the request.
+
+    Failures here are logged and dropped: a broken milestone check must not turn a
+    successfully completed workout into a 500 for the user who just finished it.
+    """
+    try:
+        from notifications.tasks import award_progress_milestones
+
+        award_progress_milestones.delay(user_id)
+    except Exception:
+        logger.warning("could not queue milestone check for user %s", user_id, exc_info=True)
 
 
 class AnalyticsViewSet(viewsets.ViewSet):
@@ -954,6 +1201,13 @@ class AnalyticsViewSet(viewsets.ViewSet):
         user = request.user
         
         if user_id:
+            # AUTHORIZATION: a caller-supplied user_id must be self, an approved
+            # client (trainer), or admin. Without this any authenticated account
+            # could read any other user's training data.
+            from .permissions import can_access_user_data
+            if not can_access_user_data(request.user, user_id):
+                return Response({'error': _('You do not have access to this user\'s data.')},
+                                status=status.HTTP_403_FORBIDDEN)
             try:
                 from users.models import CustomUser
                 user = CustomUser.objects.get(pk=user_id)
@@ -1051,9 +1305,22 @@ class AnalyticsViewSet(viewsets.ViewSet):
         routine_id = request.query_params.get('routine_id')
         user_id = request.query_params.get('user_id')
         qs = RoutineProgress.objects.all()
+        # DEFAULT SCOPE: without this, calling the endpoint with no parameters
+        # returned every user's routine progress to any authenticated caller.
+        from .permissions import accessible_user_ids
+        allowed_ids = accessible_user_ids(request.user)
+        if allowed_ids is not None:  # None == admin, unrestricted
+            qs = qs.filter(user_id__in=allowed_ids)
         if routine_id:
             qs = qs.filter(routine_id=routine_id)
         if user_id:
+            # AUTHORIZATION: a caller-supplied user_id must be self, an approved
+            # client (trainer), or admin. Without this any authenticated account
+            # could read any other user's training data.
+            from .permissions import can_access_user_data
+            if not can_access_user_data(request.user, user_id):
+                return Response({'error': _('You do not have access to this user\'s data.')},
+                                status=status.HTTP_403_FORBIDDEN)
             qs = qs.filter(user_id=user_id)
         # Aggregate by routine and user
         data = {}
@@ -1062,12 +1329,21 @@ class AnalyticsViewSet(viewsets.ViewSet):
             if key not in data:
                 data[key] = {'routine_id': rp.routine_id, 'user_id': rp.user_id, 'days': 0, 'completed': 0}
             data[key]['days'] += 1
-            if rp.status == 'Completed':
+            if rp.status == 'completed':
                 data[key]['completed'] += 1
         # Calculate completion %
         for v in data.values():
             v['completion_rate'] = round(100 * v['completed'] / v['days'], 2) if v['days'] else 0
-        return Response({'results': list(data.values())})
+        # Match the platform-wide list shape {count, next, previous, results} and
+        # cap the payload — this was a hand-rolled dict with no bound, so a trainer
+        # with many clients could pull an unbounded response.
+        rows = list(data.values())
+        return Response({
+            'count': len(rows),
+            'next': None,
+            'previous': None,
+            'results': rows[:500],
+        })
 
     @action(detail=False, methods=['get'])
     def streaks(self, request):
@@ -1081,45 +1357,52 @@ class AnalyticsViewSet(viewsets.ViewSet):
         user_id = request.query_params.get('user_id')
         user = request.user
         if user_id:
+            # AUTHORIZATION: a caller-supplied user_id must be self, an approved
+            # client (trainer), or admin. Without this any authenticated account
+            # could read any other user's training data.
+            from .permissions import can_access_user_data
+            if not can_access_user_data(request.user, user_id):
+                return Response({'error': _('You do not have access to this user\'s data.')},
+                                status=status.HTTP_403_FORBIDDEN)
             try:
                 user = CustomUser.objects.get(pk=user_id)
             except CustomUser.DoesNotExist:
                 return Response({'error': _('User not found.')}, status=404)
 
-        # Calculate streaks
-        queryset = RoutineProgress.objects.filter(
-            user=user,
-            status='Completed'
-        ).order_by('updated_at')
+        # Streaks are computed over DISTINCT calendar training days, using the
+        # real `date` field. It previously used `updated_at` (auto_now), so editing
+        # an old record moved that workout to today.
+        training_days = sorted(set(
+            RoutineProgress.objects.filter(user=user, status='completed')
+            .values_list('date', flat=True)
+        ))
 
-        current_streak = 0
         longest_streak = 0
-        last_date = None
+        run = 0
+        prev = None
+        for d in training_days:
+            if d is None:
+                continue
+            run = run + 1 if (prev is not None and (d - prev).days == 1) else 1
+            longest_streak = max(longest_streak, run)
+            prev = d
 
-        for rp in queryset:
-            completion_date = rp.updated_at.date()
+        # "Current" must mean current: if the last training day is neither today
+        # nor yesterday the streak is broken and the answer is 0. Previously this
+        # returned the trailing historical run, so a user who stopped a month ago
+        # was still told they had an active streak.
+        today = timezone.localdate()
+        current_streak = 0
+        if training_days and training_days[-1] is not None:
+            if (today - training_days[-1]).days <= 1:
+                current_streak = run
 
-            if last_date is None:
-                current_streak = 1
-                longest_streak = 1
-            else:
-                delta = (completion_date - last_date).days
-
-                if delta == 1:
-                    # Consecutive day
-                    current_streak += 1
-                elif delta == 0:
-                    # Same day multiple completions - streak stays same
-                    pass
-                else:
-                    # Streak broken
-                    longest_streak = max(longest_streak, current_streak)
-                    current_streak = 1
-
-            last_date = completion_date
-            longest_streak = max(longest_streak, current_streak)
-
-        return Response({'user_id': user.id, 'current_streak': current_streak, 'max_streak': longest_streak})
+        return Response({
+            'user_id': user.id,
+            'current_streak': current_streak,
+            'max_streak': longest_streak,
+            'last_training_date': training_days[-1] if training_days else None,
+        })
 
     @action(detail=False, methods=['get'])
     def trends(self, request):
@@ -1131,6 +1414,12 @@ class AnalyticsViewSet(viewsets.ViewSet):
         from .models import ExerciseSetLog, RoutineProgress
         from django.db.models.functions import TruncDay, TruncWeek, TruncMonth
         user_id = request.query_params.get('user_id') or request.user.id
+        # AUTHORIZATION: same rule as the other analytics actions — a supplied
+        # user_id must be self, an approved client, or admin.
+        from .permissions import can_access_user_data
+        if not can_access_user_data(request.user, user_id):
+            return Response({'error': _('You do not have access to this user\'s data.')},
+                            status=status.HTTP_403_FORBIDDEN)
         period = request.query_params.get('period', 'day')
         # Training volume trend
         setlogs = ExerciseSetLog.objects.filter(user_exercise_progress__user_id=user_id)
@@ -1152,7 +1441,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         else:
             rps = rps.annotate(period=TruncDay('updated_at'))
         completion_trend = rps.values('period').annotate(
-            completed=Count('id', filter=Q(status='Completed')),
+            completed=Count('id', filter=Q(status='completed')),
             total=Count('id')
         ).order_by('period')
         return Response({'volume_trend': list(volume_trend), 'completion_trend': list(completion_trend)})
@@ -1185,7 +1474,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         )
         
         # Calculate date range for volume (last 30 days)
-        thirty_days_ago = timezone.now().date() - timedelta(days=30)
+        thirty_days_ago = timezone.localdate() - timedelta(days=30)
         
         # Bulk aggregate volume data for all clients
         volume_data = ExerciseSetLog.objects.filter(
@@ -1203,7 +1492,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
             user__in=clients
         ).values('user').annotate(
             total_days=Count('id'),
-            completed_days=Count('id', filter=Q(status='Completed'))
+            completed_days=Count('id', filter=Q(status='completed'))
         )
         
         # Create completion lookup dictionary
@@ -1221,7 +1510,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # Bulk aggregate streak data for all clients
         streak_data = RoutineProgress.objects.filter(
             user__in=clients,
-            status='Completed'
+            status='completed'
         ).values('user', 'day').order_by('user', 'day')
         
         # Calculate streaks for each client
@@ -1288,9 +1577,28 @@ class AnalyticsViewSet(viewsets.ViewSet):
 
 
 class IsTrainerOrReadOnly(IsAuthenticated):
-    """Allow only trainers to create/edit/delete, others read-only."""
+    """Allow only trainers to create/edit/delete, others read-only.
+
+    Object level: a trainer may only modify/delete templates they CREATED. The
+    list queryset intentionally includes other trainers' public templates so they
+    can be viewed and copied — without this object check that read access also
+    granted write access, letting any trainer rename or delete another trainer's
+    public template.
+    """
     def has_permission(self, request, view):
         return super().has_permission(request, view) and (request.user.is_trainer or request.method in ('GET', 'HEAD', 'OPTIONS'))
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return True
+        # `copy` is a POST but is read-only with respect to the source template —
+        # it creates a NEW template owned by the caller. Copying a public template
+        # is the intended workflow, so it must not require ownership.
+        if getattr(view, 'action', None) == 'copy':
+            return True
+        if getattr(request.user, 'is_admin', False):
+            return True
+        return getattr(obj, 'created_by_id', None) == request.user.id
 
 
 class RoutineTemplateViewSet(viewsets.ModelViewSet):
@@ -1681,7 +1989,9 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
                 if 'unique constraint' in str(e).lower():
                     errors.append({'exercise': rex.exercise.name, 'error': 'Duplicate progress for this user, exercise, and date.'})
                 else:
-                    errors.append({'exercise': rex.exercise.name, 'error': str(e)})
+                    logger.exception("bulk progress write failed for %s", rex.exercise_id)
+                    errors.append({'exercise': rex.exercise.name,
+                                   'error': _('Could not record progress for this exercise.')})
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
 
@@ -1705,8 +2015,21 @@ class ExerciseImageUploadView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # Check if user has permission to modify this exercise
-            if not exercise.is_global and exercise.created_by != request.user:
+            # Check if user has permission to modify this exercise.
+            # Global exercises belong to the shared catalog: admin-only. The old
+            # guard was `not is_global and created_by != user`, which short-circuits
+            # to False for global exercises, leaving them writable by ANY user.
+            _is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
+            if exercise.created_by_id:
+                # Owned exercise: the creator (or an admin) may modify it. Keyed on
+                # ownership rather than is_global, because the "created_by => not
+                # global" invariant lives only in Exercise.clean(), which .create()
+                # never runs — so an owned row can still carry is_global=True.
+                allowed = (exercise.created_by_id == request.user.id) or _is_admin
+            else:
+                # No owner => shared global catalog => admin only.
+                allowed = _is_admin
+            if not allowed:
                 return Response(
                     {'error': 'You do not have permission to modify this exercise'},
                     status=status.HTTP_403_FORBIDDEN
@@ -1721,23 +2044,21 @@ class ExerciseImageUploadView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Validate file type
-            allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
-            if image_file.content_type not in allowed_types:
+            # Content-based validation (magic bytes) + pixel cap + re-encode.
+            # The Content-Type header alone is spoofable: a PHP shell sent as
+            # image/jpeg was previously stored as exercise_N_xxxx.php.
+            from training_platform.file_security import process_uploaded_image
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            try:
+                safe_file, img_ext = process_uploaded_image(image_file, max_bytes=5 * 1024 * 1024)
+            except DjangoValidationError as e:
                 return Response(
-                    {'error': f'Invalid file type. Allowed types: {", ".join(allowed_types)}'},
+                    {'error': e.messages[0] if getattr(e, 'messages', None) else str(e)},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Validate file size (5MB limit)
-            if image_file.size > 5 * 1024 * 1024:
-                return Response(
-                    {'error': 'File size too large. Maximum size is 5MB'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Update exercise image
-            exercise.image = image_file
+            # Store under the DETECTED format's extension, never the client filename.
+            exercise.image.save(f"exercise.{img_ext}", safe_file, save=False)
             exercise.save()
 
             # Return the updated exercise info
@@ -1752,6 +2073,11 @@ class ExerciseImageUploadView(APIView):
                 }
             }, status=status.HTTP_200_OK)
 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             return Response(
                 {'error': f'Upload failed: {str(e)}'},
@@ -1770,16 +2096,28 @@ class ExerciseImageUploadView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # Check if user has permission to modify this exercise
-            if not exercise.is_global and exercise.created_by != request.user:
+            # Check if user has permission to modify this exercise.
+            # Global exercises belong to the shared catalog: admin-only. The old
+            # guard was `not is_global and created_by != user`, which short-circuits
+            # to False for global exercises, leaving them writable by ANY user.
+            _is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
+            if exercise.created_by_id:
+                # Owned exercise: the creator (or an admin) may modify it. Keyed on
+                # ownership rather than is_global, because the "created_by => not
+                # global" invariant lives only in Exercise.clean(), which .create()
+                # never runs — so an owned row can still carry is_global=True.
+                allowed = (exercise.created_by_id == request.user.id) or _is_admin
+            else:
+                # No owner => shared global catalog => admin only.
+                allowed = _is_admin
+            if not allowed:
                 return Response(
                     {'error': 'You do not have permission to modify this exercise'},
                     status=status.HTTP_403_FORBIDDEN
                 )
 
             if exercise.image:
-                # Delete the file from storage
-                exercise.image.delete(save=False)
+                # See users/views.py: the post-commit receiver owns file removal.
                 exercise.image = None
                 exercise.save()
                 
@@ -1791,6 +2129,11 @@ class ExerciseImageUploadView(APIView):
                     'message': _('No image to remove')
                 }, status=status.HTTP_404_NOT_FOUND)
                 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             return Response(
                 {'error': f'Failed to remove exercise image: {str(e)}'},
@@ -1844,8 +2187,21 @@ class ExerciseAddMediaView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # Check if user has permission to modify this exercise
-            if not exercise.is_global and exercise.created_by != request.user:
+            # Check if user has permission to modify this exercise.
+            # Global exercises belong to the shared catalog: admin-only. The old
+            # guard was `not is_global and created_by != user`, which short-circuits
+            # to False for global exercises, leaving them writable by ANY user.
+            _is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
+            if exercise.created_by_id:
+                # Owned exercise: the creator (or an admin) may modify it. Keyed on
+                # ownership rather than is_global, because the "created_by => not
+                # global" invariant lives only in Exercise.clean(), which .create()
+                # never runs — so an owned row can still carry is_global=True.
+                allowed = (exercise.created_by_id == request.user.id) or _is_admin
+            else:
+                # No owner => shared global catalog => admin only.
+                allowed = _is_admin
+            if not allowed:
                 return Response(
                     {'error': 'You do not have permission to modify this exercise'},
                     status=status.HTTP_403_FORBIDDEN
@@ -1924,6 +2280,11 @@ class ExerciseAddMediaView(APIView):
             else:
                 return Response(response_data, status=status.HTTP_201_CREATED)
 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             return Response(
                 {'error': f'Failed to add media: {str(e)}'},
@@ -1964,6 +2325,11 @@ class ExerciseAddMediaView(APIView):
                 'media_items': media_data
             }, status=status.HTTP_200_OK)
 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             return Response(
                 {'error': f'Failed to get media: {str(e)}'},
@@ -1982,8 +2348,21 @@ class ExerciseAddMediaView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # Check if user has permission to modify this exercise
-            if not exercise.is_global and exercise.created_by != request.user:
+            # Check if user has permission to modify this exercise.
+            # Global exercises belong to the shared catalog: admin-only. The old
+            # guard was `not is_global and created_by != user`, which short-circuits
+            # to False for global exercises, leaving them writable by ANY user.
+            _is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
+            if exercise.created_by_id:
+                # Owned exercise: the creator (or an admin) may modify it. Keyed on
+                # ownership rather than is_global, because the "created_by => not
+                # global" invariant lives only in Exercise.clean(), which .create()
+                # never runs — so an owned row can still carry is_global=True.
+                allowed = (exercise.created_by_id == request.user.id) or _is_admin
+            else:
+                # No owner => shared global catalog => admin only.
+                allowed = _is_admin
+            if not allowed:
                 return Response(
                     {'error': 'You do not have permission to modify this exercise'},
                     status=status.HTTP_403_FORBIDDEN
@@ -2026,6 +2405,11 @@ class ExerciseAddMediaView(APIView):
             else:
                 return Response(response_data, status=status.HTTP_200_OK)
 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             return Response(
                 {'error': f'Failed to delete media: {str(e)}'},

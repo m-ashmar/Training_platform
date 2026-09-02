@@ -29,16 +29,17 @@ class SubscriptionFeatureSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
 class PaymentSerializer(serializers.ModelSerializer):
-    """Serializer for payments"""
-    
+    """Read-only serializer for payments. Business/state fields are never client-writable;
+    payment state is owned exclusively by PaymentService."""
+
     class Meta:
         model = Payment
         fields = [
             'id', 'subscription', 'amount', 'currency', 'status',
             'payment_method', 'transaction_id', 'payment_intent_id',
-            'description', 'metadata', 'created_at'
+            'invoice_number', 'description', 'metadata', 'created_at'
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = fields
 
 class SubscriptionUsageSerializer(serializers.ModelSerializer):
     """Serializer for subscription usage tracking"""

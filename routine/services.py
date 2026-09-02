@@ -5,7 +5,8 @@ def send_notification(user, notif_type, message, related_object=None):
     Service function to create a notification for a user asynchronously.
     Args:
         user: CustomUser instance (recipient)
-        notif_type: str (see Notification.NOTIF_TYPE_CHOICES)
+        notif_type: str — must be a key of notifications.channels.fcm.EVENT_CLASS_REGISTRY,
+            which is also what GET /api/notifications/event-types/ returns
         message: str (notification message)
         related_object: Optional model instance (Routine, WorkoutSession, etc.)
     Returns:

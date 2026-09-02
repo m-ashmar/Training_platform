@@ -82,7 +82,7 @@ class UserGoalSerializer(serializers.ModelSerializer):
         """Calculate days remaining to target date"""
         if obj.target_date and obj.status == 'active':
             from django.utils import timezone
-            today = timezone.now().date()
+            today = timezone.localdate()
             delta = obj.target_date - today
             return delta.days if delta.days > 0 else 0
         return None

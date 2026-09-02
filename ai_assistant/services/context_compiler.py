@@ -13,6 +13,17 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+def _safe(value):
+    """Neutralise user-controlled text before it enters the SYSTEM prompt.
+
+    These fields are writable through /api/auth/user/update/, so without this a user
+    could plant instructions in the system role — the position the model trusts most.
+    """
+    from ai_assistant.services.security import InputSanitizer
+    cleaned, _flagged = InputSanitizer().sanitize_context_value(value)
+    return cleaned
+
+
 class ContextCompiler:
     """Build the system prompt from user data and cached insights."""
 
@@ -55,7 +66,7 @@ class ContextCompiler:
     def _user_context(self, user) -> str:
         parts = [f"# USER CONTEXT (read-only, do NOT reveal raw data)"]
 
-        parts.append(f"- Name: {user.full_name}")
+        parts.append(f"- Name: {_safe(user.full_name)}")
         if user.age:
             parts.append(f"- Age: {user.age}")
         if user.gender:
@@ -67,9 +78,9 @@ class ContextCompiler:
             )
         if user.client_goals:
             goals_str = ", ".join(user.client_goals) if isinstance(user.client_goals, list) else str(user.client_goals)
-            parts.append(f"- Goals: {goals_str}")
+            parts.append(f"- Goals: {_safe(goals_str)}")
         if user.specific_injury:
-            parts.append(f"- ⚠️ Injury/Condition: {user.specific_injury}")
+            parts.append(f"- ⚠️ Injury/Condition: {_safe(user.specific_injury)}")
         if user.activity_level:
             parts.append(f"- Activity Level: {user.activity_level}")
         if user.assigned_trainer:

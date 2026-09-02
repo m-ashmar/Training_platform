@@ -41,6 +41,15 @@ EVENT_CLASS_REGISTRY = {
     'client_request_rejected': 'notifications.domain.trainer_client_events.ClientRequestRejectedEvent',
     'client_request_cancelled': 'notifications.domain.trainer_client_events.ClientRequestCancelledEvent',
     'client_unassigned_trainer': 'notifications.domain.trainer_client_events.ClientUnassignedTrainerEvent',
+    # Routine events. These keys are the notif_type strings passed to
+    # routine.services.send_notification(); routine.models.Notification was dropped
+    # (migration 0013), so there is no model to match against any more.
+    # which routine.services.send_notification passes through as event_type).
+    'routine_assignment': 'notifications.domain.routine_events.RoutineAssignmentEvent',
+    'session_reminder': 'notifications.domain.routine_events.SessionReminderEvent',
+    'session_completed': 'notifications.domain.routine_events.SessionCompletedEvent',
+    'progress_milestone': 'notifications.domain.routine_events.ProgressMilestoneEvent',
+    'custom': 'notifications.domain.routine_events.CustomRoutineNotificationEvent',
 }
 
 
@@ -128,7 +137,9 @@ class FCMChannel:
                 if total_failure > 0:
                     fcm_failed_total.labels(event_type=notification.event_type, error_code='mixed').inc(total_failure)
             except ImportError:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
             # Atomic update of notification status
             with transaction.atomic():
@@ -184,7 +195,9 @@ class FCMChannel:
                     from notifications.metrics import invalid_tokens_total
                     invalid_tokens_total.labels(platform='android').inc(len(invalid_tokens))
                 except ImportError:
-                    pass
+                    # Optional side effect: swallowing this silently is what made the
+                    # surrounding failures invisible in logs. Control flow is unchanged.
+                    logger.debug('suppressed non-fatal error', exc_info=True)
 
             return response.success_count, response.failure_count, success_tokens
 

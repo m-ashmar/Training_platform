@@ -8,6 +8,9 @@ from django.db.models import Sum
 from django.contrib import messages
 from modeltranslation.admin import TranslationAdmin
 import matplotlib
+import logging
+
+logger = logging.getLogger(__name__)
 matplotlib.use('Agg')
 
 class ExerciseMediaInline(admin.TabularInline):
@@ -96,10 +99,10 @@ class RoutineProgressAdmin(admin.ModelAdmin):
             import base64
             qs = self.get_queryset(request)
             data = qs.values_list('status', flat=True)
-            completed = sum(1 for s in data if s == 'Completed')
-            in_progress = sum(1 for s in data if s == 'In Progress')
-            not_started = sum(1 for s in data if s == 'Not Started')
-            skipped = sum(1 for s in data if s == 'Skipped')
+            completed = sum(1 for s in data if s == 'completed')
+            in_progress = sum(1 for s in data if s == 'in_progress')
+            not_started = sum(1 for s in data if s == 'not_started')
+            skipped = sum(1 for s in data if s == 'skipped')
             labels = ['Completed', 'In Progress', 'Not Started', 'Skipped']
             values = [completed, in_progress, not_started, skipped]
             fig, ax = plt.subplots()
@@ -114,7 +117,9 @@ class RoutineProgressAdmin(admin.ModelAdmin):
             extra_context = extra_context or {}
             extra_context['chart'] = image_base64
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         return super().changelist_view(request, extra_context=extra_context)
 
     def completion_percentage(self, obj):

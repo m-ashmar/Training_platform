@@ -6,9 +6,9 @@ from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework import status
+from rest_framework import status, generics
 from django.utils.translation import gettext as _
-from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditLog, IdempotencyKey, move_funds_atomic
+from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditLog, IdempotencyKey, move_funds_atomic, ensure_agent_profile
 from .serializers import (
     WalletSerializer,
     TransactionSerializer,
@@ -22,11 +22,11 @@ from .security import (
     parse_agent_auth_header,
     verify_hmac_signature,
     is_fresh_timestamp,
-    compute_hmac_signature,
+    decrypt_secret,
+    encrypt_secret,
 )
 from .throttles import ChargingRateThrottle
 import uuid
-import time
 
 
 User = get_user_model()
@@ -44,23 +44,64 @@ def audit(event_type: str, request, payload: dict):
     )
 
 
+def _topup_limit_error(agent_profile, actor, amount, request):
+    """
+    Enforce agent daily/monthly top-up caps FAIL-CLOSED. A limit of 0 means
+    "no top-ups permitted", not unlimited. Returns a Response on breach, else None.
+    """
+    today = timezone.localdate()
+    month_start = today.replace(day=1)
+    day_total = Transaction.objects.filter(actor=actor, tx_type="topup", created_at__date=today).aggregate(Sum("amount"))["amount__sum"] or 0
+    month_total = Transaction.objects.filter(actor=actor, tx_type="topup", created_at__date__gte=month_start).aggregate(Sum("amount"))["amount__sum"] or 0
+    if day_total + amount > agent_profile.daily_limit:
+        audit("wallet.topup.limit_block", request, {"scope": "daily", "attempt": float(amount), "used": float(day_total)})
+        return Response({"error": _("Daily limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+    if month_total + amount > agent_profile.monthly_limit:
+        audit("wallet.topup.limit_block", request, {"scope": "monthly", "attempt": float(amount), "used": float(month_total)})
+        return Response({"error": _("Monthly limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+    return None
+
+
 class WalletBalanceView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        wallet, _ = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": getattr(request.user, "user_type", "client")})
+        wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": getattr(request.user, "user_type", "client")})
         audit("wallet.balance.view", request, {"wallet_id": wallet.id})
         return Response(WalletSerializer(wallet).data)
 
 
-class WalletTransactionsView(APIView):
-    permission_classes = [IsAuthenticated]
+class WalletTransactionsView(generics.ListAPIView):
+    """Transaction history for the caller's own wallet.
 
-    def get(self, request):
-        wallet, _ = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": getattr(request.user, "user_type", "client")})
-        qs = Transaction.objects.filter(Q(source_wallet=wallet) | Q(destination_wallet=wallet)).order_by("-created_at")[:200]
-        audit("wallet.transactions.view", request, {"wallet_id": wallet.id, "count": qs.count()})
-        return Response(TransactionSerializer(qs, many=True).data)
+    Was an APIView returning a bare JSON array hard-sliced at [:200]: the only list
+    endpoint in the API without the {count, next, previous, results} envelope, and a
+    user with more than 200 transactions could never reach the older ones — there was
+    no next link and nothing said the list had been truncated. It is a financial
+    ledger; silently hiding rows is not acceptable.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = TransactionSerializer
+
+    def get_queryset(self):
+        wallet, _created = Wallet.objects.get_or_create(
+            owner=self.request.user,
+            defaults={"owner_type": getattr(self.request.user, "user_type", "client")},
+        )
+        self._wallet = wallet
+        return (
+            Transaction.objects
+            .filter(Q(source_wallet=wallet) | Q(destination_wallet=wallet))
+            .select_related("source_wallet", "destination_wallet")
+            .order_by("-created_at", "-id")  # total order: -created_at alone repeats rows across pages
+        )
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        # Audit the access, not the row count: counting used to run a second COUNT
+        # query over the whole ledger on every view.
+        audit("wallet.transactions.view", request, {"wallet_id": self._wallet.id})
+        return response
 
 
 class AgentTopUpView(APIView):
@@ -90,11 +131,34 @@ class AgentTopUpView(APIView):
             audit("wallet.topup.denied_ip", request, {"ip": ip})
             return Response({"error": _("IP not allowed")}, status=status.HTTP_403_FORBIDDEN)
 
+        # Verify HMAC against the RAW secret (recovered from encrypted storage) —
+        # never against the stored digest, which would itself be a bearer signer.
+        raw_secret = decrypt_secret(api_key.secret_ciphertext) if api_key.secret_ciphertext else None
         message = f"{serializer.validated_data['client_identifier']}|{serializer.validated_data['amount']}|{serializer.validated_data['timestamp']}|{serializer.validated_data['idempotency_key']}"
-        if not verify_hmac_signature(api_key.hashed_key, message, parsed.signature):
+        if not raw_secret or not verify_hmac_signature(raw_secret, message, parsed.signature):
             audit("wallet.topup.auth_failed", request, {"reason": "bad_signature"})
             return Response({"error": _("Signature verification failed")}, status=status.HTTP_401_UNAUTHORIZED)
 
+        # --- Pre-side-effect validation (runs BEFORE reserving the idempotency
+        #     key, so a validation failure never permanently bricks retries) ---
+        ident = serializer.validated_data["client_identifier"]
+        if ident.isdigit():
+            client = get_object_or_404(User, id=int(ident))
+        else:
+            client = get_object_or_404(User, email=ident)
+        if getattr(client, "user_type", None) != "client":
+            return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
+
+        agent_profile = ensure_agent_profile(request.user)
+        if agent_profile.status != "active":
+            return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
+
+        amount = serializer.validated_data["amount"]
+        limit_error = _topup_limit_error(agent_profile, request.user, amount, request)
+        if limit_error:
+            return limit_error
+
+        # --- Reserve idempotency key only after validation passes ---
         idem_key = serializer.validated_data["idempotency_key"]
         idem, created = IdempotencyKey.objects.get_or_create(key=idem_key, defaults={"request_hash": parsed.signature, "created_by": request.user})
         if not created:
@@ -103,41 +167,7 @@ class AgentTopUpView(APIView):
                 return Response(idem.response_snapshot, status=status.HTTP_200_OK)
             return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
-        ident = serializer.validated_data["client_identifier"]
-        client = None
-        if ident.isdigit():
-            client = get_object_or_404(User, id=int(ident))
-        else:
-            client = get_object_or_404(User, email=ident)
-        if getattr(client, "user_type", None) != "client":
-            return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
-
-        client_wallet, _ = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
-
-        agent_profile, _ = AgentProfile.objects.get_or_create(
-            user=request.user,
-            defaults={
-                "wallet_type": "prepaid",
-                "status": "active",
-                "daily_limit": 0,
-                "monthly_limit": 0,
-            },
-        )
-        if agent_profile.status != "active":
-            return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
-
-        amount = serializer.validated_data["amount"]
-        today = timezone.now().date()
-        month_start = today.replace(day=1)
-        day_total = Transaction.objects.filter(actor=request.user, tx_type="topup", created_at__date=today).aggregate(Sum("amount"))["amount__sum"] or 0
-        month_total = Transaction.objects.filter(actor=request.user, tx_type="topup", created_at__date__gte=month_start).aggregate(Sum("amount"))["amount__sum"] or 0
-        if agent_profile.daily_limit and day_total + amount > agent_profile.daily_limit:
-            audit("wallet.topup.limit_block", request, {"scope": "daily", "attempt": float(amount), "used": float(day_total)})
-            return Response({"error": _("Daily limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-        if agent_profile.monthly_limit and month_total + amount > agent_profile.monthly_limit:
-            audit("wallet.topup.limit_block", request, {"scope": "monthly", "attempt": float(amount), "used": float(month_total)})
-            return Response({"error": _("Monthly limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
+        client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
         tx = move_funds_atomic(
             None,
             client_wallet,
@@ -165,6 +195,12 @@ class ClientTransferToTrainerView(APIView):
         serializer = TransferRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        # --- Pre-side-effect validation before reserving the idempotency key ---
+        if getattr(request.user, "user_type", None) != "client":
+            return Response({"error": _("Only clients can initiate transfers")}, status=status.HTTP_403_FORBIDDEN)
+
+        trainer = get_object_or_404(User, id=serializer.validated_data["trainer_id"], user_type="trainer")
+
         idem_key = serializer.validated_data["idempotency_key"]
         idem, created = IdempotencyKey.objects.get_or_create(key=idem_key, defaults={"request_hash": idem_key, "created_by": request.user})
         if not created:
@@ -173,15 +209,16 @@ class ClientTransferToTrainerView(APIView):
                 return Response(idem.response_snapshot, status=status.HTTP_200_OK)
             return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
-        if getattr(request.user, "user_type", None) != "client":
-            return Response({"error": _("Only clients can initiate transfers")}, status=status.HTTP_403_FORBIDDEN)
-
-        trainer = get_object_or_404(User, id=serializer.validated_data["trainer_id"], user_type="trainer")
-        client_wallet, _ = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
-        trainer_wallet, _ = Wallet.objects.get_or_create(owner=trainer, defaults={"owner_type": "trainer"})
+        client_wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
+        trainer_wallet, _created = Wallet.objects.get_or_create(owner=trainer, defaults={"owner_type": "trainer"})
 
         amount = serializer.validated_data["amount"]
-        tx = move_funds_atomic(client_wallet, trainer_wallet, amount, actor_id=request.user.id, tx_type="transfer", metadata={"trainer_id": trainer.id})
+        try:
+            tx = move_funds_atomic(client_wallet, trainer_wallet, amount, actor_id=request.user.id, tx_type="transfer", metadata={"trainer_id": trainer.id})
+        except ValueError as e:
+            # No funds moved (atomic rollback) — release the key so the caller can retry.
+            idem.delete()
+            return Response({"error": _("Request could not be completed.")}, status=status.HTTP_400_BAD_REQUEST)
         client_wallet.refresh_from_db()
         trainer_wallet.refresh_from_db()
         resp = {"reference_id": tx.reference_id, "client_balance": str(client_wallet.balance), "trainer_balance": str(trainer_wallet.balance)}
@@ -200,6 +237,13 @@ class AdminReversalView(APIView):
         serializer = ReversalRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        # --- Pre-side-effect validation before reserving the idempotency key ---
+        original = get_object_or_404(Transaction, reference_id=serializer.validated_data["reference_id"])
+
+        # Guard: a transaction may be reversed at most once, regardless of idempotency key.
+        if Transaction.objects.filter(tx_type="reversal", metadata__original_reference=original.reference_id).exists():
+            return Response({"error": _("Transaction has already been reversed")}, status=status.HTTP_409_CONFLICT)
+
         idem_key = serializer.validated_data["idempotency_key"]
         idem, created = IdempotencyKey.objects.get_or_create(key=idem_key, defaults={"request_hash": idem_key, "created_by": request.user})
         if not created:
@@ -208,8 +252,11 @@ class AdminReversalView(APIView):
                 return Response(idem.response_snapshot, status=status.HTTP_200_OK)
             return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
-        original = get_object_or_404(Transaction, reference_id=serializer.validated_data["reference_id"])
-        tx = move_funds_atomic(original.destination_wallet, original.source_wallet, original.amount, actor_id=request.user.id, tx_type="reversal", metadata={"original_reference": original.reference_id, "reason": serializer.validated_data.get("reason", "")})
+        try:
+            tx = move_funds_atomic(original.destination_wallet, original.source_wallet, original.amount, actor_id=request.user.id, tx_type="reversal", metadata={"original_reference": original.reference_id, "reason": serializer.validated_data.get("reason", "")})
+        except ValueError as e:
+            idem.delete()
+            return Response({"error": _("Request could not be completed.")}, status=status.HTTP_400_BAD_REQUEST)
         resp = {"reference_id": tx.reference_id}
         idem.processed = True
         idem.response_snapshot = resp
@@ -228,19 +275,11 @@ class AgentApiKeyCreateView(APIView):
         The SHA-256 hash of the secret is stored in DB for HMAC verification.
         """
         import hashlib
-        agent_profile, _ = AgentProfile.objects.get_or_create(
-            user=request.user,
-            defaults={
-                "wallet_type": "prepaid",
-                "status": "active",
-                "daily_limit": 0,
-                "monthly_limit": 0,
-            },
-        )
+        agent_profile = ensure_agent_profile(request.user)
         key_id = uuid.uuid4().hex[:16]
         # Generate high-entropy secret (64 hex chars = 256 bits)
         secret = uuid.uuid4().hex + uuid.uuid4().hex
-        # Store only the SHA-256 hash — the raw secret is NEVER persisted
+        # Non-signing lookup/compat digest; the raw secret is stored encrypted (Fernet).
         hashed_key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
         # Deactivate any existing active keys (single active key policy)
@@ -249,7 +288,10 @@ class AgentApiKeyCreateView(APIView):
             AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).update(is_active=False)
             audit("wallet.agent.apikey.rotated", request, {"deactivated": prev_ids})
 
-        AgentAPIKey.objects.create(agent=agent_profile, key_id=key_id, hashed_key=hashed_key, is_active=True)
+        AgentAPIKey.objects.create(
+            agent=agent_profile, key_id=key_id, hashed_key=hashed_key,
+            secret_ciphertext=encrypt_secret(secret), is_active=True,
+        )
         audit("wallet.agent.apikey.create", request, {"key_id": key_id})
         # Return secret ONCE — client must store it securely
         return Response({"key_id": key_id, "secret": secret}, status=status.HTTP_201_CREATED)
@@ -263,15 +305,7 @@ class AgentApiKeyStatusView(APIView):
     permission_classes = [IsAuthenticated, IsAgent]
 
     def get(self, request):
-        agent_profile, _ = AgentProfile.objects.get_or_create(
-            user=request.user,
-            defaults={
-                "wallet_type": "prepaid",
-                "status": "active",
-                "daily_limit": 0,
-                "monthly_limit": 0,
-            },
-        )
+        agent_profile = ensure_agent_profile(request.user)
         has_active = AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).exists()
         return Response({"has_active": has_active})
 
@@ -285,23 +319,18 @@ class AgentApiKeyEnsureView(APIView):
 
     def post(self, request):
         import hashlib
-        agent_profile, _ = AgentProfile.objects.get_or_create(
-            user=request.user,
-            defaults={
-                "wallet_type": "prepaid",
-                "status": "active",
-                "daily_limit": 0,
-                "monthly_limit": 0,
-            },
-        )
+        agent_profile = ensure_agent_profile(request.user)
         api_key = AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).order_by("-created_at").first()
         if api_key:
             return Response({"created": False})
-        # Create without returning secret (kept server-side only)
+        # Create without returning secret (kept server-side only, encrypted at rest)
         key_id = uuid.uuid4().hex[:16]
         secret = uuid.uuid4().hex + uuid.uuid4().hex
         hashed_key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
-        AgentAPIKey.objects.create(agent=agent_profile, key_id=key_id, hashed_key=hashed_key, is_active=True)
+        AgentAPIKey.objects.create(
+            agent=agent_profile, key_id=key_id, hashed_key=hashed_key,
+            secret_ciphertext=encrypt_secret(secret), is_active=True,
+        )
         audit("wallet.agent.apikey.ensure", request, {"key_id": key_id})
         return Response({"created": True}, status=status.HTTP_201_CREATED)
 
@@ -317,46 +346,21 @@ class AgentTopUpProxyView(APIView):
         serializer = AgentTopUpProxyRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # Lookup or ensure agent profile
-        agent_profile, _ = AgentProfile.objects.get_or_create(
-            user=request.user,
-            defaults={
-                "wallet_type": "prepaid",
-                "status": "active",
-                "daily_limit": 0,
-                "monthly_limit": 0,
-            },
-        )
+        # JWT + IsAgent is the SOLE authentication control for the mobile agent
+        # flow, by design: the signing secret stays server-side and is never placed
+        # on the device. No client-supplied HMAC is involved here (previously this
+        # endpoint self-signed a request and never verified it — that dead code is
+        # removed). Security rests on JWT auth, agent status, the fail-closed
+        # top-up caps, and idempotency.
+        agent_profile = ensure_agent_profile(request.user)
         if agent_profile.status != "active":
             return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
-
-        # Use latest active API key for this agent
-        api_key = AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).order_by("-created_at").first()
-        if not api_key:
-            return Response({"error": _("No active API key")}, status=status.HTTP_400_BAD_REQUEST)
 
         client_identifier = serializer.validated_data["client_identifier"]
         amount = serializer.validated_data["amount"]
         idempotency_key = serializer.validated_data["idempotency_key"]
-        ts = int(time.time())
 
-        # Build message and compute signature server-side
-        message = f"{client_identifier}|{amount}|{ts}|{idempotency_key}"
-        signature = compute_hmac_signature(api_key.hashed_key, message)
-
-        # Now execute the same logic as AgentTopUpView, but with server-built header/fields
-        # Check idempotency first
-        idem, created = IdempotencyKey.objects.get_or_create(
-            key=idempotency_key,
-            defaults={"request_hash": signature, "created_by": request.user},
-        )
-        if not created:
-            if idem.processed and idem.response_snapshot:
-                audit("wallet.topup.idempotent_hit", request, {"key": idempotency_key})
-                return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
-
-        # Resolve client by id or email
+        # --- Pre-side-effect validation before reserving the idempotency key ---
         if str(client_identifier).isdigit():
             client = get_object_or_404(User, id=int(client_identifier))
         else:
@@ -364,21 +368,22 @@ class AgentTopUpProxyView(APIView):
         if getattr(client, "user_type", None) != "client":
             return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
 
-        client_wallet, _ = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
+        limit_error = _topup_limit_error(agent_profile, request.user, amount, request)
+        if limit_error:
+            return limit_error
 
-        # Limits
-        today = timezone.now().date()
-        month_start = today.replace(day=1)
-        day_total = Transaction.objects.filter(actor=request.user, tx_type="topup", created_at__date=today).aggregate(Sum("amount"))["amount__sum"] or 0
-        month_total = Transaction.objects.filter(actor=request.user, tx_type="topup", created_at__date__gte=month_start).aggregate(Sum("amount"))["amount__sum"] or 0
-        if agent_profile.daily_limit and day_total + amount > agent_profile.daily_limit:
-            audit("wallet.topup.limit_block", request, {"scope": "daily", "attempt": float(amount), "used": float(day_total)})
-            return Response({"error": _("Daily limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-        if agent_profile.monthly_limit and month_total + amount > agent_profile.monthly_limit:
-            audit("wallet.topup.limit_block", request, {"scope": "monthly", "attempt": float(amount), "used": float(month_total)})
-            return Response({"error": _("Monthly limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        # --- Reserve idempotency key only after validation passes ---
+        idem, created = IdempotencyKey.objects.get_or_create(
+            key=idempotency_key,
+            defaults={"request_hash": idempotency_key, "created_by": request.user},
+        )
+        if not created:
+            if idem.processed and idem.response_snapshot:
+                audit("wallet.topup.idempotent_hit", request, {"key": idempotency_key})
+                return Response(idem.response_snapshot, status=status.HTTP_200_OK)
+            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
-        # Move funds
+        client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
         tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id, tx_type="topup", metadata={"agent_id": request.user.id})
         client_wallet.refresh_from_db()
         resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance)}
@@ -387,7 +392,6 @@ class AgentTopUpProxyView(APIView):
         idem.response_snapshot = resp
         idem.save(update_fields=["processed", "response_snapshot"])
 
-        # Audit success and return
         audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount)})
         return Response(resp, status=status.HTTP_200_OK)
 
@@ -408,8 +412,14 @@ class AdminAuditExportView(APIView):
             qs = qs.filter(actor_id=agent_id)
         if user_id:
             qs = qs.filter(actor_id=user_id)
-        data = list(qs.values("event_type", "actor_id", "ip_address", "request_id", "path", "payload", "created_at")[:10000])
-        return Response({"count": len(data), "results": data})
+        data = list(qs.values("event_type", "actor_id", "ip_address", "request_id", "path", "payload", "created_at", "prev_hash", "entry_hash")[:10000])
+        resp = {"count": len(data), "results": data}
+        # Optional integrity check of the full chain: ?verify=1
+        if request.query_params.get("verify") in ("1", "true", "True"):
+            is_valid, first_bad_id = WalletAuditLog.verify_chain()
+            resp["chain_valid"] = is_valid
+            resp["first_tampered_id"] = first_bad_id
+        return Response(resp)
 
 
 class AdminSuspiciousActivityView(APIView):

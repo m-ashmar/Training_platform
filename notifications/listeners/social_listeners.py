@@ -1,4 +1,10 @@
 """
+CONTRACT: the `type` key in every FCM `data` payload must be the notification's
+`event_type` verbatim — the same value `GET /api/notifications/event-types/` lists and
+the same value stored on the Notification row. Four of these sent a short alias instead
+(`like`, `comment`, `follow`, `achievement`), so a client routing on `data.type` needed a
+second, undocumented vocabulary that no endpoint exposed.
+
 notifications/listeners/social_listeners.py — Handlers for social domain events.
 
 Each listener passes **context-only metadata** to NotificationService.
@@ -31,7 +37,7 @@ def handle_post_liked(event: PostLikedEvent):
 
         metadata = {
             'context': {'actor': actor.username},
-            'data': {'type': 'like', 'post_id': event.target_post_id}
+            'data': {'type': 'post_liked', 'post_id': event.target_post_id}
         }
         
         NotificationService.create_and_send(
@@ -61,7 +67,7 @@ def handle_comment_created(event: CommentCreatedEvent):
                 'actor': actor.username,
                 'preview': event.comment_text[:30] + '...' if len(event.comment_text) > 30 else event.comment_text,
             },
-            'data': {'type': 'comment', 'post_id': event.target_post_id, 'comment_id': event.comment_id}
+            'data': {'type': 'comment_created', 'post_id': event.target_post_id, 'comment_id': event.comment_id}
         }
         
         NotificationService.create_and_send(
@@ -73,7 +79,9 @@ def handle_comment_created(event: CommentCreatedEvent):
             event_id=event.event_id
         )
     except User.DoesNotExist:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
     except Exception as e:
         logger.error(f"Error handling CommentCreatedEvent: {e}", exc_info=True)
 
@@ -85,7 +93,7 @@ def handle_user_followed(event: UserFollowedEvent):
         
         metadata = {
             'context': {'actor': actor.username},
-            'data': {'type': 'follow', 'follower_id': actor.id}
+            'data': {'type': 'user_followed', 'follower_id': actor.id}
         }
         
         NotificationService.create_and_send(
@@ -109,7 +117,7 @@ def handle_achievement_awarded(event: AchievementAwardedEvent):
                 'name': event.achievement_name,
                 'points': str(event.points),
             },
-            'data': {'type': 'achievement', 'achievement_id': event.achievement_id}
+            'data': {'type': 'achievement_awarded', 'achievement_id': event.achievement_id}
         }
         
         NotificationService.create_and_send(

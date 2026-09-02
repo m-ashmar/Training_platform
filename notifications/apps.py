@@ -18,22 +18,27 @@ class NotificationsConfig(AppConfig):
             import notifications.listeners.social_listeners
             import notifications.listeners.trainer_client_listeners
         except ImportError:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
         # Security Check: Initialize Firebase
         self._initialize_firebase()
 
     def _initialize_firebase(self):
-        if hasattr(settings, 'FIREBASE_CREDENTIALS_PATH'):
-            cred_path = settings.FIREBASE_CREDENTIALS_PATH
-        else:
-            # Fallback (or raise error if strict)
-            cred_path = os.path.join(settings.BASE_DIR, 'yalla-gym-f6a67-firebase-adminsdk-fbsvc-fb99d3a33f.json')
-        
+        cred_path = getattr(settings, 'FIREBASE_CREDENTIALS_PATH', '') or ''
+
+        # Not configured → Firebase is an OPTIONAL integration: disable push and
+        # continue booting (matches deploy-pipeline.md). Do NOT crash the app.
+        if not cred_path:
+            logger.warning("FIREBASE_CREDENTIALS_PATH not set — push notifications disabled.")
+            return
+
+        # Configured but the file is missing → a real misconfiguration (they
+        # intended Firebase but it's wrong): fail closed in production.
         if not os.path.exists(cred_path):
-            error_msg = f"CRITICAL: Firebase credentials not found at {cred_path}. Notifications will fail."
+            error_msg = f"Firebase credentials path is set but not found at {cred_path}."
             logger.critical(error_msg)
-            # In production, this should likely crash the app
             if not settings.DEBUG:
                 raise ImproperlyConfigured(error_msg)
             return

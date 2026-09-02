@@ -3,6 +3,9 @@ from __future__ import annotations
 from ..models import DietPlan, MealComponent, FoodItem
 from ..utils.logging_utils import log_day_macros
 from ..utils.nutrition import get_macro_ratios, dominant_macro_of_food, macro_per_gram
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class MacroBalancer:
@@ -31,7 +34,9 @@ class MacroBalancer:
             try:
                 log_day_macros('macro_balance_before', diet_plan, d)
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             # Multipass convergence (max 3 passes)
             for _ in range(3):
                 totals = diet_plan.calculate_daily_nutrition(d)
@@ -64,7 +69,9 @@ class MacroBalancer:
             try:
                 log_day_macros('macro_balance_after', diet_plan, d)
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
     def _adjust_macro_for_day(self, diet_plan: DietPlan, day, macro: str, needed_delta_g: float) -> None:
         """

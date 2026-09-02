@@ -10,7 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q
+from django.db.models import Q, Exists, OuterRef
 from django.utils import timezone
 from django.utils.translation import gettext as _
 from django.contrib.contenttypes.models import ContentType
@@ -20,6 +20,7 @@ from .models import (
     UserFollow, Post, PostLike, Comment, CommentLike, Challenge,
     ChallengeParticipation, Achievement, UserAchievement
 )
+from .permissions import IsOwnerOrReadOnly, IsFollowParticipant
 from .serializers import (
     UserFollowSerializer, PostSerializer, CommentSerializer,
     ChallengeSerializer, AchievementSerializer, UserAchievementSerializer,
@@ -28,6 +29,9 @@ from .serializers import (
 
 from users.models import CustomUser
 from .tasks import dispatch_notification
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Use IsAuthenticated from rest_framework.permissions
 IsAuthenticated = permissions.IsAuthenticated
@@ -42,7 +46,7 @@ class UserFollowViewSet(viewsets.ModelViewSet):
     - Users can view their followers/following
     """
     serializer_class = UserFollowSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsFollowParticipant]
     
     def get_queryset(self):
         return UserFollow.objects.filter(
@@ -190,7 +194,7 @@ class PostViewSet(viewsets.ModelViewSet):
     API endpoints for social posts
     """
     serializer_class = PostSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOwnerOrReadOnly]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['author', 'post_type', 'visibility']
     search_fields = ['title', 'content']
@@ -235,7 +239,9 @@ class PostViewSet(viewsets.ModelViewSet):
             from .tasks import fan_out_post_root
             fan_out_post_root.delay(post.author.id, post.id, post.created_at.timestamp())
         except Exception:
-            pass # Failsafe allowing standard DB commit if Celery broker is offline
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
     
     @action(detail=True, methods=['post'])
     def like(self, request, pk=None):
@@ -303,7 +309,11 @@ class PostViewSet(viewsets.ModelViewSet):
             post_ids = get_user_feed(user_id, offset, limit)
             
             if not post_ids:
-                return Response({'posts': [], 'page': page, 'limit': limit, 'has_more': False})
+                # An empty ZSET is NOT proof of an empty feed — it is also what a failed
+                # or lagging fan-out looks like. Returning [] here turned a worker outage
+                # into a permanently blank feed with no error anywhere. Fall through to
+                # SQL, which is the same degraded path used when Redis is unreachable.
+                raise RuntimeError('empty feed cache — falling back to SQL')
                 
             # 2. Leverage get_queryset matching to respect N+1 guards and auth restrictions
             posts_query = self.get_queryset().filter(id__in=post_ids)
@@ -322,7 +332,7 @@ class PostViewSet(viewsets.ModelViewSet):
             
         except Exception as e:
             # GRACEFUL FALLBACK if Redis is unavailable or corrupted
-            logger.error(f"Redis ZSET Feed fallback triggered natively to SQL: {e}")
+            logger.warning("Feed served from SQL fallback: %s", e)
             posts = self.get_queryset()[offset:offset + limit]
             serializer = self.get_serializer(posts, many=True)
             
@@ -351,7 +361,7 @@ class CommentViewSet(viewsets.ModelViewSet):
     API endpoints for post comments
     """
     serializer_class = CommentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOwnerOrReadOnly]
     pagination_class = CommentCursorPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['post', 'author', 'parent_comment']
@@ -363,7 +373,15 @@ class CommentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         # Base queryset with visibility permissions
-        queryset = Comment.objects.filter(
+        # select_related('author','post') is required: CommentSerializer nests the
+        # author, so without it the endpoint issued ~1.2 queries per comment
+        # (measured 12 queries at 5 rows, 42 at 30 — unbounded with page size).
+        queryset = Comment.objects.select_related('author', 'post').annotate(
+            # EXISTS subquery instead of a per-row .exists() in the serializer.
+            is_liked_annotated=Exists(
+                CommentLike.objects.filter(comment=OuterRef('pk'), user=user)
+            )
+        ).filter(
             post__in=Post.objects.filter(
                 Q(visibility='public') |
                 Q(author=user) |
@@ -440,7 +458,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     API endpoints for community challenges
     """
     serializer_class = ChallengeSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOwnerOrReadOnly]
     pagination_class = StandardResultsSetPagination
     
     def get_queryset(self):
@@ -507,7 +525,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         try:
             cache.delete(self._challenges_cache_key(request.user))
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)

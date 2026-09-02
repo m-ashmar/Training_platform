@@ -2,6 +2,9 @@
 """Django's command-line utility for administrative tasks."""
 import os
 import sys
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -11,7 +14,9 @@ def main():
         from pathlib import Path
         load_dotenv(Path(__file__).resolve().parent / '.env')
     except ImportError:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "training_platform.settings")
     try:

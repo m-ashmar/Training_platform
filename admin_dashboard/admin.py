@@ -47,11 +47,11 @@ from subscription.models import (
 )
 from social.models import (
     Post, Comment, UserFollow, Challenge, ChallengeParticipation,
-    Achievement, UserAchievement, Leaderboard, Notification
+    Achievement, UserAchievement, Leaderboard
 )
 from analytics.models import (
     UserActivity, PerformanceMetric, UserSession, UserGoal,
-    AnalyticsDashboard, PlatformMetric, ErrorLog
+    AnalyticsDashboard
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,42 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # CUSTOM ADMIN SITE CONFIGURATION
 # ============================================================================
+
+def _log_admin_action(request, obj, message):
+    """Record a bulk change in Django's admin log.
+
+    Actions that used `queryset.update()` wrote nothing to LogEntry, so a bulk
+    privilege change (e.g. verifying every trainer) left no record of who did it.
+    """
+    from django.contrib.admin.models import CHANGE, LogEntry
+    from django.contrib.contenttypes.models import ContentType
+    try:
+        LogEntry.objects.log_action(
+            user_id=request.user.pk,
+            content_type_id=ContentType.objects.get_for_model(obj.__class__).pk,
+            object_id=obj.pk, object_repr=str(obj),
+            action_flag=CHANGE, change_message=message,
+        )
+    except Exception:  # auditing must never break the action itself
+        logger.warning("Could not write an admin LogEntry for %s", obj, exc_info=True)
+
+
+def _bulk_apply(request, queryset, message, **fields):
+    """Apply field changes per row via save(), logging each one.
+
+    `queryset.update()` skips save(), every signal and every validator — so
+    activating users bypassed the state rules on CustomUser.save(), and flipping
+    Exercise visibility never bumped the cache version, leaving clients on stale data.
+    """
+    count = 0
+    for obj in queryset:
+        for k, v in fields.items():
+            setattr(obj, k, v)
+        obj.save(update_fields=list(fields) if obj.pk else None)
+        _log_admin_action(request, obj, message)
+        count += 1
+    return count
+
 
 class TrainingPlatformAdminSite(AdminSite):
     """Custom admin site for the training platform"""
@@ -109,6 +145,9 @@ admin_site = TrainingPlatformAdminSite(name='training_admin')
 class CustomUserAdmin(admin.ModelAdmin):
     """Enhanced user management with comprehensive features"""
     
+    # Without this each row re-queried assigned_trainer — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('assigned_trainer',)
     list_display = (
         'username', 'email', 'user_type', 'is_active', 'is_staff',
         'assigned_trainer', 'trainer_status', 'client_count', 'date_joined'
@@ -133,7 +172,11 @@ class CustomUserAdmin(admin.ModelAdmin):
     # Fieldsets for organized editing
     fieldsets = (
         ('Basic Information', {
-            'fields': ('username', 'email', 'phone_number', 'password')
+            # `password` is deliberately ABSENT. As a plain ModelAdmin field it rendered
+            # as a text input and wrote whatever was typed straight to the column,
+            # unhashed — locking the account out and storing the value in clear. Use
+            # the 'Send password reset' action instead.
+            'fields': ('username', 'email', 'phone_number')
         }),
         ('Personal Information', {
             'fields': (
@@ -183,29 +226,48 @@ class CustomUserAdmin(admin.ModelAdmin):
     
     # Custom actions
     def activate_users(self, request, queryset):
-        queryset.update(is_active=True)
-        self.message_user(request, f"{queryset.count()} users activated successfully.")
+        updated = _bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
+        self.message_user(request, f"{updated} record(s) updated.")
     activate_users.short_description = "Activate selected users"
     
     def deactivate_users(self, request, queryset):
-        queryset.update(is_active=False)
-        self.message_user(request, f"{queryset.count()} users deactivated successfully.")
+        updated = _bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
+        self.message_user(request, f"{updated} record(s) updated.")
     deactivate_users.short_description = "Deactivate selected users"
     
     def make_trainers_verified(self, request, queryset):
-        trainers = queryset.filter(user_type='trainer')
-        trainers.update(trainer_is_verified=True)
-        self.message_user(request, f"{trainers.count()} trainers verified successfully.")
+        updated = _bulk_apply(request, queryset, "Trainer verified via bulk admin action", trainer_is_verified=True)
+        self.message_user(request, f"{updated} record(s) updated.")
     make_trainers_verified.short_description = "Verify selected trainers"
     
     def reset_passwords(self, request, queryset):
-        from django.contrib.auth.hashers import make_password
-        default_password = "testpass123"
+        """Invalidate the current password and force a reset.
+
+        This used to set every selected account to the literal string "testpass123"
+        and print it back in the confirmation banner — a known shared credential on
+        real accounts. Now it makes the existing password unusable and records an
+        admin log entry per user; each user must go through the normal reset flow.
+        """
+        from django.contrib.admin.models import CHANGE, LogEntry
+        from django.contrib.contenttypes.models import ContentType
+
+        ct = ContentType.objects.get_for_model(queryset.model)
+        count = 0
         for user in queryset:
-            user.password = make_password(default_password)
-            user.save()
-        self.message_user(request, f"Passwords reset to '{default_password}' for {queryset.count()} users.")
-    reset_passwords.short_description = "Reset passwords to default"
+            user.set_unusable_password()
+            user.save(update_fields=['password'])
+            LogEntry.objects.log_action(
+                user_id=request.user.pk, content_type_id=ct.pk, object_id=user.pk,
+                object_repr=str(user), action_flag=CHANGE,
+                change_message='Password invalidated by admin; reset required.',
+            )
+            count += 1
+        self.message_user(
+            request,
+            f"Invalidated the password for {count} user(s). They must use "
+            f"'forgot password' to set a new one — no shared password is issued.",
+        )
+    reset_passwords.short_description = "Invalidate passwords (force reset)"
     
     def export_user_data(self, request, queryset):
         """Export user data to CSV"""
@@ -215,6 +277,14 @@ class CustomUserAdmin(admin.ModelAdmin):
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="users_export.csv"'
         
+        # This streams PII. Record who exported how many rows — previously an export
+        # left no trace at all, so a compromised staff session could dump the user
+        # table a page at a time invisibly.
+        logger.warning(
+            "PII export: admin=%s exported %s user record(s)",
+            getattr(request.user, 'username', '?'), queryset.count(),
+        )
+
         writer = csv.writer(response)
         writer.writerow(['Username', 'Email', 'User Type', 'Is Active', 'Date Joined'])
         
@@ -235,6 +305,9 @@ class CustomUserAdmin(admin.ModelAdmin):
 class ExerciseAdmin(admin.ModelAdmin):
     """Comprehensive exercise management"""
     
+    # Without this each row re-queried created_by — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('created_by',)
     list_display = ('name', 'target_muscle', 'difficulty_level', 'created_by', 'is_global', 'is_active', 'media_count')
     list_filter = ('target_muscle', 'difficulty_level', 'is_global', 'is_active', 'created_by')
     search_fields = ('name', 'description', 'target_muscle')
@@ -256,7 +329,7 @@ class ExerciseAdmin(admin.ModelAdmin):
         }),
     )
     
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'created_by')
     inlines = []
     
     actions = ['make_global', 'make_private', 'activate_exercises', 'deactivate_exercises']
@@ -266,18 +339,21 @@ class ExerciseAdmin(admin.ModelAdmin):
     media_count.short_description = "Media"
     
     def make_global(self, request, queryset):
-        queryset.update(is_global=True)
-        self.message_user(request, f"{queryset.count()} exercises made global.")
+        updated = _bulk_apply(request, queryset, "Made global via bulk admin action", is_global=True)
+        self.message_user(request, f"{updated} record(s) updated.")
     make_global.short_description = "Make exercises global"
     
     def make_private(self, request, queryset):
-        queryset.update(is_global=False)
-        self.message_user(request, f"{queryset.count()} exercises made private.")
+        updated = _bulk_apply(request, queryset, "Made private via bulk admin action", is_global=False)
+        self.message_user(request, f"{updated} record(s) updated.")
     make_private.short_description = "Make exercises private"
 
 class RoutineAdmin(admin.ModelAdmin):
     """Routine management with client assignment"""
     
+    # Without this each row re-queried created_by — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('created_by',)
     list_display = ('name', 'created_by', 'difficulty_level', 'is_active', 'client_count', 'exercise_count', 'created_at')
     list_filter = ('is_active', 'created_by', 'difficulty_level', 'start_date')
     search_fields = ('name', 'created_by__username', 'assigned_to__username')
@@ -285,7 +361,9 @@ class RoutineAdmin(admin.ModelAdmin):
     
     fieldsets = (
         ('Basic Information', {
-            'fields': ('name', 'description', 'goal')
+            # 'goal' is not a field on Routine — it raised FieldError and 500'd
+            # the add page. Django's admin checks do not cover custom AdminSites.
+            'fields': ('name', 'description')
         }),
         ('Configuration', {
             'fields': ('difficulty_level', 'estimated_duration', 'start_date', 'end_date')
@@ -302,7 +380,7 @@ class RoutineAdmin(admin.ModelAdmin):
         }),
     )
     
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'created_by')
     
     actions = ['activate_routines', 'deactivate_routines', 'duplicate_routines']
     
@@ -319,7 +397,6 @@ class RoutineAdmin(admin.ModelAdmin):
             new_routine = Routine.objects.create(
                 name=f"{routine.name} (Copy)",
                 description=routine.description,
-                goal=routine.goal,
                 difficulty_level=routine.difficulty_level,
                 estimated_duration=routine.estimated_duration,
                 created_by=routine.created_by,
@@ -332,10 +409,13 @@ class RoutineAdmin(admin.ModelAdmin):
 class RoutineProgressAdmin(admin.ModelAdmin):
     """Track routine completion progress"""
     
+    # Without this each row re-queried routine, user — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('routine', 'user')
     list_display = ('user', 'routine', 'day', 'status', 'completion_percentage', 'updated_at')
     list_filter = ('status', 'routine', 'user', 'updated_at')
     search_fields = ('user__username', 'routine__name')
-    readonly_fields = ('completion_percentage',)
+    readonly_fields = ('completion_percentage', 'updated_at')
     
     def completion_percentage(self, obj):
         if obj.total_exercises == 0:
@@ -346,6 +426,9 @@ class RoutineProgressAdmin(admin.ModelAdmin):
 class WorkoutSessionAdmin(admin.ModelAdmin):
     """Workout session tracking"""
     
+    # Without this each row re-queried routine, user — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('routine', 'user')
     list_display = ('user', 'routine', 'start_time', 'end_time', 'status', 'duration')
     list_filter = ('status', 'routine', 'user', 'start_time')
     search_fields = ('user__username', 'routine__name')
@@ -364,6 +447,9 @@ class WorkoutSessionAdmin(admin.ModelAdmin):
 class FoodItemAdmin(admin.ModelAdmin):
     """Food item management with nutritional data"""
     
+    # Without this each row re-queried category — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('category',)
     list_display = ('name', 'category', 'calories', 'protein', 'carbs', 'fat', 'serving_size')
     list_filter = ('category', 'calories')
     search_fields = ('name', 'category__name')
@@ -389,6 +475,9 @@ class FoodItemAdmin(admin.ModelAdmin):
 class DietPlanAdmin(admin.ModelAdmin):
     """Diet plan management"""
     
+    # Without this each row re-queried user — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('user',)
     list_display = ('user', 'goal', 'daily_calories', 'start_date', 'end_date', 'is_active', 'meal_count')
     list_filter = ('goal', 'is_active', 'start_date', 'end_date')
     search_fields = ('user__username', 'goal')
@@ -400,6 +489,9 @@ class DietPlanAdmin(admin.ModelAdmin):
 class MealAdmin(admin.ModelAdmin):
     """Meal management"""
     
+    # Without this each row re-queried diet_plan — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('diet_plan',)
     list_display = ('diet_plan', 'meal_type', 'date', 'template', 'is_ai_generated', 'scheduled_time')
     list_filter = ('meal_type', 'template', 'is_ai_generated', 'date')
     search_fields = ('diet_plan__user__username', 'description')
@@ -448,16 +540,22 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
 class SubscriptionAdmin(admin.ModelAdmin):
     """User subscription management"""
     
+    # Without this each row re-queried plan, user — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('plan', 'user')
     list_display = ('user', 'plan', 'status', 'start_date', 'end_date', 'is_active', 'auto_renew')
     list_filter = ('plan', 'status', 'auto_renew', 'start_date')
     search_fields = ('user__email', 'user__username')
-    readonly_fields = ('start_date', 'end_date', 'is_active')
+    readonly_fields = ('start_date', 'end_date', 'created_at', 'updated_at')
     
     actions = ['activate_subscriptions', 'cancel_subscriptions', 'extend_subscriptions']
 
 class PaymentAdmin(admin.ModelAdmin):
     """Payment tracking"""
     
+    # Without this each row re-queried subscription — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('subscription',)
     list_display = ('subscription', 'amount', 'payment_method', 'status', 'created_at')
     list_filter = ('status', 'payment_method', 'created_at')
     search_fields = ('subscription__user__email', 'transaction_id')
@@ -470,6 +568,9 @@ class PaymentAdmin(admin.ModelAdmin):
 class PostAdmin(admin.ModelAdmin):
     """Social post management"""
     
+    # Without this each row re-queried author — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('author',)
     list_display = ('author', 'post_type', 'title', 'visibility', 'is_hidden', 'likes_count', 'created_at')
     list_filter = ('post_type', 'visibility', 'is_flagged', 'is_hidden', 'created_at')
     search_fields = ('author__username', 'title', 'content')
@@ -480,6 +581,9 @@ class PostAdmin(admin.ModelAdmin):
 class ChallengeAdmin(admin.ModelAdmin):
     """Challenge management"""
     
+    # Without this each row re-queried creator — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('creator',)
     list_display = ('title', 'creator', 'challenge_type', 'status', 'start_date', 'end_date', 'participant_count')
     list_filter = ('challenge_type', 'status', 'start_date', 'end_date')
     search_fields = ('title', 'creator__username')
@@ -506,6 +610,9 @@ class AchievementAdmin(admin.ModelAdmin):
 class UserActivityAdmin(admin.ModelAdmin):
     """User activity tracking"""
     
+    # Without this each row re-queried user — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('user',)
     list_display = ('user', 'activity_type', 'timestamp', 'ip_address')
     list_filter = ('activity_type', 'timestamp')
     search_fields = ('user__username', 'activity_type')
@@ -514,30 +621,15 @@ class UserActivityAdmin(admin.ModelAdmin):
 class PerformanceMetricAdmin(admin.ModelAdmin):
     """Performance metrics tracking"""
     
+    # Without this each row re-queried user — ~100 extra
+    # queries per changelist page.
+    list_select_related = ('user',)
     list_display = ('user', 'metric_type', 'value', 'unit', 'recorded_at')
     list_filter = ('metric_type', 'recorded_at')
     search_fields = ('user__username', 'metric_type')
     readonly_fields = ('recorded_at',)
 
-class PlatformMetricAdmin(admin.ModelAdmin):
-    """Platform-wide metrics"""
-    
-    list_display = ('metric_name', 'category', 'value', 'unit', 'recorded_at')
-    list_filter = ('category', 'recorded_at')
-    search_fields = ('metric_name', 'category')
-    readonly_fields = ('recorded_at',)
 
-class ErrorLogAdmin(admin.ModelAdmin):
-    """Error logging and monitoring"""
-    
-    list_display = ('level', 'message', 'user', 'occurred_at', 'exception_type')
-    list_filter = ('level', 'occurred_at', 'exception_type')
-    search_fields = ('message', 'user__username')
-    readonly_fields = ('occurred_at',)
-
-# ============================================================================
-# DASHBOARD VIEWS
-# ============================================================================
 
 class AdminDashboardView:
     """Custom admin dashboard with analytics and quick actions"""
@@ -632,15 +724,23 @@ admin_site.register(ChallengeParticipation)
 admin_site.register(Achievement, AchievementAdmin)
 admin_site.register(UserAchievement)
 admin_site.register(Leaderboard)
-admin_site.register(Notification)
+# Notifications: register the CANONICAL notifications.Notification store.
+# The legacy social.Notification table is no longer written to, so registering it
+# here would show admins a permanently empty table and imply notifications broke.
+try:
+    from notifications.models import Notification as CanonicalNotification
+    from notifications.admin import NotificationAdmin as CanonicalNotificationAdmin
+    admin_site.register(CanonicalNotification, CanonicalNotificationAdmin)
+except Exception:  # pragma: no cover — admin wiring must never break boot
+    # Optional side effect: swallowing this silently is what made the
+    # surrounding failures invisible in logs. Control flow is unchanged.
+    logger.debug('suppressed non-fatal error', exc_info=True)
 
 admin_site.register(UserActivity, UserActivityAdmin)
 admin_site.register(PerformanceMetric, PerformanceMetricAdmin)
 admin_site.register(UserSession)
 admin_site.register(UserGoal)
 admin_site.register(AnalyticsDashboard)
-admin_site.register(PlatformMetric, PlatformMetricAdmin)
-admin_site.register(ErrorLog, ErrorLogAdmin)
 
 # ============================================================================
 # URL CONFIGURATION

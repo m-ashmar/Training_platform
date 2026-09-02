@@ -16,6 +16,11 @@ from django import forms
 import csv
 from datetime import datetime, timedelta
 
+from django.utils import timezone
+import logging
+
+logger = logging.getLogger(__name__)
+
 from .models import (
     FoodItem, FoodCategory, UserFoodPreference, UserFoodCategoryPreference,
     DietPlan, Meal, MealComponent, DietConfig, DailyAdvice, DietPlanTemplate
@@ -422,7 +427,9 @@ class ImprovedFoodItemAdmin(TranslAdmin):
             food_item.save()
         except Exception as e:
             # Silently fail - category assignment is not critical
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
     
     def import_from_edamam(self, request, queryset):
         """
@@ -492,9 +499,9 @@ class ImprovedDietPlanAdmin(admin.ModelAdmin):
     
     def status_badge(self, obj):
         from datetime import date
-        if obj.end_date < date.today():
+        if obj.end_date < timezone.localdate():
             badge = '<span style="background:gray;">Completed</span>'
-        elif obj.start_date <= date.today() <= obj.end_date:
+        elif obj.start_date <= timezone.localdate() <= obj.end_date:
             badge = '<span style="background:green;">Active</span>'
         else:
             badge = '<span style="background:blue;">Upcoming</span>'
@@ -629,12 +636,16 @@ class ImprovedDietConfigAdmin(admin.ModelAdmin):
 try:
     admin.site.unregister(DailyAdvice)  # Remove from main admin
 except admin.sites.NotRegistered:
-    pass
+    # Optional side effect: swallowing this silently is what made the
+    # surrounding failures invisible in logs. Control flow is unchanged.
+    logger.debug('suppressed non-fatal error', exc_info=True)
 
 try:
     admin.site.unregister(UserFoodPreference)  # Keep in database but hide from admin
 except admin.sites.NotRegistered:
-    pass
+    # Optional side effect: swallowing this silently is what made the
+    # surrounding failures invisible in logs. Control flow is unchanged.
+    logger.debug('suppressed non-fatal error', exc_info=True)
 
 
 # DietPlanTemplate Admin with translation support

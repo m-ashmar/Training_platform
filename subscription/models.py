@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
 from users.models import CustomUser
@@ -6,6 +7,22 @@ from datetime import timedelta
 import uuid
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+from decimal import Decimal
+
+
+# Payment lifecycle state machine. The ONLY code allowed to move a payment
+# between states is subscription.services.payment_service.PaymentService; any
+# other write must respect these transitions (illegal ones raise).
+PAYMENT_STATUS_TRANSITIONS = {
+    'pending':    {'processing', 'authorized', 'completed', 'failed', 'cancelled', 'expired'},
+    'processing': {'authorized', 'completed', 'failed', 'expired'},
+    'authorized': {'completed', 'failed', 'expired'},
+    'completed':  {'refunded'},
+    'failed':     {'pending'},   # allow a fresh retry
+    'cancelled':  set(),
+    'refunded':   set(),
+    'expired':    set(),
+}
 
 class SubscriptionPlan(models.Model):
     """Subscription plans with different features and pricing"""
@@ -22,7 +39,7 @@ class SubscriptionPlan(models.Model):
     price = models.DecimalField(
         max_digits=10, 
         decimal_places=2,
-        validators=[MinValueValidator(0, _("Price cannot be negative"))]
+        validators=[MinValueValidator(Decimal("0"), _("Price cannot be negative"))]
     )
     duration_days = models.IntegerField(
         default=30,
@@ -48,7 +65,9 @@ class SubscriptionPlan(models.Model):
     )
     
     class Meta:
-        ordering = ['price']
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
+        # paging repeated and hid rows whenever two records shared the value.
+        ordering = ['price', 'id']
         indexes = [
             models.Index(fields=['is_active', 'plan_type']),
             models.Index(fields=['price', 'is_active']),
@@ -82,8 +101,11 @@ class Subscription(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(
-        CustomUser, 
-        on_delete=models.CASCADE, 
+        CustomUser,
+        # PROTECT, not CASCADE: deleting a user cascaded to the subscription and from
+        # there to every Payment, erasing the whole payment history (proven: 1 -> 0).
+        # Retire users by deactivating them, never by hard delete.
+        on_delete=models.PROTECT,
         related_name='subscription',
         db_index=True
     )
@@ -118,12 +140,17 @@ class Subscription(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        ordering = ['-created_at']
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
+        # paging repeated and hid rows whenever two records shared the value.
+        ordering = ['-created_at', '-id']
         indexes = [
             models.Index(fields=['status', 'end_date']),
             models.Index(fields=['user', 'status']),
             models.Index(fields=['trial_end_date', 'status']),
             models.Index(fields=['auto_renew', 'status']),
+            # Matches the real access pattern: WHERE <owner>=? ORDER BY created_at DESC, id DESC.
+            # A single-column created_at index cannot serve that; this one can.
+            models.Index(fields=['user', '-created_at', '-id'], name='subscription_owner_recent_idx'),
         ]
         verbose_name = "Subscription"
         verbose_name_plural = "Subscriptions"
@@ -192,36 +219,41 @@ class Payment(models.Model):
     """Payment history for subscriptions"""
     PAYMENT_STATUS = [
         ('pending', 'Pending'),
+        ('processing', 'Processing'),
+        ('authorized', 'Authorized'),
         ('completed', 'Completed'),
         ('failed', 'Failed'),
         ('refunded', 'Refunded'),
         ('cancelled', 'Cancelled'),
+        ('expired', 'Expired'),
     ]
-    
+
     PAYMENT_METHOD = [
-        # Syrian Payment Gateways
+        # Active gateway
+        ('shamcash', 'ShamCash'),
+        # Manual / admin
+        ('manual', 'Manual'),
+        # Legacy (retained for historical rows; not selectable via gateway config)
         ('syriatel_cash', 'Syriatel Cash'),
         ('baraka_bank', 'Al-Baraka Bank'),
         ('bemo_bank', 'BEMO Bank'),
-        # International Payment Methods
         ('stripe', 'Stripe'),
         ('paypal', 'PayPal'),
         ('apple_pay', 'Apple Pay'),
         ('google_pay', 'Google Pay'),
-        ('manual', 'Manual'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     subscription = models.ForeignKey(
         Subscription, 
-        on_delete=models.CASCADE, 
+        on_delete=models.PROTECT, 
         related_name='payments',
         db_index=True
     )
     amount = models.DecimalField(
         max_digits=10, 
         decimal_places=2,
-        validators=[MinValueValidator(0, _("Amount cannot be negative"))]
+        validators=[MinValueValidator(Decimal("0"), _("Amount cannot be negative"))]
     )
     currency = models.CharField(max_length=3, default='USD', db_index=True)
     status = models.CharField(
@@ -231,20 +263,24 @@ class Payment(models.Model):
         db_index=True
     )
     payment_method = models.CharField(
-        max_length=20, 
-        choices=PAYMENT_METHOD, 
-        default='stripe',
+        max_length=20,
+        choices=PAYMENT_METHOD,
+        default='shamcash',
         db_index=True
     )
-    
+
     # External payment provider details
     transaction_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     payment_intent_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
-    
+
     # Gateway-specific fields
     gateway_response = models.JSONField(default=dict, blank=True)
     gateway_error = models.TextField(blank=True, null=True)
     gateway_transaction_reference = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    # Idempotency: unique per gateway webhook event; blocks replayed/duplicate callbacks.
+    gateway_event_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    # Invoice number generated exactly once, when the payment completes.
+    invoice_number = models.CharField(max_length=64, blank=True, null=True, db_index=True)
     
     # Metadata
     description = models.TextField(blank=True)
@@ -254,16 +290,42 @@ class Payment(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        ordering = ['-created_at']
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
+        # paging repeated and hid rows whenever two records shared the value.
+        ordering = ['-created_at', '-id']
         indexes = [
             models.Index(fields=['status', 'created_at']),
             models.Index(fields=['payment_method', 'status']),
             models.Index(fields=['transaction_id']),
             models.Index(fields=['payment_intent_id']),
         ]
+        constraints = [
+            # Idempotency guards — each external identifier maps to at most one
+            # payment (NULLs excluded so pending rows without ids are allowed).
+            models.UniqueConstraint(
+                fields=['gateway_event_id'],
+                condition=Q(gateway_event_id__isnull=False),
+                name='uniq_payment_gateway_event_id',
+            ),
+            models.UniqueConstraint(
+                fields=['gateway_transaction_reference'],
+                condition=Q(gateway_transaction_reference__isnull=False),
+                name='uniq_payment_gateway_reference',
+            ),
+            models.UniqueConstraint(
+                fields=['transaction_id'],
+                condition=Q(transaction_id__isnull=False),
+                name='uniq_payment_transaction_id',
+            ),
+            models.UniqueConstraint(
+                fields=['invoice_number'],
+                condition=Q(invoice_number__isnull=False),
+                name='uniq_payment_invoice_number',
+            ),
+        ]
         verbose_name = "Payment"
         verbose_name_plural = "Payments"
-    
+
     def clean(self):
         """Custom validation"""
         if self.amount < 0:
@@ -272,6 +334,12 @@ class Payment(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+
+    def can_transition_to(self, new_status: str) -> bool:
+        """Whether moving from the current status to new_status is legal."""
+        if new_status == self.status:
+            return True  # idempotent no-op
+        return new_status in PAYMENT_STATUS_TRANSITIONS.get(self.status, set())
 
     def __str__(self):
         return f"{self.subscription.user.username} - ${self.amount} ({self.status})"
@@ -316,6 +384,9 @@ class SubscriptionUsage(models.Model):
     period_end = models.DateTimeField(db_index=True)
     
     class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-id']
         unique_together = ['subscription', 'feature', 'period_start']
         indexes = [
             models.Index(fields=['subscription', 'feature']),

@@ -1,3 +1,6 @@
+# NOTE: pytest, pytest-django, coverage and flake8 are KEPT — they are used by
+# the regression gate (pytest.ini + tests/) and by CI.
+# Removed as unreferenced: certifi, django-extensions, factory-boy, isort, pytz, setuptools, urllib3
 # Django Core
 Django==5.1.3
 djangorestframework==3.15.2
@@ -7,16 +10,25 @@ django-filter==24.3
 # Database
 psycopg2-binary==2.9.10
 
+# Secrets Management
+# REQUIRED IN PRODUCTION: settings_secrets.get_secret() fetches from AWS Secrets
+# Manager via boto3. Without it every secret load raises ImproperlyConfigured and
+# the container cannot start.
+boto3==1.42.83
+
 
 # Authentication & Security
 djangorestframework-simplejwt==5.3.1
 django-allauth==0.63.6
 dj-rest-auth==7.0.0
-cryptography==42.0.5
+whitenoise==6.8.2  # serves /static/ in production; MIDDLEWARE has no other static handler
+cryptography==46.0.6  # was 42.0.5 — the deploy shipped a version nobody tested; 42.x also carries known CVEs
 
 # Payment & Financial
+# NOTE: ShamCash is the active gateway (subscription/gateways/shamcash.py) and is
+# called over plain HTTP via `requests`. `stripe` was removed — there is no Stripe
+# integration in the codebase.
 requests==2.32.2
-stripe==7.8.0
 
 # Async & Background Tasks
 celery==5.5.3
@@ -27,47 +39,43 @@ channels-redis==4.1.0
 
 # API & Serialization
 drf-yasg==1.21.8
-django-extensions==3.2.3
 
 # Environment & Configuration
-python-decouple==3.8
-django-environ==0.11.2
+# (python-decouple / django-environ removed — settings_secrets.py handles all env
+#  parsing and secret loading; neither package was imported anywhere.)
+# Used by manage.py and settings_local.py to load a local .env file.
+python-dotenv==1.0.1
 
 # Image Processing
 Pillow==11.0.0
 
 # Date & Time
 python-dateutil==2.9.0.post0
-pytz==2024.1
 
 # HTTP & Networking
-urllib3==2.2.2
-certifi==2024.12.14
 
 # Development & Testing
 pytest==8.3.3
 pytest-django==4.9.0
-factory-boy==3.3.1
 coverage==7.6.1
 
 # Code Quality
 black==24.10.0
 flake8==7.1.1
-isort==5.13.2
 
 # Monitoring & Logging
 sentry-sdk==2.18.0
 structlog==25.4.0
+# Required by notifications/metrics.py. Without it every metrics call site
+# silently no-ops via `except ImportError: pass`, so notification/FCM metrics
+# were never recorded.
+prometheus-client==0.21.1
 
 # Production
-gunicorn==24.1.1
+# Daphne is the production server (see Dockerfile CMD / ASGI + WebSockets).
 daphne>=4.0.0
-whitenoise==6.8.2
-dj-database-url>=2.1.0
-
-# Utilities
-python-dotenv==1.0.1
-click==8.1.7 
+# (gunicorn and dj-database-url removed — Daphne serves prod and DATABASES is
+#  constructed explicitly in settings_production.py.)
 
 # Retries & Backoff
 tenacity==8.2.2
@@ -82,9 +90,14 @@ firebase-admin>=6.0.0
 django-ratelimit>=4.1.0
 django-cachalot==2.6.*
 
-# AI Assistant
+# AI Assistant / Diet AI pipeline
 openai>=1.0.0
 tiktoken>=0.5.0
+# langchain-core: prompt + PydanticOutputParser used by diet/ai_services.py and
+# diet/services/ai_response_handler.py.
+# pydantic: diet/ai_models.py defines DietPlanOutput/AIMeal/AIIngredient, which the
+# RULE-BASED planner also imports — without it diet generation fails entirely.
+langchain-core==1.2.26
+pydantic==2.12.5
 django-modeltranslation
-setuptools
 matplotlib

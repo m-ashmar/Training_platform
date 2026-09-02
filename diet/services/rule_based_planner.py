@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 
 from typing import Dict, List, Tuple, Set
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from ..utils.nutrition import (
 )
 from ..utils.logging_utils import safe_json_log
 from ..experimental.staged_fill import StagedMealFiller, MealTargets
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -82,6 +85,9 @@ class RuleBasedPlanner:
     def __init__(self, user):
         self.user = user
         self._smart_summary: List[Dict] = []
+        # Instance-local RNG — avoid reseeding the process-global `random`, which
+        # would leak deterministic state into any other code in the worker.
+        self._rng = random.Random()
 
     def _normalize_name_for_repeat(self, name: str) -> str:
         n = (name or '').strip().lower()
@@ -122,7 +128,9 @@ class RuleBasedPlanner:
                 if 'vegetable' in nm or 'vegetables' in nm or 'veggie' in nm:
                     return True
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         name = ((getattr(food, 'name', '') or '')).lower()
         veg_keywords = (
             'lettuce', 'tomato', 'tomatoes', 'cucumber', 'green bean', 'spinach',
@@ -152,7 +160,9 @@ class RuleBasedPlanner:
             if 'gain' in goals_l or 'muscle' in goals_l:
                 return 'gain'
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         return 'maintain'
 
     # ------------------------ public API ------------------------
@@ -171,7 +181,7 @@ class RuleBasedPlanner:
         # BUG FIX: Validate inputs before processing
         validate_diet_generation(daily_kcal, meal_count, duration_days)
 
-        base_date = _date.fromisoformat(start_date) if start_date else timezone.now().date()
+        base_date = _date.fromisoformat(start_date) if start_date else timezone.localdate()
         meals = ["Breakfast", "Lunch", "Dinner"][:meal_count]
 
         # Allowed foods per meal/macro (static per user)
@@ -230,7 +240,7 @@ class RuleBasedPlanner:
                 uid = 0
             salt = f"rbp:{uid}:{current_date.isoformat()}"
             seed = int(hashlib.sha256(salt.encode('utf-8')).hexdigest()[:12], 16)
-            random.seed(seed)
+            self._rng = random.Random(seed)
             day_start_idx = len(planned_meals)
             # Rebuild in-run recency from last `no_repeat_days` day windows
             try:
@@ -243,7 +253,9 @@ class RuleBasedPlanner:
                 # Always exclude by id only (names unused)
                 used_names_window = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
             # Per-day allocations and macro targets are computed via DayContext
             # Build DayContext mirroring current per-day calculations (read-only usage for now)
@@ -274,7 +286,9 @@ class RuleBasedPlanner:
                     'goal': goal,
                 }, logger_name='diet')
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
             for meal_name in meals:
                 planned_meals.append(self._plan_meal(meal_name, ctx, day_ctx))
@@ -286,12 +300,22 @@ class RuleBasedPlanner:
 
             if snack_count:
                 snack_ing = self._build_snack(allowed, used_in_window)
+                snack_nutrition = self._compute_meal_nutrition(snack_ing)
                 planned_meals.append(
                     AIMeal(
-                        meal_name="Snack",
-                        description="Snack planned by rule-based system",
+                        # Carry the dish name when the snack came from a recipe, so the
+                        # client shows "Yogurt, Apple and Almond Butter" rather than the
+                        # generic slot label.
+                        meal_name=getattr(self, "_last_snack_name", None) or "Snack",
+                        description=getattr(self, "_last_snack_desc", None)
+                        or "Snack planned by rule-based system",
                         ingredients=snack_ing,
-                        total_nutrition={"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0},
+                        total_nutrition={
+                            "calories": float(round(snack_nutrition.get("calories", 0.0), 1)),
+                            "protein": float(round(snack_nutrition.get("protein", 0.0), 1)),
+                            "carbs": float(round(snack_nutrition.get("carbs", 0.0), 1)),
+                            "fat": float(round(snack_nutrition.get("fat", 0.0), 1)),
+                        },
                         meal_type="Snack",
                     )
                 )
@@ -322,16 +346,22 @@ class RuleBasedPlanner:
                     dbg_counts = {k: len(v) for k,v in today_used.items()}
                     print(f"[RECENCY] accumulated actual ids for day {current_date}: {dbg_counts}")
                 except Exception:
-                    pass
+                    # Optional side effect: swallowing this silently is what made the
+                    # surrounding failures invisible in logs. Control flow is unchanged.
+                    logger.debug('suppressed non-fatal error', exc_info=True)
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
         output = DietPlanOutput(plan=planned_meals)
         if getattr(settings, 'DIET_SMART_MACRO_PLANNER', False):
             try:
                 output.plan_metadata['smart_macro_summary'] = self._smart_summary
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
         return output
 
     # ------------------------ meal rebalancer utilities ------------------------
@@ -387,7 +417,9 @@ class RuleBasedPlanner:
             try:
                 print(f"[REBALANCE_SCALE] item={getattr(fi,'name','')} macro={macro} dom={dom} old_g={round(g,1)} factor={round(factor,3)} target_g={round(new_g,1)} min_floor={min_g}")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             self._set_qty(ing, max(min_g, new_g))
 
     def _within_band(self, actual: float, target: float, band: float) -> bool:
@@ -397,106 +429,6 @@ class RuleBasedPlanner:
         hi = (1.0 + band) * target
         return (actual >= lo) and (actual <= hi)
 
-    def _rebalance_meal_accept(self, meal: AIMeal, kcal_target: float, macro_targets: dict) -> AIMeal:
-        # Iteratively nudge by 10% towards acceptance bands
-        band = 0.09
-        max_iter = 10
-        try:
-            print(f"[REBALANCE] start meal={meal.meal_name} kcal_t={round(kcal_target,1)} tp={round(float(macro_targets.get('protein',0.0) or 0.0),1)} tc={round(float(macro_targets.get('carb',0.0) or 0.0),1)} tf={round(float(macro_targets.get('fat',0.0) or 0.0),1)} band=±{int(band*100)}%")
-        except Exception:
-            pass
-        accepted = False
-        for it in range(max_iter):
-            totals = self._compute_meal_nutrition(meal.ingredients)
-            kcal = totals['calories']; p = totals['protein']; c = totals['carbs']; f = totals['fat']
-            tp = float(macro_targets.get('protein', 0.0) or 0.0)
-            tc = float(macro_targets.get('carb', 0.0) or 0.0)
-            tf = float(macro_targets.get('fat', 0.0) or 0.0)
-
-            # Acceptance check
-            if (self._within_band(kcal, kcal_target, band)
-                and self._within_band(p, tp, band)
-                and self._within_band(c, tc, band)
-                and self._within_band(f, tf, band)):
-                accepted = True
-                try:
-                    print(f"[ACCEPT] meal={meal.meal_name} iter={it} kcal={round(kcal,1)} p={round(p,1)} c={round(c,1)} f={round(f,1)}")
-                except Exception:
-                    pass
-                break
-
-            # Hard triggers
-            if kcal > 1.10 * kcal_target or (tf > 0.0 and f > 1.30 * tf):
-                try:
-                    print(f"[REBALANCE] iter={it} trigger=over_kcal_or_fat kcal={round(kcal,1)}>{round(1.10*kcal_target,1)} or fat={round(f,1)}>{round(1.30*tf,1)} -> scale fat x0.9")
-                except Exception:
-                    pass
-                self._scale_by_macro(meal.ingredients, 'fat', 0.9)
-                continue
-            if tp > 0.0 and p > 1.10 * tp:
-                try:
-                    print(f"[REBALANCE] iter={it} trigger=over_protein p={round(p,1)}>{round(1.10*tp,1)} -> scale protein x0.9")
-                except Exception:
-                    pass
-                self._scale_by_macro(meal.ingredients, 'protein', 0.9)
-                continue
-            if tc > 0.0 and c > 1.10 * tc:
-                try:
-                    print(f"[REBALANCE] iter={it} trigger=over_carb c={round(c,1)}>{round(1.10*tc,1)} -> scale carb x0.9")
-                except Exception:
-                    pass
-                self._scale_by_macro(meal.ingredients, 'carb', 0.9)
-                continue
-
-            # Under targets with kcal headroom
-            if tp > 0.0 and p < 0.90 * tp and kcal < 1.09 * kcal_target:
-                try:
-                    print(f"[REBALANCE] iter={it} trigger=under_protein p={round(p,1)}<{round(0.90*tp,1)} and kcal={round(kcal,1)}<{round(1.09*kcal_target,1)} -> scale protein x1.1")
-                except Exception:
-                    pass
-                self._scale_by_macro(meal.ingredients, 'protein', 1.1)
-                continue
-            if tc > 0.0 and c < 0.90 * tc and kcal < 1.09 * kcal_target:
-                try:
-                    print(f"[REBALANCE] iter={it} trigger=under_carb c={round(c,1)}<{round(0.90*tc,1)} and kcal={round(kcal,1)}<{round(1.09*kcal_target,1)} -> scale carb x1.1")
-                except Exception:
-                    pass
-                self._scale_by_macro(meal.ingredients, 'carb', 1.1)
-                continue
-            # If none matched, gently scale down overall calories if high
-            if kcal > 1.09 * kcal_target:
-                try:
-                    print(f"[REBALANCE] iter={it} trigger=kcal_high_gentle kcal={round(kcal,1)}>{round(1.09*kcal_target,1)} -> scale fat x0.95, carb x0.97, protein x0.98")
-                except Exception:
-                    pass
-                self._scale_by_macro(meal.ingredients, 'fat', 0.95)
-                self._scale_by_macro(meal.ingredients, 'carb', 0.97)
-                self._scale_by_macro(meal.ingredients, 'protein', 0.98)
-                continue
-            else:
-                try:
-                    print(f"[REBALANCE] iter={it} trigger=no_change break kcal={round(kcal,1)} p={round(p,1)} c={round(c,1)} f={round(f,1)}")
-                except Exception:
-                    pass
-                break
-
-        # Update totals into the meal
-        totals = self._compute_meal_nutrition(meal.ingredients)
-        meal.total_nutrition = {
-            'calories': float(round(totals['calories'], 1)),
-            'protein': float(round(totals['protein'], 1)),
-            'carbs': float(round(totals['carbs'], 1)),
-            'fat': float(round(totals['fat'], 1)),
-        }
-        try:
-            if not accepted:
-                print(f"[ACCEPT_FAIL] meal={meal.meal_name} final kcal={round(totals['calories'],1)} p={round(totals['protein'],1)} c={round(totals['carbs'],1)} f={round(totals['fat'],1)} vs targets kcal={round(kcal_target,1)} tp={round(float(macro_targets.get('protein',0.0) or 0.0),1)} tc={round(float(macro_targets.get('carb',0.0) or 0.0),1)} tf={round(float(macro_targets.get('fat',0.0) or 0.0),1)} band=±{int(band*100)}%")
-            else:
-                print(f"[REBALANCE_DONE] meal={meal.meal_name} kcal={round(totals['calories'],1)} p={round(totals['protein'],1)} c={round(totals['carbs'],1)} f={round(totals['fat'],1)}")
-        except Exception:
-            pass
-        return meal
-    
     # New: component-level rebalancer operating on (FoodItem, grams) before finalization
     def _components_contributions(self, components: List[Tuple[FoodItem, float]]) -> List[Dict]:
         out: List[Dict] = []
@@ -539,7 +471,9 @@ class RuleBasedPlanner:
                 else:
                     print(f"[REBAL2_SKIP_REDUCE_NO_DOM_MATCH] macro={macro}")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             return reduce_g
         total_macro = sum(x[key] for x in dom_matched)
         if total_macro <= 0.0 or reduce_g <= 0.0:
@@ -573,7 +507,9 @@ class RuleBasedPlanner:
                 try:
                     print(f"[REBAL2_MACRO_REDUCE] macro={macro} item={getattr(x['food'],'name','')} old_g={round(x['grams'],1)} new_g={round(new_g,1)} delta_g={round(x['grams']-new_g,1)}")
                 except Exception:
-                    pass
+                    # Optional side effect: swallowing this silently is what made the
+                    # surrounding failures invisible in logs. Control flow is unchanged.
+                    logger.debug('suppressed non-fatal error', exc_info=True)
                 remaining -= (x['grams'] - new_g) * x[pg_key]
                 x['grams'] = new_g
             contrib = self._components_contributions(components)
@@ -592,7 +528,9 @@ class RuleBasedPlanner:
             try:
                 print(f"[REBAL2_SKIP_INCREASE_NO_DOM_MATCH] macro={macro}")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             return add_g
         cand.sort(key=lambda x: (x[pg_key] / x['k_pg']), reverse=True)
         remaining_macro = float(add_g)
@@ -617,7 +555,9 @@ class RuleBasedPlanner:
             try:
                 print(f"[REBAL2_MACRO_INCREASE] macro={macro} item={getattr(x['food'],'name','')} old_g={round(x['grams'],1)} new_g={round(new_g,1)} add_g={round(add_here,1)}")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             remaining_macro -= add_here * pg
             remaining_kcal -= add_here * kpg
             x['grams'] = new_g
@@ -686,7 +626,9 @@ class RuleBasedPlanner:
                 try:
                     print("[REBAL2_SKIP_KCAL_NO_OVERAGE_SOURCES]")
                 except Exception:
-                    pass
+                    # Optional side effect: swallowing this silently is what made the
+                    # surrounding failures invisible in logs. Control flow is unchanged.
+                    logger.debug('suppressed non-fatal error', exc_info=True)
                 return remaining
         for x, avail_k, w in weights:
             if remaining <= 0.0:
@@ -698,7 +640,9 @@ class RuleBasedPlanner:
             try:
                 print(f"[REBAL2_KCAL_REDUCE] item={getattr(x['food'],'name','')} old_g={round(x['grams'],1)} new_g={round(new_g,1)} delta_g={round(x['grams']-new_g,1)}")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             remaining -= (x['grams'] - new_g) * x['k_pg']
             x['grams'] = new_g
         return max(0.0, remaining)
@@ -757,6 +701,14 @@ class RuleBasedPlanner:
             meal_distribution = {m: split.get(m, 1.0/len(meals)) for m in meals}
         else:
             meal_distribution = self._choose_distribution_for_goal_value(ctx.goal, meals)
+        # Normalize shares to sum to 1.0 over the ACTUAL meals. The goal patterns are
+        # defined for 3 meals, so with meal_count of 1 or 2 the raw shares sum to <1,
+        # which would silently under-deliver both calories and macros for the day.
+        _total_share = sum(meal_distribution.values())
+        if _total_share > 0:
+            meal_distribution = {m: (v / _total_share) for m, v in meal_distribution.items()}
+        else:
+            meal_distribution = {m: 1.0 / len(meals) for m in meals}
         per_meal_kcal = {m: meal_kcal_budget * meal_distribution[m] for m in meals}
 
         # Macro targets per meal
@@ -794,7 +746,62 @@ class RuleBasedPlanner:
         }
         return kcal_consumed, macro_consumed
 
+    def _snack_from_recipe(self) -> List[AIIngredient]:
+        """A real snack dish scaled to the snack calorie budget, or [] if none fits."""
+        try:
+            from diet.planner.policy import load_policy
+            from diet.planner.recipes import find_recipe
+
+            policy = load_policy(self._resolve_goal())
+            kcal = policy.snack_kcal
+            targets = {
+                "calories": kcal,
+                "protein": kcal * policy.protein_ratio / 4.0,
+                "carb": kcal * policy.carb_ratio / 4.0,
+                "fat": kcal * policy.fat_ratio / 9.0,
+            }
+            checker = None
+            try:
+                from ..models import UserFoodPreference
+                from .meal_validator import AllergenChecker
+
+                pref = UserFoodPreference.objects.filter(user=self.user).first()
+                raw = getattr(pref, "allergies", None) if pref else None
+                if raw:
+                    checker = AllergenChecker(raw)
+            except Exception:
+                logger.debug("could not load allergies for the snack", exc_info=True)
+
+            match = find_recipe("Snack", targets, policy, allergen_checker=checker)
+            if match is None or not match.deviation.within(policy.tolerance):
+                self._last_snack_name = None
+                self._last_snack_desc = None
+                return []
+            self._last_snack_name = match.name
+            self._last_snack_desc = getattr(match.recipe, "description", "") or ""
+            return [
+                AIIngredient(
+                    name=food.name,
+                    quantity=f"{grams:g}g",
+                    estimated_calories=round(float(food.calories or 0) * grams / 100, 1),
+                    estimated_protein=round(float(food.protein or 0) * grams / 100, 1),
+                    estimated_carbs=round(float(food.carbs or 0) * grams / 100, 1),
+                    estimated_fat=round(float(food.fat or 0) * grams / 100, 1),
+                )
+                for food, grams in match.components
+            ]
+        except Exception:
+            logger.debug("recipe snack unavailable; using components", exc_info=True)
+            return []
+
     def _build_snack(self, allowed: Dict[str, Dict[str, List[FoodItem]]], used_in_window: Dict[str, Set[int]]) -> List[AIIngredient]:
+        # A recipe first. Picking the single most macro-dense food per macro to hit
+        # 200 kcal produced "Extra Virgin Olive Oil 25 g" as a snack — technically
+        # 200 calories, obviously not something anyone eats.
+        recipe_snack = self._snack_from_recipe()
+        if recipe_snack:
+            return recipe_snack
+
         snack_ing: List[AIIngredient] = []
         for macro in ("fat", "protein", "carb"):
             cands = allowed.get("Snack", {}).get(macro, [])
@@ -836,6 +843,87 @@ class RuleBasedPlanner:
             return []
 
     def _plan_meal(self, meal_name: str, ctx: PlannerContext, day_ctx: DayContext) -> AIMeal:
+        # Try a real dish first. Component assembly hits the macro targets but produces
+        # a pile — "chicken 180 g, oats 90 g, olive oil 12 g, broccoli 400 g" — which is
+        # not something anyone cooks. A recipe that meets the same targets is a meal.
+        recipe_meal = self._plan_meal_from_recipe(meal_name, ctx, day_ctx)
+        if recipe_meal is not None:
+            return recipe_meal
+        return self._plan_meal_from_components(meal_name, ctx, day_ctx)
+
+    def _plan_meal_from_recipe(self, meal_name: str, ctx: PlannerContext,
+                               day_ctx: DayContext) -> AIMeal | None:
+        """Build the meal from a recipe when one fits inside tolerance.
+
+        Returns None when the library has nothing suitable, so component assembly stays
+        the fallback — a recipe library will never cover every target.
+        """
+        try:
+            from diet.planner.optimize import totals_of
+            from diet.planner.policy import load_policy
+            from diet.planner.recipes import find_recipe
+
+            target = day_ctx.meal_targets.get(meal_name)
+            if target is None:
+                return None
+            macro_targets = getattr(target, "macro_targets", None) or {}
+            targets = {
+                "calories": float(getattr(target, "kcal_target", 0) or 0),
+                "protein": float(macro_targets.get("protein", 0) or 0),
+                "carb": float(macro_targets.get("carb", 0) or 0),
+                "fat": float(macro_targets.get("fat", 0) or 0),
+            }
+            if targets["calories"] <= 0:
+                return None
+
+            checker = None
+            try:
+                from ..models import UserFoodPreference
+                from .meal_validator import AllergenChecker
+
+                pref = UserFoodPreference.objects.filter(user=self.user).first()
+                raw = getattr(pref, "allergies", None) if pref else None
+                if raw:
+                    checker = AllergenChecker(raw)
+            except Exception:
+                logger.debug("could not load allergies for recipe matching", exc_info=True)
+
+            policy = load_policy(ctx.goal)
+            match = find_recipe(meal_name, targets, policy, allergen_checker=checker)
+            if match is None or not match.deviation.within(policy.tolerance):
+                return None
+
+            ingredients = [
+                AIIngredient(
+                    name=food.name,
+                    quantity=f"{grams:g}g",
+                    estimated_calories=round(float(food.calories or 0) * grams / 100, 1),
+                    estimated_protein=round(float(food.protein or 0) * grams / 100, 1),
+                    estimated_carbs=round(float(food.carbs or 0) * grams / 100, 1),
+                    estimated_fat=round(float(food.fat or 0) * grams / 100, 1),
+                )
+                for food, grams in match.components
+            ]
+            totals = totals_of(match.components)
+            return AIMeal(
+                meal_name=match.name,
+                description=getattr(match.recipe, "description", "") or "",
+                ingredients=ingredients,
+                total_nutrition={
+                    "calories": round(totals["calories"], 1),
+                    "protein": round(totals["protein"], 1),
+                    "carbs": round(totals["carb"], 1),
+                    "fat": round(totals["fat"], 1),
+                },
+                meal_type=meal_name,
+                preparation_time=int(getattr(match.recipe, "prep_minutes", 15) or 15),
+                difficulty_level="easy",
+            )
+        except Exception:
+            logger.debug("recipe path unavailable for %s; using components", meal_name, exc_info=True)
+            return None
+
+    def _plan_meal_from_components(self, meal_name: str, ctx: PlannerContext, day_ctx: DayContext) -> AIMeal:
         try:
             components: List[Tuple[FoodItem, float]] = []
             used_macro_counts = {"protein": 0, "carb": 0, "fat": 0, "vegetable": 0, "fruit": 0}
@@ -1012,7 +1100,9 @@ class RuleBasedPlanner:
                             'remaining': round(max(0.0, target - macro_consumed[macro]),1),
                         }, logger_name='diet')
                     except Exception:
-                        pass
+                        # Optional side effect: swallowing this silently is what made the
+                        # surrounding failures invisible in logs. Control flow is unchanged.
+                        logger.debug('suppressed non-fatal error', exc_info=True)
                     remaining = max(0.0, target - macro_consumed[macro])
                     if remaining <= 0.0:
                         break
@@ -1093,7 +1183,9 @@ class RuleBasedPlanner:
                     try:
                         print(f"[REBAL2_START] meal={meal_name} iter={it} kcal={round(kcal_consumed,1)} p={round(macro_consumed['protein'],1)} c={round(macro_consumed['carb'],1)} f={round(macro_consumed['fat'],1)} targets kcal={round(kcal_t,1)} tp={round(tp,1)} tc={round(tc,1)} tf={round(tf,1)} band=±{int(band*100)}%")
                     except Exception:
-                        pass
+                        # Optional side effect: swallowing this silently is what made the
+                        # surrounding failures invisible in logs. Control flow is unchanged.
+                        logger.debug('suppressed non-fatal error', exc_info=True)
                     if ok:
                         print(f"[REBAL2_ACCEPT] meal={meal_name} iter={it}")
                         break
@@ -1110,7 +1202,9 @@ class RuleBasedPlanner:
                         try:
                             print(f"[REBAL2_CHOSEN_MACRO] meal={meal_name} iter={it} chosen={mac} over_k={round(dev_over[0][1],1)} pk={round(over_k_p,1)} ck={round(over_k_c,1)} fk={round(over_k_f,1)}")
                         except Exception:
-                            pass
+                            # Optional side effect: swallowing this silently is what made the
+                            # surrounding failures invisible in logs. Control flow is unchanged.
+                            logger.debug('suppressed non-fatal error', exc_info=True)
                         # Reduce grams for the macro with largest kcal overage
                         over_g = macro_consumed[mac] - {'protein': tp, 'carb': tc, 'fat': tf}[mac]
                         if over_g > 0.0:
@@ -1146,7 +1240,9 @@ class RuleBasedPlanner:
                             try:
                                 print(f"[REBAL2_CHOSEN_INCREASE] meal={meal_name} iter={it} chosen={macu} under_k={round(deficit_kcal,1)} pk={round(def_k_p,1)} ck={round(def_k_c,1)} fk={round(def_k_f,1)}")
                             except Exception:
-                                pass
+                                # Optional side effect: swallowing this silently is what made the
+                                # surrounding failures invisible in logs. Control flow is unchanged.
+                                logger.debug('suppressed non-fatal error', exc_info=True)
                             
                             # FIX: Target 100% of target, not 90%
                             target_map = {'protein': tp, 'carb': tc, 'fat': tf}
@@ -1174,7 +1270,9 @@ class RuleBasedPlanner:
                 kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
                 print(f"[REBAL2_DONE] meal={meal_name} kcal={round(kcal_consumed,1)} p={round(macro_consumed['protein'],1)} c={round(macro_consumed['carb'],1)} f={round(macro_consumed['fat'],1)}")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
             # Fallback if empty
             if not components and getattr(settings, 'DIET_DYNAMIC_MEAL_ALLOCATION', False):
@@ -1202,7 +1300,9 @@ class RuleBasedPlanner:
             try:
                 safe_json_log(stage="plan_meal_error", data={"meal_type": meal_name, "error": str(e), "error_type": type(e).__name__}, logger_name='diet')
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             components: List[Tuple[FoodItem, float]] = []
             try:
                 fallback_items = self._fallback_safe_set(meal_name)
@@ -1219,7 +1319,9 @@ class RuleBasedPlanner:
                     day_ctx.used_in_window.setdefault(meal_name, set()).add(getattr(food, 'id', 0))
                     day_ctx.used_names_window.setdefault(meal_name, set()).add(self._normalize_name_for_repeat(getattr(food, 'name', '') or ''))
                 except Exception:
-                    pass
+                    # Optional side effect: swallowing this silently is what made the
+                    # surrounding failures invisible in logs. Control flow is unchanged.
+                    logger.debug('suppressed non-fatal error', exc_info=True)
             kcal_consumed, macro_consumed = self._recompute_meal_totals(components)
             return self._finalize_meal(meal_name, components, day_ctx.meal_targets, kcal_consumed, macro_consumed)
 
@@ -1234,13 +1336,20 @@ class RuleBasedPlanner:
                 'components': [f"{f.name}:{int(g)}g" for f,g in components],
             }, logger_name='diet')
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         ingredients = [AIIngredient(name=f.name, quantity=f"{int(g)}g") for (f, g) in components]
         return AIMeal(
             meal_name=meal_name,
             description=f"{meal_name} planned by rule-based system",
             ingredients=ingredients,
-            total_nutrition={"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0},
+            total_nutrition={
+                "calories": float(round(kcal_consumed, 1)),
+                "protein": float(round(macro_consumed.get("protein", 0.0), 1)),
+                "carbs": float(round(macro_consumed.get("carb", 0.0), 1)),
+                "fat": float(round(macro_consumed.get("fat", 0.0), 1)),
+            },
             meal_type=meal_name,
         )
     def _macro_ratios_for_goal(self) -> Dict[str, float]:
@@ -1295,64 +1404,75 @@ class RuleBasedPlanner:
         return distribution
 
     def _build_allowed_foods_map(self) -> Dict[str, Dict[str, List[FoodItem]]]:
-        out: Dict[str, Dict[str, List[FoodItem]]] = {
-            m: {"protein": [], "carb": [], "fat": [], "vegetable": [], "fruit": []} 
-            for m in ("Breakfast", "Lunch", "Dinner", "Snack")
-        }
-        # BUG FIX: Optimize query with select_related to avoid N+1
-        qs = UserFoodCategoryPreference.objects.filter(user=self.user).select_related("food", "food__category")
-        for rec in qs:
-            name = rec.meal
-            macro = rec.macro
-            if name in out and macro in out[name]:
-                out[name][macro].append(rec.food)
-        # Fill missing from UserFoodPreference when category prefs are absent
+        """Candidate foods per (meal, macro), ranked.
+
+        Delegates to `diet.planner.candidates`, which treats preferences as a RANKING
+        over the whole catalogue rather than a gate on it. The previous implementation
+        returned only foods the user had explicitly categorised, so a user who had not
+        completed food preferences got an empty pool and a 233 kcal plan (-90% of
+        target) stored silently as if normal.
+
+        Allergens and explicit dislikes remain hard filters — they are applied inside
+        the pool builder, before anything is ranked.
+        """
+        from diet.planner.candidates import build_pool
+        from diet.planner.policy import load_policy
+
+        checker = None
         try:
             from ..models import UserFoodPreference
-            pref = UserFoodPreference.objects.get(user=self.user)
+            from .meal_validator import AllergenChecker
+
+            pref = UserFoodPreference.objects.filter(user=self.user).first()
+            raw = getattr(pref, "allergies", None) if pref else None
+            if raw:
+                checker = AllergenChecker(raw)
         except Exception:
-            pref = None
-        def _extend_if_empty(meal_key: str, macro_key: str, items: List[FoodItem]):
-            if not out[meal_key][macro_key] and items:
-                out[meal_key][macro_key].extend(items)
-        if pref:
-            try:
-                proteins = list(pref.protein_choices.all())
-            except Exception:
-                proteins = []
-            try:
-                carbs = list(pref.carb_choices.all())
-            except Exception:
-                carbs = []
-            try:
-                fats = list(pref.fat_choices.all())
-            except Exception:
-                fats = []
-            try:
-                vegs = list(pref.vegetable_choices.all())
-            except Exception:
-                vegs = []
-            try:
-                fruits = list(pref.fruit_choices.all())
-            except Exception:
-                fruits = []
-            for meal_key in ("Breakfast", "Lunch", "Dinner", "Snack"):
-                _extend_if_empty(meal_key, 'protein', proteins)
-                _extend_if_empty(meal_key, 'carb', carbs)
-                _extend_if_empty(meal_key, 'fat', fats)
-                _extend_if_empty(meal_key, 'vegetable', vegs)
-                _extend_if_empty(meal_key, 'fruit', fruits)
-        # Deduplicate by name order-preserving
-        for m in out:
-            for mac in out[m]:
-                seen = set()
-                unique: List[FoodItem] = []
-                for f in out[m][mac]:
-                    if f.name not in seen:
-                        seen.add(f.name)
-                        unique.append(f)
-                out[m][mac] = unique
-        return out
+            logger.debug("could not load allergies for the pool", exc_info=True)
+
+        policy = load_policy(self._resolve_goal())
+        pool = build_pool(self.user, policy, allergen_checker=checker)
+        return pool.by_slot
+
+    def _filter_pool_for_allergens(self, pool):
+        """Drop every food that violates the user's declared allergies.
+
+        Foods whose allergen data is unverified are kept only when they carry no
+        detected marker — `allergen_source='unknown'` is not treated as safe when a
+        marker matches, but it cannot be treated as unsafe either without discarding
+        most of the catalogue. That residual risk is why persistence still validates.
+        """
+        from ..services.meal_validator import VIOLATION, AllergenChecker
+
+        try:
+            from ..models import UserFoodPreference
+            pref = UserFoodPreference.objects.filter(user=self.user).first()
+            raw = getattr(pref, 'allergies', None) if pref else None
+        except Exception:
+            raw = None
+        if not raw:
+            return pool
+
+        checker = AllergenChecker(raw)
+        if not checker.active:
+            return pool
+
+        removed = 0
+        for meal, macros in pool.items():
+            for macro, foods in macros.items():
+                safe = []
+                for food in foods:
+                    if checker.check_food(food).verdict == VIOLATION:
+                        removed += 1
+                        continue
+                    safe.append(food)
+                macros[macro] = safe
+        if removed:
+            logger.info(
+                "Allergen pool filter removed %s candidate food(s) for user %s",
+                removed, getattr(self.user, 'id', '?'),
+            )
+        return pool
 
     def _get_recent_food_ids(self, meal_type: str, days: int, until) -> Set[int]:
         from datetime import timedelta as _timedelta
@@ -1514,7 +1634,7 @@ class RuleBasedPlanner:
         grams = min(grams, portion_sanity_cap_grams(dom))
         # Add variability to carbs to avoid always maxing out
         if carb_variable and macro == 'carb':
-            carb_cap = random.uniform(250.0, 350.0)
+            carb_cap = self._rng.uniform(250.0, 350.0)
             grams = min(grams, carb_cap)
         # Apply vegetable-specific cap only for vegetables
         if self._is_vegetable(food):
@@ -1540,7 +1660,9 @@ class RuleBasedPlanner:
                 if getattr(food.category, 'is_fat', False):
                     return 'fat'
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         p_pg, c_pg, f_pg, _ = get_macro_densities_for_food(food)
         p_cals = 4.0 * p_pg
         c_cals = 4.0 * c_pg
@@ -1564,7 +1686,9 @@ class RuleBasedPlanner:
                     pieces = max(1, int(round(grams / pw)))
                     return float(pieces * pw)
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         return grams
 
     def _load_common_foods(self, names: List[str]) -> List[FoodItem]:
@@ -1596,7 +1720,9 @@ class RuleBasedPlanner:
             try:
                 eff *= float(getattr(food, 'smart_score_weight', 1.0) or 1.0)
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             macro_pg = self._macro_per_gram(food, macro)
             if macro_pg <= 0.0:
                 continue
@@ -1618,7 +1744,7 @@ class RuleBasedPlanner:
             kcal_over = max(0.0, kcal_after - meal_target.kcal_target)
             penalty = 0.1 * fat_over + 0.05 * kcal_over
             base = eff / max(kcal_pg, 1e-9)
-            jitter = random.uniform(0.95, 1.05)
+            jitter = self._rng.uniform(0.95, 1.05)
             score = (base - penalty) * jitter
             ranked.append({'food': food, 'score': score, 'penalty': penalty, 'grams': grams})
         ranked.sort(key=lambda x: x['score'], reverse=True)
@@ -1669,8 +1795,7 @@ class RuleBasedPlanner:
         
         if available_vegs:
             # Pick a random vegetable or the first available
-            import random
-            veg = random.choice(available_vegs) if len(available_vegs) > 1 else available_vegs[0]
+            veg = self._rng.choice(available_vegs) if len(available_vegs) > 1 else available_vegs[0]
             
             # Add 100g of the vegetable
             components.append((veg, 100.0))
@@ -1682,12 +1807,11 @@ class RuleBasedPlanner:
         return False
     
     def _add_fruits_to_day(
-        self, meals: List[str], allowed: Dict, 
+        self, meals: List[str], allowed: Dict,
         today_meals: List[AIMeal], used_in_window: Dict
     ) -> None:
         """Add 2 portions of fruits across today's meals (100-150g each), respecting meal allowances."""
-        import random
-        
+
         # Identify target meals (Breakfast > Lunch > Dinner)
         candidates = [m for m in today_meals if m.meal_name in ('Breakfast', 'Lunch', 'Dinner')]
         candidates.sort(key=lambda m: {'Breakfast':0, 'Lunch':1, 'Dinner':2}.get(m.meal_name, 99))
@@ -1724,7 +1848,7 @@ class RuleBasedPlanner:
                 continue
                 
             # Pick one
-            fruit = random.choice(valid_fruits)
+            fruit = self._rng.choice(valid_fruits)
             
             # Check if fruit already in meal?
             existing_names = {ing.name.lower() for ing in meal.ingredients}
@@ -1732,7 +1856,7 @@ class RuleBasedPlanner:
                 continue
                 
             # Add to meal
-            grams = random.uniform(100.0, 150.0)
+            grams = self._rng.uniform(100.0, 150.0)
             grams = self._round_grams(grams)
             
             # Convert FoodItem to ingredient
@@ -1763,4 +1887,6 @@ class RuleBasedPlanner:
                 # We need to update user_all for next iteration
                 used_in_window.setdefault("Snack", set()).add(fid) # Add to dummy to ensure global exclusion for today
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)

@@ -14,7 +14,6 @@ from typing import Optional, Dict, Any, List
 from django.utils import timezone
 from django.db.models import Sum, Count
 from django.db import transaction
-from django.contrib.contenttypes.models import ContentType
 
 from users.models import CustomUser
 
@@ -95,11 +94,54 @@ class AchievementEngine:
                     result = cls._award_achievement(user, achievement, **context)
                     if result:
                         awarded.append(result)
+                else:
+                    # Record how close they are. AchievementProgress had a model, a
+                    # serializer, an admin page and an import in achievements/views.py,
+                    # and nothing ever wrote a row — so a "3 of 5 workouts" screen was
+                    # fully plumbed and always empty.
+                    cls._record_progress(user, achievement, **context)
         
         except Exception as e:
             logger.error(f"Error checking achievements for user {user.id}: {e}")
         
         return awarded
+
+    @classmethod
+    def _record_progress(cls, user: CustomUser, achievement, **context) -> None:
+        """Store partial progress toward an achievement that has not been earned yet."""
+        try:
+            from .models import AchievementProgress
+
+            criteria = getattr(achievement, "criteria", None) or {}
+            criteria_type = criteria.get("type")
+            # `target` is the key _evaluate_criteria uses; matching it keeps the progress
+            # bar and the award decision measuring the same thing.
+            target = criteria.get("target")
+            if not criteria_type or not target:
+                return
+
+            # Same signature the evaluator uses — `criteria` is positional.
+            current = cls._get_metric_value(user, criteria_type, criteria, **context)
+            if current is None:
+                return
+
+            target = float(target)
+            if target <= 0:
+                return
+            pct = max(0.0, min(100.0, (float(current) / target) * 100.0))
+
+            AchievementProgress.objects.update_or_create(
+                user=user, achievement=achievement,
+                defaults={
+                    "current_value": float(current),
+                    "target_value": target,
+                    "progress_percentage": round(pct, 2),
+                },
+            )
+        except Exception:
+            # Progress is a display nicety; it must never break awarding.
+            logger.debug("could not record progress for achievement %s",
+                         getattr(achievement, "pk", "?"), exc_info=True)
 
     @classmethod
     def _evaluate_criteria(cls, user: CustomUser, achievement, **context) -> bool:
@@ -226,7 +268,7 @@ class AchievementEngine:
         """Calculate consecutive days with workouts."""
         from analytics.models import UserActivity
         
-        today = timezone.now().date()
+        today = timezone.localdate()
         streak = 0
         current_date = today
         
@@ -250,7 +292,7 @@ class AchievementEngine:
         """Calculate consecutive days with meal logging."""
         from analytics.models import UserActivity
         
-        today = timezone.now().date()
+        today = timezone.localdate()
         streak = 0
         current_date = today
         
@@ -346,8 +388,7 @@ class AchievementEngine:
     def _award_achievement(cls, user: CustomUser, achievement, **context) -> Optional[Dict]:
         """Award achievement to user and send notification."""
         from achievements.models import UserAchievement
-        from social.models import Notification
-        
+
         try:
             # Create user achievement
             user_achievement = UserAchievement.objects.create(
@@ -355,17 +396,21 @@ class AchievementEngine:
                 achievement=achievement,
                 progress_data=context
             )
-            
-            # Send notification
-            Notification.objects.create(
-                recipient=user,
-                notification_type='achievement',
-                title='Achievement Unlocked! 🏆',
-                message=f'You earned the "{achievement.name}" achievement! +{achievement.points} points',
-                content_type=ContentType.objects.get_for_model(achievement),
-                object_id=achievement.id
-            )
-            
+
+            # Emit the domain event. The notifications listener persists to the
+            # canonical notifications.Notification store and dispatches FCM.
+            # (This previously wrote a legacy social.Notification row that no API
+            # endpoint reads, so achievement notifications were never delivered.)
+            from notifications.domain.dispatcher import emit_event
+            from notifications.domain.events import AchievementAwardedEvent
+
+            emit_event(AchievementAwardedEvent(
+                user_id=user.id,
+                achievement_id=achievement.id,
+                achievement_name=achievement.name,
+                points=achievement.points,
+            ))
+
             logger.info(f"Awarded '{achievement.name}' to user {user.username}")
             
             return {

@@ -12,6 +12,7 @@ import logging
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.db import transaction
 from django.utils.translation import gettext as _
 from subscription.permissions import HasAIAdviceAccess
 
@@ -113,11 +114,14 @@ class FeedbackView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Update training data for this interaction
+        # Match on the message itself. The previous filter used
+        # `ai_response__startswith=msg.content[:100]`, and assistant replies routinely
+        # share an opening line — one thumbs-up stamped TWO unrelated training rows,
+        # silently mislabelling the dataset.
         updated = AITrainingData.objects.filter(
             user=request.user,
             session=msg.session,
-            ai_response__startswith=msg.content[:100],
+            message=msg,
         ).update(user_feedback=feedback)
 
         return Response({
@@ -136,10 +140,17 @@ class GDPRDataDeleteView(APIView):
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    @transaction.atomic
     def delete(self, request):
+        # Atomic: four independent deletes meant a failure part-way left the user's data
+        # half-removed, with a 500 and no record of how far it got.
         user = request.user
         counts = {}
 
+        # Report the cascaded rows too — messages and training data were being deleted
+        # but never counted, so the response under-reported what had been removed.
+        counts['messages'] = ChatMessage.objects.filter(session__user=user).count()
+        counts['training_records'] = AITrainingData.objects.filter(user=user).count()
         counts['sessions'] = ChatSession.objects.filter(user=user).count()
         ChatSession.objects.filter(user=user).delete()  # cascades to messages + training data
 
@@ -151,6 +162,10 @@ class GDPRDataDeleteView(APIView):
 
         counts['cost_records'] = UsageCost.objects.filter(user=user).count()
         UsageCost.objects.filter(user=user).delete()
+
+        # Training data is keyed to the user as well as the session; sweep any row whose
+        # session was already gone so nothing survives the request.
+        AITrainingData.objects.filter(user=user).delete()
 
         total = sum(counts.values())
 

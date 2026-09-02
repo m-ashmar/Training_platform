@@ -1,8 +1,11 @@
 from django.contrib import admin
-from django.urls import path, include
+import re
+
+from django.urls import path, include, re_path
 from django.conf import settings
-from django.conf.urls.static import static
 from django.contrib.staticfiles.urls import staticfiles_urlpatterns
+
+from training_platform.media_views import serve_media
 
 # drf-yasg imports
 from rest_framework import permissions
@@ -46,6 +49,13 @@ urlpatterns = [
     path('', include('social.urls')),     # Social Features API
     path('api/wallet/', include('wallet.urls', namespace='wallet')),
     path('api/ai/', include('ai_assistant.urls', namespace='ai_assistant')),
+
+    # Data-subject rights (GDPR Art. 15 export / Art. 17 erasure), derived from the
+    # personal-data registry in training_platform/privacy/.
+    path('api/privacy/', include('training_platform.privacy.urls', namespace='privacy')),
+
+    # Notification preferences (listing lives under /api/social/notifications/)
+    path('api/notifications/', include('notifications.urls', namespace='notifications')),
 ]
 
 # Swagger/Redoc only served in DEBUG mode — completely hidden in production
@@ -55,11 +65,25 @@ if settings.DEBUG:
         path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
     ]
 
-# Serve media files in development
+# Static files. In production WhiteNoise (see MIDDLEWARE) serves STATIC_ROOT;
+# this pattern only covers the dev server, which has no WhiteNoise in the chain.
 if settings.DEBUG:
-    # Serve app/static and contrib/admin static files in development
     urlpatterns += staticfiles_urlpatterns()
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+# User-uploaded media.
+# NOTE: `static()` is deliberately NOT used here. It returns [] whenever DEBUG is
+# false, so it silently registers nothing in production and every upload 404s —
+# moving it out of the `if settings.DEBUG:` block above did not fix that.
+# When an external storage backend is configured (S3/R2), files are served by that
+# backend's own URLs and Django must not serve them locally.
+if not getattr(settings, 'USE_EXTERNAL_MEDIA_STORAGE', False):
+    urlpatterns += [
+        re_path(
+            r'^%s(?P<path>.*)$' % re.escape(settings.MEDIA_URL.lstrip('/')),
+            serve_media,
+            name='serve-media',
+        ),
+    ]
 
 # Language-aware error handlers (prevent default English leakage)
 handler404 = 'training_platform.error_handlers.handler404'

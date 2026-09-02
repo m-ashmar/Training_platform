@@ -2,6 +2,9 @@ from django.db import models
 from django.conf import settings
 import uuid
 from django.utils import timezone
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Notification(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -14,15 +17,20 @@ class Notification(models.Model):
     is_read = models.BooleanField(default=False)
     status = models.JSONField(default=dict, blank=True, help_text="Channel delivery status (e.g. {'fcm': {'status': 'sent'}})")
     deduplication_key = models.CharField(max_length=255, db_index=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['-created_at']
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
+        # paging repeated and hid rows whenever two records shared the value.
+        ordering = ['-created_at', '-id']
         indexes = [
             models.Index(fields=['recipient', 'is_read']),
             models.Index(fields=['deduplication_key']),
             models.Index(fields=['recipient', '-created_at']),
+            # Matches the real access pattern: WHERE <owner>=? ORDER BY created_at DESC, id DESC.
+            # A single-column created_at index cannot serve that; this one can.
+            models.Index(fields=['recipient', '-created_at', '-id'], name='notification_owner_recent_idx'),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -41,6 +49,9 @@ class UserNotificationPreference(models.Model):
     channels = models.JSONField(default=dict, help_text="{'fcm': True, 'email': False}. Empty means all default.")
     
     class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-id']
         constraints = [
             models.UniqueConstraint(fields=['user', 'event_type'], name='unique_user_event_pref')
         ]
@@ -57,7 +68,9 @@ class UserNotificationPreference(models.Model):
                 return False
             # If True or None, check 'all' preference?
         except cls.DoesNotExist:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
             
         # Check global 'all' preference if specific not found or inconclusive? 
         # For simplicity, default is True
@@ -69,9 +82,14 @@ class NotificationFailure(models.Model):
     event_payload = models.JSONField(help_text="Original event data")
     error_message = models.TextField()
     stack_trace = models.TextField(blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     retry_count = models.IntegerField(default=0)
     is_resolved = models.BooleanField(default=False)
     
     def __str__(self):
         return f"Failure: {self.event_type} at {self.created_at}"
+
+    class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-created_at', '-id']

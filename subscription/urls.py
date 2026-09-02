@@ -41,9 +41,12 @@ urlpatterns = [
     # Payment Gateway Operations
     path('v1/gateways/', views.PaymentGatewayView.as_view(), name='payment-gateways'),
     
-    # Payment Status Check
+    # Payment Status Check (read-only)
     path('v1/payments/<uuid:payment_id>/status/', views.PaymentStatusView.as_view(), name='payment-status'),
-    
+
+    # Payment Reconcile (verified fallback for missed webhooks; non-safe)
+    path('v1/payments/<uuid:payment_id>/reconcile/', views.PaymentReconcileView.as_view(), name='payment-reconcile'),
+
     # Webhook Endpoints (for payment gateway notifications)
     path('webhook/<str:gateway_name>/', views.PaymentWebhookView.as_view(), name='payment-webhook'),
 ] 

@@ -72,7 +72,19 @@ class ChatService:
             yield {"type": "error", "content": str(_("Message cannot be empty.")), "code": "invalid_input"}
             return
 
-        # 2. Ensure insights exist (cold start)
+        # 2. Budget gate — checked BEFORE any completion is requested. Cost used to be
+        # recorded only afterwards, and the hourly task merely logged CRITICAL, so there
+        # was nothing anywhere that could actually stop spending.
+        if await database_sync_to_async(self.cost_tracker.is_over_daily_limit)():
+            logger.critical("AI daily cost limit reached — refusing further completions")
+            yield {
+                "type": "error",
+                "content": str(_("The AI assistant is temporarily unavailable. Please try again later.")),
+                "code": "budget_exceeded",
+            }
+            return
+
+        # 3. Ensure insights exist (cold start)
         yield {"type": "status", "content": str(_("Getting ready..."))}
         await self._ensure_insights(user)
 
@@ -334,7 +346,9 @@ class ChatService:
                 )(session_id=session_uuid, user=user, is_active=True)
                 return session
             except (ChatSession.DoesNotExist, ValueError):
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
         # Create new session
         session = await database_sync_to_async(ChatSession.objects.create)(

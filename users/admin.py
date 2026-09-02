@@ -7,6 +7,9 @@ from django.utils.html import format_html
 from django.urls import reverse
 from django.http import HttpResponseRedirect
 from .models import CustomUser
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ClientInline(admin.TabularInline):
     model = CustomUser
@@ -189,4 +192,6 @@ try:
         readonly_fields = ('created_at', 'last_used_at')
         
 except ImportError:
-    pass
+    # Optional side effect: swallowing this silently is what made the
+    # surrounding failures invisible in logs. Control flow is unchanged.
+    logger.debug('suppressed non-fatal error', exc_info=True)

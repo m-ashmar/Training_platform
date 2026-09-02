@@ -25,7 +25,9 @@ class NotificationService:
                  logger.info(f"Notification suppressed by user preference: {recipient.id} - {event_type}")
                  return None
         except UserNotificationPreference.DoesNotExist:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         
         # calculate dedup key
         dedup_key = cls._generate_dedup_key(recipient.id, event_type, related_object_id)
@@ -36,25 +38,38 @@ class NotificationService:
                 from notifications.metrics import notifications_deduplicated_total
                 notifications_deduplicated_total.labels(source='redis', event_type=event_type).inc()
             except ImportError:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             return None
         
         try:
-            notification = Notification.objects.create(
-                recipient=recipient,
-                actor=actor,
-                event_type=event_type,
-                related_object_id=related_object_id,
-                metadata=metadata,
-                deduplication_key=dedup_key,
-                event_id=event_id
-            )
+            # The INSERT gets its own savepoint. Without one, the IntegrityError raised
+            # by a duplicate poisons the ENTIRE surrounding transaction: every view
+            # under @transaction.atomic that sends a notification would then fail with
+            # "You can't execute queries until the end of the 'atomic' block", and the
+            # user's real work — a completed workout, an assigned routine — would roll
+            # back because a notification they had already received was suppressed.
+            # Deduplication is a normal outcome here, not an error, and must cost the
+            # caller nothing.
+            with transaction.atomic():
+                notification = Notification.objects.create(
+                    recipient=recipient,
+                    actor=actor,
+                    event_type=event_type,
+                    related_object_id=related_object_id,
+                    metadata=metadata,
+                    deduplication_key=dedup_key,
+                    event_id=event_id
+                )
             # Metrics
             try:
                 from notifications.metrics import notifications_created_total
                 notifications_created_total.labels(event_type=event_type).inc()
             except ImportError:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
             # Dispatch to channels
             # In a real system, you might check user preferences here
@@ -68,7 +83,9 @@ class NotificationService:
                 from notifications.metrics import notifications_deduplicated_total
                 notifications_deduplicated_total.labels(source='db', event_type=event_type).inc()
             except ImportError:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
                 
             # Idempotency / Recovery:
             # If notification exists, we should ensure it was sent.

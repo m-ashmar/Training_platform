@@ -25,3 +25,10 @@ application = ProtocolTypeRouter({
         )
     ),
 })
+
+# Enforce production safety invariants on startup. Daphne/ASGI is the production
+# runtime, so this MUST run here too (not only in wsgi.py) — otherwise the
+# DEBUG / WALLET_DEV_MODE / PAYMENT_DEBUG / ShamCash invariants never execute.
+if os.environ.get("DJANGO_SETTINGS_MODULE") == "training_platform.settings_production":
+    from training_platform.settings_production import enforce_production_safety
+    enforce_production_safety()

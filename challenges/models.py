@@ -6,7 +6,6 @@ from social.models import (
     ChallengeParticipation as SocialChallengeParticipation,
     UserAchievement as SocialUserAchievement,
     Leaderboard as SocialLeaderboard,
-    Notification as SocialNotification,
 )
 
 
@@ -44,9 +43,3 @@ class LeaderboardProxy(SocialLeaderboard):
         verbose_name = "Leaderboard"
         verbose_name_plural = "Leaderboards"
 
-
-class NotificationProxy(SocialNotification):
-    class Meta:
-        proxy = True
-        verbose_name = "Notification"
-        verbose_name_plural = "Notifications"

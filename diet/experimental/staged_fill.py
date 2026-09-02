@@ -9,6 +9,9 @@ import random
 from diet.models import FoodItem
 from diet.utils.nutrition import portion_sanity_cap_grams  # noqa: F401 (kept for documentation parity)
 from diet.utils.portioning import compute_portion_grams
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -61,7 +64,9 @@ class StagedMealFiller:
             try:
                 print(f"[RESIDUAL] meal={meal_type} add={getattr(food,'name','')} {int(grams)}g -> kcal_left={round(max(0.0, float(targets.kcal_target or 0.0) - kcal_consumed),1)} residual={{'protein':round(residual['protein'],1),'carb':round(residual['carb'],1),'fat':round(residual['fat'],1)}}")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
         # Stage helper
         def stage(macro: str):
@@ -122,12 +127,16 @@ class StagedMealFiller:
                         try:
                             print(f"[FAT_FLOOR] meal={meal_type} disabled (need={round(fat_needed,1)}g, kcal_left={round(kcal_res,1)})")
                         except Exception:
-                            pass
+                            # Optional side effect: swallowing this silently is what made the
+                            # surrounding failures invisible in logs. Control flow is unchanged.
+                            logger.debug('suppressed non-fatal error', exc_info=True)
                     else:
                         try:
                             print(f"[FAT_FLOOR] meal={meal_type} floor={round(local_floor,1)} (need={round(fat_needed,1)}g, kcal_left={round(kcal_res,1)})")
                         except Exception:
-                            pass
+                            # Optional side effect: swallowing this silently is what made the
+                            # surrounding failures invisible in logs. Control flow is unchanged.
+                            logger.debug('suppressed non-fatal error', exc_info=True)
                 if kcal_pg > 0.0:
                     if local_floor > 0.0 and grams < local_floor:
                         max_by_kcal = kcal_res / kcal_pg if kcal_res > 0.0 else 0.0
@@ -147,7 +156,10 @@ class StagedMealFiller:
                 print(f"[FAT_SKIP_STAGED] meal={meal_type} remaining_fat={round(rem_fat,1)}g < 10g, skipping fat stage")
             else:
                 stage('fat')
-        except Exception: pass
+        except Exception:
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         return components
 
 

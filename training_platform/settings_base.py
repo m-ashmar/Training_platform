@@ -27,6 +27,12 @@ SECRET_KEY = get_secret("DJANGO_SECRET_KEY")
 _old_key = os.environ.get("DJANGO_OLD_SECRET_KEY_1")
 SECRET_KEY_FALLBACKS = [_old_key] if _old_key else []
 
+# Key for EncryptedTextField (training_platform/encrypted_fields.py), which protects
+# free-text health data at rest. Comma-separated for rotation: the first key encrypts,
+# all of them decrypt. Optional here so local development runs without it; production
+# refuses to boot without it (see enforce_production_safety).
+FIELD_ENCRYPTION_KEY = get_env("FIELD_ENCRYPTION_KEY", "")
+
 # ========================
 # Application Definition
 # ========================
@@ -73,6 +79,9 @@ INSTALLED_APPS = [
     "dj_rest_auth.registration",
     "corsheaders",
     "channels",
+    # Used by routine.views via DjangoFilterBackend — must be installed so its
+    # app checks and templates load.
+    "django_filters",
 ]
 
 ASGI_APPLICATION = "training_platform.asgi.application"
@@ -89,7 +98,15 @@ CHANNEL_LAYERS = {
 
 # SecurityMiddleware MUST be first (per Django security best practices)
 MIDDLEWARE = [
+    # Must run first: rejects oversized bodies before Django buffers them to disk.
+    'training_platform.middleware.RequestSizeLimitMiddleware',
     "django.middleware.security.SecurityMiddleware",
+    # Serves everything collectstatic wrote to STATIC_ROOT. Without it nothing serves
+    # /static/ at all once DEBUG is off: staticfiles_urlpatterns() is dev-only and there
+    # is no CDN or NGINX in front on Fly. The admin dashboard at /dj-admin/ was loading
+    # with no CSS or JS. Must be immediately after SecurityMiddleware so redirects and
+    # security headers still apply to static responses.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "training_platform.middleware.SecurityHeadersMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
@@ -178,8 +195,34 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'charging': '10/minute',
     },
+    # ONE pagination shape for every list endpoint: {count, next, previous, results}.
+    # Previously three shapes were in play (paginated dict, bare array, cursor) and
+    # seven viewsets had no pagination at all, so they returned EVERY row — an
+    # unbounded response on a 512MB box and three parsers for the mobile client.
+    # Project paginator: same {count, next, previous, results} shape as before, but
+    # ?page_size=N is honoured (capped at 100) instead of silently ignored.
+    'DEFAULT_PAGINATION_CLASS': 'training_platform.pagination.StandardPagination',
+    'PAGE_SIZE': 25,
     'NON_FIELD_ERRORS_KEY': 'non_field_errors',
+    # One error shape with a locale-independent `code`. The API is bilingual, so a
+    # client branching on translated message text breaks as soon as a user switches
+    # to Arabic. See training_platform/exception_handler.py.
+    'EXCEPTION_HANDLER': 'training_platform.exception_handler.api_exception_handler',
 }
+
+# ========================
+# Wallet / Agent configuration
+# ========================
+from decimal import Decimal as _Decimal
+# Agent top-up caps. IMPORTANT: limits are enforced fail-closed — a value of 0
+# means "no top-ups permitted", NOT unlimited. To allow more, raise the value
+# (tunable per-agent in the admin). Launch model: trusted prepaid cash-in.
+AGENT_DEFAULT_DAILY_LIMIT = _Decimal(get_env("AGENT_DEFAULT_DAILY_LIMIT", "200"))
+AGENT_DEFAULT_MONTHLY_LIMIT = _Decimal(get_env("AGENT_DEFAULT_MONTHLY_LIMIT", "5000"))
+# Optional dedicated Fernet key (base64) for encrypting agent API secrets at rest.
+# If unset, a key is derived from SECRET_KEY — a DB leak alone still cannot forge
+# signatures, since SECRET_KEY is not stored in the database.
+AGENT_APIKEY_ENC_KEY = get_env("AGENT_APIKEY_ENC_KEY", "")
 
 # ========================
 # JWT Configuration — RS256 asymmetric signing
@@ -236,10 +279,13 @@ CORS_ALLOWED_ORIGINS = [
 # ========================
 # AI Integration — All keys from environment, no hardcoded tokens
 # ========================
-OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
+# Optional integrations: loaded with get_env so a missing key disables the
+# feature (graceful degradation) instead of crashing the whole app at startup.
+# This matches deploy-pipeline.md, which lists these as "optional but expected".
+OPENAI_API_KEY = get_env("OPENAI_API_KEY", "")
 OPENAI_MODEL = get_env("OPENAI_MODEL", "gpt-4o-mini")
 AI_PROVIDER = get_env("AI_PROVIDER", "openai")
-HUGGINGFACE_API_TOKEN = get_secret("HUGGINGFACE_API_TOKEN")
+HUGGINGFACE_API_TOKEN = get_env("HUGGINGFACE_API_TOKEN", "")
 
 AI_ASSISTANT_CONFIG = {
     "MODEL": get_env("AI_ASSISTANT_MODEL", "gpt-4o-mini"),
@@ -249,6 +295,9 @@ AI_ASSISTANT_CONFIG = {
     "MAX_MESSAGES_PER_DAY": 50,
     "SESSION_TIMEOUT_MINUTES": 30,
     "DAILY_COST_ALERT_USD": "50.00",
+    # Hard platform-wide ceiling. DAILY_COST_ALERT_USD only logs; this one
+    # actually refuses further completions once the day's spend passes it.
+    "DAILY_COST_LIMIT_USD": "200.00",
     "SYSTEM_PROMPT_BUDGET": 800,
     "HISTORY_BUDGET": 3000,
     "TOOL_RESULTS_BUDGET": 2000,
@@ -258,11 +307,73 @@ AI_ASSISTANT_CONFIG = {
 # ========================
 # Celery
 # ========================
-CELERY_BROKER_URL = get_env('CELERY_BROKER_URL', 'redis://localhost:6379/0')
-CELERY_RESULT_BACKEND = get_env('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
+# DB6/DB7 — deliberately outside the 6 logical DBs the caches use. The default used to
+# be DB0, which settings_production assigns to SESSIONS, so queue keys and session keys
+# shared a keyspace.
+CELERY_BROKER_URL = get_env('CELERY_BROKER_URL', 'redis://localhost:6379/6')
+CELERY_RESULT_BACKEND = get_env('CELERY_RESULT_BACKEND', 'redis://localhost:6379/7')
+
+# Acknowledge a task only after it finishes. With the default (ack on delivery) a worker
+# killed mid-task — routine on Fly, where machines stop when idle — dropped the job
+# permanently. Paired with idempotent consumers this gives at-least-once delivery.
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# A hung external call (LLM, Edamam, FCM) previously held its worker slot forever.
+CELERY_TASK_SOFT_TIME_LIMIT = int(get_env('CELERY_TASK_SOFT_TIME_LIMIT', 300))
+CELERY_TASK_TIME_LIMIT = int(get_env('CELERY_TASK_TIME_LIMIT', 360))
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
+from celery.schedules import crontab
+
+# autodiscover_tasks() only scans `<installed_app>/tasks.py`. These two live outside
+# that pattern — one in a subpackage of the diet app, one in a plain package that is not
+# an installed app — so the worker never registered them and both scheduled jobs (the
+# planner's learning loop and the GDPR retention purge) silently never ran. Beat does
+# not error on an unregistered task name; it just skips it.
+CELERY_IMPORTS = (
+    'diet.planner.tasks',
+    'training_platform.privacy.tasks',
+)
+
 CELERY_BEAT_SCHEDULE = {
+    # Retention nudge for clients who have drifted. `session_reminder` was registered
+    # and templated from the start but nothing ever emitted it, so the platform had no
+    # re-engagement loop at all. 16:00 UTC ~ early evening in Damascus (UTC+3), before
+    # a typical training slot rather than after it.
+    'send-workout-reminders': {
+        'task': 'notifications.send_workout_reminders',
+        'schedule': crontab(hour=16, minute=0),
+    },
+    # Was declared in celery.py as `app.conf.beat_schedule = {...}` AFTER
+    # config_from_object(). That config loads lazily, so settings won on first access
+    # and the assignment was discarded — the task existed, was scheduled on paper, and
+    # never ran once. It belongs here, with every other periodic task.
+    'generate-daily-advice': {
+        'task': 'diet.tasks.generate_daily_advice',
+        'schedule': crontab(hour=6, minute=0),  # 06:00 daily
+    },
+    # The dead-letter queue was written to and never read. This replays what can
+    # be replayed and escalates what cannot.
+    'drain-notification-dlq': {
+        'task': 'notifications.drain_dead_letter_queue',
+        'schedule': 3600,
+    },
+    # Turns is_liked / is_completed / actual_quantity_consumed — all collected and
+    # previously read by nothing — into planner ranking weights.
+    'refresh-food-weights': {
+        'task': 'diet.planner.refresh_food_weights',
+        'schedule': 86400,
+    },
+    # Retention. Every source in training_platform/privacy/sources.py that declares
+    # retention_days is enforced here — analytics IPs at 180 days, notifications at
+    # 90, OTP/reset tokens at 1.
+    'purge-expired-personal-data': {
+        'task': 'training_platform.privacy.purge_expired_personal_data',
+        'schedule': 86400,
+    },
     'close-idle-ai-sessions': {
         'task': 'ai_assistant.tasks.close_idle_sessions',
         'schedule': 600,
@@ -309,21 +420,26 @@ DIET_SMART_MACRO_PLANNER = True
 DIET_DYNAMIC_MEAL_ALLOCATION = True
 DIET_STAGED_MEAL_FILL = True
 
-# Edamam API — loaded from environment
-EDAMAM_APP_ID = get_secret("EDAMAM_APP_ID")
-EDAMAM_APP_KEY = get_secret("EDAMAM_APP_KEY")
+# Edamam API — optional; empty disables nutrition lookups (graceful degradation)
+EDAMAM_APP_ID = get_env("EDAMAM_APP_ID", "")
+EDAMAM_APP_KEY = get_env("EDAMAM_APP_KEY", "")
 
 # ========================
-# Firebase / Push Notifications — loaded from environment
+# Firebase / Push Notifications — optional; empty disables push (already degrades)
 # ========================
-FIREBASE_CREDENTIALS_PATH = get_secret("FIREBASE_CREDENTIALS_PATH")
+FIREBASE_CREDENTIALS_PATH = get_env("FIREBASE_CREDENTIALS_PATH", "")
 FIREBASE_PROJECT_ID = get_env("FIREBASE_PROJECT_ID", "")
 
 # ========================
 # Internationalization & Localization
 # ========================
 LANGUAGE_CODE = "en"
-TIME_ZONE = "UTC"
+# Server-local timezone. This drives timezone.localdate(), which every training
+# date, streak and "today" check depends on. It was UTC while the user base is
+# UTC+3, so workouts logged 00:00-03:00 local were stored on the PREVIOUS day
+# (breaking streaks) and a legitimate "today" could be rejected as a future date.
+# Env-overridable so a future region change needs no code edit.
+TIME_ZONE = get_env("TIME_ZONE", "Asia/Damascus")
 USE_I18N = True
 USE_L10N = True
 USE_TZ = True
@@ -347,7 +463,16 @@ STATICFILES_DIRS = [
 ]
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# MEDIA_ROOT must NOT sit inside the container image: Fly's filesystem is ephemeral
+# and `min_machines_running = 0` stops the machine when idle, so every upload was
+# destroyed on restart/redeploy. In production this points at a mounted volume
+# (fly.toml [mounts] -> /data), overridable by env for an S3/R2 migration later.
+MEDIA_ROOT = get_env("MEDIA_ROOT", str(BASE_DIR / 'media'))
+
+# Set true once files are served by an external backend (S3/R2/CDN); Django then
+# stops serving /media/ itself. Keeping local serving is fine at current scale but
+# it does occupy an app worker per file request.
+USE_EXTERNAL_MEDIA_STORAGE = get_env("USE_EXTERNAL_MEDIA_STORAGE", "False") == "True"
 
 # ========================
 # Default Auto Field
@@ -521,7 +646,50 @@ CACHALOT_TIMEOUT = 86400  # Long duration because cachalot automatically invalid
 CACHALOT_UNCACHABLE_TABLES = frozenset([
     # CRITICAL: Prevent race conditions by bypassing cache on ledger/auth reads
     'wallet_agentapikey', 'wallet_wallet', 'wallet_transaction',
-    'auth_user', 'users_customuser', 'django_session', 
+    'auth_user', 'users_customuser', 'django_session',
     'auth_permission', 'auth_group', 'django_admin_log',
-    'django_celery_results_taskresult'
+    'django_celery_results_taskresult',
+    # Financial state — reads drive idempotency/activation; must never be stale
+    'wallet_idempotencykey', 'wallet_walletauditlog', 'wallet_agentprofile',
+    'subscription_subscription', 'subscription_payment', 'subscription_subscriptionusage',
+    # Auth/security — token revocation & permission boundaries must not be stale
+    'token_blacklist_blacklistedtoken', 'token_blacklist_outstandingtoken',
+    'users_trainerclientrelation', 'users_otpverification', 'users_passwordresettoken',
 ])
+
+# Multipart bodies are buffered here before a view ever sees them. Unset, this is the
+# container's ephemeral rootfs rather than the mounted volume, so a large upload fills
+# the machine's disk. Paired with MAX_REQUEST_BODY_BYTES, which caps the body up front.
+MAX_REQUEST_BODY_BYTES = int(get_env('MAX_REQUEST_BODY_BYTES', 15 * 1024 * 1024))
+FILE_UPLOAD_TEMP_DIR = get_env('FILE_UPLOAD_TEMP_DIR', None) or None
+
+# Media is served without per-request auth (the mobile client cannot attach a JWT
+# to image loads), so URLs are signed and time-limited instead. Signing happens in
+# SignedMediaStorage.url(), so every `.url` in every serializer is covered.
+MEDIA_URL_SIGNING = get_env('MEDIA_URL_SIGNING', 'True').lower() in ('1', 'true', 'yes')
+MEDIA_URL_TTL = int(get_env('MEDIA_URL_TTL', 24 * 3600))
+STORAGES = {
+    # Only signs when Django itself serves the files. With an external backend the
+    # signature would be meaningless — that provider issues (and secures) its own URLs.
+    'default': {'BACKEND': (
+        'django.core.files.storage.FileSystemStorage'
+        if USE_EXTERNAL_MEDIA_STORAGE
+        else 'training_platform.media_storage.SignedMediaStorage'
+    )},
+    # Compressed + hashed filenames, so static assets can be cached immutably and a
+    # deploy cannot serve a stale mix of old and new files. The manifest is generated
+    # by collectstatic during `docker build` (settings_build imports this module) and
+    # ships inside the image.
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+}
+
+# modeltranslation turns `name` into a virtual field resolving to `name_<lang>`.
+# Rows imported outside the ORM only ever filled the BASE column, so with no
+# fallback configured `.name` returned '' — the exercise library and the food
+# database came back from the API with every name blank. The fallback makes a
+# missing translation degrade to English instead of to an empty string.
+MODELTRANSLATION_DEFAULT_LANGUAGE = 'en'
+MODELTRANSLATION_FALLBACK_LANGUAGES = ('en', 'ar')
+
+# How long AI training snapshots (which contain health context) are retained.
+AI_TRAINING_RETENTION_DAYS = int(get_env('AI_TRAINING_RETENTION_DAYS', 365))

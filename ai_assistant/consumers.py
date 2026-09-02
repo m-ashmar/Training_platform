@@ -134,6 +134,33 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 }))
                 return
 
+            # Unbounded prompt size = unbounded token spend. A 200 KB frame was
+            # previously accepted and forwarded to the model verbatim.
+            # Must match InputSanitizer's own limit, otherwise a message passes here and
+            # is then silently truncated to half its length before reaching the model.
+            from ai_assistant.services.security import InputSanitizer
+            max_chars = getattr(settings, 'AI_ASSISTANT_CONFIG', {}).get(
+                'MAX_MESSAGE_CHARS', InputSanitizer.MAX_LENGTH)
+            if len(content) > max_chars:
+                await self.send(text_data=json.dumps({
+                    "type": "error",
+                    "content": str(_("Message is too long (max %(n)d characters).") % {"n": max_chars}),
+                    "code": "message_too_long",
+                }))
+                return
+
+            # Entitlement is re-checked per message. Checking only at connect meant a
+            # cancelled or lapsed subscription kept working for as long as the socket
+            # stayed open — and an active client never lets it idle out.
+            if not await self._check_premium():
+                await self.send(text_data=json.dumps({
+                    "type": "error",
+                    "content": str(_("Your AI assistant subscription is no longer active.")),
+                    "code": "subscription_inactive",
+                }))
+                await self.close(code=4003)
+                return
+
             # Check rate limit
             allowed, remaining, resets_at = await self._check_rate_limit()
             if not allowed:
@@ -245,12 +272,12 @@ class AIChatConsumer(AsyncWebsocketConsumer):
         max_messages = config.get('MAX_MESSAGES_PER_DAY', 50)
         from training_platform.cache import ratelimit_cache
 
-        cache_key = f"ai_chat_limit:{self.user.id}:{date.today().isoformat()}"
+        cache_key = f"ai_chat_limit:{self.user.id}:{timezone.localdate().isoformat()}"
         rl = ratelimit_cache()
 
         # Calculate reset time (midnight)
         tomorrow = datetime.combine(
-            date.today() + timedelta(days=1), datetime.min.time(),
+            timezone.localdate() + timedelta(days=1), datetime.min.time(),
         )
         seconds_until_midnight = int((tomorrow - datetime.now()).total_seconds())
         resets_at = tomorrow.isoformat()
@@ -267,7 +294,9 @@ class AIChatConsumer(AsyncWebsocketConsumer):
             try:
                 rl.decr(cache_key)
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             return False, 0, resets_at
 
         remaining = max_messages - current

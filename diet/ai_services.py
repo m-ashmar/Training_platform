@@ -159,6 +159,28 @@ class DietGenerator:
             }
         }
 
+    @staticmethod
+    def _sanitize_prompt_text(value, max_len: int = 200) -> str:
+        """
+        Neutralize user-supplied free text before embedding it in the LLM prompt.
+        Collapses newlines (block multi-line injected instructions), strips code
+        fences/braces used to break out of the template, drops common injection
+        phrases, and hard-caps length.
+        """
+        import re
+        s = str(value or "")
+        s = s.replace("`", "").replace("{", "").replace("}", "")
+        s = re.sub(r"\s+", " ", s).strip()
+        s = re.sub(
+            r"(?i)\b(ignore|disregard|forget)\b[^.]*\b(previous|above|prior|instructions?|prompt)\b",
+            "[removed]",
+            s,
+        )
+        s = re.sub(r"(?i)\bsystem\s*:|\bassistant\s*:|\buser\s*:", "", s)
+        if len(s) > max_len:
+            s = s[:max_len].rstrip()
+        return s
+
     def generate_plan(self, meal_count=3, snack_count=1):
         """
         Enhanced diet plan generation with meal count and snack preferences.
@@ -176,9 +198,13 @@ class DietGenerator:
         generation_metadata = self._create_generation_metadata(meal_count, snack_count, user_data)
         
         try:
-            # Build prompt via Jinja2 template
+            # Build prompt via Jinja2 template. Sanitize user-controlled free-text
+            # fields to blunt prompt-injection before they reach the LLM.
             final_prompt = self.prompt_builder.build({
                 **user_data,
+                "user_name": self._sanitize_prompt_text(user_data.get("user_name", ""), max_len=60),
+                "allergies": self._sanitize_prompt_text(user_data.get("allergies", ""), max_len=200),
+                "dietary_restrictions": self._sanitize_prompt_text(user_data.get("dietary_restrictions", ""), max_len=200),
                 "meal_count": meal_count,
                 "snack_count": snack_count,
             })
@@ -296,7 +322,9 @@ class DietGenerator:
                 if 'gain' in goals_l or 'muscle' in goals_l:
                     return 'Gain'
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             return 'Maintain'
         g = str(goal).lower()
         if 'lose' in g or 'fat' in g:
@@ -372,7 +400,9 @@ class DietGenerator:
                 if getattr(food.category, 'is_fat', False):
                     return 'fat'
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         # Fallback to per-gram macro calories
         p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0))
         c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0))

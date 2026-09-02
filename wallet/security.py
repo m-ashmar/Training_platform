@@ -1,8 +1,49 @@
 import time
 import hmac
 import hashlib
+import base64
 from dataclasses import dataclass
 from django.conf import settings
+from cryptography.fernet import Fernet, MultiFernet
+
+
+def _derive_key(material: str) -> bytes:
+    """Derive a urlsafe-base64 Fernet key from arbitrary secret material."""
+    digest = hashlib.sha256(material.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest)
+
+
+def _fernet_keys() -> list:
+    """
+    Ordered Fernet keys for agent-secret encryption. The FIRST key encrypts new
+    values; ALL keys can decrypt existing ones (MultiFernet), so rotating
+    DJANGO_SECRET_KEY (with the old value in SECRET_KEY_FALLBACKS) does not orphan
+    already-encrypted secrets.
+    """
+    keys = []
+    dedicated = getattr(settings, "AGENT_APIKEY_ENC_KEY", "") or ""
+    if dedicated:
+        keys.append(dedicated.encode("utf-8") if isinstance(dedicated, str) else dedicated)
+    # Derive from the current SECRET_KEY and any rotation fallbacks.
+    for sk in [settings.SECRET_KEY, *(getattr(settings, "SECRET_KEY_FALLBACKS", []) or [])]:
+        if sk:
+            keys.append(_derive_key(sk))
+    return keys
+
+
+def _fernet() -> MultiFernet:
+    """MultiFernet over all valid keys — never lives in the database."""
+    return MultiFernet([Fernet(k) for k in _fernet_keys()])
+
+
+def encrypt_secret(raw_secret: str) -> str:
+    """Encrypt an agent API secret for storage. Returns a Fernet token string."""
+    return _fernet().encrypt(raw_secret.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_secret(token: str) -> str:
+    """Recover the raw agent API secret from its stored Fernet token."""
+    return _fernet().decrypt(token.encode("utf-8")).decode("utf-8")
 
 
 def compute_hmac_signature(secret: str, message: str) -> str:

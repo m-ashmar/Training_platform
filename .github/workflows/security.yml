@@ -1,12 +1,125 @@
-name: Security Gates
+# ---------------------------------------------------------------------------
+# CI + Security — a single workflow file.
+#
+# These are two logically separate workflows (ci.yml and security.yml). They live in
+# one file because .github/workflows/ on the authoring machine is owned by another
+# macOS account and no new file can be created there; this file already carried a
+# write ACL. GitHub runs the jobs identically either way — a workflow file may hold
+# any number of independent jobs, and each still reports as its own check.
+#
+# To split them back into two files (optional, cosmetic):
+#   sudo chown -R "$(id -un)" .github
+#   git mv ci/ci.yml .github/workflows/ci.yml
+#   # then delete the CI jobs below
+# ---------------------------------------------------------------------------
+name: CI & Security
 
 on:
   pull_request:
     branches: [main, develop]
   push:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: training_platform
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: training_platform.settings_local
+      DB_HOST: localhost
+      DB_PORT: '5432'
+      DB_NAME: training_platform
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libmagic1
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Catches configuration and model errors that otherwise reach runtime.
+      - name: Django system check
+        run: python manage.py check
+
+      # A model change without its migration used to merge cleanly and break deploy.
+      - name: No missing migrations
+        run: python manage.py makemigrations --check --dry-run
+
+      # A broken import only surfaces on the first request that touches the module.
+      - name: Import sweep
+        run: python scripts/ci_import_sweep.py
+
+      # One assertion per defect this audit found and fixed.
+      - name: Regression gate
+        run: python -m pytest -q
+
+  full-suite:
+    # The 53 standalone probes each build their own database (~14 s each), so they run
+    # on main rather than on every pull request.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: training_platform
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: training_platform.settings_local
+      DB_HOST: localhost
+      DB_PORT: '5432'
+      DB_NAME: training_platform
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: sudo apt-get update && sudo apt-get install -y libmagic1
+      - run: pip install -r requirements.txt
+      - name: Route sweeps
+        run: |
+          set -e
+          for probe in sweep_5xx sweep_anon detail_sweep dive2_write_sweep; do
+            echo "--- $probe ---"
+            out=$(python tests/security/$probe.py 2>&1)
+            echo "$out" | tail -3
+            echo "$out" | grep -qE '5xx/exceptions=0|5xx / exceptions: 0' || {
+              echo "::error::$probe reported 5xx responses"; exit 1; }
+          done
+
   security-scan:
     runs-on: ubuntu-latest
     steps:
@@ -34,9 +147,11 @@ jobs:
             --severity-level high
 
       # Layer 2: Dependency Vulnerability Scan — Safety
+      # `|| true` meant a known-vulnerable dependency merged without objection. The
+      # report stays informational; the check itself now gates.
       - name: Safety Dependency Check
         run: |
-          safety check --full-report || true
+          safety check --full-report
 
       # Layer 3: Pattern-based Analysis — Semgrep
       - name: Semgrep Security Scan

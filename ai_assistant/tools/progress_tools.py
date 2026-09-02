@@ -83,7 +83,7 @@ def get_overall_progress(user, days=30, **kwargs):
         routine__is_active=True,
     ).aggregate(
         total=Count('id'),
-        completed=Count('id', filter=Q(status='Completed')),
+        completed=Count('id', filter=Q(status='completed')),
     )
     routine_pct = (
         round((routine_completion['completed'] / routine_completion['total'] * 100), 1)

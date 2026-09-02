@@ -11,6 +11,9 @@ from users.models import CustomUser
 from datetime import date, datetime
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
+import logging
+
+logger = logging.getLogger(__name__)
 
 class FoodCategory(models.Model):
     """
@@ -29,6 +32,11 @@ class FoodCategory(models.Model):
     is_fat = models.BooleanField(default=False)
     def __str__(self):
         return f"{self.name} ({self.get_meal_times_display()})"
+
+    class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['name', 'id']
 
 class FoodItem(models.Model):
     """
@@ -49,6 +57,28 @@ class FoodItem(models.Model):
     carbs_per_gram = models.FloatField(default=0.0)
     fat_per_gram = models.FloatField(default=0.0)
     smart_score_weight = models.FloatField(default=1.0, help_text="Adaptive weight for smart macro planner")
+
+
+    # --- Allergen awareness -------------------------------------------------
+    # A Meal is composed of MealComponents pointing at FoodItems, so the FoodItem IS
+    # the ingredient. Allergen safety therefore belongs here, not in a name match.
+    allergens = models.JSONField(
+        default=list, blank=True,
+        help_text="Canonical allergen tags from diet.allergens.ALLERGENS. Never free text.",
+    )
+    ALLERGEN_SOURCE_CHOICES = [
+        ('verified', 'Verified / curated'),
+        ('inferred', 'Inferred from name (unverified hint)'),
+        ('unknown', 'No allergen data'),
+    ]
+    allergen_source = models.CharField(
+        max_length=16, choices=ALLERGEN_SOURCE_CHOICES, default='unknown', db_index=True,
+        help_text="Trust level of `allergens`. 'unknown' must NEVER be treated as safe.",
+    )
+    ingredients_text = models.TextField(
+        blank=True, default='',
+        help_text="Raw ingredient list, when the source provides one. Scanned for allergens.",
+    )
     def save(self, *args, **kwargs):
         """
         Normalize macros to 100g and auto-calculate per-gram values on save.
@@ -139,6 +169,62 @@ class FoodItem(models.Model):
     def __str__(self):
         return self.name
 
+    class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['name', 'id']
+
+    # Physical ceilings. Nothing validated nutrition before, so the catalogue contains
+    # `Cheese, Brick` at 12.00 kcal/g — above the 9 kcal/g maximum for pure fat — and
+    # four foods whose macros disagree with their stated calories by more than 35%.
+    MAX_KCAL_PER_GRAM = 9.1
+    ATWATER_TOLERANCE = 0.35
+
+    def clean(self):
+        """Reject nutrition that cannot physically be correct."""
+        from django.core.exceptions import ValidationError
+
+        errors = {}
+        for field in ('calories', 'protein', 'carbs', 'fat'):
+            val = getattr(self, field, None)
+            if val is not None and val < 0:
+                errors[field] = 'Cannot be negative.'
+
+        grams = self.serving_size_grams or 0
+        cal = float(self.calories or 0)
+        if grams > 0 and cal > 0:
+            per_gram = cal / grams
+            if per_gram > self.MAX_KCAL_PER_GRAM:
+                errors['calories'] = (
+                    f'{per_gram:.2f} kcal/g exceeds the physical maximum of '
+                    f'{self.MAX_KCAL_PER_GRAM} (pure fat). Check the serving size.'
+                )
+
+        # A serving size with no number in it ("Serving", "Whole") left
+        # serving_size_grams sitting on its default of 100 — 32 of 346 catalogue rows,
+        # plus 20 with no serving size at all. Every per-gram figure the planner
+        # portions from is derived from that number, so a guess must not pass silently.
+        text = (self.serving_size or '').strip()
+        if not text:
+            errors['serving_size'] = 'Required — the planner portions by gram.'
+        elif not any(ch.isdigit() for ch in text) and (self.serving_size_grams or 100) == 100:
+            errors['serving_size'] = (
+                f'{text!r} has no weight in it and serving_size_grams is still the '
+                f'default 100 g. Set the real weight, or the macros are a guess.'
+            )
+
+        p_, c_, f_ = float(self.protein or 0), float(self.carbs or 0), float(self.fat or 0)
+        atwater = 4 * p_ + 4 * c_ + 9 * f_
+        if cal > 0 and atwater > 0 and abs(atwater - cal) / cal > self.ATWATER_TOLERANCE:
+            errors['calories'] = (
+                f'Stated {cal:.0f} kcal but the macros give {atwater:.0f} kcal '
+                f'(>{int(self.ATWATER_TOLERANCE * 100)}% apart).'
+            )
+
+        if errors:
+            raise ValidationError(errors)
+
+
 class UserFoodPreference(models.Model):
     """
     Stores user-specific food preferences, allergies, and macro choices.
@@ -152,6 +238,11 @@ class UserFoodPreference(models.Model):
     fat_choices = models.ManyToManyField(FoodItem, related_name='fat_prefs', limit_choices_to={'category__name': 'Fats'})
     vegetable_choices = models.ManyToManyField(FoodItem, related_name='vegetable_prefs', blank=True)
     fruit_choices = models.ManyToManyField(FoodItem, related_name='fruit_prefs', blank=True)
+
+    class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-id']
 
 
 class UserFoodCategoryPreference(models.Model):
@@ -173,11 +264,18 @@ class UserFoodCategoryPreference(models.Model):
     food = models.ForeignKey(FoodItem, on_delete=models.CASCADE)
     meal = models.CharField(max_length=16, choices=MEAL_CHOICES)
     macro = models.CharField(max_length=16, choices=MACRO_CHOICES)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
-        unique_together = [('user', 'food')]
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-created_at', '-id']
+        # (user, food) was wrong: this model carries `meal` AND `macro`, and the planner
+        # builds a per-meal-per-macro pool from them — so one food could occupy exactly
+        # ONE slot, and chicken could not be both lunch and dinner protein. Measured:
+        # 5 of 20 (meal x macro) cells empty even for a fully configured user.
+        unique_together = [('user', 'food', 'meal', 'macro')]
         indexes = [
             models.Index(fields=['user', 'meal']),
             models.Index(fields=['user', 'macro']),
@@ -210,7 +308,9 @@ class DietPlanTemplate(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
-        ordering = ['meals_per_day', 'snacks_per_day']
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
+        # paging repeated and hid rows whenever two records shared the value.
+        ordering = ['meals_per_day', 'snacks_per_day', 'id']
     
     def __str__(self):
         return f"{self.name} ({self.meals_per_day}M/{self.snacks_per_day}S - {self.days_variation}D)"
@@ -234,7 +334,7 @@ class DietPlan(models.Model):
     goal = models.CharField(max_length=20, choices=GOAL_CHOICES)
     daily_calories = models.FloatField()
     start_date = models.DateField()
-    end_date = models.DateField()
+    end_date = models.DateField(db_index=True)
     duration_weeks = models.PositiveIntegerField(default=4)
     generated_plan = models.JSONField(null=True, blank=True)
     generation_strategy = models.CharField(
@@ -260,16 +360,32 @@ class DietPlan(models.Model):
         help_text="Trainer who created this plan"
     )
     is_active = models.BooleanField(default=True, help_text="Whether this plan is currently active")
-    created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, null=True, blank=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        # A plan with end_date before start_date used to persist (verified:
+        # start=2026-09-06, end=2026-09-01 was accepted), and a user could hold two
+        # overlapping plans with nothing deciding which governs a shared day. The
+        # generation path was patched for inversion once; admin, import and any other
+        # writer bypassed that guard, so the rule belongs in the database.
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(end_date__gte=models.F('start_date')),
+                name='dietplan_end_after_start',
+            ),
+        ]
         indexes = [
             models.Index(fields=['user', 'is_active']),
             models.Index(fields=['user', 'start_date']),
             models.Index(fields=['is_active']),
+            # Matches the real access pattern: WHERE <owner>=? ORDER BY created_at DESC, id DESC.
+            # A single-column created_at index cannot serve that; this one can.
+            models.Index(fields=['user', '-created_at', '-id'], name='dietplan_owner_recent_idx'),
         ]
-        ordering = ['-created_at']
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
+        # paging repeated and hid rows whenever two records shared the value.
+        ordering = ['-created_at', '-id']
     
     @property
     def period(self):
@@ -294,7 +410,7 @@ class DietPlan(models.Model):
         Calculate total nutrition for a specific day.
         """
         if target_date is None:
-            target_date = date.today()
+            target_date = timezone.localdate()
         
         meals = self.meals.filter(date=target_date)
         total_calories = 0
@@ -315,6 +431,32 @@ class DietPlan(models.Model):
             'carbs': round(total_carbs, 1),
             'fat': round(total_fat, 1)
         }
+
+    def clean(self):
+        """Reject an overlapping active plan for the same user.
+
+        Nothing prevented two active plans covering the same dates, so for any shared
+        day it was undefined which plan applied — and `Meal`'s unique_together is
+        scoped to the plan, not the user, so both could write a breakfast for that day
+        and the client saw duplicates.
+        """
+        from django.core.exceptions import ValidationError
+
+        super().clean()
+        if not (self.start_date and self.end_date):
+            return
+        if self.end_date < self.start_date:
+            raise ValidationError({'end_date': 'Must not be before start_date.'})
+
+        clash = DietPlan.objects.filter(
+            user=self.user, is_active=True,
+            start_date__lte=self.end_date, end_date__gte=self.start_date,
+        ).exclude(pk=self.pk)
+        if getattr(self, 'is_active', False) and clash.exists():
+            raise ValidationError(
+                'This user already has an active plan covering those dates '
+                f'({clash.first().start_date} to {clash.first().end_date}).'
+            )
 
 class Meal(models.Model):
     """
@@ -362,7 +504,9 @@ class Meal(models.Model):
     notes = models.TextField(blank=True, help_text="User's notes about this meal")
     
     class Meta:
-        ordering = ['date', 'scheduled_time']
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
+        # paging repeated and hid rows whenever two records shared the value.
+        ordering = ['date', 'scheduled_time', 'id']
         unique_together = ['diet_plan', 'date', 'meal_type', 'scheduled_time']
         indexes = [
             models.Index(fields=['is_completed']),
@@ -451,7 +595,9 @@ class MealComponent(models.Model):
         try:
             self.meal.update_completion_status()
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
     
     def calculate_nutrition(self):
         """
@@ -466,6 +612,9 @@ class MealComponent(models.Model):
         }
     
     class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-id']
         indexes = [
             models.Index(fields=['meal']),
             models.Index(fields=['food']),
@@ -499,7 +648,9 @@ class DailyProgress(models.Model):
     
     class Meta:
         unique_together = ['user', 'diet_plan', 'date']
-        ordering = ['-date']
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
+        # paging repeated and hid rows whenever two records shared the value.
+        ordering = ['-date', '-id']
     
     @property
     def completion_percentage(self):
@@ -597,6 +748,11 @@ class DailyAdvice(models.Model):
     generated_at = models.DateTimeField(auto_now_add=True)
     context_data = models.JSONField()
 
+    class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-id']
+
 
 class DietConfig(models.Model):
     """Admin-configurable diet generation settings (piece weights, keywords)."""
@@ -606,3 +762,85 @@ class DietConfig(models.Model):
 
     def __str__(self):
         return f"DietConfig(updated_at={self.updated_at})"
+
+    class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-id']
+
+class Recipe(models.Model):
+    """A real dish, so a meal is food rather than a pile of macros.
+
+    The planner selected individual FoodItems and emitted them as a "meal": chicken
+    180 g, oats 90 g, olive oil 12 g, broccoli 400 g. That hits the numbers and is not
+    something anyone cooks. A recipe carries the composition, so the same targets can be
+    met with something a person recognises — and it is also the only way an allergen
+    check can know that a dish contains peanuts when its name does not say so.
+    """
+
+    MEAL_TYPES = [
+        ('Breakfast', 'Breakfast'), ('Lunch', 'Lunch'),
+        ('Dinner', 'Dinner'), ('Snack', 'Snack'),
+    ]
+
+    name = models.CharField(max_length=160)
+    description = models.TextField(blank=True, default='')
+    meal_types = models.JSONField(
+        default=list, blank=True,
+        help_text="Which meals this dish suits, e.g. ['Lunch','Dinner']. Empty = any.",
+    )
+    cuisine = models.CharField(max_length=60, blank=True, default='')
+    prep_minutes = models.PositiveIntegerField(default=15)
+    instructions = models.TextField(blank=True, default='')
+    image_url = models.URLField(blank=True, default='')
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'id']
+        indexes = [models.Index(fields=['is_active'])]
+
+    def __str__(self):
+        return self.name
+
+    def nutrition(self):
+        """Totals for one serving of the recipe as written."""
+        totals = {'calories': 0.0, 'protein': 0.0, 'carbs': 0.0, 'fat': 0.0}
+        for line in self.ingredients.select_related('food'):
+            grams = float(line.grams or 0) / 100.0
+            food = line.food
+            totals['calories'] += float(food.calories or 0) * grams
+            totals['protein'] += float(food.protein or 0) * grams
+            totals['carbs'] += float(food.carbs or 0) * grams
+            totals['fat'] += float(food.fat or 0) * grams
+        return totals
+
+    def allergen_tags(self):
+        """Union of every ingredient's allergens — composition, not the dish name."""
+        tags = set()
+        for line in self.ingredients.select_related('food'):
+            tags.update(getattr(line.food, 'allergens', None) or [])
+        return sorted(tags)
+
+
+class RecipeIngredient(models.Model):
+    """One food in a recipe, in grams for a single serving."""
+
+    recipe = models.ForeignKey(Recipe, on_delete=models.CASCADE, related_name='ingredients')
+    food = models.ForeignKey(FoodItem, on_delete=models.PROTECT, related_name='recipe_lines')
+    grams = models.FloatField(help_text="Grams per serving before scaling")
+    # A dish scales, but not uniformly: rice flexes, a teaspoon of oil does not.
+    scalable = models.BooleanField(
+        default=True,
+        help_text="False pins the amount when the recipe is scaled to a macro target.",
+    )
+    note = models.CharField(max_length=120, blank=True, default='')
+
+    class Meta:
+        ordering = ['-grams', 'id']
+        unique_together = [('recipe', 'food')]
+
+    def __str__(self):
+        return f"{self.recipe_id}: {self.food.name} {self.grams:g}g"
+

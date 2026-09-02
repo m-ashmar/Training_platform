@@ -26,8 +26,53 @@ from .exceptions import (
     ConstraintViolationError,
 )
 from .utils.logging_utils import log_json
+from django.db import OperationalError, InterfaceError
+
+# Transient failures worth retrying. These tasks previously used a bare @shared_task:
+# no bind, no autoretry, no self.retry() — so ANY exception (a DB blip, an FCM 503, a
+# broker hiccup) lost the job permanently and silently. `autoretry_for` gives them a
+# retry policy without changing any signature; permanent errors still fail fast.
+TRANSIENT_ERRORS = (
+    OperationalError,
+    InterfaceError,
+    ConnectionError,
+    TimeoutError,
+)
+
 
 logger = logging.getLogger(__name__)
+
+def _generate_rule_based_fallback(user_id, meal_count, snack_count, start_date):
+    """Produce a plan with the deterministic planner when the AI path fails for good.
+
+    Returns the plan id, or None if the fallback itself fails (in which case the
+    caller re-raises the original error).
+    """
+    try:
+        from django.contrib.auth import get_user_model
+
+        from .services.rule_based_planner import RuleBasedPlanner
+        from .services.diet_persistence import DietPersistenceService
+
+        user = get_user_model().objects.get(id=user_id)
+        daily_kcal = float(getattr(user, 'daily_calorie_target', 0) or 2000)
+        planner = RuleBasedPlanner(user)
+        output = planner.generate(
+            daily_kcal=daily_kcal,
+            meal_count=meal_count,
+            snack_count=snack_count,
+            start_date=start_date,
+        )
+        plan = DietPersistenceService(user).save_plan(output, meal_count, snack_count, start_date)
+        logger.warning(
+            "AI generation failed permanently for user %s; served a rule-based plan instead",
+            user_id,
+        )
+        return getattr(plan, 'id', None)
+    except Exception:
+        logger.exception("Rule-based fallback also failed for user %s", user_id)
+        return None
+
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0, start_date=None):
@@ -132,6 +177,13 @@ def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0, start_date
             snack_count=snack_count,
             error=str(e),
         )
+        # Permanent AI failure is not a reason for the user to get nothing. The
+        # rule-based planner is fully capable of producing a plan and needs no LLM;
+        # previously the task just re-raised and the request left no visible trace
+        # beyond a log line.
+        fallback = _generate_rule_based_fallback(user_id, meal_count, snack_count, start_date)
+        if fallback is not None:
+            return fallback
         raise
     except Exception as e:
         log_json(
@@ -150,7 +202,13 @@ def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0, start_date
             raise self.retry(countdown=60 * (2 ** self.request.retries))
         raise
 
-@shared_task
+@shared_task(
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
 def _store_training_data(training_data):
     """
     Background task to store training data for AI model development.
@@ -193,7 +251,13 @@ def _store_training_data(training_data):
         )
         raise
 
-@shared_task
+@shared_task(
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
 def generate_daily_advice(user_id=None):
     """
     Enhanced asynchronous task to generate daily dietary advice for a user.
@@ -247,153 +311,6 @@ def generate_daily_advice(user_id=None):
             extra={"user_id": user_id, "task": "generate_daily_advice"}
         )
 
-@shared_task
-def export_training_dataset(start_date=None, end_date=None, output_format='json'):
-    """
-    Export training dataset for AI model development.
-    
-    Args:
-        start_date (str, optional): Start date in ISO format.
-        end_date (str, optional): End date in ISO format.
-        output_format (str): Output format ('json' or 'csv').
-    """
-    try:
-        # Collect training data from DailyAdvice entries
-        queryset = DailyAdvice.objects.filter(
-            context_data__data_type='ai_training_dataset'
-        )
-        
-        if start_date:
-            queryset = queryset.filter(generated_at__date__gte=start_date)
-        if end_date:
-            queryset = queryset.filter(generated_at__date__lte=end_date)
-        
-        # Extract training data
-        training_dataset = []
-        for advice in queryset:
-            training_data = advice.context_data.get('training_data', {})
-            if training_data:
-                training_dataset.append(training_data)
-        
-        # Calculate dataset quality summary
-        quality_summary = _calculate_dataset_quality_summary(training_dataset)
-        
-        # Convert to requested format
-        if output_format == 'csv':
-            output_data = _convert_to_csv(training_dataset)
-        else:
-            output_data = training_dataset
-        
-        # Store exported dataset
-        _store_exported_dataset.delay(output_data, output_format, start_date, end_date)
-        
-        log_json(
-            logger,
-            "info",
-            "Training dataset export completed",
-            dataset_size=len(training_dataset),
-            output_format=output_format,
-            quality_summary=quality_summary,
-        )
-        
-        return {
-            "status": "success",
-            "dataset_size": len(training_dataset),
-            "quality_summary": quality_summary
-        }
-        
-    except Exception as e:
-        log_json(logger, "error", "Error exporting training dataset", task="export_training_dataset", error=str(e))
-        raise
-
-@shared_task
-def _store_exported_dataset(output_data, output_format, start_date, end_date):
-    """
-    Background task to store exported training dataset.
-    
-    Args:
-        output_data: The exported dataset
-        output_format (str): Output format
-        start_date (str): Start date
-        end_date (str): End date
-    """
-    try:
-        # Store the exported dataset
-        # This could be saved to a file, cloud storage, or database
-        timestamp = timezone.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"training_dataset_{start_date}_{end_date}_{timestamp}.{output_format}"
-        
-        # For now, just log the export
-        log_json(logger, "info", "Exported training dataset stored", filename=filename, format=output_format, data_size=len(str(output_data)))
-        
-    except Exception as e:
-        log_json(logger, "error", "Failed to store exported dataset", error=str(e))
-        raise
-
-@shared_task
-def analyze_diet_plan_effectiveness(diet_plan_id):
-    """
-    Analyze the effectiveness of a diet plan based on user progress and feedback.
-    
-    Args:
-        diet_plan_id (int): ID of the diet plan to analyze.
-    """
-    try:
-        diet_plan = DietPlan.objects.get(id=diet_plan_id)
-        
-        # Analyze plan metrics
-        plan_metrics = _analyze_plan_metrics(diet_plan)
-        
-        # Analyze nutritional balance
-        nutrition_analysis = _analyze_nutritional_balance(diet_plan)
-        
-        # Analyze ingredients
-        ingredient_analysis = _analyze_ingredients(diet_plan)
-        
-        # Analyze user compatibility
-        user_compatibility = _analyze_user_compatibility(diet_plan)
-        
-        # Calculate overall effectiveness score
-        effectiveness_score = _calculate_effectiveness_score({
-            'plan_metrics': plan_metrics,
-            'nutrition_analysis': nutrition_analysis,
-            'ingredient_analysis': ingredient_analysis,
-            'user_compatibility': user_compatibility
-        })
-        
-        # Store analysis results
-        DailyAdvice.objects.create(
-            user=diet_plan.user,
-            text=f"Diet plan effectiveness analysis completed. Score: {effectiveness_score}/100",
-            context_data={
-                "analysis_type": "diet_plan_effectiveness",
-                "diet_plan_id": diet_plan_id,
-                "effectiveness_score": effectiveness_score,
-                "plan_metrics": plan_metrics,
-                "nutrition_analysis": nutrition_analysis,
-                "ingredient_analysis": ingredient_analysis,
-                "user_compatibility": user_compatibility,
-                "analysis_timestamp": timezone.now().isoformat()
-            }
-        )
-        
-        log_json(logger, "info", "Diet plan effectiveness analysis completed", diet_plan_id=diet_plan_id, user_id=diet_plan.user.id, effectiveness_score=effectiveness_score)
-        
-        return {
-            "status": "success",
-            "effectiveness_score": effectiveness_score,
-            "analysis_summary": {
-                "plan_metrics": plan_metrics,
-                "nutrition_analysis": nutrition_analysis,
-                "ingredient_analysis": ingredient_analysis,
-                "user_compatibility": user_compatibility
-            }
-        }
-        
-    except Exception as e:
-        log_json(logger, "error", "Error analyzing diet plan effectiveness", diet_plan_id=diet_plan_id, task="analyze_diet_plan_effectiveness", error=str(e))
-        raise
-
 def _generate_personalized_advice(user):
     """
     Generate personalized dietary advice for a user.
@@ -427,248 +344,3 @@ def _generate_personalized_advice(user):
         log_json(logger, "error", "Error generating personalized advice", error=str(e))
         return "Stay hydrated and maintain a balanced diet with regular meals."
 
-def _convert_to_csv(training_dataset):
-    """
-    Convert training dataset to CSV format.
-    
-    Args:
-        training_dataset (list): List of training data entries
-        
-    Returns:
-        str: CSV formatted data
-    """
-    if not training_dataset:
-        return ""
-    
-    # Extract headers from first entry
-    headers = list(training_dataset[0].keys())
-    
-    # Create CSV content
-    csv_lines = [','.join(headers)]
-    
-    for entry in training_dataset:
-        row = []
-        for header in headers:
-            value = entry.get(header, '')
-            # Handle nested dictionaries and lists
-            if isinstance(value, (dict, list)):
-                value = json.dumps(value)
-            row.append(str(value))
-        csv_lines.append(','.join(row))
-    
-    return '\n'.join(csv_lines)
-
-def _calculate_dataset_quality_summary(training_dataset):
-    """
-    Calculate quality summary for training dataset.
-    
-    Args:
-        training_dataset (list): List of training data entries
-        
-    Returns:
-        dict: Quality summary
-    """
-    if not training_dataset:
-        return {"total_entries": 0, "quality_score": 0}
-    
-    total_entries = len(training_dataset)
-    complete_entries = 0
-    
-    for entry in training_dataset:
-        # Check if entry has required fields
-        required_fields = ['user_profile', 'generation_parameters', 'performance_metrics']
-        if all(field in entry for field in required_fields):
-            complete_entries += 1
-    
-    quality_score = (complete_entries / total_entries) * 100 if total_entries > 0 else 0
-    
-    return {
-        "total_entries": total_entries,
-        "complete_entries": complete_entries,
-        "quality_score": round(quality_score, 2)
-    }
-
-def _analyze_plan_metrics(diet_plan):
-    """
-    Analyze basic plan metrics.
-    
-    Args:
-        diet_plan: DietPlan instance
-        
-    Returns:
-        dict: Plan metrics analysis
-    """
-    meals = diet_plan.meals.all()
-    total_meals = meals.count()
-    
-    # Calculate completion rates
-    completed_meals = sum(1 for meal in meals if meal.is_completed)
-    completion_rate = (completed_meals / total_meals * 100) if total_meals > 0 else 0
-    
-    return {
-        "total_meals": total_meals,
-        "completed_meals": completed_meals,
-        "completion_rate": round(completion_rate, 2),
-        "plan_duration_days": (diet_plan.end_date - diet_plan.start_date).days
-    }
-
-def _analyze_nutritional_balance(diet_plan):
-    """
-    Analyze nutritional balance of the diet plan.
-    
-    Args:
-        diet_plan: DietPlan instance
-        
-    Returns:
-        dict: Nutritional analysis
-    """
-    meals = diet_plan.meals.all()
-    total_calories = 0
-    total_protein = 0
-    total_carbs = 0
-    total_fat = 0
-    
-    for meal in meals:
-        nutrition = meal.calculate_nutrition()
-        total_calories += nutrition['calories']
-        total_protein += nutrition['protein']
-        total_carbs += nutrition['carbs']
-        total_fat += nutrition['fat']
-    
-    # Calculate macronutrient ratios
-    if total_calories > 0:
-        protein_ratio = (total_protein * 4 / total_calories) * 100
-        carb_ratio = (total_carbs * 4 / total_calories) * 100
-        fat_ratio = (total_fat * 9 / total_calories) * 100
-    else:
-        protein_ratio = carb_ratio = fat_ratio = 0
-    
-    return {
-        "total_calories": round(total_calories, 1),
-        "total_protein": round(total_protein, 1),
-        "total_carbs": round(total_carbs, 1),
-        "total_fat": round(total_fat, 1),
-        "protein_ratio": round(protein_ratio, 1),
-        "carb_ratio": round(carb_ratio, 1),
-        "fat_ratio": round(fat_ratio, 1),
-        "target_calories": diet_plan.daily_calories,
-        "calorie_accuracy": round((total_calories / diet_plan.daily_calories) * 100, 1) if diet_plan.daily_calories > 0 else 0
-    }
-
-def _analyze_ingredients(diet_plan):
-    """
-    Analyze ingredients used in the diet plan.
-    
-    Args:
-        diet_plan: DietPlan instance
-        
-    Returns:
-        dict: Ingredient analysis
-    """
-    meals = diet_plan.meals.all()
-    all_components = MealComponent.objects.filter(meal__in=meals)
-    
-    # Count unique foods
-    unique_foods = all_components.values('food').distinct().count()
-    total_components = all_components.count()
-    
-    # Analyze food categories
-    category_counts = {}
-    for component in all_components.select_related('food__category'):
-        category = component.food.category.name if component.food.category else 'Uncategorized'
-        category_counts[category] = category_counts.get(category, 0) + 1
-    
-    return {
-        "unique_foods": unique_foods,
-        "total_components": total_components,
-        "variety_score": round((unique_foods / total_components) * 100, 2) if total_components > 0 else 0,
-        "category_distribution": category_counts
-    }
-
-def _analyze_user_compatibility(diet_plan):
-    """
-    Analyze compatibility between diet plan and user preferences.
-    
-    Args:
-        diet_plan: DietPlan instance
-        
-    Returns:
-        dict: User compatibility analysis
-    """
-    try:
-        preferences = diet_plan.user.userfoodpreference_set.first()
-        if not preferences:
-            return {"compatibility_score": 0, "reason": "No user preferences found"}
-        
-        meals = diet_plan.meals.all()
-        all_components = MealComponent.objects.filter(meal__in=meals)
-        
-        # Check liked foods usage
-        liked_foods_used = 0
-        disliked_foods_used = 0
-        
-        for component in all_components:
-            if component.food in preferences.liked_foods.all():
-                liked_foods_used += 1
-            elif component.food in preferences.disliked_foods.all():
-                disliked_foods_used += 1
-        
-        total_components = all_components.count()
-        
-        if total_components > 0:
-            liked_ratio = (liked_foods_used / total_components) * 100
-            disliked_ratio = (disliked_foods_used / total_components) * 100
-            compatibility_score = max(0, 100 - disliked_ratio + liked_ratio)
-        else:
-            compatibility_score = 0
-        
-        return {
-            "compatibility_score": round(compatibility_score, 2),
-            "liked_foods_used": liked_foods_used,
-            "disliked_foods_used": disliked_foods_used,
-            "total_components": total_components,
-            "liked_ratio": round((liked_foods_used / total_components) * 100, 2) if total_components > 0 else 0,
-            "disliked_ratio": round((disliked_foods_used / total_components) * 100, 2) if total_components > 0 else 0
-        }
-        
-    except Exception as e:
-        logger.error(f"Error analyzing user compatibility: {str(e)}")
-        return {"compatibility_score": 0, "reason": f"Analysis error: {str(e)}"}
-
-def _calculate_effectiveness_score(analysis):
-    """
-    Calculate overall effectiveness score from analysis components.
-    
-    Args:
-        analysis (dict): Analysis results
-        
-    Returns:
-        float: Effectiveness score (0-100)
-    """
-    try:
-        # Weight different components
-        weights = {
-            'completion_rate': 0.3,
-            'calorie_accuracy': 0.25,
-            'variety_score': 0.2,
-            'compatibility_score': 0.25
-        }
-        
-        plan_metrics = analysis.get('plan_metrics', {})
-        nutrition_analysis = analysis.get('nutrition_analysis', {})
-        ingredient_analysis = analysis.get('ingredient_analysis', {})
-        user_compatibility = analysis.get('user_compatibility', {})
-        
-        # Calculate weighted score
-        score = (
-            plan_metrics.get('completion_rate', 0) * weights['completion_rate'] +
-            nutrition_analysis.get('calorie_accuracy', 0) * weights['calorie_accuracy'] +
-            ingredient_analysis.get('variety_score', 0) * weights['variety_score'] +
-            user_compatibility.get('compatibility_score', 0) * weights['compatibility_score']
-        )
-        
-        return round(score, 2)
-        
-    except Exception as e:
-        logger.error(f"Error calculating effectiveness score: {str(e)}")
-        return 0

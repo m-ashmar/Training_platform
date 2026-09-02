@@ -23,12 +23,18 @@ RUN pip install --no-cache-dir daphne
 # Copy project
 COPY . .
 
-# Collect static files at build time
-ENV DJANGO_SETTINGS_MODULE=training_platform.settings_production
-RUN python manage.py collectstatic --noinput || true
+# Collect static files at build time using a build-only settings module that
+# needs no real secrets or AWS access. No `|| true` — a real failure must fail
+# the build rather than silently ship an empty staticfiles/.
+RUN DJANGO_SETTINGS_MODULE=training_platform.settings_build python manage.py collectstatic --noinput
 
-# Non-root user for security
-RUN useradd -m appuser && chown -R appuser /app
+# Runtime settings (used by the CMD: migrate + daphne)
+ENV DJANGO_SETTINGS_MODULE=training_platform.settings_production
+
+# Non-root user for security.
+# /data is where the Fly volume gets mounted (user-uploaded media). Create it and
+# hand it to appuser so uploads are writable after the volume attaches.
+RUN useradd -m appuser && mkdir -p /data/media /data/tmp && chown -R appuser /app /data
 USER appuser
 
 EXPOSE 8000

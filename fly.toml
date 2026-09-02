@@ -8,32 +8,78 @@ primary_region = "ams"          # Amsterdam — closest free-tier region to Midd
 [build]
   dockerfile = "Dockerfile"
 
+# Two process groups. Previously the only process was the Dockerfile CMD (web), so no
+# Celery worker or beat existed anywhere — every .delay() enqueued a job nothing ever
+# consumed: feed fan-out, notifications, FCM, AI plan generation, all silently dead.
+[processes]
+  web    = "sh -c 'python manage.py migrate --noinput && daphne -b 0.0.0.0 -p 8000 training_platform.asgi:application'"
+  worker = "celery -A training_platform worker --beat --loglevel=info --concurrency=2"
+
 [env]
   DJANGO_SETTINGS_MODULE = "training_platform.settings_production"
   PORT = "8000"
+  # User uploads must live on the mounted volume, NOT inside the image. The image
+  # filesystem is ephemeral and `min_machines_running = 0` stops the machine when
+  # idle, so anything written into the container is lost on the next start.
+  MEDIA_ROOT = "/data/media"
+  # Multipart bodies buffer here before any view runs. Unset it lands on the
+  # container rootfs; on the volume it shares the same (monitored) disk as media.
+  FILE_UPLOAD_TEMP_DIR = "/data/tmp"
+  # Broker/result backend on DB6/DB7 — outside the six segmented cache DBs.
+  # Set these to the managed Redis URL; enforce_production_safety() refuses to boot
+  # if they are unset, point at localhost, or land on a cache DB.
+  # CELERY_BROKER_URL     = "redis://<managed-redis>:6379/6"
+  # CELERY_RESULT_BACKEND = "redis://<managed-redis>:6379/7"
+
+# Persistent volume for user-uploaded media (profile pictures, exercise images).
+# Create it once before deploying:
+#   fly volumes create training_data --region ams --size 1
+# Scoped to `web`: a Fly volume attaches to a single machine, and only the web
+# process serves or writes user media. The worker must not claim it.
+[mounts]
+  processes = ["web"]
+  source = "training_data"
+  destination = "/data"
 
 [http_service]
+  processes = ["web"]
   internal_port = 8000
   force_https = true
   auto_stop_machines = true    # Free tier: machines stop when idle
   auto_start_machines = true
   min_machines_running = 0     # Free tier: scale to zero
 
+  # Connection budget. Postgres allows 100; each concurrent ASGI request can hold its
+  # own persistent connection (CONN_MAX_AGE=600), and auto_start_machines means the
+  # machine count is elastic. 4 web machines x 25 + the worker already reaches ~102, at
+  # which point new connections are refused outright — precisely when traffic arrives.
+  # 15 keeps 6 machines plus the worker inside the ceiling. Raise this only together
+  # with max_connections or a pooler.
   [http_service.concurrency]
     type = "connections"
-    hard_limit = 25
-    soft_limit = 20
+    hard_limit = 15
+    soft_limit = 12
+
+  # Health check — MUST live under [http_service.checks] to bind to this service.
+  # (Legacy [[services.http_checks]] only attaches to a [[services]] block, which
+  # does not exist here, so the check would never run.)
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/api/auth/health/"
 
 [[vm]]
+  processes = ["web"]
   memory = "512mb"
   cpu_kind = "shared"
   cpus = 1
 
-# Health check
-[[services.http_checks]]
-  interval = "30s"
-  timeout = "10s"
-  grace_period = "30s"
-  method = "GET"
-  path = "/api/auth/health/"
-  protocol = "https"
+# The worker must stay up. Scale-to-zero on this group would stop background jobs and
+# beat entirely — which is the state the app shipped in.
+[[vm]]
+  processes = ["worker"]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

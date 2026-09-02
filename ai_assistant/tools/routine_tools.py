@@ -79,7 +79,7 @@ def get_routine_progress(user, **kwargs):
 
         for rp in progress_qs:
             total_days += 1
-            if rp.status == 'Completed':
+            if rp.status == 'completed':
                 completed_days += 1
             days_progress.append({
                 "day": rp.day,

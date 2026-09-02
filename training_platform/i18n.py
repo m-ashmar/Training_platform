@@ -79,7 +79,9 @@ def _validate_language(lang, *, user_id=None):
             invalid_value=str(lang)[:10],
         ).inc()
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
 
     return settings.LANGUAGE_CODE
 

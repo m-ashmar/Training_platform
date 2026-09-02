@@ -9,10 +9,11 @@ import os
 import time
 import hashlib
 import logging
-from PIL import Image
+from PIL import Image, ImageSequence
 from django.core.exceptions import ValidationError
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
+from rest_framework import serializers
 from typing import Dict, Any
 
 # Try to import magic, with fallback
@@ -251,7 +252,9 @@ class FileSecurityValidator:
             try:
                 content.decode('utf-8', errors='ignore')
             except (UnicodeDecodeError, AttributeError):
-                pass  # Content is binary, skip string checks
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
             
             # Check for suspicious patterns
             malicious_patterns = [
@@ -418,3 +421,154 @@ def secure_file_upload_path(instance, filename, subfolder='uploads'):
     date_folder = datetime.now().strftime('%Y/%m')
     
     return os.path.join(subfolder, str(user_id), date_folder, safe_filename) 
+
+# ============================================================================
+# Single entry point used by every upload view
+# ============================================================================
+
+# A tiny 1x1 image is legitimate; a 12000x12000 PNG is 435KB on disk but ~432MB
+# once PIL decodes it — a one-request OOM on a 512MB container.
+MAX_IMAGE_PIXELS = 40_000_000        # ~40MP, well above any phone camera
+MAX_IMAGE_DIMENSION = 10_000         # px per side
+
+# Extension is derived from the DETECTED format, never from the client filename.
+FORMAT_TO_EXTENSION = {
+    'JPEG': 'jpg',
+    'PNG': 'png',
+    'GIF': 'gif',
+    'WEBP': 'webp',
+}
+
+
+def process_uploaded_image(file, max_bytes=None):
+    """
+    Validate and normalise an uploaded image. This is the ONLY function upload
+    views should use.
+
+    It closes four holes that existed while `file_security` had no call sites:
+
+      * content was never inspected — a PHP/HTML/SVG payload with a spoofed
+        `Content-Type: image/jpeg` header was accepted and stored;
+      * the stored extension came from the client filename, so `.php`/`.html`/
+        `.svg` files were written to disk;
+      * no pixel-dimension cap, so a decompression bomb could OOM the container;
+      * files were stored byte-identical, retaining EXIF/GPS metadata.
+
+    Returns (ContentFile, extension) — a re-encoded image safe to store.
+    Raises ValidationError on anything suspicious.
+    """
+    import io
+    from django.core.files.base import ContentFile
+
+    if file is None:
+        raise ValidationError(_("No file provided."), code="no_file")
+
+    if max_bytes and file.size > max_bytes:
+        raise ValidationError(
+            _("File too large. Maximum size is %(mb)s MB.") % {"mb": round(max_bytes / (1024 * 1024), 1)},
+            code="file_too_large",
+        )
+
+    # Magic-byte + MIME + extension + malicious-content checks.
+    FileSecurityValidator().validate_file(file, 'image')
+
+    # Decode with a guard against decompression bombs.
+    file.seek(0)
+    try:
+        probe = Image.open(file)
+        width, height = probe.size
+        fmt = (probe.format or '').upper()
+    except Exception:
+        raise ValidationError(_("File is not a readable image."), code="unreadable_image")
+
+    if fmt not in FORMAT_TO_EXTENSION:
+        raise ValidationError(
+            _("Unsupported image format: %(fmt)s") % {"fmt": fmt or "unknown"},
+            code="unsupported_format",
+        )
+    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+        raise ValidationError(
+            _("Image dimensions too large (max %(d)spx per side).") % {"d": MAX_IMAGE_DIMENSION},
+            code="image_dimensions_too_large",
+        )
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValidationError(_("Image has too many pixels."), code="image_too_many_pixels")
+
+    # Re-encode. This strips EXIF/GPS and any appended payload (polyglots), because
+    # only decoded pixel data is written back out.
+    file.seek(0)
+    img = Image.open(file)
+    img.load()
+    if fmt == 'JPEG' and img.mode not in ('RGB', 'L'):
+        img = img.convert('RGB')
+    elif fmt == 'PNG' and img.mode not in ('RGB', 'RGBA', 'L', 'P'):
+        img = img.convert('RGBA')
+
+    # Animation parameters live in `img.info`, which is cleared just below, so read
+    # them first. Without save_all, Pillow writes only the first frame and a user's
+    # animated GIF is silently replaced by a still image.
+    n_frames = getattr(img, 'n_frames', 1)
+    is_animated = fmt == 'GIF' and n_frames > 1
+    if is_animated:
+        gif_duration = img.info.get('duration', 100)
+        gif_loop = img.info.get('loop', 0)
+        frames = [f.convert('RGBA').convert('P', palette=Image.ADAPTIVE)
+                  for f in ImageSequence.Iterator(img)]
+
+    # Pillow carries metadata forward through `img.info` (JPEG COM/EXIF markers are
+    # re-emitted from it on save), so clearing it is required — simply omitting
+    # exif=/comment= is NOT enough and left GPS data in the stored file.
+    img.info = {}
+
+    out = io.BytesIO()
+    save_kwargs = {'format': fmt}
+    if fmt == 'JPEG':
+        save_kwargs.update(quality=88, optimize=True, exif=b'')
+    if is_animated:
+        for f in frames:
+            f.info = {}
+        img = frames[0]
+        save_kwargs.update(save_all=True, append_images=frames[1:],
+                           duration=gif_duration, loop=gif_loop, disposal=2)
+    img.save(out, **save_kwargs)
+    out.seek(0)
+
+    return ContentFile(out.read()), FORMAT_TO_EXTENSION[fmt]
+
+
+def delete_file_field(instance, field_name):
+    """
+    Delete the file backing `instance.<field_name>` from storage.
+
+    Django deliberately does NOT remove files when a row is deleted, so every
+    deleted user/exercise previously left its image on disk forever.
+    """
+    f = getattr(instance, field_name, None)
+    if not f:
+        return
+    try:
+        f.delete(save=False)
+    except Exception as exc:  # storage may already be gone; never block deletion
+        logger.warning("Could not delete %s for %s: %s", field_name, instance, exc)
+
+
+class SecureImageField(serializers.ImageField):
+    """
+    Drop-in replacement for DRF's ImageField that also validates content, caps
+    pixel dimensions and re-encodes (stripping EXIF/GPS and neutralising polyglots).
+
+    DRF's own ImageField only asks Pillow "does this parse as an image?", so a real
+    photo carrying GPS coordinates, or a 12000x12000 decompression bomb, sailed
+    through every serializer-based upload path (social posts, profile updates).
+    """
+
+    def __init__(self, *args, max_bytes=5 * 1024 * 1024, **kwargs):
+        self.max_bytes = max_bytes
+        super().__init__(*args, **kwargs)
+
+    def to_internal_value(self, data):
+        data = super().to_internal_value(data)          # base image sanity check
+        safe_file, ext = process_uploaded_image(data, max_bytes=self.max_bytes)
+        base = os.path.splitext(getattr(data, 'name', 'upload'))[0][:60] or 'upload'
+        safe_file.name = f"{base}.{ext}"
+        return safe_file

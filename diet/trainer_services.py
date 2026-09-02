@@ -95,7 +95,12 @@ class TrainerDietPlanService:
         # Calculate daily calories if not provided
         if daily_calories is None:
             daily_calories = client.calculate_daily_calories(goal)
-        
+
+        # Validate the calorie target server-side (bounds + type). Prevents a
+        # trainer from persisting a medically dangerous target (e.g. 200 or 50000).
+        from .validators import DietInputValidator
+        daily_calories = DietInputValidator.validate_daily_calories(daily_calories)
+
         # Calculate end date
         end_date = start_date + timedelta(weeks=duration_weeks)
         
@@ -257,7 +262,7 @@ class TrainerDietPlanService:
             Dictionary with nutritional summary
         """
         if target_date is None:
-            target_date = date.today()
+            target_date = timezone.localdate()
         
         meals = diet_plan.meals.filter(date=target_date)
         total_calories = 0
@@ -367,7 +372,7 @@ class ClientProgressService:
             Dictionary with daily progress information
         """
         if target_date is None:
-            target_date = date.today()
+            target_date = timezone.localdate()
         
         # Get active diet plan
         active_plan = self._get_active_diet_plan()
@@ -421,7 +426,7 @@ class ClientProgressService:
         """
         if start_date is None:
             # Start of current week (Monday)
-            today = date.today()
+            today = timezone.localdate()
             start_date = today - timedelta(days=today.weekday())
         
         week_progress = []
@@ -483,11 +488,11 @@ class ClientProgressService:
             Dictionary with enhanced daily progress information
         """
         if target_date is None:
-            target_date = date.today()
+            target_date = timezone.localdate()
         
         # Get active diet plan with optimized prefetching
         # We need to fetch everything in 3-4 queries max
-        today = date.today()
+        today = timezone.localdate()
         from django.db.models import Prefetch
         
         active_plan = DietPlan.objects.filter(
@@ -712,7 +717,7 @@ class ClientProgressService:
         Returns:
             Active DietPlan instance or None
         """
-        today = date.today()
+        today = timezone.localdate()
         # strictly order by start_date descending to get the latest one
         return DietPlan.objects.filter(
             user=self.client,

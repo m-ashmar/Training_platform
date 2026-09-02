@@ -1,5 +1,8 @@
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from datetime import timedelta
+
 from django.db import models
+from django.dispatch import receiver
 from django.db.models import Q
 from django.utils import timezone
 import logging
@@ -7,7 +10,7 @@ from datetime import date, timedelta
 from django.conf import settings
 import os
 import uuid
-from django.core.files.storage import default_storage
+from training_platform.encrypted_fields import EncryptedTextField
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,11 @@ class CustomUserManager(BaseUserManager):
         
         extra_fields.setdefault('is_active', True)
         email = self.normalize_email(email)
+        # phone_number is NOT NULL with a model-level default. Passing None here
+        # (the signature default) overrode that default and raised NotNullViolation,
+        # so any programmatic create_user() without an explicit phone_number failed.
+        if phone_number is None:
+            phone_number = self.model._meta.get_field('phone_number').get_default()
         user = self.model(email=email, username=username, phone_number=phone_number, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -96,13 +104,19 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     username = models.CharField(max_length=150, unique=True)
     email = models.EmailField(unique=True)
     date_joined = models.DateTimeField(default=timezone.now)
-    phone_number = models.CharField(max_length=15, default="0000000000", null=False, blank=True)
+    phone_number = models.CharField(max_length=15, default="0000000000", null=False, blank=True, db_index=True)
     
     # Basic profile fields
     first_name = models.CharField(max_length=30, blank=True)
     last_name = models.CharField(max_length=30, blank=True)
 
     # Profile picture
+    # Opt-in for retaining chat + health context to train models. Defaults to False:
+    # the snapshot includes injury/condition text, which is special-category data.
+    ai_training_consent = models.BooleanField(
+        default=False,
+        help_text="User consented to their AI chat data being retained for model training.",
+    )
     profile_picture = models.ImageField(
         upload_to=user_profile_picture_upload_path,
         blank=True,
@@ -125,7 +139,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     )
     
     # Django auth fields
-    is_active = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True, db_index=True)
     is_staff = models.BooleanField(default=False)
     
     # User Preferences
@@ -151,7 +165,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         null=True, 
         blank=True
     )
-    specific_injury = models.TextField(null=True, blank=True, help_text="Any injuries or health conditions")
+    # Encrypted at rest: free-text medical data, a GDPR special category. Nothing
+    # filters or searches this column, which is what makes encryption safe here —
+    # ciphertext is randomised, so lookups against it would match nothing.
+    specific_injury = EncryptedTextField(null=True, blank=True, help_text="Any injuries or health conditions")
     
     # Activity and fitness data
     activity_level = models.CharField(
@@ -221,7 +238,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     )
     
     # System fields
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_login = models.DateTimeField(null=True, blank=True)
     
@@ -231,6 +248,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     REQUIRED_FIELDS = ['username', 'phone_number']
 
     class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-created_at', '-id']
         verbose_name = "User"
         verbose_name_plural = "Users"
         indexes = [
@@ -387,6 +407,24 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             return self.clients.all()
         return CustomUser.objects.none()
 
+    def retire(self, reason=""):
+        """Retire this account without destroying any financial record.
+
+        Delegates to the personal-data registry so there is ONE definition of what
+        erasure means. Duplicating the anonymisation here is how the two drift: a field
+        added to the registry would keep leaking through this path.
+
+        Wallets, transactions, payments and the audit chain are preserved — those
+        sources are registered `on_erase="keep"`, and `Wallet.owner` is PROTECT so a
+        deletion cannot destroy a balance in the first place.
+        """
+        from training_platform.privacy import erase_user_data
+
+        report = erase_user_data(self)
+        self.refresh_from_db()
+        logger.info("Retired user %s (%s): %s", self.pk, reason or "no reason given", report)
+        return self
+
     def save(self, *args, **kwargs):
         """Override save to ensure data consistency."""
         # Ensure admins have staff permissions
@@ -397,15 +435,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         if self.is_trainer and self.assigned_trainer:
             self.assigned_trainer = None
             
-        # Clean up old profile picture if replaced
-        if self.pk:
-            try:
-                old = CustomUser.objects.get(pk=self.pk)
-                if old.profile_picture and old.profile_picture != self.profile_picture:
-                    if default_storage.exists(old.profile_picture.name):
-                        default_storage.delete(old.profile_picture.name)
-            except CustomUser.DoesNotExist:
-                pass
+        # Replaced-file cleanup lives in training_platform.signals, which defers the
+        # delete until the transaction commits and skips files another row still
+        # references. Doing it here destroyed the old picture even when the save was
+        # later rolled back, leaving the row pointing at a missing file.
         super().save(*args, **kwargs)
 
     # NOTE: Diet plan generation is handled by the diet app's GPT-based system.
@@ -430,10 +463,13 @@ class TrainerClientRelation(models.Model):
         limit_choices_to={'user_type': 'client'}
     )
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-created_at', '-id']
         unique_together = ('trainer', 'client')
         verbose_name = 'Trainer-Client Relation'
         verbose_name_plural = 'Trainer-Client Relations'
@@ -466,11 +502,14 @@ class DeviceToken(models.Model):
     platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES, default='android')
     app_version = models.CharField(max_length=50, blank=True, null=True)
     device_id = models.CharField(max_length=255, blank=True, null=True)
-    is_active = models.BooleanField(default=True, help_text="Soft delete for invalid tokens")
+    is_active = models.BooleanField(default=True, db_index=True, help_text="Soft delete for invalid tokens")
     last_used_at = models.DateTimeField(auto_now=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-created_at', '-id']
         indexes = [
             models.Index(fields=['user', 'is_active']),
         ]
@@ -498,7 +537,12 @@ class OTPVerification(models.Model):
         on_delete=models.CASCADE,
         related_name='otp_verifications'
     )
-    otp_code = models.CharField(max_length=6, help_text="6-digit OTP code")
+    # Holds the keyed HMAC-SHA256 of the code (64 hex chars), never the code itself.
+    # This was max_length=6 — the width of the plaintext code — long after the value
+    # became a hash, so Postgres rejected every insert with
+    # "value too long for type character varying(6)" and registration could not
+    # complete at all. SQLite ignores CharField width, which is why it survived.
+    otp_code = models.CharField(max_length=64, help_text="Keyed HMAC-SHA256 of the 6-digit code")
     email = models.EmailField(help_text="Email address for lookup")
     purpose = models.CharField(
         max_length=20,
@@ -506,12 +550,15 @@ class OTPVerification(models.Model):
         default='registration',
         help_text="Purpose of this OTP (registration or password_reset)"
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     expires_at = models.DateTimeField(help_text="OTP expiration time (10 minutes from creation)")
     is_verified = models.BooleanField(default=False, help_text="Whether this OTP has been used")
     verified_at = models.DateTimeField(null=True, blank=True, help_text="When OTP was verified")
 
     class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-created_at', '-id']
         verbose_name = "OTP Verification"
         verbose_name_plural = "OTP Verifications"
         indexes = [
@@ -547,17 +594,70 @@ class PasswordResetToken(models.Model):
         on_delete=models.CASCADE,
         related_name='password_reset_tokens'
     )
-    token = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    # The raw token is NEVER stored. It used to be a plain UUIDField written verbatim,
+    # so anyone who could read this table — a backup, a replica, a support export, a
+    # SQL-injection foothold — could complete a password reset for any account with a
+    # pending token. `OTPVerification` already hashed its code; this did not.
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     expires_at = models.DateTimeField(help_text="Token expiration time (15 minutes from creation)")
     is_used = models.BooleanField(default=False, help_text="Whether this token has been consumed")
     used_at = models.DateTimeField(null=True, blank=True, help_text="When the token was consumed")
 
+    RAW_TOKEN_BYTES = 32
+
+    @staticmethod
+    def hash_token(raw_token: str) -> str:
+        """Keyed hash of a reset token.
+
+        HMAC rather than a bare digest: the key lives in SECRET_KEY, so a stolen
+        database alone cannot be used to derive a usable token.
+        """
+        import hashlib
+        import hmac
+
+        from django.conf import settings
+
+        return hmac.new(
+            settings.SECRET_KEY.encode("utf-8"),
+            (raw_token or "").strip().encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    @classmethod
+    def issue(cls, user, minutes: int = 15):
+        """Create a token and return (instance, raw_token). The raw value is returned
+        to the caller once and never persisted."""
+        import secrets
+
+        from django.utils import timezone
+
+        raw = secrets.token_urlsafe(cls.RAW_TOKEN_BYTES)
+        instance = cls.objects.create(
+            user=user,
+            token_hash=cls.hash_token(raw),
+            expires_at=timezone.now() + timedelta(minutes=minutes),
+        )
+        return instance, raw
+
+    @classmethod
+    def verify(cls, raw_token: str):
+        """Return the matching token row, or None. Lookup is by hash."""
+        if not raw_token:
+            return None
+        try:
+            return cls.objects.select_related("user").get(token_hash=cls.hash_token(raw_token))
+        except cls.DoesNotExist:
+            return None
+
     class Meta:
+        # Deterministic total order. Without it Postgres returns rows in whatever order it
+        # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
+        ordering = ['-created_at', '-id']
         verbose_name = "Password Reset Token"
         verbose_name_plural = "Password Reset Tokens"
         indexes = [
-            models.Index(fields=['token', 'is_used']),
+            models.Index(fields=['token_hash', 'is_used']),
             models.Index(fields=['expires_at']),
         ]
 
@@ -567,3 +667,4 @@ class PasswordResetToken(models.Model):
     def is_valid(self):
         """Check if token is still valid (not expired and not used)."""
         return not self.is_used and timezone.now() < self.expires_at
+

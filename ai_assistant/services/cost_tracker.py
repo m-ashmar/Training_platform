@@ -43,7 +43,7 @@ class CostTracker:
         """
         from ai_assistant.models import UsageCost
 
-        today = date.today()
+        today = timezone.localdate()
         cost_record, created = UsageCost.objects.get_or_create(
             user=user,
             date=today,
@@ -72,7 +72,7 @@ class CostTracker:
         from ai_assistant.models import UsageCost
         from django.db.models import Sum
 
-        today = date.today()
+        today = timezone.localdate()
         result = UsageCost.objects.filter(
             date=today,
         ).aggregate(total=Sum('estimated_cost_usd'))
@@ -90,3 +90,17 @@ class CostTracker:
             )
             return True
         return False
+
+    def is_over_daily_limit(self) -> bool:
+        """True once the platform's spend for today passes the hard ceiling.
+
+        `check_alert_threshold` only logs — nothing ever stopped spending, so a runaway
+        loop or a burst of traffic could bill without bound. This is the kill-switch.
+        """
+        from django.conf import settings
+
+        config = getattr(settings, 'AI_ASSISTANT_CONFIG', {})
+        limit = Decimal(str(config.get('DAILY_COST_LIMIT_USD', '200.00')))
+        if limit <= 0:
+            return False
+        return self.get_daily_total() >= limit

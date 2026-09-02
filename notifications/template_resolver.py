@@ -33,7 +33,9 @@ def _inc_metric(counter_name, **labels):
         from notifications import metrics
         getattr(metrics, counter_name).labels(**labels).inc()
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
 
 
 class NotificationTemplateResolver:

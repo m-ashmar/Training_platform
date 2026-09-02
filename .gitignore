@@ -68,3 +68,19 @@ firebase-credentials.json
 # Redis
 *.rdb
 dump.rdb
+
+# Build artifacts — regenerated, never source.
+# collectstatic writes staticfiles/ during `docker build` (see Dockerfile). 405 of
+# them were committed, including hashed duplicates of every file, which is churn on
+# every deploy and a merge conflict waiting to happen.
+staticfiles/
+
+# .pyc files slipped past __pycache__/ when they sat outside such a directory.
+*.pyc
+*.pyo
+
+# Generated codebase dumps produced during the audit (113k lines between them).
+# They are snapshots of source that is already in this repo, so committing them
+# doubles the repo and guarantees they go stale.
+*_bundle.txt
+_excluded/**/*_bundle.txt

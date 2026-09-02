@@ -29,8 +29,6 @@ import json
 import logging
 from django.shortcuts import render
 from django.http import JsonResponse
-from django.contrib.auth.decorators import login_required
-from django.views.decorators.http import require_http_methods
 from .ai_services import DietGenerator
 from django.core.exceptions import PermissionDenied
 from datetime import date, time, datetime
@@ -38,6 +36,9 @@ from django.db import models
 
 # Import subscription permissions
 from subscription.permissions import HasDietAccess, MealUsageLimit
+from django.utils import timezone
+from django.http import Http404
+from rest_framework.exceptions import NotFound, PermissionDenied, NotAuthenticated
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,11 @@ class FoodListView(APIView):
                 }
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Food list error: {str(e)}")
             return Response(
@@ -191,6 +197,11 @@ class FoodCategoryListView(APIView):
                 'total_count': len(results)
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Food category list error: {str(e)}")
             return Response(
@@ -268,6 +279,11 @@ class FoodSearchView(APIView):
                 'results': results
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Food search error: {str(e)}")
             return Response(
@@ -282,7 +298,7 @@ class UserFoodCategoryPreferenceView(APIView):
     def get(self, request):
         try:
             # Ensure a UserFoodPreference exists
-            preferences, _ = UserFoodPreference.objects.get_or_create(user=request.user)
+            preferences, _created = UserFoodPreference.objects.get_or_create(user=request.user)
             liked_ids = set(preferences.liked_foods.values_list('id', flat=True))
 
             # Existing mappings
@@ -317,6 +333,11 @@ class UserFoodCategoryPreferenceView(APIView):
                     'macros': [c[0] for c in UserFoodCategoryPreference.MACRO_CHOICES],
                 }
             })
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"UserFoodCategoryPreference list error: {str(e)}")
             return Response({"error": _("Failed to load category preferences")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -339,7 +360,7 @@ class UserFoodCategoryPreferenceView(APIView):
             food = get_object_or_404(FoodItem, id=food_id)
 
             # Ensure food is liked by the user before categorization
-            preferences, _ = UserFoodPreference.objects.get_or_create(user=request.user)
+            preferences, _created = UserFoodPreference.objects.get_or_create(user=request.user)
             if not preferences.liked_foods.filter(id=food.id).exists():
                 return Response({"error": _("Food must be liked before categorization")}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -356,6 +377,11 @@ class UserFoodCategoryPreferenceView(APIView):
                 'meal': obj.meal,
                 'macro': obj.macro,
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"UserFoodCategoryPreference create error: {str(e)}")
             return Response({"error": _("Failed to set category preference")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -390,6 +416,11 @@ class UserFoodCategoryPreferenceDetailView(APIView):
                 'meal': obj.meal,
                 'macro': obj.macro,
             })
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"UserFoodCategoryPreference update error: {str(e)}")
             return Response({"error": _("Failed to update category preference")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -399,6 +430,11 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             obj = get_object_or_404(UserFoodCategoryPreference, user=request.user, food_id=food_id)
             obj.delete()
             return Response({"message": _("Category preference deleted")})
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"UserFoodCategoryPreference delete error: {str(e)}")
             return Response({"error": _("Failed to delete category preference")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -410,6 +446,10 @@ class FoodImportView(APIView):
     # Relaxed to authenticated-only to match tests
     permission_classes = [IsAuthenticated]
     
+    # Atomic: these writes were independent, so a failure part-way left the
+    # records inconsistent (a half-applied password reset either locks the
+    # user out or leaves a consumed token usable).
+    @transaction.atomic
     def post(self, request):
         try:
             # Accept either nested 'food_data' or flat body per tests
@@ -448,7 +488,7 @@ class FoodImportView(APIView):
             except Exception as _e:
                 logger.warning(f"Auto-assign category failed: {_e}")
                 try:
-                    category, _ = FoodCategory.objects.get_or_create(
+                    category, _created = FoodCategory.objects.get_or_create(
                         name='Other', defaults={'is_protein': False, 'is_carb': False, 'is_fat': False}
                     )
                     food_item.category = category
@@ -462,6 +502,11 @@ class FoodImportView(APIView):
                 "food_name": food_item.name
             }, status=status.HTTP_201_CREATED)
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Food import error: {str(e)}")
             print('FOOD_IMPORT_EXCEPTION:', repr(e))
@@ -489,7 +534,9 @@ class FoodImportView(APIView):
             if number:
                 return int(float(number[0]))
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         return 100
     
     def _auto_assign_category(self, food_item):
@@ -574,6 +621,11 @@ class UserPreferencesView(APIView):
                 ]
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"User preferences error: {str(e)}")
             return Response(
@@ -581,9 +633,13 @@ class UserPreferencesView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
+    # Atomic: these writes were independent, so a failure part-way left the
+    # records inconsistent (a half-applied password reset either locks the
+    # user out or leaves a consumed token usable).
+    @transaction.atomic
     def post(self, request):
         try:
-            preferences, _ = UserFoodPreference.objects.get_or_create(user=request.user)
+            preferences, _created = UserFoodPreference.objects.get_or_create(user=request.user)
             action = request.data.get('action')
             if action:
                 food_id = request.data.get('food_id')
@@ -616,10 +672,19 @@ class UserPreferencesView(APIView):
                 preferences.allergies = request.data['allergies']
                 preferences.save()
             return Response({"message": _("Preferences updated successfully")})
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"User preferences update error: {str(e)}")
             return Response({"error": _("Failed to update preferences")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    # Atomic: these writes were independent, so a failure part-way left the
+    # records inconsistent (a half-applied password reset either locks the
+    # user out or leaves a consumed token usable).
+    @transaction.atomic
     def delete(self, request):
         try:
             preferences = get_object_or_404(UserFoodPreference, user=request.user)
@@ -643,6 +708,11 @@ class UserPreferencesView(APIView):
             if 'disliked_foods' in request.data:
                 preferences.disliked_foods.clear()
             return Response({"message": _("Preferences cleared successfully")})
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"User preferences clear error: {str(e)}")
             return Response({"error": _("Failed to clear preferences")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -692,6 +762,11 @@ class GenerateDietPlanView(APIView):
                 "estimated_time": "2-3 minutes"
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Diet plan generation error: {str(e)}")
             return Response(
@@ -739,6 +814,11 @@ class GenerateDietPlanSyncView(APIView):
         except (PersistenceError,) as e:
             logger.error(f"Sync GPT persistence error: {str(e)}")
             return Response({"error": _("Persistence error")}, status=status.HTTP_400_BAD_REQUEST)
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Sync GPT unexpected error: {str(e)}")
             return Response({"error": _("Failed to generate plan")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -806,7 +886,7 @@ class GenerateDietPlanRuleBasedView(APIView):
             # Build rich payload for mobile to display immediately
             try:
                 # Determine which date to present (start_date if provided, else plan start date or today)
-                present_date = parse_date(start_date) if start_date else (diet_plan.start_date or date.today())
+                present_date = parse_date(start_date) if start_date else (diet_plan.start_date or timezone.localdate())
                 meals_qs = diet_plan.meals.filter(date=present_date).order_by('scheduled_time')
                 # Plan-level daily nutrition for the date
                 plan_nutrition = diet_plan.calculate_daily_nutrition(present_date)
@@ -847,7 +927,7 @@ class GenerateDietPlanRuleBasedView(APIView):
                 # If anything fails in rich payload, fallback to minimal response
                 meals_payload = []
                 plan_nutrition = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
-                present_date = start_date or date.today()
+                present_date = start_date or timezone.localdate()
 
             return Response({
                 "status": "ok",
@@ -872,6 +952,11 @@ class GenerateDietPlanRuleBasedView(APIView):
         except PersistenceError as e:
             logger.error(f"Rule-based persistence error: {str(e)}")
             return Response({"error": _("Persistence error")}, status=status.HTTP_400_BAD_REQUEST)
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Rule-based generation error: {str(e)}")
             return Response({"error": _("Failed to generate rule-based plan")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -902,28 +987,17 @@ class DailyAdviceView(APIView):
                 }
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Daily advice error: {str(e)}")
             return Response(
                 {"error": "Failed to retrieve daily advice"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-@login_required
-@require_http_methods(["GET"])
-def generate_diet_plan(request):
-    """
-    Web view for diet plan generation.
-    """
-    try:
-        return render(request, 'diet/generate_plan.html', {
-            'user': request.user
-        })
-    except Exception as e:
-        logger.error(f"Diet plan generation web view error: {str(e)}")
-        return JsonResponse({
-            "error": "Failed to load diet plan generation page"
-        }, status=500) 
 
 # ============================================================================
 # TRAINER DIET PLAN MANAGEMENT ENDPOINTS
@@ -964,6 +1038,11 @@ class TrainerTemplatesView(APIView):
                 'total_count': len(results)
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # Control-flow exceptions carry their own correct status (404/403/401/400).
+            # The broad handler below turned every one of them into a 500, which is the
+            # wrong contract for the client and hides real faults in the error budget.
+            raise
         except Exception as e:
             logger.error(f"Trainer templates error: {str(e)}")
             return Response(
@@ -1034,10 +1113,15 @@ class TrainerDietPlanView(APIView):
                 }
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Trainer diet plan creation error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
     
@@ -1083,10 +1167,15 @@ class TrainerDietPlanView(APIView):
                 'total_count': len(results)
             })
                 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Trainer diet plan retrieval error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1150,9 +1239,15 @@ class TrainerMealView(APIView):
                             'description': meal.description,
                             'components_count': meal.components.count()
                         })
+                    except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+                        # get_object() signals 404/403 by raising. The broad handler below
+                        # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+                        # so the log line was empty too). Control-flow exceptions must pass.
+                        raise
                     except Exception as e:
                         logger.error(f"Error creating meal at index {index}: {e}")
-                        errors.append({"index": index, "error": str(e)})
+                        errors.append({"index": index,
+                                       "error": _("Could not create this meal.")})
 
                 if errors and not created_meals:
                      return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
@@ -1211,10 +1306,15 @@ class TrainerMealView(APIView):
                 }
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Trainer meal creation error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
     
@@ -1256,10 +1356,15 @@ class TrainerMealView(APIView):
                 }
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Trainer meal update error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
     
@@ -1283,10 +1388,15 @@ class TrainerMealView(APIView):
                 "message": _("Meal deleted successfully")
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Trainer meal deletion error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1319,10 +1429,16 @@ class DietPlanNutritionView(APIView):
                         {"error": "You can only view your own diet plan nutrition"},
                         status=status.HTTP_403_FORBIDDEN
                     )
+            elif not request.user.is_admin:
+                # Default-deny: any other role (e.g. agent) has no ownership claim.
+                return Response(
+                    {"error": "You do not have access to this diet plan"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
             
             # Get target date from query params (fallback to plan start date if no meals for today)
             target_date_str = request.GET.get('date')
-            target_date = parse_date(target_date_str) if target_date_str else date.today()
+            target_date = parse_date(target_date_str) if target_date_str else timezone.localdate()
             
             # Calculate plan nutrition
             plan_nutrition = diet_plan.calculate_daily_nutrition(target_date)
@@ -1427,10 +1543,15 @@ class DietPlanNutritionView(APIView):
                 }
             })
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Diet plan nutrition error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1473,6 +1594,12 @@ class MealComponentsView(APIView):
                         {"error": "You can only view your own meals"},
                         status=status.HTTP_403_FORBIDDEN
                     )
+            elif not request.user.is_admin:
+                # Default-deny: any other role (e.g. agent) has no ownership claim.
+                return Response(
+                    {"error": "You do not have access to this meal"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
             
             # Get meal components - No new DB query due to prefetch
             components = meal.components.all()
@@ -1593,7 +1720,7 @@ class MealComponentsView(APIView):
         except Exception as e:
             logger.error(f"Meal components error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1615,7 +1742,7 @@ class EnhancedClientProgressView(APIView):
                 )
             
             target_date_str = request.GET.get('date')
-            target_date = parse_date(target_date_str) if target_date_str else date.today()
+            target_date = parse_date(target_date_str) if target_date_str else timezone.localdate()
             
             # Get progress using enhanced service
             client_service = ClientProgressService(request.user)
@@ -1626,7 +1753,7 @@ class EnhancedClientProgressView(APIView):
         except Exception as e:
             logger.error(f"Enhanced client progress error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1701,10 +1828,15 @@ class MealCompletionView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Meal completion error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1742,7 +1874,7 @@ class ClientProgressView(APIView):
         except Exception as e:
             logger.error(f"Client progress error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1779,7 +1911,7 @@ class ClientWeeklyProgressView(APIView):
         except Exception as e:
             logger.error(f"Client weekly progress error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1854,10 +1986,15 @@ class ClientMealInteractionView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Client meal interaction error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1885,10 +2022,15 @@ class ClientMealDetailsView(APIView):
             
             return Response(meal_details)
             
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"Client meal details error: {str(e)}")
             return Response(
-                {"error": str(e)},
+                {"error": _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -2093,6 +2235,11 @@ class DietPlanMealsWithIngredientsView(APIView):
                 'meals_count': len(out_meals),
             }
             return Response(payload)
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+            # get_object() signals 404/403 by raising. The broad handler below
+            # swallowed those and re-emitted them as 500 (str(Http404()) is '',
+            # so the log line was empty too). Control-flow exceptions must pass.
+            raise
         except Exception as e:
             logger.error(f"DietPlanMealsWithIngredientsView error: {str(e)}")
             return Response({'error': _("An error occurred while loading meal details.")}, status=status.HTTP_400_BAD_REQUEST)

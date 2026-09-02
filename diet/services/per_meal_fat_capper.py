@@ -5,6 +5,9 @@ from typing import Dict, List
 from ..models import DietPlan, Meal, MealComponent, FoodItem
 from ..utils.logging_utils import get_logger
 from ..utils.nutrition import get_macro_ratios, dominant_macro_of_food
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PerMealFatCapper:
@@ -91,7 +94,9 @@ class PerMealFatCapper:
                                 },
                             )
                         except Exception:
-                            pass
+                            # Optional side effect: swallowing this silently is what made the
+                            # surrounding failures invisible in logs. Control flow is unchanged.
+                            logger.debug('suppressed non-fatal error', exc_info=True)
 
     # ------------------------ helpers ------------------------
     def _choose_distribution_for_goal(self, goal: str, meal_types: List[str]) -> Dict[str, float]:

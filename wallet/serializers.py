@@ -1,5 +1,8 @@
+from decimal import Decimal
 from rest_framework import serializers
 from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditLog, IdempotencyKey
+
+_MIN_AMOUNT = Decimal("0.01")
 
 
 class WalletSerializer(serializers.ModelSerializer):
@@ -61,7 +64,7 @@ class AgentProfileSerializer(serializers.ModelSerializer):
 
 class TopUpRequestSerializer(serializers.Serializer):
     client_identifier = serializers.CharField()  # id or email
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=_MIN_AMOUNT)
     idempotency_key = serializers.CharField()
     timestamp = serializers.IntegerField()
     signature = serializers.CharField()
@@ -69,7 +72,7 @@ class TopUpRequestSerializer(serializers.Serializer):
 
 class TransferRequestSerializer(serializers.Serializer):
     trainer_id = serializers.IntegerField()
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=_MIN_AMOUNT)
     idempotency_key = serializers.CharField()
 
 
@@ -81,6 +84,6 @@ class ReversalRequestSerializer(serializers.Serializer):
 
 class AgentTopUpProxyRequestSerializer(serializers.Serializer):
     client_identifier = serializers.CharField()
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=_MIN_AMOUNT)
     idempotency_key = serializers.CharField()
 

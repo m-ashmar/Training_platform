@@ -7,6 +7,9 @@ from django.conf import settings
 from langchain_core.output_parsers import PydanticOutputParser
 from ..ai_models import DietPlanOutput
 from ..utils.http import post_json_with_retry
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AIResponseHandler:
@@ -73,7 +76,9 @@ class AIResponseHandler:
             if texts:
                 return "\n".join(texts)
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         # Fallback: return whole payload json-dumped
         import json
         return json.dumps(data)

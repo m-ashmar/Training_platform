@@ -16,6 +16,8 @@ except Exception:  # pragma: no cover
 
 from .nutrition import get_macro_ratios
 
+logger = logging.getLogger(__name__)
+
 
 PII_KEYS = {"email", "username", "first_name", "last_name", "age", "gender", "allergies"}
 
@@ -74,7 +76,9 @@ def safe_json_log(stage: str, data: Dict[str, Any], logger_name: str = __name__)
         if hasattr(logger, 'info'):
             logger.info(serialized)
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
 
 
 def _macro_ratios_for_goal(goal: str) -> Dict[str, float]:

@@ -10,21 +10,24 @@ class IsAdminOrOwnerOrReadOnly(BasePermission):
     """
 
     def has_permission(self, request, view):
-        # Allow safe methods (GET, HEAD, OPTIONS) for all users
+        # Safe methods still require authentication. Returning True unconditionally let
+        # anonymous callers past the permission check and into get_queryset, which assumes
+        # a real user -> AttributeError -> 500 instead of 401. The crash was the only thing
+        # preventing an anonymous read, since has_object_permission also returned True.
         if request.method in SAFE_METHODS:
-            return True
+            return bool(request.user and request.user.is_authenticated)
         # Only trainers and admins can create, update, or delete objects
-        return request.user and (request.user.is_trainer or request.user.is_staff)
+        return request.user.is_authenticated and (request.user.is_trainer or request.user.is_staff)
 
     def has_object_permission(self, request, view, obj):
-        # Allow safe methods for all users
+        # Object-level reads are bounded by get_queryset; anonymous is still refused here.
         if request.method in SAFE_METHODS:
-            return True
+            return bool(request.user and request.user.is_authenticated)
         # Allow modifying methods for admins
         if request.user and request.user.is_staff:
             return True
         # Allow modifying methods for trainers if they own the object
-        if request.user and request.user.is_trainer and hasattr(obj, 'created_by'):
+        if request.user.is_authenticated and request.user.is_trainer and hasattr(obj, 'created_by'):
             return obj.created_by == request.user
         return False
 
@@ -35,7 +38,7 @@ class IsTrainerOrAdmin(BasePermission):
     """
     
     def has_permission(self, request, view):
-        return request.user and (request.user.is_trainer or request.user.is_admin)
+        return request.user.is_authenticated and (request.user.is_trainer or request.user.is_admin)
 
 
 class IsClientOrTrainerOrAdmin(BasePermission):
@@ -80,7 +83,7 @@ class IsTrainerForClient(BasePermission):
     """
     
     def has_permission(self, request, view):
-        return request.user and (request.user.is_trainer or request.user.is_admin)
+        return request.user.is_authenticated and (request.user.is_trainer or request.user.is_admin)
     
     def has_object_permission(self, request, view, obj):
         user = request.user
@@ -208,7 +211,7 @@ class IsTrainerOfApprovedClient(BasePermission):
     """
     def has_permission(self, request, view):
         # Only trainers and admins can access this endpoint
-        return request.user and (request.user.is_trainer or request.user.is_admin)
+        return request.user.is_authenticated and (request.user.is_trainer or request.user.is_admin)
 
     def has_object_permission(self, request, view, obj):
         # obj is expected to be a CustomUser (client)
@@ -251,7 +254,7 @@ class IsTrainerOrAdminForAssignment(BasePermission):
     
     def has_permission(self, request, view):
         # Only trainers and admins can assign routines
-        return request.user and (request.user.is_trainer or request.user.is_admin)
+        return request.user.is_authenticated and (request.user.is_trainer or request.user.is_admin)
     
     def has_object_permission(self, request, view, obj):
         user = request.user
@@ -280,19 +283,19 @@ class IsSetLogCreatorOrTrainerOrAdmin(BasePermission):
     """
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
-            return True
+            return bool(request.user and request.user.is_authenticated)
         if request.method == 'POST':
             return request.user and request.user.is_authenticated
-        return request.user and (request.user.is_trainer or request.user.is_staff)
+        return request.user.is_authenticated and (request.user.is_trainer or request.user.is_staff)
 
     def has_object_permission(self, request, view, obj):
         if request.method in SAFE_METHODS:
-            return True
+            return bool(request.user and request.user.is_authenticated)
         if request.method == 'POST':
             return request.user and request.user.is_authenticated
         if request.user and request.user.is_staff:
             return True
-        if request.user and request.user.is_trainer:
+        if request.user.is_authenticated and request.user.is_trainer:
             # Trainers can update/delete if they are assigned trainer of the client
             if hasattr(obj, 'user_exercise_progress') and obj.user_exercise_progress:
                 return obj.user_exercise_progress.user.assigned_trainer == request.user
@@ -310,18 +313,75 @@ class IsSessionOwnerOrTrainerOrAdmin(BasePermission):
         if request.method in SAFE_METHODS:
             return request.user and request.user.is_authenticated
         if request.method == 'POST':
-            return request.user and (request.user.is_trainer or request.user.is_staff)
+            return request.user.is_authenticated and (request.user.is_trainer or request.user.is_staff)
         # PATCH/PUT allowed for trainers, admins, or session owner (checked in has_object_permission)
         return request.user and request.user.is_authenticated
 
     def has_object_permission(self, request, view, obj):
+        # Reads: the session owner, an approved trainer, or admin. Returning True
+        # unconditionally for SAFE_METHODS (the previous behaviour) let any
+        # authenticated user read any user's workout session by id.
         if request.method in SAFE_METHODS:
-            return True
-        if request.method in ['PATCH', 'PUT']:
-            # Allow if trainer, admin, or session owner
-            if request.user.is_staff or (hasattr(request.user, 'is_trainer') and request.user.is_trainer):
-                return True
-            return obj.user == request.user
+            return can_access_user_data(request.user, obj.user_id)
+        if request.method in ['PATCH', 'PUT', 'DELETE']:
+            # A trainer may only modify sessions of their OWN approved clients.
+            # Previously any trainer could modify any client's session.
+            return can_access_user_data(request.user, obj.user_id)
         if request.method == 'POST':
-            return request.user and (request.user.is_trainer or request.user.is_staff)
-        return False 
+            return request.user.is_authenticated and (request.user.is_trainer or request.user.is_staff)
+        return False
+
+# ============================================================================
+# Shared user-data authorization
+# ============================================================================
+def can_access_user_data(requester, target_user_id) -> bool:
+    """
+    Single source of truth for "may `requester` read another user's training data?"
+
+    Allowed when the requester is:
+      * the target user themselves,
+      * an admin,
+      * a trainer with an APPROVED TrainerClientRelation to the target.
+
+    Any endpoint that accepts a caller-supplied user id (?user_id=, ?user=, a path
+    id) MUST gate on this. Several routine analytics endpoints previously used the
+    supplied id directly, which let any authenticated account read any other user's
+    complete training history.
+    """
+    if requester is None or not getattr(requester, 'is_authenticated', False):
+        return False
+    if target_user_id in (None, ''):
+        return False
+    try:
+        target_user_id = int(target_user_id)
+    except (TypeError, ValueError):
+        return False
+
+    if requester.id == target_user_id:
+        return True
+    if getattr(requester, 'is_admin', False):
+        return True
+    if getattr(requester, 'is_trainer', False):
+        from users.models import TrainerClientRelation
+        return TrainerClientRelation.objects.filter(
+            trainer=requester, client_id=target_user_id, status='approved'
+        ).exists()
+    return False
+
+
+def accessible_user_ids(requester):
+    """
+    User ids whose training data `requester` may read: themselves, plus approved
+    clients if they are a trainer, or everyone if admin (returns None = unrestricted).
+    """
+    if getattr(requester, 'is_admin', False):
+        return None  # unrestricted
+    ids = {requester.id}
+    if getattr(requester, 'is_trainer', False):
+        from users.models import TrainerClientRelation
+        ids.update(
+            TrainerClientRelation.objects.filter(
+                trainer=requester, status='approved'
+            ).values_list('client_id', flat=True)
+        )
+    return ids

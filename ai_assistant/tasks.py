@@ -14,11 +14,31 @@ from decimal import Decimal
 from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
+from django.db import OperationalError, InterfaceError
+
+# Transient failures worth retrying. These tasks previously used a bare @shared_task:
+# no bind, no autoretry, no self.retry() — so ANY exception (a DB blip, an FCM 503, a
+# broker hiccup) lost the job permanently and silently. `autoretry_for` gives them a
+# retry policy without changing any signature; permanent errors still fail fast.
+TRANSIENT_ERRORS = (
+    OperationalError,
+    InterfaceError,
+    ConnectionError,
+    TimeoutError,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task(name='ai_assistant.tasks.close_idle_sessions')
+@shared_task(
+    name='ai_assistant.tasks.close_idle_sessions',
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
 def close_idle_sessions():
     """
     Deactivate sessions that have been idle longer than the configured
@@ -64,7 +84,14 @@ def close_idle_sessions():
     return f"Closed {closed_count} sessions"
 
 
-@shared_task(name='ai_assistant.tasks.compute_all_user_insights')
+@shared_task(
+    name='ai_assistant.tasks.compute_all_user_insights',
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
 def compute_all_user_insights():
     """
     Daily task to refresh analyzer caches for all users who have
@@ -113,7 +140,14 @@ def compute_all_user_insights():
     return f"Updated {updated} insights"
 
 
-@shared_task(name='ai_assistant.tasks.check_daily_cost')
+@shared_task(
+    name='ai_assistant.tasks.check_daily_cost',
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
 def check_daily_cost():
     """Hourly check: alert if daily AI costs exceed threshold."""
     from ai_assistant.services.cost_tracker import CostTracker
@@ -127,3 +161,28 @@ def check_daily_cost():
         # TODO: Send notification to admin (email/Slack)
 
     return f"Cost check complete. Alert: {exceeded}"
+
+
+@shared_task(
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+def purge_expired_training_data():
+    """Delete training rows past their retention date.
+
+    Nothing previously removed AITrainingData, so health-context snapshots accumulated
+    forever. Rows are written with `retain_until`; this drops them once it passes.
+    """
+    from django.utils import timezone
+
+    from ai_assistant.models import AITrainingData
+
+    deleted, _detail = AITrainingData.objects.filter(
+        retain_until__isnull=False, retain_until__lt=timezone.now(),
+    ).delete()
+    if deleted:
+        logger.info("Purged %s expired AI training records", deleted)
+    return f"Purged {deleted} expired training records"

@@ -7,6 +7,9 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from .models import DeviceToken
 import logging
+from django.http import Http404
+from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
+                                       ValidationError as DRFValidationError)
 
 logger = logging.getLogger(__name__)
 
@@ -31,28 +34,53 @@ class FCMTokenView(APIView):
         token = request.data.get('token')
         if not token:
             return Response({'error': _('Token is required')}, status=status.HTTP_400_BAD_REQUEST)
-        
+
+        # Optional device metadata sent by the mobile client.
+        platform = request.data.get('platform') or 'android'
+        if platform not in dict(DeviceToken.PLATFORM_CHOICES):
+            platform = 'android'
+        app_version = request.data.get('app_version')
+        device_id = request.data.get('device_id')
+
         try:
             # Check if token exists
             device_token = DeviceToken.objects.filter(token=token).first()
-            
+
             if device_token:
-                if device_token.user != request.user:
-                    # Token exists but belongs to another user - reassignment needed
-                    previous_user = device_token.user
-                    device_token.user = request.user
-                    device_token.save()
-                    logger.info(f"Reassigned FCM token from user {previous_user.id} to user {request.user.id}")
+                reassigned = device_token.user_id != request.user.id
+                previous_user_id = device_token.user_id
+                device_token.user = request.user
+                # Re-registering ALWAYS reactivates: a token previously soft-deleted
+                # as invalid would otherwise stay inactive forever and the device
+                # would silently never receive push again.
+                device_token.is_active = True
+                device_token.platform = platform
+                if app_version:
+                    device_token.app_version = app_version
+                if device_id:
+                    device_token.device_id = device_id
+                device_token.save()
+
+                if reassigned:
+                    logger.info(f"Reassigned FCM token from user {previous_user_id} to user {request.user.id}")
                     return Response({'message': _('Token reassigned successfully')}, status=status.HTTP_200_OK)
-                else:
-                    # Token exists and belongs to current user
-                    return Response({'message': _('Token already registered')}, status=status.HTTP_200_OK)
+                return Response({'message': _('Token already registered')}, status=status.HTTP_200_OK)
             else:
                 # Token does not exist - create new
-                DeviceToken.objects.create(user=request.user, token=token)
+                DeviceToken.objects.create(
+                    user=request.user,
+                    token=token,
+                    platform=platform,
+                    app_version=app_version,
+                    device_id=device_id,
+                    is_active=True,
+                )
                 logger.info(f"Registered new FCM token for user {request.user.id}")
                 return Response({'message': _('Token registered successfully')}, status=status.HTTP_201_CREATED)
-                
+
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # These carry their own status; the broad handler below made them 500s.
+            raise
         except Exception as e:
             logger.error(f"Error registering FCM token: {e}")
             return Response({'error': _('Failed to register token')}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -85,6 +113,9 @@ class FCMTokenView(APIView):
             else:
                 return Response({'error': _('Token not found')}, status=status.HTTP_404_NOT_FOUND)
                 
+        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+            # These carry their own status; the broad handler below made them 500s.
+            raise
         except Exception as e:
             logger.error(f"Error unregistering FCM token: {e}")
             return Response({'error': _('Failed to unregister token')}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

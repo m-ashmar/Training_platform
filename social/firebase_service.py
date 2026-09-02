@@ -115,7 +115,13 @@ class FirebaseNotificationService:
                     for idx, resp in enumerate(response.responses):
                         if not resp.success:
                             # In a real app, you might handle invalid tokens here (e.g. remove from DB)
-                            logger.debug(f"Failed token {batch_tokens[idx]}: {resp.exception}")
+                            # Truncated: a full FCM registration token can be used to push to
+                            # that device. The sibling log lines already truncate; this one
+                            # logged the whole credential.
+                            logger.debug(
+                                "Failed token %s...: %s",
+                                batch_tokens[idx][:10], resp.exception,
+                            )
                             
             except Exception as e:
                 logger.error(f"Error sending multicast batch {i}: {e}")

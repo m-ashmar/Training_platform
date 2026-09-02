@@ -1,5 +1,5 @@
 from django.contrib import admin
-from django.utils.html import mark_safe
+from django.utils.html import format_html, mark_safe
 from django.db.models import Count
 from django.db.models.functions import TruncDay
 from django.template.response import TemplateResponse
@@ -41,15 +41,21 @@ class NotificationAdmin(admin.ModelAdmin):
         success = fcm.get('success_count', 0)
         failure = fcm.get('failure_count', 0)
         color = 'green' if status == 'sent' else 'red'
-        return mark_safe(f"<span style='color:{color}'>{status}</span> (S:{success} / F:{failure})")
+        # format_html escapes the interpolated values; mark_safe on an f-string did not,
+        # and `status` comes from the FCM response rather than from us.
+        return format_html(
+            "<span style='color:{}'>{}</span> (S:{} / F:{})", color, status, success, failure
+        )
 
     def metadata_pretty(self, obj):
         import json
-        return mark_safe(f"<pre>{json.dumps(obj.metadata, indent=2)}</pre>")
+        # Notification metadata carries user-influenced content, so it must be escaped
+        # before it lands in the admin page.
+        return format_html("<pre>{}</pre>", json.dumps(obj.metadata, indent=2))
 
     def status_pretty(self, obj):
         import json
-        return mark_safe(f"<pre>{json.dumps(obj.status, indent=2)}</pre>")
+        return format_html("<pre>{}</pre>", json.dumps(obj.status, indent=2))
 
     def changelist_view(self, request, extra_context=None):
         # Analytics Data
@@ -93,4 +99,5 @@ class NotificationFailureAdmin(admin.ModelAdmin):
     
     def event_payload_pretty(self, obj):
         import json
-        return mark_safe(f"<pre>{json.dumps(obj.event_payload, indent=2)}</pre>")
+        # DLQ payloads originate from failed events — escape before rendering.
+        return format_html("<pre>{}</pre>", json.dumps(obj.event_payload, indent=2))

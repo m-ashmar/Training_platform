@@ -42,7 +42,9 @@ class EventDispatcher:
             from notifications.metrics import events_emitted_total
             events_emitted_total.labels(event_type=event.__class__.__name__).inc()
         except ImportError:
-            pass  # Metrics optional or missing during migration
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
         # Allow overriding via settings
         async_mode = getattr(settings, 'NOTIFICATIONS_ASYNC', True) and async_processing

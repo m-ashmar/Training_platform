@@ -78,13 +78,21 @@ class ExerciseCreateWithImageSerializer(serializers.ModelSerializer):
         return None
 
     def validate_image(self, value):
-        if value:
-            if value.size > 5 * 1024 * 1024:  # 5MB limit for exercise images
-                raise serializers.ValidationError(_('Exercise image size must be under 5MB.'))
-            valid_types = ['image/jpeg', 'image/png', 'image/webp']
-            if hasattr(value, 'content_type') and value.content_type not in valid_types:
-                raise serializers.ValidationError(_('Only JPEG, PNG, and WebP images are allowed.'))
-        return value
+        # Content-based validation. `content_type` is a client-supplied header, so the
+        # previous check let a renamed PHP/HTML payload through this serializer path
+        # even though the dedicated upload endpoint rejected it.
+        if not value:
+            return value
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from training_platform.file_security import process_uploaded_image
+        import os as _os
+        try:
+            safe_file, ext = process_uploaded_image(value, max_bytes=5 * 1024 * 1024)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
+        base = _os.path.splitext(getattr(value, 'name', 'exercise'))[0][:60] or 'exercise'
+        safe_file.name = f"{base}.{ext}"
+        return safe_file
 
 
 class RoutineExerciseSerializer(serializers.ModelSerializer):
@@ -337,6 +345,12 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
     user = serializers.StringRelatedField(read_only=True)
     routine_name = serializers.CharField(source='routine.name', read_only=True)
     routine_id = serializers.IntegerField(source='routine.id', read_only=True)
+    # `routine` had no writable representation at all, so every POST left routine_id
+    # NULL and died with an IntegrityError (500). `date` likewise: without it the row
+    # cannot be placed on a day, which is what the streak calculation keys off.
+    routine = serializers.PrimaryKeyRelatedField(
+        queryset=Routine.objects.all(), write_only=True
+    )
     completion_percentage = serializers.SerializerMethodField()
     exercises_summary = serializers.SerializerMethodField()
     next_suggested_action = serializers.SerializerMethodField()
@@ -344,8 +358,8 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoutineProgress
         fields = [
-            'id', 'user', 'routine_id', 'routine_name', 
-            'day', 'status', 'exercises_completed', 'total_exercises',
+            'id', 'user', 'routine', 'routine_id', 'routine_name',
+            'day', 'date', 'status', 'exercises_completed', 'total_exercises',
             'completion_percentage', 'exercises_summary', 
             'next_suggested_action', 'updated_at'
         ]
@@ -359,28 +373,44 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
         """Get summary of exercises for this day with optimized queries."""
         from .models import RoutineExercise, UserExerciseProgress
         
-        routine_exercises = RoutineExercise.objects.filter(
-            routine=obj.routine, 
-            day=obj.day
-        ).select_related('exercise')
-        
-        # Optimization: Batch query all progress for this user/date instead of N queries
+        # N+1 FIX: this method ran two queries PER ROW (26 queries for 20 rows).
+        # Results are memoised on the serializer instance and keyed by the values
+        # they actually depend on, so a page of rows sharing a routine/day/date
+        # costs one pair of queries instead of one pair each.
+        cache = getattr(self, '_exsummary_cache', None)
+        if cache is None:
+            cache = self._exsummary_cache = {'rex': {}, 'prog': {}}
+
+        rex_key = (obj.routine_id, obj.day)
+        if rex_key not in cache['rex']:
+            cache['rex'][rex_key] = list(
+                RoutineExercise.objects.filter(routine_id=obj.routine_id, day=obj.day)
+                .select_related('exercise')
+            )
+        routine_exercises = cache['rex'][rex_key]
+
         exercise_ids = [re.exercise_id for re in routine_exercises]
-        progress_date = obj.updated_at.date() if obj.updated_at else None
-        
-        # Single query to get all relevant progress entries
-        progress_map = {}
-        if progress_date and exercise_ids:
-            progress_entries = UserExerciseProgress.objects.filter(
-                user=obj.user,
-                exercise_id__in=exercise_ids,
-                date=progress_date
-            ).order_by('exercise_id', '-updated_at')
-            
-            # Build map of exercise_id -> latest progress (first in ordered results)
-            for p in progress_entries:
-                if p.exercise_id not in progress_map:
-                    progress_map[p.exercise_id] = p
+        # Use the real training date. This previously derived the date from
+        # `updated_at` (auto_now), which pointed at the wrong day as soon as a row
+        # was edited — the RoutineProgress.date field is now authoritative.
+        progress_date = obj.date
+
+        # Key the progress cache WITHOUT the date and bucket by date in memory:
+        # a page of RoutineProgress rows for one routine/day spans many dates, so
+        # keying per-date still cost one query per row.
+        prog_key = (obj.user_id, rex_key)
+        if prog_key not in cache['prog']:
+            by_date = {}
+            if exercise_ids:
+                for p in UserExerciseProgress.objects.filter(
+                    user_id=obj.user_id,
+                    exercise_id__in=exercise_ids
+                ).order_by('exercise_id', '-updated_at'):
+                    bucket = by_date.setdefault(p.date, {})
+                    if p.exercise_id not in bucket:
+                        bucket[p.exercise_id] = p
+            cache['prog'][prog_key] = by_date
+        progress_map = cache['prog'][prog_key].get(progress_date, {})
         
         summary = []
         for re in routine_exercises:
@@ -407,9 +437,9 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
     
     def get_next_suggested_action(self, obj):
         """Suggest what user should do next."""
-        if obj.status == 'Completed':
+        if obj.status == 'completed':
             return "Great job! You've finished this day's workout. Rest up for the next one."
-        elif obj.status == 'In Progress':
+        elif obj.status == 'in_progress':
             remaining = obj.total_exercises - obj.exercises_completed
             return f"Keep pushing! You have {remaining} exercises remaining to complete Day {obj.day}."
         else:
@@ -436,6 +466,25 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
     one_rep_max_estimate = serializers.SerializerMethodField()
+
+    def validate_user_exercise_progress(self, value):
+        """
+        A set log may only be attached to a progress row the caller owns (or, for a
+        trainer/admin, one belonging to an approved client).
+
+        Without this, any authenticated user could POST a set log referencing ANOTHER
+        user's progress id and inject fabricated training data into their history —
+        proven to move a victim's reported week_volume from 0 to 25000.
+        """
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            raise serializers.ValidationError(_("Authentication required."))
+        from routine.permissions import can_access_user_data
+        if not can_access_user_data(request.user, value.user_id):
+            raise serializers.ValidationError(
+                _("You cannot log sets against another user's progress.")
+            )
+        return value
 
     class Meta:
         model = ExerciseSetLog
@@ -496,12 +545,12 @@ class UserDailySummarySerializer(serializers.ModelSerializer):
 
     def get_status(self, obj):
         if obj.skipped:
-            return 'Skipped'
+            return 'skipped'
         elif obj.completed_sets >= obj.target_sets and obj.target_sets > 0:
-            return 'Completed'
+            return 'completed'
         elif obj.completed_sets > 0:
-            return 'In Progress'
-        return 'Not Started'
+            return 'in_progress'
+        return 'not_started'
 
 
 class TrainerRoutineSerializer(serializers.ModelSerializer):
@@ -555,7 +604,7 @@ class TrainerRoutineSerializer(serializers.ModelSerializer):
         
         # Calculate manually in python to avoid DB hit
         total_entries = len(progress_entries)
-        completed_entries = sum(1 for p in progress_entries if p.status == 'Completed')
+        completed_entries = sum(1 for p in progress_entries if p.status == 'completed')
         
         if total_entries == 0:
             return 0.0
@@ -880,7 +929,7 @@ class DetailedClientProgressSerializer(serializers.ModelSerializer):
         # Calculate completion rate (last 30 days)
         from django.utils import timezone
         from datetime import timedelta
-        thirty_days_ago = timezone.now().date() - timedelta(days=30)
+        thirty_days_ago = timezone.localdate() - timedelta(days=30)
         
         recent_progress = RoutineProgress.objects.filter(
             user=client,
@@ -888,7 +937,7 @@ class DetailedClientProgressSerializer(serializers.ModelSerializer):
         )
         
         total_days = recent_progress.count()
-        completed_days = recent_progress.filter(status='Completed').count()
+        completed_days = recent_progress.filter(status='completed').count()
         completion_rate = round((completed_days / total_days * 100) if total_days > 0 else 0, 1)
         
         return {
@@ -917,7 +966,7 @@ class DetailedClientProgressSerializer(serializers.ModelSerializer):
         from datetime import timedelta
         
         # This week (last 7 days)
-        week_ago = timezone.now().date() - timedelta(days=7)
+        week_ago = timezone.localdate() - timedelta(days=7)
         week_sessions = WorkoutSession.objects.filter(
             user=client,
             status='completed',
@@ -932,7 +981,7 @@ class DetailedClientProgressSerializer(serializers.ModelSerializer):
         )
         
         # This month (last 30 days)
-        month_ago = timezone.now().date() - timedelta(days=30)
+        month_ago = timezone.localdate() - timedelta(days=30)
         month_sessions = WorkoutSession.objects.filter(
             user=client,
             status='completed',
@@ -1019,7 +1068,7 @@ class RecentActivitySerializer(serializers.ModelSerializer):
         from django.utils import timezone
         from datetime import timedelta
         
-        week_ago = timezone.now().date() - timedelta(days=7)
+        week_ago = timezone.localdate() - timedelta(days=7)
         week_sessions = WorkoutSession.objects.filter(
             user=obj,
             status='completed',
@@ -1037,7 +1086,7 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             updated_at__date__gte=week_ago
         )
         total_days = week_progress.count()
-        completed_days = week_progress.filter(status='Completed').count()
+        completed_days = week_progress.filter(status='completed').count()
         completion_rate = round((completed_days / total_days * 100) if total_days > 0 else 0, 1)
         
         return {
@@ -1051,7 +1100,7 @@ class RecentActivitySerializer(serializers.ModelSerializer):
         from django.utils import timezone
         from datetime import timedelta
         
-        week_ago = timezone.now().date() - timedelta(days=7)
+        week_ago = timezone.localdate() - timedelta(days=7)
         recent_logs = ExerciseSetLog.objects.filter(
             user_exercise_progress__user=obj,
             date__gte=week_ago

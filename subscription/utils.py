@@ -39,30 +39,15 @@ def create_trial_subscription(user, plan_id, trial_days=7):
 
 def activate_subscription(subscription_id):
     """
-    Activate a subscription (typically after payment confirmation).
-    
-    Args:
-        subscription_id: UUID of the subscription
-    
-    Returns:
-        bool: True if successful, False otherwise
+    DEPRECATED / REMOVED. Subscriptions may only be activated by
+    PaymentService.complete_payment after verified payment. This helper used to
+    flip status to 'active' and mark pending payments completed with no payment
+    verification — a paywall bypass — so it now refuses to run.
     """
-    try:
-        with transaction.atomic():
-            subscription = Subscription.objects.get(id=subscription_id)
-            subscription.status = 'active'
-            subscription.save()
-            
-            # Update any pending payments
-            Payment.objects.filter(
-                subscription=subscription,
-                status='pending'
-            ).update(status='completed')
-            
-            return True
-            
-    except Subscription.DoesNotExist:
-        return False
+    raise NotImplementedError(
+        "activate_subscription is disabled; activation happens only via "
+        "PaymentService.complete_payment after verified payment."
+    )
 
 def cancel_subscription(subscription_id, immediate=False, reason=""):
     """
@@ -105,40 +90,14 @@ def cancel_subscription(subscription_id, immediate=False, reason=""):
 
 def renew_subscription(subscription_id):
     """
-    Renew a subscription.
-    
-    Args:
-        subscription_id: UUID of the subscription
-    
-    Returns:
-        bool: True if successful, False otherwise
+    DEPRECATED / REMOVED. Renewal must not extend a subscription for free.
+    Use PaymentService.start_renewal to create a pending payment and complete it
+    via PaymentService.complete_payment after the gateway confirms funds.
     """
-    try:
-        with transaction.atomic():
-            subscription = Subscription.objects.get(id=subscription_id)
-            
-            if subscription.status not in ['active', 'expired']:
-                return False
-            
-            # Extend the subscription
-            subscription.end_date = subscription.end_date + timedelta(days=subscription.plan.duration_days)
-            subscription.status = 'active'
-            subscription.auto_renew = True
-            subscription.save()
-            
-            # Create payment record
-            Payment.objects.create(
-                subscription=subscription,
-                amount=subscription.plan.price,
-                currency='USD',
-                status='completed',
-                description=f"Renewal for {subscription.plan.name}"
-            )
-            
-            return True
-            
-    except Subscription.DoesNotExist:
-        return False
+    raise NotImplementedError(
+        "renew_subscription is disabled; use PaymentService.start_renewal + "
+        "complete_payment (verified) instead."
+    )
 
 def check_subscription_access(user, required_features=None):
     """
@@ -227,10 +186,12 @@ def track_feature_usage(user, feature_name, increment=1):
             }
         )
         
-        # Increment usage count
-        usage.usage_count += increment
-        usage.save()
-        
+        # Atomic increment — avoids a read-modify-write race that could lose
+        # concurrent increments and let a user exceed their plan limit.
+        SubscriptionUsage.objects.filter(pk=usage.pk).update(
+            usage_count=models.F('usage_count') + increment
+        )
+
         return True
         
     except (Subscription.DoesNotExist, SubscriptionFeature.DoesNotExist):

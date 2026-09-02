@@ -20,6 +20,9 @@ from .snack_enforcer import SnackCalorieEnforcer
 from .per_meal_fat_capper import PerMealFatCapper
 from .macro_shortage_booster import MacroShortageBooster
 from .macro_balancer import MacroBalancer as LegacyMacroBalancer  # reuse macro rebalance logic
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class DietPersistenceService:
@@ -115,45 +118,34 @@ class DietPersistenceService:
                     for d in dates:
                         log_day_macros('persisted', diet_plan, d)
                 except Exception:
-                    pass
+                    # Optional side effect: swallowing this silently is what made the
+                    # surrounding failures invisible in logs. Control flow is unchanged.
+                    logger.debug('suppressed non-fatal error', exc_info=True)
 
-                # Enforce per-meal fat caps BEFORE any day-level passes
-                PerMealFatCapper().enforce(diet_plan)
+                # --- convergence -------------------------------------------------
+                # Replaces seven correctors that ran once each in a fixed order with no
+                # shared objective. Traced on a real plan, that chain reached +4.1%
+                # (inside tolerance) after stage three and then degraded to -6.6%, and
+                # the degraded plan is what shipped. `CalorieTrimmer` trimmed a plan
+                # already under target; `MacroShortageBooster` did nothing against a 35%
+                # fat gap; `SnackCalorieEnforcer` had to run twice because later stages
+                # undid it.
+                #
+                # The optimiser picks the macro furthest outside its OWN tolerance, keeps
+                # a move only if it improved the objective, and returns the best plan it
+                # saw. The result is reported rather than hidden.
+                from diet.planner.converge import converge_plan
 
-                # Enforce snack calories ~200 kcal (post-insert pre-balance)
-                SnackCalorieEnforcer(200.0).enforce(diet_plan)
-
-                # Macro balance toward targets first (boost carbs/protein as needed per goal)
-                LegacyMacroBalancer().rebalance(diet_plan)
+                convergence = converge_plan(diet_plan)
                 try:
-                    for d in dates:
-                        log_day_macros('after_macro_balance', diet_plan, d)
+                    payload = diet_plan.generated_plan
+                    if not isinstance(payload, dict):
+                        payload = {'raw': payload} if payload else {}
+                    payload['convergence'] = convergence
+                    diet_plan.generated_plan = payload
+                    diet_plan.save(update_fields=['generated_plan'])
                 except Exception:
-                    pass
-                # Enforce macro caps and boost carbs if below target by > 15g
-                MacroCapEnforcer().enforce(diet_plan)
-                try:
-                    for d in dates:
-                        log_day_macros('after_caps', diet_plan, d)
-                except Exception:
-                    pass
-                # If any macro is short by > 15g, iteratively increase dominant components across meals
-                MacroShortageBooster().boost(diet_plan)
-                try:
-                    for d in dates:
-                        log_day_macros('after_shortage', diet_plan, d)
-                except Exception:
-                    pass
-                # Finally trim calories per goal if above target
-                CalorieTrimmer().trim(diet_plan)
-                try:
-                    for d in dates:
-                        log_day_macros('after_trim', diet_plan, d)
-                except Exception:
-                    pass
-
-                # Final safety: enforce snack calories again to ~200 kcal
-                SnackCalorieEnforcer(200.0).enforce(diet_plan)
+                    logger.debug('could not store convergence report', exc_info=True)
 
                 log_json(
                     self.logger,
@@ -163,6 +155,25 @@ class DietPersistenceService:
                     diet_plan_id=diet_plan.id,
                     meals=len(plan_output.plan),
                 )
+                # Surface what the allergen checker found. Silence used to be the only
+                # signal, and it meant nothing: the old validator filtered on the food's
+                # NAME and could not see composition at all. `report` distinguishes an
+                # ingredient that definitely violates a declared allergy from one whose
+                # allergen data is simply missing — the latter must not pass as safe.
+                report = validator.report
+                if report.violations or report.unverified:
+                    log_json(
+                        self.logger,
+                        "warning" if report.violations else "info",
+                        "Allergen check on generated plan",
+                        user_id=self.user.id,
+                        diet_plan_id=diet_plan.id,
+                        violations=[v.food_name for v in report.violations],
+                        unverified_count=len(report.unverified),
+                    )
+                # Attached (not persisted) so callers/serializers can act on it.
+                diet_plan.allergen_report = report.as_dict()
+
                 return diet_plan
         except (IntegrityError, ValidationError) as e:
             log_json(self.logger, "error", "Constraint violation while saving diet plan", error=str(e))
@@ -231,16 +242,30 @@ class DietPersistenceService:
 
             return {n.lower() for n in allowed}
 
+        # HARD constraints only. This used to reject any food the user had not explicitly
+        # categorised, which made sense when the planner could only pick from that same
+        # set. Now that preferences RANK the catalogue instead of gating it (see
+        # diet.planner.candidates), re-gating here rejected every plan generated for a
+        # user with partial preferences — a second copy of the bug that produced the
+        # 233 kcal plan. Allergens and explicit dislikes are the real constraints, and
+        # both are already enforced in the pool builder and by MealValidator.
+        from ..models import UserFoodPreference
+
+        pref = UserFoodPreference.objects.filter(user=self.user).first()
+        disliked = {f.name.strip().lower() for f in pref.disliked_foods.all()} if pref else set()
+        if not disliked:
+            return
+
         violations = []
         for m in plan_output.plan:
-            meal_type = getattr(m, 'meal_type', None) or 'Lunch'
-            allowed = meal_allowed_set(meal_type)
             for ing in getattr(m, 'ingredients', []) or []:
                 n = (getattr(ing, 'name', '') or '').strip().lower()
-                if n and allowed and n not in allowed:
+                if n and n in disliked:
                     violations.append(n)
         if violations:
-            raise PersistenceError(f"unallowed_foods:{','.join(sorted(set(violations)))}")
+            raise ConstraintViolationError(
+                f"disliked_foods:{','.join(sorted(set(violations)))}"
+            )
 
     # ---------------------- internals ----------------------
 
@@ -249,8 +274,10 @@ class DietPersistenceService:
             try:
                 return _date.fromisoformat(str(start_date))
             except Exception:
-                pass
-        return timezone.now().date()
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
+        return timezone.localdate()
 
     def _load_piece_weights(self) -> Dict[str, float]:
         pw = {
@@ -268,7 +295,9 @@ class DietPersistenceService:
             if cfg and cfg.piece_weights:
                 pw.update(cfg.piece_weights)
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         return pw
 
     def _cat_key(self, meal: str, macro: str) -> str:
@@ -331,7 +360,9 @@ class DietPersistenceService:
                 if getattr(food.category, 'is_fat', False):
                     return 'fat'
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0))
         c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0))
         f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0))

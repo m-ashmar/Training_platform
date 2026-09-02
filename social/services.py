@@ -13,7 +13,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
 from users.models import CustomUser
-from social.models import Achievement, UserAchievement, Post, UserFollow, Notification
+from social.models import Achievement, UserAchievement, Post, UserFollow
 from analytics.models import UserActivity, PerformanceMetric, UserGoal
 
 
@@ -184,7 +184,7 @@ class AchievementService:
     @classmethod
     def _calculate_workout_streak(cls, user):
         """Calculate current workout streak for user."""
-        today = timezone.now().date()
+        today = timezone.localdate()
         streak = 0
         current_date = today
         
@@ -228,7 +228,7 @@ class AchievementService:
     @classmethod
     def _calculate_calorie_tracking_streak(cls, user):
         """Calculate consecutive days of calorie tracking."""
-        today = timezone.now().date()
+        today = timezone.localdate()
         streak = 0
         current_date = today
         
@@ -306,34 +306,24 @@ class AchievementService:
     
     @classmethod
     def _send_achievement_notification(cls, user, achievement):
-        """Send notification to user about new achievement."""
+        """
+        Send notification to user about new achievement.
+
+        Emits the domain event only. The notifications listener owns persistence
+        (canonical notifications.Notification) and FCM dispatch. The legacy
+        social.Notification write that used to happen here produced a duplicate
+        row in a table no API endpoint reads.
+        """
         try:
-            # Create in-app notification
-            title = 'Achievement Unlocked! 🏆'
-            message = f'You earned the "{achievement.name}" achievement! +{achievement.points} points'
-            
-            Notification.objects.create(
-                recipient=user,
-                notification_type='achievement',
-                title=title,
-                message=message
-            )
-            
-            # Send Push Notification via FCM
-            try:
-                # Emit Domain Event
-                from notifications.domain.dispatcher import emit_event
-                from notifications.domain.events import AchievementAwardedEvent
-                
-                emit_event(AchievementAwardedEvent(
-                    user_id=user.id,
-                    achievement_id=achievement.id,
-                    achievement_name=achievement.name,
-                    points=achievement.points
-                ))
-            except Exception as e:
-                logger.error(f"Failed to trigger FCM for achievement: {e}")
-                
+            from notifications.domain.dispatcher import emit_event
+            from notifications.domain.events import AchievementAwardedEvent
+
+            emit_event(AchievementAwardedEvent(
+                user_id=user.id,
+                achievement_id=achievement.id,
+                achievement_name=achievement.name,
+                points=achievement.points
+            ))
         except Exception as e:
             logger.error(f"Error sending achievement notification: {e}")
     

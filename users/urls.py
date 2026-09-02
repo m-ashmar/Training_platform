@@ -3,19 +3,24 @@ from .views import (
     CustomLoginView, CustomRegisterView, UpdateUserDetailsView, 
     UserDetailsView, JWTAuthLogoutView, TrainerProfileView, TrainerClientsView,
     AssignClientView, UnassignClientView, ClientProfileView, AvailableTrainersView,
-    PublicTrainersListView, PublicTrainerClientStatsView, ClientProfileViewSet, DeviceTokenRegisterView, CustomTokenObtainPairView,
+    PublicTrainersListView, PublicTrainerClientStatsView, ClientProfileViewSet, CustomTokenObtainPairView,
     ClientRequestTrainerView, TrainerPendingRequestsView, TrainerRespondToRequestView,
     ClientRequestStatusView, ProfilePictureUploadView, OTPVerificationView, ResendOTPView,
     ClientUnassignTrainerView, ClientCancelTrainerRequestView,
     PasswordResetRequestView, PasswordResetVerifyView, PasswordResetConfirmView,
 )
 from .device_token_views import FCMTokenView
+from .health_views import HealthCheckView
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.routers import DefaultRouter
 
 app_name = 'users'
 
 urlpatterns = [
+    # Health probe — polled by fly.toml [[http_service.checks]] every 30s.
+    # Must stay unauthenticated, SSL-redirect exempt and rate-limit exempt.
+    path('health/', HealthCheckView.as_view(), name='health_check'),
+
     # JWT Authentication endpoints
     path('token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

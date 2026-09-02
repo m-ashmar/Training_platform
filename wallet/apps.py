@@ -1,4 +1,7 @@
 from django.apps import AppConfig
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class WalletConfig(AppConfig):
@@ -12,6 +15,8 @@ class WalletConfig(AppConfig):
             import wallet.signals  # noqa: F401
         except Exception:
             # Signals import should not break app startup
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
 

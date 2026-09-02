@@ -10,6 +10,9 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 from typing import Iterable, Optional, Dict, Tuple, Union
 from django.conf import settings
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 Quantity = Union[str, float, int]
@@ -71,7 +74,9 @@ def is_piece_food_name(food_name_lower: str, piece_weights: Dict[str, float]) ->
         if any(k in food_name_lower for k in egg_synonyms):
             return "egg"
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
     return None
 
 
@@ -188,7 +193,9 @@ def portion_sanity_cap_grams(dominant_macro: str) -> float:
         if isinstance(bounds, (tuple, list)) and len(bounds) == 2:
             return float(bounds[1])
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
     # Fallback upper-bounds
     return {
         'protein': 350.0,
@@ -295,7 +302,9 @@ def dominant_macro_of_food(food: Optional[object]) -> str:
             if getattr(category, 'is_fat', False):
                 return 'fat'
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
     
     # Fallback to caloric contribution from per-gram values
     try:

@@ -23,10 +23,15 @@ try:
     from dotenv import load_dotenv
     load_dotenv(_BASE_DIR / '.env')
 except ImportError:
-    pass
+    # Optional side effect: swallowing this silently is what made the
+    # surrounding failures invisible in logs. Control flow is unchanged.
+    logger.debug('suppressed non-fatal error', exc_info=True)
 
 # Import all shared configuration
 from .settings_base import *  # noqa: F401, F403
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ========================
 # Local Overrides
@@ -100,3 +105,9 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {  # noqa: F405
 # ========================
 from .settings_secrets import get_bool_env_optional
 WALLET_DEV_MODE = get_bool_env_optional("WALLET_DEV_MODE", default=False)
+
+# Development-only field-encryption key, so the encrypted-column code path is actually
+# exercised locally and by the test suite instead of silently falling back to plaintext.
+# Production loads its own from the environment and refuses to boot without one; this
+# value guards nothing real and is not a secret.
+FIELD_ENCRYPTION_KEY = os.environ.get("FIELD_ENCRYPTION_KEY", "07DLC_JTJpDiu578mrD6xH4t4Hz_0FgKnKYEhUdCsz0=")

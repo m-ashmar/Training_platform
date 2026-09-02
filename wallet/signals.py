@@ -2,7 +2,7 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from .models import Wallet, AgentProfile, Transaction, move_funds_atomic
+from .models import Wallet, AgentProfile, Transaction, move_funds_atomic, ensure_agent_profile
 
 
 User = get_user_model()
@@ -14,9 +14,9 @@ def create_wallet_and_agent(sender, instance, created, **kwargs):
         # Create wallet for clients and trainers automatically
         if getattr(instance, "user_type", None) in ("client", "trainer"):
             Wallet.objects.get_or_create(owner=instance, defaults={"owner_type": instance.user_type})
-        # Prepare agent profile placeholder
+        # Prepare agent profile with fail-closed default caps
         if getattr(instance, "user_type", None) == "agent":
-            AgentProfile.objects.get_or_create(user=instance)
+            ensure_agent_profile(instance)
 
 
 @receiver(post_save)

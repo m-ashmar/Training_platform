@@ -6,6 +6,9 @@ import random
 import math
 
 from diet.models import FoodItem, DietConfig
+import logging
+
+logger = logging.getLogger(__name__)
 from diet.utils.nutrition import (
     get_macro_densities_for_food,
     portion_sanity_cap_grams,
@@ -29,7 +32,9 @@ def _is_vegetable_food(food: FoodItem) -> bool:
             if "vegetable" in nm or "vegetables" in nm or "veggie" in nm:
                 return True
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
     name = ((getattr(food, "name", "") or "")).lower()
     veg_keywords = (
         "lettuce",
@@ -72,7 +77,9 @@ def _snap_pieces_if_needed(food: FoodItem, grams: float, piece_weights: Optional
                 pieces = max(1, int(round(grams / pw)))
                 return float(pieces * pw)
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
     return grams
 
 
@@ -96,7 +103,9 @@ def compute_portion_grams(
             f"[PORTION] start food={getattr(food,'name','')} macro={macro} rem_macro_g={round(remaining_macro_g,2)} rem_kcal={round(remaining_kcal,1)} cap_override={gram_cap_override}"
         )
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
 
     # Per-gram densities
     macro_per_g = float(getattr(food, f"{'carbs' if macro=='carb' else macro}_per_gram", 0.0) or 0.0)
@@ -105,13 +114,17 @@ def compute_portion_grams(
         try:
             print(f"[PORTION] skip (no kcal budget) mpg={macro_per_g} kpg={kcal_per_g}")
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         return 0.0
     if macro_per_g <= 0.0 or kcal_per_g <= 0.0:
         try:
             print(f"[PORTION] skip (non-positive mpg/kpg) mpg={macro_per_g} kpg={kcal_per_g}")
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
         return 0.0
 
     grams_for_macro = remaining_macro_g / macro_per_g if macro_per_g > 0 else 0.0
@@ -122,7 +135,9 @@ def compute_portion_grams(
             f"[PORTION] base grams_for_macro={round(grams_for_macro,1)} grams_for_kcal={round(grams_for_kcal,1)} grams_base={round(grams,1)} (mpg={round(macro_per_g,4)} kpg={round(kcal_per_g,4)})"
         )
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
 
     # Explicit cap override
     if gram_cap_override is not None:
@@ -130,7 +145,9 @@ def compute_portion_grams(
         try:
             print(f"[PORTION] gram_cap_override -> {round(grams,1)}")
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
     # Oil/fat caps
     if macro == "fat" and _is_oil_name(getattr(food, "name", "") or ""):
@@ -138,20 +155,26 @@ def compute_portion_grams(
         try:
             print(f"[PORTION] oil cap -> {round(grams,1)}")
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
     if macro == "fat":
         grams = min(grams, 50.0)
         try:
             print(f"[PORTION] fat cap -> {round(grams,1)}")
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
     # Portion sanity by targeted macro (not food dominance)
     grams = min(grams, portion_sanity_cap_grams(macro))
     try:
         print(f"[PORTION] sanity cap ({macro}) -> {round(grams,1)}")
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
 
     # Carb variability cap (deterministic, target-aware, disabled when kcal-limited)
     if carb_variable and macro == "carb":
@@ -160,7 +183,9 @@ def compute_portion_grams(
             try:
                 print(f"[PORTION] carb cap skipped (kcal-limited)")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
         else:
             target_cap = 1.10 * grams_for_macro  # allow mild overshoot relative to target need
             # Apply hard ceilings
@@ -171,7 +196,9 @@ def compute_portion_grams(
             try:
                 print(f"[PORTION] carb cap (target-aware) -> {round(grams,1)} (cap={round(target_cap,1)})")
             except Exception:
-                pass
+                # Optional side effect: swallowing this silently is what made the
+                # surrounding failures invisible in logs. Control flow is unchanged.
+                logger.debug('suppressed non-fatal error', exc_info=True)
 
     # Vegetable cap: 300 g for true vegetables
     if _is_vegetable_food(food):
@@ -179,7 +206,9 @@ def compute_portion_grams(
         try:
             print(f"[PORTION] vegetable cap -> {round(grams,1)}")
         except Exception:
-            pass
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
 
     # Round + snap to piece
     grams = _round_grams_half_up_to_5(grams)
@@ -187,7 +216,9 @@ def compute_portion_grams(
     try:
         print(f"[PORTION] final grams -> {round(grams,1)}")
     except Exception:
-        pass
+        # Optional side effect: swallowing this silently is what made the
+        # surrounding failures invisible in logs. Control flow is unchanged.
+        logger.debug('suppressed non-fatal error', exc_info=True)
     return grams
 
 
