@@ -2426,3 +2426,21 @@ once something wraps the caller in a transaction — which is exactly how
 | beat schedule vs registry | 8 scheduled, 0 unregistered |
 | `sweep_5xx` | 572 requests, 0 5xx |
 | `dive2_write_sweep` | 805 writes, 0 5xx |
+
+## P18-4 — frozen timezone default backfilled
+
+`preferred_timezone` used `default=getattr(settings, 'TIME_ZONE', 'UTC')`, which Django
+evaluates **once at import**, so the column default froze to `'UTC'` and stopped tracking
+the setting. 376 of 378 accounts sat on the wrong clock while the platform ran on
+Asia/Damascus — and that is the field `session_reminder` resolves each user's local hour
+through, so those users would have been reminded three hours early.
+
+Safe to rewrite because **no user had ever chosen a value**: the field appeared in no
+serializer and no endpoint until the reminder work added it, so every row was a default,
+not a preference (`git log -S preferred_timezone -- users/serializers.py` returns only
+that commit). Migration `users/0029` moves rows still holding the frozen `'UTC'` to
+`settings.TIME_ZONE` and leaves anything else alone; the reverse is a deliberate no-op,
+since it could not tell a backfilled row from someone who later picks UTC on purpose.
+
+Result: 378/378 on `Asia/Damascus`, 0 unparseable. The model default is now a callable,
+gated by `test_no_account_is_left_on_the_frozen_timezone_default`.

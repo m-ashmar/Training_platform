@@ -1090,3 +1090,31 @@ def test_reminders_fire_in_each_users_own_evening(make_user):
     assert note.metadata["data"]["reason"] == "scheduled"
     assert routine.name in note.metadata["context"]["message"], \
         "a scheduled reminder should name the routine, not just count days"
+
+
+def test_no_account_is_left_on_the_frozen_timezone_default(db):
+    """`preferred_timezone` used `default=getattr(settings, 'TIME_ZONE', ...)`, which
+    Django evaluates once at import — so the column default froze to 'UTC' and stopped
+    tracking the setting, leaving 376 of 378 accounts on the wrong clock. That is the
+    field the reminder resolves each user's local hour through, so those users would
+    have been reminded three hours early.
+
+    Asserts the model default is now dynamic; the existing rows were corrected by
+    migration users/0029.
+    """
+    from zoneinfo import ZoneInfo
+
+    from django.conf import settings
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    field = User._meta.get_field("preferred_timezone")
+
+    assert callable(field.default), "the default is frozen at import time again"
+    assert field.default() == settings.TIME_ZONE
+
+    fresh = User.objects.create_user(username="gate_tzdefault", email="gate_tzd@example.com")
+    assert fresh.preferred_timezone == settings.TIME_ZONE
+
+    # Whatever is stored must be resolvable, or the reminder silently falls back to UTC.
+    ZoneInfo(fresh.preferred_timezone)
