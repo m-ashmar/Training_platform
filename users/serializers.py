@@ -60,11 +60,28 @@ class CustomRegisterSerializer(RegisterSerializer):
             user.save()
             return user
         except IntegrityError as e:
-            if "UNIQUE constraint failed: users_customuser.email" in str(e):
-                raise serializers.ValidationError({"email": _("A user with this email already exists.")})
-            if "UNIQUE constraint failed: users_customuser.phone_number" in str(e):
-                raise serializers.ValidationError({"phone_number": _("A user with this phone number already exists.")})
-            raise e  # Re-raise other exceptions if not related to unique constraintsr
+            # Match the FIELD name, not a backend's phrasing. These tests were written
+            # against SQLite ("UNIQUE constraint failed: users_customuser.email") and
+            # never matched on Postgres, which says
+            #   duplicate key value violates unique constraint "users_customuser_email_6445acef_uniq"
+            # so in production a duplicate that slipped past field validation — two
+            # simultaneous signups with the same email — surfaced as a 500 instead of
+            # the 400 this handler exists to produce. The field name appears in both
+            # backends' messages.
+            message = str(e).lower()
+            if "phone_number" in message:
+                raise serializers.ValidationError(
+                    {"phone_number": _("A user with this phone number already exists.")}
+                )
+            if "email" in message:
+                raise serializers.ValidationError(
+                    {"email": _("A user with this email already exists.")}
+                )
+            if "username" in message:
+                raise serializers.ValidationError(
+                    {"username": _("A user with that username already exists.")}
+                )
+            raiser
     
     
     
@@ -129,7 +146,11 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             'trainer_bio', 'trainer_specializations', 'trainer_certifications',
             'trainer_experience_years', 'trainer_hourly_rate', 'trainer_is_verified',
             'trainer_is_available', 'assigned_trainer', 'client_goals', 'client_preferences',
-            'is_active', 'onboarding_completed'
+            'is_active', 'onboarding_completed',
+            # Scheduling. `preferred_timezone` existed but was read by nothing, so
+            # "localized dates and times" never happened; it now decides when the
+            # workout reminder fires in the user's own day.
+            'preferred_timezone', 'workout_reminder_hour',
         ]
         # assigned_trainer is read-only here: trainer assignment must go through
         # the request/approval + wallet-escrow flow, never self-service update.

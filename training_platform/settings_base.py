@@ -339,13 +339,15 @@ CELERY_IMPORTS = (
 )
 
 CELERY_BEAT_SCHEDULE = {
-    # Retention nudge for clients who have drifted. `session_reminder` was registered
-    # and templated from the start but nothing ever emitted it, so the platform had no
-    # re-engagement loop at all. 16:00 UTC ~ early evening in Damascus (UTC+3), before
-    # a typical training slot rather than after it.
+    # Workout reminders. `session_reminder` was registered and templated from the
+    # start but nothing ever emitted it, so the platform had no re-engagement loop.
+    # Hourly, not daily: the task itself decides who is due, by comparing each user's
+    # local hour (via their preferred_timezone) against their workout_reminder_hour.
+    # A single fixed-UTC daily run would reach users at a different point in each of
+    # their days.
     'send-workout-reminders': {
         'task': 'notifications.send_workout_reminders',
-        'schedule': crontab(hour=16, minute=0),
+        'schedule': crontab(minute=0),
     },
     # Was declared in celery.py as `app.conf.beat_schedule = {...}` AFTER
     # config_from_object(). That config loads lazily, so settings won on first access

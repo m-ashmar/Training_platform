@@ -118,35 +118,41 @@ def award_progress_milestones(user_id: int):
 
 @shared_task(name="notifications.send_workout_reminders")
 def send_workout_reminders():
-    """Nudge clients who have a routine assigned but have not trained today.
+    """Remind each client about today's training, in their own evening.
 
-    `session_reminder` was registered and templated but never emitted, so the platform
-    had no retention loop at all — a user who drifted for a week heard nothing.
+    Runs hourly and sends only to users whose local hour — resolved through their own
+    `preferred_timezone` — matches their `workout_reminder_hour`. A single daily sweep
+    at a fixed UTC hour would reach a user in Damascus and a user in Berlin at
+    different points in their day, and this app is bilingual and expects users outside
+    one timezone.
 
-    There is deliberately no "your session is at 18:00" variant: WorkoutSession records
-    `start_time` (when a session actually began) and has no scheduled-for field, so a
-    time-of-day reminder would be inventing data the platform does not hold.
+    Two kinds of reminder, and the distinction matters:
 
-    Who gets one: an active client with at least one assigned routine, who has trained
-    at least once before (so it is a nudge, not a cold-start pester), whose last
-    workout was between 1 and 14 days ago. Past 14 days this stops rather than
-    following someone into their inbox forever.
+      * **Scheduled** — the user has an active routine (today falls inside its
+        start_date/end_date window) with days still not started. This is a real
+        obligation the platform knows about, so the message names the routine.
+      * **Drift** — no active routine window, but the user trained before and has been
+        away 1-14 days. A nudge, not a schedule.
 
-    Idempotency comes from the dedup key — related_object_id is today's date, so a
-    second run on the same day, or a retry, sends nothing.
+    Past 14 days with nothing scheduled, this stops. Following someone into their
+    inbox forever is how an app gets its notifications switched off.
+
+    Idempotency comes from the dedup key: related_object_id is the user's local date,
+    so a retry, or the sweep running twice in one of their hours, sends nothing.
     """
     from datetime import timedelta
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
     from django.contrib.auth import get_user_model
-    from django.db.models import Max
+    from django.db.models import Max, Q
     from django.utils import timezone
     from django.utils.translation import gettext as _
 
     from notifications.services import NotificationService
-    from routine.models import WorkoutSession
+    from routine.models import RoutineProgress
 
-    today = timezone.localdate()
     User = get_user_model()
+    now = timezone.now()
 
     candidates = (
         User.objects.filter(
@@ -155,34 +161,70 @@ def send_workout_reminders():
             assigned_routines__isnull=False,
         )
         .annotate(last_workout=Max("workout_sessions__start_time"))
-        .filter(last_workout__isnull=False)
         .distinct()
     )
 
     sent = 0
     for user in candidates.iterator(chunk_size=500):
-        last = timezone.localtime(user.last_workout).date()
-        gap = (today - last).days
-        if not (1 <= gap <= 14):
+        try:
+            tz = ZoneInfo(user.preferred_timezone or "UTC")
+        except (ZoneInfoNotFoundError, ValueError):
+            # A bad timezone string must not silence this user forever.
+            logger.warning("user %s has an unusable timezone %r", user.pk, user.preferred_timezone)
+            tz = ZoneInfo("UTC")
+
+        local = now.astimezone(tz)
+        if local.hour != user.workout_reminder_hour:
             continue
 
-        if gap == 1:
-            message = _("You trained yesterday. Keep the streak alive.")
-        elif gap <= 3:
-            message = _("It has been %(days)d days since your last workout.") % {"days": gap}
+        today = local.date()
+
+        # Is a routine actually scheduled for today?
+        pending = (
+            RoutineProgress.objects.filter(
+                user=user,
+                routine__is_active=True,
+                routine__start_date__lte=today,
+                status__in=("not_started", "in_progress"),
+            )
+            .filter(Q(routine__end_date__isnull=True) | Q(routine__end_date__gte=today))
+            .select_related("routine")
+            .order_by("day")
+            .first()
+        )
+
+        if pending:
+            message = _("Day %(day)d of %(routine)s is waiting for you.") % {
+                "day": pending.day,
+                "routine": pending.routine.name,
+            }
+            data = {
+                "type": "session_reminder",
+                "reason": "scheduled",
+                "routine_id": str(pending.routine_id),
+                "day": str(pending.day),
+            }
         else:
-            message = _(
-                "It has been %(days)d days. Even a short session gets you moving again."
-            ) % {"days": gap}
+            if user.last_workout is None:
+                continue
+            gap = (today - user.last_workout.astimezone(tz).date()).days
+            if not (1 <= gap <= 14):
+                continue
+            if gap == 1:
+                message = _("You trained yesterday. Keep the streak alive.")
+            elif gap <= 3:
+                message = _("It has been %(days)d days since your last workout.") % {"days": gap}
+            else:
+                message = _(
+                    "It has been %(days)d days. Even a short session gets you moving again."
+                ) % {"days": gap}
+            data = {"type": "session_reminder", "reason": "drift", "days_since_last_workout": gap}
 
         result = NotificationService.create_and_send(
             recipient=user,
             event_type="session_reminder",
             related_object_id=today.isoformat(),
-            metadata={
-                "context": {"message": message},
-                "data": {"type": "session_reminder", "days_since_last_workout": gap},
-            },
+            metadata={"context": {"message": message}, "data": data},
         )
         if result is not None:
             sent += 1

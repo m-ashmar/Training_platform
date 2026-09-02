@@ -1030,15 +1030,21 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 
                 for set_num in range(1, sets + 1):
                     try:
-                        # update_or_create, not get_or_create: re-submitting a set with a
-                        # corrected weight/reps previously returned success while silently
-                        # discarding the correction, so users could never fix a mistake.
-                        log, created = ExerciseSetLog.objects.update_or_create(
-                            user_exercise_progress=progress,
-                            set_number=set_num,
-                            date=date,
-                            defaults={'weight': weight, 'reps': reps}
-                        )
+                        # Savepoint: this loop continues after a failed write. Without
+                        # one, the first IntegrityError aborts the whole transaction
+                        # under any enclosing atomic() and every later set in this
+                        # request fails with TransactionManagementError instead of
+                        # being recorded in `errors`.
+                        with transaction.atomic():
+                            # update_or_create, not get_or_create: re-submitting a set with a
+                            # corrected weight/reps previously returned success while silently
+                            # discarding the correction, so users could never fix a mistake.
+                            log, created = ExerciseSetLog.objects.update_or_create(
+                                user_exercise_progress=progress,
+                                set_number=set_num,
+                                date=date,
+                                defaults={'weight': weight, 'reps': reps}
+                            )
                         results.append({'exercise': rex.exercise.name, 'set_number': set_num,
                                         'created': created, 'id': log.id})
                     except IntegrityError as e:
@@ -1974,16 +1980,20 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         errors = []
         for rex in exercises:
             try:
-                obj, created = UserExerciseProgress.objects.update_or_create(
-                    user=user,
-                    exercise=rex.exercise,
-                    date=date,
-                    defaults={
-                        'completed_sets': completed_sets,
-                        'target_sets': target_sets,
-                        'skipped': skipped
-                    }
-                )
+                # Savepoint: same reason as the set-log loop above — this one keeps
+                # going after a failure, so the failed write must not take the
+                # surrounding transaction with it.
+                with transaction.atomic():
+                    obj, created = UserExerciseProgress.objects.update_or_create(
+                        user=user,
+                        exercise=rex.exercise,
+                        date=date,
+                        defaults={
+                            'completed_sets': completed_sets,
+                            'target_sets': target_sets,
+                            'skipped': skipped
+                        }
+                    )
                 results.append({'exercise': rex.exercise.name, 'created': created, 'id': obj.id})
             except IntegrityError as e:
                 if 'unique constraint' in str(e).lower():

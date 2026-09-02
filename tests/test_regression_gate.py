@@ -731,6 +731,7 @@ def test_session_reminder_nudges_only_the_right_people(make_user):
     drifted, and leave alone anyone who trained today or who left months ago.
     """
     from datetime import timedelta
+    from zoneinfo import ZoneInfo
 
     from django.utils import timezone
 
@@ -739,10 +740,24 @@ def test_session_reminder_nudges_only_the_right_people(make_user):
     from routine.models import Routine, WorkoutSession
 
     trainer = make_user("gate_rem_t", user_type="trainer")
-    routine = Routine.objects.create(name="Gate Reminder", created_by=trainer)
+    # An expired window, so this exercises the drift branch specifically. The scheduled
+    # branch is covered by its own assertions below.
+    routine = Routine.objects.create(
+        name="Gate Reminder", created_by=trainer,
+        start_date=timezone.localdate() - timedelta(days=60),
+        end_date=timezone.localdate() - timedelta(days=30),
+    )
+
+    # The task sends only to users whose LOCAL hour matches their workout_reminder_hour,
+    # so every fixture here is pinned to the hour this test runs in.
+    tz = ZoneInfo("Asia/Damascus")
+    local_hour = timezone.now().astimezone(tz).hour
 
     def client_last_trained(name, days_ago):
         u = make_user(name, user_type="client")
+        u.preferred_timezone = "Asia/Damascus"
+        u.workout_reminder_hour = local_hour
+        u.save()
         routine.assigned_to.add(u)
         s = WorkoutSession.objects.create(user=u, routine=routine, status="completed")
         # start_time is auto_now_add, so it is ignored on create(); .update() writes it.
@@ -760,6 +775,7 @@ def test_session_reminder_nudges_only_the_right_people(make_user):
     def nudged(u):
         return Notification.objects.filter(recipient=u, event_type="session_reminder").exists()
 
+    from routine.models import RoutineProgress
     assert nudged(drifting), "a client who has drifted 3 days got no reminder"
     assert not nudged(today), "a client who trained today was nudged anyway"
     assert not nudged(gone), "a client gone 40 days is being chased indefinitely"
@@ -905,3 +921,172 @@ def test_a_duplicate_notification_does_not_roll_back_the_callers_work(make_user)
 
     assert Routine.objects.filter(name="survives the duplicate").exists(), \
         "the caller's work was rolled back by a suppressed duplicate"
+
+
+def test_duplicate_detection_is_not_written_against_sqlite(db):
+    """The registration handler matched "UNIQUE constraint failed: users_customuser.email"
+    — SQLite's wording. Postgres says `duplicate key value violates unique constraint
+    "users_customuser_email_..."`, so the branch never fired in production and a
+    duplicate that slipped past field validation (two simultaneous signups) surfaced as
+    a 500 instead of the 400 the handler exists to produce.
+    """
+    import uuid
+
+    from django.contrib.auth import get_user_model
+    from django.db import IntegrityError, transaction
+
+    User = get_user_model()
+    email = f"dupe{uuid.uuid4().hex[:8]}@example.com"
+    User.objects.create_user(username=f"seed{uuid.uuid4().hex[:6]}", email=email)
+
+    with pytest.raises(IntegrityError) as exc:
+        with transaction.atomic():
+            User.objects.create_user(username=f"other{uuid.uuid4().hex[:6]}", email=email)
+
+    # Whatever the backend, the field name must be recoverable from the message —
+    # that is what the handler now branches on.
+    assert "email" in str(exc.value).lower()
+
+
+def test_a_loop_that_continues_after_a_failed_write_uses_a_savepoint(db):
+    """Two routine endpoints record a failed write into an `errors` list and keep
+    looping. Correct under autocommit, which is how they run today — but the first
+    IntegrityError aborts the whole transaction under any enclosing atomic(), and every
+    later iteration then dies with TransactionManagementError instead of being
+    recorded. A savepoint makes them correct either way.
+    """
+    import uuid
+
+    from django.contrib.auth import get_user_model
+    from django.db import IntegrityError, transaction
+
+    User = get_user_model()
+    seed = f"sp{uuid.uuid4().hex[:8]}@example.com"
+    User.objects.create_user(username=f"sp{uuid.uuid4().hex[:6]}", email=seed)
+
+    succeeded = 0
+    with transaction.atomic():          # the enclosing transaction that used to break it
+        for i in range(3):
+            try:
+                with transaction.atomic():   # the savepoint the two loops now use
+                    User.objects.create_user(
+                        username=f"n{uuid.uuid4().hex[:6]}",
+                        email=seed if i == 0 else f"ok{uuid.uuid4().hex[:8]}@example.com",
+                    )
+                succeeded += 1
+            except IntegrityError:
+                pass
+
+    assert succeeded == 2, "iterations after the failed write did not survive"
+
+
+def test_no_unguarded_db_write_recovers_inside_a_loop():
+    """Guards the pattern itself, not just the three places it was found.
+
+    A `try: <write> except IntegrityError: <record and continue>` with no savepoint is
+    invisible under autocommit and breaks the moment anything wraps the caller in a
+    transaction — which is exactly how NotificationService started rolling back
+    completed workouts.
+    """
+    import ast
+    import pathlib
+
+    DB_ERRORS = {"IntegrityError", "DatabaseError", "DataError", "InternalError"}
+    WRITES = (".create(", ".save(", ".get_or_create(", ".update_or_create(", ".bulk_create(")
+
+    offenders = []
+    for f in pathlib.Path(".").rglob("*.py"):
+        s = str(f)
+        if any(x in s for x in ("_excluded", ".venv", "migrations", "tests/", "test_")):
+            continue
+        try:
+            src = f.read_text()
+            tree = ast.parse(src)
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            caught = {
+                n.id
+                for h in node.handlers if h.type
+                for n in ast.walk(h.type) if isinstance(n, ast.Name)
+            }
+            if not (caught & DB_ERRORS):
+                continue
+            body = "\n".join(ast.get_source_segment(src, st) or "" for st in node.body)
+            if not any(w in body for w in WRITES):
+                continue
+            if "transaction.atomic(" in body or "atomic()" in body:
+                continue
+            # Re-raising ends the request, so the poisoned transaction never matters.
+            handlers = "\n".join(
+                ast.get_source_segment(src, st) or "" for h in node.handlers for st in h.body
+            )
+            if "raise" in handlers:
+                continue
+            offenders.append(f"{s}:{node.lineno}")
+
+    assert not offenders, (
+        "DB writes that swallow an integrity error and continue, with no savepoint: "
+        f"{offenders}"
+    )
+
+
+def test_reminders_fire_in_each_users_own_evening(make_user):
+    """`preferred_timezone` was declared with the help text "for localized dates and
+    times" and read by NOTHING. A single daily sweep at a fixed UTC hour reaches a user
+    in Damascus and a user in Berlin at different points in their day; the reminder now
+    runs hourly and sends only to users whose own local hour has come.
+    """
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    from django.utils import timezone
+
+    from notifications.models import Notification
+    from notifications.tasks import send_workout_reminders
+    from routine.models import Routine, RoutineProgress
+
+    trainer = make_user("gate_tz_t", user_type="trainer")
+    routine = Routine.objects.create(
+        name="Gate TZ", created_by=trainer, days=3,
+        start_date=timezone.localdate() - timedelta(days=1),
+    )
+
+    now = timezone.now()
+
+    def client(name, tzname, hour):
+        u = make_user(name, user_type="client")
+        u.preferred_timezone = tzname
+        u.workout_reminder_hour = hour
+        u.save()
+        routine.assigned_to.add(u)
+        RoutineProgress.objects.get_or_create(
+            user=u, routine=routine, day=1, date=routine.start_date,
+            defaults={"status": "not_started"},
+        )
+        return u
+
+    dam_hour = now.astimezone(ZoneInfo("Asia/Damascus")).hour
+    ber_hour = now.astimezone(ZoneInfo("Europe/Berlin")).hour
+
+    due = client("gate_tz_due", "Asia/Damascus", dam_hour)
+    later = client("gate_tz_later", "Asia/Damascus", (dam_hour + 5) % 24)
+    berlin = client("gate_tz_berlin", "Europe/Berlin", ber_hour)
+    broken = client("gate_tz_broken", "Not/AZone", now.astimezone(ZoneInfo("UTC")).hour)
+
+    send_workout_reminders()
+
+    def got(u):
+        return Notification.objects.filter(recipient=u, event_type="session_reminder").exists()
+
+    assert got(due), "the user whose local hour it is got nothing"
+    assert not got(later), "a user 5 hours from their reminder time was messaged anyway"
+    assert got(berlin), "preferred_timezone is being ignored for non-default zones"
+    assert got(broken), "an unparseable timezone silences the user instead of falling back"
+
+    note = Notification.objects.filter(recipient=due, event_type="session_reminder").first()
+    assert note.metadata["data"]["reason"] == "scheduled"
+    assert routine.name in note.metadata["context"]["message"], \
+        "a scheduled reminder should name the routine, not just count days"

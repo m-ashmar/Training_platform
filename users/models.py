@@ -11,6 +11,7 @@ from django.conf import settings
 import os
 import uuid
 from training_platform.encrypted_fields import EncryptedTextField
+from django.core.validators import MaxValueValidator, MinValueValidator
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,12 @@ def user_profile_picture_upload_path(instance, filename):
     filename = f"user_{instance.pk or 'new'}_{uuid.uuid4().hex[:8]}.{ext}"
     return os.path.join('profile_pictures', filename)
 
+
+def _default_timezone():
+    """Re-read TIME_ZONE per row instead of freezing it at import time."""
+    return getattr(settings, 'TIME_ZONE', 'UTC')
+
+
 class CustomUser(AbstractBaseUser, PermissionsMixin):
     """
     Enhanced CustomUser model supporting multi-trainer functionality.
@@ -149,10 +156,24 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         default=settings.LANGUAGE_CODE,
         help_text="User's preferred language for notifications and API responses"
     )
+    # `default=getattr(settings, ...)` was evaluated once at import, so the column
+    # default froze to whatever TIME_ZONE happened to be when the class was first
+    # loaded rather than tracking the setting. A callable is re-evaluated per row.
     preferred_timezone = models.CharField(
-        max_length=50, 
-        default=getattr(settings, 'TIME_ZONE', 'UTC'),
-        help_text="User's preferred timezone for localized dates and times"
+        max_length=50,
+        default=_default_timezone,
+        help_text="User's preferred timezone. Used to decide when scheduled "
+                  "notifications fire in the user's own day."
+    )
+    # Local hour (0-23) at which the workout reminder is sent. Until this existed the
+    # platform held no time-of-day anywhere — not on Routine, not on WorkoutSession —
+    # so a reminder could only ever be "you have not trained in N days", never
+    # "your session is today". 18:00 is the default because it is the hour before a
+    # typical evening training slot, not after it.
+    workout_reminder_hour = models.PositiveSmallIntegerField(
+        default=18,
+        validators=[MinValueValidator(0), MaxValueValidator(23)],
+        help_text="Local hour (0-23) to send the daily workout reminder."
     )
     
     # Physical attributes (migrated from old fields - preserved for backward compatibility)

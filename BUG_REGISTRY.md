@@ -2362,3 +2362,67 @@ To split them into two files later (cosmetic only):
 | `sweep_anon` | 362 routes, **0 5xx**; exactly 3 anonymous 2xx GETs |
 | `detail_sweep` | 1302 requests, **0 5xx** |
 | `dive2_write_sweep` | 805 write requests, **0 5xx** |
+
+---
+
+# FOLLOW-UP — scheduled reminders + the transaction-poisoning class — 2026-09-02
+
+Two claims from the previous round were challenged, and one of them was wrong.
+
+## "No scheduled-for field exists" — incorrect
+
+I checked `WorkoutSession` and stopped. The scheduling data was elsewhere:
+
+| field | state before | now |
+|---|---|---|
+| `Routine.scheduled_date` | declared "Optional scheduling", **never read, written or serialized**, null on all 251 rows | **removed** (migration `routine/0016`) |
+| `Routine.start_date` / `end_date` | live — routine day scaffolding anchors to them | unchanged; now drives the reminder's "is this routine active today" test |
+| `CustomUser.preferred_timezone` | declared for "localized dates and times", honoured by **nothing** | now decides when a user's reminder fires |
+| `CustomUser.workout_reminder_hour` | did not exist — the platform held **no time-of-day anywhere** | new, 0-23, default 18, exposed on the profile |
+
+`session_reminder` was rebuilt on that basis and is no longer a blunt inactivity nudge:
+
+* **hourly** sweep, not daily — it sends only to users whose own local hour has come.
+  A fixed-UTC daily run reaches Damascus and Berlin at different points in their day.
+* **scheduled** branch — an active routine window with days not started produces
+  *"Day 3 of Push/Pull/Legs is waiting for you"*, carrying `routine_id` and `day`.
+* **drift** branch — no active window, trained 1–14 days ago. Stops at 14 days.
+* an unparseable `preferred_timezone` falls back to UTC rather than silencing the user
+  forever.
+
+"Your session is at 18:00" in the literal sense still cannot be built — no per-day
+calendar exists, only a routine-level window — but the reminder now fires at a time the
+user chose, which is what that request was actually asking for. Verified 10/10.
+
+## The transaction-poisoning bug — swept for the whole class
+
+The reported fix holds. The sweep for the same shape across the codebase found 7
+`try: <db write> except <db error>` blocks and three worth acting on:
+
+| ID | Severity | Location | Finding | Verification |
+|---|---|---|---|---|
+| **P18-1** | **MEDIUM** | `users/serializers.py:54` | **Live bug.** The duplicate-signup handler matched `"UNIQUE constraint failed: users_customuser.email"` — SQLite's wording. Postgres says `duplicate key value violates unique constraint "users_customuser_email_…"`, so the branch never fired in production and a duplicate that slipped past field validation (two simultaneous signups) returned **500 instead of 400**. Now matches the field name, which appears in both backends' messages. | `test_duplicate_detection_is_not_written_against_sqlite` |
+| **P18-2** | LOW (latent) | `routine/views.py:1032` | A set-logging loop records a failed write into `errors` and keeps looping. Correct under autocommit — measured 2/2 later iterations succeed — but **0/2 inside `transaction.atomic()`**, dying with `TransactionManagementError`. Savepoint added. | `test_a_loop_that_continues_after_a_failed_write_uses_a_savepoint` |
+| **P18-3** | LOW (latent) | `routine/views.py:1976` | Same shape in the progress-update loop. Savepoint added. | same |
+
+The other four re-raise, so the request ends and the poisoned transaction never matters.
+
+`test_no_unguarded_db_write_recovers_inside_a_loop` now guards the **pattern**, not the
+three instances: any future `except IntegrityError:` that swallows and continues without
+a savepoint fails the gate. That shape is invisible under autocommit and only breaks
+once something wraps the caller in a transaction — which is exactly how
+`NotificationService` began rolling back completed workouts.
+
+## Verification
+
+| check | result |
+|---|---|
+| regression gate | **50 passed** |
+| scheduled-reminder probe | 10/10 |
+| transaction-safety probe | 3/3 |
+| `manage.py check` | no issues |
+| `makemigrations --check` | no changes detected |
+| import sweep | 246 modules, 0 failed |
+| beat schedule vs registry | 8 scheduled, 0 unregistered |
+| `sweep_5xx` | 572 requests, 0 5xx |
+| `dive2_write_sweep` | 805 writes, 0 5xx |

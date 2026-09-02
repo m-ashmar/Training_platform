@@ -160,12 +160,21 @@ so parse ids client-side.
 | `client_unassigned_trainer` | `client_id` |
 | `routine_assignment` | `related_object_id`, `related_object_type` |
 | `session_completed` | `related_object_id`, `related_object_type` |
+| `session_reminder` | `reason` (`scheduled` \| `drift`), plus `routine_id`+`day` when scheduled, or `days_since_last_workout` when drift |
+| `progress_milestone` | `milestone` (e.g. `streak-7`, `sessions-100`) |
+| `custom` | `message_id`, `trainer_id` — a message from the user's trainer |
 
 `title`/`body` arrive in the FCM `notification` block, already rendered in the
 recipient's language.
 
-Registered but **not currently emitted** — do not build UI for these yet:
-`session_reminder`, `progress_milestone`, `custom`.
+Every registered event type is emitted; there are no placeholders to skip.
+
+**Reminder scheduling.** `session_reminder` fires once a day, in the user's own
+evening: the sweep runs hourly and sends only to users whose local hour — resolved
+through `preferred_timezone` — equals `workout_reminder_hour`. Both fields are on the
+profile (`GET`/`PATCH /api/auth/profile/`), `workout_reminder_hour` is 0-23 and
+defaults to 18. To turn reminders off entirely, disable the `session_reminder` event
+via the notification preferences endpoint rather than picking an unreachable hour.
 
 Notification history is read at `GET /api/social/notifications/` (cursor-paginated).
 

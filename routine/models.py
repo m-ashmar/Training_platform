@@ -267,7 +267,6 @@ class Routine(models.Model):
     # Scheduling
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
-    scheduled_date = models.DateTimeField(blank=True, null=True, help_text="Optional scheduling")
     start_date = models.DateField(default=date.today, help_text="Start date for the routine")
     end_date = models.DateField(blank=True, null=True, db_index=True, help_text="End date for the routine")
     
