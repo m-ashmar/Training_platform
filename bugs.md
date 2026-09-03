@@ -487,3 +487,93 @@ notification system silently inert. Set it, or accept that deliberately.
 - **Whether the diet engine's plans are nutritionally good.** Its plumbing was audited —
   goal resolution, persistence, quota, catalogue integrity. The quality of what it
   produces is a domain question, not an audit one.
+
+---
+
+# FRESH DIVE — WRITE PATHS, DELETION, AND THE ENGINE'S ARITHMETIC (2026-09-04)
+
+Re-derived from the code and from running it. Deliberately chose methods no earlier
+pass had used: every earlier sweep was read-only, so nothing had ever exercised a write.
+
+## What was executed
+
+**2,080 hostile write requests.** Every one of 208 API paths, POST and PATCH, as an
+ordinary client, with five bodies: empty, privileged field names, type confusion (a
+list where an id belongs, a dict where a name belongs, `"abc"` as an amount), 20 KB
+strings, and unicode with embedded nulls.
+
+**Zero 5xx.** Not one endpoint crashed on input it should reject. Five returned 200
+while being handed `user_type: admin`, `is_staff: true`, `is_superuser: true` and a
+`999999` balance; all five ignored every one of them. `UserDetailsSerializer` marks
+`user_type`, `is_active`, `assigned_trainer` and `trainer_is_verified` read-only, and
+the escalated token still got 403 from the admin routes. No mass assignment anywhere.
+
+**Deletion, across all 71 models.** 73 CASCADE, 11 SET_NULL, 9 PROTECT relations mapped,
+then the interesting ones executed rather than reasoned about.
+
+**The rule-based planner's output**, which every previous audit had checked the plumbing
+of and never the arithmetic.
+
+## [HIGH] routine/models.py — a derived column and a database-level SET_NULL. FIXED.
+
+Impact: `Exercise.is_global` is derived from `created_by`, and a check constraint holds
+the pair together. But `created_by` is `on_delete=SET_NULL`, and Django implements that
+as a bare `UPDATE routine_exercise SET created_by_id = NULL` — no `save()`, so the
+derivation never runs. The row lands with no owner and `is_global` still false, which is
+exactly the state the constraint forbids. **Deleting a trainer raised an IntegrityError
+naming a constraint the caller has never heard of.**
+
+Verified: setting `created_by` to null through a queryset update — precisely what
+`SET_NULL` does — was refused with `violates check constraint
+"exercise_visibility_follows_ownership"`.
+
+This was mine, introduced with the constraint. Nothing reached it in practice only
+because `Wallet.owner` is PROTECT and every user gets a wallet, so the delete was
+refused earlier. Two problems masking each other, and the day the first one moves the
+second surfaces.
+
+Fixed in `routine/signals.py`: a `pre_delete` receiver hands the departing trainer's
+exercises to the platform in one statement that sets both columns, so the constraint is
+satisfied and Django's own SET_NULL pass finds nothing left to do. It is also the right
+outcome — an exercise whose author is gone belongs to the platform, not to nobody.
+
+## [MEDIUM] diet/services/rule_based_planner.py — the plan is over target every time
+
+Impact: across five targets the plan came in **2.3% to 6.2% high, and never once low**.
+That is a bias, not noise; noise would fall both ways. For a client on a 500 kcal
+deficit, +5% of a 2,259 kcal target is +113 kcal — roughly a quarter of the deficit the
+plan exists to create.
+
+| target | produced | drift |
+|---|---|---|
+| 1400 | 1486 | +6.2% |
+| 1800 | 1890 | +5.0% |
+| 2200 | 2250 | +2.3% |
+| 2600 | 2724 | +4.8% |
+| 3000 | 3119 | +4.0% |
+
+Verified by generating five plans and summing them. Not fixed: it is a property of a
+greedy portioner that fills toward a target and applies floors on the way — the fat
+floor alone adds calories after the target is met. Whether a consistent 2-6% overshoot
+is acceptable is a product decision about the app's central promise, not a defect to
+patch silently.
+
+## What the engine got right
+
+Its own declared totals match the food rows exactly (1486 against 1486), so nothing is
+being reported that was not portioned. Calories and macros agree within ±1.6% by
+Atwater. Output is monotonic in the target. A user with peanut, shellfish and milk
+allergies received 13 ingredients and no violations. Targets below 1,000 and above
+6,000 kcal are refused with a clear message. Goal resolution produces exactly ±500 kcal
+around maintenance.
+
+## Everything else that came back clean
+
+- No cross-tenant write. No privileged field accepted anywhere.
+- No `SET_NULL` on a non-nullable column, anywhere in the schema.
+- A user with a wallet cannot be deleted, which is deliberate: erasure anonymises and
+  preserves the ledger, and `Wallet.owner` is PROTECT so a deletion cannot take a
+  balance with it. Now asserted by a test, so changing it is a decision rather than an
+  accident.
+
+Gate: 90 tests.

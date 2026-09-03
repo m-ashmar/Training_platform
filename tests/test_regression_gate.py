@@ -1880,3 +1880,44 @@ def test_the_otp_locks_out_after_five_wrong_codes(db):
     assert ok is False
     assert "Too many" in str(message), message
     _clear_otp_attempts(user.email, "registration")
+
+
+# ----------------------------------------------- a derived column and a SET_NULL
+def test_deleting_a_trainer_hands_their_exercises_to_the_platform(make_user):
+    """`Exercise.is_global` is derived from `created_by` and a check constraint holds
+    the pair together. `created_by` is `on_delete=SET_NULL`, which Django implements as
+    a bare UPDATE — no `save()`, so the derivation never runs and the row lands ownerless
+    with `is_global` still false, which the constraint rejects. Deleting a trainer then
+    failed with an IntegrityError naming a constraint the caller never heard of.
+
+    Nothing reached it in practice only because `Wallet.owner` is PROTECT and every user
+    gets a wallet, so the delete was refused earlier. Two problems masking each other."""
+    from django.db import transaction
+    from routine.models import Exercise
+    from wallet.models import Wallet
+
+    trainer = make_user("adopt_tr", user_type="trainer")
+    exercise = Exercise.objects.create(name="adopt me", created_by=trainer)
+    assert exercise.is_global is False
+
+    # Clear the PROTECT that would otherwise stop the delete before the constraint.
+    Wallet.objects.filter(owner=trainer).delete()
+    with transaction.atomic():
+        trainer.delete()
+
+    exercise.refresh_from_db()
+    assert exercise.created_by_id is None
+    assert exercise.is_global is True, "an exercise whose author is gone belongs to the platform"
+
+
+def test_a_users_wallet_keeps_them_from_being_deleted(make_user):
+    """Deliberate: erasure anonymises and preserves the ledger, and `Wallet.owner` is
+    PROTECT so a deletion cannot take a balance with it. Asserted so that a future
+    change to `on_delete` is a decision rather than an accident."""
+    from django.db.models import ProtectedError
+    from wallet.models import Wallet
+
+    user = make_user("protected_by_wallet")
+    Wallet.objects.get_or_create(owner=user, defaults={"owner_type": "client"})
+    with pytest.raises(ProtectedError):
+        user.delete()
