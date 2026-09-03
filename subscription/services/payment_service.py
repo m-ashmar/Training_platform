@@ -130,6 +130,66 @@ class PaymentService:
         return payment
 
     @classmethod
+    def refund_payment(cls, payment_id, reason: str = "") -> Payment:
+        """Move a completed payment to refunded and take back what it paid for.
+
+        Nothing could reach this state. `PAYMENT_STATUS_TRANSITIONS` has declared
+        `'completed' -> 'refunded'` all along, the webhook had no branch for a refund
+        or a chargeback, and the admin action wrote the column with `queryset.update()`
+        — so the money went back and the subscription stayed active either way.
+
+        Access is withdrawn in proportion to what was refunded: a renewal loses the
+        period it bought, an initial payment ends the subscription outright. If that
+        leaves the end date in the past the subscription is expired rather than left
+        nominally active with a stale date.
+        """
+        with transaction.atomic():
+            payment = (
+                Payment.objects
+                .select_for_update()
+                .select_related('subscription', 'subscription__plan')
+                .get(id=payment_id)
+            )
+            if payment.status == 'refunded':
+                return payment
+            if not payment.can_transition_to('refunded'):
+                raise InvalidPaymentTransition(
+                    f"Payment {payment.id} cannot go {payment.status} -> refunded"
+                )
+
+            payment.status = 'refunded'
+            if reason:
+                payment.gateway_error = reason[:2000]
+            payment.save()
+
+            subscription = (
+                Subscription.objects.select_for_update()
+                .select_related('plan')
+                .get(pk=payment.subscription_id)
+            )
+            now = timezone.now()
+            is_renewal = str(payment.metadata.get('kind', '')) == 'renewal'
+            if is_renewal and subscription.end_date:
+                subscription.end_date = subscription.end_date - timedelta(
+                    days=subscription.plan.duration_days
+                )
+            else:
+                subscription.end_date = now
+
+            if subscription.end_date <= now:
+                subscription.status = 'cancelled'
+                subscription.cancelled_at = now
+                subscription.auto_renew = False
+            subscription.save()
+
+            logger.warning(
+                "Payment %s refunded (%s); subscription %s now %s until %s",
+                payment.id, reason or 'no reason given',
+                subscription.id, subscription.status, subscription.end_date,
+            )
+        return payment
+
+    @classmethod
     def fail_payment(cls, payment_id, error_message: str = "") -> Payment:
         """Mark a payment failed (legal from pending/processing/authorized)."""
         with transaction.atomic():
@@ -165,10 +225,29 @@ class PaymentService:
         """
         if subscription.status not in ('active', 'expired'):
             raise PaymentError("Subscription is not in a renewable state")
+
+        # One renewal in flight at a time. Nothing stopped a retried task or a
+        # double-tapped button from opening several, and every one of them could be
+        # completed and charged: a probe opened six and the subscription took 180 days.
+        existing = Payment.objects.filter(
+            subscription=subscription,
+            status__in=('pending', 'processing', 'authorized'),
+            metadata__kind='renewal',
+        ).first()
+        if existing:
+            logger.info(
+                "Renewal already pending for subscription %s (payment %s)",
+                subscription.id, existing.id,
+            )
+            return existing
+
         return Payment.objects.create(
             subscription=subscription,
             amount=subscription.plan.price,
-            currency='USD',
+            # The plan's own currency. Hardcoding 'USD' here made every renewal
+            # unclearable: plans are priced in SYP, ShamCash reports SYP, and
+            # _verify_amount_and_currency rejected the mismatch on arrival.
+            currency=subscription.plan.currency,
             status='pending',
             payment_method='shamcash',
             description=f"Renewal for {subscription.plan.name}",
@@ -199,7 +278,15 @@ class PaymentService:
 
     @staticmethod
     def _activate_subscription(payment: Payment) -> None:
-        subscription = payment.subscription
+        # Take the subscription's own row lock. The caller holds the *payment* row, and
+        # two payments for one subscription are different rows, so without this both
+        # would read the same end_date and both write base + duration — the later write
+        # overwriting the earlier, and a customer who paid twice getting one period.
+        subscription = (
+            Subscription.objects.select_for_update()
+            .select_related('plan')
+            .get(pk=payment.subscription_id)
+        )
         now = timezone.now()
         duration = timedelta(days=subscription.plan.duration_days)
         is_renewal = str(payment.metadata.get('kind', '')) == 'renewal'

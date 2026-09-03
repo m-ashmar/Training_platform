@@ -24,4 +24,5 @@ from .registry import (  # noqa: F401
     purge_expired,
     register,
     registry,
+    validate_sources,
 )

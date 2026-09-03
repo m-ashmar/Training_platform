@@ -18,7 +18,7 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from ..settings.gateway_config import (
-    get_gateway_config, get_gateway_info, is_gateway_enabled,
+    get_gateway_config, get_gateway_info, get_amount_limits, is_gateway_enabled,
     GATEWAY_MODE,
 )
 
@@ -122,14 +122,23 @@ class PaymentGatewayService:
     # ------------------------------------------------------------------ #
     def _validate_payment_request(self, amount: Decimal, currency: str, user_data: Dict[str, Any]):
         gateway_info = get_gateway_info(self.gateway_name)
-        min_amount = Decimal(str(gateway_info['min_amount']))
-        max_amount = Decimal(str(gateway_info['max_amount']))
-        if amount < min_amount:
-            raise ValidationError(f"Amount {amount} is below minimum {min_amount}")
-        if amount > max_amount:
-            raise ValidationError(f"Amount {amount} exceeds maximum {max_amount}")
+        currency = str(currency).upper()
         if currency not in gateway_info['supported_currencies']:
             raise ValidationError(f"Currency {currency} not supported by {self.gateway_name}")
+
+        # Bounds are looked up FOR THIS CURRENCY. A single min/max documented in SYP
+        # used to be applied to every currency, so a plan priced 10.00 was rejected as
+        # "below minimum 100" against a Syrian-pound floor. No bounds means the gateway
+        # is not configured to charge in this currency, which is a refusal, not a pass.
+        limits = get_amount_limits(self.gateway_name, currency)
+        if not limits:
+            raise ValidationError(
+                f"{self.gateway_name} has no configured amount limits for {currency}"
+            )
+        if amount < limits['min']:
+            raise ValidationError(f"Amount {amount} {currency} is below minimum {limits['min']}")
+        if amount > limits['max']:
+            raise ValidationError(f"Amount {amount} {currency} exceeds maximum {limits['max']}")
         for field in ('email', 'phone'):
             if not user_data.get(field):
                 raise ValidationError(f"Missing required field: {field}")
@@ -147,18 +156,46 @@ class PaymentGatewayManager:
     """High-level helpers across enabled gateways."""
 
     @staticmethod
+    def _wire_number(value: Decimal):
+        """Render a Decimal as the same JSON type the old int constants produced.
+
+        `min_amount` and `max_amount` were plain ints on the wire. A Flutter client
+        reading them into an `int` would throw on `100.0`, so an integral bound must
+        stay an integer even though it is now stored as a Decimal.
+        """
+        return int(value) if value == value.to_integral_value() else float(value)
+
+    @staticmethod
     def get_available_gateways() -> Dict[str, Dict[str, Any]]:
-        from ..settings.gateway_config import get_available_gateways, get_gateway_info
+        from ..settings.gateway_config import (
+            get_available_gateways, get_gateway_config, get_gateway_info,
+        )
         available = {}
         for gateway_name in get_available_gateways():
             info = get_gateway_info(gateway_name)
-            available[gateway_name] = {
+            limits = info.get('amount_limits') or {}
+            # The legacy flat pair describes the gateway's own settlement currency,
+            # which is what those numbers always meant. `amount_limits` carries the
+            # full per-currency truth for clients that can read it.
+            settlement = str(get_gateway_config(gateway_name).get('currency', '')).upper()
+            settlement_limits = limits.get(settlement) or {}
+            entry = {
                 'name': info['name'],
                 'supported_currencies': info['supported_currencies'],
-                'min_amount': info['min_amount'],
-                'max_amount': info['max_amount'],
+                'settlement_currency': settlement,
+                'amount_limits': {
+                    cur: {
+                        'min': PaymentGatewayManager._wire_number(b['min']),
+                        'max': PaymentGatewayManager._wire_number(b['max']),
+                    }
+                    for cur, b in limits.items()
+                },
                 'enabled': True,
             }
+            if settlement_limits:
+                entry['min_amount'] = PaymentGatewayManager._wire_number(settlement_limits['min'])
+                entry['max_amount'] = PaymentGatewayManager._wire_number(settlement_limits['max'])
+            available[gateway_name] = entry
         return available
 
     @staticmethod

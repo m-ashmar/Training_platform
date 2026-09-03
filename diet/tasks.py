@@ -286,7 +286,7 @@ def generate_daily_advice(user_id=None):
                     "user_metrics": {
                         "bmi": user.calculate_bmi() if hasattr(user, 'calculate_bmi') else None,
                         "daily_calories": user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None,
-                        "fitness_goal": getattr(user, 'fitness_goal', 'Maintain')
+                        "fitness_goal": user.resolve_fitness_goal()
                     },
                     "advice_effectiveness_tracking": {
                         "views_count": 0,
@@ -325,7 +325,7 @@ def _generate_personalized_advice(user):
         # Get user metrics
         bmi = user.calculate_bmi() if hasattr(user, 'calculate_bmi') else None
         daily_calories = user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None
-        goal = getattr(user, 'fitness_goal', 'Maintain')
+        goal = user.resolve_fitness_goal()
         
         # Generate advice based on user profile
         if goal == 'Lose':

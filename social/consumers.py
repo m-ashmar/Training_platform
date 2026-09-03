@@ -2,8 +2,9 @@ import logging
 from django.utils.translation import gettext as _
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
-from urllib.parse import parse_qs
 from channels.db import database_sync_to_async
+
+from training_platform.ws_auth import authenticate_scope
 
 logger = logging.getLogger(__name__)
 
@@ -48,19 +49,9 @@ class SocialConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def get_user_from_token(self):
-        try:
-            from rest_framework_simplejwt.tokens import UntypedToken
-            from django.db import close_old_connections
-            from rest_framework_simplejwt.authentication import JWTAuthentication
-            # JWT in querystring: ws://.../ws/social/?token=...
-            query_string = self.scope.get("query_string", b"").decode()
-            token = parse_qs(query_string).get("token", [None])[0]
-            if not token:
-                return None
-            validated_token = UntypedToken(token)
-            jwt_auth = JWTAuthentication()
-            user = jwt_auth.get_user(validated_token)
-            close_old_connections()
-            return user
-        except Exception:
-            return None 
+        """Authenticate from ?token= (or an Authorization header).
+
+        Shared with AIChatConsumer. See training_platform.ws_auth for why this must
+        be an AccessToken and not an UntypedToken.
+        """
+        return authenticate_scope(self.scope) 

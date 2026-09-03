@@ -41,6 +41,7 @@ from django.db import transaction
 from django.http import Http404
 from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
                                        ValidationError as DRFValidationError)
+from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ class JWTAuthLogoutView(APIView):
                 {'error': _('Invalid refresh token')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -337,7 +338,7 @@ class ResendOTPView(APIView):
         try:
             create_otp(user)
             logger.info(f"OTP resent for user {user.id}")
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -669,8 +670,14 @@ class PublicTrainersListView(APIView):
         }, status=status.HTTP_200_OK)
 
 class PublicTrainerClientStatsView(APIView):
-    """Public view to get statistics about clients with trainers and total trainers"""
-    permission_classes = [AllowAny]
+    """Roster totals for the signed-in app.
+
+    This answered anonymously with the platform's trainer count and how many clients
+    have one. Neither is personal data, but together they publish roster size and
+    adoption to anyone who asks, and both move with the business. The mobile client
+    reads them after sign-in, so authentication costs it nothing.
+    """
+    permission_classes = [IsAuthenticated]
     
     def get(self, request):
         """Get statistics: number of clients with trainers and total number of trainers"""
@@ -877,7 +884,7 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
                 'clients': serializer.data
             })
             
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -1083,12 +1090,15 @@ class ClientRequestTrainerView(APIView):
                     relation.status = 'pending'
                     relation.save()
             
-            # Emit domain event — notification handled at delivery boundary
-            emit_event(ClientRequestReceivedEvent(
+            # Emit domain event — notification handled at delivery boundary.
+            # On commit: this runs inside an open transaction, and a message queued
+            # before the commit can be picked up before the row exists, or delivered
+            # after a rollback for a request that was never saved.
+            transaction.on_commit(lambda: emit_event(ClientRequestReceivedEvent(
                 actor_id=request.user.id,
                 recipient_id=trainer.id,
                 client_name=request.user.full_name or request.user.username,
-            ))
+            )))
             
             logger.info(f"Client {request.user.id} requested trainer {trainer.id}")
             
@@ -1103,7 +1113,7 @@ class ClientRequestTrainerView(APIView):
                 {'error': _('Trainer not found')}, 
                 status=status.HTTP_404_NOT_FOUND
             )
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -1188,7 +1198,7 @@ class ClientUnassignTrainerView(APIView):
                 'previous_trainer_name': trainer_name
             }, status=status.HTTP_200_OK)
             
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -1259,7 +1269,7 @@ class ClientCancelTrainerRequestView(APIView):
                 'cancelled_trainer_name': trainer_name
             }, status=status.HTTP_200_OK)
             
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -1330,7 +1340,7 @@ class TrainerPendingRequestsView(APIView):
                 'pending_requests': requests_data
             }, status=status.HTTP_200_OK)
             
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -1478,7 +1488,7 @@ class TrainerRespondToRequestView(APIView):
                 {'error': _('Request not found or already processed')}, 
                 status=status.HTTP_404_NOT_FOUND
             )
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -1547,7 +1557,7 @@ class ClientRequestStatusView(APIView):
                 'requests': requests_data
             }, status=status.HTTP_200_OK)
             
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -1614,7 +1624,7 @@ class ProfilePictureUploadView(APIView):
                 }
             }, status=status.HTTP_200_OK)
 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -1644,7 +1654,7 @@ class ProfilePictureUploadView(APIView):
                     'message': _('No profile picture to remove')
                 }, status=status.HTTP_404_NOT_FOUND)
                 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.

@@ -83,59 +83,28 @@ class HasPrioritySupportAccess(permissions.BasePermission):
         return HasSubscriptionFeature('priority_support').has_permission(request, view)
 
 class SubscriptionUsageLimit(permissions.BasePermission):
+    """Whether the caller has any of a metered feature left.
+
+    The decision, the period it is counted over and the increment all live in
+    `subscription.quota`. This class used to hold its own copy of the lookup, and it
+    disagreed with the table's unique key in a way that let concurrent requests insert
+    duplicate rows and then locked the subscriber out permanently.
+
+    `limit_field` is accepted for the two subclasses below that still pass it; the
+    authoritative mapping from feature to plan field is `quota.FEATURES`.
     """
-    Permission to check if user hasn't exceeded usage limits for a feature.
-    """
-    
+
     def __init__(self, feature_name=None, limit_field=None):
         self.feature_name = feature_name
         self.limit_field = limit_field
         super().__init__()
-    
+
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             return False
-        
-        try:
-            subscription = request.user.subscription
-            
-            if not subscription.is_active:
-                return False
-            
-            # Get the limit from subscription plan
-            if self.limit_field:
-                limit = getattr(subscription.plan, self.limit_field, 0)
-            else:
-                limit = 0
-            
-            # If no limit (unlimited), allow access
-            if limit == 0:
-                return True
-            
-            # Check current usage
-            from .models import SubscriptionUsage, SubscriptionFeature
-            
-            try:
-                feature, _ = SubscriptionFeature.objects.get_or_create(
-                    name=self.feature_name,
-                    defaults={
-                        'description': f'Auto-created feature for {self.feature_name}',
-                        'is_active': True
-                    }
-                )
-                usage, created = SubscriptionUsage.objects.get_or_create(
-                    subscription=subscription,
-                    feature=feature,
-                    defaults={'limit': limit, 'period_end': timezone.now() + timezone.timedelta(days=30)}
-                )
-                
-                return usage.usage_count < limit
-                
-            except SubscriptionFeature.DoesNotExist:
-                return False
-                
-        except:
-            return False
+        from subscription import quota
+        return quota.has_headroom(request.user, self.feature_name)
+
 
 class MealUsageLimit(permissions.BasePermission):
     """Permission to check daily meal creation limits."""

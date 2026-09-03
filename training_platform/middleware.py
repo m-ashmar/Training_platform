@@ -17,7 +17,7 @@ from django.utils import timezone
 import secrets
 # Named-backend accessors — routes to the correct Redis DB segment
 from training_platform.cache import ratelimit_cache, public_cache, private_cache
-from django.db import connection, reset_queries
+from django.db import connection
 from django.utils import timezone
 from django.shortcuts import redirect
 import re
@@ -397,21 +397,21 @@ class DatabaseQueryCountMiddleware(MiddlewareMixin):
         self.enabled = settings.DEBUG
     
     def process_request(self, request):
-        """
-        Reset query count (only in DEBUG)
+        """Remember where this request's queries begin.
+
+        This used to call `reset_queries()`, which clears the log that
+        `CaptureQueriesContext` — and therefore `assertNumQueries` — reads. Any query
+        count asserted around a test-client request observed zero and passed, so the
+        two N+1s in this codebase could not have been caught by a test. Recording the
+        offset counts the same queries and leaves the log intact for whoever else is
+        reading it.
         """
         if not self.enabled:
             return None
-            
         try:
-            reset_queries()
+            request._query_log_offset = len(connection.queries)
         except Exception:
-            try:
-                connection.queries.clear()
-            except Exception:
-                # Optional side effect: swallowing this silently is what made the
-                # surrounding failures invisible in logs. Control flow is unchanged.
-                logger.debug('suppressed non-fatal error', exc_info=True)
+            request._query_log_offset = 0
         return None
     
     def process_response(self, request, response):
@@ -420,22 +420,24 @@ class DatabaseQueryCountMiddleware(MiddlewareMixin):
         """
         if not self.enabled:
             return response
-            
-        query_count = len(connection.queries)
-        
+
+        offset = getattr(request, '_query_log_offset', 0)
+        queries = connection.queries[offset:]
+        query_count = len(queries)
+
         # Log high query count
         if query_count > 20:
             logger.warning(
                 f"High query count for {request.path}: {query_count} queries"
             )
-        
+
         # Log slow queries
-        for query in connection.queries:
+        for query in queries:
             if float(query['time']) > 0.1:  # Queries > 100ms
                 logger.warning(
                     f"Slow query ({query['time']}s): {query['sql'][:200]}..."
                 )
-        
+
         return response
 
 

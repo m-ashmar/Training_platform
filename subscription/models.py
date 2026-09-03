@@ -8,6 +8,7 @@ import uuid
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from decimal import Decimal
+from training_platform.model_validation import RowValidationMixin
 
 
 # Payment lifecycle state machine. The ONLY code allowed to move a payment
@@ -24,7 +25,15 @@ PAYMENT_STATUS_TRANSITIONS = {
     'expired':    set(),
 }
 
-class SubscriptionPlan(models.Model):
+# Currencies the platform can price and charge in. ShamCash settles in SYP; USD exists
+# only for historical rows written before plans carried a currency of their own.
+SUPPORTED_CURRENCIES = [
+    ('SYP', 'Syrian Pound'),
+    ('USD', 'US Dollar'),
+]
+
+
+class SubscriptionPlan(RowValidationMixin, models.Model):
     """Subscription plans with different features and pricing"""
     PLAN_TYPES = [
         ('basic', 'Basic'),
@@ -40,6 +49,17 @@ class SubscriptionPlan(models.Model):
         max_digits=10, 
         decimal_places=2,
         validators=[MinValueValidator(Decimal("0"), _("Price cannot be negative"))]
+    )
+    # A price without a currency is not a price. Every Payment inherits this value;
+    # no view, serializer or gateway may substitute one of its own. Plans were priced
+    # in SYP while three call sites stamped their payments 'USD', so the ledger was
+    # denominated in a currency the platform never charged in and renewals could never
+    # clear the gateway's currency check.
+    currency = models.CharField(
+        max_length=3,
+        choices=SUPPORTED_CURRENCIES,
+        default='SYP',
+        db_index=True,
     )
     duration_days = models.IntegerField(
         default=30,
@@ -83,13 +103,13 @@ class SubscriptionPlan(models.Model):
             raise ValidationError(_("Duration must be greater than 0"))
     
     def save(self, *args, **kwargs):
-        self.full_clean()
+        self.validate_row()
         super().save(*args, **kwargs)
     
     def __str__(self):
-        return f"{self.name} - {self.price} SYP"
+        return f"{self.name} - {self.price} {self.currency}"
 
-class Subscription(models.Model):
+class Subscription(RowValidationMixin, models.Model):
     """User subscription details"""
     STATUS_CHOICES = [
         ('active', 'Active'),
@@ -181,7 +201,7 @@ class Subscription(models.Model):
             self.has_ai_advice = self.plan.has_ai_advice
             self.has_priority_support = self.plan.has_priority_support
         
-        self.full_clean()
+        self.validate_row()
         super().save(*args, **kwargs)
     
     @property
@@ -215,7 +235,7 @@ class Subscription(models.Model):
     def __str__(self):
         return f"{self.user.username} - {self.plan.name} ({self.status})"
 
-class Payment(models.Model):
+class Payment(RowValidationMixin, models.Model):
     """Payment history for subscriptions"""
     PAYMENT_STATUS = [
         ('pending', 'Pending'),
@@ -255,7 +275,14 @@ class Payment(models.Model):
         decimal_places=2,
         validators=[MinValueValidator(Decimal("0"), _("Amount cannot be negative"))]
     )
-    currency = models.CharField(max_length=3, default='USD', db_index=True)
+    # Inherited from the plan at creation; never chosen by a caller and never by the
+    # client. `choices` is enforced because Payment.save() runs validate_row().
+    currency = models.CharField(
+        max_length=3,
+        choices=SUPPORTED_CURRENCIES,
+        default='SYP',
+        db_index=True,
+    )
     status = models.CharField(
         max_length=20, 
         choices=PAYMENT_STATUS, 
@@ -332,7 +359,7 @@ class Payment(models.Model):
             raise ValidationError(_("Payment amount cannot be negative"))
 
     def save(self, *args, **kwargs):
-        self.full_clean()
+        self.validate_row()
         super().save(*args, **kwargs)
 
     def can_transition_to(self, new_status: str) -> bool:
@@ -342,7 +369,7 @@ class Payment(models.Model):
         return new_status in PAYMENT_STATUS_TRANSITIONS.get(self.status, set())
 
     def __str__(self):
-        return f"{self.subscription.user.username} - ${self.amount} ({self.status})"
+        return f"{self.subscription.user.username} - {self.amount} {self.currency} ({self.status})"
 
 class SubscriptionFeature(models.Model):
     """Individual features that can be enabled/disabled per subscription"""
@@ -359,7 +386,7 @@ class SubscriptionFeature(models.Model):
     def __str__(self):
         return self.name
 
-class SubscriptionUsage(models.Model):
+class SubscriptionUsage(RowValidationMixin, models.Model):
     """Track usage of subscription features"""
     subscription = models.ForeignKey(
         Subscription, 
@@ -380,13 +407,24 @@ class SubscriptionUsage(models.Model):
         default=0,  # 0 means unlimited
         validators=[MinValueValidator(0, _("Limit cannot be negative"))]
     )
-    period_start = models.DateTimeField(auto_now_add=True, db_index=True)
+    period_start = models.DateTimeField(
+        db_index=True,
+        help_text=(
+            "Start of the window this row counts. Computed by subscription.quota, not "
+            "stamped on insert: it was auto_now_add, so every row got a distinct value "
+            "and the unique key below could never be violated. Concurrent requests each "
+            "inserted their own row and the lookup then raised MultipleObjectsReturned."
+        ),
+    )
     period_end = models.DateTimeField(db_index=True)
     
     class Meta:
         # Deterministic total order. Without it Postgres returns rows in whatever order it
         # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
         ordering = ['-id']
+        # Enforceable now that period_start is a computed boundary rather than an
+        # insertion timestamp: two requests inside the same window collide, which is
+        # exactly what makes get_or_create race-safe.
         unique_together = ['subscription', 'feature', 'period_start']
         indexes = [
             models.Index(fields=['subscription', 'feature']),
@@ -405,7 +443,7 @@ class SubscriptionUsage(models.Model):
             raise ValidationError(_("Period end must be after period start"))
 
     def save(self, *args, **kwargs):
-        self.full_clean()
+        self.validate_row()
         super().save(*args, **kwargs)
 
     @property

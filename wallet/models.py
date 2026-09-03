@@ -88,9 +88,21 @@ class Wallet(models.Model):
 
 
 class IdempotencyKey(models.Model):
-    """Ensures POST/transfer/top-up operations are processed exactly once."""
-    key = models.CharField(max_length=64, unique=True)
-    request_hash = models.CharField(max_length=128)
+    """Ensures POST/transfer/top-up operations are processed exactly once.
+
+    Scoped to the caller. The key used to be unique across the whole table, and
+    callers choose their own, so two clients picking the same string was enough for
+    one of them to be handed the other's stored response. See wallet/idempotency.py.
+    """
+    key = models.CharField(max_length=64, db_index=True)
+    request_hash = models.CharField(
+        max_length=128, blank=True,
+        help_text=(
+            "Digest of the request that claimed this key, so a replay carrying "
+            "different content is refused instead of answered with the first "
+            "request's result. Blank on rows written before this was compared."
+        ),
+    )
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="idempotency_keys")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     processed = models.BooleanField(default=False)
@@ -100,7 +112,12 @@ class IdempotencyKey(models.Model):
         # Deterministic total order. Without it Postgres returns rows in whatever order it
         # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
         ordering = ['-created_at', '-id']
-        indexes = [models.Index(fields=["key"])]
+        indexes = [models.Index(fields=["created_by", "key"], name="wallet_idem_created_ec3507_idx")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["created_by", "key"], name="uniq_idempotency_key_per_caller"
+            ),
+        ]
 
 
 class Transaction(models.Model):

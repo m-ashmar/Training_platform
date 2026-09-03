@@ -14,6 +14,7 @@ from django.dispatch import receiver
 import contextlib as _contextlib
 import threading as _threading
 import logging
+from training_platform.model_validation import RowValidationMixin
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def exercise_image_upload_path(instance, filename):
     filename = f"exercise_{instance.pk or 'new'}_{uuid.uuid4().hex[:8]}.{ext}"
     return os.path.join('exercise_images', filename)
 
-class Exercise(models.Model):
+class Exercise(RowValidationMixin, models.Model):
     """
     Exercise model representing individual exercises that can be used in routines.
     
@@ -53,30 +54,34 @@ class Exercise(models.Model):
     # Muscle group targeting (granular)
     target_muscle = models.CharField(
         max_length=50,
+        # The left half is the stored key and must not move; the right half is what a
+        # person reads, so it goes through the catalogue. Serialised as
+        # `target_muscle_display`, which stayed English under Accept-Language: ar
+        # because these labels were plain strings.
         choices=[
-            ("Upper Chest", "Upper Chest"),
-            ("Lower Chest", "Lower Chest"),
-            ("Middle Chest", "Middle Chest"),
-            ("Lateral Deltoid", "Lateral Deltoid"),
-            ("Rear Deltoid", "Rear Deltoid"),
-            ("Front Deltoid", "Front Deltoid"),
-            ("Biceps", "Biceps"),
-            ("Triceps", "Triceps"),
-            ("Forearms", "Forearms"),
-            ("Upper Back", "Upper Back"),
-            ("Lats", "Lats"),
-            ("Lower Back", "Lower Back"),
-            ("Traps", "Traps"),
-            ("Abdominals", "Abdominals"),
-            ("Obliques", "Obliques"),
-            ("Glutes", "Glutes"),
-            ("Front Quads", "Front Quads"),
-            ("Hamstrings", "Hamstrings"),
-            ("Calves", "Calves"),
-            ("Adductors", "Adductors"),
-            ("Abductors", "Abductors"),
-            ("Neck", "Neck"),
-            ("Other", "Other")
+            ("Upper Chest", _("Upper Chest")),
+            ("Lower Chest", _("Lower Chest")),
+            ("Middle Chest", _("Middle Chest")),
+            ("Lateral Deltoid", _("Lateral Deltoid")),
+            ("Rear Deltoid", _("Rear Deltoid")),
+            ("Front Deltoid", _("Front Deltoid")),
+            ("Biceps", _("Biceps")),
+            ("Triceps", _("Triceps")),
+            ("Forearms", _("Forearms")),
+            ("Upper Back", _("Upper Back")),
+            ("Lats", _("Lats")),
+            ("Lower Back", _("Lower Back")),
+            ("Traps", _("Traps")),
+            ("Abdominals", _("Abdominals")),
+            ("Obliques", _("Obliques")),
+            ("Glutes", _("Glutes")),
+            ("Front Quads", _("Front Quads")),
+            ("Hamstrings", _("Hamstrings")),
+            ("Calves", _("Calves")),
+            ("Adductors", _("Adductors")),
+            ("Abductors", _("Abductors")),
+            ("Neck", _("Neck")),
+            ("Other", _("Other"))
         ],
         default="Other",
         help_text="Targeted muscle group for this exercise (granular)"
@@ -86,10 +91,10 @@ class Exercise(models.Model):
     difficulty_level = models.CharField(
         max_length=20,
         choices=[
-            ('beginner', 'Beginner'),
-            ('intermediate', 'Intermediate'),
-            ('advanced', 'Advanced'),
-            ('expert', 'Expert')
+            ('beginner', _('Beginner')),
+            ('intermediate', _('Intermediate')),
+            ('advanced', _('Advanced')),
+            ('expert', _('Expert'))
         ],
         default='beginner',
         help_text="Exercise difficulty level"
@@ -128,6 +133,22 @@ class Exercise(models.Model):
             # A single-column created_at index cannot serve that; this one can.
             models.Index(fields=['created_by', '-created_at', '-id'], name='exercise_owner_recent_idx'),
         ]
+        constraints = [
+            # "Global" had three definitions that disagreed: this column, and
+            # `created_by IS NULL` used by both the viewset queryset and the
+            # RoutineExercise serializer. Which one executed decided whether a
+            # boundary held. Guarding only "global implies no owner" left the other
+            # half open — an exercise with no owner and is_global false belongs to
+            # nobody and is visible to nobody, which is how one disappears. Both
+            # directions, so the column and the ownership can only ever agree.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(is_global=True, created_by__isnull=True)
+                    | models.Q(is_global=False, created_by__isnull=False)
+                ),
+                name='exercise_visibility_follows_ownership',
+            ),
+        ]
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
         # paging repeated and hid rows whenever two records shared the value.
         ordering = ['name', 'id']
@@ -135,14 +156,25 @@ class Exercise(models.Model):
     def __str__(self):
         return self.name
 
+    row_validation_exclude = ("created_by",)
+
     def clean(self):
-        """Validate exercise data."""
+        """Validate exercise data.
+
+        `is_global` is not an independent choice: an exercise is either part of the
+        platform catalogue (no owner, visible to everyone) or a trainer's own (owned,
+        visible to them). Storing both facts let them disagree, so `save()` derives the
+        column from ownership and a constraint holds the pair together. Validation must
+        not silently rewrite what the caller passed, so this only reports the conflict.
+        """
         if self.created_by and not self.created_by.is_trainer:
             raise ValidationError(_("Only trainers can create exercises"), code="trainer_required")
-        
-        if self.created_by and self.is_global:
-            # If a trainer creates an exercise, it should not be global by default
-            self.is_global = False
+
+        if self.is_global != (self.created_by_id is None):
+            raise ValidationError(
+                {"is_global": _("A global exercise has no owner; an owned exercise is not global.")},
+                code="global_owner_conflict",
+            )
 
     def can_be_accessed_by(self, user):
         """
@@ -183,6 +215,12 @@ class Exercise(models.Model):
                 # Optional side effect: swallowing this silently is what made the
                 # surrounding failures invisible in logs. Control flow is unchanged.
                 logger.debug('suppressed non-fatal error', exc_info=True)
+        # Visibility follows ownership; it is not a separate decision. Deriving the
+        # column here is what stops it and `created_by` from ever disagreeing, which
+        # is how the same exercise came to read as global to one code path and
+        # private to another.
+        self.is_global = self.created_by_id is None
+        self.validate_row()
         super().save(*args, **kwargs)
 
 
@@ -221,7 +259,7 @@ class ExerciseMedia(models.Model):
         return f"{self.media_type.capitalize()} for {self.exercise.name}"
 
 
-class Routine(models.Model):
+class Routine(RowValidationMixin, models.Model):
     """
     Enhanced Routine model supporting multi-trainer functionality.
     
@@ -274,10 +312,10 @@ class Routine(models.Model):
     difficulty_level = models.CharField(
         max_length=20,
         choices=[
-            ('beginner', 'Beginner'),
-            ('intermediate', 'Intermediate'),
-            ('advanced', 'Advanced'),
-            ('expert', 'Expert')
+            ('beginner', _('Beginner')),
+            ('intermediate', _('Intermediate')),
+            ('advanced', _('Advanced')),
+            ('expert', _('Expert'))
         ],
         default='beginner',
         help_text="Routine difficulty level"
@@ -312,17 +350,21 @@ class Routine(models.Model):
         extra = '' if self.assigned_to.count() <= 5 else '...'
         return f"{self.name} for {user_names}{extra}"
 
+    row_validation_exclude = ("created_by",)
+
     def clean(self):
-        """Validate routine data."""
+        """Validate what this row decides on its own.
+
+        Who may be assigned to a routine is not one of those things. That check used
+        to live here and compared each assigned client's *current* trainer against the
+        creator, so moving a client to another trainer retroactively invalidated every
+        routine the first trainer had ever written for them — 100 rows in this
+        database alone. Membership is settled where the link is made, by
+        `RoutineSerializer._validate_client_assignments`, against the approved
+        trainer-client relation rather than a mutable pointer on the user.
+        """
         if not self.created_by.is_trainer:
             raise ValidationError(_("Only trainers can create routines"), code="trainer_required")
-        
-        # Ensure assigned users are clients of the trainer
-        for user in self.assigned_to.all():
-            if not user.is_client:
-                raise ValidationError(_("User %(username)s is not a client") % {"username": user.username}, code="not_client")
-            if user.assigned_trainer != self.created_by:
-                raise ValidationError(_("User %(username)s is not assigned to trainer %(trainer)s") % {"username": user.username, "trainer": self.created_by.username}, code="not_assigned")
 
     def get_assigned_users(self):
         """Return a comma-separated list of usernames assigned to this routine."""
@@ -372,6 +414,7 @@ class Routine(models.Model):
     def save(self, *args, **kwargs):
         """Override save to initialize progress for each user and day."""
         is_new = self.pk is None
+        self.validate_row()
         super().save(*args, **kwargs)
         
         # Scaffold rows are anchored to the routine's start_date. Actual training
@@ -414,7 +457,7 @@ class Routine(models.Model):
         }
 
 
-class RoutineExercise(models.Model):
+class RoutineExercise(RowValidationMixin, models.Model):
     """
     Junction model linking routines and exercises with specific parameters.
     
@@ -457,13 +500,21 @@ class RoutineExercise(models.Model):
         return f"{self.exercise.name} in {self.routine.name} (Day {self.day}, Order {self.order})"
 
     def clean(self):
-        """Validate routine exercise data."""
-        if self.day > self.routine.days:
-            raise ValidationError(_("Day %(day)s exceeds routine duration of %(days)s days") % {"day": self.day, "days": self.routine.days}, code="day_exceeded")
-        
-        # Ensure exercise is accessible to routine creator
-        if not self.exercise.can_be_accessed_by(self.routine.created_by):
-            raise ValidationError(_("Exercise %(name)s is not accessible to routine creator") % {"name": self.exercise.name}, code="exercise_not_accessible")
+        """Validate what this row decides on its own.
+
+        Neither of the rules that used to live here qualified. Both read another row's
+        present state: whether the exercise is *still* accessible to the routine's
+        creator, and whether the day *still* fits the routine's length. Deactivating an
+        exercise or shortening a routine therefore made existing rows unsaveable — 878
+        of 2201 here. Both are now checked by `RoutineExerciseSerializer.validate`, at
+        the moment a client asks to add or move an exercise.
+        """
+        if self.day is not None and self.day < 1:
+            raise ValidationError({"day": _("Day is 1-based.")}, code="day_invalid")
+
+    def save(self, *args, **kwargs):
+        self.validate_row()
+        super().save(*args, **kwargs)
 
 
 class UserExerciseProgress(models.Model):
@@ -665,7 +716,7 @@ class WorkoutSession(models.Model):
         return None
 
 
-class ExerciseSetLog(models.Model):
+class ExerciseSetLog(RowValidationMixin, models.Model):
     """
     Detailed log of individual sets within an exercise session.
     
@@ -724,9 +775,13 @@ class ExerciseSetLog(models.Model):
         if self.rpe and (self.rpe < 1 or self.rpe > 10):
             raise ValidationError(_("RPE must be between 1 and 10"), code="rpe_out_of_range")
 
+    def save(self, *args, **kwargs):
+        self.validate_row()
+        super().save(*args, **kwargs)
 
 
-class RoutineTemplate(models.Model):
+
+class RoutineTemplate(RowValidationMixin, models.Model):
     """
     RoutineTemplate: reusable structure for common training splits, saved by trainers.
     Trainers can organize by goal (hypertrophy, strength, etc.).
@@ -789,6 +844,10 @@ class RoutineTemplate(models.Model):
         """Validate template data."""
         if not self.created_by.is_trainer:
             raise ValidationError(_("Only trainers can create templates"), code="trainer_required")
+
+    def save(self, *args, **kwargs):
+        self.validate_row()
+        super().save(*args, **kwargs)
 
 
 class RoutineTemplateExercise(models.Model):

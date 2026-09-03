@@ -2,9 +2,9 @@
 consumers.py — WebSocket consumer for AI chat.
 
 Handles WebSocket connections at ws://host/ws/ai/chat/?token=<JWT>.
-Authenticates via JWT query string (proven pattern from SocialConsumer),
-checks premium subscription, enforces rate limiting, and streams
-GPT responses to the client.
+Authentication is delegated to training_platform.ws_auth, shared with
+SocialConsumer. It checks premium entitlement, enforces rate limiting, and
+streams GPT responses to the client.
 
 LANGUAGE SAFETY: Uses LanguageContext.for_user() per-handler, NOT
 translation.activate() in connect(), to avoid ASGI threadlocal leaks.
@@ -20,11 +20,11 @@ from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 from django.utils.translation import gettext as _
-from urllib.parse import parse_qs
 
 from ai_assistant.services.chat_service import ChatService
 from ai_assistant.services.security import InputSanitizer
 from training_platform.i18n import LanguageContext
+from training_platform.ws_auth import authenticate_scope
 
 logger = logging.getLogger(__name__)
 
@@ -230,39 +230,34 @@ class AIChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def _authenticate(self):
-        """
-        Authenticate via JWT in query string.
-        Reuses the proven pattern from SocialConsumer.
-        """
-        try:
-            from rest_framework_simplejwt.tokens import UntypedToken
-            from rest_framework_simplejwt.authentication import JWTAuthentication
-            from django.db import close_old_connections
+        """Authenticate via JWT in the query string (or an Authorization header).
 
-            query_string = self.scope.get("query_string", b"").decode()
-            token = parse_qs(query_string).get("token", [None])[0]
-            if not token:
-                logger.warning("AI chat: no token provided")
-                return None
-
-            validated_token = UntypedToken(token)
-            jwt_auth = JWTAuthentication()
-            user = jwt_auth.get_user(validated_token)
-            close_old_connections()
-            return user
-        except Exception as e:
-            logger.warning(f"AI chat auth failed: {e}")
-            return None
+        Shared with SocialConsumer. The previous copy of this method described itself
+        as reusing "the proven pattern" from that consumer; the pattern accepted
+        refresh tokens, including revoked ones, so copying it doubled the hole.
+        """
+        return authenticate_scope(self.scope)
 
     @database_sync_to_async
     def _check_premium(self):
-        """Verify the user has an active subscription with AI advice access."""
+        """Verify the user holds a live subscription that includes AI advice.
+
+        `Subscription.is_active` is the single definition of "live" and it checks
+        end_date and any trial window, not just the status column. This used to be a
+        bare `filter(status='active', has_ai_advice=True)`, which asks a different and
+        weaker question: nothing sweeps lapsed rows out of 'active', so a subscription
+        that ended a year ago still matched and kept spending model tokens. The HTTP
+        routes guarding the same feature go through HasAIAdviceAccess -> is_active and
+        correctly answered 403 for exactly that user, so the two surfaces disagreed.
+        """
         from subscription.models import Subscription
-        return Subscription.objects.filter(
-            user=self.user,
-            status='active',
-            has_ai_advice=True,
-        ).exists()
+        subscription = (
+            Subscription.objects
+            .select_related('plan')
+            .filter(user=self.user)
+            .first()
+        )
+        return bool(subscription and subscription.is_active and subscription.has_ai_advice)
 
     # --- Rate Limiting ---
 

@@ -12,6 +12,7 @@ from datetime import date, datetime
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 import logging
+from training_platform.model_validation import RowValidationMixin
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class FoodCategory(models.Model):
         # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
         ordering = ['name', 'id']
 
-class FoodItem(models.Model):
+class FoodItem(RowValidationMixin, models.Model):
     """
     Represents a food item with nutritional information and category.
     """
@@ -52,7 +53,10 @@ class FoodItem(models.Model):
     serving_size = models.CharField(max_length=100)
     category = models.ForeignKey(FoodCategory, on_delete=models.SET_NULL, null=True, blank=True)
     serving_size_grams = models.PositiveIntegerField(default=100)
-    calories_per_gram = models.FloatField(default=1.0)
+    # 0.0 like its three siblings. A default of 1.0 meant every new FoodItem created
+    # with calories=0 hit the reverse-initialisation below and was stored as 100 kcal,
+    # so a zero-calorie food (water, black coffee, diet soda) could not be entered at all.
+    calories_per_gram = models.FloatField(default=0.0)
     protein_per_gram = models.FloatField(default=0.0)
     carbs_per_gram = models.FloatField(default=0.0)
     fat_per_gram = models.FloatField(default=0.0)
@@ -74,6 +78,13 @@ class FoodItem(models.Model):
     allergen_source = models.CharField(
         max_length=16, choices=ALLERGEN_SOURCE_CHOICES, default='unknown', db_index=True,
         help_text="Trust level of `allergens`. 'unknown' must NEVER be treated as safe.",
+    )
+    needs_review = models.BooleanField(
+        default=False,
+        help_text=(
+            "Nutrition on this row failed a sanity check and a human has not yet "
+            "corrected it. The planner will not portion from it."
+        ),
     )
     ingredients_text = models.TextField(
         blank=True, default='',
@@ -115,15 +126,20 @@ class FoodItem(models.Model):
         except Exception:
             self.fat = 0.0
             
-        # Reverse initialization: compute from per_gram if base macros are not provided (0.0)
-        if self.calories == 0.0 and (getattr(self, 'calories_per_gram', 0.0) or 0.0) > 0:
-            self.calories = self.calories_per_gram * 100.0
-        if self.protein == 0.0 and (getattr(self, 'protein_per_gram', 0.0) or 0.0) > 0:
-            self.protein = self.protein_per_gram * 100.0
-        if self.carbs == 0.0 and (getattr(self, 'carbs_per_gram', 0.0) or 0.0) > 0:
-            self.carbs = self.carbs_per_gram * 100.0
-        if self.fat == 0.0 and (getattr(self, 'fat_per_gram', 0.0) or 0.0) > 0:
-            self.fat = self.fat_per_gram * 100.0
+        # Reverse initialisation: derive the per-100g macros from per-gram values when a
+        # caller supplied only those. ON CREATE ONLY. `0` is being used as a sentinel for
+        # "not provided", which is indistinguishable from a real zero, so on UPDATE this
+        # silently restored the previous value: correcting a 200 kcal drink to 0 kcal and
+        # saving put 200 kcal straight back. On an update the caller's value is the truth.
+        if self._state.adding:
+            if self.calories == 0.0 and (getattr(self, 'calories_per_gram', 0.0) or 0.0) > 0:
+                self.calories = self.calories_per_gram * 100.0
+            if self.protein == 0.0 and (getattr(self, 'protein_per_gram', 0.0) or 0.0) > 0:
+                self.protein = self.protein_per_gram * 100.0
+            if self.carbs == 0.0 and (getattr(self, 'carbs_per_gram', 0.0) or 0.0) > 0:
+                self.carbs = self.carbs_per_gram * 100.0
+            if self.fat == 0.0 and (getattr(self, 'fat_per_gram', 0.0) or 0.0) > 0:
+                self.fat = self.fat_per_gram * 100.0
         
         # BUG FIX: Validate nutritional values are non-negative
         if self.calories < 0:
@@ -135,8 +151,11 @@ class FoodItem(models.Model):
         if self.fat < 0:
             raise ValidationError(_("Fat cannot be negative"), code="negative_fat")
         
-        # BUG FIX: Ensure serving size is valid
-        if self.serving_size_grams <= 0:
+        # A non-positive serving size used to be silently replaced with 100 g. Every
+        # per-gram figure the planner portions from is derived from this number, so a
+        # guess must not pass as data. clean() rejects it; this keeps the arithmetic
+        # below safe for callers that bypass validation.
+        if self.serving_size_grams is None or self.serving_size_grams <= 0:
             self.serving_size_grams = 100
         
         # NORMALIZE: Convert all macros to per-100g standard
@@ -165,6 +184,7 @@ class FoodItem(models.Model):
         self.carbs_per_gram = self.carbs / 100.0
         self.fat_per_gram = self.fat / 100.0
         
+        self.validate_row()
         super().save(*args, **kwargs)
     def __str__(self):
         return self.name
@@ -192,7 +212,7 @@ class FoodItem(models.Model):
 
         grams = self.serving_size_grams or 0
         cal = float(self.calories or 0)
-        if grams > 0 and cal > 0:
+        if grams > 0 and cal > 0 and not self.needs_review:
             per_gram = cal / grams
             if per_gram > self.MAX_KCAL_PER_GRAM:
                 errors['calories'] = (
@@ -215,7 +235,8 @@ class FoodItem(models.Model):
 
         p_, c_, f_ = float(self.protein or 0), float(self.carbs or 0), float(self.fat or 0)
         atwater = 4 * p_ + 4 * c_ + 9 * f_
-        if cal > 0 and atwater > 0 and abs(atwater - cal) / cal > self.ATWATER_TOLERANCE:
+        if (cal > 0 and atwater > 0 and not self.needs_review
+                and abs(atwater - cal) / cal > self.ATWATER_TOLERANCE):
             errors['calories'] = (
                 f'Stated {cal:.0f} kcal but the macros give {atwater:.0f} kcal '
                 f'(>{int(self.ATWATER_TOLERANCE * 100)}% apart).'
@@ -320,7 +341,7 @@ class DietPlanTemplate(models.Model):
         """Total meals in one complete cycle."""
         return (self.meals_per_day + self.snacks_per_day) * self.days_variation
 
-class DietPlan(models.Model):
+class DietPlan(RowValidationMixin, models.Model):
     """
     Represents a generated diet plan for a user, including goal, calories, and plan data.
     Enhanced to support both AI-generated and trainer-created plans.
@@ -331,12 +352,39 @@ class DietPlan(models.Model):
         ('Maintain', 'Maintain Weight'),
         ('Gain', 'Gain Muscle')
     ]
+
+    @classmethod
+    def normalise_goal(cls, value, default='Maintain'):
+        """Map any spelling of a goal onto `GOAL_CHOICES`.
+
+        The planner package works in lower case throughout and this column stores
+        title case, so a value that made a whole round trip through the planner came
+        back rejected by its own model. Callers taking a goal from request data or
+        from the planner run it through here first.
+        """
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        for stored, _label in cls.GOAL_CHOICES:
+            if text == stored.lower():
+                return stored
+        return default
     goal = models.CharField(max_length=20, choices=GOAL_CHOICES)
     daily_calories = models.FloatField()
     start_date = models.DateField()
     end_date = models.DateField(db_index=True)
     duration_weeks = models.PositiveIntegerField(default=4)
     generated_plan = models.JSONField(null=True, blank=True)
+    # What the allergen checker concluded about this plan's ingredients.
+    # This was computed on every generation and then thrown away: the code assigned it
+    # to `diet_plan.allergen_report` with the comment "so callers/serializers can act on
+    # it", but no such field existed, so it was an instance attribute that died with the
+    # function. A user with declared allergies was served ingredients the checker could
+    # not clear and nobody was told — not the user, not their trainer.
+    #   {"is_safe": bool,
+    #    "violations": [{"food": str, "allergens": [str]}],
+    #    "unverified": [str]}
+    allergen_report = models.JSONField(default=dict, blank=True)
     generation_strategy = models.CharField(
         max_length=20,
         choices=[('GPT', 'AI Generated'), ('TRAINER', 'Trainer Created'), ('FALLBACK', 'Rule-Based')],
@@ -457,6 +505,10 @@ class DietPlan(models.Model):
                 'This user already has an active plan covering those dates '
                 f'({clash.first().start_date} to {clash.first().end_date}).'
             )
+
+    def save(self, *args, **kwargs):
+        self.validate_row()
+        super().save(*args, **kwargs)
 
 class Meal(models.Model):
     """

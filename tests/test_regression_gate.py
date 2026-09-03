@@ -175,10 +175,8 @@ def test_uploads_reject_disguised_payloads(db):
 def test_catalogue_names_are_not_blank(db):
     """modeltranslation returned '' for 542 of 554 exercises through the ORM."""
     from routine.models import Exercise
-    from users.models import CustomUser
 
-    tr = CustomUser.objects.create_user(email="gate_t@x.test", username="gate_t", password="Xx!23456")
-    Exercise.objects.create(name="Barbell Squat", created_by=tr, is_global=True)
+    Exercise.objects.create(name="Barbell Squat")
     assert Exercise.objects.first().name == "Barbell Squat"
 
 
@@ -322,7 +320,7 @@ def test_food_weights_learn_from_what_was_actually_eaten(make_user, diet_catalog
     from django.utils import timezone
 
     user = make_user("gate_learn")
-    plan = DietPlan.objects.create(user=user, goal="maintain", daily_calories=2000,
+    plan = DietPlan.objects.create(user=user, goal="Maintain", daily_calories=2000,
                                    start_date=timezone.localdate(), end_date=timezone.localdate())
     refused = diet_catalogue["Broccoli"]
     for i in range(3):
@@ -902,7 +900,7 @@ def test_a_duplicate_notification_does_not_roll_back_the_callers_work(make_user)
     from notifications.services import NotificationService
     from routine.models import Routine
 
-    user = make_user("gate_dedup")
+    user = make_user("gate_dedup", user_type="trainer")
     payload = {"context": {"message": "hi"}, "data": {"type": "custom"}}
 
     with transaction.atomic():
@@ -1118,3 +1116,702 @@ def test_no_account_is_left_on_the_frozen_timezone_default(db):
 
     # Whatever is stored must be resolvable, or the reminder silently falls back to UTC.
     ZoneInfo(fresh.preferred_timezone)
+
+
+# --------------------------------------------------------------- money is server-side
+@pytest.fixture
+def paid_plan(db):
+    """A plan with a real price, in the currency the platform actually charges in."""
+    from subscription.models import SubscriptionPlan
+
+    return SubscriptionPlan.objects.create(
+        name="gate_paid_plan", plan_type="premium", description="gate",
+        price="5000.00", currency="SYP", duration_days=30, is_active=True,
+        has_diet_access=True, has_routine_access=True, has_challenges_access=True,
+        has_ai_advice=True, has_priority_support=True,
+    )
+
+
+def test_a_plan_carries_its_own_currency(paid_plan):
+    """A price without a currency is not a price.
+
+    Plans were priced in SYP while three separate call sites stamped their payments
+    'USD', so the ledger was denominated in a currency the platform never charged in
+    and every renewal failed the gateway's currency check.
+    """
+    from subscription.models import Payment, SubscriptionPlan
+
+    assert SubscriptionPlan._meta.get_field("currency"), "plans must declare a currency"
+    assert not SubscriptionPlan.objects.exclude(
+        currency__in=[c for c, _ in Payment._meta.get_field("currency").choices]
+    ).exists(), "a plan is priced in a currency payments cannot express"
+
+
+def test_the_client_cannot_choose_what_it_pays(make_user, api, paid_plan):
+    """`amount` used to be read straight from the request body.
+
+    Every later check compares the gateway's report against `payment.amount`, so the
+    whole verification chain agreed with a number the payer had picked: a 5000.00 plan
+    activated in full for the 100 SYP gateway floor.
+    """
+    from django.utils import timezone
+    from datetime import timedelta
+
+    from subscription.models import Payment, Subscription
+
+    user = make_user("gate_payer")
+    sub = Subscription.objects.create(
+        user=user, plan=paid_plan, status="pending",
+        end_date=timezone.now() + timedelta(days=30),
+    )
+    client = api(user)
+
+    # An amount that disagrees with the plan is refused outright, never charged.
+    resp = client.post(
+        "/api/subscription/v1/gateways/",
+        data=json.dumps({"gateway": "shamcash", "subscription_id": str(sub.id),
+                         "amount": "100.00", "currency": "SYP"}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 409, f"underpricing was accepted: {resp.status_code}"
+
+    # Omitting it entirely is the correct call, and the server sets the price itself.
+    resp = client.post(
+        "/api/subscription/v1/gateways/",
+        data=json.dumps({"gateway": "shamcash", "subscription_id": str(sub.id)}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, resp.content
+    payment = Payment.objects.get(id=resp.json()["payment_id"])
+    assert payment.amount == paid_plan.price
+    assert payment.currency == paid_plan.currency
+
+
+def test_every_payment_row_inherits_the_plans_currency(make_user, api, paid_plan):
+    """No call site may invent a currency of its own."""
+    from django.utils import timezone
+    from datetime import timedelta
+
+    from subscription.models import Payment, Subscription
+    from subscription.services.payment_service import PaymentService
+
+    user = make_user("gate_currency")
+    sub = Subscription.objects.create(
+        user=user, plan=paid_plan, status="active",
+        end_date=timezone.now() + timedelta(days=30),
+    )
+    PaymentService.start_renewal(sub)
+    assert set(Payment.objects.filter(subscription=sub).values_list("currency", flat=True)) == {
+        paid_plan.currency
+    }
+
+
+def test_a_webhook_signature_header_is_found_whatever_its_case(settings):
+    """HTTP header names are case-insensitive; a plain dict is not.
+
+    The view passed `dict(request.headers)`, Django title-cases every segment, and the
+    gateway looked for 'X-ShamCash-Signature' with a capital C. No spelling a client
+    could send would ever match, so 100% of webhooks were rejected as unsigned and no
+    payment could be confirmed by webhook at all.
+    """
+    from subscription.gateways.shamcash import ShamCashGateway
+
+    gateway = ShamCashGateway({"webhook_secret": "x" * 20})
+    for spelling in ("X-ShamCash-Signature", "x-shamcash-signature",
+                     "X-SHAMCASH-SIGNATURE", "X-Shamcash-Signature"):
+        assert gateway.header({spelling: "sig"}, "X-ShamCash-Signature") == "sig", spelling
+
+
+# ------------------------------------------------------------------ error contract
+def test_an_object_level_error_reaches_the_client_as_a_sentence(db):
+    """A wrong password is the most common failure the API has.
+
+    `non_field_errors` was excluded from field_errors, which skipped the branch that
+    builds a human `detail`, so the app was handed the repr of a Python dict to show
+    its user: "{'non_field_errors': [ErrorDetail(string='Unable to log in...')]}".
+    """
+    from django.test import Client
+
+    resp = Client().post(
+        "/api/auth/login/",
+        {"email": "nobody@gate.test", "password": "wrong-password"},
+        content_type="application/json",
+    )
+    body = resp.json()
+    assert resp.status_code == 400
+    assert "ErrorDetail" not in body["detail"], body["detail"]
+    assert "non_field_errors" not in body["detail"], body["detail"]
+    assert body["code"] == "validation_error"
+    assert body["field_errors"]["non_field_errors"][0]["message"]
+
+
+def test_control_flow_exceptions_are_never_flattened_into_a_500():
+    """Views wrap their work in `except Exception -> 500`, so anything carrying its own
+    status has to be re-raised first. The hand-written tuple that did this named five
+    classes, missed four more, and in two files named a symbol nobody had imported —
+    so evaluating the clause raised NameError and destroyed the original exception.
+    """
+    from rest_framework import exceptions
+
+    from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
+
+    for cls in (exceptions.NotFound, exceptions.PermissionDenied,
+                exceptions.NotAuthenticated, exceptions.ValidationError,
+                exceptions.MethodNotAllowed, exceptions.UnsupportedMediaType,
+                exceptions.NotAcceptable, exceptions.Throttled):
+        assert issubclass(cls, PASSTHROUGH_EXCEPTIONS), cls.__name__
+
+
+def test_no_view_hand_writes_the_passthrough_tuple():
+    """Guards the pattern, not just the two files it was broken in."""
+    import pathlib
+
+    offenders = []
+    for path in pathlib.Path(".").glob("*/views.py"):
+        if "except (Http404, NotFound" in path.read_text():
+            offenders.append(str(path))
+    assert not offenders, f"hand-written exception tuples returned: {offenders}"
+
+
+# ---------------------------------------------------------------------- websockets
+def test_a_websocket_refuses_a_refresh_token(make_user):
+    """Both consumers used `UntypedToken`, whose purpose is to NOT check the token type.
+
+    So a refresh token opened a socket, and since UntypedToken has no BlacklistMixin it
+    never consulted the blacklist: logging out closed nothing, and the 7-day refresh
+    token the logout endpoint had just revoked still opened the AI socket, which spends
+    model tokens per message.
+    """
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    from training_platform.ws_auth import authenticate_scope
+
+    user = make_user("gate_ws")
+    refresh = RefreshToken.for_user(user)
+
+    def scope(token):
+        return {"headers": [], "query_string": f"token={token}".encode()}
+
+    assert authenticate_scope(scope(str(refresh.access_token))) == user
+    assert authenticate_scope(scope(str(refresh))) is None, "a refresh token opened a socket"
+
+    refresh.blacklist()
+    assert authenticate_scope(scope(str(refresh))) is None
+
+
+def test_the_ai_socket_and_the_http_route_agree_on_entitlement(make_user, paid_plan):
+    """They disagreed. The HTTP guard goes through Subscription.is_active, which checks
+    end_date; the socket used a bare filter on `status`, and nothing sweeps lapsed rows
+    out of 'active' — 64 of 72 rows in the database were already past their end_date.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from subscription.models import Subscription
+
+    user = make_user("gate_lapsed")
+    sub = Subscription.objects.create(
+        user=user, plan=paid_plan, status="active",
+        end_date=timezone.now() + timedelta(days=1),
+    )
+    Subscription.objects.filter(pk=sub.pk).update(
+        end_date=timezone.now() - timedelta(days=365))
+    sub.refresh_from_db()
+
+    assert sub.status == "active"
+    assert sub.is_active is False, "is_active must consider end_date"
+    assert sub.has_ai_advice is True, "the flag is still set; only the window has closed"
+
+
+# ------------------------------------------------------------------------ retention
+def test_every_privacy_source_matches_its_model():
+    """A declaration nobody verifies rots exactly like a scheduled task nobody registers.
+
+    `sessions` declared retention_field="session_start"; the column is `started_at`.
+    purge_expired() caught the FieldError, logged it and moved on, so retention reported
+    success while the rows holding IP address and user agent were never purged at all.
+    """
+    from training_platform import privacy
+
+    assert privacy.validate_sources() == []
+
+
+def test_lapsed_subscriptions_have_a_scheduled_sweep():
+    """`expire_subscriptions()` carried the docstring "This should be run as a scheduled
+    task" and never was: not a Celery task, no beat entry, no management command, and
+    every other function in that module was uncalled too.
+    """
+    from training_platform.celery import app
+
+    app.loader.import_default_modules()
+    assert "subscription.expire_lapsed_subscriptions" in app.tasks
+    assert any(e["task"] == "subscription.expire_lapsed_subscriptions"
+               for e in app.conf.beat_schedule.values())
+
+
+def test_expiring_subscriptions_twice_changes_nothing_the_second_time(make_user, paid_plan):
+    """Celery delivers at least once, so every task runs twice sooner or later."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from subscription.models import Subscription
+    from subscription.tasks import expire_lapsed_subscriptions
+
+    user = make_user("gate_expiry")
+    sub = Subscription.objects.create(
+        user=user, plan=paid_plan, status="active",
+        end_date=timezone.now() + timedelta(days=1),
+    )
+    Subscription.objects.filter(pk=sub.pk).update(
+        end_date=timezone.now() - timedelta(days=2))
+
+    assert expire_lapsed_subscriptions() >= 1
+    sub.refresh_from_db()
+    assert sub.status == "expired"
+    assert expire_lapsed_subscriptions() == 0
+
+
+# ------------------------------------------------- rules that must not rot with time
+def test_reassigning_a_client_does_not_freeze_their_old_routines(make_user):
+    """Routine.clean() compared each assigned client's *current* trainer to the
+    routine's creator. Moving a client to another trainer therefore invalidated every
+    routine the first trainer had ever written for them: 100 rows in the development
+    database could no longer be saved at all. Who may be assigned is settled where the
+    assignment is made, not re-litigated on every write of a years-old row."""
+    from routine.models import Routine
+
+    first = make_user("rot_tr_a", user_type="trainer")
+    second = make_user("rot_tr_b", user_type="trainer")
+    client = make_user("rot_client", assigned_trainer=first)
+
+    routine = Routine.objects.create(name="rot legacy", created_by=first, days=3)
+    routine.assigned_to.add(client)
+
+    client.assigned_trainer = second
+    client.save()
+
+    routine.name = "renamed after the move"
+    routine.save()
+    routine.refresh_from_db()
+    assert routine.name == "renamed after the move"
+
+
+def test_retiring_an_exercise_does_not_freeze_routines_that_use_it(make_user):
+    """RoutineExercise.clean() asked whether the exercise was *still* accessible to
+    the routine's creator, so deactivating one made every row referencing it
+    unsaveable — 878 of 2201 rows. Accessibility is checked when the exercise is
+    added, by the serializer, where the actor is known."""
+    from routine.models import Exercise, Routine, RoutineExercise
+
+    trainer = make_user("rot_ex_tr", user_type="trainer")
+    exercise = Exercise.objects.create(name="rot squat", created_by=trainer)
+    routine = Routine.objects.create(name="rot routine", created_by=trainer, days=3)
+    link = RoutineExercise.objects.create(
+        routine=routine, exercise=exercise, day=1, order=1, sets=3, reps=10)
+
+    exercise.is_active = False
+    exercise.save()
+
+    link.reps = 12
+    link.save()
+    link.refresh_from_db()
+    assert link.reps == 12
+
+
+def test_shortening_a_routine_does_not_freeze_the_days_already_written(make_user):
+    from routine.models import Exercise, Routine, RoutineExercise
+
+    trainer = make_user("rot_days_tr", user_type="trainer")
+    exercise = Exercise.objects.create(name="rot press", created_by=trainer)
+    routine = Routine.objects.create(name="rot days", created_by=trainer, days=5)
+    link = RoutineExercise.objects.create(
+        routine=routine, exercise=exercise, day=4, order=1, sets=3, reps=10)
+
+    routine.days = 2
+    routine.save()
+
+    link.order = 2
+    link.save()
+    assert RoutineExercise.objects.get(pk=link.pk).order == 2
+
+
+# --------------------------------------------------------- exercise visibility
+def test_an_exercise_is_global_exactly_when_it_has_no_owner(make_user):
+    """`is_global` and `created_by IS NULL` were both used as the definition of
+    "global", in different code paths, and disagreed about the same row."""
+    from django.db import IntegrityError, transaction
+    from routine.models import Exercise
+
+    trainer = make_user("vis_tr", user_type="trainer")
+
+    catalogue = Exercise.objects.create(name="vis catalogue")
+    assert catalogue.is_global is True
+
+    owned = Exercise.objects.create(name="vis owned", created_by=trainer, is_global=True)
+    assert owned.is_global is False, "an owned exercise is not global, whatever was passed"
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Exercise.objects.filter(pk=owned.pk).update(is_global=True)
+
+
+# ------------------------------------------------------------------ the client's goal
+def test_a_generated_plan_uses_the_clients_goal_not_maintenance(make_user):
+    """`fitness_goal` was read in five places across the diet app and was a field on
+    no model, so every read returned its 'Maintain' fallback. Generated plans were
+    labelled Maintain and — because calculate_daily_calories() defaulted the same way —
+    given a maintenance calorie target, whatever the client had asked for."""
+    losing = make_user("goal_lose", client_goals=["Weight Loss"], height=180,
+                       weight=90, age=30, gender="Male", activity_level="Moderate")
+    gaining = make_user("goal_gain", client_goals=["Muscle Gain"], height=180,
+                        weight=70, age=30, gender="Male", activity_level="Moderate")
+    unsure = make_user("goal_both", client_goals=["Weight Loss", "Muscle Gain"],
+                       height=180, weight=80, age=30, gender="Male",
+                       activity_level="Moderate")
+
+    assert losing.resolve_fitness_goal() == "Lose"
+    assert gaining.resolve_fitness_goal() == "Gain"
+    assert unsure.resolve_fitness_goal() == "Maintain", "do not guess a deficit"
+
+    assert losing.calculate_daily_calories() < losing.calculate_daily_calories("Maintain")
+    assert gaining.calculate_daily_calories() > gaining.calculate_daily_calories("Maintain")
+
+
+def test_a_goal_survives_the_round_trip_through_the_planner():
+    """The planner package works in lower case and the column stores title case, so a
+    goal that made the trip came back rejected by its own model."""
+    from diet.models import DietPlan
+
+    assert DietPlan.normalise_goal("maintain") == "Maintain"
+    assert DietPlan.normalise_goal("LOSE") == "Lose"
+    assert DietPlan.normalise_goal("Gain") == "Gain"
+    assert DietPlan.normalise_goal("nonsense") == "Maintain"
+    assert DietPlan.normalise_goal(None) == "Maintain"
+
+
+# ---------------------------------------------------------- untrustworthy nutrition
+def test_a_food_with_impossible_nutrition_is_flagged_not_frozen(db):
+    """Brick cheese stated 1200 kcal against 371 from its own macros. Rejecting the
+    row on save meant the weight-learning loop crashed on it and nobody could correct
+    it either; the flag keeps it writable and keeps the planner away from it."""
+    from diet.models import FoodItem
+    from diet.planner.candidates import build_pool
+    from diet.planner.policy import load_policy
+
+    bad = FoodItem.objects.create(
+        name="gate impossible", name_en="gate impossible", api_id="gate-impossible",
+        calories=1200, protein=23.2, carbs=2.79, fat=29.7, serving_size="100g",
+        allergens=[], allergen_source="verified", needs_review=True)
+
+    bad.smart_score_weight = 0.5
+    bad.save(update_fields=["smart_score_weight"])
+    assert FoodItem.objects.get(pk=bad.pk).smart_score_weight == 0.5
+
+    pool = build_pool(None, load_policy("maintain"))
+    ranked = {getattr(entry, "id", None)
+              for macros in pool.by_slot.values()
+              for foods in macros.values()
+              for entry in foods}
+    assert bad.id not in ranked, "a flagged food must not be portioned from"
+
+
+def test_nutrition_that_contradicts_itself_is_still_refused(db):
+    from django.core.exceptions import ValidationError
+    from diet.models import FoodItem
+
+    with pytest.raises(ValidationError):
+        FoodItem.objects.create(
+            name="gate contradiction", name_en="gate contradiction",
+            api_id="gate-contradiction", calories=1200, protein=23.2, carbs=2.79,
+            fat=29.7, serving_size="100g", allergens=[], allergen_source="verified")
+
+
+# ------------------------------------------------------------------ idempotency
+def test_an_idempotency_key_belongs_to_the_caller_who_chose_it(make_user, api):
+    """`IdempotencyKey.key` was unique across the whole table and nothing compared the
+    row's owner to the caller. Clients pick their own keys, so two of them choosing the
+    same string was enough: the second was handed the first's stored response —
+    reference id and both balances — while their own transfer never happened, with a
+    200 to say it had."""
+    import decimal
+    from wallet.models import Wallet
+
+    alice, bob = make_user("idem_alice"), make_user("idem_bob")
+    trainer = make_user("idem_tr", user_type="trainer")
+    for u in (alice, bob):
+        w, _ = Wallet.objects.get_or_create(owner=u, defaults={"owner_type": "client"})
+        Wallet.objects.filter(pk=w.pk).update(balance=decimal.Decimal("500.00"))
+    Wallet.objects.get_or_create(owner=trainer, defaults={"owner_type": "trainer"})
+
+    url = "/api/wallet/client/transfer/"
+    body = {"trainer_id": trainer.id, "amount": "25.00", "idempotency_key": "shared"}
+
+    first = api(alice).post(url, data=body, content_type="application/json")
+    assert first.status_code == 200
+
+    second = api(bob).post(url, data=body, content_type="application/json")
+    assert second.status_code == 200
+    assert second.json()["reference_id"] != first.json()["reference_id"], \
+        "bob received alice's receipt"
+    assert Wallet.objects.get(owner=bob).balance == decimal.Decimal("475.00")
+
+
+def test_replaying_a_key_with_different_content_is_refused(make_user, api):
+    """`request_hash` was written by four endpoints and compared by none, so the same
+    key carrying a different amount replayed the earlier receipt and moved no money."""
+    import decimal
+    from wallet.models import Wallet
+
+    user = make_user("idem_replay")
+    trainer = make_user("idem_replay_tr", user_type="trainer")
+    w, _ = Wallet.objects.get_or_create(owner=user, defaults={"owner_type": "client"})
+    Wallet.objects.filter(pk=w.pk).update(balance=decimal.Decimal("500.00"))
+    Wallet.objects.get_or_create(owner=trainer, defaults={"owner_type": "trainer"})
+
+    url = "/api/wallet/client/transfer/"
+    key = "replay-key"
+    ok = api(user).post(url, content_type="application/json", data={
+        "trainer_id": trainer.id, "amount": "25.00", "idempotency_key": key})
+    assert ok.status_code == 200
+
+    same = api(user).post(url, content_type="application/json", data={
+        "trainer_id": trainer.id, "amount": "25.00", "idempotency_key": key})
+    assert same.status_code == 200, "an identical replay is still a replay"
+    assert same.json()["reference_id"] == ok.json()["reference_id"]
+
+    different = api(user).post(url, content_type="application/json", data={
+        "trainer_id": trainer.id, "amount": "400.00", "idempotency_key": key})
+    assert different.status_code == 422
+    assert Wallet.objects.get(owner=user).balance == decimal.Decimal("475.00")
+
+
+# ------------------------------------------------------------------------ quota
+def _paid_user(make_user, name, meals_per_day):
+    import decimal
+    from datetime import timedelta
+    from django.utils import timezone
+    from subscription.models import Subscription, SubscriptionPlan
+
+    user = make_user(name)
+    plan = SubscriptionPlan.objects.create(
+        name=f"plan {name}", price=decimal.Decimal("10.00"), currency="SYP",
+        duration_days=30, description="gate", max_meals_per_day=meals_per_day)
+    Subscription.objects.create(user=user, plan=plan, status="active",
+                                start_date=timezone.now(),
+                                end_date=timezone.now() + timedelta(days=30))
+    return user
+
+
+def test_a_metered_feature_counts_and_stops_at_the_limit(make_user):
+    """`track_feature_usage` held the only increment and had no callers, so
+    `usage_count` never left 0 and every limit passed."""
+    from subscription import quota
+    from subscription.models import SubscriptionFeature, SubscriptionUsage
+
+    user = _paid_user(make_user, "quota_counts", 3)
+    for _ in range(3):
+        assert quota.has_headroom(user, "daily_meals")
+        quota.consume(user, "daily_meals")
+    assert not quota.has_headroom(user, "daily_meals")
+
+    feature = SubscriptionFeature.objects.get(name="daily_meals")
+    rows = SubscriptionUsage.objects.filter(subscription=user.subscription, feature=feature)
+    assert rows.count() == 1
+    assert rows.first().usage_count == 3
+
+
+def test_a_quota_check_does_not_lock_the_subscriber_out(make_user):
+    """The lookup was `(subscription, feature)` while the unique key was
+    `(subscription, feature, period_start)` and `period_start` was `auto_now_add`, so
+    the constraint could never fire. Concurrent requests each inserted a row; from the
+    second on, `get_or_create` raised `MultipleObjectsReturned`, a bare `except:` turned
+    that into a denial, and the paying subscriber was refused for good."""
+    from subscription import quota
+    from subscription.models import SubscriptionFeature, SubscriptionUsage
+
+    user = _paid_user(make_user, "quota_lockout", 5)
+    feature = SubscriptionFeature.objects.get(name="daily_meals")
+
+    # Even given rows that pre-date the repair, the check must answer, not blow up.
+    for _ in range(3):
+        assert quota.has_headroom(user, "daily_meals") is True
+    assert SubscriptionUsage.objects.filter(
+        subscription=user.subscription, feature=feature).count() == 1
+
+
+# ---------------------------------------------------------------------- refunds
+def _completed_payment(make_user, name):
+    import decimal
+    from datetime import timedelta
+    from django.utils import timezone
+    from subscription.models import Payment, Subscription, SubscriptionPlan
+    from subscription.services.payment_service import PaymentService
+
+    user = make_user(name)
+    plan = SubscriptionPlan.objects.create(
+        name=f"refund {name}", price=decimal.Decimal("10.00"), currency="SYP",
+        duration_days=30, description="gate")
+    sub = Subscription.objects.create(user=user, plan=plan, status="pending",
+                                      start_date=timezone.now(),
+                                      end_date=timezone.now() + timedelta(days=30))
+    payment = Payment.objects.create(
+        subscription=sub, amount=decimal.Decimal("10.00"), currency="SYP",
+        status="pending", payment_method="shamcash", description="gate")
+    PaymentService.complete_payment(payment.id, {
+        "amount": "10.00", "currency": "SYP", "status": "completed",
+        "event_id": f"gate-{payment.id}"})
+    sub.refresh_from_db()
+    assert sub.status == "active"
+    return sub, payment
+
+
+def test_a_refund_takes_back_the_access_it_paid_for(make_user):
+    """`'completed' -> 'refunded'` was a declared transition nothing could reach: the
+    webhook had no branch for it and the admin action wrote the column with
+    `queryset.update()`. Either way the money went back and the subscription stayed
+    active."""
+    from subscription.services.payment_service import PaymentService
+
+    sub, payment = _completed_payment(make_user, "refund_revokes")
+    PaymentService.refund_payment(payment.id, "gate")
+
+    payment.refresh_from_db(); sub.refresh_from_db()
+    assert payment.status == "refunded"
+    assert sub.status == "cancelled"
+    assert sub.is_active is False
+
+
+def test_a_subscription_holds_one_pending_renewal(make_user):
+    """Nothing stopped a retried task or a double tap from opening several renewals,
+    and every one of them could be completed and charged."""
+    from subscription.services.payment_service import PaymentService
+
+    sub, _payment = _completed_payment(make_user, "renewal_guard")
+    payments = {PaymentService.start_renewal(sub).id for _ in range(5)}
+    assert len(payments) == 1
+
+
+# ------------------------------------------------------- one bad row, one response
+def test_one_unusable_profile_does_not_fail_the_whole_client_list(make_user, api):
+    """`get_tdee` called a function that raises on an incomplete profile and on an
+    activity level outside its table, once per row of a list, so one client stored as
+    'moderate' returned 500 for all 260."""
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("tdee_tr", user_type="trainer")
+    good = make_user("tdee_ok", height=180, weight=80, age=30, gender="Male",
+                     activity_level="Moderate")
+    thin = make_user("tdee_partial", height=180, weight=80, age=30)  # no gender
+    for client in (good, thin):
+        TrainerClientRelation.objects.create(trainer=trainer, client=client, status="approved")
+
+    response = api(trainer).get("/api/auth/trainer/client-profile/")
+    assert response.status_code == 200
+    assert response.json()["client_count"] == 2
+
+
+def test_the_database_refuses_an_activity_level_the_calculation_cannot_weight(make_user):
+    from django.db import IntegrityError, transaction
+    from users.models import CustomUser
+
+    user = make_user("act_level")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        CustomUser.objects.filter(pk=user.pk).update(activity_level="moderate")
+
+
+# ---------------------------------------------------------------------- language
+def test_a_404_answers_in_the_callers_language(make_user, api):
+    """401, 403 and 400 came back in Arabic and 404 did not: Django builds the message
+    by interpolating a model name, so it never reaches the catalogue."""
+    client = api(make_user("lang_404"))
+    client.defaults["HTTP_ACCEPT_LANGUAGE"] = "ar"
+    response = client.get("/api/routine/routines/99999999/")
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail != "No Routine matches the given query."
+    assert any("؀" <= ch <= "ۿ" for ch in detail), detail
+
+
+def test_every_string_in_the_arabic_catalogue_is_translated():
+    import re
+    from pathlib import Path
+
+    catalogue = Path("locale/ar/LC_MESSAGES/django.po").read_text(encoding="utf-8")
+    entries = re.findall(r'msgid ((?:"[^"]*"\s*)+)msgstr ((?:"[^"]*"\s*)+)', catalogue)
+    missing = [msgid for msgid, msgstr in entries
+               if msgstr.strip() == '""' and "".join(re.findall(r'"([^"]*)"', msgid))]
+    assert not missing, f"{len(missing)} untranslated entries, e.g. {missing[:3]}"
+
+
+# ------------------------------------------------------------------------- volume
+def test_the_achievement_list_does_not_query_per_achievement(make_user, api):
+    """Three serializer method fields each queried per row — an EXISTS, a SELECT and a
+    metric COUNT — so the endpoint cost 70 queries for 20 achievements and 150 for 40."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from achievements.models import Achievement
+
+    user = make_user("n1_ach")
+    for i in range(5):
+        Achievement.objects.create(
+            name=f"gate ach {i}", description="d", category="workout", key=f"gate-ach-{i}",
+            criteria={"type": "workout_count", "target": i + 1}, points=5)
+
+    def count_queries():
+        with CaptureQueriesContext(connection) as ctx:
+            assert api(user).get("/api/achievements/").status_code == 200
+        return len(ctx.captured_queries)
+
+    small = count_queries()
+    for i in range(5, 25):
+        Achievement.objects.create(
+            name=f"gate ach {i}", description="d", category="workout", key=f"gate-ach-{i}",
+            criteria={"type": "workout_count", "target": i + 1}, points=5)
+    large = count_queries()
+    assert large <= small + 2, f"{small} queries for 5 achievements, {large} for 25"
+
+
+def test_the_notification_list_does_not_query_per_notification(make_user, api):
+    """`recipient` is serialised on every row and was not joined, so a page of 20 cost
+    21 queries — one identical user select per row, for the user the queryset already
+    filters on."""
+    import uuid
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from notifications.models import Notification
+
+    user = make_user("n1_notif")
+    for i in range(30):
+        Notification.objects.create(
+            recipient=user, event_type="custom",
+            metadata={"context": {"message": f"m{i}"}},
+            related_object_id=uuid.uuid4().hex, deduplication_key=uuid.uuid4().hex)
+
+    with CaptureQueriesContext(connection) as ctx:
+        response = api(user).get("/api/social/notifications/")
+    assert response.status_code == 200
+    assert len(response.json()["results"]) == 20
+    assert len(ctx.captured_queries) <= 5, \
+        f"{len(ctx.captured_queries)} queries for a page of 20"
+
+
+def test_the_query_log_survives_a_request(make_user, api):
+    """`DatabaseQueryCountMiddleware` called `reset_queries()` on every request, which
+    clears the log `assertNumQueries` reads — so any query-count assertion around a
+    test-client call saw zero and passed, and neither N+1 above could be caught."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    user = make_user("query_log")
+    with CaptureQueriesContext(connection) as ctx:
+        api(user).get("/api/routine/routines/")
+    assert len(ctx.captured_queries) > 0, "the middleware is eating the query log again"
+
+
+def test_the_notification_list_rejects_the_wrong_pagination_contract(make_user, api):
+    """It is cursor-paginated, so `?page=2` was ignored and returned page one again —
+    a client written against the platform's documented shape paged forever."""
+    response = api(make_user("pagination")).get("/api/social/notifications/?page=2")
+    assert response.status_code == 400
+    assert "page" in response.json().get("field_errors", response.json())

@@ -117,16 +117,51 @@ class PaymentAdmin(admin.ModelAdmin):
         return obj.subscription.user.username
     subscription_user.short_description = 'User'
     
+    # `queryset.update()` writes the column and nothing else: it skips save(), so it
+    # skips the state machine that subscription/models.py declares is the only legal
+    # way to move a payment, and it skips every side effect the move is supposed to
+    # have. Marking a payment completed granted the customer nothing, and marking one
+    # refunded took the money back while leaving the subscription active. Each of these
+    # now does what the same transition does when a gateway asks for it.
+    def _apply(self, request, queryset, action, verb):
+        from django.contrib import messages
+        from subscription.services.payment_service import (
+            InvalidPaymentTransition, PaymentError,
+        )
+
+        done, refused = 0, []
+        for payment in queryset:
+            try:
+                action(payment)
+                done += 1
+            except (InvalidPaymentTransition, PaymentError) as exc:
+                refused.append(f"{payment.id}: {exc}")
+        if done:
+            self.message_user(request, f"{verb} {done} payment(s).", messages.SUCCESS)
+        for line in refused:
+            self.message_user(request, line, messages.ERROR)
+
     def mark_as_completed(self, request, queryset):
-        queryset.update(status='completed')
+        """Only for a payment already settled out of band — it activates the subscription."""
+        from subscription.services.payment_service import PaymentService
+        self._apply(request, queryset, lambda p: PaymentService.complete_payment(
+            p.id,
+            {'amount': p.amount, 'currency': p.currency, 'status': 'completed',
+             'event_id': f'admin-{p.id}'},
+        ), "Completed")
     mark_as_completed.short_description = "Mark as completed"
-    
+
     def mark_as_failed(self, request, queryset):
-        queryset.update(status='failed')
+        from subscription.services.payment_service import PaymentService
+        self._apply(request, queryset, lambda p: PaymentService.fail_payment(
+            p.id, "Marked failed by an administrator"), "Failed")
     mark_as_failed.short_description = "Mark as failed"
-    
+
     def mark_as_refunded(self, request, queryset):
-        queryset.update(status='refunded')
+        """Refunds the payment and withdraws the access it paid for."""
+        from subscription.services.payment_service import PaymentService
+        self._apply(request, queryset, lambda p: PaymentService.refund_payment(
+            p.id, "Refunded by an administrator"), "Refunded")
     mark_as_refunded.short_description = "Mark as refunded"
 
 @admin.register(SubscriptionFeature)

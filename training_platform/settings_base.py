@@ -199,6 +199,13 @@ REST_FRAMEWORK = {
     # Previously three shapes were in play (paginated dict, bare array, cursor) and
     # seven viewsets had no pagination at all, so they returned EVERY row — an
     # unbounded response on a 512MB box and three parsers for the mobile client.
+    #
+    # One endpoint is deliberately outside this: the notification list is cursor
+    # paginated, because new notifications arrive between page loads and offset paging
+    # drifts. It answers {next, previous, results} with no `count` — counting is the
+    # cost a cursor exists to avoid — and rejects `?page=` rather than silently
+    # returning the first page to a client using the wrong contract. See
+    # social/views.py NotificationCursorPagination.
     # Project paginator: same {count, next, previous, results} shape as before, but
     # ?page_size=N is honoured (capped at 100) instead of silently ignored.
     'DEFAULT_PAGINATION_CLASS': 'training_platform.pagination.StandardPagination',
@@ -375,6 +382,14 @@ CELERY_BEAT_SCHEDULE = {
     'purge-expired-personal-data': {
         'task': 'training_platform.privacy.purge_expired_personal_data',
         'schedule': 86400,
+    },
+    # Paid access has to be able to lapse. subscription.utils.expire_subscriptions
+    # said "This should be run as a scheduled task" and never was, so 64 of 72 rows
+    # marked 'active' were already past their end_date. Hourly rather than daily: the
+    # gap between cover ending and the sweep noticing is free access.
+    'expire-lapsed-subscriptions': {
+        'task': 'subscription.expire_lapsed_subscriptions',
+        'schedule': crontab(minute=5),
     },
     'close-idle-ai-sessions': {
         'task': 'ai_assistant.tasks.close_idle_sessions',

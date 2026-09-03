@@ -188,8 +188,8 @@ class ShamCashGateway(PaymentGateway):
             logger.warning("ShamCash webhook received but no webhook_secret configured — rejecting")
             return False, {}
 
-        signature = headers.get(self.sig_header) or headers.get(self.sig_header.lower())
-        timestamp = headers.get(self.ts_header) or headers.get(self.ts_header.lower())
+        signature = self.header(headers, self.sig_header)
+        timestamp = self.header(headers, self.ts_header)
         if not signature or not timestamp:
             logger.warning("ShamCash webhook missing signature/timestamp header")
             return False, {}

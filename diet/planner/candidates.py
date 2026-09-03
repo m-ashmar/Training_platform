@@ -151,7 +151,8 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
     from diet.models import FoodItem, UserFoodCategoryPreference, UserFoodPreference
 
     foods = list(catalogue) if catalogue is not None else list(
-        FoodItem.objects.select_related("category").all()
+        # A row whose nutrition failed its own sanity check must not be portioned from.
+        FoodItem.objects.select_related("category").filter(needs_review=False)
     )
 
     # ---- hard constraints: allergens and explicit dislikes only -------------

@@ -31,10 +31,19 @@ class ExerciseSerializer(serializers.ModelSerializer):
     media = ExerciseMediaSerializer(many=True, read_only=True)
     thumbnail = serializers.SerializerMethodField()
     difficulty_level = serializers.CharField(read_only=True)
+    # The stored value is the client's key; the label is what a person reads, and it
+    # goes through the translation catalogue. Serving only the raw value meant an
+    # Arabic client displayed "Front Quads" and "beginner" in English or wrote its own
+    # second copy of the vocabulary.
+    target_muscle_display = serializers.CharField(
+        source='get_target_muscle_display', read_only=True)
+    difficulty_level_display = serializers.CharField(
+        source='get_difficulty_level_display', read_only=True)
 
     class Meta:
         model = Exercise
-        fields = ['id', 'name', 'description', 'target_muscle', 'difficulty_level', 'image', 'thumbnail', 'media']
+        fields = ['id', 'name', 'description', 'target_muscle', 'target_muscle_display',
+                  'difficulty_level', 'difficulty_level_display', 'image', 'thumbnail', 'media']
 
     def get_image(self, obj):
         request = self.context.get('request')
@@ -135,7 +144,23 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         "exercise": _("You can only assign your own exercises or global exercises.")
                     })
-        
+                if not exercise.is_active:
+                    raise serializers.ValidationError({
+                        "exercise": _("That exercise has been retired and cannot be added.")
+                    })
+
+        # Checked here rather than on the model: `days` belongs to the routine, so a
+        # trainer shortening a routine would otherwise invalidate rows already written
+        # against the old length. Asking at the point the day is chosen keeps the
+        # answer true when it is given.
+        day = attrs.get('day', getattr(self.instance, 'day', None))
+        routine = routine or getattr(self.instance, 'routine', None)
+        if day is not None and routine is not None and day > routine.days:
+            raise serializers.ValidationError({
+                "day": _("Day %(day)s exceeds the routine's %(days)s days.")
+                       % {"day": day, "days": routine.days}
+            })
+
         return attrs
 
     def create(self, validated_data):
@@ -667,11 +692,23 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
         return value if value is not None else 0.0
 
     def get_tdee(self, obj):
-        """Calculate TDEE for the client."""
-        if obj.height and obj.weight and obj.age:
+        """Calculate TDEE for the client, or 0.0 when their profile cannot support it.
+
+        `calculate_daily_calories` raises on an incomplete profile and on an activity
+        level outside its table, and this method is called once per row of a list. One
+        client stored as 'moderate' instead of 'Moderate' therefore returned 500 for
+        the whole of `/api/auth/trainer/client-profile/` — 260 clients unreachable
+        because of one. A profile this serializer cannot compute is a zero for that
+        row, logged, not an error for everyone else's.
+        """
+        if not (obj.height and obj.weight and obj.age):
+            return 0.0
+        try:
             value = obj.calculate_daily_calories('Maintain')
-            return value if value is not None else 0.0
-        return 0.0
+        except ValueError:
+            logger.warning("TDEE unavailable for user %s", obj.pk, exc_info=True)
+            return 0.0
+        return value if value is not None else 0.0
 
     def get_full_name(self, obj):
         """Get client's full name."""

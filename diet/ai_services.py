@@ -310,28 +310,7 @@ class DietGenerator:
     # =============================
     def _determine_user_goal(self) -> str:
         """Infer user's goal: 'Lose', 'Gain', or 'Maintain'."""
-        # Prefer explicit attribute if present
-        goal = getattr(self.user, 'fitness_goal', None) or getattr(self.user, 'goal', None)
-        if not goal:
-            # Try client_goals list
-            try:
-                goals = (getattr(self.user, 'client_goals', []) or [])
-                goals_l = ",".join(goals).lower()
-                if 'lose' in goals_l or 'fat' in goals_l:
-                    return 'Lose'
-                if 'gain' in goals_l or 'muscle' in goals_l:
-                    return 'Gain'
-            except Exception:
-                # Optional side effect: swallowing this silently is what made the
-                # surrounding failures invisible in logs. Control flow is unchanged.
-                logger.debug('suppressed non-fatal error', exc_info=True)
-            return 'Maintain'
-        g = str(goal).lower()
-        if 'lose' in g or 'fat' in g:
-            return 'Lose'
-        if 'gain' in g or 'muscle' in g:
-            return 'Gain'
-        return 'Maintain'
+        return self.user.resolve_fitness_goal()
 
     def _macro_ratios_for_goal(self, goal: str) -> Dict[str, float]:
         """Default macro ratios by goal."""

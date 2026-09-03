@@ -77,7 +77,7 @@ def cancel_subscription(subscription_id, immediate=False, reason=""):
             Payment.objects.create(
                 subscription=subscription,
                 amount=0,
-                currency='USD',
+                currency=subscription.plan.currency,
                 status='cancelled',
                 description=f"Subscription cancelled: {reason}",
                 metadata={'reason': reason, 'immediate': immediate}
@@ -176,23 +176,12 @@ def track_feature_usage(user, feature_name, increment=1):
         
         feature = SubscriptionFeature.objects.get(name=feature_name, is_active=True)
         
-        # Get or create usage record
-        usage, created = SubscriptionUsage.objects.get_or_create(
-            subscription=subscription,
-            feature=feature,
-            defaults={
-                'limit': getattr(subscription.plan, f'max_{feature_name}', 0),
-                'period_end': timezone.now() + timedelta(days=30)
-            }
-        )
-        
-        # Atomic increment — avoids a read-modify-write race that could lose
-        # concurrent increments and let a user exceed their plan limit.
-        SubscriptionUsage.objects.filter(pk=usage.pk).update(
-            usage_count=models.F('usage_count') + increment
-        )
-
-        return True
+        # `subscription.quota` owns the period, the limit lookup and the increment.
+        # The version that lived here resolved the limit from `max_{feature_name}` —
+        # `max_daily_meals` for the `daily_meals` feature, a field the plan does not
+        # have — so it read 0 and every caller saw "unlimited". It also had no callers.
+        from subscription import quota
+        return quota.consume(user, feature_name, increment)
         
     except (Subscription.DoesNotExist, SubscriptionFeature.DoesNotExist):
         return False
@@ -210,10 +199,16 @@ def get_subscription_statistics():
     expired_subscriptions = Subscription.objects.filter(status='expired').count()
     cancelled_subscriptions = Subscription.objects.filter(status='cancelled').count()
     
-    # Revenue calculation (completed payments)
-    total_revenue = Payment.objects.filter(status='completed').aggregate(
-        total=models.Sum('amount')
-    )['total'] or 0
+    # Revenue is reported PER CURRENCY. Summing a single 'amount' column across a
+    # ledger that holds both SYP and USD rows produced one meaningless number; the
+    # currencies differ by four orders of magnitude.
+    revenue_by_currency = {
+        row['currency']: row['total']
+        for row in Payment.objects.filter(status='completed')
+        .values('currency')
+        .annotate(total=models.Sum('amount'))
+        .order_by('currency')
+    }
     
     return {
         'total_subscriptions': total_subscriptions,
@@ -221,32 +216,21 @@ def get_subscription_statistics():
         'trial_subscriptions': trial_subscriptions,
         'expired_subscriptions': expired_subscriptions,
         'cancelled_subscriptions': cancelled_subscriptions,
-        'total_revenue': total_revenue
+        'revenue_by_currency': revenue_by_currency,
     }
 
 def expire_subscriptions():
+    """Deprecated shim. Use the scheduled task instead.
+
+    Kept so any caller outside this repo keeps working, but the implementation now
+    lives in subscription.tasks.expire_lapsed_subscriptions, which is registered with
+    Celery and listed in CELERY_BEAT_SCHEDULE. Two copies of an expiry rule is one
+    copy too many.
     """
-    Expire subscriptions that have passed their end date.
-    This should be run as a scheduled task.
-    
-    Returns:
-        int: Number of subscriptions expired
-    """
-    now = timezone.now()
-    expired_count = 0
-    
-    # Find subscriptions that should be expired
-    expired_subscriptions = Subscription.objects.filter(
-        status__in=['active', 'trial'],
-        end_date__lt=now
-    )
-    
-    for subscription in expired_subscriptions:
-        subscription.status = 'expired'
-        subscription.save()
-        expired_count += 1
-    
-    return expired_count
+    from .tasks import expire_lapsed_subscriptions
+
+    return expire_lapsed_subscriptions()
+
 
 def send_subscription_notifications():
     """

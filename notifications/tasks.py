@@ -2,6 +2,18 @@ import logging
 import importlib
 from celery import shared_task
 from django.conf import settings
+from django.db import InterfaceError, OperationalError
+
+# Transient failures worth retrying, matching routine/, diet/ and social/. The two
+# beat tasks below carried no retry policy at all, so a single database or broker blip
+# dropped a whole day's workout reminders, or one user's milestone, with a log line.
+TRANSIENT_ERRORS = (
+    OperationalError,
+    InterfaceError,
+    ConnectionError,
+    TimeoutError,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +104,14 @@ def drain_dead_letter_queue():
     return f"pending={pending} stuck={stuck}"
 
 
-@shared_task(name="notifications.award_progress_milestones")
+@shared_task(
+    name="notifications.award_progress_milestones",
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
 def award_progress_milestones(user_id: int):
     """Evaluate and send milestone notifications for one user.
 
@@ -116,7 +135,14 @@ def award_progress_milestones(user_id: int):
     return sent
 
 
-@shared_task(name="notifications.send_workout_reminders")
+@shared_task(
+    name="notifications.send_workout_reminders",
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
 def send_workout_reminders():
     """Remind each client about today's training, in their own evening.
 

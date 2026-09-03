@@ -115,7 +115,7 @@ class TrainingDataCollector:
                     "height": getattr(user, 'height', None),
                     "weight": getattr(user, 'weight', None),
                     "activity_level": getattr(user, 'activity_level', None),
-                    "fitness_goal": getattr(user, 'fitness_goal', None),
+                    "fitness_goal": user.resolve_fitness_goal(),
                     "dietary_restrictions": getattr(user, 'dietary_restrictions', None)
                 },
                 "health_metrics": {

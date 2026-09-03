@@ -161,6 +161,24 @@ class AchievementEngine:
         return cls._check_condition(current_value, target, condition)
 
     @classmethod
+    def metric_value_cached(cls, user: CustomUser, criteria: dict, cache=None):
+        """`_get_metric_value` with a per-request memo.
+
+        A catalogue of achievements shares a handful of metric types — twenty of them
+        may all count workouts, each with a different target — so computing the metric
+        once per achievement re-ran the same COUNT twenty times. The key is everything
+        the metric actually reads: its type, and the unit that `total_distance` takes.
+        """
+        criteria_type = criteria.get('type')
+        key = (criteria_type, criteria.get('unit', 'km'))
+        if cache is not None and key in cache:
+            return cache[key]
+        value = cls._get_metric_value(user, criteria_type, criteria)
+        if cache is not None:
+            cache[key] = value
+        return value
+
+    @classmethod
     def _get_metric_value(cls, user: CustomUser, criteria_type: str, 
                           criteria: dict, **context) -> Optional[float]:
         """Get the current metric value for the user."""
@@ -401,15 +419,22 @@ class AchievementEngine:
             # canonical notifications.Notification store and dispatches FCM.
             # (This previously wrote a legacy social.Notification row that no API
             # endpoint reads, so achievement notifications were never delivered.)
+            from django.db import transaction as _transaction
+
             from notifications.domain.dispatcher import emit_event
             from notifications.domain.events import AchievementAwardedEvent
 
-            emit_event(AchievementAwardedEvent(
+            # Queued on commit, not now. `.delay()` inside an open transaction puts
+            # the message on the broker before the row is visible, so a worker can read
+            # state that is not there yet — and if the transaction rolls back the
+            # notification still goes out, telling the user about something that never
+            # happened.
+            _transaction.on_commit(lambda: emit_event(AchievementAwardedEvent(
                 user_id=user.id,
                 achievement_id=achievement.id,
                 achievement_name=achievement.name,
                 points=achievement.points,
-            ))
+            )))
 
             logger.info(f"Awarded '{achievement.name}' to user {user.username}")
             

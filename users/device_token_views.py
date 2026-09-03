@@ -10,6 +10,7 @@ import logging
 from django.http import Http404
 from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
                                        ValidationError as DRFValidationError)
+from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ class FCMTokenView(APIView):
                 logger.info(f"Registered new FCM token for user {request.user.id}")
                 return Response({'message': _('Token registered successfully')}, status=status.HTTP_201_CREATED)
 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # These carry their own status; the broad handler below made them 500s.
             raise
         except Exception as e:
@@ -113,7 +114,7 @@ class FCMTokenView(APIView):
             else:
                 return Response({'error': _('Token not found')}, status=status.HTTP_404_NOT_FOUND)
                 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # These carry their own status; the broad handler below made them 500s.
             raise
         except Exception as e:

@@ -295,8 +295,8 @@ class PostViewSet(viewsets.ModelViewSet):
         
         GET /api/social/posts/feed/?page=1&limit=10
         """
-        page = int(request.query_params.get('page', 1))
-        limit = min(int(request.query_params.get('limit', 10)), 50)
+        page = int_param(request.query_params, 'page', default=1, minimum=1)
+        limit = int_param(request.query_params, 'limit', default=10, minimum=1, maximum=50)
         offset = (page - 1) * limit
         user_id = request.user.id
         
@@ -344,6 +344,7 @@ class PostViewSet(viewsets.ModelViewSet):
             })
 
 
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.pagination import CursorPagination
 
 class CommentCursorPagination(CursorPagination):
@@ -491,39 +492,74 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             )
         return qs
     
+    CHALLENGES_CACHE_TIMEOUT = 120
+
     def list(self, request, *args, **kwargs):
-        """
-        Per-user short-lived cache for the challenges list to reduce repeated DB work.
-        Cached for 30 seconds keyed by user and querystring.
+        """Short-lived per-user cache of the challenges list.
+
+        The key covers the QUERY STRING as well as the user. It did not, despite the
+        docstring claiming it did, so the first request of a 120-second window was
+        replayed for every later one: ask for page 1 and page 2 is unreachable, ask
+        for page 2 first and page 1 is unreachable. Whichever arrived first won.
         """
         try:
-            from django.utils.translation import get_language
-            from training_platform.i18n import CACHE_VERSION
-            user_part = f"user:{request.user.id}" if request.user and request.user.is_authenticated else "anon"
-            lang = get_language() or 'en'
-            key = f"challenges_list:{user_part}:{lang}:{CACHE_VERSION}"
+            key = self._challenges_cache_key(request.user, request.query_params)
             cached = cache.get(key)
             if cached is not None:
                 return Response(cached)
             response = super().list(request, *args, **kwargs)
             if response.status_code == 200 and isinstance(response.data, (list, dict)):
-                cache.set(key, response.data, timeout=120)
+                cache.set(key, response.data, timeout=self.CHALLENGES_CACHE_TIMEOUT)
             return response
         except Exception:
             return super().list(request, *args, **kwargs)
 
-    def _challenges_cache_key(self, user):
-        """Return the challenges_list cache key for a given user."""
+    @staticmethod
+    def _challenges_cache_user_part(user):
+        return f"user:{user.id}" if user and user.is_authenticated else "anon"
+
+    @classmethod
+    def _challenges_cache_version(cls, user):
+        """Monotonic per-user version, bumped to invalidate every variant at once.
+
+        One user now has one cache entry PER query string, so a single cache.delete()
+        can no longer reach them all — it only ever knew one key. Folding a version
+        number into the key means a write orphans every variant in one step, and the
+        orphans fall out on their own when their short TTL expires.
+        """
+        version_key = f"challenges_ver:{cls._challenges_cache_user_part(user)}"
+        version = cache.get(version_key)
+        if version is None:
+            version = 1
+            cache.set(version_key, version, timeout=None)
+        return version
+
+    @classmethod
+    def _challenges_cache_key(cls, user, query_params=None):
+        """Cache key for one user's challenges list under one exact query string."""
+        import hashlib
         from django.utils.translation import get_language
         from training_platform.i18n import CACHE_VERSION
-        user_part = f"user:{user.id}" if user and user.is_authenticated else "anon"
+
         lang = get_language() or 'en'
-        return f"challenges_list:{user_part}:{lang}:{CACHE_VERSION}"
+        # Sorted so ?a=1&b=2 and ?b=2&a=1 share an entry; hashed so a caller cannot
+        # grow the key space with arbitrarily long query strings.
+        items = sorted((query_params or {}).items())
+        qs_digest = hashlib.sha256(repr(items).encode('utf-8')).hexdigest()[:16]
+        return (
+            f"challenges_list:{cls._challenges_cache_user_part(user)}:{lang}:"
+            f"{CACHE_VERSION}:v{cls._challenges_cache_version(user)}:{qs_digest}"
+        )
 
     def _invalidate_challenges_cache(self, request):
-        """Delete this user's challenges list cache entry."""
+        """Invalidate every cached variant of this user's challenges list."""
         try:
-            cache.delete(self._challenges_cache_key(request.user))
+            version_key = f"challenges_ver:{self._challenges_cache_user_part(request.user)}"
+            try:
+                cache.incr(version_key)
+            except ValueError:
+                # No counter yet: seeding it at 2 skips whatever v1 entries exist.
+                cache.set(version_key, 2, timeout=None)
         except Exception:
             # Optional side effect: swallowing this silently is what made the
             # surrounding failures invisible in logs. Control flow is unchanged.
@@ -751,6 +787,7 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
 
 from notifications.models import Notification
 from rest_framework.pagination import CursorPagination
+from training_platform.query_params import int_param
 
 
 class NotificationCursorPagination(CursorPagination):
@@ -771,6 +808,20 @@ class NotificationCursorPagination(CursorPagination):
     max_page_size = 50
     ordering = '-created_at'
 
+    def paginate_queryset(self, queryset, request, view=None):
+        # `?page=` belongs to the offset paginator every other list endpoint uses.
+        # Cursor pagination ignored it, so a client written against the platform's
+        # documented shape paged forever through the same twenty rows and never saw
+        # the other hundred. Say so rather than answering page one again.
+        if 'page' in request.query_params:
+            raise DRFValidationError({
+                'page': _(
+                    "This endpoint is cursor-paginated. Follow the `next` link "
+                    "instead of passing `page`."
+                )
+            })
+        return super().paginate_queryset(queryset, request, view)
+
 
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -786,7 +837,10 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     pagination_class = NotificationCursorPagination
     
     def get_queryset(self):
-        qs = Notification.objects.select_related('actor').filter(
+        # `recipient` is serialised on every row and was not joined, so a page of 20
+        # cost 21 queries: one for the notifications and one identical user select per
+        # row, for the same user the queryset already filters on.
+        qs = Notification.objects.select_related('actor', 'recipient').filter(
             recipient=self.request.user
         ).order_by('-created_at')
         

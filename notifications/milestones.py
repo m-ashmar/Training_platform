@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 
-from django.utils.translation import gettext as _
+from django.utils.translation import gettext_lazy as _
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +92,17 @@ def award(user) -> int:
     """
     from notifications.services import NotificationService
 
+    from training_platform.i18n import LanguageContext
+
     sent = 0
-    for milestone_id, message in evaluate(user):
+    # Rendered here, inside the recipient's language. `evaluate` builds lazy strings;
+    # resolving them on the worker without this context would use LANGUAGE_CODE, and
+    # the sentence would arrive in English inside an Arabic notification because the
+    # FCM boundary translates the template around it, not the text handed to it.
+    with LanguageContext.for_user_id(user.pk):
+        milestones_reached = [(mid, str(msg)) for mid, msg in evaluate(user)]
+
+    for milestone_id, message in milestones_reached:
         result = NotificationService.create_and_send(
             recipient=user,
             event_type="progress_milestone",

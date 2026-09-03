@@ -54,6 +54,25 @@ class DietPersistenceService:
             ed = sd + _timedelta(days=duration_days - 1)
 
             with transaction.atomic():
+                # Serialise generation for this user. Five parallel "generate" taps each
+                # created their own active plan, so the user ended up with five active
+                # plans and twenty meals for one day. Locking the user row makes the
+                # supersede below a real check rather than a race.
+                type(self.user).objects.select_for_update().filter(pk=self.user.pk).first()
+
+                # A new plan REPLACES any active plan covering the same dates. Nothing
+                # did this, and DietPlan.clean() — which exists to reject exactly that
+                # overlap — was never executed because save() does not call full_clean().
+                # So plans accumulated: the list showed N duplicates for one day while
+                # progress tracked only the newest, and which plan applied was undefined.
+                superseded = DietPlan.objects.filter(
+                    user=self.user, is_active=True,
+                    start_date__lte=ed, end_date__gte=sd,
+                ).update(is_active=False)
+                if superseded:
+                    log_json(self.logger, "info", "Superseded overlapping active plans",
+                             user_id=self.user.id, count=superseded)
+
                 # Validate AI ingredients are in-DB and allowed by per-meal lists
                 categories, macro_pool, name_to_food = self._build_food_category_maps()
                 self._validate_ingredients_in_db(plan_output)
@@ -61,7 +80,7 @@ class DietPersistenceService:
 
                 diet_plan = DietPlan.objects.create(
                     user=self.user,
-                    goal=getattr(self.user, 'fitness_goal', 'Maintain'),
+                    goal=self.user.resolve_fitness_goal(),
                     daily_calories=self.user.calculate_daily_calories(),
                     start_date=sd,
                     end_date=ed,
@@ -171,8 +190,8 @@ class DietPersistenceService:
                         violations=[v.food_name for v in report.violations],
                         unverified_count=len(report.unverified),
                     )
-                # Attached (not persisted) so callers/serializers can act on it.
                 diet_plan.allergen_report = report.as_dict()
+                diet_plan.save(update_fields=['allergen_report'])
 
                 return diet_plan
         except (IntegrityError, ValidationError) as e:

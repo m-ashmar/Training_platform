@@ -17,6 +17,7 @@ from .serializers import (
     UserAchievementDetailSerializer,
 )
 from .engine import AchievementEngine
+from training_platform.query_params import int_param
 
 
 class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
@@ -58,6 +59,18 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
             return AchievementWithProgressSerializer
         return AchievementWithProgressSerializer
     
+    def _progress_context(self, request):
+        """The two maps that turn this endpoint's per-row queries into per-request ones."""
+        if not request.user.is_authenticated:
+            return {}
+        return {
+            'earned_map': {
+                ua.achievement_id: ua
+                for ua in UserAchievement.objects.filter(user=request.user)
+            },
+            'metric_cache': {},
+        }
+
     def list(self, request, *args, **kwargs):
         """
         List all available achievements with user's progress.
@@ -65,8 +78,13 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         Returns achievements grouped by category with progress data.
         """
         queryset = self.get_queryset()
-        serializer = self.get_serializer(queryset, many=True)
-        
+        # Built once and handed to the serializer, which used to issue an EXISTS, a
+        # SELECT and a metric COUNT per achievement.
+        serializer = self.get_serializer(
+            queryset, many=True,
+            context={**self.get_serializer_context(), **self._progress_context(request)},
+        )
+
         # Group by category
         categories = {}
         for item in serializer.data:
@@ -171,7 +189,7 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         
         Returns top achievers ranked by total points.
         """
-        limit = min(int(request.query_params.get('limit', 10)), 50)
+        limit = int_param(request.query_params, 'limit', default=10, minimum=1, maximum=50)
         
         # Aggregate points per user
         from django.db.models import Sum as DjSum

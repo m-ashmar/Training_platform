@@ -2444,3 +2444,134 @@ since it could not tell a backfilled row from someone who later picks UTC on pur
 
 Result: 378/378 on `Asia/Damascus`, 0 unparseable. The model default is now a callable,
 gated by `test_no_account_is_left_on_the_frozen_timezone_default`.
+
+---
+
+## Dive 17 — model validation: declared vs enforced (2026-09-03)
+
+Method: loaded every row of the twelve models whose `save()` called `full_clean()` and
+validated it against the development Postgres on 5433. 1347 of 4819 rows could not be
+saved. All twelve now validate clean, and the gate is at 71 tests.
+
+| Model | Rows | Rejected before | After |
+|---|---|---|---|
+| routine.RoutineExercise | 2201 | 878 | 0 |
+| diet.DietPlan | 333 | 240 | 0 |
+| routine.Routine | 252 | 100 | 0 |
+| diet.FoodItem | 346 | 99 | 0 |
+| routine.Exercise | 555 | 30 | 0 |
+
+### Root causes, not leaves
+
+**R1 — `full_clean()` in `save()` was the wrong enforcement point.**
+It re-validated a whole historical row against today's rules on every partial write,
+including rules about other rows' present state. Replaced by `RowValidationMixin` in
+`training_platform/model_validation.py`: row-local rules stay in `clean()` and run on
+every write; contextual rules move to the serializer that performs the action. The
+constraint re-check is dropped — the database is the authority for constraints and
+`validate_constraints()` only asks the same question a query earlier.
+
+**R2 — mutable present-tense facts used as predicates on immutable historical rows.**
+`Routine.clean()` required an assigned client's *current* trainer to still equal the
+routine's creator, and `RoutineExercise.clean()` required the exercise to be *still*
+accessible. Reassigning a client or retiring an exercise silently froze past rows.
+Both checks already existed, correctly, in `RoutineSerializer._validate_client_assignments`
+and `RoutineExerciseSerializer.validate`; the model copies are gone. The day-bound
+check moved to the serializer for the same reason.
+
+**R3 — `fitness_goal` was read in five places and was a field on no model.**
+Every `getattr(user, 'fitness_goal', 'Maintain')` returned its fallback, and
+`calculate_daily_calories()` defaulted the same way, so every generated plan was
+labelled Maintain *and* given a maintenance calorie target whatever the client asked
+for. One resolver now, `CustomUser.resolve_fitness_goal()`, reading `client_goals`;
+`calculate_daily_calories(goal=None)` uses it. A profile asking for loss and gain at
+once gets Maintain rather than a guessed deficit.
+
+**R4 — two goal vocabularies for one column.**
+`DietPlan.GOAL_CHOICES` stores title case; the planner package works in lower case
+throughout. `DietPlan.normalise_goal()` converts at every boundary that takes a goal
+from request data or from the planner.
+
+**R5 — "global exercise" had two definitions and one-directional protection.**
+0017 guarded `is_global AND owner` and left `NOT is_global AND no owner` open: a row
+belonging to nobody and visible to nobody. `Exercise.save()` now derives the column
+from ownership; migration 0018 replaces the constraint with the biconditional.
+`clean()` no longer silently rewrites `is_global` behind the caller.
+
+**R6 — the food catalogue had no way to say "these numbers are wrong".**
+99 of 346 rows failed `FoodItem.clean()`. Three distinct causes: 44 stored a relative
+media path in a URLField, 52 labelled a correct per-100 g row 'Serving', 'Whole' or
+nothing, and a handful state calories their own macros contradict. The first two were
+repaired; the last get `needs_review`, which keeps them saveable for curation and out
+of the planner's pool. Rewriting their nutrition from the macros would have been
+inventing data.
+
+**R7 — a data migration cannot write a translated column.**
+`apps.get_model()` returns a historical model with no modeltranslation registration,
+so assigning `name` wrote the plain column while the API kept reading `name_en` as
+blank. Same shape as the import that once left 542 of 554 exercise names empty through
+the API. Fixed in 0050.
+
+### Migrations added
+- `routine/0018_exercise_visibility_biconditional` — biconditional constraint, retires `target_muscle='Legs'`
+- `diet/0048_fooditem_needs_review_and_catalogue_repair`
+- `diet/0049_retire_overlapping_active_plans` — retired 214 overlapping active plans
+- `diet/0050_finish_catalogue_repair`
+
+### Still open (content, not code)
+- `name_ar` is empty on all 346 foods and 554 exercises; the API serves `ar`.
+- The platform exercise catalogue is 8 rows. The other 547 are development test data.
+- 6 food rows carry `needs_review` and need a human.
+
+---
+
+## Dive 18 — six-dive audit and its fixes (2026-09-03)
+
+26 findings, all closed. Full detail in `bugs.md`; this is the index.
+
+| Dive | Focus | Findings | Root cause they shared |
+|---|---|---|---|
+| 1 | Concurrency | 9 | idempotency as a global token; no owner for the quota subsystem |
+| 2 | Permissions by execution | 2 | a form-layer rule guarding a value the calculation refuses |
+| 3 | Money and webhooks | 3 | payment state changed outside the service declared to own it |
+| 4 | Celery at-least-once | 2 | work queued inside an open transaction |
+| 5 | Arabic and i18n | 6 | bilingual paths that were not bilingual |
+| 6 | Volume and N+1 | 4 | per-row work in serializers; a middleware that ate the query log |
+
+### The four that mattered
+- Two clients sharing an idempotency key: the second was handed the first's transfer
+  receipt while their own transfer silently did not happen, with a 200 to say it had.
+- The same key replayed with a different amount returned the earlier receipt and moved
+  no money. `request_hash` existed for exactly this and was compared nowhere.
+- Concurrent quota checks created duplicate usage rows, and from the second row on a
+  paying subscriber was denied diet and meal generation permanently and silently.
+- A refund or chargeback webhook was answered 200 and dropped, so the money went back
+  and the subscription stayed active.
+
+### New modules
+- `wallet/idempotency.py` — one implementation of claiming a key, replacing four copies
+- `subscription/quota.py` — one owner of metered-feature limits and their increments
+
+### Migrations
+`wallet/0007_idempotency_key_per_caller`, `subscription/0008_quota_periods_and_features`,
+`subscription/0009_subscriptionplan_description_ar_and_more`,
+`subscription/0010_backfill_plan_translation_source`, `users/0031_activity_level_constraint`
+
+### The pattern, again
+Six more instances of *declared and honoured by nothing*: a hash column written four
+times and read never; the only usage increment in the codebase with no callers; a
+`unique_together` whose third column was `auto_now_add`, so it could not fire; a
+`'completed' -> 'refunded'` transition no request path could reach; `SubscriptionPlan`
+serving a bilingual API with no translated fields; a pagination contract stated in
+settings that one endpoint did not keep. Worth a dedicated sweep rather than finding
+them one dive at a time.
+
+### Also worth knowing
+- `validate_row()` no longer pre-checks uniqueness. `get_or_create` resolves a lost
+  race by catching `IntegrityError`, which a `ValidationError` raised first is not, so
+  the pre-check denied half of eight concurrent callers. DRF still returns 400 for API
+  writes; the database is the authority elsewhere.
+- The Arabic catalogue is complete for the first time: 481 of 481 entries. 174 strings
+  were written during this pass and want a native speaker's review.
+- `name_ar` remains empty on 346 foods and 554 exercises. That is content. The columns
+  resolve correctly; nothing here invented catalogue data.

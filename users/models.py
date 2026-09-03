@@ -91,6 +91,20 @@ def _default_timezone():
     return getattr(settings, 'TIME_ZONE', 'UTC')
 
 
+#: The only values `calculate_daily_calories` knows how to weight. Declared as
+#: `choices`, which DRF enforces and nothing else did — a management command, a fixture
+#: or a probe could store 'moderate', and one such row was enough to raise out of a
+#: serializer method and turn an admin's whole client list into a 500. Migration 0031
+#: makes the database refuse it. Module-level so `Meta.constraints` can name it too.
+ACTIVITY_LEVELS = [
+    ('Sedentary', 'Sedentary'),
+    ('Light', 'Light Exercise'),
+    ('Moderate', 'Moderate Exercise'),
+    ('Active', 'Active'),
+    ('VeryActive', 'Very Active'),
+]
+
+
 class CustomUser(AbstractBaseUser, PermissionsMixin):
     """
     Enhanced CustomUser model supporting multi-trainer functionality.
@@ -194,13 +208,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     # Activity and fitness data
     activity_level = models.CharField(
         max_length=20,
-        choices=[
-            ('Sedentary', 'Sedentary'),
-            ('Light', 'Light Exercise'),
-            ('Moderate', 'Moderate Exercise'),
-            ('Active', 'Active'),
-            ('VeryActive', 'Very Active')
-        ],
+        choices=ACTIVITY_LEVELS,
         default='Sedentary'
     )
     
@@ -280,6 +288,16 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             models.Index(fields=['username']),
             models.Index(fields=['assigned_trainer']),
         ]
+        constraints = [
+            # `choices` is a form-layer rule. Everything that writes this column
+            # without going through a serializer bypassed it, and
+            # `calculate_daily_calories` raises on a value it does not recognise, so
+            # one such row failed a whole list response for everybody in it.
+            models.CheckConstraint(
+                condition=models.Q(activity_level__in=[c[0] for c in ACTIVITY_LEVELS]),
+                name='user_activity_level_is_a_declared_choice',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.username} ({self.get_user_type_display()})"
@@ -357,16 +375,52 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             return 10 * self.weight + 6.25 * self.height - 5 * self.age - 161
         return None
 
-    def calculate_daily_calories(self, goal='Maintain'):
+    # Widely used clinical floors for a medically unsupervised diet, and a ceiling
+    # comfortably above any real athlete. A plan outside these is not a plan.
+    MIN_DAILY_CALORIES = 1200
+    MAX_DAILY_CALORIES = 6000
+
+    #: The vocabulary `DietPlan.goal` stores. The diet planner works in lower case
+    #: internally; it lower-cases at its own boundary rather than storing a second set.
+    FITNESS_GOALS = ('Lose', 'Maintain', 'Gain')
+
+    _GOAL_LOSE_WORDS = ('lose', 'loss', 'fat', 'cut', 'slim', 'lean')
+    _GOAL_GAIN_WORDS = ('gain', 'muscle', 'bulk', 'mass', 'strength')
+
+    def resolve_fitness_goal(self):
+        """This user's goal, as one of `FITNESS_GOALS`.
+
+        `fitness_goal` is read in five places across the diet app and is a field on no
+        model, so every `getattr(user, 'fitness_goal', 'Maintain')` returned its
+        fallback. The goals are in `client_goals`; read them from one place.
+
+        A profile asking for both directions at once gets Maintain. Guessing between a
+        deficit and a surplus is worse than declining to guess.
+        """
+        words = ' '.join(str(g) for g in (self.client_goals or [])).lower()
+        wants_loss = any(w in words for w in self._GOAL_LOSE_WORDS)
+        wants_gain = any(w in words for w in self._GOAL_GAIN_WORDS)
+        if wants_loss and not wants_gain:
+            return 'Lose'
+        if wants_gain and not wants_loss:
+            return 'Gain'
+        return 'Maintain'
+
+    def calculate_daily_calories(self, goal=None):
         """
         Calculate daily calorie needs based on BMR and activity level.
-        
+
         Args:
-            goal: 'Lose', 'Gain', or 'Maintain'
-            
+            goal: 'Lose', 'Gain', or 'Maintain'. Omit it to use the client's own goal.
+                  It used to default to 'Maintain', and every caller that omitted it —
+                  plan generation included — silently produced a maintenance target for
+                  a client who had asked to lose or gain.
+
         Returns:
             Daily calorie target or None if insufficient data
         """
+        if goal is None:
+            goal = self.resolve_fitness_goal()
         required_fields = [self.height, self.weight, self.age, self.gender]
         if any(field is None for field in required_fields):
             raise ValueError("Complete profile required: height, weight, age, gender")
@@ -382,14 +436,29 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             'Active': 1.725,
             'VeryActive': 1.9
         }
-        maintenance = bmr * activity_factors.get(self.activity_level, 1.2)
-        
+        # An unrecognised activity level is a data error, not a person who never moves.
+        # `.get(..., 1.2)` silently treated one as the other: a user stored as 'moderate'
+        # instead of 'Moderate' was quietly downgraded to the sedentary factor and told
+        # to eat 22.6% less than their real maintenance, with nothing logged anywhere.
+        if self.activity_level not in activity_factors:
+            raise ValueError(
+                f"Unrecognised activity level {self.activity_level!r}. "
+                f"Expected one of: {', '.join(activity_factors)}"
+            )
+        maintenance = bmr * activity_factors[self.activity_level]
+
         # Apply goal-based adjustments
         if goal == 'Lose':
-            return maintenance - 500
+            target = maintenance - 500
         elif goal == 'Gain':
-            return maintenance + 500
-        return maintenance
+            target = maintenance + 500
+        else:
+            target = maintenance
+
+        # Clamp. A flat -500 for a small, sedentary person produced targets below any
+        # safe intake, and nothing rejected an absurd one at the other end either. These
+        # are health bounds, not input validation, so they belong with the calculation.
+        return max(self.MIN_DAILY_CALORIES, min(target, self.MAX_DAILY_CALORIES))
 
     def can_access_user_data(self, target_user):
         """

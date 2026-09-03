@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+
+from django.core.exceptions import FieldError
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -138,9 +140,60 @@ def purge_expired() -> dict:
             n, _detail = qs.delete()
             if n:
                 removed[source.label] = n
+        except FieldError:
+            # The source is misconfigured, not merely unlucky. Every future run fails
+            # the same way, so this must be shouted rather than filed under "failed".
+            logger.critical(
+                "Retention source %s is misconfigured: no field %r on %s. These rows "
+                "are never purged. See privacy.validate_sources().",
+                source.label, source.retention_field, source.model,
+            )
         except Exception:
             logger.exception("Retention purge failed for %s", source.model)
     return removed
+
+
+# ----------------------------------------------------------------- self-check
+def validate_sources() -> list[str]:
+    """Every declared field must exist on the model it is declared against.
+
+    A source is a declaration, and nothing was checking it against reality. One
+    retention_field named a column that did not exist; purge_expired() caught the
+    FieldError, logged it and carried on, so the retention job reported success while
+    that source was never purged at all. A declaration nobody verifies is the same
+    defect as a scheduled task nobody registered.
+    """
+    problems: list[str] = []
+    for source in registry.values():
+        try:
+            model = source.get_model()
+        except Exception as exc:
+            problems.append(f"{source.label}: model {source.model!r} does not resolve ({exc})")
+            continue
+
+        names = {f.name for f in model._meta.get_fields()}
+        # `pk`/`id` are valid lookups even though `pk` is not a field name.
+        head = source.user_field.split("__")[0]
+        if head not in names and head not in ("pk", "id"):
+            problems.append(
+                f"{source.label}: user_field {source.user_field!r} is not on {source.model}"
+            )
+        if source.retention_days and source.retention_field not in names:
+            problems.append(
+                f"{source.label}: retention_field {source.retention_field!r} is not on "
+                f"{source.model} — retention would silently never run"
+            )
+        for fname in source.fields or []:
+            if fname not in names and fname not in ("pk", "id"):
+                problems.append(
+                    f"{source.label}: exported field {fname!r} is not on {source.model}"
+                )
+        for fname in (source.anonymise or {}):
+            if fname not in names:
+                problems.append(
+                    f"{source.label}: anonymise field {fname!r} is not on {source.model}"
+                )
+    return problems
 
 
 # ------------------------------------------------------------------- coverage

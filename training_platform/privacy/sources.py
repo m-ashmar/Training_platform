@@ -48,8 +48,12 @@ register(PersonalDataSource(
     label="activity_log", model="analytics.UserActivity", user_field="user",
     retention_days=180, retention_field="timestamp"))
 register(PersonalDataSource(
+    # `started_at`, not `session_start`: no such field exists on UserSession, so the
+    # purge raised FieldError, purge_expired() logged it and moved on, and these rows —
+    # the ones holding IP address and user agent, the reason retention was added at all
+    # — were never deleted. validate_sources() below now makes that impossible to ship.
     label="sessions", model="analytics.UserSession", user_field="user",
-    retention_days=180, retention_field="session_start"))
+    retention_days=180, retention_field="started_at"))
 register(PersonalDataSource(
     label="performance_metrics", model="analytics.PerformanceMetric", user_field="user"))
 

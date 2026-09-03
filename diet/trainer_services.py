@@ -107,7 +107,7 @@ class TrainerDietPlanService:
         # Create the diet plan
         diet_plan = DietPlan.objects.create(
             user=client,
-            goal=goal,
+            goal=DietPlan.normalise_goal(goal),
             daily_calories=daily_calories,
             start_date=start_date,
             end_date=end_date,

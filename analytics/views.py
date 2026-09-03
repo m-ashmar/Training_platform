@@ -19,6 +19,7 @@ from .serializers import (
     UserActivitySerializer, PerformanceMetricSerializer,
     UserSessionSerializer, UserGoalSerializer, AnalyticsDashboardSerializer
 )
+from training_platform.query_params import int_param
 
 
 class UserActivityViewSet(viewsets.ModelViewSet):
@@ -46,12 +47,18 @@ class UserActivityViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def recent_activities(self, request):
         """Get recent activities for the user"""
-        days = int(request.query_params.get('days', 7))
+        days = int_param(request.query_params, 'days', default=7, minimum=1, maximum=365)
         since_date = timezone.now() - timedelta(days=days)
         
+        # The hard [:50] slice hid every older row with nothing in the response to say
+        # so — the same defect the wallet ledger had. Pagination replaces it, so the
+        # client can page back and knows how many rows exist.
         activities = self.get_queryset().filter(
             timestamp__gte=since_date
-        ).order_by('-timestamp')[:50]
+        ).order_by('-timestamp')
+        page = self.paginate_queryset(activities)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
         
         serializer = self.get_serializer(activities, many=True)
         return Response(serializer.data)
@@ -59,7 +66,7 @@ class UserActivityViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def activity_summary(self, request):
         """Get activity summary by type"""
-        days = int(request.query_params.get('days', 30))
+        days = int_param(request.query_params, 'days', default=30, minimum=1, maximum=365)
         since_date = timezone.now() - timedelta(days=days)
         
         summary = self.get_queryset().filter(
@@ -93,7 +100,7 @@ class PerformanceMetricViewSet(viewsets.ModelViewSet):
     def metric_trends(self, request):
         """Get metric trends over time"""
         metric_type = request.query_params.get('metric_type')
-        days = int(request.query_params.get('days', 30))
+        days = int_param(request.query_params, 'days', default=30, minimum=1, maximum=365)
         since_date = timezone.now() - timedelta(days=days)
         
         queryset = self.get_queryset().filter(
@@ -112,13 +119,30 @@ class PerformanceMetricViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def current_metrics(self, request):
-        """Get current metric values"""
-        metrics = self.get_queryset().values('metric_type').annotate(
-            latest_value=Avg('value'),
-            latest_date=Avg('recorded_at')
+        """The most recently recorded value for each metric type.
+
+        Was `latest_date=Avg('recorded_at')`. Postgres has no avg(timestamptz), so
+        this endpoint answered 500 for every role on every request; SQLite would have
+        averaged the timestamp and returned a number that meant nothing. Both
+        annotations were also averages despite being named `latest_*`, so even where
+        it ran it did not report what it claimed.
+
+        DISTINCT ON gives one row per metric_type, the newest, in a single query.
+        """
+        rows = (
+            self.get_queryset()
+            .order_by('metric_type', '-recorded_at', '-id')
+            .distinct('metric_type')
+            .values('metric_type', 'value', 'recorded_at')
         )
-        
-        return Response(metrics)
+        return Response([
+            {
+                'metric_type': r['metric_type'],
+                'latest_value': r['value'],
+                'latest_date': r['recorded_at'],
+            }
+            for r in rows
+        ])
 
 
 class UserSessionViewSet(viewsets.ModelViewSet):
@@ -200,10 +224,17 @@ class UserGoalViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def active_goals(self, request):
-        """Get active goals for the user"""
+        """Active goals for the user, paginated.
+
+        Returned every matching row as a bare array with no envelope and no limit, so
+        the payload grew with the user's history and nothing told the client there was
+        more to fetch.
+        """
         active_goals = self.get_queryset().filter(status='active')
-        serializer = self.get_serializer(active_goals, many=True)
-        return Response(serializer.data)
+        page = self.paginate_queryset(active_goals)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(active_goals, many=True).data)
 
 
 class AnalyticsDashboardViewSet(viewsets.ModelViewSet):
@@ -232,7 +263,7 @@ class AnalyticsDashboardViewSet(viewsets.ModelViewSet):
     def user_overview(self, request):
         """Get user overview analytics"""
         user = request.user
-        days = int(request.query_params.get('days', 30))
+        days = int_param(request.query_params, 'days', default=30, minimum=1, maximum=365)
         since_date = timezone.now() - timedelta(days=days)
         
         # Activity count
@@ -285,7 +316,7 @@ class AnalyticsDashboardViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        days = int(request.query_params.get('days', 30))
+        days = int_param(request.query_params, 'days', default=30, minimum=1, maximum=365)
         since_date = timezone.now() - timedelta(days=days)
         
         # User activity

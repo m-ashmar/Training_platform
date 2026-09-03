@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.db.models import Sum, Q
 from django.conf import settings
 from django.utils import timezone
@@ -27,6 +28,8 @@ from .security import (
 )
 from .throttles import ChargingRateThrottle
 import uuid
+from training_platform.query_params import int_param
+from wallet import idempotency
 
 
 User = get_user_model()
@@ -44,10 +47,28 @@ def audit(event_type: str, request, payload: dict):
     )
 
 
+def _lock_agent_profile(agent_profile):
+    """Take a row lock on the agent's profile.
+
+    Serializes one agent's concurrent top-ups against each other. Raises
+    TransactionManagementError if the caller forgot the enclosing atomic block,
+    which is the loud failure we want rather than a silently unlocked read.
+    """
+    return AgentProfile.objects.select_for_update().get(pk=agent_profile.pk)
+
+
 def _topup_limit_error(agent_profile, actor, amount, request):
     """
     Enforce agent daily/monthly top-up caps FAIL-CLOSED. A limit of 0 means
     "no top-ups permitted", not unlimited. Returns a Response on breach, else None.
+
+    CONCURRENCY CONTRACT: `agent_profile` must already be locked by
+    `_lock_agent_profile`, and the ledger write this guards must happen in the SAME
+    transaction. These two aggregates are a read; on their own they are a
+    check-then-act. Ten concurrent top-ups of 400 against a 1000/day cap each read a
+    total that predated the other nine, all passed, and minted 3200 — 3.2x the cap.
+    Holding the profile lock from here through move_funds_atomic is what makes the
+    aggregate below true at the moment the money moves.
     """
     today = timezone.localdate()
     month_start = today.replace(day=1)
@@ -60,6 +81,24 @@ def _topup_limit_error(agent_profile, actor, amount, request):
         audit("wallet.topup.limit_block", request, {"scope": "monthly", "attempt": float(amount), "used": float(month_total)})
         return Response({"error": _("Monthly limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
     return None
+
+
+
+def _idempotency_conflict(exc):
+    """Turn an idempotency clash into the response the caller can act on.
+
+    The two cases need different answers. A first attempt still running is a 409 the
+    caller may retry once it finishes. A key reused for a *different* request is a 422:
+    retrying will never help, and answering it with the earlier request's stored
+    receipt — which is what this code used to do — tells the caller money moved when
+    none did.
+    """
+    if exc.in_flight:
+        return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
+    return Response(
+        {"error": _("This idempotency key was already used for a different request.")},
+        status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+    )
 
 
 class WalletBalanceView(APIView):
@@ -150,38 +189,45 @@ class AgentTopUpView(APIView):
             return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
 
         agent_profile = ensure_agent_profile(request.user)
-        if agent_profile.status != "active":
-            return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
-
         amount = serializer.validated_data["amount"]
-        limit_error = _topup_limit_error(agent_profile, request.user, amount, request)
-        if limit_error:
-            return limit_error
-
-        # --- Reserve idempotency key only after validation passes ---
         idem_key = serializer.validated_data["idempotency_key"]
-        idem, created = IdempotencyKey.objects.get_or_create(key=idem_key, defaults={"request_hash": parsed.signature, "created_by": request.user})
-        if not created:
-            if idem.processed and idem.response_snapshot:
-                audit("wallet.topup.idempotent_hit", request, {"key": idem_key})
-                return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
 
-        client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
-        tx = move_funds_atomic(
-            None,
-            client_wallet,
-            amount,
-            actor_id=request.user.id,
-            tx_type="topup",
-            metadata={"agent_id": request.user.id, "api_key_id": getattr(api_key, "key_id", None)},
-        )
-        # refresh balance from DB to reflect updated value
-        client_wallet.refresh_from_db()
-        resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance)}
-        idem.processed = True
-        idem.response_snapshot = resp
-        idem.save(update_fields=["processed", "response_snapshot"])
+        # Cap check and ledger write share ONE transaction, with the agent's profile
+        # locked for its whole span. See _topup_limit_error's concurrency contract.
+        with transaction.atomic():
+            agent_profile = _lock_agent_profile(agent_profile)
+            if agent_profile.status != "active":
+                return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
+
+            limit_error = _topup_limit_error(agent_profile, request.user, amount, request)
+            if limit_error:
+                return limit_error
+
+            # --- Reserve idempotency key only after validation passes ---
+            try:
+                idem, replay = idempotency.reserve(
+                    request.user, idem_key,
+                    idempotency.fingerprint(op="topup", client=client.id, amount=amount),
+                )
+            except idempotency.IdempotencyConflict as exc:
+                return _idempotency_conflict(exc)
+            if replay is not None:
+                audit("wallet.topup.idempotent_hit", request, {"key": idem_key})
+                return Response(replay, status=status.HTTP_200_OK)
+
+            client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
+            tx = move_funds_atomic(
+                None,
+                client_wallet,
+                amount,
+                actor_id=request.user.id,
+                tx_type="topup",
+                metadata={"agent_id": request.user.id, "api_key_id": getattr(api_key, "key_id", None)},
+            )
+            # refresh balance from DB to reflect updated value
+            client_wallet.refresh_from_db()
+            resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance)}
+            idempotency.complete(idem, resp)
 
         audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount)})
         return Response(resp, status=status.HTTP_200_OK)
@@ -202,12 +248,19 @@ class ClientTransferToTrainerView(APIView):
         trainer = get_object_or_404(User, id=serializer.validated_data["trainer_id"], user_type="trainer")
 
         idem_key = serializer.validated_data["idempotency_key"]
-        idem, created = IdempotencyKey.objects.get_or_create(key=idem_key, defaults={"request_hash": idem_key, "created_by": request.user})
-        if not created:
-            if idem.processed and idem.response_snapshot:
-                audit("wallet.transfer.idempotent_hit", request, {"key": idem_key})
-                return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
+        try:
+            idem, replay = idempotency.reserve(
+                request.user, idem_key,
+                idempotency.fingerprint(
+                    op="transfer", trainer=trainer.id,
+                    amount=serializer.validated_data["amount"],
+                ),
+            )
+        except idempotency.IdempotencyConflict as exc:
+            return _idempotency_conflict(exc)
+        if replay is not None:
+            audit("wallet.transfer.idempotent_hit", request, {"key": idem_key})
+            return Response(replay, status=status.HTTP_200_OK)
 
         client_wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
         trainer_wallet, _created = Wallet.objects.get_or_create(owner=trainer, defaults={"owner_type": "trainer"})
@@ -217,14 +270,12 @@ class ClientTransferToTrainerView(APIView):
             tx = move_funds_atomic(client_wallet, trainer_wallet, amount, actor_id=request.user.id, tx_type="transfer", metadata={"trainer_id": trainer.id})
         except ValueError as e:
             # No funds moved (atomic rollback) — release the key so the caller can retry.
-            idem.delete()
+            idempotency.release(idem)
             return Response({"error": _("Request could not be completed.")}, status=status.HTTP_400_BAD_REQUEST)
         client_wallet.refresh_from_db()
         trainer_wallet.refresh_from_db()
         resp = {"reference_id": tx.reference_id, "client_balance": str(client_wallet.balance), "trainer_balance": str(trainer_wallet.balance)}
-        idem.processed = True
-        idem.response_snapshot = resp
-        idem.save(update_fields=["processed", "response_snapshot"])
+        idempotency.complete(idem, resp)
 
         audit("wallet.transfer.success", request, {"reference_id": tx.reference_id, "trainer_id": trainer.id, "amount": float(amount)})
         return Response(resp, status=status.HTTP_200_OK)
@@ -245,22 +296,24 @@ class AdminReversalView(APIView):
             return Response({"error": _("Transaction has already been reversed")}, status=status.HTTP_409_CONFLICT)
 
         idem_key = serializer.validated_data["idempotency_key"]
-        idem, created = IdempotencyKey.objects.get_or_create(key=idem_key, defaults={"request_hash": idem_key, "created_by": request.user})
-        if not created:
-            if idem.processed and idem.response_snapshot:
-                audit("wallet.reversal.idempotent_hit", request, {"key": idem_key})
-                return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
+        try:
+            idem, replay = idempotency.reserve(
+                request.user, idem_key,
+                idempotency.fingerprint(op="reversal", original=original.reference_id),
+            )
+        except idempotency.IdempotencyConflict as exc:
+            return _idempotency_conflict(exc)
+        if replay is not None:
+            audit("wallet.reversal.idempotent_hit", request, {"key": idem_key})
+            return Response(replay, status=status.HTTP_200_OK)
 
         try:
             tx = move_funds_atomic(original.destination_wallet, original.source_wallet, original.amount, actor_id=request.user.id, tx_type="reversal", metadata={"original_reference": original.reference_id, "reason": serializer.validated_data.get("reason", "")})
         except ValueError as e:
-            idem.delete()
+            idempotency.release(idem)
             return Response({"error": _("Request could not be completed.")}, status=status.HTTP_400_BAD_REQUEST)
         resp = {"reference_id": tx.reference_id}
-        idem.processed = True
-        idem.response_snapshot = resp
-        idem.save(update_fields=["processed", "response_snapshot"])
+        idempotency.complete(idem, resp)
         audit("wallet.reversal.success", request, {"reference_id": tx.reference_id, "original": original.reference_id})
         return Response(resp, status=status.HTTP_200_OK)
 
@@ -353,8 +406,6 @@ class AgentTopUpProxyView(APIView):
         # removed). Security rests on JWT auth, agent status, the fail-closed
         # top-up caps, and idempotency.
         agent_profile = ensure_agent_profile(request.user)
-        if agent_profile.status != "active":
-            return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
 
         client_identifier = serializer.validated_data["client_identifier"]
         amount = serializer.validated_data["amount"]
@@ -368,29 +419,35 @@ class AgentTopUpProxyView(APIView):
         if getattr(client, "user_type", None) != "client":
             return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
 
-        limit_error = _topup_limit_error(agent_profile, request.user, amount, request)
-        if limit_error:
-            return limit_error
+        # Same serialization as the signed endpoint. This path needs only a JWT, so it
+        # is the easier of the two to race: an agent's own app can fire ten parallel
+        # requests with no signing at all.
+        with transaction.atomic():
+            agent_profile = _lock_agent_profile(agent_profile)
+            if agent_profile.status != "active":
+                return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
 
-        # --- Reserve idempotency key only after validation passes ---
-        idem, created = IdempotencyKey.objects.get_or_create(
-            key=idempotency_key,
-            defaults={"request_hash": idempotency_key, "created_by": request.user},
-        )
-        if not created:
-            if idem.processed and idem.response_snapshot:
+            limit_error = _topup_limit_error(agent_profile, request.user, amount, request)
+            if limit_error:
+                return limit_error
+
+            # --- Reserve idempotency key only after validation passes ---
+            try:
+                idem, replay = idempotency.reserve(
+                    request.user, idempotency_key,
+                    idempotency.fingerprint(op="topup", client=client.id, amount=amount),
+                )
+            except idempotency.IdempotencyConflict as exc:
+                return _idempotency_conflict(exc)
+            if replay is not None:
                 audit("wallet.topup.idempotent_hit", request, {"key": idempotency_key})
-                return Response(idem.response_snapshot, status=status.HTTP_200_OK)
-            return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
+                return Response(replay, status=status.HTTP_200_OK)
 
-        client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
-        tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id, tx_type="topup", metadata={"agent_id": request.user.id})
-        client_wallet.refresh_from_db()
-        resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance)}
-
-        idem.processed = True
-        idem.response_snapshot = resp
-        idem.save(update_fields=["processed", "response_snapshot"])
+            client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
+            tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id, tx_type="topup", metadata={"agent_id": request.user.id})
+            client_wallet.refresh_from_db()
+            resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance)}
+            idempotency.complete(idem, resp)
 
         audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount)})
         return Response(resp, status=status.HTTP_200_OK)
@@ -426,7 +483,7 @@ class AdminSuspiciousActivityView(APIView):
     permission_classes = [IsAuthenticated, IsAdmin]
 
     def get(self, request):
-        window_days = int(request.query_params.get("days", 1))
+        window_days = int_param(request.query_params, "days", default=1, minimum=1, maximum=365)
         since = timezone.now() - timezone.timedelta(days=window_days)
         alerts = []
         # Heuristics: multiple failed auths, rapid topups, large amounts

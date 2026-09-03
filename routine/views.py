@@ -42,6 +42,8 @@ from django.db import transaction
 from django.http import Http404
 from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
                                        ValidationError as DRFValidationError)
+from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
+from training_platform.query_params import int_param
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +392,7 @@ class ExerciseCreateWithImageView(APIView):
                 }
             }, status=status.HTTP_201_CREATED)
 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -570,7 +572,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
                 {"error": "Client not found"}, 
                 status=status.HTTP_404_NOT_FOUND
             )
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -659,7 +661,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
                 {"error": "Client not found"}, 
                 status=status.HTTP_404_NOT_FOUND
             )
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -944,9 +946,9 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         # Previously unvalidated: negative weight (-500 kg), 100000 reps, dates in
         # 2030 or 1900, and an uncapped `sets` (500 sets => 502 rows, ~11s request).
         try:
-            sets = int(request.data.get('sets', 1))
+            sets = int_param(request.data, 'sets', default=1, minimum=1, maximum=100)
             weight = float(request.data.get('weight', 0))
-            reps = int(request.data.get('reps', 10))
+            reps = int_param(request.data, 'reps', default=10, minimum=1, maximum=1000)
         except (TypeError, ValueError):
             return Response({'error': _('sets, weight and reps must be numeric.')},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -1013,18 +1015,30 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         # once per affected progress row afterwards.
         with transaction.atomic(), suspend_progress_recalc():
             for rex in exercises.select_related('exercise'):
+                # target_sets is the TRAINER'S PRESCRIPTION (RoutineExercise.sets), never
+                # the number the client just logged. Taking it from the request made the
+                # target whatever the client last claimed, so `completed >= target` was
+                # true by construction: one set of one rep at 0 kg marked a prescribed
+                # 3x10 exercise complete, and that fed RoutineProgress, analytics,
+                # streaks and achievements. `routine/serializers.py` already reported the
+                # prescription here, so the two disagreed about the same number.
+                prescribed = rex.sets or 0
                 progress, _created = UserExerciseProgress.objects.get_or_create(
                     user=user,
                     exercise=rex.exercise,
                     date=date,
-                    defaults={'completed_sets': sets, 'target_sets': sets}
+                    defaults={'completed_sets': sets, 'target_sets': prescribed}
                 )
-                # Keep the progress row in sync with what was actually logged.
-                # target_sets previously went stale (5 logged against a target of 3).
-                if not _created and (progress.completed_sets != sets or progress.target_sets != sets):
+                # completed_sets follows what was logged; target_sets follows the routine.
+                updates = []
+                if progress.completed_sets != sets:
                     progress.completed_sets = sets
-                    progress.target_sets = sets
-                    progress.save(update_fields=['completed_sets', 'target_sets'])
+                    updates.append('completed_sets')
+                if progress.target_sets != prescribed:
+                    progress.target_sets = prescribed
+                    updates.append('target_sets')
+                if not _created and updates:
+                    progress.save(update_fields=updates)
 
                 touched_progress.append(progress)
 
@@ -1832,8 +1846,10 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
             return Response({'detail': _('Only trainers can access this endpoint')}, status=403)
         
         templates = self.get_queryset().filter(created_by=request.user)
-        serializer = self.get_serializer(templates, many=True)
-        return Response(serializer.data)
+        page = self.paginate_queryset(templates)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(templates, many=True).data)
 
     @action(detail=False, methods=['get'])
     def public_templates(self, request):
@@ -1841,9 +1857,14 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         Get all public templates from all trainers.
         Available to all authenticated users.
         """
+        # Every public template on the platform, from every trainer. This is the one
+        # that grows without bound as the platform grows, and it returned the whole
+        # table as a bare array with no envelope and no page links.
         templates = self.get_queryset().filter(is_public=True)
-        serializer = self.get_serializer(templates, many=True)
-        return Response(serializer.data)
+        page = self.paginate_queryset(templates)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(templates, many=True).data)
 
 
 class RoutineTemplateExerciseSerializer(serializers.ModelSerializer):
@@ -1906,6 +1927,15 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         return UserExerciseProgressSerializer
 
     def get_permissions(self):
+        # An @action(permission_classes=[...]) declaration wins. Overriding
+        # get_permissions() discarded it silently, so `bulk-complete` — declared
+        # IsAuthenticated and documented as the client's own "mark my day done" call —
+        # actually ran under IsAdminOrOwnerOrReadOnly, which requires is_trainer or
+        # is_staff for a POST. Every client got 403 from the endpoint written for them.
+        handler = getattr(self, self.action, None) if self.action else None
+        declared = getattr(handler, 'kwargs', {}).get('permission_classes')
+        if declared:
+            return [permission() for permission in declared]
         if self.action == 'create':
             return [IsAuthenticated()]
         return [IsAdminOrOwnerOrReadOnly()]
@@ -1965,17 +1995,47 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         routine_id = request.data.get('routine_id')
         day = request.data.get('day')
         date = request.data.get('date')
-        completed_sets = request.data.get('completed_sets', 1)
-        target_sets = request.data.get('target_sets', 1)
+        completed_sets = int_param(request.data, 'completed_sets', default=1, minimum=0,
+                                   maximum=MAX_SETS_PER_REQUEST)
         skipped = request.data.get('skipped', False)
         if not routine_id or not day or not date:
             return Response({'error': _('routine_id, day, and date are required.')}, status=400)
+
+        parsed_date = parse_date(str(date))
+        if parsed_date is None:
+            return Response({'error': _('date must be in YYYY-MM-DD format.')},
+                            status=status.HTTP_400_BAD_REQUEST)
+        today = timezone.localdate()
+        if parsed_date > today:
+            return Response({'error': _('Cannot log a workout in the future.')},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if (today - parsed_date).days > MAX_BACKLOG_DAYS:
+            return Response(
+                {'error': _('Cannot log a workout more than %(d)d days in the past.') % {'d': MAX_BACKLOG_DAYS}},
+                status=status.HTTP_400_BAD_REQUEST)
+        date = parsed_date
+
         from .models import Routine, RoutineExercise, UserExerciseProgress
         try:
             routine = Routine.objects.get(id=routine_id)
         except Routine.DoesNotExist:
             return Response({'error': _('Routine not found.')}, status=404)
+
+        # AUTHORIZATION: the same check bulk-create already makes, and for the same two
+        # reasons. Without it any caller could write progress against a routine never
+        # assigned to them, AND read every exercise name of another trainer's private
+        # routine straight out of the `results` array.
+        if not (routine.assigned_to.filter(id=user.id).exists()
+                or routine.created_by_id == user.id
+                or user.is_admin):
+            return Response({'error': _('You do not have access to this routine.')},
+                            status=status.HTTP_403_FORBIDDEN)
+
         exercises = RoutineExercise.objects.filter(routine=routine, day=day)
+        if not exercises.exists():
+            return Response(
+                {'error': _('Day %(day)s is not part of this routine.') % {'day': day}},
+                status=status.HTTP_400_BAD_REQUEST)
         results = []
         errors = []
         for rex in exercises:
@@ -1990,7 +2050,11 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
                         date=date,
                         defaults={
                             'completed_sets': completed_sets,
-                            'target_sets': target_sets,
+                            # The prescription, never a number the caller sent. Taking it
+                            # from the request made `completed >= target` true by
+                            # construction, so a day could be marked complete by claiming
+                            # a target of 1.
+                            'target_sets': rex.sets or 0,
                             'skipped': skipped
                         }
                     )
@@ -2083,7 +2147,7 @@ class ExerciseImageUploadView(APIView):
                 }
             }, status=status.HTTP_200_OK)
 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -2139,7 +2203,7 @@ class ExerciseImageUploadView(APIView):
                     'message': _('No image to remove')
                 }, status=status.HTTP_404_NOT_FOUND)
                 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -2290,7 +2354,7 @@ class ExerciseAddMediaView(APIView):
             else:
                 return Response(response_data, status=status.HTTP_201_CREATED)
 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -2335,7 +2399,7 @@ class ExerciseAddMediaView(APIView):
                 'media_items': media_data
             }, status=status.HTTP_200_OK)
 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -2415,7 +2479,7 @@ class ExerciseAddMediaView(APIView):
             else:
                 return Response(response_data, status=status.HTTP_200_OK)
 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.

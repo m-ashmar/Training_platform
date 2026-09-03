@@ -12,6 +12,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.utils import timezone
 from users.models import CustomUser
+from training_platform.model_validation import RowValidationMixin
 
 
 def _random_media_path(folder, filename):
@@ -38,7 +39,7 @@ def achievement_icon_upload_path(instance, filename):
     return _random_media_path('achievements', filename)
 
 
-class UserFollow(models.Model):
+class UserFollow(RowValidationMixin, models.Model):
     """
     Track user following relationships
     """
@@ -81,6 +82,10 @@ class UserFollow(models.Model):
         from django.utils.translation import gettext_lazy as _
         if self.follower == self.following:
             raise ValidationError(_("Users cannot follow themselves"), code="self_follow")
+
+    def save(self, *args, **kwargs):
+        self.validate_row()
+        super().save(*args, **kwargs)
 
 
 class Post(models.Model):

@@ -140,30 +140,11 @@ class RuleBasedPlanner:
         return any(k in name for k in veg_keywords)
 
     def _resolve_goal(self) -> str:
+        """The user's goal in this planner's lower-case vocabulary.
+
+        One resolver, on the user; this is the boundary that lower-cases it.
         """
-        Resolve user goal into one of: 'lose' | 'gain' | 'maintain'.
-        Checks: fitness_goal, goal, then client_goals list.
-        """
-        goal = getattr(self.user, 'fitness_goal', None) or getattr(self.user, 'goal', None)
-        if goal:
-            g = str(goal).lower()
-            if 'lose' in g or 'fat' in g:
-                return 'lose'
-            if 'gain' in g or 'muscle' in g:
-                return 'gain'
-            return 'maintain'
-        try:
-            goals = (getattr(self.user, 'client_goals', []) or [])
-            goals_l = ','.join(goals).lower()
-            if 'lose' in goals_l or 'fat' in goals_l:
-                return 'lose'
-            if 'gain' in goals_l or 'muscle' in goals_l:
-                return 'gain'
-        except Exception:
-            # Optional side effect: swallowing this silently is what made the
-            # surrounding failures invisible in logs. Control flow is unchanged.
-            logger.debug('suppressed non-fatal error', exc_info=True)
-        return 'maintain'
+        return self.user.resolve_fitness_goal().lower()
 
     # ------------------------ public API ------------------------
     def generate(

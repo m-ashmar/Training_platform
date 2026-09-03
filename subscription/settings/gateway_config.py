@@ -8,6 +8,7 @@ NO usable hardcoded fallbacks; production readiness is enforced at startup by
 """
 
 import os
+from decimal import Decimal
 from typing import Dict, Any
 
 # ========================
@@ -59,8 +60,13 @@ GATEWAY_REGISTRY = {
         'config': SHAMCASH_CONFIG,
         'class_name': 'ShamCashGateway',
         'supported_currencies': ['SYP', 'USD'],
-        'min_amount': 100,      # SYP
-        'max_amount': 5000000,  # SYP
+        # Bounds are PER CURRENCY. A single pair of numbers was documented as SYP and
+        # then compared against amounts of any currency, so a plan priced in USD was
+        # measured against a Syrian-pound floor. A currency with no entry here cannot
+        # be charged at all — fail closed rather than borrow another currency's bounds.
+        'amount_limits': {
+            'SYP': {'min': Decimal('100'), 'max': Decimal('5000000')},
+        },
     },
 }
 
@@ -87,6 +93,16 @@ def get_gateway_info(gateway_name: str) -> Dict[str, Any]:
     if gateway_name not in GATEWAY_REGISTRY:
         raise ValueError(f"Unknown gateway: {gateway_name}")
     return GATEWAY_REGISTRY[gateway_name]
+
+
+def get_amount_limits(gateway_name: str, currency: str) -> Dict[str, Decimal]:
+    """Min/max chargeable amount for one gateway in one currency.
+
+    Returns None when the currency has no configured bounds, which callers must
+    treat as "cannot charge in this currency".
+    """
+    info = get_gateway_info(gateway_name)
+    return (info.get('amount_limits') or {}).get(str(currency).upper())
 
 
 def is_gateway_enabled(gateway_name: str) -> bool:

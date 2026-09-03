@@ -1,6 +1,6 @@
 import logging
 from django.shortcuts import render
-from rest_framework import viewsets, status, permissions
+from rest_framework import viewsets, status, permissions, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -11,7 +11,7 @@ from django.utils.translation import gettext as _
 from django.core.exceptions import ValidationError
 from django.http import Http404, HttpResponse
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from .models import (
     SubscriptionPlan, Subscription, Payment, 
@@ -47,6 +47,8 @@ from .services.payment_gateways import PaymentGatewayManager
 from rest_framework.permissions import AllowAny
 import uuid
 from rest_framework.exceptions import NotFound, PermissionDenied, NotAuthenticated
+from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
+from wallet.throttles import ChargingRateThrottle
 
 class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for subscription plans (read-only for users)"""
@@ -70,7 +72,7 @@ class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
             plans = self.get_queryset().order_by('price')
             serializer = self.get_serializer(plans, many=True)
             return Response(serializer.data)
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -82,8 +84,19 @@ class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-class SubscriptionViewSet(viewsets.ModelViewSet):
-    """ViewSet for user subscriptions"""
+class SubscriptionViewSet(mixins.CreateModelMixin,
+                          mixins.RetrieveModelMixin,
+                          mixins.UpdateModelMixin,
+                          mixins.ListModelMixin,
+                          viewsets.GenericViewSet):
+    """ViewSet for user subscriptions.
+
+    Deliberately NOT a ModelViewSet: there is no destroy. `Payment.subscription` is
+    on_delete=PROTECT so the ledger survives, which means a DELETE could never
+    succeed for any subscription that has payments — and perform_create gives every
+    subscription one immediately. The route therefore existed only to raise an
+    unhandled ProtectedError and answer 500. Ending a subscription is `cancel`.
+    """
     serializer_class = SubscriptionSerializer
     permission_classes = [permissions.IsAuthenticated]
     
@@ -110,7 +123,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
                 Payment.objects.create(
                     subscription=subscription,
                     amount=subscription.plan.price,
-                    currency='USD',
+                    currency=subscription.plan.currency,
                     status='pending',
                     description=f"Subscription to {subscription.plan.name}"
                 )
@@ -142,20 +155,30 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
                     if immediate:
                         subscription.status = 'cancelled'
                         subscription.cancelled_at = timezone.now()
+                        state_changed = True
                     else:
+                        # Turning auto-renew off twice is not a second cancellation.
+                        # The serializer only rejects an already-'cancelled' row, so a
+                        # non-immediate cancel stayed 'active' and could be replayed
+                        # without limit, appending an audit row to the caller's own
+                        # payment history on every call.
+                        state_changed = subscription.auto_renew
                         subscription.auto_renew = False
-                    
+
                     subscription.save()
-                    
-                    # Log the cancellation
-                    Payment.objects.create(
-                        subscription=subscription,
-                        amount=0,
-                        currency='USD',
-                        status='cancelled',
-                        description=f"Subscription cancelled: {reason}",
-                        metadata={'reason': reason, 'immediate': immediate}
-                    )
+
+                    if state_changed:
+                        # Audit row. Currency follows the plan like every other Payment;
+                        # 'USD' here was a third independent guess at a currency the
+                        # platform does not charge in.
+                        Payment.objects.create(
+                            subscription=subscription,
+                            amount=0,
+                            currency=subscription.plan.currency,
+                            status='cancelled',
+                            description=f"Subscription cancelled: {reason}",
+                            metadata={'reason': reason, 'immediate': immediate}
+                        )
                 
                 logger.info(f"Cancelled subscription {subscription.id} for user {request.user.id}")
                 
@@ -166,7 +189,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+        except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
@@ -230,7 +253,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
                 'instructions': resp.get('instructions'),
             })
 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+        except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
@@ -254,7 +277,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
                 {'message': _('No active subscription')},
                 status=status.HTTP_404_NOT_FOUND
             )
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -274,7 +297,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             usage = subscription.usage.all().select_related('feature')
             serializer = SubscriptionUsageSerializer(usage, many=True)
             return Response(serializer.data)
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated):
+        except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
@@ -340,7 +363,7 @@ class SubscriptionManagementView(APIView):
                 'trial_subscriptions': trial_subscriptions,
                 'expired_subscriptions': expired_subscriptions
             })
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -401,7 +424,7 @@ class SubscriptionManagementView(APIView):
                 {'error': _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -465,7 +488,7 @@ class SubscriptionAccessView(APIView):
                     'message': _('No subscription found')
                 })
                 
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -476,6 +499,16 @@ class SubscriptionAccessView(APIView):
                 {'error': _('Failed to check access')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+#: What a gateway can tell us about a payment, and which of them we act on. The
+#: handler is exhaustive: anything outside these three sets is a delivery failure, not
+#: a silent 200.
+SUCCESS_STATUSES = frozenset({'completed', 'success', 'succeeded', 'paid'})
+FAILURE_STATUSES = frozenset({'failed', 'declined', 'error', 'rejected', 'expired'})
+REFUND_STATUSES = frozenset({'refunded', 'refund', 'reversed', 'reversal',
+                             'chargeback', 'charged_back', 'disputed', 'cancelled',
+                             'canceled', 'voided'})
+
 
 class PaymentWebhookView(APIView):
     """
@@ -507,9 +540,12 @@ class PaymentWebhookView(APIView):
             # Log webhook receipt
             logger.info(f"Webhook received from {gateway_name}")
             
-            # Get raw payload and headers
+            # Get raw payload and headers. `request.headers` is Django's HttpHeaders,
+            # which is case-insensitive; `dict(...)` of it is not, and that alone was
+            # enough to reject every webhook the gateway ever sent. Gateways now fold
+            # case themselves (PaymentGateway.header), so this is belt and braces.
             payload = request.body
-            headers = dict(request.headers)
+            headers = request.headers
             
             # Initialize gateway service
             gateway_service = PaymentGatewayService(gateway_name)
@@ -555,12 +591,27 @@ class PaymentWebhookView(APIView):
 
         gateway_status = str(payment_data.get('status', '')).lower()
         try:
-            if gateway_status in ('completed', 'success', 'succeeded', 'paid'):
+            if gateway_status in SUCCESS_STATUSES:
                 PaymentService.complete_payment(payment.id, payment_data)
                 logger.info(f"Webhook completed payment {payment.id} via {gateway_name}")
-            elif gateway_status in ('failed', 'declined', 'error'):
+            elif gateway_status in FAILURE_STATUSES:
                 PaymentService.fail_payment(payment.id, payment_data.get('error_message', 'Payment failed'))
                 logger.info(f"Webhook marked payment {payment.id} failed")
+            elif gateway_status in REFUND_STATUSES:
+                PaymentService.refund_payment(
+                    payment.id, payment_data.get('error_message', gateway_status)
+                )
+                logger.info(f"Webhook refunded payment {payment.id} via {gateway_name}")
+            else:
+                # There used to be no else. Every status that was neither a success nor
+                # a failure word fell through, the view answered 200, and the gateway
+                # took that for acceptance and never retried — so a refund, a reversal
+                # or a chargeback left the subscription active with the money returned.
+                # An unknown status is now a failed delivery, which is what makes the
+                # gateway send it again and puts it in front of a person.
+                raise PaymentGatewayError(
+                    f"Unhandled gateway status {gateway_status!r} for payment {payment.id}"
+                )
         except (PaymentVerificationError, InvalidPaymentTransition) as e:
             # Do not activate on mismatched/illegal data; surface as a bad webhook.
             logger.warning(f"Webhook rejected for payment {payment.id}: {str(e)}")
@@ -589,8 +640,12 @@ class PaymentGatewayView(APIView):
                     'name': gateway_name,
                     'display_name': gateway_info['name'],
                     'supported_currencies': gateway_info['supported_currencies'],
-                    'min_amount': gateway_info['min_amount'],
-                    'max_amount': gateway_info['max_amount'],
+                    'settlement_currency': gateway_info['settlement_currency'],
+                    # Per-currency bounds. The flat pair below is kept for existing
+                    # clients and describes the settlement currency only.
+                    'amount_limits': gateway_info['amount_limits'],
+                    'min_amount': gateway_info.get('min_amount'),
+                    'max_amount': gateway_info.get('max_amount'),
                     'enabled': gateway_info['enabled']
                 })
             
@@ -599,7 +654,7 @@ class PaymentGatewayView(APIView):
                 'gateways': gateway_list
             })
             
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -613,41 +668,97 @@ class PaymentGatewayView(APIView):
     
     def post(self, request):
         """
-        Initiate a payment through a specific gateway.
-        
+        Initiate a payment for one of the caller's own subscriptions.
+
         Expected payload:
         {
-            "gateway": "syriatel_cash",
-            "amount": "1000.00",
-            "currency": "SYP",
-            "subscription_id": "uuid"
+            "gateway": "shamcash",
+            "subscription_id": "uuid",
+            "amount": "5000.00",   # OPTIONAL, confirmation only (see below)
+            "currency": "SYP"      # OPTIONAL, confirmation only
         }
+
+        THE CLIENT DOES NOT SET THE PRICE. Amount and currency are read from
+        `subscription.plan` and nowhere else. They used to be taken straight from
+        the request body, and because every later check compares the gateway's
+        report against `payment.amount`, the whole verification chain then agreed
+        with a number the payer had chosen: a 5000.00 plan activated in full for
+        the 100 SYP gateway floor.
+
+        `amount`/`currency` are still accepted, but only as an assertion of the
+        price the client displayed. A mismatch is a conflict, not an instruction —
+        silently charging the server price would bill the user something other
+        than the figure they agreed to.
         """
         try:
             gateway_name = request.data.get('gateway')
-            amount = Decimal(request.data.get('amount'))
-            currency = request.data.get('currency', 'SYP')
             subscription_id = request.data.get('subscription_id')
-            
-            # Validate inputs
-            if not all([gateway_name, amount, subscription_id]):
+
+            if not gateway_name or not subscription_id:
                 return Response(
                     {'error': _('Missing required fields')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
             # Get subscription
             try:
-                subscription = Subscription.objects.get(
+                subscription = Subscription.objects.select_related('plan').get(
                     id=subscription_id,
                     user=request.user
                 )
-            except Subscription.DoesNotExist:
+            except (Subscription.DoesNotExist, ValidationError, ValueError):
                 return Response(
                     {'error': _('Subscription not found')},
                     status=status.HTTP_404_NOT_FOUND
                 )
-            
+
+            # --- The price is the plan's price. Full stop. ---
+            plan = subscription.plan
+            amount = plan.price
+            currency = plan.currency
+
+            if amount <= 0:
+                # A free plan has nothing to charge; sending it to a gateway would
+                # only fail the minimum-amount check with a confusing message.
+                return Response(
+                    {'error': _('This plan does not require a payment')},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Paying again while cover is still running buys nothing: activation only
+            # moves end_date when it is missing or already past, so the money would be
+            # taken and no time added. Extending an active subscription is what the
+            # renew action is for.
+            if subscription.is_active:
+                return Response(
+                    {'error': _('This subscription is already active. Use renew to extend it.')},
+                    status=status.HTTP_409_CONFLICT
+                )
+
+            # --- Optional client confirmation of the price it displayed ---
+            quoted_amount = request.data.get('amount')
+            if quoted_amount is not None:
+                try:
+                    quoted = Decimal(str(quoted_amount))
+                except (InvalidOperation, TypeError, ValueError):
+                    return Response(
+                        {'error': _('Invalid amount')},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                if quoted.quantize(Decimal('0.01')) != Decimal(amount).quantize(Decimal('0.01')):
+                    return Response(
+                        {'error': _('The price has changed. Please refresh and try again.'),
+                         'expected_amount': str(amount), 'expected_currency': currency},
+                        status=status.HTTP_409_CONFLICT
+                    )
+            quoted_currency = request.data.get('currency')
+            if quoted_currency is not None and str(quoted_currency).upper() != currency:
+                return Response(
+                    {'error': _('The price has changed. Please refresh and try again.'),
+                     'expected_amount': str(amount), 'expected_currency': currency},
+                    status=status.HTTP_409_CONFLICT
+                )
+
             # Initialize gateway service
             gateway_service = PaymentGatewayService(gateway_name)
             reference = gateway_service._generate_reference()
@@ -701,7 +812,7 @@ class PaymentGatewayView(APIView):
                 {'error': _('Request could not be completed.')},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        except (Http404, NotFound, PermissionDenied, NotAuthenticated, DRFValidationError):
+        except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
@@ -749,6 +860,11 @@ class PaymentReconcileView(APIView):
     trusts a bare status flag and never activates on unverified data.
     """
     permission_classes = [permissions.IsAuthenticated]
+    # Every call makes an outbound gateway lookup, so an authenticated caller could
+    # amplify one request of theirs into unbounded traffic at the provider. The
+    # `charging` scope is already declared in DEFAULT_THROTTLE_RATES and was used only
+    # by the wallet.
+    throttle_classes = [ChargingRateThrottle]
 
     def post(self, request, payment_id):
         try:
