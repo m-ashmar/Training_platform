@@ -435,3 +435,55 @@ account.
 
 *Product decision, not a defect:* `trainer` is self-registerable. Only `admin` and
 `agent` require a superuser.
+
+## DIVE 11 — THE PRODUCTION KILL-SWITCH: CLEAN
+
+Method: `settings_production` booted in a subprocess per scenario with
+`LOCAL_PROD_TEST=True` (which bypasses the AWS Secrets Manager fetch, not the checks),
+adding one environment variable at a time until it started.
+
+`enforce_production_safety()` fires on every misconfiguration it claims to catch, and
+each message names the variable and what is wrong with it:
+
+| Scenario | Result |
+|---|---|
+| `WALLET_DEV_MODE=True` | refused |
+| `PAYMENT_DEBUG=true` | refused |
+| `CELERY_BROKER_URL` unset | refused — "background jobs would be lost" |
+| broker on localhost | refused — "no broker inside the app container" |
+| broker on a cache DB (0-5) | refused — "use DB6 or higher" |
+| everything set correctly | boots |
+
+**The fifteen variables production refuses to boot without**, discovered by adding them
+one at a time until it started. Worth checking against `fly secrets list` before deploy:
+
+```
+DJANGO_SECRET_KEY   DJANGO_ALLOWED_HOSTS   JWT_PRIVATE_KEY   JWT_PUBLIC_KEY
+DB_NAME   DB_USER   DB_PASSWORD   DB_HOST
+EMAIL_HOST_USER   EMAIL_HOST_PASSWORD   CORS_ALLOWED_ORIGINS   CSRF_TRUSTED_ORIGINS
+FIELD_ENCRYPTION_KEY (must be a valid Fernet key)   CELERY_BROKER_URL   REDIS_URL
+```
+
+*Deploy checklist item, not a defect:* with a valid environment the boot still prints
+`FIREBASE_CREDENTIALS_PATH not set — push notifications disabled` and starts anyway.
+That is a warning rather than an error, so it is possible to launch with the entire
+notification system silently inert. Set it, or accept that deliberately.
+
+---
+
+## What is still unverified, stated plainly
+
+- **The seventeen audit phases that preceded these dives.** Never re-verified here; the
+  previous session's own handoff says its markdown contained wrong claims. Treated as
+  leads throughout, never as evidence.
+- **A real deployment.** The kill-switch was exercised in a subprocess, not on Fly, and
+  Redis was `LocMemCache` locally rather than six segmented databases.
+- **The mobile client contract.** These fixes changed response shapes: two new fields on
+  the exercise serializer, an idempotency conflict now 422 rather than 200, `?page=` on
+  notifications now 400 rather than 200, 404 detail text, and plan name/description now
+  resolving through modeltranslation. Each needs checking against the Flutter client.
+- **Latency and memory under load.** Query counts are flat; nothing here measured time
+  or memory on a 512 MB machine.
+- **Whether the diet engine's plans are nutritionally good.** Its plumbing was audited —
+  goal resolution, persistence, quota, catalogue integrity. The quality of what it
+  produces is a domain question, not an audit one.
