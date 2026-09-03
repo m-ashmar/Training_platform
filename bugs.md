@@ -372,3 +372,66 @@ Fourteen, covering every root above: cross-caller idempotency, content-bound rep
 quota counting and lockout, refund revocation, the renewal guard, one bad row not
 failing a list, the activity-level constraint, 404 translation, catalogue completeness,
 both N+1s, the query log itself, and the pagination contract.
+
+---
+
+# DIVES 7-10 — the four areas that had never been audited (2026-09-04)
+
+Run after the resolution above, against the same development Postgres. One finding.
+
+## DIVE 7 — CACHE CORRECTNESS: CLEAN
+Two layers, both checked by execution. The HTTP response cache keys on the caller's
+verified JWT subject for `private` routes and omits identity only for `public` ones,
+and the registry that decides which is which is a single file both the middleware and
+the invalidation signals read. Trainer A's exercise catalogue was never served to
+trainer B. English and Arabic hold separate entries, which matters now that plans are
+translatable. A write bumped the version counter and the next read saw it. Cachalot's
+uncachable set covers every wallet, subscription, auth and OTP table, including the
+usage table repaired above.
+
+## DIVE 8 — WEBSOCKETS: CLEAN
+Both consumers reject a missing token, a refresh token and a malformed token, and
+accept only an access token — the `UntypedToken` hole `ws_auth.py` was written to close
+is genuinely closed. The AI socket refuses a caller with no live entitlement (4003) and
+re-checks it per message, so a lapsed subscription cannot keep spending model tokens on
+an open socket. Passing another user's `session_id` gets you your own session, because
+`_get_or_create_session` scopes the lookup by user. The social consumer derives its
+group from the token, so there is no frame a client can send to subscribe to someone
+else's stream.
+
+## DIVE 9 — UPLOADS AND MEDIA: CLEAN
+Five traversal shapes all 404. Unsigned and tampered media links 404; a correctly
+signed one returns 200, and a signature minted for one path does not open another.
+Anything that is not an inline-safe type is forced to `Content-Disposition: attachment`,
+so an uploaded file cannot execute in a browser. PHP disguised as a JPEG, an SVG
+carrying a script, HTML named `.png` and executable bytes named `.png` are all rejected
+by `SecureImageField`, and a genuine 1×1 PNG passes.
+
+*Worth knowing, not a defect:* a signed media URL is a bearer token. Anyone holding the
+link can fetch the file for `MEDIA_URL_TTL` (24 hours), regardless of who they are.
+
+## DIVE 10 — AUTH, OTP AND REGISTRATION: one finding
+
+**[HIGH] templates/emails/otp_verification.html:L99, L109 and password_reset_otp.html:L105, L109 — every account email went out with template syntax in it. FIXED.**
+Impact: Django's `tag_re` is compiled without `re.DOTALL`, so a `{% ... %}` that does
+not close on the same line is never recognised as a tag — it is emitted as literal text.
+Four `{% trans %}` tags were wrapped across lines, so the HTML body of every
+registration and every password-reset email contained `{% trans "Thank you for
+registering with Training Platform! …" %}` verbatim. Those four sentences also never
+reached the translation catalogue.
+Verified: capturing a real registration email showed `{% trans` present in the
+`text/html` part and absent from the plain-text part — which is why nothing about it
+was visible from the API. Live, and on the first screen a new user ever sees.
+Fixed by joining the four tags onto one line; the four sentences are now in the
+catalogue and translated. A gate test now sweeps every template for a tag left open at
+a line end.
+
+Everything else in this flow held: registration creates an inactive user and a hashed
+OTP; `admin` and `agent` cannot be self-registered; five wrong codes trigger a
+15-minute lockout that also refuses the correct code; a correct code first time
+activates the account and returns tokens; neither login nor password reset reveals
+whether an email is registered; six parallel registrations for one email produce one
+account.
+
+*Product decision, not a defect:* `trainer` is self-registerable. Only `admin` and
+`agent` require a superuser.

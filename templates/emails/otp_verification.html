@@ -96,8 +96,7 @@
             <h2>{% trans "Email Verification" %}</h2>
             <p>{% trans "Hello" %}{% if user.first_name %} {{ user.first_name }}{% endif %},</p>
 
-            <p>{% trans "Thank you for registering with Training Platform! To complete your registration and activate
-                your account, please use the verification code below:" %}</p>
+            <p>{% trans "Thank you for registering with Training Platform! To complete your registration and activate your account, please use the verification code below:" %}</p>
 
             <div class="otp-code">
                 {{ otp_code }}
@@ -106,8 +105,7 @@
             <p>{% trans "Enter this code in the verification page to activate your account." %}</p>
 
             <div class="warning">
-                <strong>{% trans "Important:" %}</strong> {% trans "This code will expire in 10 minutes. If you didn't
-                request this code, please ignore this email." %}
+                <strong>{% trans "Important:" %}</strong> {% trans "This code will expire in 10 minutes. If you didn't request this code, please ignore this email." %}
             </div>
 
             <p>{% trans "If you didn't create an account with us, please disregard this email." %}</p>

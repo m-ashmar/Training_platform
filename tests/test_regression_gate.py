@@ -1815,3 +1815,68 @@ def test_the_notification_list_rejects_the_wrong_pagination_contract(make_user, 
     response = api(make_user("pagination")).get("/api/social/notifications/?page=2")
     assert response.status_code == 400
     assert "page" in response.json().get("field_errors", response.json())
+
+
+# --------------------------------------------------- templates that are not templates
+def test_no_template_tag_spans_a_line_break():
+    """Django's `tag_re` is compiled without `re.DOTALL`, so a `{% ... %}` that does not
+    close on the same line is never recognised as a tag — it is emitted as literal text.
+    Four `{% trans %}` tags in the account emails were wrapped across lines, so every
+    registration and every password reset went out with template syntax visible in the
+    HTML body, and those four sentences never reached the translation catalogue."""
+    from pathlib import Path
+
+    offenders = []
+    for path in Path(".").rglob("*.html"):
+        if any(part in {".venv", "_excluded", "node_modules", "site-packages"}
+               for part in path.parts):
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            opens = line.count("{%") + line.count("{{")
+            closes = line.count("%}") + line.count("}}")
+            if opens > closes:
+                offenders.append(f"{path}:{number}")
+    assert not offenders, f"template tags left open at line end: {offenders}"
+
+
+def test_the_account_emails_contain_no_template_syntax(db):
+    """The HTML part is what the user actually reads; the plain-text part was fine, so
+    nothing about this was visible from the API."""
+    from django.core import mail
+    from django.test import override_settings
+    from users.utils import send_otp_email
+    from users.models import CustomUser
+
+    user = CustomUser.objects.create_user(
+        email="tmpl@gate.test", username="tmpl_gate", password="Xx!23456")
+    with override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+        mail.outbox = []
+        send_otp_email(user, "123456")
+        assert mail.outbox, "no email was sent"
+        for message in mail.outbox:
+            assert "{%" not in message.body and "{{" not in message.body
+            for content, _mimetype in getattr(message, "alternatives", []):
+                assert "{%" not in content, content[content.find("{%"):][:120]
+                assert "{{" not in content
+
+
+# ------------------------------------------------------------------------ OTP flow
+def test_the_otp_locks_out_after_five_wrong_codes(db):
+    """A six-digit code with no attempt limit is a 10^6 space one client can walk."""
+    from users.utils import verify_otp, create_otp, _clear_otp_attempts
+    from users.models import CustomUser
+
+    user = CustomUser.objects.create_user(
+        email="otpgate@gate.test", username="otp_gate", password="Xx!23456")
+    _clear_otp_attempts(user.email, "registration")
+    create_otp(user)
+
+    for _ in range(5):
+        ok, _row, message = verify_otp(user.email, "000000")
+        assert ok is False
+        assert "Too many" not in str(message)
+
+    ok, _row, message = verify_otp(user.email, "000000")
+    assert ok is False
+    assert "Too many" in str(message), message
+    _clear_otp_attempts(user.email, "registration")

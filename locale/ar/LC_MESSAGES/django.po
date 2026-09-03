@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Training Platform 1.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-03 13:29+0300\n"
+"POT-Creation-Date: 2026-09-03 22:53+0300\n"
 "PO-Revision-Date: 2026-03-01 23:30+0400\n"
 "Last-Translator: Training Platform Team\n"
 "Language-Team: Arabic\n"
@@ -60,6 +60,7 @@ msgstr "اسم الطعام طويل جدًا (الحد الأقصى 255 حرف�
 #: ai_assistant/consumers.py:158
 msgid "Your AI assistant subscription is no longer active."
 msgstr "لم يعد اشتراك المساعد الذكي الخاص بك نشطًا."
+
 #: ai_assistant/consumers.py:169
 #, python-format
 msgid "Daily message limit reached. Resets at %(time)s."
@@ -547,6 +548,7 @@ msgstr "تم تحديث البيانات بنجاح!"
 #: subscription/views.py:900 wallet/views.py:274 wallet/views.py:314
 msgid "Request could not be completed."
 msgstr "تعذّر إتمام الطلب."
+
 #: diet/views.py:1268
 #, fuzzy
 #| msgid "Could not fetch this data right now."
@@ -670,15 +672,19 @@ msgstr "تمت إعادة تعيين الرمز المميز بنجاح"
 #, python-format
 msgid "%(message)s"
 msgstr "%(message)s"
+
 #: notifications/domain/routine_events.py:35
 msgid "Workout Reminder"
 msgstr "تذكير بالتمرين"
+
 #: notifications/domain/routine_events.py:45
 msgid "Workout Completed"
 msgstr "اكتمل التمرين"
+
 #: notifications/domain/routine_events.py:55
 msgid "Milestone Reached 🎯"
 msgstr "إنجاز محقق 🎯"
+
 #: notifications/domain/routine_events.py:65
 #: notifications/template_resolver.py:89 notifications/template_resolver.py:115
 #: notifications/template_resolver.py:131
@@ -756,48 +762,60 @@ msgstr "ألغى %(name)s إسناده من تدريبك."
 #, python-format
 msgid "A full year of training. %(days)d days in a row."
 msgstr "سنة كاملة من التدريب. %(days)d يومًا متتاليًا."
+
 #: notifications/milestones.py:38
 #, python-format
 msgid "%(days)d days without missing one. Remarkable."
 msgstr "%(days)d يومًا دون انقطاع. مذهل."
+
 #: notifications/milestones.py:40
 #, python-format
 msgid "%(days)d-day streak — this is a habit now."
 msgstr "سلسلة %(days)d يومًا — أصبح هذا عادة الآن."
+
 #: notifications/milestones.py:41
 #, python-format
 msgid "%(days)d days in a row. Keep it going."
 msgstr "%(days)d يومًا متتاليًا. واصل."
+
 #: notifications/milestones.py:46
 msgid "First workout complete. The hardest one is behind you."
 msgstr "اكتمل أول تمرين. الأصعب أصبح خلفك."
+
 #: notifications/milestones.py:48
 #, python-format
 msgid "%(count)d workouts completed. That is a training career."
 msgstr "%(count)d تمرينًا مكتملًا. هذه مسيرة تدريبية."
+
 #: notifications/milestones.py:50
 #, python-format
 msgid "%(count)d workouts completed."
 msgstr "%(count)d تمرينًا مكتملًا."
+
 #: notifications/milestones.py:51
 #, python-format
 msgid "%(count)d workouts done. Momentum is building."
 msgstr "%(count)d تمرينًا أنجزت. الزخم يتصاعد."
+
 #: notifications/tasks.py:223
 #, python-format
 msgid "Day %(day)d of %(routine)s is waiting for you."
 msgstr "اليوم %(day)d من %(routine)s بانتظارك."
+
 #: notifications/tasks.py:240
 msgid "You trained yesterday. Keep the streak alive."
 msgstr "تدربت بالأمس. حافظ على السلسلة."
+
 #: notifications/tasks.py:242
 #, python-format
 msgid "It has been %(days)d days since your last workout."
 msgstr "مضى %(days)d يومًا منذ آخر تمرين لك."
+
 #: notifications/tasks.py:245
 #, python-format
 msgid "It has been %(days)d days. Even a short session gets you moving again."
 msgstr "مضى %(days)d يومًا. حتى جلسة قصيرة تعيدك إلى الحركة."
+
 #: notifications/template_resolver.py:73
 #, fuzzy
 #| msgid "New Notification"
@@ -807,6 +825,7 @@ msgstr "إشعار جديد"
 #: notifications/trainer_message.py:41
 msgid "Message contains invalid characters."
 msgstr "تحتوي الرسالة على أحرف غير صالحة."
+
 #: notifications/trainer_message.py:63
 #, fuzzy
 #| msgid "Only trainers and admins can create routines"
@@ -816,12 +835,15 @@ msgstr "يمكن للمدربين والمسؤولين فقط إنشاء الب�
 #: notifications/trainer_message.py:79 notifications/trainer_message.py:87
 msgid "No such client."
 msgstr "لا يوجد متدرب بهذا المعرّف."
+
 #: notifications/trainer_message.py:114
 msgid "The client has turned off messages of this kind."
 msgstr "أوقف المتدرب استقبال هذا النوع من الرسائل."
+
 #: notifications/trainer_message.py:121
 msgid "Message sent."
 msgstr "تم إرسال الرسالة."
+
 #: notifications/views.py:31
 msgid "channels must be an object, e.g. {\"fcm\": true}"
 msgstr ""
@@ -830,6 +852,7 @@ msgstr ""
 #, python-format
 msgid "Unknown channel(s): %(bad)s"
 msgstr "قنوات غير معروفة: %(bad)s"
+
 #: notifications/views.py:40
 #, fuzzy
 #| msgid "current_value must be a valid number"
@@ -845,84 +868,111 @@ msgstr "الرمز مطلوب."
 #: routine/models.py:62
 msgid "Upper Chest"
 msgstr "أعلى الصدر"
+
 #: routine/models.py:63
 msgid "Lower Chest"
 msgstr "أسفل الصدر"
+
 #: routine/models.py:64
 msgid "Middle Chest"
 msgstr "وسط الصدر"
+
 #: routine/models.py:65
 msgid "Lateral Deltoid"
 msgstr "الدالية الجانبية"
+
 #: routine/models.py:66
 msgid "Rear Deltoid"
 msgstr "الدالية الخلفية"
+
 #: routine/models.py:67
 msgid "Front Deltoid"
 msgstr "الدالية الأمامية"
+
 #: routine/models.py:68
 msgid "Biceps"
 msgstr "العضلة ذات الرأسين"
+
 #: routine/models.py:69
 msgid "Triceps"
 msgstr "العضلة ثلاثية الرؤوس"
+
 #: routine/models.py:70
 msgid "Forearms"
 msgstr "الساعدان"
+
 #: routine/models.py:71
 msgid "Upper Back"
 msgstr "أعلى الظهر"
+
 #: routine/models.py:72
 msgid "Lats"
 msgstr "العضلة الظهرية العريضة"
+
 #: routine/models.py:73
 msgid "Lower Back"
 msgstr "أسفل الظهر"
+
 #: routine/models.py:74
 msgid "Traps"
 msgstr "شبه المنحرفة"
+
 #: routine/models.py:75
 msgid "Abdominals"
 msgstr "عضلات البطن"
+
 #: routine/models.py:76
 msgid "Obliques"
 msgstr "العضلات المائلة"
+
 #: routine/models.py:77
 msgid "Glutes"
 msgstr "عضلات الأرداف"
+
 #: routine/models.py:78
 msgid "Front Quads"
 msgstr "الرباعية الأمامية"
+
 #: routine/models.py:79
 msgid "Hamstrings"
 msgstr "أوتار الركبة"
+
 #: routine/models.py:80
 msgid "Calves"
 msgstr "السمانة"
+
 #: routine/models.py:81
 msgid "Adductors"
 msgstr "المقربات"
+
 #: routine/models.py:82
 msgid "Abductors"
 msgstr "المبعدات"
+
 #: routine/models.py:83
 msgid "Neck"
 msgstr "الرقبة"
+
 #: routine/models.py:84
 msgid "Other"
 msgstr "أخرى"
+
 #: routine/models.py:94 routine/models.py:315
 msgid "Beginner"
 msgstr "مبتدئ"
+
 #: routine/models.py:95 routine/models.py:316
 msgid "Intermediate"
 msgstr "متوسط"
+
 #: routine/models.py:96 routine/models.py:317
 msgid "Advanced"
 msgstr "متقدم"
+
 #: routine/models.py:97 routine/models.py:318
 msgid "Expert"
 msgstr "خبير"
+
 #: routine/models.py:171
 #, fuzzy
 #| msgid "Only trainers and admins can create routines"
@@ -932,6 +982,7 @@ msgstr "يمكن للمدربين والمسؤولين فقط إنشاء الب�
 #: routine/models.py:175
 msgid "A global exercise has no owner; an owned exercise is not global."
 msgstr "التمرين العام لا مالك له، والتمرين المملوك ليس عامًا."
+
 #: routine/models.py:367
 #, fuzzy
 #| msgid "Only trainers and admins can create routines"
@@ -941,6 +992,7 @@ msgstr "يمكن للمدربين والمسؤولين فقط إنشاء الب�
 #: routine/models.py:513
 msgid "Day is 1-based."
 msgstr "ترقيم الأيام يبدأ من 1."
+
 #: routine/models.py:776
 msgid "RPE must be between 1 and 10"
 msgstr "يجب أن تكون درجة الجهد المبذول بين 1 و10"
@@ -962,6 +1014,7 @@ msgstr "يمكنك فقط تعيين تمارينك الخاصة أو التما
 #: routine/serializers.py:149
 msgid "That exercise has been retired and cannot be added."
 msgstr "تم إيقاف هذا التمرين ولا يمكن إضافته."
+
 #: routine/serializers.py:160
 #, fuzzy, python-format
 #| msgid "Day %(day)s exceeds routine duration of %(days)s days"
@@ -981,6 +1034,7 @@ msgstr "اسم المستخدم مطلوب"
 #: routine/serializers.py:510
 msgid "You cannot log sets against another user's progress."
 msgstr "لا يمكنك تسجيل مجموعات على تقدّم مستخدم آخر."
+
 #: routine/serializers.py:649 users/serializers.py:249
 msgid "This serializer is only for trainers"
 msgstr "هذا الكائن خاص بالمدربين فقط"
@@ -993,7 +1047,10 @@ msgstr "هذا الكائن خاص بالعملاء فقط"
 msgid ""
 "This routine has recorded client progress and cannot be deleted. Set "
 "is_active=false to retire it instead."
-msgstr "هذا البرنامج يحتوي على تقدّم مسجّل للمتدربين ولا يمكن حذفه. اضبط is_active=false لإيقافه بدلًا من ذلك."
+msgstr ""
+"هذا البرنامج يحتوي على تقدّم مسجّل للمتدربين ولا يمكن حذفه. اضبط "
+"is_active=false لإيقافه بدلًا من ذلك."
+
 #: routine/views.py:385
 #, fuzzy
 #| msgid "Preferences cleared successfully"
@@ -1080,10 +1137,12 @@ msgstr "تنسيق التاريخ غير صالح. استخدم YYYY-MM-DD."
 #: routine/views.py:975 routine/views.py:2010
 msgid "Cannot log a workout in the future."
 msgstr "لا يمكن تسجيل تمرين في المستقبل."
+
 #: routine/views.py:979 routine/views.py:2014
 #, python-format
 msgid "Cannot log a workout more than %(d)d days in the past."
 msgstr "لا يمكن تسجيل تمرين مضى عليه أكثر من %(d)d أيام."
+
 #: routine/views.py:986 routine/views.py:2022
 msgid "Routine not found."
 msgstr "البرنامج التدريبي غير موجود."
@@ -1167,6 +1226,7 @@ msgstr "تنسيق التاريخ غير صالح. استخدم YYYY-MM-DD."
 #: routine/views.py:2068
 msgid "Could not record progress for this exercise."
 msgstr "تعذّر تسجيل التقدّم لهذا التمرين."
+
 #: routine/views.py:2140
 #, fuzzy
 #| msgid "Profile picture uploaded successfully"
@@ -1265,7 +1325,10 @@ msgstr "تم تحديث التقدم بنجاح"
 msgid ""
 "This endpoint is cursor-paginated. Follow the `next` link instead of passing "
 "`page`."
-msgstr "هذه الواجهة تستخدم ترقيم الصفحات بالمؤشر. اتبع الرابط `next` بدلًا من تمرير `page`."
+msgstr ""
+"هذه الواجهة تستخدم ترقيم الصفحات بالمؤشر. اتبع الرابط `next` بدلًا من تمرير "
+"`page`."
+
 #: social/views.py:871
 msgid "Notification marked as read"
 msgstr "تم تحديد الإشعار كمقروء"
@@ -1376,6 +1439,7 @@ msgstr "فشل في إلغاء الاشتراك"
 msgid ""
 "Renewal payment initiated. Complete payment to extend your subscription."
 msgstr "بدأت عملية دفع التجديد. أكمل الدفع لتمديد اشتراكك."
+
 #: subscription/views.py:264
 msgid "Failed to renew subscription"
 msgstr "فشل في تجديد الاشتراك"
@@ -1427,6 +1491,7 @@ msgstr "الاشتراك غير موجود"
 #: subscription/views.py:724
 msgid "This plan does not require a payment"
 msgstr "هذه الخطة لا تتطلب دفعًا"
+
 #: subscription/views.py:734
 #, fuzzy
 #| msgid "Subscription is already cancelled or expired"
@@ -1442,6 +1507,7 @@ msgstr "إجراء غير صالح"
 #: subscription/views.py:750 subscription/views.py:757
 msgid "The price has changed. Please refresh and try again."
 msgstr "تغيّر السعر. يُرجى التحديث والمحاولة مرة أخرى."
+
 #: subscription/views.py:823
 msgid "Failed to initiate payment"
 msgstr "فشل في بدء الدفع"
@@ -1453,9 +1519,11 @@ msgstr "الدفعة غير موجودة"
 #: subscription/views.py:880
 msgid "Payment has no gateway reference to reconcile"
 msgstr "لا يوجد مرجع لدى بوابة الدفع لتسوية هذه العملية"
+
 #: subscription/views.py:891
 msgid "Could not verify payment with gateway"
 msgstr "تعذّر التحقق من الدفع لدى البوابة"
+
 #: templates/emails/otp_verification.html:8
 msgid "Email Verification - Training Platform"
 msgstr "تأكيد البريد الإلكتروني - منصة التدريب"
@@ -1474,26 +1542,50 @@ msgstr "تأكيد البريد الإلكتروني"
 msgid "Hello"
 msgstr "مرحبًا"
 
-#: templates/emails/otp_verification.html:106
+#: templates/emails/otp_verification.html:99
+msgid ""
+"Thank you for registering with Training Platform! To complete your "
+"registration and activate your account, please use the verification code "
+"below:"
+msgstr "شكرًا لتسجيلك في منصة التدريب! لإكمال التسجيل وتفعيل حسابك، استخدم رمز التحقق أدناه:"
+#: templates/emails/otp_verification.html:105
 msgid "Enter this code in the verification page to activate your account."
 msgstr "أدخل هذا الرمز في صفحة التحقق لتفعيل حسابك."
 
-#: templates/emails/otp_verification.html:109
+#: templates/emails/otp_verification.html:108
 #: templates/emails/password_reset_otp.html:105
 msgid "Important:"
 msgstr "مهم:"
 
-#: templates/emails/otp_verification.html:113
+#: templates/emails/otp_verification.html:108
+#, fuzzy
+#| msgid ""
+#| "Your OTP verification code is: %(code)s\n"
+#| "\n"
+#| "This code will expire in 10 minutes.\n"
+#| "\n"
+#| "If you didn't request this code, please ignore this email."
+msgid ""
+"This code will expire in 10 minutes. If you didn't request this code, please "
+"ignore this email."
+msgstr ""
+"رمز التحقق الخاص بك هو: %(code)s\n"
+"\n"
+"تنتهي صلاحية هذا الرمز خلال 10 دقائق.\n"
+"\n"
+"إذا لم تطلب هذا الرمز، يُرجى تجاهل هذه الرسالة."
+
+#: templates/emails/otp_verification.html:111
 msgid "If you didn't create an account with us, please disregard this email."
 msgstr "إذا لم تنشئ حسابًا لدينا، يُرجى تجاهل هذه الرسالة."
 
-#: templates/emails/otp_verification.html:117
-#: templates/emails/password_reset_otp.html:114
+#: templates/emails/otp_verification.html:115
+#: templates/emails/password_reset_otp.html:112
 msgid "This is an automated message. Please do not reply to this email."
 msgstr "هذه رسالة آلية. يُرجى عدم الرد عليها."
 
-#: templates/emails/otp_verification.html:118
-#: templates/emails/password_reset_otp.html:115
+#: templates/emails/otp_verification.html:116
+#: templates/emails/password_reset_otp.html:113
 msgid "Training Platform. All rights reserved."
 msgstr "منصة التدريب. جميع الحقوق محفوظة."
 
@@ -1516,6 +1608,29 @@ msgstr ""
 msgid "Enter this code in the app to reset your password."
 msgstr "أدخل هذا الرمز في التطبيق لإعادة تعيين كلمة المرور."
 
+#: templates/emails/password_reset_otp.html:105
+#, fuzzy
+#| msgid ""
+#| "Your password reset code is: %(code)s\n"
+#| "\n"
+#| "This code will expire in 10 minutes.\n"
+#| "\n"
+#| "If you didn't request a password reset, please ignore this email."
+msgid ""
+"This code will expire in 10 minutes. If you didn't request a password reset, "
+"please ignore this email. Your password will remain unchanged."
+msgstr ""
+"رمز إعادة تعيين كلمة المرور الخاص بك هو: %(code)s\n"
+"\n"
+"تنتهي صلاحية هذا الرمز خلال 10 دقائق.\n"
+"\n"
+"إذا لم تطلب إعادة التعيين، يُرجى تجاهل هذه الرسالة."
+
+#: templates/emails/password_reset_otp.html:108
+msgid ""
+"If you didn't request this, someone may have entered your email by mistake. "
+"No action is needed."
+msgstr "إذا لم تطلب ذلك، فربما أدخل شخص ما بريدك الإلكتروني عن طريق الخطأ. لا حاجة لأي إجراء."
 #: training_platform/error_handlers.py:34
 #, fuzzy
 #| msgid "Payment not found"
@@ -1621,17 +1736,21 @@ msgstr "حجم الملف كبير جدًا. الحد الأقصى للحجم ه
 #: training_platform/file_security.py:482
 msgid "File is not a readable image."
 msgstr "الملف ليس صورة قابلة للقراءة."
+
 #: training_platform/file_security.py:486
 #, python-format
 msgid "Unsupported image format: %(fmt)s"
 msgstr "صيغة صورة غير مدعومة: %(fmt)s"
+
 #: training_platform/file_security.py:491
 #, python-format
 msgid "Image dimensions too large (max %(d)spx per side)."
 msgstr "أبعاد الصورة كبيرة جدًا (الحد الأقصى %(d)s بكسل لكل ضلع)."
+
 #: training_platform/file_security.py:495
 msgid "Image has too many pixels."
 msgstr "الصورة تحتوي على عدد بكسلات كبير جدًا."
+
 #: training_platform/middleware.py:101
 #, fuzzy
 #| msgid "Failed to send OTP. Please try again later."
@@ -1659,6 +1778,7 @@ msgstr "الرمز مطلوب."
 #: training_platform/privacy/views.py:63
 msgid "Repeat the request with confirm=ERASE. This cannot be undone."
 msgstr "أعد إرسال الطلب مع confirm=ERASE. لا يمكن التراجع عن هذا الإجراء."
+
 #: training_platform/privacy/views.py:71
 #, fuzzy
 #| msgid "All AI data has been deleted."
@@ -1814,6 +1934,7 @@ msgstr "يجب إدخال رقم الهاتف بصيغة: '+999999999'. يُسم
 #: users/serializers.py:37
 msgid "This user type cannot be self-registered."
 msgstr "لا يمكن تسجيل هذا النوع من المستخدمين ذاتيًا."
+
 #: users/serializers.py:40
 msgid "Invalid user type."
 msgstr "نوع المستخدم غير صالح."
@@ -1935,6 +2056,7 @@ msgstr "تم التحقق من البريد الإلكتروني بنجاح. ت�
 #: users/views.py:294
 msgid "If this email is registered and unverified, a new OTP has been sent."
 msgstr "إذا كان هذا البريد مسجّلًا وغير مُفعّل، فقد تم إرسال رمز تحقق جديد."
+
 #: users/views.py:299
 msgid "Email is required"
 msgstr "البريد الإلكتروني مطلوب"
