@@ -1,0 +1,45 @@
+{
+  "_comment": "Diet engine quality baseline, phase 0.2 of the rebuild. Measured against the catalogue built by `add_healthy_foods` and `seed_recipes`, which is what a fresh production database contains. The gate asserts these as bounds in the direction of improvement and tightens them phase by phase.",
+  "recorded": "2026-09-04",
+  "catalogue": {
+    "foods": 100,
+    "recipes": 12
+  },
+  "measured": {
+    "dish_rate_overall": 0.4167,
+    "dish_rate_by_slot": {
+      "Breakfast": 0.1667,
+      "Lunch": 0.5,
+      "Dinner": 0.6667,
+      "Snack": 0.3333
+    },
+    "meals_measured": 168,
+    "distinct_dishes": 5,
+    "max_repeats_of_one_dish": 21,
+    "absurd_portion_rate": 0.0909,
+    "portions_measured": 671,
+    "min_distinct_portions_per_food": 1,
+    "drift_by_target": {
+      "1400": 8.679,
+      "1800": 8.7,
+      "2200": 3.259,
+      "2600": 2.875,
+      "3000": 7.158
+    },
+    "drift_all_one_sided": true,
+    "drift_worst_abs": 8.7,
+    "twin_identical_meals": 28,
+    "twin_total_meals": 28,
+    "chosen_ingredient_share": 0.0171,
+    "chooser_pool_ranked_first": true,
+    "condiment_slots": [],
+    "catalogue_gaps": [
+      "missing food: Chicken Breast",
+      "missing food: Greek Yogurt",
+      "missing food: Oats",
+      "missing food: Salmon",
+      "missing food: Sweet Potato",
+      "missing food: White Rice"
+    ]
+  }
+}

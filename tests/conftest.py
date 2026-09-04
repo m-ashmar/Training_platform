@@ -69,3 +69,43 @@ def _reset_rate_limits():
         ratelimit_cache().clear()
     except Exception:
         pass
+
+
+@pytest.fixture(scope="session")
+def seeded_catalogue(django_db_setup, django_db_blocker):
+    """The catalogue and recipe library, built by the project's own seed commands.
+
+    The quality harness measures what the engine puts on a plate, so it needs food to
+    put there, and the test database starts empty. Seeding through `add_healthy_foods`
+    and `seed_recipes` rather than a hand-written fixture means the gate measures what
+    a fresh production database will actually contain — which matters, because the
+    development database is going to be dropped before launch and every number taken
+    from it goes with it.
+    """
+    from django.core.management import call_command
+
+    with django_db_blocker.unblock():
+        from diet.models import FoodItem, Recipe
+
+        if FoodItem.objects.count() < 20:
+            call_command("add_healthy_foods", verbosity=0)
+        if Recipe.objects.count() == 0:
+            call_command("seed_recipes", verbosity=0)
+        return {
+            "foods": FoodItem.objects.filter(needs_review=False).count(),
+            "recipes": Recipe.objects.filter(is_active=True).count(),
+        }
+
+
+@pytest.fixture(scope="session")
+def diet_quality(seeded_catalogue, django_db_blocker):
+    """One quality measurement, shared across every assertion that reads it.
+
+    Generating 168 meals takes about six seconds, so it runs once per session. Measured
+    against the seeded catalogue rather than the development database, so the numbers
+    describe what a fresh install does and survive that database being dropped.
+    """
+    from tests.diet_quality import measure, PROFILES
+
+    with django_db_blocker.unblock():
+        return measure(PROFILES, days=7)

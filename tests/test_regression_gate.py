@@ -1921,3 +1921,153 @@ def test_a_users_wallet_keeps_them_from_being_deleted(make_user):
     Wallet.objects.get_or_create(owner=user, defaults={"owner_type": "client"})
     with pytest.raises(ProtectedError):
         user.delete()
+
+
+# =========================================================================
+# Diet engine quality — phase 0.3 of the rebuild.
+#
+# These assert TODAY's numbers as bounds in the direction of improvement, so a
+# regression fails and a fix does not. Each one names the phase that tightens it
+# and the value it tightens to. The measurement lives in tests/diet_quality.py and
+# the recorded baseline in tests/diet_quality_baseline.json.
+#
+# The failure mode being guarded is silent: a worse plan is still a plan and
+# raises nothing.
+# =========================================================================
+
+def test_choosing_your_own_food_currently_changes_nothing(diet_quality):
+    """The headline finding. Per-slot choices are modelled, captured by a live
+    endpoint, and ranked first by build_pool at the highest weight — all correct. But
+    find_recipe takes no user, and the recipe path serves most meals, so the ranking is
+    never consulted and both clients get the same plan.
+
+    Tightens in P2 to <= 8 of 28 once find_recipe scores dishes by the client's picks."""
+    assert diet_quality.chooser_pool_ranked_first, \
+        "build_pool stopped ranking the client's chosen foods first"
+    assert diet_quality.twin_identical_meals <= diet_quality.twin_total_meals
+    assert diet_quality.twin_total_meals >= 20, "not enough meals to judge"
+
+
+def test_the_library_is_barely_used(diet_quality):
+    """find_recipe returns the best-fitting recipe deterministically, so the same target
+    always yields the same dish and most of the library is never served.
+
+    Tightens in P2 to >= 6 distinct and <= 2 repeats once selection samples."""
+    assert diet_quality.distinct_dishes >= 5, \
+        f"dish variety regressed to {diet_quality.distinct_dishes}"
+    assert diet_quality.max_repeats_of_one_dish <= 24, \
+        f"one dish now served {diet_quality.max_repeats_of_one_dish} times"
+
+
+def test_some_portions_are_not_servings(diet_quality):
+    """No food carries a unit, so a portion is an unbounded gram figure: 350 g of egg
+    white is eleven of them, and 370 g of squash is a plate nobody finishes.
+
+    Tightens in P4 to 0.0 once a portion is k x unit_grams inside a declared range."""
+    assert diet_quality.absurd_portion_rate <= 0.11, \
+        f"absurd portions rose to {diet_quality.absurd_portion_rate:.0%}: " \
+        f"{diet_quality.absurd_examples[:3]}"
+
+
+def test_a_portion_sticks_at_one_or_two_sizes(diet_quality):
+    """A floor in a greedy filler is an attractor: the algorithm satisfies it minimally
+    and stops, so the floor becomes the permanent answer.
+
+    Tightens in P4 to >= 4 once floors become min_units inside the search space."""
+    assert diet_quality.min_distinct_portions_per_food >= 1
+    assert diet_quality.min_distinct_portions_per_food <= 3, \
+        "portion diversity improved; tighten this bound"
+
+
+def test_calorie_drift_only_ever_goes_up(diet_quality):
+    """Round-up steps, floors firing after the target is met, and residual filling all
+    push one way. Noise would fall both ways, so this is a bias with a cause.
+
+    The bound is deliberately loose. Drift is noisy today for two reasons that P4
+    removes: the planner seeds its RNG from the user id, and portions are continuous
+    grams so a single rounding decision moves the total. Observed range across runs and
+    catalogues is +6.2% to +10.9%. What this guards is a regression to something much
+    worse, not the exact figure.
+
+    Tightens in P4 to <= 2% and drift_all_one_sided False, at which point it becomes a
+    real assertion rather than a tripwire."""
+    assert diet_quality.drift_worst_abs <= 14.0, \
+        f"drift worsened to {diet_quality.drift_worst_abs:+.1f}%"
+
+
+def test_condiments_top_the_candidate_lists(diet_quality):
+    """Ranking is grams of macro per kcal, which is maximised by foods that are almost
+    pure macro and nothing else, so sauces and jellies outrank staples.
+
+    Tightens in P1 to 0 once role excludes condiments from primary selection."""
+    assert len(diet_quality.condiment_slots) <= 4, \
+        f"condiments now top {len(diet_quality.condiment_slots)} slots"
+
+
+def test_breakfast_is_the_weakest_slot(diet_quality):
+    """Half of breakfasts are an unstructured pile because the library holds five
+    breakfast recipes and none is Levantine.
+
+    Tightens in P3 and P6 to >= 0.85."""
+    breakfast = diet_quality.dish_rate_by_slot.get("Breakfast", 0.0)
+    assert breakfast >= 0.15, f"breakfast dish rate fell to {breakfast:.0%}"
+    assert diet_quality.dish_rate_overall >= 0.38, \
+        f"overall dish rate fell to {diet_quality.dish_rate_overall:.0%}"
+
+
+def test_the_recorded_baseline_still_describes_this_engine(diet_quality):
+    """Guards the harness itself. If the catalogue changes underneath it the recorded
+    baseline stops meaning anything, and every comparison above is against a number
+    that no longer applies."""
+    import json
+    from pathlib import Path
+
+    from diet.models import FoodItem, Recipe
+
+    baseline = json.loads(Path("tests/diet_quality_baseline.json").read_text())
+    assert FoodItem.objects.filter(needs_review=False).count() >= \
+        baseline["catalogue"]["foods"], "catalogue shrank; re-record the baseline"
+    assert Recipe.objects.filter(is_active=True).count() >= \
+        baseline["catalogue"]["recipes"], "recipes were removed; re-record the baseline"
+
+
+def test_the_two_seed_commands_agree_on_food_names(seeded_catalogue, db):
+    """A fresh production database cannot build most of its own recipes.
+
+    `add_healthy_foods` writes 100 foods and `seed_recipes` writes recipes that name
+    their ingredients, and the two disagree: the catalogue has "Chicken Breast
+    (Grilled)", "Salmon Fillet", "Greek Yogurt (Non-Fat)", "Sweet Potato (Baked)",
+    "Extra Virgin Olive Oil" and "Lentils (Cooked)", while the recipes ask for "Chicken
+    Breast", "Salmon", "Greek Yogurt", "Sweet Potato", "Olive Oil" and "Lentils". Oats
+    are absent from a hundred-item healthy-food catalogue entirely.
+
+    The effect is not subtle. On the development database, whose 340 Edamam rows happen
+    to carry the plain names, the engine serves a named dish 71% of the time. On the
+    catalogue a fresh install actually gets, it manages 42%, breakfast drops to 17%, and
+    a client's chosen ingredients reach the plate 3% of the time instead of 32%.
+
+    That development database is going to be dropped before launch. This is the number
+    that ships."""
+    from diet.models import FoodItem, Recipe
+
+    from diet.management.commands.seed_recipes import RECIPES
+
+    # `seed_recipes` skips any recipe whose foods it cannot find, so asking whether the
+    # recipes that exist resolve is a question that answers itself. Ask instead what the
+    # seed intended to create, and compare that against the catalogue.
+    unresolvable = {}
+    for name, _meals, _cuisine, _minutes, lines in RECIPES:
+        missing = [
+            food_name for food_name, _grams, _scalable in lines
+            if not FoodItem.objects.filter(name__iexact=food_name).exists()
+            and not FoodItem.objects.filter(name__icontains=food_name).exists()
+        ]
+        if missing:
+            unresolvable[name] = missing
+
+    seeded = Recipe.objects.filter(is_active=True).count()
+    assert seeded >= 12, f"only {seeded} of {len(RECIPES)} recipes survived seeding"
+    assert len(unresolvable) <= 4, (
+        f"{len(unresolvable)} of {len(RECIPES)} recipes cannot be built from the seeded "
+        f"catalogue: {unresolvable}"
+    )
