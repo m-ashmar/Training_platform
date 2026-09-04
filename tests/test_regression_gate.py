@@ -1941,18 +1941,31 @@ def test_choosing_your_own_food_currently_changes_nothing(diet_quality):
     find_recipe takes no user, and the recipe path serves most meals, so the ranking is
     never consulted and both clients get the same plan.
 
-    Tightens in P2 to <= 8 of 28 once find_recipe scores dishes by the client's picks."""
+    P2 connected it: `find_recipe` now takes the user and scores each dish by the share
+    of its ingredients the client picked for that slot. 28 of 28 became 22 of 28.
+
+    It stops there because preference can only choose between alternatives, and with
+    sixteen recipes across four meals most slots have one viable dish whatever the
+    client wants. P3's templates are what make the rest of the difference, by building
+    a meal from their pool instead of picking one off a shelf."""
     assert diet_quality.chooser_pool_ranked_first, \
         "build_pool stopped ranking the client's chosen foods first"
-    assert diet_quality.twin_identical_meals <= diet_quality.twin_total_meals
     assert diet_quality.twin_total_meals >= 20, "not enough meals to judge"
+    assert diet_quality.twin_identical_meals <= 24, \
+        f"choosing your food stopped mattering: {diet_quality.twin_identical_meals} of " \
+        f"{diet_quality.twin_total_meals} meals identical"
 
 
 def test_the_library_is_barely_used(diet_quality):
     """find_recipe returns the best-fitting recipe deterministically, so the same target
     always yields the same dish and most of the library is never served.
 
-    Tightens in P2 to >= 6 distinct and <= 2 repeats once selection samples."""
+    P2 replaced the argmin with a weighted sample over every dish inside tolerance, and
+    made recency a penalty rather than a ban. A ban emptied a sixteen-recipe library
+    within a week and dropped the planner back to assembling piles, which trades a
+    repeated dish for no dish at all.
+
+    The remaining repeats are the snack slot, which has three recipes. That is P6."""
     assert diet_quality.distinct_dishes >= 7, \
         f"dish variety regressed to {diet_quality.distinct_dishes}"
     assert diet_quality.max_repeats_of_one_dish <= 24, \

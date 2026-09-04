@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 
 from typing import Dict, List, Tuple, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from django.utils import timezone
 from django.conf import settings
@@ -55,6 +55,10 @@ class DayContext:
     recent_exclusions_names: Dict[str, Set[str]]
     used_in_window: Dict[str, Set[int]]
     used_names_window: Dict[str, Set[str]]
+    #: Recipe ids served for this meal inside the no-repeat window. The food-level
+    #: window above was already computed and threaded into component assembly; the
+    #: recipe path ignored it, which is half of why one dish was served 48 times.
+    recent_recipe_ids: Dict[str, Set[int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -210,6 +214,7 @@ class RuleBasedPlanner:
         used_names_window: Dict[str, Set[str]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
         # Maintain per-day sliding windows of chosen FoodItem IDs (ID-only)
         day_windows: List[Dict[str, Set[int]]] = []
+        recipe_windows: List[Dict[str, Set[int]]] = []
 
         for day_idx in range(max(1, duration_days)):
             current_date = base_date + _timedelta(days=day_idx)
@@ -223,6 +228,14 @@ class RuleBasedPlanner:
             seed = int(hashlib.sha256(salt.encode('utf-8')).hexdigest()[:12], 16)
             self._rng = random.Random(seed)
             day_start_idx = len(planned_meals)
+            # Recipes served in the last `no_repeat_days`, per meal, so a dish is not
+            # offered again while something else still fits.
+            recent_recipes: Dict[str, Set[int]] = {
+                m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
+            for window in recipe_windows[-int(no_repeat_days):]:
+                for _m in recent_recipes:
+                    recent_recipes[_m].update(window.get(_m, set()))
+            self._recipes_today = {m: set() for m in recent_recipes}
             # Rebuild in-run recency from last `no_repeat_days` day windows
             try:
                 rebuilt: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
@@ -245,6 +258,7 @@ class RuleBasedPlanner:
                 current_date=current_date,
                 daily_kcal=daily_kcal,
                 snack_count=snack_count,
+                recent_recipe_ids=recent_recipes,
                 meals=meals,
                 used_in_window=used_in_window,
                 used_names_window=used_names_window,
@@ -323,6 +337,9 @@ class RuleBasedPlanner:
                 # Prune to last `no_repeat_days`
                 while len(day_windows) > int(no_repeat_days):
                     day_windows.pop(0)
+                recipe_windows.append(dict(self._recipes_today))
+                while len(recipe_windows) > int(no_repeat_days):
+                    recipe_windows.pop(0)
                 try:
                     dbg_counts = {k: len(v) for k,v in today_used.items()}
                     print(f"[RECENCY] accumulated actual ids for day {current_date}: {dbg_counts}")
@@ -661,6 +678,7 @@ class RuleBasedPlanner:
         used_in_window: Dict[str, Set[int]],
         used_names_window: Dict[str, Set[str]],
         no_repeat_days: int,
+        recent_recipe_ids: Dict[str, Set[int]] | None = None,
     ) -> DayContext:
         # Recent history (ids and normalized names)
         try:
@@ -717,6 +735,7 @@ class RuleBasedPlanner:
             recent_exclusions_names=recent_names,
             used_in_window=used_in_window,
             used_names_window=used_names_window,
+            recent_recipe_ids=recent_recipe_ids or {},
         )
     def _recompute_meal_totals(self, components: List[Tuple[FoodItem, float]]) -> Tuple[float, Dict[str, float]]:
         kcal_consumed = sum(g * float(getattr(f, "calories_per_gram", 0.0) or 0.0) for f, g in components)
@@ -870,7 +889,18 @@ class RuleBasedPlanner:
                 logger.debug("could not load allergies for recipe matching", exc_info=True)
 
             policy = load_policy(ctx.goal)
-            match = find_recipe(meal_name, targets, policy, allergen_checker=checker)
+            # The client, so the dish can be chosen from what they picked; the day's
+            # seeded generator, so the choice varies without becoming unreproducible;
+            # and the recipes already served inside the no-repeat window, which the
+            # recipe path was computing and then ignoring.
+            served = getattr(day_ctx, "recent_recipe_ids", {}).get(meal_name, ())
+            match = find_recipe(
+                meal_name, targets, policy,
+                allergen_checker=checker,
+                recent_ids=tuple(served),
+                user=self.user,
+                rng=getattr(self, "_rng", None),
+            )
             if match is None or not match.deviation.within(policy.tolerance):
                 return None
 
@@ -886,6 +916,9 @@ class RuleBasedPlanner:
                 for food, grams in match.components
             ]
             totals = totals_of(match.components)
+            served = getattr(self, "_recipes_today", None)
+            if served is not None:
+                served.setdefault(meal_name, set()).add(match.recipe.id)
             return AIMeal(
                 meal_name=match.name,
                 description=getattr(match.recipe, "description", "") or "",
