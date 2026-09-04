@@ -209,6 +209,27 @@ def _recipe_names() -> set:
     return set(Recipe.objects.values_list("name", flat=True))
 
 
+def _resolve_food(name: str):
+    """Find a food the way `seed_recipes` does: exact, then the shortest containing name.
+
+    The catalogue writes "Chicken Breast (Grilled)" and "Greek Yogurt (Non-Fat)" where a
+    recipe asks for "Chicken Breast" and "Greek Yogurt". A harness that only matched
+    exactly reported six of its own eight choice foods as missing and measured
+    personalisation against two, which made the number meaningless rather than merely
+    imprecise.
+    """
+    from diet.models import FoodItem
+
+    exact = FoodItem.objects.filter(name__iexact=name, needs_review=False).first()
+    if exact is not None:
+        return exact
+    candidates = sorted(
+        FoodItem.objects.filter(name__icontains=name, needs_review=False),
+        key=lambda f: (len(f.name), f.name),
+    )
+    return candidates[0] if candidates else None
+
+
 def _generate(user, kcal: float, days: int):
     """One plan, or None if the engine refused. Refusals are a finding, not a crash."""
     from diet.services.rule_based_planner import RuleBasedPlanner
@@ -301,12 +322,14 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     twin = _make_client(f"qt{tag}", ["Maintain"], 175, 78, 28, "Male", "Moderate")
 
     chosen_names = set()
+    resolved = {}
     for meal_slot, macro, names in SLOT_CHOICES:
         for name in names:
-            food = FoodItem.objects.filter(name__iexact=name, needs_review=False).first()
+            food = _resolve_food(name)
             if food is None:
                 report.catalogue_gaps.append(f"missing food: {name}")
                 continue
+            resolved[name] = food
             UserFoodCategoryPreference.objects.create(
                 user=chooser, food=food, meal=meal_slot, macro=macro)
             chosen_names.add(food.name)
@@ -317,7 +340,7 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
         ranked = pool.by_slot.get(meal_slot, {}).get(macro, [])
         head = {f.name.lower() for f in ranked[:len(names)]}
         for name in names:
-            food = FoodItem.objects.filter(name__iexact=name, needs_review=False).first()
+            food = resolved.get(name)
             if food is not None and food.name.lower() not in head:
                 ranked_first = False
     report.chooser_pool_ranked_first = ranked_first

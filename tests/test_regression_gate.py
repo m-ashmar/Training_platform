@@ -1953,7 +1953,7 @@ def test_the_library_is_barely_used(diet_quality):
     always yields the same dish and most of the library is never served.
 
     Tightens in P2 to >= 6 distinct and <= 2 repeats once selection samples."""
-    assert diet_quality.distinct_dishes >= 5, \
+    assert diet_quality.distinct_dishes >= 7, \
         f"dish variety regressed to {diet_quality.distinct_dishes}"
     assert diet_quality.max_repeats_of_one_dish <= 24, \
         f"one dish now served {diet_quality.max_repeats_of_one_dish} times"
@@ -2010,8 +2010,8 @@ def test_breakfast_is_the_weakest_slot(diet_quality):
 
     Tightens in P3 and P6 to >= 0.85."""
     breakfast = diet_quality.dish_rate_by_slot.get("Breakfast", 0.0)
-    assert breakfast >= 0.15, f"breakfast dish rate fell to {breakfast:.0%}"
-    assert diet_quality.dish_rate_overall >= 0.38, \
+    assert breakfast >= 0.45, f"breakfast dish rate fell to {breakfast:.0%}"
+    assert diet_quality.dish_rate_overall >= 0.45, \
         f"overall dish rate fell to {diet_quality.dish_rate_overall:.0%}"
 
 
@@ -2067,7 +2067,7 @@ def test_the_two_seed_commands_agree_on_food_names(seeded_catalogue, db):
 
     seeded = Recipe.objects.filter(is_active=True).count()
     assert seeded >= 12, f"only {seeded} of {len(RECIPES)} recipes survived seeding"
-    assert len(unresolvable) <= 4, (
+    assert not unresolvable, (
         f"{len(unresolvable)} of {len(RECIPES)} recipes cannot be built from the seeded "
         f"catalogue: {unresolvable}"
     )

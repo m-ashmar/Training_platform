@@ -79,8 +79,21 @@ class Command(BaseCommand):
             foods = {}
             missing = []
             for food_name, grams, scalable in lines:
-                food = (FoodItem.objects.filter(name__iexact=food_name).first()
-                        or FoodItem.objects.filter(name__icontains=food_name).first())
+                # Exact first. Failing that, the *shortest* containing name, because
+                # `.first()` on an unordered icontains picks arbitrarily: asking for
+                # "Olive Oil" against a catalogue holding both "Extra Virgin Olive Oil"
+                # and "Olive Oil Spray" would take whichever the database returned
+                # first, and the macros of the two are not the same food.
+                food = FoodItem.objects.filter(name__iexact=food_name).first()
+                if food is None:
+                    candidates = sorted(
+                        FoodItem.objects.filter(name__icontains=food_name),
+                        key=lambda f: (len(f.name), f.name),
+                    )
+                    food = candidates[0] if candidates else None
+                    if food is not None:
+                        self.stdout.write(
+                            f"  {name!r}: {food_name!r} -> {food.name!r}")
                 if food is None:
                     missing.append(food_name)
                 else:

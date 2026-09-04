@@ -87,10 +87,12 @@ def seeded_catalogue(django_db_setup, django_db_blocker):
     with django_db_blocker.unblock():
         from diet.models import FoodItem, Recipe
 
-        if FoodItem.objects.count() < 20:
-            call_command("add_healthy_foods", verbosity=0)
-        if Recipe.objects.count() == 0:
-            call_command("seed_recipes", verbosity=0)
+        # Both commands are idempotent — update_or_create and get_or_create — so run
+        # them every time rather than guarding on a row count. The guard meant a food
+        # added to the seed never appeared in a reused test database, which is how a
+        # missing staple stayed invisible across several runs.
+        call_command("add_healthy_foods", verbosity=0)
+        call_command("seed_recipes", verbosity=0)
         return {
             "foods": FoodItem.objects.filter(needs_review=False).count(),
             "recipes": Recipe.objects.filter(is_active=True).count(),

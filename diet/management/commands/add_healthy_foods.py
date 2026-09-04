@@ -70,6 +70,12 @@ class Command(BaseCommand):
             ("White Rice (Cooked)", 130, 2.7, 28.0, 0.3, "Carbs"),
             ("Quinoa (Cooked)", 120, 4.4, 21.0, 1.9, "Carbs"),
             ("Oatmeal (Cooked)", 71, 2.5, 12.0, 1.5, "Carbs"),
+            # Dry rolled oats, which is what a recipe means when it says "Oats 60 g".
+            # Only the cooked form was here, and at 71 kcal against 389 it is mostly
+            # water: four breakfast recipes could not resolve their oats at all and were
+            # silently skipped by seed_recipes, which is most of why a fresh install
+            # served a named dish at breakfast 17% of the time.
+            ("Oats (Rolled, Dry)", 389, 16.9, 66.3, 6.9, "Carbs"),
             ("Sweet Potato (Baked)", 90, 2.0, 21.0, 0.1, "Carbs"),
             ("White Potato (Baked)", 93, 2.5, 21.0, 0.1, "Carbs"),
             ("Whole Wheat Bread", 247, 13.0, 41.0, 3.4, "Carbs"),
