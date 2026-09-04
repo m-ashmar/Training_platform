@@ -43,6 +43,20 @@ class FoodItem(RowValidationMixin, models.Model):
     """
     Represents a food item with nutritional information and category.
     """
+
+    #: What a food is *for* in a meal, which is not the same question as which macro it
+    #: leads on. Ranking by grams of macro per kcal is maximised by things that are
+    #: almost pure macro and nothing else, so BBQ sauce and mint jelly outranked rice as
+    #: a carbohydrate. Only a staple may be a slot's primary source.
+    ROLE_STAPLE = "staple"
+    ROLE_ACCOMPANIMENT = "accompaniment"
+    ROLE_CONDIMENT = "condiment"
+    ROLE_CHOICES = [
+        (ROLE_STAPLE, "Staple — a meal can be built on it"),
+        (ROLE_ACCOMPANIMENT, "Accompaniment — served alongside, gram-capped"),
+        (ROLE_CONDIMENT, "Condiment — added by the spoon, never a primary source"),
+    ]
+
     api_id = models.CharField(max_length=255, unique=True)
     name = models.CharField(max_length=255)
     image_url = models.URLField(max_length=500, blank=True, null=True)
@@ -85,6 +99,37 @@ class FoodItem(RowValidationMixin, models.Model):
             "Nutrition on this row failed a sanity check and a human has not yet "
             "corrected it. The planner will not portion from it."
         ),
+    )
+    # --- how much of this a person actually serves ---------------------------
+    # A portion used to be an unbounded continuous gram figure, because nothing in the
+    # catalogue said what a serving was: `serving_size` reads "100g" for 339 of 340 rows
+    # and is the basis the macros are quoted against, not a portion. So the planner
+    # produced 350 g of egg white, which is eleven of them, and 370 g of squash.
+    # Expressing a portion as a multiple of a unit a person recognises makes those
+    # unrepresentable rather than merely discouraged, and it stops a minimum from
+    # becoming a permanent answer the way a post-hoc floor does.
+    household_unit = models.CharField(
+        max_length=32, blank=True,
+        help_text="What one of these is to a person: egg, slice, cup, tbsp, medium, handful.",
+    )
+    unit_grams = models.FloatField(
+        null=True, blank=True,
+        help_text="Grams in one household_unit. Null means unknown; the planner then "
+                  "falls back to grams and caps the portion.",
+    )
+    min_units = models.FloatField(
+        default=0.5,
+        help_text="Fewest units worth serving. A minimum inside the search space, not a "
+                  "floor applied afterwards.",
+    )
+    max_units = models.FloatField(
+        null=True, blank=True,
+        help_text="Most units a person would serve at one meal. Null means unknown.",
+    )
+    role = models.CharField(
+        max_length=16, choices=ROLE_CHOICES, default=ROLE_STAPLE, db_index=True,
+        help_text="Whether a meal can be built on this food, served alongside it, or "
+                  "only seasoned with it.",
     )
     ingredients_text = models.TextField(
         blank=True, default='',

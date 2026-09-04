@@ -93,6 +93,7 @@ def seeded_catalogue(django_db_setup, django_db_blocker):
         # missing staple stayed invisible across several runs.
         call_command("add_healthy_foods", verbosity=0)
         call_command("seed_recipes", verbosity=0)
+        call_command("seed_food_units", "--apply", verbosity=0)
         return {
             "foods": FoodItem.objects.filter(needs_review=False).count(),
             "recipes": Recipe.objects.filter(is_active=True).count(),

@@ -1999,9 +1999,12 @@ def test_condiments_top_the_candidate_lists(diet_quality):
     """Ranking is grams of macro per kcal, which is maximised by foods that are almost
     pure macro and nothing else, so sauces and jellies outrank staples.
 
-    Tightens in P1 to 0 once role excludes condiments from primary selection."""
-    assert len(diet_quality.condiment_slots) <= 4, \
-        f"condiments now top {len(diet_quality.condiment_slots)} slots"
+    Closed in P1: `FoodItem.role` now excludes condiments from the pool entirely, which
+    is the source fix. Tuning the density weight would only have moved them down a
+    place."""
+    assert not diet_quality.condiment_slots, \
+        f"condiments are back in {len(diet_quality.condiment_slots)} slots: " \
+        f"{diet_quality.condiment_slots}"
 
 
 def test_breakfast_is_the_weakest_slot(diet_quality):
@@ -2071,3 +2074,34 @@ def test_the_two_seed_commands_agree_on_food_names(seeded_catalogue, db):
         f"{len(unresolvable)} of {len(RECIPES)} recipes cannot be built from the seeded "
         f"catalogue: {unresolvable}"
     )
+
+
+def test_the_catalogue_knows_what_a_serving_is(seeded_catalogue, db):
+    """P1.4. A portion was an unbounded gram figure because nothing said what a serving
+    was, which is how 350 g of egg white — eleven of them — reached a plate.
+
+    Coverage rather than completeness: a food with no unit still portions in grams, so
+    this guards against the seeding rules silently stopping working, not against a gap."""
+    from diet.models import FoodItem
+
+    total = FoodItem.objects.filter(needs_review=False).count()
+    with_units = FoodItem.objects.filter(
+        needs_review=False, unit_grams__isnull=False, max_units__isnull=False).count()
+    assert total, "no catalogue to measure"
+    assert with_units / total >= 0.75, \
+        f"only {with_units} of {total} foods carry a serving unit"
+
+    # The rules must not have drifted back into matching substrings.
+    squash = FoodItem.objects.filter(name__icontains="Butternut").first()
+    if squash is not None:
+        assert squash.household_unit != "tbsp", \
+            "Butternut Squash matched the butter rule again"
+
+
+def test_no_test_row_can_be_served(seeded_catalogue, db):
+    """P1.1. Eighteen rows named "Manual Food N" carried 20 g of protein each and ranked
+    second through fifth in every protein slot the planner offered."""
+    from diet.models import FoodItem
+
+    assert not FoodItem.objects.filter(name__regex=r"^Manual Food \d+$").exists()
+    assert not FoodItem.objects.filter(name__iexact="test").exists()

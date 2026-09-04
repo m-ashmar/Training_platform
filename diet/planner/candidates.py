@@ -77,6 +77,14 @@ _FRUIT_WORDS = {
     "date", "dates", "papaya", "guava", "pomegranate", "tangerine", "clementine",
     "grapefruit", "lemon", "lime", "cantaloupe", "honeydew", "nectarine", "lychee",
 }
+#: Anything drunk rather than eaten. Checked before the produce lists because those
+#: match any token in the name, and a soft drink carrying a fruit in its branding was
+#: being served as that fruit.
+_BEVERAGE_WORDS = {
+    "cola", "soda", "pepsi", "coke", "drink", "juice", "lemonade", "squash-drink",
+    "beverage", "tea", "coffee", "latte", "cappuccino", "smoothie", "shake",
+}
+
 _VEGETABLE_WORDS = {
     "broccoli", "spinach", "kale", "lettuce", "romaine", "cabbage", "cauliflower",
     "carrot", "cucumber", "tomato", "tomatoes", "pepper", "zucchini", "courgette",
@@ -105,6 +113,18 @@ def classify_food(food) -> str:
     for token, slot in _CATEGORY_HINTS.items():
         if token in category:
             return slot
+
+    # A drink is not produce, whatever fruit is printed on the label. The name test
+    # below matches any token, so "Diet Pepsi Drink Wild Cherry" was filed as fruit on
+    # the strength of "cherry", and the low-calorie fallback further down filed plain
+    # Cola as a vegetable because it is under 70 kcal with some carbohydrate and no fat.
+    # Both then ranked at the top of a slot, because density per kcal rewards exactly
+    # this: almost pure macro and nothing else.
+    if words & _BEVERAGE_WORDS:
+        # MACROS has no condiment bucket; role is what excludes these from selection.
+        # Filing them as a vegetable keeps them out of protein, carb and fat, which is
+        # where a near-pure macro does the damage.
+        return "vegetable"
 
     if words & _VEGETABLE_WORDS:
         return "vegetable"
@@ -151,8 +171,15 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
     from diet.models import FoodItem, UserFoodCategoryPreference, UserFoodPreference
 
     foods = list(catalogue) if catalogue is not None else list(
-        # A row whose nutrition failed its own sanity check must not be portioned from.
-        FoodItem.objects.select_related("category").filter(needs_review=False)
+        # A row whose nutrition failed its own sanity check must not be portioned from,
+        # and a condiment is not something a meal is built on. Ranking by grams of macro
+        # per kcal is maximised by foods that are almost pure macro and nothing else, so
+        # BBQ sauce and mint jelly topped the carbohydrate lists ahead of rice. Excluding
+        # by role fixes that at the source; tuning the density weight would only have
+        # moved them down a place.
+        FoodItem.objects.select_related("category")
+        .filter(needs_review=False)
+        .exclude(role=FoodItem.ROLE_CONDIMENT)
     )
 
     # ---- hard constraints: allergens and explicit dislikes only -------------

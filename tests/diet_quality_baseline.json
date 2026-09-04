@@ -16,21 +16,21 @@
     "meals_measured": 168,
     "distinct_dishes": 7,
     "max_repeats_of_one_dish": 21,
-    "absurd_portion_rate": 0.0865,
-    "portions_measured": 659,
+    "absurd_portion_rate": 0.0846,
+    "portions_measured": 662,
     "min_distinct_portions_per_food": 1,
     "drift_by_target": {
       "1400": 8.057,
       "1800": 7.817,
       "2200": 5.227,
-      "2600": 1.369,
-      "3000": 4.07
+      "2600": 4.15,
+      "3000": 4.913
     },
     "drift_all_one_sided": true,
     "drift_worst_abs": 8.057,
     "twin_identical_meals": 28,
     "twin_total_meals": 28,
-    "chosen_ingredient_share": 0.178,
+    "chosen_ingredient_share": 0.2069,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],
     "catalogue_gaps": []
