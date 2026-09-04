@@ -1942,16 +1942,25 @@ def test_choosing_your_own_food_currently_changes_nothing(diet_quality):
     never consulted and both clients get the same plan.
 
     P2 connected it: `find_recipe` now takes the user and scores each dish by the share
-    of its ingredients the client picked for that slot. 28 of 28 became 22 of 28.
+    of its ingredients the client picked for that slot. That moved it from 28 of 28 to
+    26 of 28 — two meals in a week.
 
-    It stops there because preference can only choose between alternatives, and with
-    sixteen recipes across four meals most slots have one viable dish whatever the
-    client wants. P3's templates are what make the rest of the difference, by building
-    a meal from their pool instead of picking one off a shelf."""
+    Measured as one client before and after choosing, not as two clients side by side.
+    The two-client version read 22 of 28 and most of that gap was noise: the planner
+    seeds its variety generator from the user id, so two people differ partly because
+    they drew differently. Same id, same seed, one variable.
+
+    Two of 28 is the honest size of what preference alone can do here. It can only
+    choose between alternatives, and with sixteen recipes across four meals most slots
+    have one dish inside tolerance whatever the client wants. The ceiling is the
+    library, and P3's templates lift it by building the meal from their pool instead of
+    picking one off a shelf.
+
+    Tightens in P3 to <= 8 of 28."""
     assert diet_quality.chooser_pool_ranked_first, \
         "build_pool stopped ranking the client's chosen foods first"
     assert diet_quality.twin_total_meals >= 20, "not enough meals to judge"
-    assert diet_quality.twin_identical_meals <= 24, \
+    assert diet_quality.twin_identical_meals <= 26, \
         f"choosing your food stopped mattering: {diet_quality.twin_identical_meals} of " \
         f"{diet_quality.twin_total_meals} meals identical"
 

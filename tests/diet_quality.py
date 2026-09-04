@@ -318,8 +318,13 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     report.drift_worst_abs = max((abs(v) for v in report.drift_by_target.values()), default=0.0)
 
     # ---- personalisation ---------------------------------------------------
+    # One client, measured before and after they choose. Two different clients would
+    # not isolate anything: the planner seeds its variety generator from the user id,
+    # so half the difference between two people is which random draws each got. Same
+    # id, same seed, one variable — whether they picked their food.
     chooser = _make_client(f"qc{tag}", ["Maintain"], 175, 78, 28, "Male", "Moderate")
-    twin = _make_client(f"qt{tag}", ["Maintain"], 175, 78, 28, "Male", "Moderate")
+    kcal_before = chooser.calculate_daily_calories()
+    before_plan = _generate(chooser, kcal_before, days)
 
     chosen_names = set()
     resolved = {}
@@ -345,18 +350,16 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
                 ranked_first = False
     report.chooser_pool_ranked_first = ranked_first
 
-    kcal = chooser.calculate_daily_calories()
-    chooser_plan = _generate(chooser, kcal, days)
-    twin_plan = _generate(twin, kcal, days)
-    if chooser_plan and twin_plan:
-        a_names = [m.meal_name for m in chooser_plan.plan]
-        b_names = [m.meal_name for m in twin_plan.plan]
+    after_plan = _generate(chooser, kcal_before, days)
+    if before_plan and after_plan:
+        a_names = [m.meal_name for m in before_plan.plan]
+        b_names = [m.meal_name for m in after_plan.plan]
         report.twin_total_meals = min(len(a_names), len(b_names))
         report.twin_identical_meals = sum(
             1 for x, y in zip(a_names, b_names) if x == y)
 
         chosen_hits = seen = 0
-        for meal in chooser_plan.plan:
+        for meal in after_plan.plan:
             for ingredient in meal.ingredients:
                 seen += 1
                 if ingredient.name in chosen_names:
