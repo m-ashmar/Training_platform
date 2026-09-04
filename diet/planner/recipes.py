@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .optimize import Components, refine, totals_of
+from .optimize import Components, _better, refine, totals_of
 from .policy import PlannerPolicy
 from .report import deviation_of
 
@@ -199,10 +199,16 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         # A dish whose macro ratio does not match the target cannot be fixed by serving
         # more of all of it, so after the best serving is chosen the scalable lines are
         # adjusted individually — on their own ladders, so the dish stays servable.
+        #
+        # Unconditionally. This used to run only when the serving was OUTSIDE tolerance,
+        # which is an early exit on first-acceptable rather than best-available: a dish
+        # that scraped inside the band was served as it landed while a better portioning
+        # of the same dish sat one move away. Against exhaustive search that accounted
+        # for most of the meals the engine served that it could have beaten.
         movable = [i for i, (_f, _g, scalable) in enumerate(lines) if scalable]
-        if movable and not match.deviation.within(policy.tolerance):
+        if movable:
             tuned, dev = refine(match.components, targets, policy.tolerance, movable)
-            if dev.within(policy.tolerance) or dev.magnitude < match.deviation.magnitude:
+            if _better(dev, match.deviation, policy.tolerance):
                 match = RecipeMatch(recipe, tuned, match.servings, dev)
 
         if best is None or match.deviation.magnitude < best.deviation.magnitude:

@@ -8,6 +8,7 @@ Kept deliberately fast (one shared database, no per-test migrations) so it can r
 every pull request. The 53 standalone probes in tests/security/ remain the deep suite.
 """
 import json
+import random
 
 import pytest
 from django.urls import get_resolver
@@ -2260,3 +2261,153 @@ def test_a_portion_is_a_number_of_somethings(seeded_catalogue, db):
     # Asking for an absurd amount returns the largest sane one, not the absurd one.
     assert nearest_portion(egg, 350).grams <= 200
     assert "egg white" in nearest_portion(egg, 100).described
+
+# ---------------------------------------------------------------------------
+# The optimiser, measured against ground truth rather than against itself
+# ---------------------------------------------------------------------------
+
+def _mid_rung(food):
+    from diet.planner.portion import portions_for
+    rungs = portions_for(food)
+    return rungs[len(rungs) // 2].grams
+
+
+def _singles_only(components, targets, tolerance, passes=8):
+    """What the optimiser used to be: one portion moved at a time, until it stalls."""
+    from diet.planner.optimize import _single_pass, totals_of
+    from diet.planner.portion import portions_for
+    from diet.planner.report import deviation_of
+
+    best = list(components)
+    best_dev = deviation_of(totals_of(best), targets)
+    indices = list(range(len(best)))
+    ladders = {i: portions_for(best[i][0]) for i in indices}
+    for _ in range(passes):
+        best, best_dev, improved = _single_pass(
+            best, best_dev, targets, tolerance, indices, ladders)
+        if not improved:
+            break
+    return best, best_dev
+
+
+def _exhaustive_best(components, targets, tolerance):
+    import itertools
+
+    from diet.planner.optimize import totals_of
+    from diet.planner.portion import portions_for
+    from diet.planner.report import deviation_of
+
+    ladders = [portions_for(f) for f, _g in components]
+    best = None
+    for combo in itertools.product(*ladders):
+        cand = [(components[i][0], p.grams) for i, p in enumerate(combo)]
+        dev = deviation_of(totals_of(cand), targets)
+        if not dev.within(tolerance):
+            continue
+        if best is None or dev.magnitude < best.magnitude:
+            best = dev
+    return best
+
+
+def test_the_optimiser_escapes_two_move_local_minima(seeded_catalogue):
+    """A meal over on one macro and under on another needs both portions moved at once.
+
+    Either move alone makes the objective worse, so a search that only ever changes one
+    food declares itself finished and serves a portioning it could have beaten. That is
+    the shape of every local minimum the adversarial pass found, and it is what paired
+    moves exist to escape. The test asserts the old search still stalls, so it keeps its
+    teeth as the catalogue changes.
+    """
+    from diet.models import FoodItem
+    from diet.planner.optimize import refine, totals_of
+    from diet.planner.policy import load_policy
+
+    policy = load_policy("maintain")
+    rng = random.Random(4242)
+    foods = list(FoodItem.objects.filter(needs_review=False).exclude(role="condiment"))
+    stalled = escaped = compared = 0
+
+    for _ in range(180):
+        picked = rng.sample(foods, 3)
+        start = [(f, _mid_rung(f)) for f in picked]
+        totals = totals_of(start)
+        target = {
+            "calories": totals["calories"] * rng.uniform(0.75, 1.3),
+            "protein": totals["protein"] * rng.uniform(0.7, 1.5),
+            "carb": totals["carb"] * rng.uniform(0.7, 1.5),
+            "fat": totals["fat"] * rng.uniform(0.7, 1.5),
+        }
+        if min(target.values()) <= 0:
+            continue
+        best = _exhaustive_best(start, target, policy.tolerance)
+        if best is None:
+            continue
+        compared += 1
+        _s, singles = _singles_only(start, target, policy.tolerance)
+        _p, paired = refine(start, target, policy.tolerance)
+        if singles.magnitude > best.magnitude + 1e-6:
+            stalled += 1
+            if paired.magnitude <= best.magnitude + 1e-6:
+                escaped += 1
+
+    assert compared >= 30, f"only {compared} feasible cases; the test has no teeth"
+    assert stalled >= 5, (
+        f"single-move search stalled on only {stalled} of {compared} cases, so this "
+        "test is no longer exercising the failure it exists to catch")
+    # Measured at 40 of 43 when this was written. The residue needs three portions
+    # moved together, which is a wider neighbourhood than this search offers and a
+    # deliberate stopping point rather than an oversight: pairs close 93% of the class
+    # for about a third more planning time, and triples would multiply that again for
+    # the last few percent. The bound is here so a REGRESSION is visible; raising it is
+    # a decision about cost, not a bug fix.
+    assert escaped >= stalled * 0.9, (
+        f"paired moves escaped only {escaped} of {stalled} two-move local minima")
+
+
+def test_the_optimiser_reaches_the_proven_optimum(seeded_catalogue):
+    """Every portioning the engine serves, against every portioning it could have had.
+
+    A green gate says no assertion tripped. It cannot say the optimiser settled for a
+    meal it had the information to beat. The benchmark enumerates the whole space for
+    each meal, which is small — a handful of foods at a handful of servable amounts —
+    and reports the gap. Before paired moves and unconditional refinement, 69% of
+    feasible meals sat at the optimum.
+    """
+    from tests.optimiser_benchmark import run
+
+    report = run(days=2)
+    assert report.feasible, "benchmark produced no feasible meals"
+    assert report.optimal_share >= 0.90, (
+        f"only {report.optimal_share:.0%} of feasible meals are at the proven optimum "
+        f"({len(report.off_optimum)} of {len(report.feasible)} off it); "
+        f"worst objective gap {report.worst_objective_gap:.3f}")
+    assert report.worst_objective_gap <= 0.20, (
+        f"worst objective gap {report.worst_objective_gap:.3f}")
+
+
+def test_paired_moves_cannot_leave_the_ladder_or_change_the_meal(seeded_catalogue):
+    """Widening the search must not widen what it is allowed to do.
+
+    Paired moves choose amounts and only amounts. Every amount comes from the food's own
+    declared ladder and the set of foods is never touched, so ceilings, minimums,
+    allergens, dislikes and the meal's shape are all outside what this search can reach.
+    """
+    from diet.models import FoodItem
+    from diet.planner.optimize import refine
+    from diet.planner.policy import load_policy
+    from diet.planner.portion import portions_for
+
+    policy = load_policy("maintain")
+    rng = random.Random(99)
+    foods = list(FoodItem.objects.filter(needs_review=False).exclude(role="condiment"))
+    for _ in range(60):
+        picked = rng.sample(foods, rng.randint(2, 4))
+        start = [(f, _mid_rung(f)) for f in picked]
+        target = {"calories": 700, "protein": 45, "carb": 80, "fat": 20}
+        tuned, _dev = refine(start, target, policy.tolerance)
+        assert [f.id for f, _g in tuned] == [f.id for f, _g in start], \
+            "refine changed which foods are in the meal"
+        for food, grams in tuned:
+            assert any(abs(p.grams - grams) < 1e-6 for p in portions_for(food)), \
+                f"refine produced {grams} g of {food.name}, off its own ladder"
+

@@ -89,6 +89,55 @@ Fixes D-03, D-04, D-05.
     `Leaderboard`, `AchievementProgress`) — owner approved — plus the composite indexes
     I mistakenly added to two of them.
 
+### G — Prove the optimiser, then make it better  ⏳ *(in progress, 2026-09-05)*
+An adversarial pass on `d050855` brute-forced every valid ladder combination for 115
+meals and compared it with what the engine served. That is a ground-truth benchmark:
+28 meals were strictly worse than a portioning the engine could have chosen, 4 of them
+because `refine` is skipped whenever the serving search already landed inside tolerance,
+and 24 because coordinate descent moves one portion at a time and the better point needs
+two moved together.
+
+19. Keep the exhaustive search as a permanent benchmark, not a one-off probe. The
+    acceptance criterion stops being "the gate is green" and becomes "every feasible
+    meal is at the proven optimum, or within a stated gap of it".
+20. Bounded neighbourhood search in `optimize.py`: single-rung moves first, paired moves
+    only when singles stall, both atomic and judged against the whole objective.
+    No continuous grams. No change to the objective weights — that is a separate
+    question and mixing the two would make neither answerable.
+21. Regression tests naming the specific local minima, so this class cannot come back.
+**Done when:** the benchmark reports the optimality gap for every feasible meal, and the
+remaining gap is explained rather than merely small.
+
+**Two things this phase will NOT do, recorded so we do not over-claim.** The benchmark
+proves the *portioning* is optimal for a chosen set of foods; choosing four foods from a
+hundred is not a space that can be exhausted, so it says nothing about whether those were
+the right foods. And it will not remove the residual calorie drift: 30 of the 115 meals
+miss on calories because the objective deliberately buys macro accuracy with calorie
+accuracy at `CALORIE_WEIGHT = 0.5`. Those stay until the weights are revisited.
+
+### H — The rest of the adversarial findings  ⏳ *(queued)*
+Found by the same pass. Ordered by what a client would notice, not by how interesting
+the bug is.
+
+22. **Disliked foods are ignored on the recipe path.** `build_pool` filters them and
+    `find_recipe` never consults them, so a dislike is honoured only on the quarter of
+    meals the engine builds itself. Measured: a client who marked Chicken Breast and
+    White Rice as disliked was served both across five days. Allergens *are* checked in
+    the same function, so the gap sits inside one feature. This is the most
+    trust-destroying defect on the list and it is a small patch.
+    Note while fixing: `_validate_ingredients_allowed` in persistence claims to enforce
+    dislikes as a hard constraint. It did not stop this. Check whether it runs at all.
+23. **A target above the structural ceiling is under-delivered in silence.** Three meals
+    and a snack top out near 3,700 kcal; a 5,000 request returns 3,912 with nothing in
+    the output naming the 22% shortfall. Carry the achievable maximum and surface it.
+24. **The meal-type restriction has an escape hatch.** `plan_meal` falls back to every
+    template when none suits the slot, so a library with no snack recipes would serve a
+    lunch shape at snack. Not reachable with the current library; latent.
+25. **Unit-rule coverage is name-based.** A beverage row such as coconut water would
+    match no rule, classify as a vegetable and be servable at 250 g. Nothing like it is
+    in the catalogue today, so this is a guard for future imports.
+**Done when:** 22 is fixed and proven by a test that fails on the current code.
+
 ---
 
 ## Guardrails for me
