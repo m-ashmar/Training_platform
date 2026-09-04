@@ -61,6 +61,16 @@ class DayContext:
     recent_recipe_ids: Dict[str, Set[int]] = field(default_factory=dict)
 
 
+class _PoolView:
+    """Reads `allowed_map` with the same call shape as a CandidatePool."""
+
+    def __init__(self, allowed_map):
+        self._map = allowed_map or {}
+
+    def get(self, meal: str, macro: str):
+        return self._map.get(meal, {}).get(macro, [])
+
+
 @dataclass
 class MealState:
     components: List[Tuple[FoodItem, float]]
@@ -843,13 +853,117 @@ class RuleBasedPlanner:
             return []
 
     def _plan_meal(self, meal_name: str, ctx: PlannerContext, day_ctx: DayContext) -> AIMeal:
-        # Try a real dish first. Component assembly hits the macro targets but produces
-        # a pile — "chicken 180 g, oats 90 g, olive oil 12 g, broccoli 400 g" — which is
-        # not something anyone cooks. A recipe that meets the same targets is a meal.
+        # Three paths, in descending order of how much a person had to do with the
+        # result. A recipe is a dish someone wrote down. A template is a shape read off
+        # those recipes and filled from this client's own chosen foods — coherent, and
+        # unlike a recipe it can express a client nobody wrote a dish for. Component
+        # assembly hits the macro targets and produces a pile: "chicken 180 g, oats
+        # 90 g, olive oil 12 g, broccoli 400 g" is not something anyone cooks.
         recipe_meal = self._plan_meal_from_recipe(meal_name, ctx, day_ctx)
         if recipe_meal is not None:
             return recipe_meal
+        template_meal = self._plan_meal_from_template(meal_name, ctx, day_ctx)
+        if template_meal is not None:
+            return template_meal
         return self._plan_meal_from_components(meal_name, ctx, day_ctx)
+
+    def _plan_meal_from_template(self, meal_name: str, ctx: PlannerContext,
+                                 day_ctx: DayContext) -> AIMeal | None:
+        """Build a meal from a shape and this client's pool.
+
+        The shapes come from the recipe library rather than from anyone's judgement, and
+        the pool arrives already ranked with the client's chosen foods at the top, so
+        what comes out is structurally a meal and made of what they asked for.
+        """
+        try:
+            from diet.planner.portion import totals as portion_totals
+            from diet.planner.templates import plan_meal as plan_from_template
+
+            target = day_ctx.meal_targets.get(meal_name)
+            if target is None:
+                return None
+            macro_targets = getattr(target, "macro_targets", None) or {}
+            targets = {
+                "calories": float(getattr(target, "kcal_target", 0) or 0),
+                "protein": float(macro_targets.get("protein", 0) or 0),
+                "carb": float(macro_targets.get("carb", 0) or 0),
+                "fat": float(macro_targets.get("fat", 0) or 0),
+            }
+            if targets["calories"] <= 0:
+                return None
+
+            portions, _score, template = plan_from_template(
+                meal_name,
+                _PoolView(ctx.allowed_map),
+                targets,
+                templates=self._templates(),
+                edges=self._pairings(),
+                recent=set(day_ctx.recent_exclusions_ids.get(meal_name, ())),
+                rng=getattr(self, "_rng", None),
+            )
+            if not portions or template is None:
+                return None
+
+            checker = self._allergen_checker()
+            if checker is not None and getattr(checker, "active", False):
+                from diet.services.meal_validator import VIOLATION
+                if any(checker.check_food(p.food).verdict == VIOLATION for p in portions):
+                    return None
+
+            nutrition = portion_totals(portions)
+            return AIMeal(
+                meal_name=meal_name,
+                description=f"Built from your {meal_name.lower()} foods.",
+                ingredients=[
+                    AIIngredient(
+                        name=p.food.name,
+                        quantity=f"{p.grams:g}g",
+                        estimated_calories=round(float(p.food.calories or 0) * p.grams / 100, 1),
+                        estimated_protein=round(float(p.food.protein or 0) * p.grams / 100, 1),
+                        estimated_carbs=round(float(p.food.carbs or 0) * p.grams / 100, 1),
+                        estimated_fat=round(float(p.food.fat or 0) * p.grams / 100, 1),
+                    )
+                    for p in portions
+                ],
+                total_nutrition={
+                    "calories": round(nutrition["calories"], 1),
+                    "protein": round(nutrition["protein"], 1),
+                    "carbs": round(nutrition["carb"], 1),
+                    "fat": round(nutrition["fat"], 1),
+                },
+                meal_type=meal_name,
+                preparation_time=15,
+                difficulty_level="easy",
+            )
+        except Exception:
+            logger.debug("template path unavailable for %s; using components",
+                         meal_name, exc_info=True)
+            return None
+
+    def _templates(self):
+        """Derived once per generation; they only change when a recipe does."""
+        if getattr(self, "_template_cache", None) is None:
+            from diet.planner.templates import derive_templates
+            self._template_cache = derive_templates()
+        return self._template_cache
+
+    def _pairings(self):
+        if getattr(self, "_pairing_cache", None) is None:
+            from diet.planner.templates import pairing_edges
+            self._pairing_cache = pairing_edges()
+        return self._pairing_cache
+
+    def _allergen_checker(self):
+        try:
+            from ..models import UserFoodPreference
+            from .meal_validator import AllergenChecker
+
+            pref = UserFoodPreference.objects.filter(user=self.user).first()
+            raw = getattr(pref, "allergies", None) if pref else None
+            return AllergenChecker(raw) if raw else None
+        except Exception:
+            logger.debug("could not load allergies", exc_info=True)
+            return None
 
     def _plan_meal_from_recipe(self, meal_name: str, ctx: PlannerContext,
                                day_ctx: DayContext) -> AIMeal | None:

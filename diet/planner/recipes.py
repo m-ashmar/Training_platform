@@ -34,7 +34,19 @@ def _scaled_components(recipe, servings: float, policy: PlannerPolicy) -> Compon
 
     Doubling a dish doubles the rice; it does not double the pinch of salt or the
     teaspoon of oil that makes it work. `scalable=False` lines stay put.
+
+    Every scaled amount then snaps to a servable portion of that food — a whole number
+    of eggs, half a cup of oats — rather than to whatever gram figure the arithmetic
+    produced. Scaling by calories alone is how 210 g of oats reached a plate from a
+    recipe that asked for 60: the macros were inside tolerance the whole way, because
+    tolerance is about the total and says nothing about any one ingredient.
+
+    Snapping also removes a bias. `policy.round_grams` rounded to a step, and the floor
+    below it could only ever push an amount up, so a scaled recipe missed high and never
+    low. Choosing the nearest servable amount misses in both directions.
     """
+    from .portion import nearest_portion
+
     out: Components = []
     for line in recipe.ingredients.select_related("food"):
         grams = float(line.grams or 0)
@@ -43,7 +55,7 @@ def _scaled_components(recipe, servings: float, policy: PlannerPolicy) -> Compon
         from .candidates import classify_food
         macro = classify_food(line.food)
         grams = max(policy.floor_portion_for(macro), min(policy.cap_for(macro), grams))
-        out.append((line.food, policy.round_grams(grams)))
+        out.append((line.food, nearest_portion(line.food, grams).grams))
     return out
 
 

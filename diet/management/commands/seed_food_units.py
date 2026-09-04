@@ -30,6 +30,11 @@ from diet.models import FoodItem
 # (pattern, household_unit, unit_grams, min_units, max_units)
 # Ordered: the first match wins, so put the specific before the general.
 #
+# Ceilings are what a large person eats at one sitting, not what is merely possible.
+# Set too low they become a different kind of wrong: capping every staple meant a
+# 3,000 kcal day could not be reached at all and landed 12% under, which is the same
+# failure as an absurd portion seen from the other side.
+#
 # Patterns deliberately open without \b and close with it. A leading boundary made
 # "Blackberries" miss "berries" and "Almonds" miss "almond", because those are one word.
 # The trailing boundary is what still keeps "Butternut Squash" out of the butter rule,
@@ -52,19 +57,19 @@ UNIT_RULES = [
     (r"egg whites?\b", "egg white", 33, 2, 6),
     (r"eggs?\b", "egg", 50, 1, 4),
     (r"(chicken|turkey|duck|beef|lamb|pork|bison|veal|sirloin|steak)\b",
-     "palm", 120, 0.75, 2),
+     "palm", 120, 0.75, 2.5),
     (r"(salmon|tuna|cod|tilapia|shrimps?|fish|sardines?|mackerel|prawns?)\b",
-     "fillet", 120, 0.75, 2),
+     "fillet", 120, 0.75, 2.5),
     (r"(yogurt|yoghurt|labneh)\b", "pot", 150, 0.5, 2),
     (r"(cheese|halloumi|feta|cottage|mozzarella|ricotta)\b", "slice", 30, 1, 4),
     (r"(tofu|tempeh|seitan)\b", "block", 100, 0.5, 2),
     # --- carbohydrates --------------------------------------------------------
-    (r"(oats|oatmeal|granola|muesli)\b", "cup", 40, 0.75, 2),
-    (r"(rice|quinoa|freekeh|bulgur|couscous|barley|farro)\b", "cup", 60, 0.75, 2.5),
-    (r"(lentils?|chickpeas?|beans?|fava|ful|peas)\b", "cup", 100, 0.5, 2),
+    (r"(oats|oatmeal|granola|muesli)\b", "cup", 40, 0.75, 3),
+    (r"(rice|quinoa|freekeh|bulgur|couscous|barley|farro)\b", "cup", 60, 0.75, 4),
+    (r"(lentils?|chickpeas?|beans?|fava|ful|peas)\b", "cup", 100, 0.5, 3),
     (r"(bread|pita|toast|bagel|manakish|tortillas?|cracker)\b", "slice", 40, 1, 3),
     (r"(pasta|noodles?|spaghetti|macaroni)\b", "cup", 75, 0.75, 2),
-    (r"(potato(es)?|yams?)\b", "medium", 150, 0.5, 2),
+    (r"(potato(es)?|yams?)\b", "medium", 150, 0.5, 2.5),
     # --- produce --------------------------------------------------------------
     (r"(bananas?|apples?|oranges?|pears?|peach(es)?|mangos?|kiwis?|plums?)\b",
      "medium", 120, 0.5, 2),

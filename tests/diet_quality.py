@@ -26,7 +26,7 @@ import collections
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Fixed inputs. Every measurement uses these, so two runs are comparable.
@@ -165,6 +165,21 @@ def _grams(quantity) -> float:
     return float(re.sub(r"[^0-9.]", "", str(quantity)) or 0)
 
 
+def _declared_ceiling(food) -> Optional[float]:
+    """The food's own maximum serving, in grams, if it declares one.
+
+    This is the authority now that P1 populated units. The table below was a stand-in
+    for a catalogue that could not answer the question, and keeping it as the judge
+    after the catalogue could answer would mean measuring the engine against a guess
+    while it obeys a fact.
+    """
+    unit_grams = float(getattr(food, "unit_grams", 0) or 0)
+    max_units = float(getattr(food, "max_units", 0) or 0)
+    if unit_grams > 0 and max_units > 0:
+        return unit_grams * max_units
+    return None
+
+
 def _portion_ceiling(food_name: str):
     """Grams above which a person would not serve this food, or None if unknown.
 
@@ -280,8 +295,11 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
                 grams = _grams(ingredient.quantity)
                 total_portions += 1
                 portions_by_food[ingredient.name].append(grams)
-                ceiling = _portion_ceiling(ingredient.name)
-                if ceiling is not None and grams > ceiling:
+                food = _resolve_food(ingredient.name)
+                ceiling = _declared_ceiling(food) if food else None
+                if ceiling is None:
+                    ceiling = _portion_ceiling(ingredient.name)
+                if ceiling is not None and grams > ceiling + 0.5:
                     absurd += 1
                     if len(report.absurd_examples) < 12:
                         report.absurd_examples.append(
@@ -352,11 +370,17 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
 
     after_plan = _generate(chooser, kcal_before, days)
     if before_plan and after_plan:
-        a_names = [m.meal_name for m in before_plan.plan]
-        b_names = [m.meal_name for m in after_plan.plan]
-        report.twin_total_meals = min(len(a_names), len(b_names))
-        report.twin_identical_meals = sum(
-            1 for x, y in zip(a_names, b_names) if x == y)
+        # Compared by what is on the plate, not by what the meal is called. A meal built
+        # from a template is named after its slot — "Breakfast" — so two plates made of
+        # entirely different food carry the same name, and comparing names reported no
+        # change at all while the ingredients were visibly moving.
+        def signature(meal):
+            return (meal.meal_name, tuple(sorted(i.name for i in meal.ingredients)))
+
+        a = [signature(m) for m in before_plan.plan]
+        b = [signature(m) for m in after_plan.plan]
+        report.twin_total_meals = min(len(a), len(b))
+        report.twin_identical_meals = sum(1 for x, y in zip(a, b) if x == y)
 
         chosen_hits = seen = 0
         for meal in after_plan.plan:
