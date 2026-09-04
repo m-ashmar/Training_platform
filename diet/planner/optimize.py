@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .policy import PlannerPolicy
 from .report import MacroDeviation, deviation_of
@@ -41,16 +41,6 @@ def totals_of(components: Components) -> Dict[str, float]:
 
 
 @dataclass
-class Move:
-    """One adjustment the optimiser can make, and which deviation it addresses."""
-
-    name: str
-    macro: str
-    direction: int            # +1 raises the macro, -1 lowers it
-    apply: Callable[[Components, PlannerPolicy, float], Components]
-
-
-@dataclass
 class OptimizeResult:
     components: Components
     deviation: MacroDeviation
@@ -69,119 +59,117 @@ def _macro_of(food, macro: str) -> float:
                                 "fat": "fat"}.get(macro, "calories"), 0) or 0)
 
 
-def _scale_macro(components: Components, policy: PlannerPolicy,
-                 macro: str, factor: float) -> Components:
-    """Scale the foods richest in `macro`, respecting portion bounds.
+def _snapped(components: Components, factor: float) -> Components:
+    """Rescale a meal and land every line on an amount a person would serve."""
+    from .portion import nearest_portion
 
-    Only the contributors are touched, so raising protein does not silently inflate
-    carbohydrate as a whole-meal rescale would.
+    return [(food, nearest_portion(food, float(grams) * factor).grams)
+            for food, grams in components]
+
+
+#: The whole-meal scale is searched rather than hill-climbed. A meal that is 30% short
+#: on fat cannot be fixed by adding oil past two tablespoons, and a hill-climber that
+#: is told to make a 5% adjustment on a ladder whose smallest rung is half a unit
+#: overshoots, fails its own improve-or-stop test, and gives up on pass zero. Searching
+#: is both simpler and stronger: 211 evaluations of a four-line meal is nothing.
+SCALE_LO, SCALE_HI, SCALE_STEP = 0.4, 2.5, 0.01
+
+
+def _better(candidate, incumbent, tolerance: Dict[str, float]) -> bool:
+    """Is `candidate` the deviation to keep?
+
+    Inside tolerance beats lowest magnitude, because they are not the same point.
+    Magnitude averages the four numbers; `within` demands each one separately, so the
+    smallest average is regularly a portioning that fails on one macro while a
+    neighbouring one passes on all of them.
     """
-    from .candidates import classify_food
-
-    out: Components = []
-    for food, grams in components:
-        if classify_food(food) == macro and _macro_of(food, macro) > 0:
-            cap = policy.cap_for(macro)
-            new = min(cap, max(policy.floor_portion_for(macro), float(grams) * factor))
-            out.append((food, policy.round_grams(new)))
-        else:
-            out.append((food, grams))
-    return out
+    if incumbent is None:
+        return True
+    inside, was_inside = candidate.within(tolerance), incumbent.within(tolerance)
+    if inside != was_inside:
+        return inside
+    return candidate.magnitude < incumbent.magnitude - 1e-9
 
 
-def _build_moves() -> List[Move]:
-    """The move set. Each mirrors one of the original correctors, minus the blind firing."""
-    moves: List[Move] = []
-    for macro in ("protein", "carb", "fat"):
-        moves.append(Move(f"raise_{macro}", macro, +1,
-                          lambda c, p, s, m=macro: _scale_macro(c, p, m, 1.0 + s)))
-        moves.append(Move(f"lower_{macro}", macro, -1,
-                          lambda c, p, s, m=macro: _scale_macro(c, p, m, 1.0 - s)))
-    return moves
+def refine(components: Components, targets: Dict[str, float],
+           tolerance: Dict[str, float], movable: Optional[Sequence[int]] = None,
+           max_passes: int = 4) -> Tuple[Components, "MacroDeviation"]:
+    """Move one portion at a time to a different rung, keeping only what helps.
 
+    Scaling a whole meal preserves its composition, which is right for a dish and not
+    enough for a meal that is the right size and the wrong shape: a recipe whose macro
+    ratio does not match the target cannot be fixed by serving more of all of it. This
+    adjusts the balance, still only ever between amounts the food itself declares.
 
-MOVES = _build_moves()
+    `movable` restricts which lines may change, so a recipe's pinch of salt stays a
+    pinch while its rice moves.
+    """
+    from .portion import portions_for
+
+    best = list(components)
+    best_dev = deviation_of(totals_of(best), targets)
+    indices = list(range(len(best))) if movable is None else list(movable)
+    ladders = {i: portions_for(best[i][0]) for i in indices}
+
+    for _ in range(max_passes):
+        improved = False
+        for index in indices:
+            food = best[index][0]
+            for option in ladders[index]:
+                if abs(option.grams - best[index][1]) < 1e-6:
+                    continue
+                candidate = list(best)
+                candidate[index] = (food, option.grams)
+                dev = deviation_of(totals_of(candidate), targets)
+                if _better(dev, best_dev, tolerance):
+                    best, best_dev, improved = candidate, dev, True
+        if not improved:
+            break
+    return best, best_dev
 
 
 def optimize_meal(components: Components, targets: Dict[str, float],
                   policy: PlannerPolicy) -> OptimizeResult:
-    """Nudge a meal toward its macro targets, keeping the best version seen."""
+    """Bring a meal as close to its macro targets as servable portions allow.
+
+    Two stages, both searches over the same discrete space: the amounts each food
+    declares a person would serve. First the whole meal is scaled, which keeps its
+    composition; then single portions are adjusted, which can fix a meal that is the
+    right size and the wrong shape.
+
+    The result is on the ladder by construction. The previous implementation was a
+    hill-climb over continuous gram figures bounded only by a per-macro cap, and it ran
+    immediately after the portion solver — so it took a snapped 225 g of rice back up
+    to the 300 g carbohydrate cap and 198 g of egg white to 280 g. An input that is
+    already off the ladder is repaired here rather than preserved.
+    """
     if not components:
         return OptimizeResult(components, MacroDeviation(), 0, False, ["empty meal"])
 
-    best = list(components)
-    best_dev = deviation_of(totals_of(best), targets)
-    current = list(components)
     trace: List[str] = []
+    best: Optional[Components] = None
+    best_dev: Optional[MacroDeviation] = None
 
-    for step in range(policy.max_optimiser_passes):
-        dev = deviation_of(totals_of(current), targets)
-        if dev.within(policy.tolerance):
-            trace.append(f"pass {step}: within tolerance")
-            best, best_dev = current, dev
-            break
+    # Inside tolerance beats lowest magnitude. Magnitude averages the four numbers;
+    # `within` demands each one separately, so the smallest average is frequently a
+    # scale that fails on one macro while a neighbouring scale passes on all of them.
+    steps = int(round((SCALE_HI - SCALE_LO) / SCALE_STEP)) + 1
+    best_factor = 1.0
+    for index in range(steps):
+        factor = SCALE_LO + index * SCALE_STEP
+        candidate = _snapped(components, factor)
+        dev = deviation_of(totals_of(candidate), targets)
+        if _better(dev, best_dev, policy.tolerance):
+            best, best_dev, best_factor = candidate, dev, factor
 
-        macro, _score = dev.worst(policy.tolerance)
+    trace.append(f"scale x{best_factor:.2f} -> {best_dev.human()}")
+    if not best_dev.within(policy.tolerance):
+        refined, refined_dev = refine(best, targets, policy.tolerance)
+        if _better(refined_dev, best_dev, policy.tolerance):
+            trace.append(f"refine portions -> {refined_dev.human()}")
+            best, best_dev = refined, refined_dev
 
-        # Energy out while every macro is in means the portion is simply the wrong size —
-        # the dish is right, there is just too much or too little of it. Scaling the whole
-        # meal keeps its composition. Without this move a recipe that was -4.9% protein,
-        # +3.4% carb and -7.4% fat was still rejected for being +11% calories.
-        macros_ok = all(abs(getattr(dev, m)) <= policy.tolerance.get(m, 0.2)
-                        for m in ("protein", "carb", "fat"))
-        if macros_ok and abs(dev.calories) > policy.tolerance.get("calories", 0.1):
-            factor = 1.0 / (1.0 + dev.calories)
-            factor = max(0.6, min(1.6, factor))
-            scaled = [(food, policy.round_grams(
-                max(policy.floor_portion_for(_slot(food)),
-                    min(policy.cap_for(_slot(food)), float(grams) * factor))))
-                for food, grams in current]
-            scaled_dev = deviation_of(totals_of(scaled), targets)
-            if abs(scaled_dev.calories) < abs(dev.calories):
-                current = scaled
-                trace.append(f"pass {step}: scale_portion x{factor:.2f} "
-                             f"calories {dev.calories:+.1%} -> {scaled_dev.calories:+.1%}")
-                if scaled_dev.within(policy.tolerance):
-                    best, best_dev = current, scaled_dev
-                    trace.append(f"pass {step}: within tolerance")
-                    break
-                if scaled_dev.magnitude < best_dev.magnitude:
-                    best, best_dev = current, scaled_dev
-                continue
-            trace.append(f"pass {step}: scale_portion did not help; stopping")
-            break
-
-        if macro == "calories":
-            # Calories are not adjusted directly; the macro furthest out is what moved
-            # them. Excluding it prevents a whole-meal rescale that fixes the headline
-            # number while leaving the real shortfall untouched — exactly the failure
-            # where fat sat at -37% while the pipeline chased a -6.6% calorie gap.
-            macro, _score = max(
-                (("protein", abs(dev.protein) / max(policy.tolerance.get("protein", .15), 1e-9)),
-                 ("carb", abs(dev.carb) / max(policy.tolerance.get("carb", .2), 1e-9)),
-                 ("fat", abs(dev.fat) / max(policy.tolerance.get("fat", .2), 1e-9))),
-                key=lambda t: t[1],
-            )
-
-        need = getattr(dev, macro)
-        direction = -1 if need > 0 else +1
-        move = next((m for m in MOVES if m.macro == macro and m.direction == direction), None)
-        if move is None:
-            break
-
-        # Step proportional to the gap, damped so it converges instead of oscillating.
-        candidate = move.apply(current, policy, min(0.5, abs(need) * 0.6))
-        cand_dev = deviation_of(totals_of(candidate), targets)
-
-        if cand_dev.magnitude >= dev.magnitude - 1e-6:
-            # The move did not help. Stopping here is what turns a silent no-op — the
-            # MacroShortageBooster behaviour — into a visible non-convergence.
-            trace.append(f"pass {step}: {move.name} did not improve; stopping")
-            break
-
-        current = candidate
-        trace.append(f"pass {step}: {move.name} {dev.magnitude:.3f} -> {cand_dev.magnitude:.3f}")
-        if cand_dev.magnitude < best_dev.magnitude:
-            best, best_dev = current, cand_dev
-
-    return OptimizeResult(best, best_dev, len(trace), best_dev.within(policy.tolerance), trace)
+    converged = best_dev.within(policy.tolerance)
+    if not converged:
+        trace.append("no servable combination reaches tolerance")
+    return OptimizeResult(best, best_dev, len(trace), converged, trace)

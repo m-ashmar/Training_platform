@@ -13,7 +13,7 @@ now only possible if the catalogue itself is empty.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from .policy import PlannerPolicy
@@ -25,21 +25,49 @@ MEALS = ("Breakfast", "Lunch", "Dinner", "Snack")
 
 # Ranking weights. Higher wins.
 W_MEAL_MACRO_PREF = 100.0   # user put this food in exactly this meal+macro slot
+#: The user named this food for this meal but filed it under a different macro than the
+#: engine classifies it as. That disagreement is not the user being wrong: someone who
+#: says chickpeas are their lunch protein is describing how they eat, while the
+#: classifier reads the macro that leads by calories and files them as a carbohydrate.
+#: Requiring both to agree meant the preference was dropped in silence and the client
+#: was served exactly what someone who had chosen nothing would get.
+W_MEAL_PREF = 80.0
 W_MACRO_CHOICE = 50.0       # user listed it as one of their proteins/carbs/fats
 W_LIKED = 25.0              # user liked it
 W_LEARNED = 20.0            # smart_score_weight from actual consumption
 W_DENSITY = 10.0            # macro density per kcal — the original heuristic
+#: Something a meal is built on outranks something served alongside it. Excluding
+#: condiments stopped BBQ sauce leading the carbohydrates; it did nothing about oil
+#: leading the fats, because oil is a real fat and density per kcal is maximised by
+#: whatever is closest to pure. So a snack came out as an orange and a spoon of coconut
+#: oil while nuts, avocado and nut butter sat below it. Role decides who anchors a slot.
+W_ROLE_STAPLE = 40.0
+#: Whether the recipe library serves this food at this meal. The default ordering knew
+#: nothing about the time of day, so a client who had chosen nothing was offered a
+#: breakfast of grilled chicken, white rice and olive oil — each of them the top-ranked
+#: staple in its slot, and together a lunch. Ranked below the client's own choice, so
+#: someone who says they want chicken for breakfast still gets it.
+W_MEAL_LIBRARY = 35.0
 
 
 @dataclass
 class CandidatePool:
     """Ranked candidates per (meal, macro), plus why the ranking came out that way."""
 
-    by_slot: Dict[str, Dict[str, List]] 
+    by_slot: Dict[str, Dict[str, List]]
     source_counts: Dict[str, int]
+    #: meal -> macro -> food id -> the score that put it where it is. Rank position
+    #: alone says which food is preferred and not by how much, and the difference is
+    #: the whole of the personalisation signal: a food the client explicitly asked for
+    #: sits a hundred points above the next, while two foods separated by macro density
+    #: differ by one or two. A consumer that reads only the order treats those the same.
+    scores: Dict[str, Dict[str, Dict[int, float]]] = field(default_factory=dict)
 
     def get(self, meal: str, macro: str) -> List:
         return self.by_slot.get(meal, {}).get(macro, [])
+
+    def weights(self, meal: str, macro: str) -> Dict[int, float]:
+        return self.scores.get(meal, {}).get(macro, {})
 
     @property
     def empty_slots(self) -> List[tuple]:
@@ -90,8 +118,13 @@ _VEGETABLE_WORDS = {
     "carrot", "cucumber", "tomato", "tomatoes", "pepper", "zucchini", "courgette",
     "asparagus", "celery", "onion", "garlic", "mushroom", "eggplant", "aubergine",
     "beet", "radish", "turnip", "leek", "chard", "arugula", "sprout", "sprouts",
-    "okra", "pumpkin", "squash", "bean", "beans", "pea", "peas", "corn",
+    "okra", "pumpkin", "squash",
 }
+# Legumes and corn are deliberately absent. Naming them here filed Black Beans (132 kcal,
+# 24 g carbohydrate) and Corn (96 kcal) as vegetables, which hid their carbohydrate from
+# the optimiser exactly as a flat protein threshold once hid the carbohydrate in oats.
+# The energy test below separates them correctly without a list: green beans are 31 kcal
+# and land as produce, black beans are not.
 
 
 def classify_food(food) -> str:
@@ -200,8 +233,11 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
 
     # ---- ranking signals ---------------------------------------------------
     slot_pref: Dict[tuple, set] = {}
-    for rec in UserFoodCategoryPreference.objects.filter(user=user).select_related("food"):
+    meal_pref: Dict[str, set] = {}
+    for rec in UserFoodCategoryPreference.objects.filter(user=user).only(
+            "meal", "macro", "food_id"):
         slot_pref.setdefault((rec.meal, rec.macro), set()).add(rec.food_id)
+        meal_pref.setdefault(rec.meal, set()).add(rec.food_id)
 
     macro_choice: Dict[str, set] = {}
     if pref:
@@ -213,10 +249,18 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
             "fruit": {f.id for f in pref.fruit_choices.all()},
         }
 
+    from .templates import meal_foods
+
+    served_at = meal_foods()
+
     def score(food, meal: str, macro: str) -> float:
-        s = 0.0
+        s = W_ROLE_STAPLE if getattr(food, "role", "") == FoodItem.ROLE_STAPLE else 0.0
+        if food.id in served_at.get(meal, ()):
+            s += W_MEAL_LIBRARY
         if food.id in slot_pref.get((meal, macro), ()):
             s += W_MEAL_MACRO_PREF
+        elif food.id in meal_pref.get(meal, ()):
+            s += W_MEAL_PREF
         if food.id in macro_choice.get(macro, ()):
             s += W_MACRO_CHOICE
         if food.id in liked:
@@ -231,9 +275,12 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         dom = _dominant_macro(food)
         for meal in MEALS:
             by_slot[meal][dom].append(food)
+    scores: Dict[str, Dict[str, Dict[int, float]]] = {m: {} for m in MEALS}
     for meal in MEALS:
         for macro in MACROS:
-            by_slot[meal][macro].sort(key=lambda f: score(f, meal, macro), reverse=True)
+            table = {f.id: score(f, meal, macro) for f in by_slot[meal][macro]}
+            by_slot[meal][macro].sort(key=lambda f: table[f.id], reverse=True)
+            scores[meal][macro] = table
 
     counts = {
         "catalogue": len(foods),
@@ -242,7 +289,7 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         "liked": len(liked),
         "disliked": len(disliked),
     }
-    pool = CandidatePool(by_slot=by_slot, source_counts=counts)
+    pool = CandidatePool(by_slot=by_slot, source_counts=counts, scores=scores)
     if pool.empty_slots:
         logger.warning(
             "Candidate pool has empty slots for user %s: %s (catalogue=%d, safe=%d)",

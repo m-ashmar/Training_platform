@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -41,9 +42,20 @@ MAX_PER_SLOT = {"protein": 1, "carb": 1, "vegetable": 1, "fruit": 1, "fat": 1}
 #: Lunch and dinner get something green whether or not the shape asked for it.
 VEGETABLE_MEALS = ("Lunch", "Dinner")
 
-W_RANK = 1.0        # position in the client's own ranked pool
-W_PAIRING = 1.5     # how often this food appears beside what is already on the plate
+#: How often this food appears beside what is already on the plate, in the same units
+#: as the pool's own ranking so the two can simply be added.
+W_PAIRING = 10.0
 RECENCY_PENALTY = 0.1
+
+#: How decisively the best-scoring candidate wins. Selection is a softmax over the
+#: pool's scores, which makes the strength of a preference matter and not merely its
+#: rank: a food the client chose outscores the next by about a hundred, so at this
+#: temperature it is served essentially every time, while two foods separated by a
+#: point of macro density are picked with near-equal probability and the plan stays
+#: varied. Sampling by rank position gave the top candidate under a third of the draws
+#: whether the client had asked for it or not, so choosing your own breakfast changed
+#: nothing that could be measured.
+SOFTMAX_T = 20.0
 
 
 @dataclass(frozen=True)
@@ -81,16 +93,34 @@ def derive_templates(recipes: Optional[Sequence] = None) -> List[MealTemplate]:
 
     shapes: Dict[Tuple[str, ...], Dict] = {}
     for recipe in recipes:
-        slots = tuple(sorted(classify_food(line.food) for line in recipe.ingredients.all()))
+        # Clamp at derivation. A shape is what can be BUILT, and `MAX_PER_SLOT` allows
+        # one food per slot, so a recipe with two fats derived a two-fat shape whose
+        # second fat was silently dropped when it was filled. Three of ten templates
+        # were duplicates of a shape already in the list, scored twice under different
+        # meal restrictions and building the identical meal both times.
+        counts: Dict[str, int] = collections.Counter(
+            classify_food(line.food) for line in recipe.ingredients.all())
+        slots = tuple(sorted(
+            slot for slot, n in counts.items()
+            for _ in range(min(n, MAX_PER_SLOT.get(slot, 1)))))
         if not slots:
             continue
         entry = shapes.setdefault(
-            slots, {"count": 0, "meals": set(), "example": recipe.name})
+            slots, {"count": 0, "meals": set(), "any_meal": False, "example": recipe.name})
         entry["count"] += 1
-        entry["meals"].update(getattr(recipe, "meal_types", None) or [])
+        meals = getattr(recipe, "meal_types", None) or []
+        # A recipe that names no meal suits every meal. Unioning its empty list with a
+        # restricted sibling's said the opposite: absence narrowed the shape instead of
+        # widening it, so one unrestricted recipe sharing a shape with a lunch recipe
+        # produced a lunch-only template.
+        if meals:
+            entry["meals"].update(meals)
+        else:
+            entry["any_meal"] = True
 
     templates = [
-        MealTemplate(slots=slots, meals=tuple(sorted(entry["meals"])),
+        MealTemplate(slots=slots,
+                     meals=() if entry["any_meal"] else tuple(sorted(entry["meals"])),
                      seen=entry["count"], example=entry["example"])
         for slots, entry in shapes.items()
     ]
@@ -124,6 +154,31 @@ def pairing_edges(recipes: Optional[Sequence] = None) -> Dict[int, collections.C
     return edges
 
 
+def meal_foods(recipes: Optional[Sequence] = None) -> Dict[str, Set[int]]:
+    """Which foods the library serves at which meal.
+
+    The third thing read off the recipes, after their shapes and their pairings. Without
+    it nothing in the ranking knows that grilled chicken is not breakfast: for a client
+    who has chosen nothing, the pool is ordered by role and macro density, both of which
+    are blind to the time of day, and a breakfast came out as chicken, white rice and
+    olive oil. Someone already answered this question every time they wrote a recipe
+    down and said which meals it suits.
+    """
+    from diet.models import Recipe
+
+    if recipes is None:
+        recipes = list(
+            Recipe.objects.filter(is_active=True).prefetch_related("ingredients__food"))
+
+    out: Dict[str, Set[int]] = collections.defaultdict(set)
+    for recipe in recipes:
+        meals = getattr(recipe, "meal_types", None) or []
+        ids = [line.food_id for line in recipe.ingredients.all()]
+        for meal in meals:
+            out[meal].update(ids)
+    return dict(out)
+
+
 def _affinity(candidate_id: int, chosen_ids: Sequence[int],
               edges: Dict[int, collections.Counter]) -> float:
     """How well this food sits beside what is already on the plate, 0.0 upward."""
@@ -136,27 +191,37 @@ def _affinity(candidate_id: int, chosen_ids: Sequence[int],
 
 
 def _pick(candidates: Sequence, chosen_ids: List[int],
-          edges: Dict[int, collections.Counter], recent: Set[int], rng) -> Optional[object]:
+          edges: Dict[int, collections.Counter], recent: Set[int], rng,
+          scores: Optional[Dict[int, float]] = None) -> Optional[object]:
     """One filler for one slot.
 
-    The pool arrives already ranked for this client — `build_pool` puts what they chose
-    for this meal and macro at the top, at the highest weight it has. Position in that
-    ranking is therefore the preference signal; affinity decides between foods the
-    client is equally happy with. Sampled rather than maximised, because taking the top
-    of a ranked list every time is exactly what served one dish 48 times.
+    The pool arrives ranked AND scored for this client — `build_pool` gives what they
+    chose for this meal and macro a hundred points, a food the recipe library serves at
+    this meal thirty-five, a staple forty. Affinity with what is already on the plate is
+    added in the same units, and the result is sampled through a softmax, so a strong
+    preference decides the slot and a weak one only tilts it.
     """
     shortlist = list(candidates)[:12]
     if not shortlist:
         return None
+    scores = scores or {}
 
-    weights = []
+    totals = []
     for index, food in enumerate(shortlist):
-        rank_score = W_RANK * (1.0 / (1.0 + index))
-        pair_score = W_PAIRING * _affinity(food.id, chosen_ids, edges)
-        weight = rank_score + pair_score
+        base = scores.get(food.id)
+        if base is None:
+            # No score table: fall back to position, spread over the same range so the
+            # softmax below behaves the same way.
+            base = SOFTMAX_T * (len(shortlist) - index) / len(shortlist)
+        totals.append(base + W_PAIRING * _affinity(food.id, chosen_ids, edges))
+
+    top = max(totals)
+    weights = []
+    for food, total in zip(shortlist, totals):
+        weight = math.exp((total - top) / SOFTMAX_T)
         if food.id in recent:
             weight *= RECENCY_PENALTY
-        weights.append(max(weight, 1e-6))
+        weights.append(max(weight, 1e-9))
 
     if rng is None:
         return max(zip(shortlist, weights), key=lambda pair: pair[1])[0]
@@ -187,7 +252,8 @@ def build_meal(meal_name: str, template: MealTemplate, pool, targets: Dict[str, 
             if used_per_slot[slot] >= MAX_PER_SLOT.get(slot, 1):
                 continue
             available = [f for f in pool.get(meal_name, slot) if f.id not in chosen_ids]
-            food = _pick(available, chosen_ids, edges, recent, rng)
+            weights = pool.weights(meal_name, slot) if hasattr(pool, "weights") else None
+            food = _pick(available, chosen_ids, edges, recent, rng, weights)
             if food is None:
                 continue
             chosen.append(food)

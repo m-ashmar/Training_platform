@@ -59,6 +59,13 @@ class DayContext:
     #: window above was already computed and threaded into component assembly; the
     #: recipe path ignored it, which is half of why one dish was served 48 times.
     recent_recipe_ids: Dict[str, Set[int]] = field(default_factory=dict)
+    #: Recipes already served TODAY, across every slot. The window above is a snapshot
+    #: taken before the day starts and never updated while it runs, and the set the
+    #: recipe path wrote to during the day was only read the following morning — two
+    #: stores for one idea, so nothing stopped a dish appearing at both lunch and
+    #: dinner. It happened on 9 of 42 measured days, and the snack dish was also being
+    #: served as that morning's breakfast.
+    served_today: Set[int] = field(default_factory=set)
 
 
 class _PoolView:
@@ -295,35 +302,25 @@ class RuleBasedPlanner:
                 # surrounding failures invisible in logs. Control flow is unchanged.
                 logger.debug('suppressed non-fatal error', exc_info=True)
 
-            for meal_name in meals:
+            # The snack is a meal. It used to be planned by sixty lines of its own that
+            # predated the recipe and template paths and were never folded in: they
+            # called the recipe search without the client, without the day's generator
+            # and without the recipes already served, so the snack was a deterministic
+            # best fit — one dish, forty-two times out of forty-two, identical for every
+            # client. Routing it through `_plan_meal` gives it personalisation, variety,
+            # shapes and servable portions in one move rather than four.
+            slots = list(meals) + (["Snack"] if snack_count else [])
+            for meal_name in slots:
                 planned_meals.append(self._plan_meal(meal_name, ctx, day_ctx))
-                
 
-            # Add fruits to 2 meals per day (100-150g each) before adding snack
-            today_meals = planned_meals[day_start_idx:]
-            self._add_fruits_to_day(meals, allowed, today_meals, used_in_window)
+            # Nothing is appended to a meal after it has been planned. Two portions of
+            # fruit used to be stapled on here, at a gram figure drawn uniformly between
+            # 100 and 150 and never checked against the food's own ladder, onto meals
+            # that had already been solved to their calorie target — and onto a named
+            # dish, which made it a different dish. Fruit is a slot in a meal's shape,
+            # chosen and portioned with the rest of it; four of the ten derived
+            # templates carry one.
 
-            if snack_count:
-                snack_ing = self._build_snack(allowed, used_in_window)
-                snack_nutrition = self._compute_meal_nutrition(snack_ing)
-                planned_meals.append(
-                    AIMeal(
-                        # Carry the dish name when the snack came from a recipe, so the
-                        # client shows "Yogurt, Apple and Almond Butter" rather than the
-                        # generic slot label.
-                        meal_name=getattr(self, "_last_snack_name", None) or "Snack",
-                        description=getattr(self, "_last_snack_desc", None)
-                        or "Snack planned by rule-based system",
-                        ingredients=snack_ing,
-                        total_nutrition={
-                            "calories": float(round(snack_nutrition.get("calories", 0.0), 1)),
-                            "protein": float(round(snack_nutrition.get("protein", 0.0), 1)),
-                            "carbs": float(round(snack_nutrition.get("carbs", 0.0), 1)),
-                            "fat": float(round(snack_nutrition.get("fat", 0.0), 1)),
-                        },
-                        meal_type="Snack",
-                    )
-                )
 
             # Note: rebalancing now occurs inside _plan_meal on (FoodItem, grams) components before finalization.
 
@@ -333,9 +330,7 @@ class RuleBasedPlanner:
                 today_used: Dict[str, Set[int]] = {m: set() for m in ("Breakfast","Lunch","Dinner","Snack")}
                 from diet.models import FoodItem as _FoodItem
                 for m in today_meals:
-                    meal_key = m.meal_name if m.meal_name in today_used else (m.meal_type or "")
-                    if meal_key not in today_used:
-                        meal_key = "Snack" if (m.meal_type == "Snack" or m.meal_name == "Snack") else "Dinner"
+                    meal_key = m.meal_type if m.meal_type in today_used else "Dinner"
                     for ing in m.ingredients:
                         try:
                             fi = _FoodItem.objects.filter(name=ing.name).first() or _FoodItem.objects.filter(name__iexact=ing.name).first()
@@ -373,62 +368,14 @@ class RuleBasedPlanner:
         return output
 
     # ------------------------ meal rebalancer utilities ------------------------
-    def _grams_from_qty(self, qty: str) -> float:
-        try:
-            import re
-            m = re.search(r"(\d+(?:\.\d+)?)\s*g", qty or "")
-            return float(m.group(1)) if m else 0.0
-        except Exception:
-            return 0.0
-
-    def _set_qty(self, ing, grams: float) -> None:
-        g = max(0.0, float(grams))
-        ing.quantity = f"{int(round(g))}g"
-
-    def _compute_meal_nutrition(self, ingredients) -> dict:
-        from diet.models import FoodItem
-        kcal = p = c = f = 0.0
-        for ing in ingredients:
-            fi = FoodItem.objects.filter(name=ing.name).first() or FoodItem.objects.filter(name__iexact=ing.name).first()
-            if not fi:
-                continue
-            g = self._grams_from_qty(getattr(ing, 'quantity', '') or '')
-            if g <= 0.0:
-                continue
-            kcal += g * float(getattr(fi, 'calories_per_gram', 0.0) or 0.0)
-            p    += g * float(getattr(fi, 'protein_per_gram', 0.0) or 0.0)
-            c    += g * float(getattr(fi, 'carbs_per_gram', 0.0) or 0.0)
-            f    += g * float(getattr(fi, 'fat_per_gram', 0.0) or 0.0)
-        return {'calories': kcal, 'protein': p, 'carbs': c, 'fat': f}
+    # Four helpers used to live here that parsed grams back out of a "180g" string,
+    # scaled them by a factor and wrote the string again. They served the bespoke snack
+    # builder and the old rebalancer, both of which are gone: a quantity is chosen from
+    # the food's own ladder now and never re-derived from its own display text.
 
     def _is_oil_like(self, name: str) -> bool:
         nm = (name or '').lower()
         return ('oil' in nm) or ('ghee' in nm) or ('butter' in nm)
-
-    def _scale_by_macro(self, ingredients, macro: str, factor: float) -> None:
-        from diet.models import FoodItem
-        factor = float(factor)
-        for ing in ingredients:
-            fi = FoodItem.objects.filter(name=ing.name).first() or FoodItem.objects.filter(name__iexact=ing.name).first()
-            if not fi:
-                continue
-            # Choose items whose dominant macro matches
-            dom = self._dominant_macro_of_food(fi)
-            if dom != macro:
-                continue
-            g = self._grams_from_qty(ing.quantity)
-            if g <= 0.0:
-                continue
-            new_g = g * factor
-            # Floors to avoid absurd tiny portions
-            min_g = 5.0 if self._is_oil_like(getattr(fi, 'name', '')) else 25.0
-            try:
-                print(f"[REBALANCE_SCALE] item={getattr(fi,'name','')} macro={macro} dom={dom} old_g={round(g,1)} factor={round(factor,3)} target_g={round(new_g,1)} min_floor={min_g}")
-            except Exception:
-                # Optional side effect: swallowing this silently is what made the
-                # surrounding failures invisible in logs. Control flow is unchanged.
-                logger.debug('suppressed non-fatal error', exc_info=True)
-            self._set_qty(ing, max(min_g, new_g))
 
     def _within_band(self, actual: float, target: float, band: float) -> bool:
         if target <= 0.0:
@@ -702,8 +649,13 @@ class RuleBasedPlanner:
             recent_ids[m] = set(ids_by_meal.get(m, set())) | set(used_in_window.get(m, set()))
             recent_names[m] = set(norm_names_by_meal.get(m, set())) | set(used_names_window.get(m, set()))
 
-        # Kcal allocation
-        snack_kcal = 200.0 if snack_count else 0.0
+        # Kcal allocation. `snack_kcal` comes from the policy rather than a literal:
+        # the number lived in `PlannerPolicy` and this line hardcoded it, so a
+        # deployment that changed the snack budget changed only half the arithmetic.
+        from diet.planner.policy import load_policy
+
+        policy = load_policy(ctx.goal)
+        snack_kcal = float(policy.snack_kcal) if snack_count else 0.0
         meal_kcal_budget = max(0.0, daily_kcal - snack_kcal)
         if getattr(settings, 'DIET_DYNAMIC_MEAL_ALLOCATION', False):
             split = goal_meal_kcal_split(ctx.goal)
@@ -718,7 +670,17 @@ class RuleBasedPlanner:
             meal_distribution = {m: (v / _total_share) for m, v in meal_distribution.items()}
         else:
             meal_distribution = {m: 1.0 / len(meals) for m in meals}
-        per_meal_kcal = {m: meal_kcal_budget * meal_distribution[m] for m in meals}
+
+        # One distribution over the whole day, snack included. The meal shares used to
+        # be normalised over the three main meals while the MACRO targets were shares
+        # of the whole day, so the three meals were handed 100% of the day's protein,
+        # carbohydrate and fat and the snack's macros were added on top of a complete
+        # day. Energy and macros are now split by the same numbers.
+        snack_share = (snack_kcal / daily_kcal) if daily_kcal > 0 else 0.0
+        meal_distribution = {m: v * (1.0 - snack_share) for m, v in meal_distribution.items()}
+        if snack_count:
+            meal_distribution["Snack"] = snack_share
+        per_meal_kcal = {m: daily_kcal * share for m, share in meal_distribution.items()}
 
         # Macro targets per meal
         ratios = self._macro_ratios_for_goal_value(ctx.goal)
@@ -726,7 +688,7 @@ class RuleBasedPlanner:
         carb_target = daily_kcal * ratios["carb"] / 4.0
         fat_target = daily_kcal * ratios["fat"] / 9.0
         meal_targets: Dict[str, MealTarget] = {}
-        for m in meals:
+        for m in meal_distribution:
             meal_targets[m] = MealTarget(
                 name=m,
                 kcal_target=per_meal_kcal[m],
@@ -755,83 +717,6 @@ class RuleBasedPlanner:
             "fat": sum(g * self._macro_per_gram(f, "fat") for f, g in components),
         }
         return kcal_consumed, macro_consumed
-
-    def _snack_from_recipe(self) -> List[AIIngredient]:
-        """A real snack dish scaled to the snack calorie budget, or [] if none fits."""
-        try:
-            from diet.planner.policy import load_policy
-            from diet.planner.recipes import find_recipe
-
-            policy = load_policy(self._resolve_goal())
-            kcal = policy.snack_kcal
-            targets = {
-                "calories": kcal,
-                "protein": kcal * policy.protein_ratio / 4.0,
-                "carb": kcal * policy.carb_ratio / 4.0,
-                "fat": kcal * policy.fat_ratio / 9.0,
-            }
-            checker = None
-            try:
-                from ..models import UserFoodPreference
-                from .meal_validator import AllergenChecker
-
-                pref = UserFoodPreference.objects.filter(user=self.user).first()
-                raw = getattr(pref, "allergies", None) if pref else None
-                if raw:
-                    checker = AllergenChecker(raw)
-            except Exception:
-                logger.debug("could not load allergies for the snack", exc_info=True)
-
-            match = find_recipe("Snack", targets, policy, allergen_checker=checker)
-            if match is None or not match.deviation.within(policy.tolerance):
-                self._last_snack_name = None
-                self._last_snack_desc = None
-                return []
-            self._last_snack_name = match.name
-            self._last_snack_desc = getattr(match.recipe, "description", "") or ""
-            return [
-                AIIngredient(
-                    name=food.name,
-                    quantity=f"{grams:g}g",
-                    estimated_calories=round(float(food.calories or 0) * grams / 100, 1),
-                    estimated_protein=round(float(food.protein or 0) * grams / 100, 1),
-                    estimated_carbs=round(float(food.carbs or 0) * grams / 100, 1),
-                    estimated_fat=round(float(food.fat or 0) * grams / 100, 1),
-                )
-                for food, grams in match.components
-            ]
-        except Exception:
-            logger.debug("recipe snack unavailable; using components", exc_info=True)
-            return []
-
-    def _build_snack(self, allowed: Dict[str, Dict[str, List[FoodItem]]], used_in_window: Dict[str, Set[int]]) -> List[AIIngredient]:
-        # A recipe first. Picking the single most macro-dense food per macro to hit
-        # 200 kcal produced "Extra Virgin Olive Oil 25 g" as a snack — technically
-        # 200 calories, obviously not something anyone eats.
-        recipe_snack = self._snack_from_recipe()
-        if recipe_snack:
-            return recipe_snack
-
-        snack_ing: List[AIIngredient] = []
-        for macro in ("fat", "protein", "carb"):
-            cands = allowed.get("Snack", {}).get(macro, [])
-            if not cands:
-                continue
-            food = sorted(cands, key=lambda f: self._macro_density_per_kcal(f, macro), reverse=True)[0]
-            kcal_pg = float(getattr(food, "calories_per_gram", 0.0) or 0.0)
-            if kcal_pg <= 0.0:
-                cals_per_serv = float(getattr(food, "calories", 0.0) or 0.0)
-                serv_g = float(getattr(food, "serving_size_grams", 100.0) or 100.0)
-                kcal_pg = (cals_per_serv / serv_g) if serv_g > 0 else 0.0
-            grams = 200.0 / kcal_pg if kcal_pg > 0 else 0.0
-            if grams > 300.0:
-                grams = 300.0
-            grams = self._round_grams(grams)
-            if grams > 0:
-                snack_ing.append(AIIngredient(name=food.name, quantity=f"{int(grams)}g"))
-                used_in_window.setdefault("Snack", set()).add(food.id)
-                break
-        return snack_ing
 
     def _staged_fill(self, meal_name: str, ctx: PlannerContext, day_ctx: DayContext, recent_set: Set[int]) -> List[Tuple[FoodItem, float]]:
         if not getattr(settings, 'DIET_STAGED_MEAL_FILL', False):
@@ -894,7 +779,7 @@ class RuleBasedPlanner:
 
             portions, _score, template = plan_from_template(
                 meal_name,
-                _PoolView(ctx.allowed_map),
+                getattr(self, "_pool", None) or _PoolView(ctx.allowed_map),
                 targets,
                 templates=self._templates(),
                 edges=self._pairings(),
@@ -1007,10 +892,17 @@ class RuleBasedPlanner:
             # seeded generator, so the choice varies without becoming unreproducible;
             # and the recipes already served inside the no-repeat window, which the
             # recipe path was computing and then ignoring.
-            served = getattr(day_ctx, "recent_recipe_ids", {}).get(meal_name, ())
+            # Today is a ban, earlier days are a penalty. Banning a dish for three
+            # days emptied a sixteen-recipe library inside a week and dropped the
+            # planner back to assembling piles, which is the worse trade. Banning it
+            # for the rest of the same day costs at most three dishes and the fallback
+            # is a meal built from the client's own foods, so nobody is served the same
+            # dish at lunch and dinner to save a recipe for tomorrow.
+            served = set(getattr(day_ctx, "recent_recipe_ids", {}).get(meal_name, ()))
             match = find_recipe(
                 meal_name, targets, policy,
                 allergen_checker=checker,
+                exclude_ids=tuple(getattr(day_ctx, "served_today", ())),
                 recent_ids=tuple(served),
                 user=self.user,
                 rng=getattr(self, "_rng", None),
@@ -1030,9 +922,10 @@ class RuleBasedPlanner:
                 for food, grams in match.components
             ]
             totals = totals_of(match.components)
-            served = getattr(self, "_recipes_today", None)
-            if served is not None:
-                served.setdefault(meal_name, set()).add(match.recipe.id)
+            today = getattr(self, "_recipes_today", None)
+            if today is not None:
+                today.setdefault(meal_name, set()).add(match.recipe.id)
+            day_ctx.served_today.add(match.recipe.id)
             return AIMeal(
                 meal_name=match.name,
                 description=getattr(match.recipe, "description", "") or "",
@@ -1560,6 +1453,9 @@ class RuleBasedPlanner:
 
         policy = load_policy(self._resolve_goal())
         pool = build_pool(self.user, policy, allergen_checker=checker)
+        # Kept whole as well as flattened: `by_slot` is a list per slot and the
+        # template path needs the scores behind that order, not just the order.
+        self._pool = pool
         return pool.by_slot
 
     def _filter_pool_for_allergens(self, pool):
@@ -1933,88 +1829,3 @@ class RuleBasedPlanner:
             used_names_window.setdefault(meal_name, set()).add(self._normalize_name_for_repeat(veg.name))
             return True
         return False
-    
-    def _add_fruits_to_day(
-        self, meals: List[str], allowed: Dict,
-        today_meals: List[AIMeal], used_in_window: Dict
-    ) -> None:
-        """Add 2 portions of fruits across today's meals (100-150g each), respecting meal allowances."""
-
-        # Identify target meals (Breakfast > Lunch > Dinner)
-        candidates = [m for m in today_meals if m.meal_name in ('Breakfast', 'Lunch', 'Dinner')]
-        candidates.sort(key=lambda m: {'Breakfast':0, 'Lunch':1, 'Dinner':2}.get(m.meal_name, 99))
-        
-        # Target up to 2 meals
-        targets = candidates[:2]
-        
-        for meal in targets:
-            meal_name = meal.meal_name
-            
-            # Get allowed fruits SPECIFICALLY for this meal
-            allowed_candidates = allowed.get(meal_name, {}).get('fruit', [])
-            
-            # Filter logic (recency, used today)
-            # Used today across all meals
-            try:
-                used_all = set().union(*(used_in_window.get(k, set()) for k in ("Breakfast","Lunch","Dinner","Snack")))
-            except Exception:
-                used_all = set()
-            
-            valid_fruits = [f for f in allowed_candidates if f.id not in used_all]
-            
-            # Fallback ONLY if we have safe common fruits allowed for this meal?
-            # Actually, we can't easily know which common fruits are allowed for this meal unless we check preferences.
-            # But the 'allowed' dict ALREADY contains preferences.
-            # So if valid_fruits is empty, we effectively have NO allowed fruits for this meal.
-            # We should SKIP to avoid PersistenceError.
-            
-            if not valid_fruits:
-                # Try to use any candidate even if used recently?
-                valid_fruits = allowed_candidates
-                
-            if not valid_fruits:
-                continue
-                
-            # Pick one
-            fruit = self._rng.choice(valid_fruits)
-            
-            # Check if fruit already in meal?
-            existing_names = {ing.name.lower() for ing in meal.ingredients}
-            if fruit.name.lower() in existing_names:
-                continue
-                
-            # Add to meal
-            grams = self._rng.uniform(100.0, 150.0)
-            grams = self._round_grams(grams)
-            
-            # Convert FoodItem to ingredient
-            # Warning: meal.ingredients is list of AIIngredient
-            meal.ingredients.append(AIIngredient(name=fruit.name, quantity=f"{int(grams)}g"))
-            
-            # Update Nutrition
-            # We need to calculate kcal/macros for the added fruit
-            # approximate values from food object
-            f_cal = float(fruit.calories) / 100.0 * grams
-            f_pro = float(fruit.protein) / 100.0 * grams
-            f_carb = float(fruit.carbs) / 100.0 * grams
-            f_fat = float(fruit.fat) / 100.0 * grams
-            
-            if not meal.total_nutrition:
-                meal.total_nutrition = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
-            
-            meal.total_nutrition["calories"] += f_cal
-            meal.total_nutrition["protein"] += f_pro
-            meal.total_nutrition["carbs"] += f_carb
-            meal.total_nutrition["fat"] += f_fat
-            
-            # Mark as used (id is int)
-            try:
-                fid = int(fruit.id)
-                used_in_window.setdefault(meal_name, set()).add(fid)
-                # Also prevent reuse in same day (handled by 'used_in_window' updates?)
-                # We need to update user_all for next iteration
-                used_in_window.setdefault("Snack", set()).add(fid) # Add to dummy to ensure global exclusion for today
-            except Exception:
-                # Optional side effect: swallowing this silently is what made the
-                # surrounding failures invisible in logs. Control flow is unchanged.
-                logger.debug('suppressed non-fatal error', exc_info=True)

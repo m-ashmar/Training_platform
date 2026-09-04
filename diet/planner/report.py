@@ -7,10 +7,19 @@ plan already 3.7% under). One measure, used by every stage, removes both.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict
 
 MACROS = ("calories", "protein", "carb", "fat")
+
+#: Below these absolute misses a percentage is not information. A 200 kcal snack with a
+#: 30/50/20 split asks for 4.4 g of fat, and a 20% band on that is plus or minus nine
+#: tenths of a gram — a fifth of a teaspoon. No system that serves food in amounts
+#: people recognise can hit it, so every snack recipe was rejected for missing a target
+#: finer than the resolution of a spoon, and the snack slot fell back to assembly on
+#: every single day measured. These are also below the accuracy of the nutrition data
+#: itself, which is quoted to the gram per hundred grams.
+NEGLIGIBLE = {"calories": 40.0, "protein": 4.0, "carb": 6.0, "fat": 3.0}
 
 
 @dataclass(frozen=True)
@@ -21,6 +30,10 @@ class MacroDeviation:
     protein: float = 0.0
     carb: float = 0.0
     fat: float = 0.0
+    #: The same misses in grams and kilocalories. A ratio alone cannot say whether a
+    #: deviation matters, because it has thrown away the size of the thing it is a
+    #: deviation from.
+    absolute: Dict[str, float] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, float]:
         return {m: getattr(self, m) for m in MACROS}
@@ -41,22 +54,32 @@ class MacroDeviation:
         return worst_macro, worst_score
 
     def within(self, tolerance: Dict[str, float]) -> bool:
-        return all(
-            abs(getattr(self, m)) <= tolerance.get(m, 0.10) for m in MACROS
-        )
+        """Inside every macro's own band, or missing it by an amount too small to mean
+        anything."""
+        for macro in MACROS:
+            if abs(getattr(self, macro)) <= tolerance.get(macro, 0.10):
+                continue
+            missed = abs(self.absolute.get(macro, float("inf")))
+            if missed <= NEGLIGIBLE.get(macro, 0.0):
+                continue
+            return False
+        return True
+
+    #: Energy's share of the objective. Calories used to be excluded entirely, because
+    #: the optimiser was a hill-climb that stopped as soon as a move failed to improve:
+    #: a move correctly cutting a +30% carbohydrate surplus also cut calories, the
+    #: doubly-counted total failed to improve, the move was rejected and the surplus
+    #: stayed. There is no such loop now — portions are chosen by enumerating a food's
+    #: own ladder — so nothing is rejected for improving two things at once, and
+    #: leaving energy out of the objective simply meant nothing steered it. Every plan
+    #: then landed 2 to 4% under target, in the same direction every time.
+    CALORIE_WEIGHT = 0.5
 
     @property
     def magnitude(self) -> float:
-        """Single scalar for comparing two candidate plans.
-
-        Calories are deliberately EXCLUDED: energy is a linear function of the three
-        macros, so counting it again double-weights every change. With it included, a
-        move that correctly cut a +30% carb surplus also moved calories down, the summed
-        magnitude failed to improve, the move was rejected and the loop stopped — leaving
-        the surplus in place. Optimise the three macros; energy follows, and the
-        tolerance check below still guards it.
-        """
-        return sum(abs(getattr(self, m)) for m in ("protein", "carb", "fat"))
+        """Single scalar for comparing two candidate plans."""
+        macros = sum(abs(getattr(self, m)) for m in ("protein", "carb", "fat"))
+        return macros + self.CALORIE_WEIGHT * abs(self.calories)
 
     def human(self) -> str:
         return ", ".join(f"{m} {getattr(self, m):+.1%}" for m in MACROS)
@@ -64,9 +87,10 @@ class MacroDeviation:
 
 def deviation_of(totals: Dict[str, float], targets: Dict[str, float]) -> MacroDeviation:
     """Relative deviation of achieved totals from target."""
-    out = {}
+    out, absolute = {}, {}
     for macro in MACROS:
         target = float(targets.get(macro, 0.0) or 0.0)
         actual = float(totals.get(macro, 0.0) or 0.0)
         out[macro] = 0.0 if target <= 0 else (actual - target) / target
-    return MacroDeviation(**out)
+        absolute[macro] = actual - target
+    return MacroDeviation(absolute=absolute, **out)

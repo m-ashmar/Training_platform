@@ -6,31 +6,46 @@
     "recipes": 16
   },
   "measured": {
-    "dish_rate_overall": 0.6667,
+    "dish_rate_overall": 0.75,
     "dish_rate_by_slot": {
-      "Breakfast": 0.5,
-      "Lunch": 0.5,
-      "Dinner": 0.6667,
-      "Snack": 1.0
+      "Breakfast": 0.6667,
+      "Lunch": 0.6667,
+      "Dinner": 0.8333,
+      "Snack": 0.8333
     },
     "meals_measured": 168,
-    "distinct_dishes": 6,
+    "distinct_dishes": 7,
     "max_repeats_of_one_dish": 42,
-    "absurd_portion_rate": 0.0825,
-    "portions_measured": 679,
-    "min_distinct_portions_per_food": 1,
+    "absurd_portion_rate": 0.0,
+    "max_repeats_by_slot": {
+      "Breakfast": 21,
+      "Lunch": 9,
+      "Dinner": 12,
+      "Snack": 35
+    },
+    "distinct_dishes_by_slot": {
+      "Breakfast": 2,
+      "Lunch": 4,
+      "Dinner": 4,
+      "Snack": 1
+    },
+    "days_repeating_a_dish": 0,
+    "portions_measured": 614,
+    "min_distinct_portions_per_food": 2,
     "drift_by_target": {
-      "1400": 3.493,
-      "1800": 3.061,
-      "2200": 1.127,
-      "2600": 5.725,
-      "3000": -0.145
+      "1400": 3.164,
+      "1800": -0.656,
+      "2200": 1.795,
+      "2600": -2.512,
+      "3000": -3.04
     },
     "drift_all_one_sided": false,
-    "drift_worst_abs": 5.725,
-    "twin_identical_meals": 14,
+    "drift_worst_abs": 3.164,
+    "twin_identical_meals": 21,
     "twin_total_meals": 28,
-    "chosen_ingredient_share": 0.2712,
+    "twin_identical_built": 0,
+    "twin_built_meals": 7,
+    "chosen_ingredient_share": 0.1359,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],
     "catalogue_gaps": []

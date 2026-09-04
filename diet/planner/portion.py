@@ -21,17 +21,43 @@ rather than breaks.
 """
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
-#: Portions step by half a unit. Finer than that is not a decision anyone makes when
-#: serving: half an avocado, one and a half cups of rice, two eggs.
+#: How finely each unit divides. A single global step was wrong in both directions: a
+#: quarter of an egg is not a thing, and half a pot of yogurt is a 75 g quantum, which
+#: in a 200 kcal snack is a fifth of the meal — coarse enough that no snack recipe could
+#: land inside tolerance and every one of them fell back to assembly. People measure a
+#: cup in quarters and an egg in whole eggs, so the step belongs to the unit.
 UNIT_STEP = 0.5
+UNIT_STEPS = {
+    "cup": 0.25, "pot": 0.25, "serving": 0.25,
+    "tbsp": 0.5, "slice": 0.5, "palm": 0.5, "fillet": 0.5, "block": 0.5,
+    "handful": 0.5, "half": 0.5, "medium": 0.5,
+    "egg": 1.0, "egg white": 1.0, "piece": 1.0, "clove": 1.0, "sprig": 1.0,
+    "pinch": 1.0, "avocado": 0.25,
+}
+
+#: Units that read wrong in the plural. An abbreviation does not take an s, and "medium"
+#: is an adjective standing in for the thing it describes.
+INVARIANT_UNITS = {"tbsp", "tsp", "medium"}
+
+
+def step_for(food) -> float:
+    """The smallest change in this food a person would actually make."""
+    unit = (getattr(food, "household_unit", "") or "").strip().lower()
+    return UNIT_STEPS.get(unit, UNIT_STEP)
 
 #: When a food carries no unit, cap the gram portion so the fallback cannot reproduce
-#: the plates this module exists to prevent.
+#: the plates this module exists to prevent. A single flat ceiling was still too
+#: permissive: 250 g is a reasonable plate of fish and an absurd amount of garlic, and
+#: the catalogue's uncovered foods are a mix of both. The cap follows what the food IS.
 FALLBACK_MAX_G = 250.0
 FALLBACK_MIN_G = 20.0
+FALLBACK_CAPS_G = {"fat": 60.0, "protein": 250.0, "carb": 200.0,
+                   "vegetable": 250.0, "fruit": 200.0}
 
 
 @dataclass(frozen=True)
@@ -45,12 +71,7 @@ class Portion:
     @property
     def described(self) -> str:
         """What a person would say they are eating."""
-        unit = getattr(self.food, "household_unit", "") or ""
-        if self.units and unit:
-            count = int(self.units) if float(self.units).is_integer() else self.units
-            plural = "" if count == 1 else "s"
-            return f"{count} {unit}{plural}"
-        return f"{self.grams:.0f} g"
+        return describe(self.food, self.grams)
 
 
 def unit_levels(food) -> List[float]:
@@ -66,13 +87,24 @@ def unit_levels(food) -> List[float]:
     if high <= 0 or high < low:
         return []
 
+    # Rungs sit on the unit grid, inside [low, high]. Two faults lived in the old
+    # `int(round((high - low) / UNIT_STEP))`. It treated the maximum as a step COUNT, so
+    # a range that was not a whole number of steps either overshot its own ceiling —
+    # 0.75-2.5 palms produced a 2.75-palm rung, 330 g of chicken against a declared
+    # 300 g maximum — or could not reach it, as 0.75-4 cups of rice stopped at 3.75.
+    # And it counted FROM the minimum, so a minimum off the grid put every rung off it:
+    # chicken came out at 0.75, 1.25, 1.75 palms, none of which is an amount anyone
+    # says. Counting from the grid gives 1, 1.5, 2, 2.5 — and the ceiling is a bound
+    # that is always reachable.
+    step = step_for(food)
+    first = max(math.ceil(low / step - 1e-9) * step, step)
     levels: List[float] = []
-    steps = int(round((high - low) / UNIT_STEP))
-    for index in range(steps + 1):
-        units = round(low + index * UNIT_STEP, 2)
-        if units <= 0:
-            continue
-        levels.append(units)
+    units = first
+    while units <= high + 1e-9:
+        levels.append(round(units, 2))
+        units = round(units + step, 4)
+    if not levels:
+        levels.append(round(high, 2))
     return levels
 
 
@@ -83,10 +115,110 @@ def portions_for(food) -> List[Portion]:
     if levels:
         return [Portion(food, round(units * grams_per_unit, 1), units) for units in levels]
 
-    # No unit declared. Offer a coarse gram ladder under a cap rather than a continuum,
-    # so the fallback still cannot serve half a kilo of anything.
-    return [Portion(food, grams)
-            for grams in (25.0, 50.0, 75.0, 100.0, 125.0, 150.0, 200.0, FALLBACK_MAX_G)]
+    # No unit declared. Offer a coarse ladder under a cap rather than a continuum, so
+    # the fallback still cannot serve half a kilo of anything. The rungs are fractions
+    # of that food's own cap, not a fixed gram list: a fixed list starting at 25 g put
+    # the smallest servable amount of an un-unitised FAT at 220 kcal, which is a floor
+    # behaving as an attractor — the exact failure this module exists to remove,
+    # reintroduced through the back door of the fallback.
+    cap = fallback_cap(food)
+    rungs = []
+    for share in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0):
+        grams = cap * share
+        grams = round(grams) if grams < 50 else round(grams / 5) * 5
+        if grams > 0 and grams not in rungs:
+            rungs.append(float(grams))
+    return [Portion(food, g) for g in rungs]
+
+
+def fallback_cap(food) -> float:
+    """The most of an un-unitised food the planner may serve."""
+    from .candidates import classify_food
+
+    return FALLBACK_CAPS_G.get(classify_food(food), FALLBACK_MAX_G)
+
+
+def ceiling_grams(food) -> float:
+    """The largest amount of this food the planner is allowed to put on a plate.
+
+    The one definition of "too much". The engine enforces it and the quality harness
+    measures against it; when those were two separate tables they disagreed, and 53
+    portions above a food's own declared ceiling passed a green gate.
+    """
+    options = portions_for(food)
+    return max(p.grams for p in options) if options else FALLBACK_MAX_G
+
+
+def describe(food, grams: float) -> str:
+    """What a person would say they are eating, given a food and an amount.
+
+    A module function rather than a property of `Portion`, because a portion object
+    exists only inside the planner: by the time a meal reaches the client it is a
+    `MealComponent` holding a float. Serving sizes were computed all the way through
+    phase 4 and then dropped at the boundary, so the client still read "285 g yogurt".
+    """
+    unit = (getattr(food, "household_unit", "") or "").strip()
+    per_unit = float(getattr(food, "unit_grams", 0) or 0)
+    grams = float(grams or 0)
+    if not unit or per_unit <= 0 or grams <= 0:
+        return f"{grams:.0f} g"
+    step = step_for(food)
+    units = round(grams / per_unit / step) * step
+    if units <= 0:
+        return f"{grams:.0f} g"
+    return f"{spell(units)} {unit}{plural_suffix(unit, units)}"
+
+
+#: A quarter written as a quarter. "1.25 cups" is a spreadsheet; "1¼ cups" is a recipe.
+FRACTIONS = {0.25: "\u00bc", 0.5: "\u00bd", 0.75: "\u00be"}
+
+
+def spell(units: float) -> str:
+    """A count of units the way it is written on a card."""
+    whole = int(units)
+    part = round(units - whole, 2)
+    glyph = FRACTIONS.get(part)
+    if glyph is None:
+        return f"{units:g}"
+    if whole == 0:
+        return glyph
+    return f"{whole}{glyph}"
+
+
+def plural_suffix(unit: str, count) -> str:
+    """English plural for a serving unit. "2 pinches", not "2 pinchs"."""
+    if count <= 1 or unit.lower() in INVARIANT_UNITS:
+        return ""
+    return "es" if unit.endswith(("ch", "sh", "s", "x", "z")) else "s"
+
+
+def toward(food, current_grams: float, wanted_grams: float) -> float:
+    """The servable amount nearest `wanted_grams`, never on the wrong side of `current`.
+
+    This is what makes the ladder an invariant rather than a suggestion. Every stage
+    that adjusts a portion goes through here, so an adjustment can move a food between
+    the amounts a person serves and can never invent one in between or beyond.
+
+    When the ladder has nothing left in the requested direction the food is already at
+    its ceiling or its floor, and the answer is the nearest rung to where it is — which
+    also repairs a portion that arrived off the ladder.
+    """
+    options = [p.grams for p in portions_for(food)]
+    if not options:
+        capped = max(FALLBACK_MIN_G, min(fallback_cap(food), float(wanted_grams)))
+        return round(capped, 1)
+
+    current = float(current_grams or 0)
+    wanted = float(wanted_grams or 0)
+    if wanted > current:
+        side = [g for g in options if g > current + 1e-6]
+    elif wanted < current:
+        side = [g for g in options if g < current - 1e-6]
+    else:
+        side = []
+    if not side:
+        return min(options, key=lambda g: abs(g - current))
+    return min(side, key=lambda g: abs(g - wanted))
 
 
 def nearest_portion(food, target_grams: float) -> Portion:
@@ -96,9 +228,6 @@ def nearest_portion(food, target_grams: float) -> Portion:
     that made every plan land over its calorie target and never under.
     """
     options = portions_for(food)
-    if not options:
-        capped = max(FALLBACK_MIN_G, min(FALLBACK_MAX_G, float(target_grams)))
-        return Portion(food, round(capped, 1))
     return min(options, key=lambda p: abs(p.grams - float(target_grams)))
 
 

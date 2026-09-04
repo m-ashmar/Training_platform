@@ -43,6 +43,8 @@ from rest_framework.exceptions import NotFound, PermissionDenied, NotAuthenticat
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 from training_platform.query_params import int_param
 
+from diet.planner.portion import describe
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -1650,6 +1652,15 @@ class MealComponentsView(APIView):
                         'category': food.category.name if food.category else None
                     },
                     'quantity': component.quantity,
+                    # What a person would say they are eating. Grams stay exactly as
+                    # they were, so nothing that reads them changes; this is the serving
+                    # beside them. The planner has chosen portions in whole eggs and
+                    # cups since phase 4 and then dropped the unit at the boundary,
+                    # because a component stores a float and nothing else — so the
+                    # client read "285 g yogurt" for what the engine had decided was
+                    # two pots. Derived on read rather than stored, so it cannot drift
+                    # from the quantity it describes.
+                    'serving': describe(component.food, component.quantity),
                     'is_completed': component.is_completed,
                     'completed_at': component.completed_at,
                     'actual_quantity_consumed': component.actual_quantity_consumed,
@@ -2184,7 +2195,12 @@ class DietPlanMealsWithIngredientsView(APIView):
                 except IndexError:
                     est_snack_count = 0
             
-            snack_reserve = est_snack_count * 200.0
+            # The snack budget is policy, not a literal. It was declared in
+            # `PlannerPolicy` and written as 200.0 in two other places, so a deployment
+            # that changed it changed one third of the arithmetic.
+            from diet.planner.policy import load_policy
+
+            snack_reserve = est_snack_count * float(load_policy().snack_kcal)
             main_cal_pool = max(0.0, daily_cals - snack_reserve)
             
             out_meals = []
@@ -2197,6 +2213,7 @@ class DietPlanMealsWithIngredientsView(APIView):
                         'food_id': f.id,
                         'food_name': f.name,
                         'quantity_grams': c.quantity,
+                        'serving': describe(f, c.quantity),
                         'image_url': f.image_url,
                         'macros': c.calculate_nutrition(),
                         'is_completed': c.is_completed,

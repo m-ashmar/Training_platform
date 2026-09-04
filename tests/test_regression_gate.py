@@ -236,14 +236,34 @@ def diet_catalogue(db):
         ("Spinach", 23, 2.9, 3.6, 0.4), ("Apple", 52, 0.3, 14, 0.2),
         ("Banana", 89, 1.1, 23, 0.3),
     ]
-    return {
+    # The macros above are for the food as eaten, so the row must say so. A cup is a
+    # cup of what the row holds: sixty grams is a cup of dry rice and a third of a cup
+    # of cooked rice, and naming a cooked staple as though it were dry gave it a
+    # ceiling a third of a real serving. The production catalogue carries these
+    # qualifiers; the fixture has to as well or it measures a different engine.
+    catalogue_names = {
+        "White Rice": "White Rice (Cooked)", "Lentils": "Lentils (Cooked)",
+        "Sweet Potato": "Sweet Potato (Baked)", "Oats": "Oats (Rolled, Dry)",
+    }
+    made = {
         n: FoodItem.objects.create(
-            name=n, name_en=n, category=cat, api_id=f"gate-{n}", calories=c,
+            name=catalogue_names.get(n, n), name_en=catalogue_names.get(n, n),
+            category=cat, api_id=f"gate-{n}", calories=c,
             protein=p, carbs=cb, fat=f, serving_size="100g",
             allergens=[], allergen_source="verified",
         )
         for n, c, p, cb, f in rows
     }
+    # Give them servings, as the real catalogue has. Without this the fixture's foods
+    # declared no unit, so every test built on it exercised the planner's fallback
+    # ladder rather than the path production takes — and a fixture that is not shaped
+    # like production measures something that does not ship.
+    from django.core.management import call_command
+
+    call_command("seed_food_units", "--apply", verbosity=0)
+    for food in made.values():
+        food.refresh_from_db()
+    return made
 
 
 def test_food_classification_is_correct(diet_catalogue):
@@ -1935,84 +1955,135 @@ def test_a_users_wallet_keeps_them_from_being_deleted(make_user):
 # raises nothing.
 # =========================================================================
 
-def test_choosing_your_own_food_currently_changes_nothing(diet_quality):
-    """The headline finding. Per-slot choices are modelled, captured by a live
-    endpoint, and ranked first by build_pool at the highest weight — all correct. But
-    find_recipe takes no user, and the recipe path serves most meals, so the ranking is
-    never consulted and both clients get the same plan.
+def test_choosing_your_own_food_changes_what_you_are_served(diet_quality):
+    """`find_recipe` took no user argument, so a client who filled in their food
+    preferences received exactly the plan of one who ignored the form.
 
-    P2 connected it: `find_recipe` now takes the user and scores each dish by the share
-    of its ingredients the client picked for that slot. That moved it from 28 of 28 to
-    26 of 28 — two meals in a week.
-
-    Measured as one client before and after choosing, not as two clients side by side.
-    The two-client version read 22 of 28 and most of that gap was noise: the planner
-    seeds its variety generator from the user id, so two people differ partly because
-    they drew differently. Same id, same seed, one variable.
-
-    Two of 28 is the honest size of what preference alone can do here. It can only
-    choose between alternatives, and with sixteen recipes across four meals most slots
-    have one dish inside tolerance whatever the client wants. The ceiling is the
-    library, and P3's templates lift it by building the meal from their pool instead of
-    picking one off a shelf.
-
-    P3 took it to 14 of 28 — half the plan — by building meals from shapes read off
-    the recipe library and filled from the client's own pool, so a slot with one viable
-    recipe is no longer a slot with one viable meal.
-
-    Measured by what is on the plate, not what the meal is called: a template meal is
-    named after its slot, so comparing names showed no change while the ingredients were
-    visibly moving."""
+    Measured on the meals the engine BUILDS. A recipe is a fixed combination someone
+    wrote down, and when none of the dishes that fit a slot contains what the client
+    asked for, the honest answer is that the library does not cover their tastes — no
+    amount of ranking puts bulgur in a chicken and rice bowl. Counting both together
+    made a library gap read as a personalisation failure, and hid the reverse as well:
+    the first version of this measurement had the client choose the library's own
+    staples, so the number could not have moved whatever the engine did.
+    """
     assert diet_quality.chooser_pool_ranked_first, \
-        "build_pool stopped ranking the client's chosen foods first"
-    assert diet_quality.twin_total_meals >= 20, "not enough meals to judge"
-    assert diet_quality.twin_identical_meals <= 16, \
-        f"choosing your food stopped mattering: {diet_quality.twin_identical_meals} of " \
-        f"{diet_quality.twin_total_meals} meals identical"
+        "a chosen food does not outrank the foods the client did not choose"
+    assert diet_quality.twin_built_meals > 0, "nothing was built; nothing to measure"
+    assert diet_quality.twin_identical_built == 0, \
+        f"choosing your food changed nothing in " \
+        f"{diet_quality.twin_identical_built} of " \
+        f"{diet_quality.twin_built_meals} meals the engine assembled"
 
 
 def test_the_library_is_barely_used(diet_quality):
-    """find_recipe returns the best-fitting recipe deterministically, so the same target
-    always yields the same dish and most of the library is never served.
+    """find_recipe returned the best-fitting recipe deterministically, so the same
+    target always yielded the same dish and most of the library was never served.
 
-    P2 replaced the argmin with a weighted sample over every dish inside tolerance, and
-    made recency a penalty rather than a ban. A ban emptied a sixteen-recipe library
-    within a week and dropped the planner back to assembling piles, which trades a
-    repeated dish for no dish at all.
+    Repeats are counted per slot, because a single global figure treats a slot with one
+    usable recipe and a slot with four as the same situation and cannot tell whether
+    the planner repeated a dish or had nothing else to serve. Lunch and dinner have
+    four dishes each inside tolerance and spread across them; the snack slot has one,
+    and no amount of engine work changes that. P6's content is what lifts it.
 
-    The remaining 42 repeats are one snack dish, served to six clients across seven
-    days. The snack slot has three recipes and usually one inside tolerance, so the
-    penalty has nothing to prefer instead.
-
-    I tried routing a repeat to the template path and it made things worse: the window
-    is three days, so by day four every dish is recent, everything went to templates and
-    the named-dish rate fell from 67% to 46%. Distorting the architecture to move this
-    number was the wrong trade. It is a library floor, and P6's content is what lifts
-    it."""
-    # Named dishes fell by one when P3 landed, because the template path now takes
-    # meals a marginal recipe used to take. That is the right trade: a meal built from
-    # the client's own foods beats a recipe chosen because nothing else fitted. Total
-    # variety is higher; it is just no longer all recipe-shaped.
-    assert diet_quality.distinct_dishes >= 6, \
+    Serving the same dish twice in one day is different: nothing about the library
+    forces it, and it happened on 9 of 42 days because recency was snapshotted before
+    the day began and the set written during the day was only read the next morning.
+    A dish is now banned for the rest of the day it is served and penalised for three
+    days after, so this is zero and stays zero.
+    """
+    assert diet_quality.distinct_dishes >= 7, \
         f"dish variety regressed to {diet_quality.distinct_dishes}"
-    assert diet_quality.max_repeats_of_one_dish <= 42, \
-        f"one dish now served {diet_quality.max_repeats_of_one_dish} times"
+    assert diet_quality.days_repeating_a_dish == 0, \
+        f"a dish was served twice in one day on " \
+        f"{diet_quality.days_repeating_a_dish} of {diet_quality.days_measured} days"
+
+    for slot, distinct in diet_quality.distinct_dishes_by_slot.items():
+        if distinct < 2:
+            continue  # nothing else fits this slot; that is the library, not the engine
+        served = diet_quality.meals_by_slot.get(slot, 0)
+        repeats = diet_quality.max_repeats_by_slot.get(slot, 0)
+        assert repeats <= 0.6 * served, \
+            f"{slot} served one of its {distinct} dishes {repeats} times in {served}"
 
 
-def test_some_portions_are_not_servings(diet_quality):
-    """No food carries a unit, so a portion is an unbounded gram figure: 350 g of egg
-    white is eleven of them, and 370 g of squash is a plate nobody finishes.
+def test_no_portion_is_larger_than_the_food_allows(diet_quality):
+    """A portion used to be an unbounded gram figure: 350 g of egg white is eleven of
+    them, and 370 g of squash is a plate nobody finishes.
 
-    P3 and P4.1 brought it from 10% to 4%: a portion built by the template path is a
-    multiple of a household unit inside the range the food declares, so an absurd amount
-    is unrepresentable rather than discouraged. The remainder comes from the recipe
-    path and, mostly, from component assembly, which still serves a third of meals and
-    portions in grams. Measured against each food's own declared ceiling now that the
-    catalogue can answer; the remaining overshoots are small — 250 g of rice against a
-    240 g cap. P5 removes the path that produces them."""
-    assert diet_quality.absurd_portion_rate <= 0.10, \
-        f"absurd portions rose to {diet_quality.absurd_portion_rate:.0%}: " \
-        f"{diet_quality.absurd_examples[:3]}"
+    The bound is each food's own ladder, read from the engine rather than from a table
+    maintained beside it — when those were two definitions they disagreed and 53
+    portions above a food's declared maximum passed a green gate at an 8% allowance.
+
+    Zero, not a percentage. An amount off the ladder is now unrepresentable rather than
+    discouraged: every stage that adjusts a portion, including the one that runs after
+    the plan is saved, chooses from the rungs instead of multiplying grams by a factor.
+    A percentage allowance here would only hide the next stage that forgets.
+    """
+    assert diet_quality.absurd_portion_rate == 0.0, \
+        f"{diet_quality.absurd_portion_rate:.0%} of portions exceed the food's own " \
+        f"ceiling: {diet_quality.absurd_examples[:3]}"
+
+
+def test_the_last_corrector_cannot_undo_the_portioning(make_user, diet_catalogue):
+    """`converge_plan` runs on the SAVED rows, after everything else has finished.
+
+    The quality harness measures what `generate` returns, which is not what a client
+    receives: this runs later, during persistence, and rewrites the quantities. While
+    it adjusted portions by multiplying grams by a factor bounded only by a per-macro
+    gram cap, it could take a meal that had been portioned correctly and put 300 g of
+    rice back on the plate — and no measurement would have seen it, because every
+    number in the baseline is taken before this point.
+
+    Asserting the invariant directly is cheaper than measuring through persistence and
+    catches the case the measurement structurally cannot.
+    """
+    from datetime import date, timedelta
+
+    from diet.models import DietPlan, Meal, MealComponent
+    from diet.planner.converge import converge_plan
+    from diet.planner.portion import portions_for
+
+    user = make_user("convergegate")
+    plan = DietPlan.objects.create(
+        user=user, goal="Maintain", daily_calories=2200.0,
+        start_date=date.today(), end_date=date.today() + timedelta(days=1))
+    meal = Meal.objects.create(diet_plan=plan, meal_type="Lunch", date=date.today())
+    # Deliberately off the ladder and well over: what the old corrector used to write.
+    starting = {"Chicken Breast": 400.0, "White Rice": 500.0,
+                "Olive Oil": 55.0, "Broccoli": 380.0}
+    for food_key, grams in starting.items():
+        MealComponent.objects.create(meal=meal, food=diet_catalogue[food_key],
+                                     quantity=grams, meal_time="Lunch")
+
+    converge_plan(plan)
+
+    for component in meal.components.select_related("food"):
+        rungs = [p.grams for p in portions_for(component.food)]
+        assert any(abs(component.quantity - g) < 0.5 for g in rungs), (
+            f"{component.food.name} left at {component.quantity} g, which is not one of "
+            f"{rungs}")
+
+
+def test_the_catalogue_can_answer_what_a_serving_is(seeded_catalogue, db):
+    """A food with no serving unit falls back to a gram ladder, which is a weaker bound
+    than its own — so coverage is a property worth failing on, not a statistic.
+
+    The rules match on patterns rather than an exhaustive list precisely so a food
+    imported tomorrow is covered, but a whole family can still slip through: halibut,
+    sea bass and venison matched nothing, and neither did garlic, which is not a food a
+    meal is built on at all.
+    """
+    from diet.models import FoodItem
+    from diet.planner.portion import unit_levels
+
+    selectable = list(FoodItem.objects.filter(needs_review=False)
+                      .exclude(role=FoodItem.ROLE_CONDIMENT))
+    assert selectable, "nothing to measure"
+    without = [f.name for f in selectable if not unit_levels(f)]
+    share = len(without) / len(selectable)
+    assert share <= 0.05, (
+        f"{share:.0%} of selectable foods declare no serving: {sorted(without)[:8]}")
 
 
 def test_a_portion_sticks_at_one_or_two_sizes(diet_quality):
