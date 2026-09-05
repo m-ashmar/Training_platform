@@ -26,10 +26,16 @@ class RecipeMatch:
     components: Components
     servings: float
     deviation: object
+    #: Foods added from the client's pool to bring an under-target dish up to its
+    #: slot. The dish keeps its name and says what came with it.
+    extras: tuple = ()
 
     @property
     def name(self) -> str:
-        return getattr(self.recipe, "name", "meal")
+        base = getattr(self.recipe, "name", "meal")
+        if not self.extras:
+            return base
+        return f"{base} + {' + '.join(getattr(f, 'name', str(f)) for f in self.extras)}"
 
 
 def _recipe_lines(recipe) -> List[Tuple[object, float, bool]]:
@@ -117,6 +123,71 @@ def softmax_weights(scores: Sequence[float], temperature: float) -> List[float]:
         return []
     top = max(scores)
     return [max(math.exp((v - top) / temperature), 1e-9) for v in scores]
+
+
+#: Which slot fills which shortfall, by meal. A short carbohydrate at breakfast or a
+#: snack is fruit; at a main meal it is a starch. Protein and fat are what they are.
+_FILL_SLOT = {
+    ("Breakfast", "carb"): "fruit", ("Snack", "carb"): "fruit",
+    ("Lunch", "carb"): "carb", ("Dinner", "carb"): "carb",
+}
+
+
+#: Whether to enumerate every portion of every food jointly when the space is under
+#: `solve`'s cap. OFF. It was measured on: the optimiser gate rose to 305 of 306 at the
+#: proven optimum, and in the same run chosen-ingredient share fell 0.229 to 0.210 and
+#: calorie drift rose 4.0% to 5.3%, while the pair search moved all four product metrics
+#: the right way. The exhaustive optimum is optimal for a blended objective that weights
+#: calories at 0.5, so it sits further from the calorie target than the pair search
+#: lands. That is a question about the objective, which the plan holds open, not about
+#: the search. Flip this after the CALORIE_WEIGHT decision, and re-measure.
+EXHAUSTIVE_PORTIONING = False
+
+
+def _best_portioning(components, targets, policy, movable):
+    """The pair search, or every portion jointly when that is both affordable and
+    switched on. A non-scalable line pins the search to `refine`, which honours it."""
+    if EXHAUSTIVE_PORTIONING and len(movable) == len(components):
+        from .portion import portions_for, solve
+        from .report import deviation_of
+
+        space = 1
+        for food, _g in components:
+            space *= max(1, len(portions_for(food)))
+        if space <= 20_000:
+            portions, _score = solve([f for f, _g in components], targets)
+            if portions:
+                tuned = [(pt.food, float(pt.grams)) for pt in portions]
+                return tuned, deviation_of(totals_of(tuned), targets)
+    return refine(components, targets, policy.tolerance, movable)
+
+
+def _augment(match: RecipeMatch, lines, targets, policy, pool, meal_name, edges, rng, recent):
+    """One food from the client's pool, chosen for the largest macro shortfall, portioned
+    jointly with the dish. Returns None when the pool has nothing to add."""
+    from .templates import _pick
+
+    dev = match.deviation
+    shortfalls = {m: -getattr(dev, m) for m in ("protein", "carb", "fat") if getattr(dev, m) < 0}
+    if not shortfalls:
+        return None
+    macro = max(shortfalls, key=shortfalls.get)
+    slot = _FILL_SLOT.get((meal_name, macro), macro)
+    already = {getattr(f, "id", None) for f, _g, _s in lines}
+    candidates = [f for f in pool.get(meal_name, slot) if f.id not in already]
+    if not candidates:
+        return None
+    food = _pick(candidates, [f.id for f, _g, _s in lines], edges or {}, set(recent), rng,
+                 pool.weights(meal_name, slot))
+    if food is None:
+        return None
+    combined = list(match.components) + [(food, 0.0)]
+    movable = [i for i, (_f, _g, scalable) in enumerate(lines) if scalable] + [len(lines)]
+    tuned, tuned_dev = _best_portioning(combined, targets, policy, movable)
+    added = next((g for f, g in tuned if f is food), 0.0)
+    if added <= 0:
+        return None
+    return RecipeMatch(match.recipe, tuned, match.servings, tuned_dev, extras=(food,))
 
 
 def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy,
@@ -258,9 +329,22 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         # for most of the meals the engine served that it could have beaten.
         movable = [i for i, (_f, _g, scalable) in enumerate(lines) if scalable]
         if movable:
-            tuned, dev = refine(match.components, targets, policy.tolerance, movable)
+            tuned, dev = _best_portioning(match.components, targets, policy, movable)
             if _better(dev, match.deviation, policy.tolerance):
                 match = RecipeMatch(recipe, tuned, match.servings, dev)
+
+        # Augment before rejecting. A dish under its slot by more than tolerance used
+        # to be discarded: overnight oats is 500 kcal, an 870 kcal breakfast wanted
+        # more, and the library collapsed onto the few dishes that happened to be big
+        # enough. Fill the largest shortfall with ONE food from the client's own pool,
+        # then re-solve every portion jointly. The dish keeps its name and says what
+        # came with it. This is the root fix for the concentration onto seven dishes,
+        # and it multiplies the reach of every recipe in the library.
+        if (pool is not None and not match.deviation.within(policy.tolerance)
+                and match.deviation.calories < -float(policy.tolerance.get("calories", 0.10))):
+            augmented = _augment(match, lines, targets, policy, pool, meal_name, edges, rng, recent)
+            if augmented is not None and _better(augmented.deviation, match.deviation, policy.tolerance):
+                match = augmented
 
         if best is None or match.deviation.magnitude < best.deviation.magnitude:
             best = match
