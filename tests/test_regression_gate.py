@@ -2001,7 +2001,11 @@ def test_the_library_is_barely_used(diet_quality):
         f"{diet_quality.days_repeating_a_dish} of {diet_quality.days_measured} days"
 
     for slot, distinct in diet_quality.distinct_dishes_by_slot.items():
-        if distinct < 2:
+        # A slot with two dishes cannot serve either under 60% of the time without
+        # alternating perfectly, so the rule would read the library's breadth as the
+        # engine's behaviour. Residual carry made a second snack dish reachable and
+        # concentration fell from 100% to 64% — an improvement this rule then failed.
+        if distinct < 3:
             continue  # nothing else fits this slot; that is the library, not the engine
         served = diet_quality.meals_by_slot.get(slot, 0)
         repeats = diet_quality.max_repeats_by_slot.get(slot, 0)

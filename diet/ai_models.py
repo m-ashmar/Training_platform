@@ -58,6 +58,11 @@ class AIMeal(BaseModel):
     recipe_id: Optional[int] = Field(default=None, description="Recipe pk, if a library dish")
     shape: Optional[str] = Field(default=None, description="Template shape, if engine-built")
     reason: Optional[str] = Field(default=None, description="Why the engine chose this meal")
+    #: The target this meal was actually built to. Meals compensate each other, so a
+    #: later slot's target is the policy split plus the earlier slots' signed residual.
+    #: Anything that judges a meal — the API, the benchmark — must judge it against
+    #: this, not against the unshifted split.
+    target: Optional[Dict[str, float]] = Field(default=None, description="calories/protein/carb/fat the meal was built to")
     preparation_time: Optional[int] = Field(default=None, description="Estimated preparation time in minutes")
     difficulty_level: Optional[str] = Field(default=None, description="Easy, Medium, Hard")
     

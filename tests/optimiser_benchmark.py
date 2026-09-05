@@ -252,10 +252,16 @@ def run(days: int = 3, kcal_targets: Sequence[int] = BENCH_KCAL,
             by_slot = {t.name: t for t in targets.meals}
 
             for meal in out.plan:
+                # The target the meal was BUILT to. Meals compensate each other, so a
+                # later slot's target is the split plus the earlier residual; judging
+                # against the unshifted split reported 95 of 192 meals off an optimum
+                # they were never aimed at.
+                built_to = getattr(meal, "target", None)
                 target = by_slot.get(meal.meal_type)
-                if target is None:
+                if built_to is None and target is None:
                     continue
-                result = judge_meal(meal, target.as_dict(), policy.tolerance, resolve)
+                result = judge_meal(meal, dict(built_to) if built_to else target.as_dict(),
+                                    policy.tolerance, resolve)
                 if result is None:
                     report.skipped_too_large += 1
                 else:

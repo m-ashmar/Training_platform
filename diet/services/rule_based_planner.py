@@ -227,8 +227,17 @@ class RuleBasedPlanner:
             # client. Routing it through `_plan_meal` gives it personalisation, variety,
             # shapes and servable portions in one move rather than four.
             slots = list(meals) + (["Snack"] if snack_count else [])
-            for meal_name in slots:
-                planned_meals.append(self._plan_meal(meal_name, ctx, day_ctx))
+            for index, meal_name in enumerate(slots):
+                meal = self._plan_meal(meal_name, ctx, day_ctx)
+                planned_meals.append(meal)
+                # Meals compensate each other. Each was optimised to a fixed target and
+                # the day summed afterwards, so drift was per-meal by construction: a
+                # lunch that lands 60 kcal over stays 60 over. The signed residual is
+                # carried into the next slot's target, bounded so one bad meal cannot
+                # drag the next into something nobody would serve.
+                if index + 1 < len(slots):
+                    self._carry_residual(meal, day_ctx.meal_targets.get(meal_name),
+                                         day_ctx.meal_targets.get(slots[index + 1]))
 
             # Nothing is appended to a meal after it has been planned. Two portions of
             # fruit used to be stapled on here, at a gram figure drawn uniformly between
@@ -277,6 +286,33 @@ class RuleBasedPlanner:
         output = DietPlanOutput(plan=planned_meals)
         self._record_delivery(output, daily_kcal, max(1, duration_days))
         return output
+
+    #: How far a later meal's target may move to absorb an earlier one's miss.
+    RESIDUAL_CARRY_CAP = 0.15
+
+    def _carry_residual(self, meal, served_target, next_target) -> None:
+        """Move the signed miss of `meal` into `next_target`, bounded per macro."""
+        if meal is None or served_target is None or next_target is None:
+            return
+        got = getattr(meal, "total_nutrition", None) or {}
+        pairs = (("calories", "kcal_target", None),
+                 ("protein", "macro_targets", "protein"),
+                 ("carbs", "macro_targets", "carb"),
+                 ("fat", "macro_targets", "fat"))
+        for got_key, attr, macro in pairs:
+            if macro is None:
+                want, actual = float(served_target.kcal_target), float(got.get(got_key, 0) or 0)
+                base = float(next_target.kcal_target)
+                shift = max(-self.RESIDUAL_CARRY_CAP * base,
+                            min(self.RESIDUAL_CARRY_CAP * base, want - actual))
+                next_target.kcal_target = max(0.0, base + shift)
+            else:
+                want = float(served_target.macro_targets.get(macro, 0.0))
+                actual = float(got.get(got_key, 0) or 0)
+                base = float(next_target.macro_targets.get(macro, 0.0))
+                shift = max(-self.RESIDUAL_CARRY_CAP * base,
+                            min(self.RESIDUAL_CARRY_CAP * base, want - actual))
+                next_target.macro_targets[macro] = max(0.0, base + shift)
 
     def _record_delivery(self, output, daily_kcal: float, days: int) -> None:
         """State what the plan actually delivers against what was asked for.
@@ -492,6 +528,7 @@ class RuleBasedPlanner:
                 },
                 meal_type=meal_name,
                 shape=getattr(template, "name", None),
+                target=dict(targets),
                 preparation_time=15,
                 difficulty_level="easy",
             )
@@ -636,6 +673,7 @@ class RuleBasedPlanner:
                 },
                 meal_type=meal_name,
                 recipe_id=match.recipe.id,
+                target=dict(targets),
                 preparation_time=int(getattr(match.recipe, "prep_minutes", 15) or 15),
                 difficulty_level="easy",
             )
