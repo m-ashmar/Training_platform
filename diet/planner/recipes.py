@@ -114,7 +114,8 @@ def _preference_share(recipe, wanted: frozenset) -> float:
 
 
 def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy,
-                allergen_checker=None, exclude_ids: Sequence[int] = (),
+                allergen_checker=None, constraints=None,
+                exclude_ids: Sequence[int] = (),
                 recipes: Optional[Sequence] = None, user=None, rng=None,
                 recent_ids: Sequence[int] = ()) -> Optional[RecipeMatch]:
     """A dish for this meal's macro target, or None if nothing fits.
@@ -137,9 +138,13 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
     the result is varied but reproducible.
     """
     from diet.models import Recipe
-    from diet.services.meal_validator import VIOLATION
 
+    from .constraints import ClientConstraints
     from .portion import portions_for
+
+    if constraints is None:
+        constraints = (ClientConstraints(allergen_checker=allergen_checker)
+                       if allergen_checker is not None else ClientConstraints.for_user(user))
 
     if recipes is None:
         recipes = list(
@@ -166,9 +171,12 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         if not lines:
             continue
 
-        if allergen_checker is not None and getattr(allergen_checker, "active", False):
-            if any(allergen_checker.check_food(food).verdict == VIOLATION
-                   for food, _g, _s in lines):
+        # Every hard constraint, not just allergens. This checked allergies and nothing
+        # else, so a dish built on a food the client had explicitly rejected was served
+        # to them — and persistence then refused the finished plan outright rather than
+        # producing one without it, so the client received an error instead of dinner.
+        if constraints is not None and constraints.active:
+            if constraints.forbids_any(food for food, _g, _s in lines):
                 continue
 
         ladders = {id(food): [p.grams for p in portions_for(food)]

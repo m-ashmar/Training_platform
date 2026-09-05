@@ -277,8 +277,20 @@ def plan_meal(meal_name: str, pool, targets: Dict[str, float],
     """
     templates = templates if templates is not None else derive_templates()
     edges = edges if edges is not None else pairing_edges()
+    if not templates:
+        return [], float("inf"), None
 
-    usable = [t for t in templates if t.suits(meal_name)] or list(templates)
+    # No fallback to every shape. `or list(templates)` meant that when nothing suited
+    # the slot the restriction silently inverted itself and the meal was built from any
+    # shape at all, so a library with no snack recipes would serve a lunch at snack.
+    # Returning nothing is correct: the caller already has a fallback, and component
+    # assembly is a better answer than a confidently wrong one.
+    usable = [t for t in templates if t.suits(meal_name)]
+    if not usable:
+        logger.info("No meal shape in the library suits %s; falling back to assembly",
+                    meal_name)
+        return [], float("inf"), None
+
     best_portions: List = []
     best_score = float("inf")
     best_template: Optional[MealTemplate] = None

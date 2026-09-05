@@ -89,7 +89,7 @@ Fixes D-03, D-04, D-05.
     `Leaderboard`, `AchievementProgress`) — owner approved — plus the composite indexes
     I mistakenly added to two of them.
 
-### G — Prove the optimiser, then make it better  ⏳ *(in progress, 2026-09-05)*
+### G — Prove the optimiser, then make it better  ✅ *(2026-09-05)*
 An adversarial pass on `d050855` brute-forced every valid ladder combination for 115
 meals and compared it with what the engine served. That is a ground-truth benchmark:
 28 meals were strictly worse than a portioning the engine could have chosen, 4 of them
@@ -115,7 +115,7 @@ the right foods. And it will not remove the residual calorie drift: 30 of the 11
 miss on calories because the objective deliberately buys macro accuracy with calorie
 accuracy at `CALORIE_WEIGHT = 0.5`. Those stay until the weights are revisited.
 
-### H — The rest of the adversarial findings  ⏳ *(queued)*
+### H — The rest of the adversarial findings  ✅ *(2026-09-05)*
 Found by the same pass. Ordered by what a client would notice, not by how interesting
 the bug is.
 
@@ -137,6 +137,36 @@ the bug is.
     match no rule, classify as a vegetable and be servable at 250 g. Nothing like it is
     in the catalogue today, so this is a guard for future imports.
 **Done when:** 22 is fixed and proven by a test that fails on the current code.
+
+**Outcome.** All four fixed at root, plus two more found while fixing:
+
+* **22 — dislikes.** The root was not the missing check. There was no single answer to
+  "may this client eat this food": `build_pool` filtered allergens and dislikes inline,
+  `find_recipe` checked allergens only, and persistence checked dislikes only, at the
+  end, by refusing the whole plan. `ClientConstraints` is now the one rule, built once
+  per generation and consulted by every path that chooses a food.
+* **26 — a nut allergy did not cover peanuts.** Found while asserting that constraints
+  survive paired moves, and worse than anything else on the list. `_USER_SYNONYMS` was
+  `dict[str, str]`, so an everyday word could mean exactly one allergen and whoever
+  wrote it had to choose: "nuts" was filed as tree nuts, peanut carries its own tag, and
+  a client who typed "nut allergy" was served peanut butter. A safety vocabulary must
+  widen on ambiguity, never narrow. Also stopped nut butters reading as dairy.
+* **27 — the quality harness was not a measurement.** It created a fresh client per run
+  and the planner seeds each day's generator from the client's row id, so every number
+  was one draw. Calorie drift read 1.2% and 9.2% on consecutive runs of identical code,
+  and the recorded baseline was whichever draw happened that day. Several numbers
+  reported during this rebuild were noise, the chosen-ingredient share worst of all.
+  The planner now takes an optional seed salt and the harness passes a fixed one.
+* **23 — the ceiling.** `plan_metadata['delivery']` states what the plan delivers
+  against what was asked, and why, whenever the gap is outside tolerance.
+* **24 — the escape hatch.** `plan_meal` returns nothing when no shape suits the slot.
+* **Two objectives.** `portion.solve` scored calories at 2.0 against the engine's 0.5.
+  Deleted; there is one objective and one `totals_of`. Unifying moved 99% of feasible
+  meals to the proven optimum and cut worst calorie drift to 3.0%.
+
+**Still open, deliberately.** One meal in roughly three hundred needs three portions
+moved together, which pairs cannot reach. Raising that is a decision about cost, not a
+bug fix. And `CALORIE_WEIGHT = 0.5` is still a product question, not a defect.
 
 ---
 

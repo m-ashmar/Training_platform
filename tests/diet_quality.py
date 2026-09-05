@@ -275,12 +275,20 @@ def _resolve_food(name: str):
     return candidates[0] if candidates else None
 
 
-def _generate(user, kcal: float, days: int):
-    """One plan, or None if the engine refused. Refusals are a finding, not a crash."""
+def _generate(user, kcal: float, days: int, salt: str):
+    """One plan, or None if the engine refused. Refusals are a finding, not a crash.
+
+    `salt` replaces the client's row id as the seed for the planner's per-day generator.
+    A measurement creates a new client every run, so the id changes, so the seed changes,
+    so the plan changes: drift read 1.2% and 9.2% on consecutive runs of identical code,
+    and the baseline file recorded one draw as though it were the value. The salt names
+    what is being measured — the profile, the calorie target, the client who chose —
+    so the same measurement plans the same days every time.
+    """
     from diet.services.rule_based_planner import RuleBasedPlanner
 
     try:
-        return RuleBasedPlanner(user).generate(
+        return RuleBasedPlanner(user, seed_salt=salt).generate(
             daily_kcal=float(kcal), meal_count=3, snack_count=1, duration_days=days)
     except Exception:
         return None
@@ -298,6 +306,10 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     from diet.planner.policy import load_policy
 
     report = QualityReport()
+    # A fresh username per run only keeps the reused test database from colliding; the
+    # planner seeds each day's generator from the client's row id, so a new row means a
+    # new seed and a different plan. Every meal below is planned under a FIXED salt so
+    # two runs of the same code produce the same numbers and a change is attributable.
     tag = uuid.uuid4().hex[:6]
     dishes = _recipe_names()
 
@@ -312,7 +324,7 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
 
     for index, (goals, h, w, a, g, act) in enumerate(profiles):
         user = _make_client(f"q{index}{tag}", goals, h, w, a, g, act)
-        plan = _generate(user, user.calculate_daily_calories(), days)
+        plan = _generate(user, user.calculate_daily_calories(), days, f"profile:{index}")
         if plan is None:
             report.catalogue_gaps.append(f"generation failed for profile {index}")
             continue
@@ -368,7 +380,7 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     signs = set()
     for target in drift_targets:
         user = _make_client(f"qd{target}{tag}", ["Maintain"], 175, 78, 28, "Male", "Moderate")
-        plan = _generate(user, target, 1)
+        plan = _generate(user, target, 1, f"drift:{target}")
         if plan is None:
             report.catalogue_gaps.append(f"generation failed at {target} kcal")
             continue
@@ -386,7 +398,7 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     # id, same seed, one variable — whether they picked their food.
     chooser = _make_client(f"qc{tag}", ["Maintain"], 175, 78, 28, "Male", "Moderate")
     kcal_before = chooser.calculate_daily_calories()
-    before_plan = _generate(chooser, kcal_before, days)
+    before_plan = _generate(chooser, kcal_before, days, "twin")
 
     chosen_names = set()
     resolved = {}
@@ -431,7 +443,7 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
                 ranked_first = False
     report.chooser_pool_ranked_first = ranked_first
 
-    after_plan = _generate(chooser, kcal_before, days)
+    after_plan = _generate(chooser, kcal_before, days, "twin")
     if before_plan and after_plan:
         # Compared by what is on the plate, not by what the meal is called. A meal built
         # from a template is named after its slot — "Breakfast" — so two plates made of

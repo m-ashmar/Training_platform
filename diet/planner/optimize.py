@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .policy import PlannerPolicy
-from .report import MacroDeviation, deviation_of
+from .report import MacroDeviation, deviation_of, totals_of
 
 logger = logging.getLogger(__name__)
 
@@ -28,16 +28,6 @@ logger = logging.getLogger(__name__)
 Components = List[Tuple[object, float]]
 
 
-def totals_of(components: Components) -> Dict[str, float]:
-    """Macro totals for a component list."""
-    out = {"calories": 0.0, "protein": 0.0, "carb": 0.0, "fat": 0.0}
-    for food, grams in components:
-        g = float(grams or 0.0) / 100.0
-        out["calories"] += float(getattr(food, "calories", 0) or 0) * g
-        out["protein"] += float(getattr(food, "protein", 0) or 0) * g
-        out["carb"] += float(getattr(food, "carbs", 0) or 0) * g
-        out["fat"] += float(getattr(food, "fat", 0) or 0) * g
-    return out
 
 
 @dataclass

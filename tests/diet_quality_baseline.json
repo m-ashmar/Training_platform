@@ -1,15 +1,15 @@
 {
   "_comment": "Diet engine quality baseline, phase 0.2 of the rebuild. Measured against the catalogue built by `add_healthy_foods` and `seed_recipes`, which is what a fresh production database contains. The gate asserts these as bounds in the direction of improvement and tightens them phase by phase.",
-  "recorded": "2026-09-04",
+  "recorded": "2026-09-05",
   "catalogue": {
     "foods": 101,
     "recipes": 16
   },
   "measured": {
-    "dish_rate_overall": 0.75,
+    "dish_rate_overall": 0.7917,
     "dish_rate_by_slot": {
       "Breakfast": 0.6667,
-      "Lunch": 0.6667,
+      "Lunch": 0.8333,
       "Dinner": 0.8333,
       "Snack": 0.8333
     },
@@ -19,8 +19,8 @@
     "absurd_portion_rate": 0.0,
     "max_repeats_by_slot": {
       "Breakfast": 21,
-      "Lunch": 9,
-      "Dinner": 12,
+      "Lunch": 15,
+      "Dinner": 14,
       "Snack": 35
     },
     "distinct_dishes_by_slot": {
@@ -30,22 +30,22 @@
       "Snack": 1
     },
     "days_repeating_a_dish": 0,
-    "portions_measured": 614,
+    "portions_measured": 612,
     "min_distinct_portions_per_food": 2,
     "drift_by_target": {
-      "1400": 3.164,
-      "1800": -0.656,
-      "2200": 1.795,
-      "2600": -2.512,
-      "3000": -3.04
+      "1400": -1.793,
+      "1800": 0.756,
+      "2200": -1.077,
+      "2600": -0.623,
+      "3000": -2.98
     },
     "drift_all_one_sided": false,
-    "drift_worst_abs": 3.164,
+    "drift_worst_abs": 2.98,
     "twin_identical_meals": 21,
     "twin_total_meals": 28,
     "twin_identical_built": 0,
     "twin_built_meals": 7,
-    "chosen_ingredient_share": 0.1359,
+    "chosen_ingredient_share": 0.0971,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],
     "catalogue_gaps": []

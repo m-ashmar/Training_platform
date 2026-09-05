@@ -103,12 +103,19 @@ class RuleBasedPlanner:
     - Quantity rounding to nearest 5g; piece foods may be left in grams (conversion handled later).
     """
 
-    def __init__(self, user):
+    def __init__(self, user, seed_salt: str | None = None):
         self.user = user
         self._smart_summary: List[Dict] = []
         # Instance-local RNG — avoid reseeding the process-global `random`, which
         # would leak deterministic state into any other code in the worker.
         self._rng = random.Random()
+        #: What the day's generator is seeded from, in place of the user's row id.
+        #: In production the id IS the client's stable identity and nothing needs this.
+        #: A measurement harness creates a new client on every run, so the id changes,
+        #: so the seed changes, so every plan changes — and every number it reported was
+        #: one sample from a distribution presented as a measurement. Drift read 1.2%
+        #: and 9.2% on consecutive runs of identical code.
+        self._seed_salt = seed_salt
 
     def _normalize_name_for_repeat(self, name: str) -> str:
         n = (name or '').strip().lower()
@@ -241,7 +248,7 @@ class RuleBasedPlanner:
                 uid = int(getattr(self.user, 'id', 0) or 0)
             except Exception:
                 uid = 0
-            salt = f"rbp:{uid}:{current_date.isoformat()}"
+            salt = f"rbp:{self._seed_salt or uid}:{current_date.isoformat()}"
             seed = int(hashlib.sha256(salt.encode('utf-8')).hexdigest()[:12], 16)
             self._rng = random.Random(seed)
             day_start_idx = len(planned_meals)
@@ -358,6 +365,7 @@ class RuleBasedPlanner:
                 logger.debug('suppressed non-fatal error', exc_info=True)
 
         output = DietPlanOutput(plan=planned_meals)
+        self._record_delivery(output, daily_kcal, max(1, duration_days))
         if getattr(settings, 'DIET_SMART_MACRO_PLANNER', False):
             try:
                 output.plan_metadata['smart_macro_summary'] = self._smart_summary
@@ -366,6 +374,39 @@ class RuleBasedPlanner:
                 # surrounding failures invisible in logs. Control flow is unchanged.
                 logger.debug('suppressed non-fatal error', exc_info=True)
         return output
+
+    def _record_delivery(self, output, daily_kcal: float, days: int) -> None:
+        """State what the plan actually delivers against what was asked for.
+
+        Nothing in the output said whether the target had been met. A day is capped by
+        what its meals can hold: three meals and a snack top out near 3,700 kcal, because
+        every portion is bounded by an amount a person would serve. A 5,000 kcal request
+        therefore returned a 3,912 kcal plan, correct in every other respect, labelled
+        5,000 and silent about the 22% it was short. A ceiling is a fact about food and
+        is fine; not saying so is not.
+        """
+        requested = float(daily_kcal or 0.0)
+        delivered = sum(float((m.total_nutrition or {}).get("calories", 0) or 0)
+                        for m in output.plan) / max(1, days)
+        shortfall = (delivered / requested - 1.0) if requested > 0 else 0.0
+        report = {
+            "requested_kcal_per_day": round(requested, 1),
+            "delivered_kcal_per_day": round(delivered, 1),
+            "deviation": round(shortfall, 4),
+            "met": abs(shortfall) <= 0.10,
+        }
+        if not report["met"]:
+            report["reason"] = (
+                "the day's meals cannot carry this many calories in servable portions"
+                if shortfall < 0 else
+                "the day's meals overshoot the target in servable portions")
+            logger.warning(
+                "Plan for user %s delivers %.0f kcal/day against %.0f requested (%+.1f%%)",
+                getattr(self.user, "id", "?"), delivered, requested, shortfall * 100)
+        try:
+            output.plan_metadata["delivery"] = report
+        except Exception:
+            logger.debug("could not record the delivery report", exc_info=True)
 
     # ------------------------ meal rebalancer utilities ------------------------
     # Four helpers used to live here that parsed grams back out of a "180g" string,
@@ -789,11 +830,9 @@ class RuleBasedPlanner:
             if not portions or template is None:
                 return None
 
-            checker = self._allergen_checker()
-            if checker is not None and getattr(checker, "active", False):
-                from diet.services.meal_validator import VIOLATION
-                if any(checker.check_food(p.food).verdict == VIOLATION for p in portions):
-                    return None
+            constraints = self._constraints()
+            if constraints.active and constraints.forbids_any(p.food for p in portions):
+                return None
 
             nutrition = portion_totals(portions)
             return AIMeal(
@@ -838,17 +877,21 @@ class RuleBasedPlanner:
             self._pairing_cache = pairing_edges()
         return self._pairing_cache
 
-    def _allergen_checker(self):
-        try:
-            from ..models import UserFoodPreference
-            from .meal_validator import AllergenChecker
+    def _constraints(self):
+        """Everything this client may not eat, read once per generation.
 
-            pref = UserFoodPreference.objects.filter(user=self.user).first()
-            raw = getattr(pref, "allergies", None) if pref else None
-            return AllergenChecker(raw) if raw else None
-        except Exception:
-            logger.debug("could not load allergies", exc_info=True)
-            return None
+        Was `_allergen_checker`, which is half the question. Dislikes were enforced in
+        the pool builder and nowhere else, so the recipe path — three quarters of meals —
+        never saw them.
+        """
+        if getattr(self, "_constraint_cache", None) is None:
+            from diet.planner.constraints import ClientConstraints
+            try:
+                self._constraint_cache = ClientConstraints.for_user(self.user)
+            except Exception:
+                logger.debug("could not load client constraints", exc_info=True)
+                self._constraint_cache = ClientConstraints()
+        return self._constraint_cache
 
     def _plan_meal_from_recipe(self, meal_name: str, ctx: PlannerContext,
                                day_ctx: DayContext) -> AIMeal | None:
@@ -875,18 +918,6 @@ class RuleBasedPlanner:
             if targets["calories"] <= 0:
                 return None
 
-            checker = None
-            try:
-                from ..models import UserFoodPreference
-                from .meal_validator import AllergenChecker
-
-                pref = UserFoodPreference.objects.filter(user=self.user).first()
-                raw = getattr(pref, "allergies", None) if pref else None
-                if raw:
-                    checker = AllergenChecker(raw)
-            except Exception:
-                logger.debug("could not load allergies for recipe matching", exc_info=True)
-
             policy = load_policy(ctx.goal)
             # The client, so the dish can be chosen from what they picked; the day's
             # seeded generator, so the choice varies without becoming unreproducible;
@@ -901,7 +932,7 @@ class RuleBasedPlanner:
             served = set(getattr(day_ctx, "recent_recipe_ids", {}).get(meal_name, ()))
             match = find_recipe(
                 meal_name, targets, policy,
-                allergen_checker=checker,
+                constraints=self._constraints(),
                 exclude_ids=tuple(getattr(day_ctx, "served_today", ())),
                 recent_ids=tuple(served),
                 user=self.user,
@@ -1439,20 +1470,8 @@ class RuleBasedPlanner:
         from diet.planner.candidates import build_pool
         from diet.planner.policy import load_policy
 
-        checker = None
-        try:
-            from ..models import UserFoodPreference
-            from .meal_validator import AllergenChecker
-
-            pref = UserFoodPreference.objects.filter(user=self.user).first()
-            raw = getattr(pref, "allergies", None) if pref else None
-            if raw:
-                checker = AllergenChecker(raw)
-        except Exception:
-            logger.debug("could not load allergies for the pool", exc_info=True)
-
         policy = load_policy(self._resolve_goal())
-        pool = build_pool(self.user, policy, allergen_checker=checker)
+        pool = build_pool(self.user, policy, constraints=self._constraints())
         # Kept whole as well as flattened: `by_slot` is a list per slot and the
         # template path needs the scores behind that order, not just the order.
         self._pool = pool

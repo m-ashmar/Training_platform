@@ -199,7 +199,7 @@ def _density(food, macro: str) -> float:
 
 
 def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None,
-               allergen_checker=None) -> CandidatePool:
+               allergen_checker=None, constraints=None) -> CandidatePool:
     """Rank the whole catalogue into (meal, macro) slots for this user."""
     from diet.models import FoodItem, UserFoodCategoryPreference, UserFoodPreference
 
@@ -215,21 +215,25 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         .exclude(role=FoodItem.ROLE_CONDIMENT)
     )
 
-    # ---- hard constraints: allergens and explicit dislikes only -------------
+    # ---- hard constraints -------------------------------------------------
+    # Asked once, of the one object that knows the answer. This used to be decided here
+    # inline, which is why the recipe path could not consult the same rule.
+    from .constraints import ClientConstraints
+
     pref = UserFoodPreference.objects.filter(user=user).prefetch_related(
         "liked_foods", "disliked_foods", "protein_choices", "carb_choices",
         "fat_choices", "vegetable_choices", "fruit_choices",
     ).first()
 
-    disliked = {f.id for f in pref.disliked_foods.all()} if pref else set()
     liked = {f.id for f in pref.liked_foods.all()} if pref else set()
 
-    if allergen_checker is not None and getattr(allergen_checker, "active", False):
-        from diet.services.meal_validator import VIOLATION
-        safe = [f for f in foods
-                if allergen_checker.check_food(f).verdict != VIOLATION and f.id not in disliked]
-    else:
-        safe = [f for f in foods if f.id not in disliked]
+    if constraints is None:
+        constraints = ClientConstraints(
+            disliked_ids=frozenset(f.id for f in pref.disliked_foods.all()) if pref
+            else frozenset(),
+            allergen_checker=allergen_checker,
+        )
+    safe = [f for f in foods if not constraints.forbids(f)]
 
     # ---- ranking signals ---------------------------------------------------
     slot_pref: Dict[tuple, set] = {}
@@ -287,7 +291,7 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         "after_hard_filters": len(safe),
         "slot_preferences": sum(len(v) for v in slot_pref.values()),
         "liked": len(liked),
-        "disliked": len(disliked),
+        "disliked": len(constraints.disliked_ids),
     }
     pool = CandidatePool(by_slot=by_slot, source_counts=counts, scores=scores)
     if pool.empty_slots:

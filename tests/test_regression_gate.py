@@ -2411,3 +2411,192 @@ def test_paired_moves_cannot_leave_the_ladder_or_change_the_meal(seeded_catalogu
             assert any(abs(p.grams - grams) < 1e-6 for p in portions_for(food)), \
                 f"refine produced {grams} g of {food.name}, off its own ladder"
 
+# ---------------------------------------------------------------------------
+# Hard constraints: what a client may not eat, on every path
+# ---------------------------------------------------------------------------
+
+def test_every_ordinary_phrasing_of_a_nut_allergy_blocks_peanuts(seeded_catalogue):
+    """Peanut is a legume and carries its own tag, so a vocabulary that reads "nuts" as
+    tree nuts alone leaves the most common and most dangerous nut allergy unprotected.
+
+    The synonym table mapped one term to one tag, so whoever wrote it had to choose, and
+    a client who typed "nut allergy" was served peanut butter. An ambiguous everyday
+    word must widen to everything it could mean.
+    """
+    from diet.allergens import parse_user_allergies
+
+    for phrase in ("nuts", "nut", "nut allergy", "allergic to nuts", "nut free",
+                   "no nuts", "mixed nuts", "nut intolerance"):
+        tags = parse_user_allergies(phrase)
+        assert "peanut" in tags, f"{phrase!r} does not protect against peanuts: {tags}"
+        assert "tree_nut" in tags, f"{phrase!r} does not protect against tree nuts: {tags}"
+
+    # Specific phrasings stay specific.
+    assert parse_user_allergies("peanuts") == {"peanut"}
+    assert parse_user_allergies("tree nuts") == {"tree_nut"}
+    # "Seafood" and "shellfish" are wider in speech than in the vocabulary.
+    assert parse_user_allergies("seafood") == {"fish", "shellfish", "mollusc"}
+    assert "mollusc" in parse_user_allergies("shellfish")
+
+
+def test_a_nut_butter_is_not_dairy(seeded_catalogue):
+    """"Butter" is a milk marker and peanut butter contains no milk.
+
+    Over-blocking is the safe direction and it is still wrong: a client avoiding dairy
+    lost both nut butters in the catalogue, which are the only spoonable fats it has.
+    """
+    from diet.allergens import infer_allergens
+
+    assert "milk" not in infer_allergens("Peanut Butter (Natural)")
+    assert "milk" not in infer_allergens("Almond Butter")
+    assert "milk" not in infer_allergens("Almond Milk")
+    assert "peanut" in infer_allergens("Peanut Butter (Natural)")
+    assert "tree_nut" in infer_allergens("Almond Butter")
+    # A real dairy food is still caught.
+    assert "milk" in infer_allergens("Butter (Salted)")
+    assert "milk" in infer_allergens("Greek Yogurt (Non-Fat)")
+
+
+def test_a_disliked_food_never_reaches_the_plate(seeded_catalogue):
+    """Dislikes were enforced in the pool and nowhere else.
+
+    Three quarters of meals come from the recipe library, and `find_recipe` checked
+    allergies and not dislikes, so a dish built on a rejected food was served — and
+    persistence then refused the finished plan outright rather than producing one
+    without it, so the client got an error instead of dinner.
+    """
+    from diet.models import FoodItem, UserFoodPreference
+    from diet.services.diet_persistence import DietPersistenceService
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    names = ["Chicken Breast (Grilled)", "White Rice (Cooked)"]
+    user = _make_client("dislike-gate", *PROFILES[2])
+    pref = UserFoodPreference.objects.create(user=user, allergies="")
+    pref.disliked_foods.set(FoodItem.objects.filter(name__in=names))
+
+    out = RuleBasedPlanner(user, seed_salt="dislike-gate").generate(
+        daily_kcal=2200, duration_days=5, snack_count=1)
+    served = {i.name for m in out.plan for i in m.ingredients}
+    assert not (served & set(names)), f"disliked food served: {sorted(served & set(names))}"
+    assert len(out.plan) == 20, "the client must still get a full plan, not a refusal"
+    DietPersistenceService(user).save_plan(out, meal_count=3, snack_count=1)
+
+
+def test_an_allergen_never_reaches_the_plate(seeded_catalogue):
+    from diet.models import UserFoodPreference
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    banned = {
+        "nut allergy": ("almond", "walnut", "pecan", "cashew", "pistachio",
+                        "macadamia", "peanut"),
+        "seafood": ("salmon", "tuna", "cod", "shrimp", "tilapia", "halibut",
+                    "sea bass", "mackerel", "sardine", "trout"),
+        "dairy": ("yogurt", "cheese", "milk", "labneh", "cottage"),
+    }
+    for index, (phrase, words) in enumerate(banned.items()):
+        user = _make_client(f"allergy-gate-{index}", *PROFILES[2])
+        UserFoodPreference.objects.create(user=user, allergies=phrase)
+        out = RuleBasedPlanner(user, seed_salt=f"allergy{index}").generate(
+            daily_kcal=2200, duration_days=5, snack_count=1)
+        served = [i.name for m in out.plan for i in m.ingredients]
+        hits = sorted({n for n in served if any(w in n.lower() for w in words)})
+        assert not hits, f"declared {phrase!r} and was served {hits}"
+        assert len(out.plan) == 20
+
+
+# ---------------------------------------------------------------------------
+# One objective, one arithmetic, one measurement
+# ---------------------------------------------------------------------------
+
+def test_the_engine_has_exactly_one_notion_of_better(seeded_catalogue):
+    """Two measures of "which meal is better" always drift apart.
+
+    This engine has made the mistake twice: a duplicated macro-ratio table, where the
+    planner aimed at one target while the optimiser judged another, and then a second
+    scoring function in the portion solver weighting calories at 2.0 against the
+    engine's 0.5. Six meals in every three hundred came out provably off the optimum for
+    that reason alone.
+    """
+    import diet.planner.portion as portion
+
+    assert not hasattr(portion, "deviation"), (
+        "portion.py has its own scoring function again; the objective lives in report.py")
+
+    # And one arithmetic. `calories` and `calories_per_gram` are separate stored columns
+    # reconciled only when one is zero, so two implementations could add the same meal
+    # up and disagree.
+    from diet.models import FoodItem
+    from diet.planner.optimize import totals_of
+    from diet.planner.report import totals_of as canonical
+
+    assert totals_of is canonical
+    food = FoodItem.objects.filter(needs_review=False).first()
+    by_portion = portion.totals([portion.Portion(food, 100.0)])
+    by_components = canonical([(food, 100.0)])
+    assert by_portion == by_components
+
+
+def test_the_quality_harness_reports_the_same_numbers_twice(seeded_catalogue):
+    """A measurement that moves on its own cannot attribute a change to anything.
+
+    The harness created a fresh client per run and the planner seeds each day's
+    generator from the client's row id, so every number was one draw from a
+    distribution. Calorie drift read 1.2% and 9.2% on consecutive runs of identical
+    code, and the recorded baseline was whichever draw happened that day.
+    """
+    from tests.diet_quality import PROFILES, measure
+
+    first = measure(PROFILES, days=3)
+    second = measure(PROFILES, days=3)
+    assert first.as_dict() == second.as_dict(), "the quality harness is not deterministic"
+
+
+# ---------------------------------------------------------------------------
+# A plan says what it delivers
+# ---------------------------------------------------------------------------
+
+def test_a_plan_that_cannot_reach_its_target_says_so(seeded_catalogue):
+    """A day is capped by what its meals can hold, and that cap is a fact about food.
+
+    Three meals and a snack top out near 3,700 kcal because every portion is bounded by
+    an amount a person would serve. A 5,000 kcal request returned a 3,900 kcal plan,
+    correct in every other respect, labelled 5,000 and silent about the shortfall.
+    """
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    user = _make_client("delivery-gate", *PROFILES[4])
+    planner = RuleBasedPlanner(user, seed_salt="delivery")
+
+    reachable = planner.generate(daily_kcal=2200, duration_days=1, snack_count=1)
+    assert reachable.plan_metadata["delivery"]["met"] is True
+
+    impossible = RuleBasedPlanner(user, seed_salt="delivery").generate(
+        daily_kcal=5000, duration_days=1, snack_count=1)
+    delivery = impossible.plan_metadata["delivery"]
+    assert delivery["met"] is False
+    assert delivery["deviation"] < -0.1
+    assert "reason" in delivery
+
+
+def test_a_slot_with_no_suitable_shape_falls_back_instead_of_inventing_one(seeded_catalogue):
+    """`or list(templates)` inverted the meal-type restriction it had just applied.
+
+    When nothing suited the slot the code used every shape instead of none, so a library
+    with no snack recipes would serve a lunch at snack. The caller already has a
+    fallback; assembly is a better answer than a confidently wrong one.
+    """
+    from diet.planner.templates import derive_templates, plan_meal
+
+    lunch_only = [t for t in derive_templates() if t.meals and "Snack" not in t.meals]
+    assert lunch_only, "fixture needs at least one slot-restricted shape"
+    portions, _score, template = plan_meal(
+        "Snack", None, {"calories": 200, "protein": 15, "carb": 25, "fat": 4.4},
+        templates=lunch_only, edges={})
+    assert portions == [] and template is None
+

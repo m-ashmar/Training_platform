@@ -87,19 +87,54 @@ _MARKERS: dict[str, set[str]] = {
 }
 
 # Free-text a user might type, mapped onto canonical tags.
-_USER_SYNONYMS: dict[str, str] = {
-    "peanuts": "peanut", "ground nut": "peanut", "groundnuts": "peanut",
-    "nuts": "tree_nut", "nut": "tree_nut", "tree nuts": "tree_nut",
-    "almonds": "tree_nut", "walnuts": "tree_nut", "cashews": "tree_nut",
-    "dairy": "milk", "lactose": "milk", "cheese": "milk", "milk products": "milk",
-    "eggs": "egg",
-    "seafood": "shellfish", "shrimps": "shellfish", "prawns": "shellfish",
-    "crustaceans": "shellfish", "shell fish": "shellfish",
-    "molluscs": "mollusc", "mollusks": "mollusc",
-    "soya": "soy", "soybeans": "soy", "soy beans": "soy",
-    "wheat": "gluten", "celiac": "gluten", "coeliac": "gluten", "gluten free": "gluten",
-    "sesame seeds": "sesame", "tahini": "sesame",
-    "sulphites": "sulphite", "sulfites": "sulphite",
+#
+# A term maps to a SET, and that is the whole point. This was `dict[str, str]`, so an
+# everyday word could only ever mean one allergen and whoever wrote it had to choose:
+# "nuts" was filed as tree nuts alone. Peanut is a legume and carries its own tag, so
+# the single most common and most dangerous nut allergy was the one phrasing that did
+# not protect against it, and a client who wrote "nut allergy" was served peanut butter.
+#
+# In a safety vocabulary an ambiguous word must WIDEN to everything it could plausibly
+# mean, never narrow to one reading. Over-blocking costs a client some variety.
+# Under-blocking costs them a hospital visit.
+_USER_SYNONYMS: dict[str, set[str]] = {
+    # Ambiguous in ordinary speech. Widened deliberately.
+    "nuts": {"peanut", "tree_nut"}, "nut": {"peanut", "tree_nut"},
+    "mixed nuts": {"peanut", "tree_nut"}, "all nuts": {"peanut", "tree_nut"},
+    "seafood": {"fish", "shellfish", "mollusc"},
+    "shellfish": {"shellfish", "mollusc"}, "shell fish": {"shellfish", "mollusc"},
+    # Specific, so they stay specific.
+    "tree nuts": {"tree_nut"}, "tree nut": {"tree_nut"},
+    "almonds": {"tree_nut"}, "walnuts": {"tree_nut"}, "cashews": {"tree_nut"},
+    "peanuts": {"peanut"}, "ground nut": {"peanut"}, "groundnuts": {"peanut"},
+    "dairy": {"milk"}, "lactose": {"milk"}, "cheese": {"milk"},
+    "milk products": {"milk"},
+    "eggs": {"egg"},
+    "shrimps": {"shellfish"}, "prawns": {"shellfish"}, "crustaceans": {"shellfish"},
+    "molluscs": {"mollusc"}, "mollusks": {"mollusc"},
+    "soya": {"soy"}, "soybeans": {"soy"}, "soy beans": {"soy"},
+    "wheat": {"gluten"}, "celiac": {"gluten"}, "coeliac": {"gluten"},
+    "gluten free": {"gluten"},
+    "sesame seeds": {"sesame"}, "tahini": {"sesame"},
+    "sulphites": {"sulphite"}, "sulfites": {"sulphite"},
+}
+
+#: Words people attach to an allergy that are not part of the allergen's name. Written
+#: as "nut free" or "allergic to dairy", both of which reached the vocabulary as terms
+#: it had never seen and fell through to a free-text match that finds nothing.
+_QUALIFIERS = ("free", "allergy", "allergies", "allergic", "to", "intolerance",
+               "intolerant", "sensitivity", "sensitive", "no", "avoid")
+
+#: Phrases that contain a marker word without containing the allergen. "Peanut butter"
+#: is not dairy and neither is almond milk, but "butter" and "milk" are milk markers, so
+#: a client avoiding dairy lost both nut butters in the catalogue for no reason. Stripped
+#: before that tag's markers are matched, and only for that tag.
+_FALSE_MARKERS: dict[str, set[str]] = {
+    "milk": {"peanut butter", "almond butter", "cashew butter", "nut butter",
+             "seed butter", "sunflower butter", "sunflower seed butter", "tahini",
+             "cocoa butter", "shea butter", "apple butter", "coconut butter",
+             "almond milk", "soy milk", "oat milk", "rice milk", "coconut milk",
+             "cashew milk", "hemp milk", "buttern"},
 }
 
 _WORD_RE = re.compile(r"[a-z']+")
@@ -118,13 +153,17 @@ def infer_allergens(*texts: str) -> Set[str]:
     ``allergen_source='inferred'`` so downstream checks know it is unverified.
     """
     found: Set[str] = set()
-    words, low = _norm(" ".join(t for t in texts if t))
-    singular = {w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
-                for w in words}
+    _words, low = _norm(" ".join(t for t in texts if t))
     for tag, markers in _MARKERS.items():
+        text = low
+        for phrase in _FALSE_MARKERS.get(tag, ()):
+            text = text.replace(phrase, " ")
+        words = set(_WORD_RE.findall(text))
+        singular = {w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss")
+                    else w for w in words}
         for marker in markers:
             if " " in marker:
-                if marker in low:
+                if marker in text:
                     found.add(tag); break
             elif marker in words or marker in singular:
                 found.add(tag); break
@@ -139,14 +178,18 @@ def parse_user_allergies(raw: str | None) -> Set[str]:
     implementation dropped every term after the first comma.
     """
     tags: Set[str] = set()
-    for chunk in re.split(r"[,;/]| and ", (raw or "").lower()):
-        term = " ".join(_WORD_RE.findall(chunk)).strip()
+    for chunk in re.split(r"[,;/&]|\band\b|\bplus\b", (raw or "").lower()):
+        words = [w for w in _WORD_RE.findall(chunk) if w not in _QUALIFIERS]
+        term = " ".join(words).strip()
         if not term:
             continue
+        # Synonyms first. "shellfish" is both a canonical tag and an everyday word that
+        # people use to include molluscs; checking the canonical table first would take
+        # the narrow reading and never consult the wider one.
+        if term in _USER_SYNONYMS:
+            tags.update(_USER_SYNONYMS[term]); continue
         if term in ALLERGENS:
             tags.add(term); continue
-        if term in _USER_SYNONYMS:
-            tags.add(_USER_SYNONYMS[term]); continue
         inferred = infer_allergens(term)
         if inferred:
             tags.update(inferred)

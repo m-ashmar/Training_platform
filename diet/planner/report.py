@@ -85,6 +85,25 @@ class MacroDeviation:
         return ", ".join(f"{m} {getattr(self, m):+.1%}" for m in MACROS)
 
 
+def totals_of(components) -> Dict[str, float]:
+    """Calories and macros for a list of (food, grams).
+
+    The one implementation. There were three: this arithmetic in `optimize`, a second
+    copy in `portion` reading the per-gram columns instead of the per-hundred-gram ones,
+    and the estimates the planner writes onto each ingredient. `calories` and
+    `calories_per_gram` are separate stored columns reconciled only when one of them is
+    zero, so two stages could add the same meal up and disagree.
+    """
+    out = {"calories": 0.0, "protein": 0.0, "carb": 0.0, "fat": 0.0}
+    for food, grams in components:
+        g = float(grams or 0.0) / 100.0
+        out["calories"] += float(getattr(food, "calories", 0) or 0) * g
+        out["protein"] += float(getattr(food, "protein", 0) or 0) * g
+        out["carb"] += float(getattr(food, "carbs", 0) or 0) * g
+        out["fat"] += float(getattr(food, "fat", 0) or 0) * g
+    return out
+
+
 def deviation_of(totals: Dict[str, float], targets: Dict[str, float]) -> MacroDeviation:
     """Relative deviation of achieved totals from target."""
     out, absolute = {}, {}
