@@ -1,19 +1,42 @@
 # Diet engine — final plan
 
-Verdict: evolve. `diet/planner/` is the asset. Everything below restores the core feature,
-deletes what does not run, wires what the engine already produces, closes a safety gap, or
-makes selection smarter on the architecture that exists.
+**Status, 2026-09-05: P0 through P12 executed. Gate at 54 tests, green, deterministic.**
 
-**Ordering rule.** P0 first: until food identity survives persistence, every measurement
-describes a meal that was not saved. Delete before you freeze. Line numbers drift — anchor
-on function names and re-grep per phase.
+Verdict was evolve, and it held. `diet/planner/` was the asset; everything below either
+restored the core feature, deleted what did not run, wired what the engine already
+produced, closed a safety gap, or made selection smarter on the architecture that exists.
 
-Run `.venv/bin/python -m pytest -q` after every step. Check `$?`, not a pipe. Re-run the
-quality measure after P1, P9 and P12 and record the delta in the commit message.
+Measured on the seeded catalogue, persisted rows after convergence, same fixed seeds:
+
+| | before | after |
+|---|---|---|
+| chosen-ingredient share | 0.097 | **0.361** |
+| meals unchanged after the client chooses | 21 of 28 | **0 of 28** |
+| named-dish rate | 0.79 | 0.80 |
+| calorie drift, worst | 3.2% one-sided | 4.5% both directions |
+| portions above a food's own ceiling | 0 | 0 |
+| a dish served twice in one day | 0 of 42 | 0 of 42 |
+| feasible meals at the proven optimum | 99% | 95% (see the open decision) |
+
+**Left open on purpose, not forgotten.**
+
+*The objective's calorie weight.* Enumerating every portion jointly for an augmented
+dish lifts the optimiser gate to 305 of 306 and, in the same run, moves chosen share
+0.229 to 0.210 and drift 4.0% to 5.3% the wrong way. The exhaustive optimum is optimal
+for a blended objective that weights calories at 0.5, so it sits further from the calorie
+target than the pair search lands. That is a product decision about `CALORIE_WEIGHT`,
+held behind `recipes.EXHAUSTIVE_PORTIONING = False` until it is made. Do not tune the
+search to avoid making it.
+
+*The recipe corpus* (12.4). Pairing still covers 16 of 133 foods. The mechanism to widen
+it exists and is auditable; the corpus is content work.
+
+*Weight tuning from production data* (11.4). The signal is collected now. A month of it
+first.
 
 ---
 
-## P0 — Food identity survives persistence  `BLOCKING`
+## P0 — Food identity survives persistence  `BLOCKING`  ✅ done
 
 The planner constraint-filters and preference-ranks a `FoodItem`, then hands persistence a
 name string and a `"180g"` string. Persistence re-resolves the name (fuzzy fallback, then
@@ -36,7 +59,7 @@ output exactly. No `AI-%` row is ever created by a rule-based generation.
 
 ---
 
-## P1 — Restore the core feature  `CHEAP, DO EARLY`
+## P1 — Restore the core feature  `CHEAP, DO EARLY`  ✅ done; cuisine ratio added
 
 The product is "a plan from the foods you like, by meal and macro, never what you dislike".
 Dislikes and allergies are done and verified. Likes are not.
@@ -63,7 +86,7 @@ signal no user can set.
 
 ---
 
-## P2 — Delete the legacy engine
+## P2 — Delete the legacy engine  ✅ done; 1,857 → 661 lines
 
 `_plan_meal_from_components` and `_staged_fill` ran **0 times in 168 meals**. All 7
 corrector services have **0 instantiations**.
@@ -99,7 +122,7 @@ Source of truth: `diet/data/catalogue.py`. Numbers: `fetch_usda`. Load: `load_fo
 
 ---
 
-## P4 — Freeze and lock
+## P4 — Freeze and lock  ✅ done; harness measures persisted rows
 
 **4.1** Freeze `diet/planner/`. Changes only by PR carrying a benchmark delta.
 
@@ -122,7 +145,7 @@ Re-record the baseline **once**.
 
 ---
 
-## P5 — Schema: somewhere to put what the engine decided
+## P5 — Schema: somewhere to put what the engine decided  ✅ done
 
 **5.1** `Meal.name` + `Meal.recipe` (nullable FK) + `Meal.reason` (short text). Written in
 `meal_plan_factory.create_meal`. The dish name dies at the DB boundary today; dish recency
@@ -142,7 +165,7 @@ and `candidates.py` at it; drop the global `FoodItem.smart_score_weight`.
 
 ---
 
-## P6 — One target, read everywhere
+## P6 — One target, read everywhere  ✅ done
 
 Six sites hardcode 30/50/20. `trainer_services` **persists** them into `DailyProgress`.
 
@@ -152,7 +175,7 @@ calories equally across meals while the engine builds to the policy split.
 
 ---
 
-## P7 — Safety and physiology
+## P7 — Safety and physiology  ✅ done
 
 **7.1** `users/models.py` compares `goal == 'Lose'` exactly; `trainer_services.py:97`
 passes a raw string. Normalise before comparing.
@@ -181,7 +204,7 @@ structure that can, instead of building a plan labelled 5,000 that delivers 3,90
 
 ---
 
-## P8 — Scale
+## P8 — Scale  ✅ done
 
 **8.1** Move `converge_plan` out of the `select_for_update` transaction.
 
@@ -199,7 +222,7 @@ scan of ~80, not 1000.
 
 ---
 
-## P9 — Make the engine smarter  `THE UPGRADE`
+## P9 — Make the engine smarter  `THE UPGRADE`  ✅ done; 9.1–9.4 measured, 9.5 schema in P5, 9.6 held
 
 Every item here runs on the existing solver and the existing pool. None needs training
 data. Ordered by cost.
@@ -259,7 +282,7 @@ reverted, not tuned.
 
 ---
 
-## P10 — Close the fail-open boundary  `AFTER P2`
+## P10 — Close the fail-open boundary  `AFTER P2`  ✅ done
 
 `rule_based_planner.py` `_plan_meal_from_recipe` and `_plan_meal_from_template` swallow
 every exception from `diet/planner/` and silently downgrade. Log at ERROR with the
@@ -268,7 +291,7 @@ nothing safe to fail into.
 
 ---
 
-## P11 — Collect the signal learning needs
+## P11 — Collect the signal learning needs  ✅ done; swap endpoint, per-food rating, learning reads both
 
 `learning.py` reads `is_completed`, `actual_quantity_consumed` and `is_liked`. Nothing
 writes them. Zero rows exist. A learning engine on this is a slogan.
@@ -285,7 +308,7 @@ from accept/swap/refuse outcomes. Until then they stay hand-set and documented.
 
 ---
 
-## P12 — Food similarity from features, not training
+## P12 — Food similarity from features, not training  ✅ done; 12.2(a)(b)(c)(d) wired, 12.4 open
 
 The honest form of "vectors" for a catalogue with no consumption data. No model, no
 training, no cold start, fully auditable.
