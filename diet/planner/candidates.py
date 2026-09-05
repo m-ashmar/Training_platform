@@ -66,12 +66,22 @@ class CandidatePool:
     #: sits a hundred points above the next, while two foods separated by macro density
     #: differ by one or two. A consumer that reads only the order treats those the same.
     scores: Dict[str, Dict[str, Dict[int, float]]] = field(default_factory=dict)
+    #: The preference half of each score on its own: what the client said, and only
+    #: that. A recipe is many foods, and a client's "I chose chicken" is a fact about
+    #: the dish, not about chicken's share of its calories. Weighting preference by
+    #: calorie share diluted a 100-point choice to 35 and a dish of unchosen staples
+    #: tied it; measured P(chosen recipe wins) was 0.13. Structure is weighted by share;
+    #: preference is counted by presence.
+    preference_scores: Dict[str, Dict[str, Dict[int, float]]] = field(default_factory=dict)
 
     def get(self, meal: str, macro: str) -> List:
         return self.by_slot.get(meal, {}).get(macro, [])
 
     def weights(self, meal: str, macro: str) -> Dict[int, float]:
         return self.scores.get(meal, {}).get(macro, {})
+
+    def preference(self, meal: str, macro: str) -> Dict[int, float]:
+        return self.preference_scores.get(meal, {}).get(macro, {})
 
     @property
     def empty_slots(self) -> List[tuple]:
@@ -264,23 +274,32 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
     learned = (dict(UserFoodWeight.objects.filter(user=user).values_list("food_id", "weight"))
                if getattr(user, "pk", None) else {})
 
-    def score(food, meal: str, macro: str) -> float:
-        s = W_ROLE_STAPLE if getattr(food, "role", "") == FoodItem.ROLE_STAPLE else 0.0
-        s += W_CUISINE * constraints.cuisine.weight(getattr(food, "cuisine", None))
+    def score_parts(food, meal: str, macro: str):
+        """(structure, preference). Structure is what makes a good dish for anyone;
+        preference is what this client said. Kept apart so a multi-food dish can weight
+        the first by calorie share and count the second by presence."""
+        structure = W_ROLE_STAPLE if getattr(food, "role", "") == FoodItem.ROLE_STAPLE else 0.0
+        structure += W_CUISINE * constraints.cuisine.weight(getattr(food, "cuisine", None))
         if food.id in served_at.get(meal, ()):
-            s += W_MEAL_LIBRARY
+            structure += W_MEAL_LIBRARY
+        structure += W_DENSITY * _density(food, macro)
+
+        preference = 0.0
         if food.id in slot_pref.get((meal, macro), ()):
-            s += W_MEAL_MACRO_PREF
+            preference += W_MEAL_MACRO_PREF
         elif food.id in meal_pref.get(meal, ()):
-            s += W_MEAL_PREF
+            preference += W_MEAL_PREF
         if food.id in macro_choice.get(macro, ()):
-            s += W_MACRO_CHOICE
+            preference += W_MACRO_CHOICE
         if food.id in liked:
-            s += W_LIKED
+            preference += W_LIKED
         # This client's learned weight, neutral at 1.0 until they have eaten something.
-        s += W_LEARNED * (float(learned.get(food.id, 1.0)) - 1.0)
-        s += W_DENSITY * _density(food, macro)
-        return s
+        preference += W_LEARNED * (float(learned.get(food.id, 1.0)) - 1.0)
+        return structure, preference
+
+    def score(food, meal: str, macro: str) -> float:
+        structure, preference = score_parts(food, meal, macro)
+        return structure + preference
 
     by_slot: Dict[str, Dict[str, List]] = {m: {mac: [] for mac in MACROS} for m in MEALS}
     for food in safe:
@@ -288,11 +307,14 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         for meal in MEALS:
             by_slot[meal][dom].append(food)
     scores: Dict[str, Dict[str, Dict[int, float]]] = {m: {} for m in MEALS}
+    preference_scores: Dict[str, Dict[str, Dict[int, float]]] = {m: {} for m in MEALS}
     for meal in MEALS:
         for macro in MACROS:
-            table = {f.id: score(f, meal, macro) for f in by_slot[meal][macro]}
+            parts = {f.id: score_parts(f, meal, macro) for f in by_slot[meal][macro]}
+            table = {fid: st + pr for fid, (st, pr) in parts.items()}
             by_slot[meal][macro].sort(key=lambda f: table[f.id], reverse=True)
             scores[meal][macro] = table
+            preference_scores[meal][macro] = {fid: pr for fid, (_st, pr) in parts.items()}
 
     counts = {
         "catalogue": len(foods),
@@ -301,7 +323,8 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         "liked": len(liked),
         "disliked": len(constraints.disliked_ids),
     }
-    pool = CandidatePool(by_slot=by_slot, source_counts=counts, scores=scores)
+    pool = CandidatePool(by_slot=by_slot, source_counts=counts, scores=scores,
+                         preference_scores=preference_scores)
     if pool.empty_slots:
         logger.warning(
             "Candidate pool has empty slots for user %s: %s (catalogue=%d, safe=%d)",

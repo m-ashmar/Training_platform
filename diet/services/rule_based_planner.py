@@ -627,6 +627,8 @@ class RuleBasedPlanner:
                 constraints=self._constraints(),
                 recipes=self._recipes(),
                 ladders=self._ladder_cache,
+                pool=getattr(self, "_pool", None),
+                edges=self._pairings(),
                 exclude_ids=tuple(getattr(day_ctx, "served_today", ())),
                 recent_ids=tuple(served),
                 user=self.user,

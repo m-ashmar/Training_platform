@@ -2868,3 +2868,78 @@ def test_the_goal_metrics_never_move_the_wrong_way(diet_quality):
     assert diet_quality.distinct_dishes >= recorded["distinct_dishes"]
     assert diet_quality.absurd_portion_rate == 0.0
     assert diet_quality.days_repeating_a_dish == 0
+
+
+# ---------------------------------------------------------------------------
+# P9.2 — one scorer for both paths, and the six rows it had to pass first
+# ---------------------------------------------------------------------------
+
+def test_the_recipe_scorer_passes_its_own_gate(seeded_catalogue):
+    """The plan required these distributions measured BEFORE the unified scorer was
+    wired. Two drafts failed: a plain calorie-share mean diluted a chosen food's bonus to
+    its share of the dish (P(chosen wins) 0.13), and a plain presence max counted a chosen
+    garnish like a chosen anchor (olive oil +100). Structure by calorie share, preference
+    by presence weighted by role, pairing bounded, is what passed. This keeps it passing.
+    """
+    import statistics as st
+
+    from diet.models import FoodItem, Recipe, UserFoodCategoryPreference
+    from diet.planner.candidates import build_pool, classify_food
+    from diet.planner.policy import load_policy
+    from diet.planner.recipes import _recipe_lines, find_recipe, recipe_pool_score, softmax_weights
+    from diet.planner.targets import compute_targets
+    from diet.planner.templates import SOFTMAX_T, W_PAIRING, _affinity, pairing_edges
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    pol = load_policy("maintain")
+    edges = pairing_edges()
+    recipes = list(Recipe.objects.filter(is_active=True).prefetch_related("ingredients__food__category"))
+    plain = build_pool(_make_client("scorer-plain", *PROFILES[2]), pol)
+
+    # T2: no penalty for a complete dish.
+    by_n = {}
+    for r in recipes:
+        by_n.setdefault(len(_recipe_lines(r)), []).append(
+            recipe_pool_score(_recipe_lines(r), plain, (r.meal_types or ["Lunch"])[0], edges))
+    means = [st.mean(v) for _n, v in sorted(by_n.items())]
+    assert all(b >= a - 5 for a, b in zip(means, means[1:])), f"score falls with ingredient count: {means}"
+
+    # T3: a chosen staple moves the dish far more than a chosen garnish.
+    dish = next(r for r in recipes
+                if any("Chicken" in l.food.name for l in r.ingredients.all())
+                and any("Olive Oil" in l.food.name for l in r.ingredients.all()))
+    lines = _recipe_lines(dish)
+    base = recipe_pool_score(lines, plain, "Lunch", edges)
+    def lift(name):
+        u = _make_client(f"scorer-{name.split()[0].lower()}", *PROFILES[2])
+        f = next(l[0] for l in lines if name in l[0].name)
+        UserFoodCategoryPreference.objects.get_or_create(user=u, food=f, meal="Lunch", macro=classify_food(f))
+        return recipe_pool_score(lines, build_pool(u, pol), "Lunch", edges) - base
+    chicken, oil = lift("Chicken"), lift("Olive Oil")
+    assert chicken >= 90, f"choosing the anchor lifted the dish only +{chicken:.0f}"
+    assert oil <= 0.4 * chicken, f"choosing the garnish lifted the dish +{oil:.0f} vs anchor +{chicken:.0f}"
+
+    # T4: pairing never outweighs a choice.
+    pairing_max = max(W_PAIRING * _affinity(f.id, [i for i in [l[0].id for l in _recipe_lines(rr)] if i != f.id], edges)
+                      for rr in recipes for f, _g, _s in _recipe_lines(rr))
+    assert pairing_max <= 20, f"pairing term reaches {pairing_max:.1f} against a 100-point choice"
+
+    # T5, the informative case: chicken chosen for lunch, rice NOT. Among the fitting
+    # lunch dishes, the ones with chicken must win at this temperature; the ones
+    # without (salmon, lentils) must not.
+    ch = _make_client("scorer-chooser", *PROFILES[2])
+    chicken_row = FoodItem.objects.get(name="Chicken Breast (Grilled)")
+    UserFoodCategoryPreference.objects.get_or_create(user=ch, food=chicken_row, meal="Lunch", macro="protein")
+    pool_c = build_pool(ch, pol)
+    lunch = next(t for t in compute_targets(2695, pol, ["Breakfast", "Lunch", "Dinner"], 1,
+                                            weight_kg=ch.weight).meals if t.name == "Lunch")
+    within = [(rr, recipe_pool_score(_recipe_lines(rr), pool_c, "Lunch", edges))
+              for rr in recipes if (not rr.meal_types or "Lunch" in rr.meal_types)
+              and (m := find_recipe("Lunch", lunch.as_dict(), pol, recipes=[rr]))
+              and m.deviation.within(pol.tolerance)]
+    has = [any(l[0].id == chicken_row.id for l in _recipe_lines(rr)) for rr, _ in within]
+    assert any(has) and not all(has), "fixture must contain fitting dishes with AND without chicken"
+    w = softmax_weights([s for _r, s in within], SOFTMAX_T)
+    p_chosen = sum(wi for wi, h in zip(w, has) if h) / sum(w)
+    assert 0.85 <= p_chosen <= 0.999, f"P(chosen dish wins) = {p_chosen:.2f}"

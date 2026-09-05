@@ -181,13 +181,21 @@ def meal_foods(recipes: Optional[Sequence] = None) -> Dict[str, Set[int]]:
 
 def _affinity(candidate_id: int, chosen_ids: Sequence[int],
               edges: Dict[int, collections.Counter]) -> float:
-    """How well this food sits beside what is already on the plate, 0.0 upward."""
+    """How well this food sits beside what is already on the plate, 0.0 to 1.0.
+
+    Normalised by the strongest edge in the library. A raw co-occurrence count is a
+    property of library SIZE: chicken and rice appear together in five of sixteen
+    recipes, so the term reached 43 points against a chosen food's 100 and a common
+    combination outweighed what the client had asked for. Bounded, it cannot exceed
+    W_PAIRING, which is a tenth of a chosen food.
+    """
     if not chosen_ids:
         return 0.0
     neighbours = edges.get(candidate_id)
     if not neighbours:
         return 0.0
-    return sum(neighbours.get(other, 0) for other in chosen_ids) / len(chosen_ids)
+    strongest = max((max(c.values()) for c in edges.values() if c), default=1) or 1
+    return (sum(neighbours.get(other, 0) for other in chosen_ids) / len(chosen_ids)) / strongest
 
 
 def _pick(candidates: Sequence, chosen_ids: List[int],

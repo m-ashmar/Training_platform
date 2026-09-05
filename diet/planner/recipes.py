@@ -6,6 +6,7 @@ will never cover every target — but when a dish fits, a dish is what the user 
 """
 from __future__ import annotations
 
+import collections
 import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -13,6 +14,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .optimize import Components, _better, refine, totals_of
 from .policy import PlannerPolicy
 from .report import deviation_of
+# One temperature for both paths. templates does not import this module, so it is safe.
+from .templates import SOFTMAX_T
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +73,6 @@ SERVINGS_LO, SERVINGS_HI, SERVINGS_STEP = 0.5, 2.0, 0.05
 
 
 
-#: How much a dish being made of the client's own choices counts against how neatly it
-#: hits the macro target. Fit is a constraint — anything outside tolerance is discarded
-#: before this is consulted — so among dishes that all work, what the client picked is
-#: what should decide.
-W_PREFERENCE = 2.0
-W_FIT = 1.0
 
 #: How hard a dish served inside the no-repeat window is pushed down. A penalty, not a
 #: ban: with sixteen recipes across four meals, excluding outright exhausts the library
@@ -104,14 +101,66 @@ def chosen_food_ids(user, meal_name: str) -> frozenset:
     )
 
 
-def _preference_share(recipe, wanted: frozenset) -> float:
-    """Fraction of this dish's ingredients the client asked for. 0.0 when they asked for nothing."""
-    if not wanted:
+
+#: How much a chosen food's preference counts by what it is in the dish.
+PREFERENCE_ROLE_WEIGHT = {"staple": 1.0, "accompaniment": 0.3, "condiment": 0.1}
+
+
+def recipe_pool_score(lines: Sequence[Tuple[object, float, bool]], pool, meal_name: str,
+                      edges: Optional[Dict[int, "collections.Counter"]] = None) -> float:
+    """One number, on the pool's own scale, for how much this client wants this dish.
+
+    NOT a mean. Each ingredient's pool score for this meal is weighted by the
+    ingredient's share of the recipe's calories at one serving. A plain mean let a spoon
+    of oil drag chicken down and rewarded short recipes over complete ones; calorie share
+    is the recipe's own composition and needs no constant. A garnish weighs what a
+    garnish weighs. Pairing affinity is added in the same units as the template path
+    adds it, so the two paths are commensurable.
+
+    Additive and unwired until the distribution tests in the plan (9.2) pass on the
+    seeded catalogue; only then does selection read it.
+    """
+    from .candidates import classify_food
+    from .templates import SOFTMAX_T, W_PAIRING, _affinity
+
+    if not lines or pool is None:
         return 0.0
-    lines = list(recipe.ingredients.all())
-    if not lines:
-        return 0.0
-    return sum(1 for line in lines if line.food_id in wanted) / len(lines)
+    kcal = [max(0.0, float(getattr(f, "calories", 0) or 0) * float(g) / 100.0) for f, g, _s in lines]
+    total = sum(kcal) or 1.0
+    ids = [getattr(f, "id", None) for f, _g, _s in lines]
+    structure = 0.0
+    preference = 0.0
+    pairing = 0.0
+    has_preference = hasattr(pool, "preference")
+    for (food, _g, _s), k in zip(lines, kcal):
+        share = k / total
+        slot = classify_food(food)
+        if has_preference:
+            struct_i = float(pool.weights(meal_name, slot).get(food.id, 0.0)) \
+                       - float(pool.preference(meal_name, slot).get(food.id, 0.0))
+            pref_i = float(pool.preference(meal_name, slot).get(food.id, 0.0))
+        else:
+            struct_i, pref_i = float(pool.weights(meal_name, slot).get(food.id, 0.0)), 0.0
+        # Structure by calorie share: a garnish weighs what a garnish weighs.
+        structure += share * struct_i
+        # Preference by presence, weighted by ROLE. A client who chose chicken chose the
+        # chicken dish whatever chicken's share of its calories — share-weighting gave
+        # P(chosen wins) = 0.13. But a plain max counted a chosen garnish exactly like a
+        # chosen anchor (choosing olive oil moved the dish +100, same as chicken), and
+        # the role field exists to say which foods a meal is built on.
+        preference = max(preference, PREFERENCE_ROLE_WEIGHT.get(
+            getattr(food, "role", "staple"), 1.0) * pref_i)
+        pairing += share * W_PAIRING * _affinity(food.id, [i for i in ids if i != food.id], edges or {})
+    return structure + preference + pairing
+
+
+def softmax_weights(scores: Sequence[float], temperature: float) -> List[float]:
+    """The template path's sampling rule, exposed so the recipe path can use the same one."""
+    import math
+    if not scores:
+        return []
+    top = max(scores)
+    return [max(math.exp((v - top) / temperature), 1e-9) for v in scores]
 
 
 def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy,
@@ -119,7 +168,9 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
                 exclude_ids: Sequence[int] = (),
                 recipes: Optional[Sequence] = None, user=None, rng=None,
                 recent_ids: Sequence[int] = (),
-                ladders: Optional[Dict[int, List[float]]] = None) -> Optional[RecipeMatch]:
+                ladders: Optional[Dict[int, List[float]]] = None,
+                pool=None, edges: Optional[Dict[int, "collections.Counter"]] = None
+                ) -> Optional[RecipeMatch]:
     """A dish for this meal's macro target, or None if nothing fits.
 
     Every serving size between half and double is tried, each one snapped to the
@@ -168,7 +219,6 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
     if target_kcal <= 0 or not recipes:
         return None
 
-    wanted = chosen_food_ids(user, meal_name)
     recent = set(recent_ids or ())
     steps = int(round((SERVINGS_HI - SERVINGS_LO) / SERVINGS_STEP)) + 1
     within: List[Tuple[RecipeMatch, float]] = []
@@ -260,23 +310,29 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             best = match
 
         if match.deviation.within(policy.tolerance):
-            # Closeness of fit, normalised so a perfect match scores 1 and one at the
-            # edge of tolerance scores near 0, plus the share of the dish the client
-            # asked for. Weighted so preference decides between dishes that all fit.
-            fit = 1.0 / (1.0 + float(match.deviation.magnitude))
-            weight = W_FIT * fit + W_PREFERENCE * _preference_share(recipe, wanted)
-            if constraints is not None:
-                # A dish from the cuisine the client asked for less of is still
-                # servable at a mixed ratio; it is simply chosen less often.
-                weight *= max(0.1, constraints.cuisine.weight(getattr(recipe, "cuisine", None)))
-            if recipe.id in recent:
-                weight *= RECENCY_PENALTY
-            within.append((match, max(weight, 1e-6)))
+            # Fit is a FILTER — inside tolerance or not — never a weight. Among the
+            # dishes that fit, the dish is scored on the pool's own scale, the same
+            # scale the template path samples on: structure by calorie share,
+            # preference by presence and role, pairing bounded. One scorer for both
+            # paths, so "which path served this meal" can be a judged decision rather
+            # than an accident of ordering. The two paths used to weight preference
+            # at 1.7:1 and 148:1 respectively.
+            score = (recipe_pool_score(lines, pool, meal_name, edges) if pool is not None
+                     else -float(match.deviation.magnitude))
+            within.append((match, score, recipe))
 
     if within:
         if rng is None or len(within) == 1:
-            return max(within, key=lambda pair: pair[1])[0]
-        matches, weights = zip(*within)
+            return max(within, key=lambda triple: triple[1])[0]
+        matches = [m for m, _s, _r in within]
+        weights = softmax_weights([s for _m, s, _r in within], SOFTMAX_T)
+        for i, (_m, _s, r) in enumerate(within):
+            if constraints is not None:
+                # A dish from the cuisine the client asked for less of is still
+                # servable at a mixed ratio; it is simply chosen less often.
+                weights[i] *= max(0.1, constraints.cuisine.weight(getattr(r, "cuisine", None)))
+            if r.id in recent:
+                weights[i] *= RECENCY_PENALTY
         return rng.choices(matches, weights=weights, k=1)[0]
 
     if best is not None:
