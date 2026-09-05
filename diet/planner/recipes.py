@@ -29,10 +29,14 @@ class RecipeMatch:
     #: Foods added from the client's pool to bring an under-target dish up to its
     #: slot. The dish keeps its name and says what came with it.
     extras: tuple = ()
+    #: A food the client chose, substituted for the line it most resembles.
+    substituted: object = None
 
     @property
     def name(self) -> str:
         base = getattr(self.recipe, "name", "meal")
+        if self.substituted is not None:
+            base = f"{base} (with {getattr(self.substituted, 'name', 'your choice')})"
         if not self.extras:
             return base
         return f"{base} + {' + '.join(getattr(f, 'name', str(f)) for f in self.extras)}"
@@ -187,7 +191,53 @@ def _augment(match: RecipeMatch, lines, targets, policy, pool, meal_name, edges,
     added = next((g for f, g in tuned if f is food), 0.0)
     if added <= 0:
         return None
-    return RecipeMatch(match.recipe, tuned, match.servings, tuned_dev, extras=(food,))
+    return RecipeMatch(match.recipe, tuned, match.servings, tuned_dev, extras=(food,),
+                       substituted=match.substituted)
+
+
+def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids):
+    """Put a food the client chose for this meal into the dish, in place of the line
+    it most resembles, when that line is a substitute for it.
+
+    Preference used to reach a named dish only if a recipe author had written that
+    exact food in. With 16 recipes over 133 foods, a client who chose bulgur for lunch
+    was served rice in every rice dish and bulgur in none. The line's `swap_group`, if
+    the author set one, is honoured as the class; otherwise similarity in the same slot
+    decides. One substitution per dish, of the strongest choice, so the dish stays the
+    dish.
+    """
+    from .candidates import classify_food
+
+    if not chosen_ids or index is None:
+        return lines, None
+    present = {getattr(f, "id", None) for f, _g, _s in lines}
+    best = None  # (similarity, line_index, chosen_food)
+    for i, (food, grams, scalable) in enumerate(lines):
+        if not scalable:
+            continue
+        slot = classify_food(food)
+        for cid in chosen_ids:
+            if cid in present:
+                continue
+            chosen = index.foods.get(cid)
+            if chosen is None or classify_food(chosen) != slot:
+                continue
+            group = (getattr(getattr(food, "_line", None), "swap_group", "") or "")
+            sim = index.similarity(cid, food.id)
+            if (group and getattr(chosen, "swap_group_tag", "") == group) or sim >= policy.similarity_threshold:
+                if best is None or sim > best[0]:
+                    best = (sim, i, chosen)
+    if best is None:
+        return lines, None
+    _sim, i, chosen = best
+    out = list(lines)
+    food, grams, scalable = out[i]
+    # Same energy, so the dish's macro shape survives the swap.
+    k_old = float(getattr(food, "calories", 0) or 0)
+    k_new = float(getattr(chosen, "calories", 0) or 0)
+    grams_new = grams * (k_old / k_new) if k_old > 0 and k_new > 0 else grams
+    out[i] = (chosen, grams_new, scalable)
+    return out, chosen
 
 
 def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy,
@@ -196,8 +246,8 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
                 recipes: Optional[Sequence] = None, user=None, rng=None,
                 recent_ids: Sequence[int] = (),
                 ladders: Optional[Dict[int, List[float]]] = None,
-                pool=None, edges: Optional[Dict[int, "collections.Counter"]] = None
-                ) -> Optional[RecipeMatch]:
+                pool=None, edges: Optional[Dict[int, "collections.Counter"]] = None,
+                index=None) -> Optional[RecipeMatch]:
     """A dish for this meal's macro target, or None if nothing fits.
 
     Every serving size between half and double is tried, each one snapped to the
@@ -258,6 +308,10 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         lines = _recipe_lines(recipe)
         if not lines:
             continue
+        substituted = None
+        if index is not None and pool is not None:
+            lines, substituted = _substitute_chosen(
+                lines, pool, meal_name, policy, index, chosen_food_ids(user, meal_name))
 
         # Every hard constraint, not just allergens. This checked allergies and nothing
         # else, so a dish built on a food the client had explicitly rejected was served
@@ -308,7 +362,7 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             servings = SERVINGS_LO + index * SERVINGS_STEP
             components = _portion_recipe(lines, servings, line_ladders)
             dev = deviation_of(totals_of(components), targets)
-            candidate = RecipeMatch(recipe, components, servings, dev)
+            candidate = RecipeMatch(recipe, components, servings, dev, substituted=substituted)
             if closest is None or dev.magnitude < closest.deviation.magnitude:
                 closest = candidate
             if dev.within(policy.tolerance):
@@ -331,7 +385,7 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         if movable:
             tuned, dev = _best_portioning(match.components, targets, policy, movable)
             if _better(dev, match.deviation, policy.tolerance):
-                match = RecipeMatch(recipe, tuned, match.servings, dev)
+                match = RecipeMatch(recipe, tuned, match.servings, dev, substituted=match.substituted)
 
         # Augment before rejecting. A dish under its slot by more than tolerance used
         # to be discarded: overnight oats is 500 kcal, an 870 kcal breakfast wanted

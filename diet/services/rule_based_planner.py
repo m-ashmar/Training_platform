@@ -577,6 +577,22 @@ class RuleBasedPlanner:
             self._ladder_cache = {}
         return self._recipe_cache
 
+    def _similarity(self):
+        """Cosine neighbours over the safe catalogue, built once per generation."""
+        if getattr(self, "_similarity_cache", None) is None:
+            from diet.planner.similarity import SimilarityIndex
+            pool = getattr(self, "_pool", None)
+            foods = []
+            if pool is not None:
+                seen = set()
+                for meal in pool.by_slot.values():
+                    for lst in meal.values():
+                        for f in lst:
+                            if f.id not in seen:
+                                seen.add(f.id); foods.append(f)
+            self._similarity_cache = SimilarityIndex(foods)
+        return self._similarity_cache
+
     def _templates(self):
         """Derived once per generation; they only change when a recipe does."""
         if getattr(self, "_template_cache", None) is None:
@@ -650,6 +666,7 @@ class RuleBasedPlanner:
                 ladders=self._ladder_cache,
                 pool=getattr(self, "_pool", None),
                 edges=self._pairings(),
+                index=self._similarity(),
                 exclude_ids=tuple(getattr(day_ctx, "served_today", ())),
                 recent_ids=tuple(served),
                 user=self.user,

@@ -273,6 +273,8 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
     served_at = meal_foods()
     learned = (dict(UserFoodWeight.objects.filter(user=user).values_list("food_id", "weight"))
                if getattr(user, "pk", None) else {})
+    from .similarity import SimilarityIndex
+    index = SimilarityIndex(safe) if (slot_pref or meal_pref) else None
 
     def score_parts(food, meal: str, macro: str):
         """(structure, preference). Structure is what makes a good dish for anyone;
@@ -289,6 +291,17 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
             preference += W_MEAL_MACRO_PREF
         elif food.id in meal_pref.get(meal, ()):
             preference += W_MEAL_PREF
+        elif index is not None:
+            # Preference propagation through similarity. A chosen food's neighbours in
+            # the same slot inherit a share of its bonus, scaled by how alike they are:
+            # a client who chose chicken sees turkey rise, without anyone telling the
+            # engine that. Only explicit slot choices propagate, and never past the
+            # chosen food itself.
+            chosen_here = slot_pref.get((meal, macro), set()) | meal_pref.get(meal, set())
+            if chosen_here:
+                nearest_id, sim = index.nearest_of(food.id, list(chosen_here))
+                if nearest_id is not None and sim >= policy.similarity_threshold:
+                    preference += W_MEAL_MACRO_PREF * policy.similarity_propagation * sim
         if food.id in macro_choice.get(macro, ()):
             preference += W_MACRO_CHOICE
         if food.id in liked:

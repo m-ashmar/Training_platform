@@ -51,6 +51,13 @@ class PlannerPolicy:
     max_kcal_per_meal: float = 1250.0
     max_kcal_per_snack: float = 400.0
 
+    # --- similarity ---------------------------------------------------------
+    #: Cosine above which two foods count as substitutes in the same slot.
+    similarity_threshold: float = 0.80
+    #: How much of a chosen food's preference its neighbours inherit, scaled by
+    #: similarity. A client who chose chicken sees turkey nudged up.
+    similarity_propagation: float = 0.5
+
     # --- per-meal floors --------------------------------------------------
     protein_floor_main_g: float = 40.0      # lunch / dinner
     protein_floor_other_g: float = 35.0     # breakfast / snack
