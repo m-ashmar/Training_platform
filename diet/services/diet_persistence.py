@@ -117,7 +117,13 @@ class DietPersistenceService:
                     # Strict mapping only: replace fuzzy with dictionary/index lookups
                     mapped: list[tuple[FoodItem, str]] = []
                     meal_type = ai_meal.meal_type or 'Lunch'
+                    identified = {ing.food_id for ing in ai_meal.ingredients if ing.food_id}
                     for food_item, quantity in resolved:
+                        if food_item.id in identified:
+                            # Chosen by id upstream. Re-mapping by name here is the same
+                            # leak in a second place.
+                            mapped.append((food_item, quantity))
+                            continue
                         dom_macro = self._dominant_macro_of_food(food_item)
                         cat_key = self._cat_key(meal_type, dom_macro)
                         pool = strict_index.get(cat_key, set())

@@ -842,6 +842,8 @@ class RuleBasedPlanner:
                     AIIngredient(
                         name=p.food.name,
                         quantity=f"{p.grams:g}g",
+                        food_id=p.food.id,
+                        grams=float(p.grams),
                         estimated_calories=round(float(p.food.calories or 0) * p.grams / 100, 1),
                         estimated_protein=round(float(p.food.protein or 0) * p.grams / 100, 1),
                         estimated_carbs=round(float(p.food.carbs or 0) * p.grams / 100, 1),
@@ -856,6 +858,7 @@ class RuleBasedPlanner:
                     "fat": round(nutrition["fat"], 1),
                 },
                 meal_type=meal_name,
+                shape=getattr(template, "name", None),
                 preparation_time=15,
                 difficulty_level="easy",
             )
@@ -945,6 +948,8 @@ class RuleBasedPlanner:
                 AIIngredient(
                     name=food.name,
                     quantity=f"{grams:g}g",
+                    food_id=food.id,
+                    grams=float(grams),
                     estimated_calories=round(float(food.calories or 0) * grams / 100, 1),
                     estimated_protein=round(float(food.protein or 0) * grams / 100, 1),
                     estimated_carbs=round(float(food.carbs or 0) * grams / 100, 1),
@@ -968,6 +973,7 @@ class RuleBasedPlanner:
                     "fat": round(totals["fat"], 1),
                 },
                 meal_type=meal_name,
+                recipe_id=match.recipe.id,
                 preparation_time=int(getattr(match.recipe, "prep_minutes", 15) or 15),
                 difficulty_level="easy",
             )
@@ -1391,7 +1397,8 @@ class RuleBasedPlanner:
             # Optional side effect: swallowing this silently is what made the
             # surrounding failures invisible in logs. Control flow is unchanged.
             logger.debug('suppressed non-fatal error', exc_info=True)
-        ingredients = [AIIngredient(name=f.name, quantity=f"{int(g)}g") for (f, g) in components]
+        ingredients = [AIIngredient(name=f.name, quantity=f"{int(g)}g", food_id=f.id, grams=float(g))
+                       for (f, g) in components]
         return AIMeal(
             meal_name=meal_name,
             description=f"{meal_name} planned by rule-based system",

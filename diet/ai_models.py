@@ -15,6 +15,14 @@ class AIIngredient(BaseModel):
     """
     name: str = Field(description="Standard food name")
     quantity: str = Field(description="Amount with unit e.g. '100g' or '2 eggs'")
+    #: Identity and amount as the planner decided them. `name` and `quantity` exist for
+    #: the LLM path and the client; they are display text. Persistence used to re-resolve
+    #: the name (23 duplicate names, then a fuzzy scan, then auto-create) and re-parse the
+    #: grams, so the food that reached the plate was not provably the food the planner
+    #: had constraint-filtered and ranked. When these are set, persistence uses them and
+    #: nothing else.
+    food_id: Optional[int] = Field(default=None, description="FoodItem pk chosen by the planner")
+    grams: Optional[float] = Field(default=None, description="Amount in grams as decided")
     estimated_calories: Optional[float] = Field(default=None, description="Estimated calories")
     estimated_protein: Optional[float] = Field(default=None, description="Estimated protein in grams")
     estimated_carbs: Optional[float] = Field(default=None, description="Estimated carbs in grams")
@@ -44,6 +52,11 @@ class AIMeal(BaseModel):
     ingredients: List[AIIngredient]
     total_nutrition: Dict[str, float] = Field(description="Dict with calories, protein, carbs, fat")
     meal_type: Optional[str] = Field(default=None, description="Breakfast, Lunch, Dinner, Snack")
+    #: Provenance. A recipe id when the meal is a dish from the library; the shape name
+    #: when the engine built it from a template. Both were computed and then dropped at
+    #: the database boundary.
+    recipe_id: Optional[int] = Field(default=None, description="Recipe pk, if a library dish")
+    shape: Optional[str] = Field(default=None, description="Template shape, if engine-built")
     preparation_time: Optional[int] = Field(default=None, description="Estimated preparation time in minutes")
     difficulty_level: Optional[str] = Field(default=None, description="Easy, Medium, Hard")
     

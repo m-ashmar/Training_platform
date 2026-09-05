@@ -733,6 +733,12 @@ class MealComponent(models.Model):
             models.Index(fields=['meal']),
             models.Index(fields=['food']),
         ]
+        # The planner never serves a food twice in one meal, and `converge._write_back`
+        # collapses duplicates into one gram figure if it ever sees them. Make the
+        # database say so, rather than two code paths each half-guarding it.
+        constraints = [
+            models.UniqueConstraint(fields=['meal', 'food'], name='one_row_per_food_per_meal'),
+        ]
 
 class DailyProgress(models.Model):
     """

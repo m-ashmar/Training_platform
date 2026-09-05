@@ -26,15 +26,23 @@ class MealPlanFactory:
 
     def add_components(self, meal: Meal, resolved: Iterable[Tuple[FoodItem, str]]) -> None:
         for food_item, quantity in resolved:
-            grams = convert_to_grams(quantity)
-            grams = piece_based_grams_if_appropriate(quantity, grams, food_item.name, self.piece_weights)
+            if isinstance(quantity, (int, float)):
+                # A gram figure the planner decided. It is not text to be parsed, not a
+                # piece count to be reinterpreted, and not something to merge with a
+                # different row that happens to share a normalised name.
+                grams = float(quantity)
+                decided = True
+            else:
+                grams = convert_to_grams(quantity)
+                grams = piece_based_grams_if_appropriate(quantity, grams, food_item.name, self.piece_weights)
+                decided = False
             
             # Merge with existing component of the same food within this meal if present
             # First try exact ID match
             existing = MealComponent.objects.filter(meal=meal, food=food_item).select_related('food', 'food__category').first()
             
             # If not found, try normalized name match to prevent visual duplicates
-            if not existing:
+            if not existing and not decided:
                 normalized_name = self._normalize_food_name(food_item.name)
                 # BUG FIX: Fetch all components with select_related once instead of N queries
                 all_components = list(MealComponent.objects.filter(meal=meal).select_related('food', 'food__category'))

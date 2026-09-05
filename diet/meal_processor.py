@@ -72,6 +72,19 @@ class MealProcessor:
         resolved_ingredients = []
         
         for ingredient in ai_meal.ingredients:
+            # The deterministic path names the row it chose. Nothing below may reinterpret
+            # that: not a name lookup, not a fuzzy scan, not a fallback row. A food the
+            # planner cleared for allergens and dislikes must be the food that is saved.
+            if ingredient.food_id is not None:
+                food_item = FoodItem.objects.filter(pk=ingredient.food_id).first()
+                if food_item is None:
+                    raise ValueError(
+                        f"planner chose FoodItem {ingredient.food_id} ({ingredient.name!r}) "
+                        f"but no such row exists")
+                amount = ingredient.grams if ingredient.grams is not None else ingredient.quantity
+                resolved_ingredients.append((food_item, amount))
+                continue
+
             try:
                 processed = self._process_single_ingredient(ingredient)
                 self.processed_ingredients.append(processed)

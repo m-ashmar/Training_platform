@@ -2600,3 +2600,66 @@ def test_a_slot_with_no_suitable_shape_falls_back_instead_of_inventing_one(seede
         templates=lunch_only, edges={})
     assert portions == [] and template is None
 
+
+
+# ---------------------------------------------------------------------------
+# P0 — food identity survives persistence
+# ---------------------------------------------------------------------------
+
+def test_the_food_the_planner_chose_is_the_food_that_is_saved(seeded_catalogue):
+    """The planner constraint-filters and ranks a FoodItem, then used to hand persistence
+    a name string. Persistence re-resolved it: exact name, then a fuzzy scan over the whole
+    table, then a brand-new row. With 23 duplicate names in the database, the row on the
+    plate was not provably the row the planner cleared. Now the DTO carries the id and the
+    grams, and persistence uses nothing else.
+    """
+    from diet.models import FoodItem, MealComponent
+    from diet.services.diet_persistence import DietPersistenceService
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    user = _make_client("identity-gate", *PROFILES[2])
+    out = RuleBasedPlanner(user, seed_salt="identity").generate(
+        daily_kcal=2200, duration_days=2, snack_count=1)
+
+    planned = []
+    for meal in out.plan:
+        for ing in meal.ingredients:
+            assert ing.food_id is not None, f"{ing.name} left the planner without an id"
+            assert ing.grams is not None, f"{ing.name} left the planner without grams"
+            planned.append((ing.food_id, round(float(ing.grams), 1)))
+    assert all(m.recipe_id or m.shape for m in out.plan), "every meal carries provenance"
+
+    before = FoodItem.objects.count()
+    plan = DietPersistenceService(user).save_plan(out, meal_count=3, snack_count=1)
+    assert FoodItem.objects.count() == before, "persistence must never invent a food row"
+
+    saved = sorted((c.food_id, round(float(c.quantity), 1))
+                   for c in MealComponent.objects.filter(meal__diet_plan=plan))
+    # converge_plan may re-portion on the ladder, so compare identity exactly and amount
+    # only up to being on the same food's ladder.
+    assert sorted(f for f, _ in saved) == sorted(f for f, _ in planned)
+    from diet.planner.portion import portions_for
+    by_id = {f.id: f for f in FoodItem.objects.filter(id__in={f for f, _ in saved})}
+    for food_id, grams in saved:
+        rungs = [p.grams for p in portions_for(by_id[food_id])]
+        assert any(abs(r - grams) < 0.6 for r in rungs), \
+            f"{by_id[food_id].name} saved at {grams} g, off its ladder {rungs}"
+
+
+def test_two_rows_for_one_food_in_one_meal_cannot_exist(seeded_catalogue):
+    from django.db import IntegrityError, transaction
+
+    from diet.models import DietPlan, FoodItem, Meal, MealComponent
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    user = _make_client("dupe-gate", *PROFILES[2])
+    plan = DietPlan.objects.create(user=user, goal="Maintain", daily_calories=2000.0,
+                                   start_date="2026-09-05", end_date="2026-09-05")
+    meal = Meal.objects.create(diet_plan=plan, meal_type="Lunch", date="2026-09-05")
+    food = FoodItem.objects.filter(needs_review=False).first()
+    MealComponent.objects.create(meal=meal, food=food, quantity=100.0)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        MealComponent.objects.create(meal=meal, food=food, quantity=50.0)
