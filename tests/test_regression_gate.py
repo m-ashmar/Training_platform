@@ -297,7 +297,8 @@ def test_allergens_never_reach_the_candidate_pool(make_user, diet_catalogue):
     from diet.services.meal_validator import AllergenChecker
 
     user = make_user("gate_allergy")
-    UserFoodPreference.objects.create(user=user, allergies="fish")
+    _p, _ = UserFoodPreference.objects.get_or_create(user=user)
+    _p.allergies = "fish"; _p.save(update_fields=["allergies"])
     pool = build_pool(user, load_policy("maintain"), allergen_checker=AllergenChecker("fish"))
     names = {f.name for macros in pool.by_slot.values() for lst in macros.values() for f in lst}
     assert "Salmon" not in names
@@ -2473,7 +2474,7 @@ def test_a_disliked_food_never_reaches_the_plate(seeded_catalogue):
 
     names = ["Chicken Breast (Grilled)", "White Rice (Cooked)"]
     user = _make_client("dislike-gate", *PROFILES[2])
-    pref = UserFoodPreference.objects.create(user=user, allergies="")
+    pref, _ = UserFoodPreference.objects.get_or_create(user=user)
     pref.disliked_foods.set(FoodItem.objects.filter(name__in=names))
 
     out = RuleBasedPlanner(user, seed_salt="dislike-gate").generate(
@@ -2499,7 +2500,8 @@ def test_an_allergen_never_reaches_the_plate(seeded_catalogue):
     }
     for index, (phrase, words) in enumerate(banned.items()):
         user = _make_client(f"allergy-gate-{index}", *PROFILES[2])
-        UserFoodPreference.objects.create(user=user, allergies=phrase)
+        _p, _ = UserFoodPreference.objects.get_or_create(user=user)
+        _p.allergies = phrase; _p.save(update_fields=["allergies"])
         out = RuleBasedPlanner(user, seed_salt=f"allergy{index}").generate(
             daily_kcal=2200, duration_days=5, snack_count=1)
         served = [i.name for m in out.plan for i in m.ingredients]
@@ -2663,3 +2665,112 @@ def test_two_rows_for_one_food_in_one_meal_cannot_exist(seeded_catalogue):
     MealComponent.objects.create(meal=meal, food=food, quantity=100.0)
     with pytest.raises(IntegrityError), transaction.atomic():
         MealComponent.objects.create(meal=meal, food=food, quantity=50.0)
+
+
+# ---------------------------------------------------------------------------
+# P1 — the core feature: liked foods, by meal and macro, and the cuisine a client chose
+# ---------------------------------------------------------------------------
+
+
+def _grant_diet_access(user):
+    """A live subscription whose plan carries diet access, the way production gates it."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from subscription.models import Subscription, SubscriptionPlan
+
+    plan, _ = SubscriptionPlan.objects.get_or_create(
+        name="gate_diet_plan",
+        defaults=dict(plan_type="premium", description="gate", price="5000.00",
+                      currency="SYP", duration_days=30, is_active=True,
+                      has_diet_access=True, has_routine_access=True,
+                      has_challenges_access=True, has_ai_advice=True,
+                      has_priority_support=True))
+    return Subscription.objects.create(
+        user=user, plan=plan, status="active",
+        end_date=timezone.now() + timedelta(days=30))
+
+
+def test_one_food_can_be_chosen_for_several_meals(seeded_catalogue):
+    """405 categorisation rows in the old database, 405 distinct (user, food) pairs, zero
+    in more than one slot. The write endpoint was keyed on (user, food), so the second
+    slot overwrote the first and "chicken is my lunch protein AND my dinner protein" had
+    never once existed.
+    """
+    from diet.models import FoodItem, UserFoodCategoryPreference, UserFoodPreference
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    user = _make_client("slots-gate", *PROFILES[2])
+    _grant_diet_access(user)
+    chicken = FoodItem.objects.get(name="Chicken Breast (Grilled)")
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+    c = Client()
+    c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(user).access_token}"
+
+    for meal in ("Lunch", "Dinner"):
+        r = c.post("/api/diet/v1/preferences/food-category/", {"food_id": chicken.id, "meal": meal,
+                                                   "macro": "protein"},
+                   content_type="application/json")
+        assert r.status_code in (200, 201), r.content
+
+    rows = UserFoodCategoryPreference.objects.filter(user=user, food=chicken)
+    assert sorted(rows.values_list("meal", flat=True)) == ["Dinner", "Lunch"]
+    # Categorising implies liking; the client no longer has to do both.
+    assert UserFoodPreference.objects.get(user=user).liked_foods.filter(pk=chicken.pk).exists()
+
+
+def test_a_client_can_set_every_preference_list_and_the_cuisine_ratio(seeded_catalogue):
+    from diet.models import FoodItem, UserFoodPreference
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    user = _make_client("lists-gate", *PROFILES[2])
+    _grant_diet_access(user)
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+    c = Client()
+    c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(user).access_token}"
+    salmon = FoodItem.objects.get(name="Salmon Fillet")
+    rice = FoodItem.objects.get(name="White Rice (Cooked)")
+    r = c.post("/api/diet/v1/preferences/", {"protein_choices": [salmon.id],
+                                          "carb_choices": [rice.id], "local_ratio": 0.8},
+               content_type="application/json")
+    assert r.status_code == 200, r.content
+    pref = UserFoodPreference.objects.get(user=user)
+    assert list(pref.protein_choices.values_list("id", flat=True)) == [salmon.id]
+    assert pref.local_ratio == 0.8
+    body = c.get("/api/diet/v1/preferences/").json()
+    assert "vegetable_choices" in body and "fruit_choices" in body
+    assert body["local_ratio"] == 0.8
+    assert c.post("/api/diet/v1/preferences/", {"local_ratio": 1.7},
+                  content_type="application/json").status_code == 400
+
+
+def test_the_cuisine_ratio_is_honoured_on_every_path(seeded_catalogue):
+    """0.0 is Western only, 1.0 is Levantine only. Universal foods are always eligible.
+    At the ends the other cuisine is excluded outright; between, it is weighted.
+    """
+    from diet.models import FoodItem, UserFoodPreference
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    western = set(FoodItem.objects.filter(cuisine="western").values_list("name", flat=True))
+    levantine = set(FoodItem.objects.filter(cuisine="levantine").values_list("name", flat=True))
+    assert western and levantine
+
+    served = {}
+    for ratio in (0.0, 1.0):
+        user = _make_client(f"cuisine-gate-{int(ratio)}", *PROFILES[2])
+        _p, _ = UserFoodPreference.objects.get_or_create(user=user)
+        _p.local_ratio = ratio; _p.save(update_fields=["local_ratio"])
+        out = RuleBasedPlanner(user, seed_salt="cuisine").generate(
+            daily_kcal=2200, duration_days=5, snack_count=1)
+        served[ratio] = {i.name for m in out.plan for i in m.ingredients}
+        assert len(out.plan) == 20
+
+    assert not (served[0.0] & levantine), f"Western-only got Levantine: {served[0.0] & levantine}"
+    assert not (served[1.0] & western), f"Levantine-only got Western: {served[1.0] & western}"

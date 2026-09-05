@@ -195,6 +195,19 @@ LEVANTINE = [
 ]
 
 
+#: Foods a Levantine client would not call their own. Everything else in `USDA` is
+#: universal — chicken, rice, eggs, vegetables, fruit belong to no cuisine. `LEVANTINE`
+#: rows are Levantine by construction.
+WESTERN = {
+    "Oats (Rolled, Dry)", "Quinoa (Cooked)", "Pasta (Cooked)", "Whole Wheat Bread",
+    "Peanut Butter (Natural)", "Almond Butter", "Cottage Cheese (Low-Fat)",
+    "Greek Yogurt (Non-Fat)", "Mozzarella (Part-Skim)", "Turkey Breast", "Tofu (Firm)",
+    "Chia Seeds", "Flax Seeds", "Blueberries", "Kiwi", "Avocado", "Salmon Fillet",
+    "Cod Fillet", "Tuna (Canned in Water)", "Sardines (Canned)", "Broccoli", "Kale",
+    "Sweet Potato (Baked)", "Corn (Cooked)", "Butter (Salted)",
+}
+
+
 def target_names():
     """Every canonical name the catalogue should contain, in load order."""
     return [row[0] for row in USDA] + [row[0] for row in LEVANTINE]

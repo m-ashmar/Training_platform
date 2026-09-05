@@ -24,7 +24,7 @@ from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from diet.data.catalogue import LEVANTINE, USDA
+from diet.data.catalogue import LEVANTINE, USDA, WESTERN
 from diet.models import FoodCategory, FoodItem, Recipe, RecipeIngredient
 
 CACHE = Path(__file__).resolve().parents[2] / "data" / "usda_cache.json"
@@ -55,6 +55,7 @@ class Command(BaseCommand):
                 continue
             rows.append(dict(
                 name=name, name_ar=name_ar, category=category, slots=slots,
+                cuisine="western" if name in WESTERN else "universal",
                 api_id=f"usda-{data['fdc_id']}",
                 calories=data["calories"], protein=data["protein"],
                 carbs=data["carbs"], fat=data["fat"],
@@ -64,6 +65,7 @@ class Command(BaseCommand):
         for name, name_ar, kcal, protein, carbs, fat, category, slots in LEVANTINE:
             rows.append(dict(
                 name=name, name_ar=name_ar, category=category, slots=slots,
+                cuisine="levantine",
                 api_id=f"lev-{_slug(name)}",
                 calories=kcal, protein=protein, carbs=carbs, fat=fat,
                 source="curated (absent from USDA SR Legacy and Foundation)",
@@ -120,6 +122,7 @@ class Command(BaseCommand):
                         serving_size="100g", serving_size_grams=100,
                         category=categories[row["category"]],
                         meal_slots=list(row["slots"]),
+                        cuisine=row["cuisine"],
                         needs_review=False,
                     ),
                 )

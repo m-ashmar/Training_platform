@@ -364,15 +364,20 @@ class UserFoodCategoryPreferenceView(APIView):
 
             food = get_object_or_404(FoodItem, id=food_id)
 
-            # Ensure food is liked by the user before categorization
+            # Putting a food in a meal slot is a stronger statement than liking it, so it
+            # implies the like rather than requiring it first. Rejecting the request
+            # meant a client who categorised without tapping "like" got an error, and a
+            # client who liked without categorising contributed nothing to 79% of meals.
             preferences, _created = UserFoodPreference.objects.get_or_create(user=request.user)
-            if not preferences.liked_foods.filter(id=food.id).exists():
-                return Response({"error": _("Food must be liked before categorization")}, status=status.HTTP_400_BAD_REQUEST)
+            preferences.liked_foods.add(food)
+            preferences.disliked_foods.remove(food)
 
-            obj, created = UserFoodCategoryPreference.objects.update_or_create(
-                user=request.user,
-                food=food,
-                defaults={"meal": meal, "macro": macro}
+            # Keyed on every field of the unique constraint. Keyed on (user, food) alone,
+            # a second slot for the same food overwrote the first, so "chicken is my lunch
+            # protein AND my dinner protein" — the whole point of the feature — had never
+            # once existed in the database: 405 rows, 405 distinct (user, food) pairs.
+            obj, created = UserFoodCategoryPreference.objects.get_or_create(
+                user=request.user, food=food, meal=meal, macro=macro,
             )
 
             return Response({
@@ -409,7 +414,22 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             if macro and macro not in macro_values:
                 return Response({"error": _("Invalid macro")}, status=status.HTTP_400_BAD_REQUEST)
 
-            obj = get_object_or_404(UserFoodCategoryPreference, user=request.user, food_id=food_id)
+            # A food may now sit in several slots, so the row to change is named by
+            # the slot it is in (`from_meal`, `from_macro`) and moved to the new one.
+            # Without that, `get_object_or_404` on (user, food) raised
+            # MultipleObjectsReturned the moment the core feature worked.
+            rows = UserFoodCategoryPreference.objects.filter(user=request.user, food_id=food_id)
+            from_meal, from_macro = request.data.get('from_meal'), request.data.get('from_macro')
+            if from_meal:
+                rows = rows.filter(meal=from_meal)
+            if from_macro:
+                rows = rows.filter(macro=from_macro)
+            if rows.count() > 1:
+                return Response({"error": _("This food is in several slots; pass from_meal and from_macro")},
+                                status=status.HTTP_400_BAD_REQUEST)
+            obj = rows.first()
+            if obj is None:
+                return Response({"error": _("Not found")}, status=status.HTTP_404_NOT_FOUND)
             if meal:
                 obj.meal = meal
             if macro:
@@ -432,9 +452,16 @@ class UserFoodCategoryPreferenceDetailView(APIView):
 
     def delete(self, request, food_id):
         try:
-            obj = get_object_or_404(UserFoodCategoryPreference, user=request.user, food_id=food_id)
-            obj.delete()
-            return Response({"message": _("Category preference deleted")})
+            # Delete one slot when named, every slot for the food when not.
+            rows = UserFoodCategoryPreference.objects.filter(user=request.user, food_id=food_id)
+            if request.data.get('meal'):
+                rows = rows.filter(meal=request.data['meal'])
+            if request.data.get('macro'):
+                rows = rows.filter(macro=request.data['macro'])
+            deleted, _ = rows.delete()
+            if not deleted:
+                return Response({"error": _("Not found")}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"message": _("Category preference deleted"), "deleted": deleted})
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -591,11 +618,8 @@ class UserPreferencesView(APIView):
             # Optimize: Prefetch all related ManyToMany fields to prevent N+1 queries
             try:
                 preferences = UserFoodPreference.objects.prefetch_related(
-                    'liked_foods', 
-                    'disliked_foods', 
-                    'protein_choices', 
-                    'carb_choices', 
-                    'fat_choices'
+                    'liked_foods', 'disliked_foods', 'protein_choices', 'carb_choices',
+                    'fat_choices', 'vegetable_choices', 'fruit_choices',
                 ).get(user=request.user)
                 created = False
             except UserFoodPreference.DoesNotExist:
@@ -623,7 +647,16 @@ class UserPreferencesView(APIView):
                 'fat_choices': [
                     {'id': food.id, 'name': food.name, 'image_url': food.image_url}
                     for food in preferences.fat_choices.all()
-                ]
+                ],
+                'vegetable_choices': [
+                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    for food in preferences.vegetable_choices.all()
+                ],
+                'fruit_choices': [
+                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    for food in preferences.fruit_choices.all()
+                ],
+                'local_ratio': preferences.local_ratio,
             })
             
         except PASSTHROUGH_EXCEPTIONS:
@@ -673,9 +706,30 @@ class UserPreferencesView(APIView):
                 food_ids = request.data['disliked_foods']
                 foods = FoodItem.objects.filter(id__in=food_ids)
                 preferences.disliked_foods.set(foods)
+            # The five macro-choice lists carried a 50-point ranking weight that no
+            # endpoint could write; Django admin was the only writer.
+            for field in ('protein_choices', 'carb_choices', 'fat_choices',
+                          'vegetable_choices', 'fruit_choices'):
+                if field in request.data:
+                    ids = request.data[field] or []
+                    getattr(preferences, field).set(FoodItem.objects.filter(id__in=ids))
+            changed = []
             if 'allergies' in request.data:
                 preferences.allergies = request.data['allergies']
-                preferences.save()
+                changed.append('allergies')
+            if 'local_ratio' in request.data:
+                try:
+                    ratio = float(request.data['local_ratio'])
+                except (TypeError, ValueError):
+                    return Response({"error": _("local_ratio must be a number from 0 to 1")},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                if not 0.0 <= ratio <= 1.0:
+                    return Response({"error": _("local_ratio must be a number from 0 to 1")},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                preferences.local_ratio = ratio
+                changed.append('local_ratio')
+            if changed:
+                preferences.save(update_fields=changed)
             return Response({"message": _("Preferences updated successfully")})
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).

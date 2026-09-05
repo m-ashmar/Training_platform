@@ -138,6 +138,13 @@ class FoodItem(RowValidationMixin, models.Model):
     meal_slots = models.JSONField(
         default=list, blank=True,
         help_text="Meals this food suits, e.g. ['Breakfast', 'Snack']. Empty means any.")
+    CUISINE_UNIVERSAL, CUISINE_WESTERN, CUISINE_LEVANTINE = 'universal', 'western', 'levantine'
+    CUISINE_CHOICES = [(CUISINE_UNIVERSAL, 'Universal'), (CUISINE_WESTERN, 'Western'),
+                       (CUISINE_LEVANTINE, 'Levantine')]
+    #: Which table this food belongs on. Universal is the default and means both: a
+    #: chicken breast is not Western or Levantine, it is dinner.
+    cuisine = models.CharField(max_length=12, choices=CUISINE_CHOICES,
+                               default=CUISINE_UNIVERSAL, db_index=True)
     ingredients_text = models.TextField(
         blank=True, default='',
         help_text="Raw ingredient list, when the source provides one. Scanned for allergens.",
@@ -312,7 +319,10 @@ class UserFoodPreference(models.Model):
     """
     Stores user-specific food preferences, allergies, and macro choices.
     """
-    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    # One row per client. This was a plain ForeignKey read everywhere with
+    # `.filter(user=).first()`, so a second row — which nothing prevented — silently
+    # zeroed every like, dislike and allergy the client had entered.
+    user = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
     liked_foods = models.ManyToManyField(FoodItem, related_name='liked_by', blank=True)
     disliked_foods = models.ManyToManyField(FoodItem, related_name='disliked_by', blank=True)
     allergies = models.TextField(blank=True)
@@ -321,6 +331,12 @@ class UserFoodPreference(models.Model):
     fat_choices = models.ManyToManyField(FoodItem, related_name='fat_prefs', limit_choices_to={'category__name': 'Fats'})
     vegetable_choices = models.ManyToManyField(FoodItem, related_name='vegetable_prefs', blank=True)
     fruit_choices = models.ManyToManyField(FoodItem, related_name='fruit_prefs', blank=True)
+    #: How much of the plan should be local food. 0.0 is Western only, 1.0 is Levantine
+    #: only, anything between is a mix at that ratio. Universal foods — chicken, rice,
+    #: eggs, vegetables, fruit — are always eligible. At exactly 0 or 1 the other cuisine
+    #: is excluded outright; between, it is weighted. The client chooses; the engine
+    #: honours it on both selection paths.
+    local_ratio = models.FloatField(default=0.5)
 
     class Meta:
         # Deterministic total order. Without it Postgres returns rows in whatever order it

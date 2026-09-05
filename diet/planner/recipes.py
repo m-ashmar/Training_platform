@@ -178,6 +178,8 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         if constraints is not None and constraints.active:
             if constraints.forbids_any(food for food, _g, _s in lines):
                 continue
+            if not constraints.cuisine.allows(getattr(recipe, "cuisine", None)):
+                continue
 
         ladders = {id(food): [p.grams for p in portions_for(food)]
                    for food, _g, _s in lines}
@@ -228,6 +230,10 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             # asked for. Weighted so preference decides between dishes that all fit.
             fit = 1.0 / (1.0 + float(match.deviation.magnitude))
             weight = W_FIT * fit + W_PREFERENCE * _preference_share(recipe, wanted)
+            if constraints is not None:
+                # A dish from the cuisine the client asked for less of is still
+                # servable at a mixed ratio; it is simply chosen less often.
+                weight *= max(0.1, constraints.cuisine.weight(getattr(recipe, "cuisine", None)))
             if recipe.id in recent:
                 weight *= RECENCY_PENALTY
             within.append((match, max(weight, 1e-6)))

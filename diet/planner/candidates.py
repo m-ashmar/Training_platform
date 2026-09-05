@@ -48,6 +48,10 @@ W_ROLE_STAPLE = 40.0
 #: staple in its slot, and together a lunch. Ranked below the client's own choice, so
 #: someone who says they want chicken for breakfast still gets it.
 W_MEAL_LIBRARY = 35.0
+#: How well the food matches the cuisine ratio the client chose, 0 to 1, scaled. Below a
+#: chosen food and above density, so a client who asks for mostly local food gets it and
+#: a client who names a Western food still gets that food.
+W_CUISINE = 30.0
 
 
 @dataclass
@@ -259,6 +263,7 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
 
     def score(food, meal: str, macro: str) -> float:
         s = W_ROLE_STAPLE if getattr(food, "role", "") == FoodItem.ROLE_STAPLE else 0.0
+        s += W_CUISINE * constraints.cuisine.weight(getattr(food, "cuisine", None))
         if food.id in served_at.get(meal, ()):
             s += W_MEAL_LIBRARY
         if food.id in slot_pref.get((meal, macro), ()):
