@@ -93,6 +93,20 @@ UNIT_RULES = [
     (r"(pasta|noodles?|spaghetti|macaroni)\b", "cup", 75, 1, 2),
     (r"(potato(es)?|yams?)\b", "medium", 150, 0.5, 2.5),
     (r"(edamame|sprouted)\b", "cup", 155, 0.5, 1.5),
+    # --- Levantine dishes and drinks ------------------------------------------
+    # Served as a plate, a bowl or a glass, not as a weight. Without these the
+    # nineteen foods below fell to the gram ladder, which is a coarser and less
+    # recognisable amount than the dish has a name for.
+    (r"(coffee|tea|ayran|jallab|lemonade|milks?)\b", "glass", 200, 0.5, 1.5),
+    (r"(ashta|labneh|shanklish)\b", "serving", 60, 0.5, 2),
+    (r"(hummus|baba ghanoush|mutabbal|tzatziki|dips?)\b", "serving", 60, 0.5, 2),
+    (r"(tabbouleh|fattoush|salad)\b", "bowl", 120, 0.5, 2),
+    (r"(kibbeh|kubba|falafel|patt(y|ies))\b", "piece", 55, 1, 4),
+    (r"(mujadara|molokhia|stew|casserole)\b", "plate", 220, 0.5, 1.5),
+    (r"(makdous|kishk|sumac|zaatar|za'atar)\b", "tbsp", 15, 1, 3),
+    (r"(pickles?|kabees|kabis)\b", "serving", 40, 0.5, 2),
+    (r"(lemons?|limes?)\b", "half", 30, 0.5, 1),
+    (r"(pomegranates?)\b", "half", 140, 0.5, 1.5),
     # --- produce --------------------------------------------------------------
     (r"(bananas?|apples?|oranges?|pears?|peach(es)?|mangos?|kiwis?|plums?)\b",
      "medium", 120, 0.5, 2),

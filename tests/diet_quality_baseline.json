@@ -2,7 +2,7 @@
   "_comment": "Diet engine quality baseline, phase 0.2 of the rebuild. Measured against the catalogue built by `add_healthy_foods` and `seed_recipes`, which is what a fresh production database contains. The gate asserts these as bounds in the direction of improvement and tightens them phase by phase.",
   "recorded": "2026-09-05",
   "catalogue": {
-    "foods": 101,
+    "foods": 133,
     "recipes": 16
   },
   "measured": {
@@ -33,19 +33,19 @@
     "portions_measured": 612,
     "min_distinct_portions_per_food": 2,
     "drift_by_target": {
-      "1400": -1.793,
-      "1800": 0.756,
-      "2200": -1.077,
-      "2600": -0.623,
-      "3000": -2.98
+      "1400": 0.829,
+      "1800": -0.928,
+      "2200": -0.073,
+      "2600": -3.908,
+      "3000": -2.107
     },
     "drift_all_one_sided": false,
-    "drift_worst_abs": 2.98,
+    "drift_worst_abs": 3.908,
     "twin_identical_meals": 21,
     "twin_total_meals": 28,
     "twin_identical_built": 0,
     "twin_built_meals": 7,
-    "chosen_ingredient_share": 0.0971,
+    "chosen_ingredient_share": 0.1635,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],
     "catalogue_gaps": []

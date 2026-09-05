@@ -84,3 +84,6 @@ staticfiles/
 # doubles the repo and guarantees they go stale.
 *_bundle.txt
 _excluded/**/*_bundle.txt
+
+# API keys handed over during development
+key.md

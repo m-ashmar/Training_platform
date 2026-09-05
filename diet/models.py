@@ -249,6 +249,8 @@ class FoodItem(RowValidationMixin, models.Model):
     # Physical ceilings. Nothing validated nutrition before, so the catalogue contains
     # `Cheese, Brick` at 12.00 kcal/g — above the 9 kcal/g maximum for pure fat — and
     # four foods whose macros disagree with their stated calories by more than 35%.
+    #: Below this absolute gap the percentage is noise, not a data error. See clean().
+    ATWATER_MIN_ABS_KCAL = 25.0
     MAX_KCAL_PER_GRAM = 9.1
     ATWATER_TOLERANCE = 0.35
 
@@ -287,7 +289,15 @@ class FoodItem(RowValidationMixin, models.Model):
 
         p_, c_, f_ = float(self.protein or 0), float(self.carbs or 0), float(self.fat or 0)
         atwater = 4 * p_ + 4 * c_ + 9 * f_
+        # A percentage gap on a small number is not information. Atwater factors apply to
+        # AVAILABLE carbohydrate, while every reference table quotes carbohydrate by
+        # difference, which includes fibre at roughly 2 kcal/g rather than 4. On a
+        # low-calorie plant food that systematically over-counts: a lemon is 29 kcal and
+        # estimates at 44, a 52% gap and a 15 kcal one. The absolute floor keeps the check
+        # doing its real job — catching a row whose macros and calories describe different
+        # foods — without rejecting correct reference data.
         if (cal > 0 and atwater > 0 and not self.needs_review
+                and abs(atwater - cal) > self.ATWATER_MIN_ABS_KCAL
                 and abs(atwater - cal) / cal > self.ATWATER_TOLERANCE):
             errors['calories'] = (
                 f'Stated {cal:.0f} kcal but the macros give {atwater:.0f} kcal '

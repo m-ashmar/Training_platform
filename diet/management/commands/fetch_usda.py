@@ -25,6 +25,7 @@ from diet.data.catalogue import USDA
 
 CACHE = Path(__file__).resolve().parents[2] / "data" / "usda_cache.json"
 ENDPOINT = "https://api.nal.usda.gov/fdc/v1/foods/search"
+DETAIL = "https://api.nal.usda.gov/fdc/v1/food"
 
 #: FoodData Central nutrient ids. Everything else in the response is discarded.
 NUTRIENTS = {1008: "calories", 1003: "protein", 1005: "carbs", 1004: "fat",
@@ -32,11 +33,22 @@ NUTRIENTS = {1008: "calories", 1003: "protein", 1005: "carbs", 1004: "fat",
 
 
 def _macros(food: dict) -> dict:
+    """Per-100 g macros from either response shape.
+
+    Search results carry a flat `nutrientId`/`value`; the single-food detail endpoint
+    nests them as `nutrient: {id}` with the figure under `amount`. Reading only the first
+    shape made every pinned food look like it had no energy data.
+    """
     out = {}
-    for nutrient in food.get("foodNutrients", []):
-        key = NUTRIENTS.get(nutrient.get("nutrientId"))
-        if key:
-            out[key] = float(nutrient.get("value") or 0.0)
+    for entry in food.get("foodNutrients", []):
+        nutrient_id = entry.get("nutrientId")
+        value = entry.get("value")
+        if nutrient_id is None:
+            nutrient_id = (entry.get("nutrient") or {}).get("id")
+            value = entry.get("amount")
+        key = NUTRIENTS.get(nutrient_id)
+        if key and value is not None:
+            out[key] = float(value)
     return out
 
 
@@ -62,13 +74,19 @@ class Command(BaseCommand):
 
         failed = []
         for index, (name, query) in enumerate(missing, 1):
+            pinned = query.startswith("fdc:")
             try:
-                response = requests.post(
-                    ENDPOINT, params={"api_key": opts["api_key"]},
-                    json={"query": query,
-                          "dataType": ["SR Legacy", "Foundation"],
-                          "pageSize": 5},
-                    timeout=30)
+                if pinned:
+                    response = requests.get(
+                        f"{DETAIL}/{query[4:]}",
+                        params={"api_key": opts["api_key"]}, timeout=30)
+                else:
+                    response = requests.post(
+                        ENDPOINT, params={"api_key": opts["api_key"]},
+                        json={"query": query,
+                              "dataType": ["SR Legacy", "Foundation"],
+                              "pageSize": 5},
+                        timeout=30)
             except requests.RequestException as exc:
                 failed.append((name, f"network: {exc}"))
                 continue
@@ -82,10 +100,14 @@ class Command(BaseCommand):
                 failed.append((name, f"HTTP {response.status_code}"))
                 continue
 
-            foods = response.json().get("foods") or []
-            best = next((f for f in foods if _macros(f).get("calories") is not None), None)
+            payload = response.json()
+            foods = [payload] if pinned else (payload.get("foods") or [])
+            # A row reporting zero energy is a Foundation entry quoting Atwater-specific
+            # energy under a different nutrient id, not a zero-calorie food. Skip it
+            # rather than store a food the planner can serve infinitely much of.
+            best = next((f for f in foods if _macros(f).get("calories", 0) > 0), None)
             if best is None:
-                failed.append((name, "no SR Legacy or Foundation match"))
+                failed.append((name, "no usable SR Legacy or Foundation match"))
                 continue
 
             macros = _macros(best)

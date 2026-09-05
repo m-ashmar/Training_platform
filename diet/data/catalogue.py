@@ -38,16 +38,22 @@ ALL = (B, L, D, S)
 MAIN = (L, D)
 MORNING = (B, S)
 
-# (canonical name, USDA search term, category, meal slots, Arabic name)
+# (canonical name, USDA source, category, meal slots, Arabic name)
+#
+# The source is a search term, or "fdc:<id>" to pin one FoodData Central row by identity.
+# A search is a heuristic and it picked the wrong food nine times out of ninety-eight:
+# "chicken breast roasted skinless" returned oven-roasted lunchmeat roll at 14.6 g protein,
+# and "chicken thigh roasted skinless" returned chicken SKIN at 44 g fat. Anything whose
+# value matters is pinned.
 USDA = [
     # --- poultry and meat --------------------------------------------------
-    ("Chicken Breast (Grilled)", "chicken breast roasted skinless", "Proteins", MAIN, "صدر دجاج"),
-    ("Chicken Thigh (Skinless)", "chicken thigh roasted skinless", "Proteins", MAIN, "فخذ دجاج"),
+    ("Chicken Breast (Grilled)", "fdc:171477", "Proteins", MAIN, "صدر دجاج"),
+    ("Chicken Thigh (Skinless)", "fdc:172388", "Proteins", MAIN, "فخذ دجاج"),
     ("Turkey Breast", "turkey breast roasted", "Proteins", MAIN, "صدر حبش"),
-    ("Lean Beef Sirloin", "beef top sirloin lean cooked", "Proteins", MAIN, "لحم بقر"),
+    ("Lean Beef Sirloin", "fdc:168636", "Proteins", MAIN, "لحم بقر"),
     ("Beef Mince (Lean)", "ground beef 90% lean cooked", "Proteins", MAIN, "لحمة مفرومة"),
-    ("Lamb Leg (Lean)", "lamb leg roasted lean", "Proteins", MAIN, "لحم غنم"),
-    ("Lamb Shoulder", "lamb shoulder cooked lean", "Proteins", MAIN, "كتف غنم"),
+    ("Lamb Leg (Lean)", "fdc:174314", "Proteins", MAIN, "لحم غنم"),
+    ("Lamb Shoulder", "fdc:173814", "Proteins", MAIN, "كتف غنم"),
     ("Veal Cutlet", "veal cutlet cooked", "Proteins", MAIN, "لحم عجل"),
     ("Liver (Lamb)", "lamb liver cooked", "Proteins", MAIN, "كبدة"),
     # --- fish and seafood --------------------------------------------------
@@ -78,14 +84,14 @@ USDA = [
     ("Green Peas (Cooked)", "peas green cooked boiled", "Vegetables", MAIN, "بازلاء"),
     ("Tofu (Firm)", "tofu firm prepared", "Proteins", MAIN, "توفو"),
     # --- grains and starches ----------------------------------------------
-    ("White Rice (Cooked)", "rice white long grain cooked", "Carbs", MAIN, "رز أبيض"),
+    ("White Rice (Cooked)", "fdc:169757", "Carbs", MAIN, "رز أبيض"),
     ("Brown Rice (Cooked)", "rice brown long grain cooked", "Carbs", MAIN, "رز أسمر"),
     ("Bulgur (Cooked)", "bulgur cooked", "Carbs", MAIN, "برغل"),
-    ("Oats (Rolled, Dry)", "oats raw", "Carbs", MORNING, "شوفان"),
+    ("Oats (Rolled, Dry)", "fdc:173904", "Carbs", MORNING, "شوفان"),
     ("Quinoa (Cooked)", "quinoa cooked", "Carbs", MAIN, "كينوا"),
     ("Barley (Cooked)", "barley pearled cooked", "Carbs", MAIN, "شعير"),
     ("Couscous (Cooked)", "couscous cooked", "Carbs", MAIN, "كسكس"),
-    ("Pasta (Cooked)", "spaghetti cooked enriched", "Carbs", MAIN, "معكرونة"),
+    ("Pasta (Cooked)", "fdc:169737", "Carbs", MAIN, "معكرونة"),
     ("Whole Wheat Bread", "bread whole wheat commercially prepared", "Carbs", ALL, "خبز أسمر"),
     ("White Potato (Baked)", "potato baked flesh and skin", "Carbs", MAIN, "بطاطا"),
     ("Sweet Potato (Baked)", "sweet potato baked in skin", "Carbs", MAIN, "بطاطا حلوة"),
@@ -110,7 +116,7 @@ USDA = [
     ("Cauliflower", "cauliflower cooked boiled drained", "Vegetables", MAIN, "قرنبيط"),
     ("Spinach", "spinach cooked boiled drained", "Vegetables", ALL, "سبانخ"),
     ("Tomato", "tomatoes red ripe raw", "Vegetables", ALL, "بندورة"),
-    ("Cucumber", "cucumber with peel raw", "Vegetables", ALL, "خيار"),
+    ("Cucumber", "fdc:168409", "Vegetables", ALL, "خيار"),
     ("Lettuce (Romaine)", "lettuce cos or romaine raw", "Vegetables", ALL, "خس"),
     ("Carrot", "carrots raw", "Vegetables", ALL, "جزر"),
     ("Bell Pepper (Red)", "peppers sweet red raw", "Vegetables", ALL, "فليفلة"),

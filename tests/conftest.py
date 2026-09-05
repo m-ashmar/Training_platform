@@ -91,7 +91,10 @@ def seeded_catalogue(django_db_setup, django_db_blocker):
         # them every time rather than guarding on a row count. The guard meant a food
         # added to the seed never appeared in a reused test database, which is how a
         # missing staple stayed invisible across several runs.
-        call_command("add_healthy_foods", verbosity=0)
+        # The curated catalogue, not the old ad-hoc seed. The gate has to measure the
+        # database that ships: `add_healthy_foods` built a different 100 rows, so every
+        # number recorded against it described a catalogue production no longer has.
+        call_command("load_food_catalogue", "--apply", "--wipe", verbosity=0)
         call_command("seed_recipes", verbosity=0)
         call_command("seed_food_units", "--apply", verbosity=0)
         return {
