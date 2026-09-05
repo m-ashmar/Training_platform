@@ -122,8 +122,10 @@ food that no nutrition API returns: household unit with min/max, role, meal appr
 Arabic name. There is also no Edamam import command in the repo, so the current 124 rows are
 not reproducible.
 
-**3.1** Drop the catalogue. `FoodItem`, `Recipe`, `RecipeIngredient`, and every plan that
-references them. It is all development data.
+**Status: done 2026-09-05.** 133 rows, 98 USDA-pinned, 35 curated Levantine, zero
+duplicates, 100% units, every row with an Arabic name and meal slots. Gate seeds it.
+
+**3.1** ~~Drop the catalogue.~~ Done.
 
 **3.2** One curated seed file in the repo, ~300–400 rows, per-100g normalised, one row per
 food. Source the numbers from **USDA FoodData Central** (SR Legacy + Foundation Foods):
@@ -273,6 +275,55 @@ recipe. Pairing covers 16 of 101 foods today; the other 85 get zero culinary sig
 recipes. Adding 100 to a selector that concentrates this hard reproduces the monotony.
 
 **9.6** Do **not** lower `SOFTMAX_T`. Measured P(chosen food wins) is 0.91–0.96.
+
+---
+
+## P11 — Collect the signal learning needs
+
+`diet/planner/learning.py` reads `MealComponent.is_completed`,
+`actual_quantity_consumed` and `Meal.is_liked`. Nothing in the app writes them: zero rows
+exist. A learning engine on this data is a slogan. Ship these first, then learning means
+something.
+
+**11.1** Endpoint + client action: mark a meal eaten, with optional actual amount per
+component. Writes `is_completed`, `completed_at`, `actual_quantity_consumed`.
+
+**11.2** Endpoint + client action: swap this meal or this food. Record the rejected food
+and the chosen replacement as a `MealSwap(user, meal, rejected_food, chosen_food, at)`.
+A swap is the strongest preference signal a client will ever give you, and it is free.
+
+**11.3** Per-component rating, not per-meal. `Meal.is_liked` credits every food in a
+liked meal equally, so a client who disliked one food penalises the other three.
+
+**11.4** Only after 11.1–11.3 have run in production for a month: tune the eight
+`candidates.py` weights from accept/swap/refuse outcomes. Until then they stay
+hand-set and documented.
+
+---
+
+## P12 — Food similarity from features, not training
+
+The honest version of "vectors" for a catalogue with zero consumption data. No model,
+no training, no cold start.
+
+**12.1** `diet/planner/similarity.py`: a feature vector per food — normalised macro
+profile per 100 g, category one-hot, role one-hot, meal-slot multi-hot, cooked/dry flag —
+and cosine similarity over it. Chicken lands next to turkey and tilapia; rice next to
+bulgur and couscous; labneh next to Greek yogurt.
+
+**12.2** Use it in three places. (a) Generalise `swap_group` (P9.1): a recipe line with no
+explicit group accepts any food above a similarity threshold in the same slot. (b) When a
+client's chosen food is not in any fitting recipe, substitute the nearest chosen food into
+the nearest recipe line, so preference reaches the recipe path without a recipe author.
+(c) `swap this food` in P11.2 offers the top-k neighbours, portioned to the same macros.
+
+**12.3** Threshold and features are tunable in `policy.py`. Benchmark: `chosen_ingredient_share`
+must rise; `absurd_portion_rate` and `days_repeating_a_dish` must not move.
+
+**Do not** add embeddings from a language model here. A learned embedding encodes
+culinary association, which is real, but it cannot be audited, it drifts with the model
+version, and it needs a corpus you do not have. Revisit when P11 has produced data and the
+recipe library is past two hundred.
 
 ---
 
