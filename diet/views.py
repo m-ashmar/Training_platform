@@ -908,7 +908,10 @@ class GenerateDietPlanRuleBasedView(APIView):
             # Rule-Based Planner only supports 1 snack max. Requesting more causes stride verification issues in persistence.
             requested_snacks = int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10)
             snack_count = min(1, requested_snacks)
-            duration_days = int_param(request.data, 'duration_days', default=1, minimum=1, maximum=31)
+            # Seven days inline. This endpoint is synchronous and CPU-bound, and it
+            # accepted 31 while the validator rejected above 30. Anything longer belongs
+            # on the Celery task, which already exists for this planner.
+            duration_days = int_param(request.data, 'duration_days', default=1, minimum=1, maximum=7)
             start_date = request.data.get('start_date')
             # Reserve 200 kcal for snack from daily calories by giving planner full daily calories; planner subtracts snack internally
             try:

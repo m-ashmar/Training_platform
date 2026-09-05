@@ -505,6 +505,20 @@ class RuleBasedPlanner:
                 raise
             return None
 
+    def _recipes(self):
+        """The active library, loaded once per generation with its foods and categories.
+
+        `find_recipe` reloaded and re-prefetched it for every meal of every day: 28
+        identical queries per week-long plan, each followed by the same ladder arithmetic.
+        """
+        if getattr(self, "_recipe_cache", None) is None:
+            from diet.models import Recipe
+            self._recipe_cache = list(
+                Recipe.objects.filter(is_active=True)
+                .prefetch_related("ingredients__food__category"))
+            self._ladder_cache = {}
+        return self._recipe_cache
+
     def _templates(self):
         """Derived once per generation; they only change when a recipe does."""
         if getattr(self, "_template_cache", None) is None:
@@ -574,6 +588,8 @@ class RuleBasedPlanner:
             match = find_recipe(
                 meal_name, targets, policy,
                 constraints=self._constraints(),
+                recipes=self._recipes(),
+                ladders=self._ladder_cache,
                 exclude_ids=tuple(getattr(day_ctx, "served_today", ())),
                 recent_ids=tuple(served),
                 user=self.user,

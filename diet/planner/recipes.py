@@ -69,6 +69,7 @@ def _portion_recipe(lines: Sequence[Tuple[object, float, bool]],
 SERVINGS_LO, SERVINGS_HI, SERVINGS_STEP = 0.5, 2.0, 0.05
 
 
+
 #: How much a dish being made of the client's own choices counts against how neatly it
 #: hits the macro target. Fit is a constraint — anything outside tolerance is discarded
 #: before this is consulted — so among dishes that all work, what the client picked is
@@ -117,7 +118,8 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
                 allergen_checker=None, constraints=None,
                 exclude_ids: Sequence[int] = (),
                 recipes: Optional[Sequence] = None, user=None, rng=None,
-                recent_ids: Sequence[int] = ()) -> Optional[RecipeMatch]:
+                recent_ids: Sequence[int] = (),
+                ladders: Optional[Dict[int, List[float]]] = None) -> Optional[RecipeMatch]:
     """A dish for this meal's macro target, or None if nothing fits.
 
     Every serving size between half and double is tried, each one snapped to the
@@ -153,6 +155,15 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             .prefetch_related("ingredients__food__category")
         )
 
+    # Exclusions apply to the list we were GIVEN as well as the one we would build.
+    # They were applied only inside the query above, so the moment the planner began
+    # passing a cached library, same-day exclusion silently stopped: a dish was served
+    # twice in one day on 23 of 42 measured days, recipes fit every slot, and the
+    # template path never got a turn.
+    if exclude_ids:
+        banned = set(exclude_ids)
+        recipes = [r for r in recipes if getattr(r, "id", None) not in banned]
+
     target_kcal = float(targets.get("calories", 0) or 0)
     if target_kcal <= 0 or not recipes:
         return None
@@ -181,8 +192,32 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             if not constraints.cuisine.allows(getattr(recipe, "cuisine", None)):
                 continue
 
-        ladders = {id(food): [p.grams for p in portions_for(food)]
-                   for food, _g, _s in lines}
+        # Ladders are a pure function of the food; cached per generation when the
+        # caller provides a dict, recomputed otherwise.
+        if ladders is None:
+            ladders = {}
+        line_ladders = {}
+        for food, _g, _s in lines:
+            key = getattr(food, "id", None) or id(food)
+            if key not in ladders:
+                ladders[key] = [p.grams for p in portions_for(food)]
+            line_ladders[id(food)] = ladders[key]
+
+        # A dish that cannot REACH the target is not a candidate, and the servings search
+        # need not run to find that out. The bound is the dish's real reach — every line
+        # at its ladder floor, and every line at its ladder ceiling — which is exactly the
+        # space the search and refinement can produce, so it can never reject a fit. A
+        # slack multiplier on the base serving could: refinement moves single lines to
+        # their ceilings and took Mujadara from a 450 kcal base to a 1,120 kcal lunch,
+        # which a 2.5x window discarded and the day landed 6.9% under. At a thousand
+        # recipes this is the difference between scanning a thousand and scanning tens.
+        reach_lo = sum(min(line_ladders[id(f)]) * float(getattr(f, "calories", 0) or 0) / 100.0
+                       for f, _g, _s in lines)
+        reach_hi = sum(max(line_ladders[id(f)]) * float(getattr(f, "calories", 0) or 0) / 100.0
+                       for f, _g, _s in lines)
+        tol = float(policy.tolerance.get("calories", 0.10))
+        if reach_hi <= 0 or not (reach_lo * (1.0 - tol) <= target_kcal <= reach_hi * (1.0 + tol)):
+            continue
 
         # Prefer a serving that is inside tolerance over the one with the smallest
         # magnitude. They are not the same point and the difference decides whether the
@@ -194,7 +229,7 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         closest: Optional[RecipeMatch] = None
         for index in range(steps):
             servings = SERVINGS_LO + index * SERVINGS_STEP
-            components = _portion_recipe(lines, servings, ladders)
+            components = _portion_recipe(lines, servings, line_ladders)
             dev = deviation_of(totals_of(components), targets)
             candidate = RecipeMatch(recipe, components, servings, dev)
             if closest is None or dev.magnitude < closest.deviation.magnitude:

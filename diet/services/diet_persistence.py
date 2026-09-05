@@ -176,47 +176,52 @@ class DietPersistenceService:
                 # The optimiser picks the macro furthest outside its OWN tolerance, keeps
                 # a move only if it improved the objective, and returns the best plan it
                 # saw. The result is reported rather than hidden.
-                from diet.planner.converge import converge_plan
+            # Convergence runs OUTSIDE the transaction that holds the user row lock.
+            # A 30-day plan is about 120 optimiser runs and hundreds of UPDATEs; doing
+            # that inside select_for_update held one client's row for the whole of it,
+            # and Fly's connection budget is small. The rows are committed by now, so a
+            # failure here leaves a valid, unconverged plan rather than no plan.
+            from diet.planner.converge import converge_plan
 
-                convergence = converge_plan(diet_plan)
-                try:
-                    payload = diet_plan.generated_plan
-                    if not isinstance(payload, dict):
-                        payload = {'raw': payload} if payload else {}
-                    payload['convergence'] = convergence
-                    diet_plan.generated_plan = payload
-                    diet_plan.save(update_fields=['generated_plan'])
-                except Exception:
-                    logger.debug('could not store convergence report', exc_info=True)
+            convergence = converge_plan(diet_plan)
+            try:
+                payload = diet_plan.generated_plan
+                if not isinstance(payload, dict):
+                    payload = {'raw': payload} if payload else {}
+                payload['convergence'] = convergence
+                diet_plan.generated_plan = payload
+                diet_plan.save(update_fields=['generated_plan'])
+            except Exception:
+                logger.debug('could not store convergence report', exc_info=True)
 
+            log_json(
+                self.logger,
+                "info",
+                "Diet plan persisted",
+                user_id=getattr(self.user, "id", None),
+                diet_plan_id=diet_plan.id,
+                meals=len(plan_output.plan),
+            )
+            # Surface what the allergen checker found. Silence used to be the only
+            # signal, and it meant nothing: the old validator filtered on the food's
+            # NAME and could not see composition at all. `report` distinguishes an
+            # ingredient that definitely violates a declared allergy from one whose
+            # allergen data is simply missing — the latter must not pass as safe.
+            report = validator.report
+            if report.violations or report.unverified:
                 log_json(
                     self.logger,
-                    "info",
-                    "Diet plan persisted",
-                    user_id=getattr(self.user, "id", None),
+                    "warning" if report.violations else "info",
+                    "Allergen check on generated plan",
+                    user_id=self.user.id,
                     diet_plan_id=diet_plan.id,
-                    meals=len(plan_output.plan),
+                    violations=[v.food_name for v in report.violations],
+                    unverified_count=len(report.unverified),
                 )
-                # Surface what the allergen checker found. Silence used to be the only
-                # signal, and it meant nothing: the old validator filtered on the food's
-                # NAME and could not see composition at all. `report` distinguishes an
-                # ingredient that definitely violates a declared allergy from one whose
-                # allergen data is simply missing — the latter must not pass as safe.
-                report = validator.report
-                if report.violations or report.unverified:
-                    log_json(
-                        self.logger,
-                        "warning" if report.violations else "info",
-                        "Allergen check on generated plan",
-                        user_id=self.user.id,
-                        diet_plan_id=diet_plan.id,
-                        violations=[v.food_name for v in report.violations],
-                        unverified_count=len(report.unverified),
-                    )
-                diet_plan.allergen_report = report.as_dict()
-                diet_plan.save(update_fields=['allergen_report'])
+            diet_plan.allergen_report = report.as_dict()
+            diet_plan.save(update_fields=['allergen_report'])
 
-                return diet_plan
+            return diet_plan
         except (IntegrityError, ValidationError) as e:
             log_json(self.logger, "error", "Constraint violation while saving diet plan", error=str(e))
             raise ConstraintViolationError(str(e))
