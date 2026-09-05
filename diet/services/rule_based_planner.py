@@ -156,6 +156,11 @@ class RuleBasedPlanner:
             # offered again while something else still fits.
             recent_recipes: Dict[str, Set[int]] = {
                 m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
+            # Persisted dishes first. Without this the recipe window was this run only,
+            # and with duration_days defaulting to 1 a client generating each morning was
+            # served the same dish forever while the food-level window reshuffled it.
+            for _m, ids in self._get_recent_recipe_history(no_repeat_days, current_date).items():
+                recent_recipes[_m].update(ids)
             for window in recipe_windows[-int(no_repeat_days):]:
                 for _m in recent_recipes:
                     recent_recipes[_m].update(window.get(_m, set()))
@@ -413,6 +418,7 @@ class RuleBasedPlanner:
         """
         try:
             from diet.planner.portion import totals as portion_totals
+            from diet.planner.candidates import classify_food
             from diet.planner.templates import plan_meal as plan_from_template
 
             target = day_ctx.meal_targets.get(meal_name)
@@ -445,9 +451,18 @@ class RuleBasedPlanner:
                 return None
 
             nutrition = portion_totals(portions)
+            pool_obj = getattr(self, "_pool", None)
+            chosen_here = []
+            if pool_obj is not None:
+                for p in portions:
+                    if pool_obj.weights(meal_name, classify_food(p.food)).get(p.food.id, 0) >= 80:
+                        chosen_here.append(p.food.name)
+            reason = (f"because you chose {', '.join(chosen_here[:2])} for {meal_name.lower()}"
+                      if chosen_here else f"built from your {meal_name.lower()} foods to fit your target")
             return AIMeal(
                 meal_name=meal_name,
                 description=f"Built from your {meal_name.lower()} foods.",
+                reason=reason,
                 ingredients=[
                     AIIngredient(
                         name=p.food.name,
@@ -521,7 +536,7 @@ class RuleBasedPlanner:
         try:
             from diet.planner.optimize import totals_of
             from diet.planner.policy import load_policy
-            from diet.planner.recipes import find_recipe
+            from diet.planner.recipes import chosen_food_ids, find_recipe
 
             target = day_ctx.meal_targets.get(meal_name)
             if target is None:
@@ -577,9 +592,15 @@ class RuleBasedPlanner:
             if today is not None:
                 today.setdefault(meal_name, set()).add(match.recipe.id)
             day_ctx.served_today.add(match.recipe.id)
+            picked = chosen_food_ids(self.user, meal_name)
+            chosen_here = sorted(f.name for f, _g in match.components if f.id in picked)
+            reason = (f"because you chose {', '.join(chosen_here[:2])} for {meal_name.lower()}"
+                      if chosen_here else
+                      f"a {(getattr(match.recipe, 'cuisine', '') or 'library').lower()} dish that fits your {meal_name.lower()} target")
             return AIMeal(
                 meal_name=match.name,
                 description=getattr(match.recipe, "description", "") or "",
+                reason=reason,
                 ingredients=ingredients,
                 total_nutrition={
                     "calories": round(totals["calories"], 1),
@@ -640,6 +661,23 @@ class RuleBasedPlanner:
         # template path needs the scores behind that order, not just the order.
         self._pool = pool
         return pool.by_slot
+
+    def _get_recent_recipe_history(self, days: int, until) -> Dict[str, Set[int]]:
+        """Dishes served to this client in the window, from persisted meals."""
+        from datetime import timedelta as _timedelta
+        from ..models import Meal
+        out: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
+        try:
+            rows = Meal.objects.filter(
+                diet_plan__user=self.user, recipe__isnull=False,
+                date__gte=until - _timedelta(days=days), date__lt=until,
+            ).values_list('meal_type', 'recipe_id')
+            for meal_type, recipe_id in rows:
+                if meal_type in out:
+                    out[meal_type].add(recipe_id)
+        except Exception:
+            logger.warning("could not read recent recipe history", exc_info=True)
+        return out
 
     def _get_recent_food_history(self, days: int, until) -> Dict[str, Set[int]]:
         """

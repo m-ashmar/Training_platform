@@ -383,6 +383,30 @@ class UserFoodCategoryPreference(models.Model):
     def __str__(self):
         return f"{self.user_id}:{self.food.name}→{self.meal} {self.macro}"
 
+class UserFoodWeight(models.Model):
+    """A learned per-client weight for one food.
+
+    `FoodItem.smart_score_weight` was a single global column that the nightly task wrote
+    per client, so every client overwrote every other and one person refusing lentils
+    twice lowered lentils for the whole platform. Learning that is not per client is
+    not personalisation.
+    """
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='food_weights')
+    food = models.ForeignKey(FoodItem, on_delete=models.CASCADE, related_name='user_weights')
+    weight = models.FloatField(default=1.0)
+    observations = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # Deterministic total order, like every other model here.
+        ordering = ['-updated_at', '-id']
+        unique_together = [('user', 'food')]
+        indexes = [models.Index(fields=['user'])]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.food_id}={self.weight:.2f}"
+
+
 class DietPlanTemplate(models.Model):
     """
     Predefined diet plan templates for trainer-created plans.
@@ -449,6 +473,13 @@ class DietPlan(RowValidationMixin, models.Model):
         return default
     goal = models.CharField(max_length=20, choices=GOAL_CHOICES)
     daily_calories = models.FloatField()
+    #: The macro targets this plan was built to, in grams. Six sites re-derived them
+    #: from a hardcoded 30/50/20 regardless of goal, so a correctly built Lose plan
+    #: rendered as off-target in the app and the wrong numbers were persisted into
+    #: DailyProgress for the coach to reason from.
+    target_protein = models.FloatField(null=True, blank=True)
+    target_carbs = models.FloatField(null=True, blank=True)
+    target_fat = models.FloatField(null=True, blank=True)
     start_date = models.DateField()
     end_date = models.DateField(db_index=True)
     duration_weeks = models.PositiveIntegerField(default=4)
@@ -622,6 +653,20 @@ class Meal(models.Model):
     
     # New fields for meal scheduling
     meal_type = models.CharField(max_length=20, choices=MEAL_TYPES, default='Lunch')
+    #: What this meal IS. The engine named 79% of meals as real dishes and the name died
+    #: at this boundary, because there was nowhere to put it: the client read
+    #: "Levantine · about 25 minutes" where the engine had said "Chicken Freekeh Bowl".
+    name = models.CharField(max_length=160, blank=True, default='')
+    #: Which library dish this is, when it is one. Dish-level variety cannot exist
+    #: without it: the recipe window lived only in memory inside one generate() call,
+    #: and duration_days defaults to 1, so a daily generator could get the same dish
+    #: forever while the food-level no-repeat reshuffled its ingredients.
+    recipe = models.ForeignKey('Recipe', null=True, blank=True, on_delete=models.SET_NULL,
+                               related_name='meals')
+    #: The template shape, when the engine built the meal itself.
+    shape = models.CharField(max_length=80, blank=True, default='')
+    #: One sentence the engine already knew: "because you chose chicken for lunch".
+    reason = models.CharField(max_length=200, blank=True, default='')
     scheduled_time = models.TimeField(null=True, blank=True, help_text="Scheduled time for this meal")
     estimated_duration = models.PositiveIntegerField(
         null=True, 
@@ -919,7 +964,7 @@ class Recipe(models.Model):
         ('Dinner', 'Dinner'), ('Snack', 'Snack'),
     ]
 
-    name = models.CharField(max_length=160)
+    name = models.CharField(max_length=160, unique=True)
     description = models.TextField(blank=True, default='')
     meal_types = models.JSONField(
         default=list, blank=True,
@@ -972,6 +1017,10 @@ class RecipeIngredient(models.Model):
         help_text="False pins the amount when the recipe is scaled to a macro target.",
     )
     note = models.CharField(max_length=120, blank=True, default='')
+    #: An author's explicit substitution class for this line — "lean_protein",
+    #: "cooked_grain" — so a dish can say "any lean protein" and honour a food the client
+    #: chose inside a named dish. Empty means the similarity module decides.
+    swap_group = models.CharField(max_length=40, blank=True, default='', db_index=True)
 
     class Meta:
         ordering = ['-grams', 'id']

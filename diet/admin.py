@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 from .models import (
     FoodItem, FoodCategory, UserFoodPreference, UserFoodCategoryPreference,
-    DietPlan, Meal, MealComponent, DietConfig, DailyAdvice, DietPlanTemplate
+    DietPlan, Meal, MealComponent, DietConfig, DailyAdvice, DietPlanTemplate,
+    Recipe, RecipeIngredient, UserFoodWeight,
 )
 
 
@@ -674,3 +675,28 @@ admin.site.index_title = "Diet System Dashboard"
 # - Automated meal prep scheduling
 # - Shopping list generation
 # - Recipe suggestions based on available foods
+
+
+
+class RecipeIngredientInline(admin.TabularInline):
+    model = RecipeIngredient
+    extra = 1
+    autocomplete_fields = ['food']
+    fields = ('food', 'grams', 'scalable', 'swap_group', 'note')
+
+
+@admin.register(Recipe)
+class RecipeAdmin(TranslAdmin):
+    """The recipe library had no write path: no admin, no endpoint, reachable only by
+    the seed command, so sixteen rows were the ceiling on culinary knowledge."""
+    list_display = ('name', 'cuisine', 'meal_types', 'prep_minutes', 'is_active', 'updated_at')
+    list_filter = ('cuisine', 'is_active')
+    search_fields = ('name', 'description')
+    inlines = [RecipeIngredientInline]
+
+
+@admin.register(UserFoodWeight)
+class UserFoodWeightAdmin(admin.ModelAdmin):
+    list_display = ('user', 'food', 'weight', 'observations', 'updated_at')
+    search_fields = ('user__username', 'food__name')
+    readonly_fields = ('updated_at',)

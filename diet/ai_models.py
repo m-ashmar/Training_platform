@@ -57,6 +57,7 @@ class AIMeal(BaseModel):
     #: the database boundary.
     recipe_id: Optional[int] = Field(default=None, description="Recipe pk, if a library dish")
     shape: Optional[str] = Field(default=None, description="Template shape, if engine-built")
+    reason: Optional[str] = Field(default=None, description="Why the engine chose this meal")
     preparation_time: Optional[int] = Field(default=None, description="Estimated preparation time in minutes")
     difficulty_level: Optional[str] = Field(default=None, description="Easy, Medium, Hard")
     

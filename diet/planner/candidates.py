@@ -258,8 +258,11 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         }
 
     from .templates import meal_foods
+    from diet.models import UserFoodWeight
 
     served_at = meal_foods()
+    learned = (dict(UserFoodWeight.objects.filter(user=user).values_list("food_id", "weight"))
+               if getattr(user, "pk", None) else {})
 
     def score(food, meal: str, macro: str) -> float:
         s = W_ROLE_STAPLE if getattr(food, "role", "") == FoodItem.ROLE_STAPLE else 0.0
@@ -274,8 +277,8 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
             s += W_MACRO_CHOICE
         if food.id in liked:
             s += W_LIKED
-        # Learned weight defaults to 1.0, so this is neutral until learning runs.
-        s += W_LEARNED * (float(getattr(food, "smart_score_weight", 1.0) or 1.0) - 1.0)
+        # This client's learned weight, neutral at 1.0 until they have eaten something.
+        s += W_LEARNED * (float(learned.get(food.id, 1.0)) - 1.0)
         s += W_DENSITY * _density(food, macro)
         return s
 

@@ -92,6 +92,7 @@ register(PersonalDataSource(label="daily_advice", model="diet.DailyAdvice", user
                             retention_days=365, retention_field="generated_at"))
 register(PersonalDataSource(label="daily_progress", model="diet.DailyProgress", user_field="user"))
 register(PersonalDataSource(label="food_category_preferences", model="diet.UserFoodCategoryPreference", user_field="user"))
+register(PersonalDataSource(label="learned_food_weights", model="diet.UserFoodWeight", user_field="user"))
 
 register(PersonalDataSource(label="ai_usage_cost", model="ai_assistant.UsageCost", user_field="user", on_erase="keep"))
 register(PersonalDataSource(label="ai_insights", model="ai_assistant.UserInsight", user_field="user"))

@@ -1,5 +1,5 @@
 from modeltranslation.translator import register, TranslationOptions
-from .models import FoodCategory, FoodItem, DietPlanTemplate
+from .models import FoodCategory, FoodItem, DietPlanTemplate, Recipe
 
 @register(FoodCategory)
 class FoodCategoryTranslationOptions(TranslationOptions):
@@ -12,3 +12,8 @@ class FoodItemTranslationOptions(TranslationOptions):
 @register(DietPlanTemplate)
 class DietPlanTemplateTranslationOptions(TranslationOptions):
     fields = ('name', 'description',)
+
+
+@register(Recipe)
+class RecipeTranslationOptions(TranslationOptions):
+    fields = ('name', 'description')

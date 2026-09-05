@@ -85,8 +85,11 @@ class Command(BaseCommand):
 
         created = updated = skipped = 0
         for was, now in RENAMED.items():
-            Recipe.objects.filter(name=was).exclude(
-                name__in=Recipe.objects.filter(name=now).values("name")).update(name=now)
+            # Rename only when the target name is free. This was a subquery on
+            # `.values("name")`, which modeltranslation now expands to three columns
+            # and Django refuses as a filter value.
+            if not Recipe.objects.filter(name=now).exists():
+                Recipe.objects.filter(name=was).update(name=now)
         Recipe.objects.filter(name__in=RENAMED).delete()
         for name, meals, cuisine, minutes, lines in RECIPES:
             foods = {}

@@ -71,15 +71,35 @@ class DietPersistenceService:
                 self._validate_ingredients_in_db(plan_output)
                 self._validate_ingredients_allowed(plan_output, categories)
 
+                from diet.utils.nutrition import get_macro_ratios
+                # Computed once, so the plan row and its targets describe the same client.
+                goal = self.user.resolve_fitness_goal()
+                daily_calories = self.user.calculate_daily_calories()
+                _ratios = get_macro_ratios(goal)
+                _kcal = float(daily_calories or 0.0)
+                targets = {
+                    'protein': round(_kcal * _ratios['protein'] / 4.0, 1),
+                    'carb': round(_kcal * _ratios['carb'] / 4.0, 1),
+                    'fat': round(_kcal * _ratios['fat'] / 9.0, 1),
+                }
+                deterministic = bool(plan_output.plan) and all(
+                    ing.food_id is not None
+                    for m in plan_output.plan for ing in m.ingredients)
                 diet_plan = DietPlan.objects.create(
                     user=self.user,
-                    goal=self.user.resolve_fitness_goal(),
-                    daily_calories=self.user.calculate_daily_calories(),
+                    goal=goal,
+                    daily_calories=daily_calories,
                     start_date=sd,
                     end_date=ed,
                     duration_weeks=(duration_days + 6) // 7,
                     generated_plan=plan_output.dict(),
-                    generation_strategy='GPT',
+                    # The deterministic path names every food by id; the LLM path names
+                    # none. That is the provenance, and the column already had a value
+                    # for it that nothing ever wrote.
+                    generation_strategy=('FALLBACK' if deterministic else 'GPT'),
+                    target_protein=targets['protein'],
+                    target_carbs=targets['carb'],
+                    target_fat=targets['fat'],
                 )
 
                 piece_weights = self._load_piece_weights()

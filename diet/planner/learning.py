@@ -1,8 +1,9 @@
 """Per-user food weights, learned from what was actually eaten.
 
-`FoodItem.smart_score_weight` was declared "Adaptive weight for smart macro planner",
-read in exactly one place, and **never written** — it had been 1.0 since the day it was
-added. Meanwhile `Meal.is_liked`, `MealComponent.is_completed` and
+Weights live in `UserFoodWeight`, one row per (client, food). They used to be written
+onto `FoodItem.smart_score_weight`, a single global column, so the nightly task had every
+client overwriting every other and one person refusing lentils lowered lentils for the
+whole platform. Meanwhile `Meal.is_liked`, `MealComponent.is_completed` and
 `actual_quantity_consumed` were being collected on every plan and read by nothing.
 
 The signal was already there. This turns it into ranking input.
@@ -71,27 +72,28 @@ def update_weights(user, dry_run: bool = False) -> Dict[int, float]:
 
     A step rather than a jump: one skipped meal should nudge a food, not exile it.
     """
-    from diet.models import FoodItem
+    from diet.models import UserFoodWeight
 
     stats = observations_for(user)
     if not stats:
         return {}
 
     changes: Dict[int, float] = {}
-    foods = {f.id: f for f in FoodItem.objects.filter(id__in=stats.keys())}
+    existing = {w.food_id: w for w in UserFoodWeight.objects.filter(user=user, food_id__in=stats)}
     for food_id, rec in stats.items():
-        food = foods.get(food_id)
-        if food is None or rec["served"] < 2:
+        if rec["served"] < 2:
             continue  # one observation is noise
-        current = float(getattr(food, "smart_score_weight", 1.0) or 1.0)
+        row = existing.get(food_id)
+        current = float(row.weight if row else 1.0)
         target = score_from(rec)
         new = current + LEARNING_RATE * (target - current)
         new = round(max(MIN_WEIGHT, min(MAX_WEIGHT, new)), 4)
         if abs(new - current) > 1e-4:
             changes[food_id] = new
             if not dry_run:
-                food.smart_score_weight = new
-                food.save(update_fields=["smart_score_weight"])
+                UserFoodWeight.objects.update_or_create(
+                    user=user, food_id=food_id,
+                    defaults={"weight": new, "observations": int(rec["served"])})
     if changes:
         logger.info("Adjusted %s food weights from consumption by user %s",
                     len(changes), getattr(user, "id", "?"))

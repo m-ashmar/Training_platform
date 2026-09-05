@@ -15,14 +15,32 @@ class MealPlanFactory:
         self.piece_weights = piece_weights
 
     def create_meal(self, diet_plan: DietPlan, ai_meal: AIMeal, date) -> Meal:
+        slot = ai_meal.meal_type or 'Lunch'
+        # A recipe meal is named after its dish; an engine-built meal arrives named after
+        # the slot, which is not a name. Compose one from what is on the plate.
+        name = ai_meal.meal_name if ai_meal.meal_name != slot else self._compose_name(ai_meal)
         return Meal.objects.create(
             diet_plan=diet_plan,
             template=self._determine_meal_template(ai_meal),
             date=date,
             description=ai_meal.description,
-            meal_type=ai_meal.meal_type or 'Lunch',
+            meal_type=slot,
             is_ai_generated=True,
+            name=name[:160],
+            recipe_id=ai_meal.recipe_id,
+            shape=(ai_meal.shape or '')[:80],
+            reason=(ai_meal.reason or '')[:200],
         )
+
+    @staticmethod
+    def _compose_name(ai_meal: AIMeal) -> str:
+        """"Chicken, Rice and Broccoli" from the components."""
+        names = [ing.name for ing in ai_meal.ingredients][:4]
+        if not names:
+            return ai_meal.meal_type or 'Meal'
+        if len(names) == 1:
+            return names[0]
+        return ", ".join(names[:-1]) + " and " + names[-1]
 
     def add_components(self, meal: Meal, resolved: Iterable[Tuple[FoodItem, str]]) -> None:
         for food_item, quantity in resolved:
