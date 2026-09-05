@@ -594,9 +594,11 @@ class RuleBasedPlanner:
             day_ctx.served_today.add(match.recipe.id)
             picked = chosen_food_ids(self.user, meal_name)
             chosen_here = sorted(f.name for f, _g in match.components if f.id in picked)
+            cuisine = (getattr(match.recipe, "cuisine", "") or "").strip()
             reason = (f"because you chose {', '.join(chosen_here[:2])} for {meal_name.lower()}"
                       if chosen_here else
-                      f"a {(getattr(match.recipe, 'cuisine', '') or 'library').lower()} dish that fits your {meal_name.lower()} target")
+                      (f"a {cuisine} dish that fits your {meal_name.lower()} target" if cuisine
+                       else f"a dish that fits your {meal_name.lower()} target"))
             return AIMeal(
                 meal_name=match.name,
                 description=getattr(match.recipe, "description", "") or "",

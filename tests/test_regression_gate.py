@@ -2774,3 +2774,30 @@ def test_the_cuisine_ratio_is_honoured_on_every_path(seeded_catalogue):
 
     assert not (served[0.0] & levantine), f"Western-only got Levantine: {served[0.0] & levantine}"
     assert not (served[1.0] & western), f"Levantine-only got Western: {served[1.0] & western}"
+
+
+# ---------------------------------------------------------------------------
+# P4 — the target a plan was built to is the target it is saved and converged to
+# ---------------------------------------------------------------------------
+
+def test_a_plan_is_saved_and_converged_to_the_target_it_was_built_for(seeded_catalogue):
+    """Persistence recomputed daily_calories from the profile, so a plan generated at
+    1,400 kcal was stored as the client's 2,695 kcal TDEE and converge_plan then pushed
+    every meal toward the wrong number: +63% over the request. Found the moment the
+    quality harness started measuring persisted rows instead of the in-memory plan.
+    """
+    from diet.planner.report import totals_of
+
+    from tests.diet_quality import PROFILES, _components, _generate, _make_client, _meals_of
+
+    user = _make_client("target-gate", *PROFILES[2])
+    assert user.calculate_daily_calories() > 2000, "fixture must have a TDEE far from 1400"
+    plan = _generate(user, 1400, 1, "target-gate")
+    assert plan is not None
+    assert abs(plan.daily_calories - 1400) < 1.0, f"stored {plan.daily_calories}, built for 1400"
+    produced = sum(totals_of(_components(m))["calories"] for m in _meals_of(plan))
+    assert abs(produced / 1400 - 1) <= 0.10, f"persisted day is {produced:.0f} kcal for a 1400 request"
+    # And the persisted macro targets describe the same plan.
+    assert plan.target_protein and plan.target_carbs and plan.target_fat
+    kcal_from_targets = plan.target_protein * 4 + plan.target_carbs * 4 + plan.target_fat * 9
+    assert abs(kcal_from_targets / 1400 - 1) <= 0.02

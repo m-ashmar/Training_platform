@@ -73,3 +73,32 @@ def compute_targets(daily_kcal: float, policy: PlannerPolicy,
         fat=daily_kcal * policy.fat_ratio / 9.0,
         meals=meals,
     )
+
+
+def plan_targets(diet_plan, meal_names, snack_count: int = 0) -> DayTargets:
+    """The targets a persisted plan was built to, for the day and per meal.
+
+    Six sites recomputed these by hand from a hardcoded 30/50/20 regardless of goal,
+    and two of them split calories equally across meals while the engine builds to the
+    policy split, so a correctly converged Lose plan rendered as over-target in the app.
+    This reads the plan's own goal and stored targets and applies the same split the
+    planner used. Everything that shows a client a target reads it from here.
+    """
+    from .policy import load_policy
+
+    policy = load_policy(getattr(diet_plan, "goal", "maintain"))
+    day = compute_targets(float(getattr(diet_plan, "daily_calories", 0) or 0.0),
+                          policy, list(meal_names), snack_count)
+    stored = tuple(getattr(diet_plan, f, None) for f in
+                   ("target_protein", "target_carbs", "target_fat"))
+    if all(v is not None for v in stored):
+        # Persisted grams win over re-derivation; per-meal values scale with each
+        # meal's share of the day's energy so the day still sums to the stored totals.
+        kcal = day.calories or 1.0
+        meals = [MealTargets(m.name, m.calories,
+                             stored[0] * m.calories / kcal,
+                             stored[1] * m.calories / kcal,
+                             stored[2] * m.calories / kcal) for m in day.meals]
+        return DayTargets(day.calories, float(stored[0]), float(stored[1]),
+                          float(stored[2]), meals)
+    return day

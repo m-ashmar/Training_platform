@@ -480,6 +480,17 @@ class DietPlan(RowValidationMixin, models.Model):
     target_protein = models.FloatField(null=True, blank=True)
     target_carbs = models.FloatField(null=True, blank=True)
     target_fat = models.FloatField(null=True, blank=True)
+
+    def macro_targets(self):
+        """Day-level targets in grams: the stored ones, or derived from the goal."""
+        if None not in (self.target_protein, self.target_carbs, self.target_fat):
+            return {"protein": float(self.target_protein), "carbs": float(self.target_carbs),
+                    "fat": float(self.target_fat)}
+        from diet.utils.nutrition import get_macro_ratios
+        r = get_macro_ratios(self.goal)
+        kcal = float(self.daily_calories or 0.0)
+        return {"protein": kcal * r["protein"] / 4.0, "carbs": kcal * r["carb"] / 4.0,
+                "fat": kcal * r["fat"] / 9.0}
     start_date = models.DateField()
     end_date = models.DateField(db_index=True)
     duration_weeks = models.PositiveIntegerField(default=4)

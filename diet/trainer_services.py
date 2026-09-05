@@ -392,9 +392,9 @@ class ClientProgressService:
             date=target_date,
             defaults={
                 'target_calories': active_plan.daily_calories,
-                'target_protein': (active_plan.daily_calories * 0.30) / 4,
-                'target_carbs': (active_plan.daily_calories * 0.50) / 4,
-                'target_fat': (active_plan.daily_calories * 0.20) / 9
+                'target_protein': active_plan.macro_targets()["protein"],
+                'target_carbs': active_plan.macro_targets()["carbs"],
+                'target_fat': active_plan.macro_targets()["fat"]
             }
         )
         
@@ -529,9 +529,9 @@ class ClientProgressService:
             date=target_date,
             defaults={
                 'target_calories': active_plan.daily_calories,
-                'target_protein': (active_plan.daily_calories * 0.30) / 4,
-                'target_carbs': (active_plan.daily_calories * 0.50) / 4,
-                'target_fat': (active_plan.daily_calories * 0.20) / 9
+                'target_protein': active_plan.macro_targets()["protein"],
+                'target_carbs': active_plan.macro_targets()["carbs"],
+                'target_fat': active_plan.macro_targets()["fat"]
             }
         )
         
@@ -691,9 +691,9 @@ class ClientProgressService:
             date=meal.date,
             defaults={
                 'target_calories': meal.diet_plan.daily_calories,
-                'target_protein': (meal.diet_plan.daily_calories * 0.30) / 4,
-                'target_carbs': (meal.diet_plan.daily_calories * 0.50) / 4,
-                'target_fat': (meal.diet_plan.daily_calories * 0.20) / 9
+                'target_protein': meal.diet_plan.macro_targets()["protein"],
+                'target_carbs': meal.diet_plan.macro_targets()["carbs"],
+                'target_fat': meal.diet_plan.macro_targets()["fat"]
             }
         )
         # Use new optimized method that doesn't iterate

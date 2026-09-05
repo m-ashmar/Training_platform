@@ -958,23 +958,21 @@ class GenerateDietPlanRuleBasedView(APIView):
                 # Plan-level daily nutrition for the date
                 plan_nutrition = diet_plan.calculate_daily_nutrition(present_date)
                 # Meal targets (match MealComponentsView logic)
-                daily_cal = float(diet_plan.daily_calories or 0.0)
+                # The split the planner built to, not an equal share and not 30/50/20.
+                from diet.planner.targets import plan_targets
                 day_snack_count = meals_qs.filter(meal_type='Snack').count()
-                non_snack_count = max(1, meals_qs.exclude(meal_type='Snack').count())
-                snack_kcal_target = 200.0
-                snacks_total_target = day_snack_count * snack_kcal_target
-                base_kcal_for_meals = max(0.0, daily_cal - snacks_total_target)
+                slot_names = [m for m in ('Breakfast', 'Lunch', 'Dinner')
+                              if meals_qs.filter(meal_type=m).exists()] or ['Lunch']
+                by_slot = {t.name: t for t in plan_targets(diet_plan, slot_names, day_snack_count).meals}
 
                 meals_payload = []
                 for meal in meals_qs:
                     meal_nutrition = meal.calculate_nutrition()
-                    if meal.meal_type == 'Snack':
-                        meal_calorie_target = snack_kcal_target
-                    else:
-                        meal_calorie_target = base_kcal_for_meals / non_snack_count
-                    meal_protein_target = (meal_calorie_target * 0.30) / 4
-                    meal_carbs_target = (meal_calorie_target * 0.50) / 4
-                    meal_fat_target = (meal_calorie_target * 0.20) / 9
+                    t = by_slot.get(meal.meal_type) or by_slot.get('Snack') or next(iter(by_slot.values()))
+                    meal_calorie_target = t.calories
+                    meal_protein_target = t.protein
+                    meal_carbs_target = t.carb
+                    meal_fat_target = t.fat
                     meals_payload.append({
                         "id": meal.id,
                         "meal_type": meal.meal_type,
@@ -1010,9 +1008,9 @@ class GenerateDietPlanRuleBasedView(APIView):
                     "fat": plan_nutrition.get("fat", 0.0),
                     "targets": {
                         "calories": diet_plan.daily_calories,
-                        "protein": (diet_plan.daily_calories * 0.30) / 4 if diet_plan.daily_calories else 0.0,
-                        "carbs": (diet_plan.daily_calories * 0.50) / 4 if diet_plan.daily_calories else 0.0,
-                        "fat": (diet_plan.daily_calories * 0.20) / 9 if diet_plan.daily_calories else 0.0,
+                        "protein": diet_plan.macro_targets()["protein"],
+                        "carbs": diet_plan.macro_targets()["carbs"],
+                        "fat": diet_plan.macro_targets()["fat"],
                     }
                 },
                 "meals": meals_payload,
@@ -1556,9 +1554,8 @@ class DietPlanNutritionView(APIView):
             completed_meals = sum(1 for meal in meals if meal.is_completed)
             
             # Calculate nutritional targets (based on standard ratios)
-            target_protein = (diet_plan.daily_calories * 0.30) / 4  # 30% of calories from protein
-            target_carbs = (diet_plan.daily_calories * 0.50) / 4    # 50% of calories from carbs
-            target_fat = (diet_plan.daily_calories * 0.20) / 9      # 20% of calories from fat
+            _t = diet_plan.macro_targets()
+            target_protein, target_carbs, target_fat = _t["protein"], _t["carbs"], _t["fat"]
             
             # Calculate nutritional percentages
             protein_percentage = round((plan_nutrition['protein'] / target_protein * 100), 1) if target_protein > 0 else 0
@@ -1727,22 +1724,18 @@ class MealComponentsView(APIView):
             completed_components = components.filter(is_completed=True).count()
             
             # Calculate meal nutritional targets (dynamic per day and snack share)
-            daily_kcal = float(meal.diet_plan.daily_calories or 0.0)
-            # Count snacks and non-snack meals for the day
+            # The split the planner built to, not an equal share and not 30/50/20.
+            from diet.planner.targets import plan_targets
             day_meals_qs = meal.diet_plan.meals.filter(date=meal.date)
             snack_count = day_meals_qs.filter(meal_type='Snack').count()
-            non_snack_count = day_meals_qs.exclude(meal_type='Snack').count() or 1
-            snack_kcal_target = 200.0
-            snacks_total_target = snack_count * snack_kcal_target
-            base_kcal_for_meals = max(0.0, daily_kcal - snacks_total_target)
-            if meal.meal_type == 'Snack':
-                meal_calorie_target = snack_kcal_target
-            else:
-                meal_calorie_target = base_kcal_for_meals / non_snack_count
-            # Use default macro split 30/50/20 for targets display
-            meal_protein_target = (meal_calorie_target * 0.30) / 4
-            meal_carbs_target = (meal_calorie_target * 0.50) / 4
-            meal_fat_target = (meal_calorie_target * 0.20) / 9
+            slot_names = [m for m in ('Breakfast', 'Lunch', 'Dinner')
+                          if day_meals_qs.filter(meal_type=m).exists()] or ['Lunch']
+            by_slot = {t.name: t for t in plan_targets(meal.diet_plan, slot_names, snack_count).meals}
+            t = by_slot.get(meal.meal_type) or by_slot.get('Snack') or next(iter(by_slot.values()))
+            meal_calorie_target = t.calories
+            meal_protein_target = t.protein
+            meal_carbs_target = t.carb
+            meal_fat_target = t.fat
             
             # Calculate meal nutritional percentages
             meal_protein_percentage = round((meal_nutrition['protein'] / meal_protein_target * 100), 1) if meal_protein_target > 0 else 0

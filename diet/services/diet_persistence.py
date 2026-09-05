@@ -74,7 +74,14 @@ class DietPersistenceService:
                 from diet.utils.nutrition import get_macro_ratios
                 # Computed once, so the plan row and its targets describe the same client.
                 goal = self.user.resolve_fitness_goal()
-                daily_calories = self.user.calculate_daily_calories()
+                # The target the plan was BUILT to, not the profile's default. Persistence
+                # recomputed daily_calories from the profile, so a plan generated at
+                # 1,400 kcal was stored as 2,695 and converge_plan then re-optimised every
+                # meal toward the wrong number: persisted at 2,282 kcal, +63% over what
+                # was asked for. The planner records the requested figure; read it.
+                requested = ((getattr(plan_output, 'plan_metadata', None) or {})
+                             .get('delivery', {}) or {}).get('requested_kcal_per_day')
+                daily_calories = float(requested) if requested else self.user.calculate_daily_calories()
                 _ratios = get_macro_ratios(goal)
                 _kcal = float(daily_calories or 0.0)
                 targets = {

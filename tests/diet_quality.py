@@ -276,22 +276,35 @@ def _resolve_food(name: str):
 
 
 def _generate(user, kcal: float, days: int, salt: str):
-    """One plan, or None if the engine refused. Refusals are a finding, not a crash.
+    """One PERSISTED plan, or None if the engine refused. Refusals are a finding.
 
-    `salt` replaces the client's row id as the seed for the planner's per-day generator.
-    A measurement creates a new client every run, so the id changes, so the seed changes,
-    so the plan changes: drift read 1.2% and 9.2% on consecutive runs of identical code,
-    and the baseline file recorded one draw as though it were the value. The salt names
-    what is being measured — the profile, the calorie target, the client who chose —
-    so the same measurement plans the same days every time.
+    Persisted, because that is what the client receives. Measuring the in-memory output
+    of `generate()` graded meals before `converge_plan` re-portioned them and before the
+    boundary that used to re-resolve every food by name — so the recorded numbers
+    described a plan that was never saved. `salt` replaces the client's row id as the
+    seed for the planner's per-day generator so two runs plan the same days.
     """
+    from diet.services.diet_persistence import DietPersistenceService
     from diet.services.rule_based_planner import RuleBasedPlanner
 
     try:
-        return RuleBasedPlanner(user, seed_salt=salt).generate(
+        out = RuleBasedPlanner(user, seed_salt=salt).generate(
             daily_kcal=float(kcal), meal_count=3, snack_count=1, duration_days=days)
+        return DietPersistenceService(user).save_plan(out, meal_count=3, snack_count=1)
     except Exception:
         return None
+
+
+def _meals_of(plan):
+    """Persisted meals with their components, in day order."""
+    from diet.models import Meal
+    return list(Meal.objects.filter(diet_plan=plan)
+                .order_by("date", "id").prefetch_related("components__food"))
+
+
+def _components(meal):
+    return [(c.food, float(c.quantity or 0.0)) for c in meal.components.all()]
+
 
 
 # ---------------------------------------------------------------------------
@@ -328,33 +341,34 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
         if plan is None:
             report.catalogue_gaps.append(f"generation failed for profile {index}")
             continue
-        for offset in range(0, len(plan.plan), 4):
+        meals = _meals_of(plan)
+        by_day: Dict[object, list] = collections.defaultdict(list)
+        for meal in meals:
+            by_day[meal.date].append(meal)
+        for day_meals in by_day.values():
             report.days_measured += 1
-            served = [m.meal_name for m in plan.plan[offset:offset + 4]
-                      if m.meal_name in dishes]
+            served = [m.recipe_id for m in day_meals if m.recipe_id]
             if len(served) != len(set(served)):
                 report.days_repeating_a_dish += 1
-        for meal in plan.plan:
+        for meal in meals:
             slot = meal.meal_type or "?"
-            is_dish = meal.meal_name in dishes
+            is_dish = meal.recipe_id is not None
             slot_counts[slot][0 if is_dish else 1] += 1
             report.meals_measured += 1
             if is_dish:
-                dish_tally[meal.meal_name] += 1
-                per_slot_tally[slot][meal.meal_name] += 1
-            for ingredient in meal.ingredients:
-                grams = _grams(ingredient.quantity)
+                dish_tally[meal.name] += 1
+                per_slot_tally[slot][meal.name] += 1
+            for food, grams in _components(meal):
                 total_portions += 1
-                portions_by_food[ingredient.name].append(grams)
-                food = _resolve_food(ingredient.name)
-                ceiling = _declared_ceiling(food) if food else None
+                portions_by_food[food.name].append(grams)
+                ceiling = _declared_ceiling(food)
                 if ceiling is None:
-                    ceiling = _portion_ceiling(ingredient.name)
+                    ceiling = _portion_ceiling(food.name)
                 if ceiling is not None and grams > ceiling + 0.5:
                     absurd += 1
                     if len(report.absurd_examples) < 12:
                         report.absurd_examples.append(
-                            f"{grams:.0f}g {ingredient.name} in {slot} (max ~{ceiling}g)")
+                            f"{grams:.0f}g {food.name} in {slot} (max ~{ceiling}g)")
 
     for slot, (d, p) in slot_counts.items():
         report.dish_rate_by_slot[slot] = d / (d + p) if (d + p) else 0.0
@@ -384,7 +398,8 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
         if plan is None:
             report.catalogue_gaps.append(f"generation failed at {target} kcal")
             continue
-        produced = sum(float(m.total_nutrition.get("calories", 0) or 0) for m in plan.plan)
+        from diet.planner.report import totals_of
+        produced = sum(totals_of(_components(m))["calories"] for m in _meals_of(plan))
         pct = (produced - target) / target * 100 if target else 0.0
         report.drift_by_target[target] = pct
         signs.add(pct >= 0)
@@ -450,10 +465,11 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
         # entirely different food carry the same name, and comparing names reported no
         # change at all while the ingredients were visibly moving.
         def signature(meal):
-            return (meal.meal_name, tuple(sorted(i.name for i in meal.ingredients)))
+            return (meal.name, tuple(sorted(f.name for f, _g in _components(meal))))
 
-        a = [signature(m) for m in before_plan.plan]
-        b = [signature(m) for m in after_plan.plan]
+        before_meals, after_meals = _meals_of(before_plan), _meals_of(after_plan)
+        a = [signature(m) for m in before_meals]
+        b = [signature(m) for m in after_meals]
         report.twin_total_meals = min(len(a), len(b))
         report.twin_identical_meals = sum(1 for x, y in zip(a, b) if x == y)
 
@@ -464,16 +480,16 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
         # plate. Mixing the two makes a library gap read as a personalisation failure —
         # and hid the reverse too, because the first version of SLOT_CHOICES named the
         # library's own staples and the metric could not have moved either way.
-        built = [i for i, m in enumerate(after_plan.plan)
-                 if m.meal_name not in dishes and i < report.twin_total_meals]
+        built = [i for i, m in enumerate(after_meals)
+                 if m.recipe_id is None and i < report.twin_total_meals]
         report.twin_built_meals = len(built)
         report.twin_identical_built = sum(1 for i in built if a[i] == b[i])
 
         chosen_hits = seen = 0
-        for meal in after_plan.plan:
-            for ingredient in meal.ingredients:
+        for meal in after_meals:
+            for food, _g in _components(meal):
                 seen += 1
-                if ingredient.name in chosen_names:
+                if food.name in chosen_names:
                     chosen_hits += 1
         report.chosen_ingredient_share = chosen_hits / seen if seen else 0.0
 
