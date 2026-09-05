@@ -19,6 +19,7 @@ from .ai_services import DietGenerator
 from .exceptions import OpenAIError, DietParsingError, PersistenceError
 from .engine.rule_based_planner import RuleBasedPlanner
 from .models import (
+    MealSwap,
     DailyAdvice, FoodItem, UserFoodPreference, FoodCategory, 
     DietPlan, DietPlanTemplate, Meal, MealComponent, UserFoodCategoryPreference
 )
@@ -2027,6 +2028,52 @@ class ClientMealInteractionView(APIView):
             
             action = request.data.get('action')
             
+            if action == 'swap_food':
+                # The client rejected one food on the plate and took another. Offered
+                # neighbours come from the similarity index; the replacement is
+                # portioned to the same energy so the meal's shape survives. Recorded as
+                # a MealSwap, which learning reads before anything else.
+                from diet.planner.similarity import SimilarityIndex
+                from diet.planner.portion import nearest_portion
+                component = get_object_or_404(
+                    MealComponent.objects.select_related('meal', 'food'),
+                    id=request.data.get('component_id'), meal__diet_plan__user=request.user)
+                chosen_id = request.data.get('chosen_food_id')
+                index = SimilarityIndex(list(FoodItem.objects.filter(needs_review=False)))
+                if not chosen_id:
+                    offered = index.neighbours(component.food_id, k=6)
+                    return Response({"component_id": component.id, "food": component.food.name,
+                                     "offers": [{"food_id": f.id, "name": f.name,
+                                                 "name_ar": getattr(f, "name_ar", None),
+                                                 "similarity": round(sim, 2)} for f, sim in offered]})
+                chosen = get_object_or_404(FoodItem, id=chosen_id, needs_review=False)
+                k_old = float(component.food.calories or 0); k_new = float(chosen.calories or 0)
+                grams = float(component.quantity) * (k_old / k_new) if k_old > 0 and k_new > 0 else float(component.quantity)
+                grams = nearest_portion(chosen, grams).grams
+                rejected = component.food
+                with transaction.atomic():
+                    if MealComponent.objects.filter(meal=component.meal, food=chosen).exclude(pk=component.pk).exists():
+                        return Response({"error": _("That food is already on this plate")},
+                                        status=status.HTTP_409_CONFLICT)
+                    component.food = chosen
+                    component.quantity = grams
+                    component.save(update_fields=['food', 'quantity'])
+                    MealSwap.objects.create(user=request.user, meal=component.meal,
+                                            rejected_food=rejected, chosen_food=chosen)
+                return Response({"message": _("Swapped"), "component": {
+                    "id": component.id, "food_id": chosen.id, "name": chosen.name,
+                    "quantity": grams}})
+
+            if action == 'rate_component':
+                component = get_object_or_404(
+                    MealComponent, id=request.data.get('component_id'), meal__diet_plan__user=request.user)
+                is_liked = request.data.get('is_liked')
+                if is_liked is None:
+                    return Response({"error": _("is_liked is required")}, status=status.HTTP_400_BAD_REQUEST)
+                component.is_liked = bool(is_liked)
+                component.save(update_fields=['is_liked'])
+                return Response({"message": _("Rated"), "component": {"id": component.id, "is_liked": component.is_liked}})
+
             if action == 'complete_component':
                 component_id = request.data.get('component_id')
                 actual_quantity = request.data.get('actual_quantity')

@@ -2952,3 +2952,75 @@ def test_the_recipe_scorer_passes_its_own_gate(seeded_catalogue):
     w = softmax_weights([s for _r, s in within], SOFTMAX_T)
     p_chosen = sum(wi for wi, h in zip(w, has) if h) / sum(w)
     assert 0.85 <= p_chosen <= 0.999, f"P(chosen dish wins) = {p_chosen:.2f}"
+
+
+# ---------------------------------------------------------------------------
+# P11 — the signal learning needs is collected
+# ---------------------------------------------------------------------------
+
+def test_a_client_can_swap_a_food_and_learning_hears_it(seeded_catalogue):
+    """learning.py read fields nothing wrote; zero consumption rows existed. A swap is
+    the strongest preference signal a client will ever give — they rejected one food and
+    named another — and it is free. The endpoint offers similarity neighbours, swaps at
+    the same energy on the food's own ladder, records a MealSwap, and learning reads it
+    as a refusal of one and a like of the other.
+    """
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    from diet.models import FoodItem, MealComponent, MealSwap
+    from diet.planner.learning import observations_for
+    from diet.planner.portion import portions_for
+    from diet.services.diet_persistence import DietPersistenceService
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    user = _make_client("swap-gate", *PROFILES[2])
+    _grant_diet_access(user)
+    out = RuleBasedPlanner(user, seed_salt="swap").generate(daily_kcal=2200, duration_days=1, snack_count=1)
+    plan = DietPersistenceService(user).save_plan(out, meal_count=3, snack_count=1)
+    component = MealComponent.objects.filter(meal__diet_plan=plan).select_related("food").first()
+    assert component is not None
+
+    c = Client()
+    c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(user).access_token}"
+    url = "/api/diet/v1/client/meals/interact/"
+
+    offers = c.post(url, {"action": "swap_food", "component_id": component.id},
+                    content_type="application/json")
+    assert offers.status_code == 200, offers.content
+    offered = offers.json()["offers"]
+    assert offered and all(o["similarity"] >= 0.5 for o in offered)
+    chosen_id = offered[0]["food_id"]
+    assert chosen_id != component.food_id
+
+    rejected_id = component.food_id
+    done = c.post(url, {"action": "swap_food", "component_id": component.id, "chosen_food_id": chosen_id},
+                  content_type="application/json")
+    assert done.status_code == 200, done.content
+    component.refresh_from_db()
+    assert component.food_id == chosen_id
+    rungs = [p.grams for p in portions_for(component.food)]
+    assert any(abs(r - float(component.quantity)) < 0.6 for r in rungs), "swapped portion is off its ladder"
+
+    swap = MealSwap.objects.get(user=user, meal=component.meal)
+    assert (swap.rejected_food_id, swap.chosen_food_id) == (rejected_id, chosen_id)
+
+    stats = observations_for(user)
+    assert stats[rejected_id]["refused"] >= 1 and stats[chosen_id]["liked"] >= 1
+
+    # A food already on the plate cannot be swapped in twice.
+    other = MealComponent.objects.filter(meal=component.meal).exclude(pk=component.pk).first()
+    if other is not None:
+        dup = c.post(url, {"action": "swap_food", "component_id": other.id, "chosen_food_id": chosen_id},
+                     content_type="application/json")
+        assert dup.status_code == 409
+
+    # Per-food rating outranks the meal's.
+    rated = c.post(url, {"action": "rate_component", "component_id": component.id, "is_liked": False},
+                   content_type="application/json")
+    assert rated.status_code == 200, rated.content
+    component.refresh_from_db()
+    assert component.is_liked is False
+    assert observations_for(user)[chosen_id]["disliked"] >= 1

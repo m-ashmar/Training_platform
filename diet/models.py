@@ -383,6 +383,26 @@ class UserFoodCategoryPreference(models.Model):
     def __str__(self):
         return f"{self.user_id}:{self.food.name}→{self.meal} {self.macro}"
 
+class MealSwap(models.Model):
+    """A client rejected one food on a plate and took another.
+
+    The strongest preference signal a client will ever give, and it is free: nothing
+    is inferred, they said so. Learning reads it before anything else.
+    """
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='meal_swaps')
+    meal = models.ForeignKey('Meal', on_delete=models.CASCADE, related_name='swaps')
+    rejected_food = models.ForeignKey(FoodItem, on_delete=models.CASCADE, related_name='rejected_in_swaps')
+    chosen_food = models.ForeignKey(FoodItem, on_delete=models.CASCADE, related_name='chosen_in_swaps')
+    at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-at', '-id']
+        indexes = [models.Index(fields=['user', 'at'])]
+
+    def __str__(self):
+        return f"{self.user_id}: {self.rejected_food_id} -> {self.chosen_food_id}"
+
+
 class UserFoodWeight(models.Model):
     """A learned per-client weight for one food.
 
@@ -765,6 +785,9 @@ class MealComponent(models.Model):
         blank=True, 
         help_text="Actual quantity consumed (may differ from planned quantity)"
     )
+    #: Per-food rating. `Meal.is_liked` credits every food in a liked meal equally, so
+    #: a client who disliked one food penalised the other three.
+    is_liked = models.BooleanField(null=True, blank=True)
     
     def complete(self, actual_quantity=None):
         """

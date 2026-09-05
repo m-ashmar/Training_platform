@@ -33,7 +33,7 @@ def observations_for(user) -> Dict[int, Dict[str, float]]:
         MealComponent.objects
         .filter(meal__diet_plan__user=user)
         .select_related("meal")
-        .only("food_id", "quantity", "actual_quantity_consumed", "is_completed",
+        .only("food_id", "quantity", "actual_quantity_consumed", "is_completed", "is_liked",
               "meal__is_liked")
     )
     for comp in components:
@@ -47,11 +47,24 @@ def observations_for(user) -> Dict[int, Dict[str, float]]:
         if planned > 0 and actual is not None:
             if float(actual) / planned < REFUSED_RATIO:
                 rec["refused"] += 1
-        liked = getattr(comp.meal, "is_liked", None)
+        # A per-food rating outranks the meal's; the meal's applies only where the
+        # client said nothing about the food itself.
+        liked = comp.is_liked if comp.is_liked is not None else getattr(comp.meal, "is_liked", None)
         if liked is True:
             rec["liked"] += 1
         elif liked is False:
             rec["disliked"] += 1
+
+    # A swap is the strongest signal there is: the client rejected one food and named
+    # another. It counts as a refusal of the first and a like of the second.
+    from diet.models import MealSwap
+    for swap in MealSwap.objects.filter(user=user).only("rejected_food_id", "chosen_food_id"):
+        rej = stats.setdefault(swap.rejected_food_id, {"served": 0.0, "completed": 0.0,
+                                                        "refused": 0.0, "liked": 0.0, "disliked": 0.0})
+        rej["served"] += 1; rej["refused"] += 1
+        got = stats.setdefault(swap.chosen_food_id, {"served": 0.0, "completed": 0.0,
+                                                      "refused": 0.0, "liked": 0.0, "disliked": 0.0})
+        got["served"] += 1; got["liked"] += 1
     return stats
 
 
