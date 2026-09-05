@@ -924,6 +924,21 @@ class GenerateDietPlanRuleBasedView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+            # Refuse what the meal structure cannot carry, before building it. Three
+            # meals and a snack top out near 3,700 kcal in servable portions; a 5,000
+            # kcal request used to return a correct 3,900 kcal plan labelled 5,000.
+            from diet.services.rule_based_planner import feasible_kcal_ceiling
+            ceiling = feasible_kcal_ceiling(meal_count, snack_count, request.user.resolve_fitness_goal())
+            if daily_kcal > ceiling * 1.05:
+                suggested_meals = min(6, int(-(-daily_kcal // 1250)))
+                return Response({
+                    "error": _("This many calories cannot be served in %(m)d meals and %(s)d snacks.")
+                             % {"m": meal_count, "s": snack_count},
+                    "requested_kcal": round(daily_kcal),
+                    "max_feasible_kcal": round(ceiling),
+                    "suggestion": {"meal_count": suggested_meals, "snack_count": 2},
+                }, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
             planner = RuleBasedPlanner(request.user)
             plan_output = planner.generate(
                 daily_kcal=daily_kcal,

@@ -35,6 +35,21 @@ class PlannerPolicy:
     protein_ratio: float = 0.30
     carb_ratio: float = 0.45
     fat_ratio: float = 0.25
+    #: Protein by bodyweight, in grams per kilogram. A percentage of energy is the wrong
+    #: primary model: a 110 kg client cutting landed near 0.95 g/kg because the 1,200 kcal
+    #: floor capped the calories the percentage was taken of. When a weight is known,
+    #: protein comes from here and carbohydrate and fat split the remaining energy.
+    protein_g_per_kg: float = 1.6
+    protein_floor_g: float = 60.0
+    protein_ceiling_g: float = 250.0
+
+    # --- feasibility --------------------------------------------------------
+    #: What one slot can carry in servable portions. Measured: three meals and a snack
+    #: top out near 3,700 kcal, because every portion is bounded by an amount a person
+    #: would serve. Checked BEFORE planning so a 5,000 kcal request is refused with a
+    #: suggestion, not built at 3,900 and labelled 5,000.
+    max_kcal_per_meal: float = 1250.0
+    max_kcal_per_snack: float = 400.0
 
     # --- per-meal floors --------------------------------------------------
     protein_floor_main_g: float = 40.0      # lunch / dinner
@@ -107,10 +122,12 @@ _GOAL_POLICIES = {
         meal_kcal_split={"Breakfast": 0.30, "Lunch": 0.40, "Dinner": 0.30},
         macro_order=["protein", "carb", "fat"],
         carb_floor_g=0.0,          # carbs are not floored when cutting
+        protein_g_per_kg=2.0,
     ),
     "gain": dict(
         meal_kcal_split={"Breakfast": 0.35, "Lunch": 0.35, "Dinner": 0.30},
         macro_order=["carb", "protein", "fat"],
+        protein_g_per_kg=1.8,
     ),
     "maintain": {},
 }

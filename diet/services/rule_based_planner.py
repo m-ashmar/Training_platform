@@ -74,6 +74,14 @@ class NoServableMealError(RuntimeError):
     """The pool cannot supply a dish or a meal shape for this slot."""
 
 
+def feasible_kcal_ceiling(meal_count: int, snack_count: int, goal: str = "maintain") -> float:
+    """The most a day of this shape can carry in servable portions."""
+    from diet.planner.policy import load_policy
+    policy = load_policy(goal)
+    return (max(0, int(meal_count)) * policy.max_kcal_per_meal
+            + max(0, int(snack_count)) * policy.max_kcal_per_snack)
+
+
 class RuleBasedPlanner:
     """
     Deterministic diet planner that uses user category preferences and macro density.
@@ -363,11 +371,11 @@ class RuleBasedPlanner:
             meal_distribution["Snack"] = snack_share
         per_meal_kcal = {m: daily_kcal * share for m, share in meal_distribution.items()}
 
-        # Macro targets per meal
-        ratios = self._macro_ratios_for_goal_value(ctx.goal)
-        protein_target = daily_kcal * ratios["protein"] / 4.0
-        carb_target = daily_kcal * ratios["carb"] / 4.0
-        fat_target = daily_kcal * ratios["fat"] / 9.0
+        # Macro targets per meal, from the one function persistence and convergence
+        # also read, with the client's bodyweight driving protein.
+        from diet.planner.targets import day_macro_grams
+        day = day_macro_grams(daily_kcal, policy, getattr(self.user, "weight", None))
+        protein_target, carb_target, fat_target = day["protein"], day["carb"], day["fat"]
         meal_targets: Dict[str, MealTarget] = {}
         for m in meal_distribution:
             meal_targets[m] = MealTarget(

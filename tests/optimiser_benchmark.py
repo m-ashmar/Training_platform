@@ -246,7 +246,9 @@ def run(days: int = 3, kcal_targets: Sequence[int] = BENCH_KCAL,
             # split makes every meal look broken and is how a first draft of this
             # benchmark reported 62 failures that were not failures.
             policy = load_policy(planner._resolve_goal())
-            targets = compute_targets(kcal, policy, ["Breakfast", "Lunch", "Dinner"], 1)
+            # Judged against the targets the planner built to, bodyweight included.
+            targets = compute_targets(kcal, policy, ["Breakfast", "Lunch", "Dinner"], 1,
+                                      weight_kg=getattr(user, "weight", None))
             by_slot = {t.name: t for t in targets.meals}
 
             for meal in out.plan:

@@ -191,9 +191,16 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     )
     
     # Physical attributes (migrated from old fields - preserved for backward compatibility)
-    height = models.FloatField(null=True, blank=True, help_text="Height in cm")
-    weight = models.FloatField(null=True, blank=True, help_text="Weight in kg")
-    age = models.PositiveIntegerField(null=True, blank=True)
+    # Bounded. Nothing rejected a height of 1.75 — metres, entered where centimetres
+    # were expected — and Mifflin-St Jeor on it produced a BMR of about 560, which the
+    # floor silently turned into a 1,200 kcal plan. The whole physiology layer trusted
+    # three unvalidated numbers.
+    height = models.FloatField(null=True, blank=True, help_text="Height in cm",
+                               validators=[MinValueValidator(100.0), MaxValueValidator(250.0)])
+    weight = models.FloatField(null=True, blank=True, help_text="Weight in kg",
+                               validators=[MinValueValidator(30.0), MaxValueValidator(300.0)])
+    age = models.PositiveIntegerField(null=True, blank=True,
+                                      validators=[MinValueValidator(13), MaxValueValidator(100)])
     gender = models.CharField(
         max_length=10, 
         choices=[('Male', 'Male'), ('Female', 'Female')], 
@@ -419,12 +426,17 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         Returns:
             Daily calorie target or None if insufficient data
         """
-        if goal is None:
-            goal = self.resolve_fitness_goal()
-        required_fields = [self.height, self.weight, self.age, self.gender]
-        if any(field is None for field in required_fields):
+        # Any spelling. The comparison below was exact, and the trainer path passed the
+        # raw string it was given, so 'lose' or 'Weight Loss' silently produced a
+        # MAINTENANCE target on a plan labelled Lose — the same silent-default failure
+        # the activity guard eight lines down was written to eliminate.
+        goal = self.normalise_goal(goal if goal is not None else self.resolve_fitness_goal())
+        # Truthiness, to match calculate_bmr. This guarded `is None` while the BMR
+        # guarded truthiness, so a height of 0 passed here, BMR returned None, and the
+        # generate view coerced that None into a 0 kcal plan.
+        if not (self.height and self.weight and self.age and self.gender):
             raise ValueError("Complete profile required: height, weight, age, gender")
-        
+
         bmr = self.calculate_bmr()
         if bmr is None:
             return None
@@ -447,18 +459,41 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             )
         maintenance = bmr * activity_factors[self.activity_level]
 
-        # Apply goal-based adjustments
+        # A sized adjustment, not a flat 500. Twenty percent of maintenance, bounded,
+        # and never below BMR: a flat -500 on a small sedentary person was a third of
+        # their intake and a flat +500 on a large active one was a rounding error.
+        # BMI feeds a decision here for the first time — no deficit below 18.5 — and
+        # nobody under 18 is put in a deficit at all.
+        bmi = self.calculate_bmi()
         if goal == 'Lose':
-            target = maintenance - 500
+            if (bmi is not None and bmi < self.MIN_BMI_FOR_DEFICIT) or (self.age or 0) < 18:
+                target = maintenance
+            else:
+                target = maintenance - max(300.0, min(750.0, 0.20 * maintenance))
+                target = max(target, bmr)
         elif goal == 'Gain':
-            target = maintenance + 500
+            target = maintenance + max(250.0, min(500.0, 0.15 * maintenance))
         else:
             target = maintenance
 
-        # Clamp. A flat -500 for a small, sedentary person produced targets below any
-        # safe intake, and nothing rejected an absurd one at the other end either. These
-        # are health bounds, not input validation, so they belong with the calculation.
+        # Clamp. Health bounds, not input validation, so they belong with the calculation.
         return max(self.MIN_DAILY_CALORIES, min(target, self.MAX_DAILY_CALORIES))
+
+    #: Below this a deficit is refused whatever the goal says.
+    MIN_BMI_FOR_DEFICIT = 18.5
+
+    @classmethod
+    def normalise_goal(cls, value) -> str:
+        """'lose', 'Weight Loss', 'cut', 'shred' -> 'Lose'; the gain words -> 'Gain';
+        anything else -> 'Maintain'. One resolver for a caller-supplied string."""
+        words = str(value or '').lower()
+        loss = any(w in words for w in cls._GOAL_LOSE_WORDS)
+        gain = any(w in words for w in cls._GOAL_GAIN_WORDS)
+        if loss and not gain:
+            return 'Lose'
+        if gain and not loss:
+            return 'Gain'
+        return 'Maintain'
 
     def can_access_user_data(self, target_user):
         """

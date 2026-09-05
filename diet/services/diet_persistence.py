@@ -71,7 +71,8 @@ class DietPersistenceService:
                 self._validate_ingredients_in_db(plan_output)
                 self._validate_ingredients_allowed(plan_output, categories)
 
-                from diet.utils.nutrition import get_macro_ratios
+                from diet.planner.policy import load_policy
+                from diet.planner.targets import day_macro_grams
                 # Computed once, so the plan row and its targets describe the same client.
                 goal = self.user.resolve_fitness_goal()
                 # The target the plan was BUILT to, not the profile's default. Persistence
@@ -82,13 +83,9 @@ class DietPersistenceService:
                 requested = ((getattr(plan_output, 'plan_metadata', None) or {})
                              .get('delivery', {}) or {}).get('requested_kcal_per_day')
                 daily_calories = float(requested) if requested else self.user.calculate_daily_calories()
-                _ratios = get_macro_ratios(goal)
-                _kcal = float(daily_calories or 0.0)
-                targets = {
-                    'protein': round(_kcal * _ratios['protein'] / 4.0, 1),
-                    'carb': round(_kcal * _ratios['carb'] / 4.0, 1),
-                    'fat': round(_kcal * _ratios['fat'] / 9.0, 1),
-                }
+                _day = day_macro_grams(float(daily_calories or 0.0), load_policy(goal),
+                                       getattr(self.user, 'weight', None))
+                targets = {k: round(v, 1) for k, v in _day.items()}
                 deterministic = bool(plan_output.plan) and all(
                     ing.food_id is not None
                     for m in plan_output.plan for ing in m.ingredients)

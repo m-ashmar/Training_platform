@@ -2110,7 +2110,7 @@ def test_calorie_drift_only_ever_goes_up(diet_quality):
 
     Tightens in P4 to <= 2% and drift_all_one_sided False, at which point it becomes a
     real assertion rather than a tripwire."""
-    assert diet_quality.drift_worst_abs <= 14.0, \
+    assert diet_quality.drift_worst_abs <= 5.0, \
         f"drift worsened to {diet_quality.drift_worst_abs:+.1f}%"
 
 
@@ -2133,7 +2133,11 @@ def test_breakfast_is_the_weakest_slot(diet_quality):
     Tightens in P3 and P6 to >= 0.85."""
     breakfast = diet_quality.dish_rate_by_slot.get("Breakfast", 0.0)
     assert breakfast >= 0.45, f"breakfast dish rate fell to {breakfast:.0%}"
-    assert diet_quality.dish_rate_overall >= 0.45, \
+    # 0.72 after P7.5 moved protein to grams per kilogram: the maintain profile went
+    # from 202 g to 125 g and the chicken-heavy dinners stopped fitting (3 recipes to 1).
+    # A corrected target the library meets less well, not a selection regression. P9.4
+    # is the recovery; this floor rises with it.
+    assert diet_quality.dish_rate_overall >= 0.70, \
         f"overall dish rate fell to {diet_quality.dish_rate_overall:.0%}"
 
 
@@ -2801,3 +2805,62 @@ def test_a_plan_is_saved_and_converged_to_the_target_it_was_built_for(seeded_cat
     assert plan.target_protein and plan.target_carbs and plan.target_fat
     kcal_from_targets = plan.target_protein * 4 + plan.target_carbs * 4 + plan.target_fat * 9
     assert abs(kcal_from_targets / 1400 - 1) <= 0.02
+
+
+def test_plan_time_and_converge_time_targets_are_the_same_numbers(seeded_catalogue):
+    """Calories agreeing is not enough. After protein moved to grams per kilogram, the
+    planner built toward one macro split and converge_plan re-optimised toward another,
+    and the calorie-only check above passed while 114 of 144 meals drifted off their
+    optimum. Every per-meal gram must match, from the one function both read.
+    """
+    from diet.planner.policy import load_policy
+    from diet.planner.targets import compute_targets
+    from diet.services.rule_based_planner import PlannerContext, RuleBasedPlanner
+
+    from tests.diet_quality import PROFILES, _make_client
+
+    user = _make_client("bind-gate", *PROFILES[2])
+    planner = RuleBasedPlanner(user, seed_salt="bind")
+    ctx = PlannerContext(goal=planner._resolve_goal(), allowed_map={})
+    day = planner._prepare_day(ctx=ctx, current_date=None, daily_kcal=2200, snack_count=1,
+                               meals=["Breakfast", "Lunch", "Dinner"], used_in_window={},
+                               no_repeat_days=3)
+    converge_side = {t.name: t for t in compute_targets(
+        2200, load_policy(ctx.goal), ["Breakfast", "Lunch", "Dinner"], 1,
+        weight_kg=user.weight).meals}
+    for name, mine in day.meal_targets.items():
+        theirs = converge_side[name]
+        assert abs(mine.kcal_target - theirs.calories) < 0.5, name
+        for macro, key in (("protein", "protein"), ("carb", "carb"), ("fat", "fat")):
+            assert abs(mine.macro_targets[macro] - getattr(theirs, key)) < 0.5, \
+                f"{name} {macro}: planner {mine.macro_targets[macro]:.1f} vs converge {getattr(theirs, key):.1f}"
+
+
+
+# ---------------------------------------------------------------------------
+# P4.3 — the goal metrics are ratchets, not observations
+# ---------------------------------------------------------------------------
+
+def test_the_goal_metrics_never_move_the_wrong_way(diet_quality):
+    """chosen_ingredient_share and twin_identical_meals were recorded in the baseline and
+    asserted by nothing. Locking the gate without them would have ratified "choosing your
+    food changes nothing" as the accepted state, and every later change to selection
+    would have been graded by a gate that could not see the product goal.
+
+    Ratchets against the recorded baseline: each may only move in the direction of
+    improvement. To move the floor, re-record the baseline deliberately.
+    """
+    import json
+    from pathlib import Path
+
+    recorded = json.loads(
+        (Path(__file__).parent / "diet_quality_baseline.json").read_text())["measured"]
+    assert diet_quality.chosen_ingredient_share >= recorded["chosen_ingredient_share"] - 1e-9, (
+        f"chosen-ingredient share fell: {diet_quality.chosen_ingredient_share:.3f} "
+        f"< recorded {recorded['chosen_ingredient_share']:.3f}")
+    assert diet_quality.twin_identical_meals <= recorded["twin_identical_meals"], (
+        f"more meals unchanged after choosing: {diet_quality.twin_identical_meals} "
+        f"> recorded {recorded['twin_identical_meals']}")
+    assert diet_quality.distinct_dishes >= recorded["distinct_dishes"]
+    assert diet_quality.absurd_portion_rate == 0.0
+    assert diet_quality.days_repeating_a_dish == 0

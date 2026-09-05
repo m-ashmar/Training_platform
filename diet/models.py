@@ -486,11 +486,11 @@ class DietPlan(RowValidationMixin, models.Model):
         if None not in (self.target_protein, self.target_carbs, self.target_fat):
             return {"protein": float(self.target_protein), "carbs": float(self.target_carbs),
                     "fat": float(self.target_fat)}
-        from diet.utils.nutrition import get_macro_ratios
-        r = get_macro_ratios(self.goal)
-        kcal = float(self.daily_calories or 0.0)
-        return {"protein": kcal * r["protein"] / 4.0, "carbs": kcal * r["carb"] / 4.0,
-                "fat": kcal * r["fat"] / 9.0}
+        from diet.planner.policy import load_policy
+        from diet.planner.targets import day_macro_grams
+        d = day_macro_grams(float(self.daily_calories or 0.0), load_policy(self.goal),
+                            getattr(self.user, "weight", None))
+        return {"protein": d["protein"], "carbs": d["carb"], "fat": d["fat"]}
     start_date = models.DateField()
     end_date = models.DateField(db_index=True)
     duration_weeks = models.PositiveIntegerField(default=4)

@@ -34,7 +34,12 @@ def converge_plan(diet_plan, policy: PlannerPolicy | None = None) -> Dict:
         meals = list(diet_plan.meals.filter(date=day).prefetch_related("components__food"))
         names = [m.meal_type for m in meals if (m.meal_type or "").lower() != "snack"]
         snacks = sum(1 for m in meals if (m.meal_type or "").lower() == "snack")
-        targets = compute_targets(daily_kcal, policy, names or ["Breakfast", "Lunch", "Dinner"], snacks)
+        # The same targets the plan was built to, bodyweight included. Without the
+        # weight, convergence re-optimised every meal toward the percentage split while
+        # the planner had built it to grams per kilogram, and the two disagreed by enough
+        # that 114 of 144 persisted meals read as off the proven optimum.
+        targets = compute_targets(daily_kcal, policy, names or ["Breakfast", "Lunch", "Dinner"],
+                                  snacks, weight_kg=getattr(getattr(diet_plan, "user", None), "weight", None))
         by_name = {t.name: t for t in targets.meals}
 
         day_totals = {"calories": 0.0, "protein": 0.0, "carb": 0.0, "fat": 0.0}

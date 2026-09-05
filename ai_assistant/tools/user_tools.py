@@ -50,20 +50,15 @@ def get_body_stats(user, **kwargs):
     
     print(f"[AI Tool] BMI: {bmi}, BMR: {bmr}, Category: {bmi_category}")
 
-    # TDEE via activity multiplier
-    activity_multipliers = {
-        "Sedentary": 1.2,
-        "Light": 1.375,
-        "Moderate": 1.55,
-        "Active": 1.725,
-        "VeryActive": 1.9,
-    }
+    # The model owns the arithmetic. A second multiplier table lived here with the
+    # exact `.get(level, 1.2)` fallback the model was fixed to raise on, so the coach
+    # could tell a client stored as 'moderate' a sedentary number the planner never used.
     tdee = None
     if bmr:
-        multiplier = activity_multipliers.get(user.activity_level, 1.2)
-        tdee = round(bmr * multiplier)
-    
-    print(f"[AI Tool] Activity: {user.activity_level}, Multiplier used: {activity_multipliers.get(user.activity_level, 1.2)}, TDEE: {tdee}")
+        try:
+            tdee = round(user.calculate_daily_calories(goal='Maintain'))
+        except ValueError:
+            tdee = None
 
     return {
         "bmi": bmi,
