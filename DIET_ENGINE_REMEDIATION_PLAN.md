@@ -209,12 +209,29 @@ is summed afterwards, so drift is per-meal by construction. In `generate()`, aft
 meal, add its signed residual (kcal, protein, carb, fat) to the next meal's target,
 bounded to ±15% of that meal. Ten lines. Attacks the remaining 3.9% directly.
 
-**9.2 One scorer for both paths.** Recipes weight preference at ~1.7:1, templates at
-~148:1. Do not tune two ratios to agree — delete one. Score a recipe as the **mean pool
-score of its ingredients for this meal** (`pool.weights(meal, slot)[food_id]`), plus the
-same pairing affinity, then softmax at `SOFTMAX_T`. `W_FIT`, `W_PREFERENCE` and
-`chosen_food_ids` go away; `liked_foods` reaches the recipe path for free because it is
-already in the pool score. Fit stays a **filter** (inside tolerance or not), never a weight.
+**9.2 One scorer for both paths — measured before applied.** Recipes weight preference
+at ~1.7:1, templates at ~148:1. Do not tune two ratios to agree; delete one.
+
+Score a recipe as the **calorie-share-weighted** pool score of its ingredients for this
+meal: `Σ share_i × pool.weights(meal, slot_i)[food_i]`, where `share_i` is the
+ingredient's fraction of the recipe's calories at one serving. Not a plain mean. A mean
+lets a spoon of oil drag chicken down and rewards short recipes over complete ones;
+calorie share is the recipe's own composition and needs no constant. Add the same pairing
+affinity as the template path, then softmax at `SOFTMAX_T`. `W_FIT`, `W_PREFERENCE` and
+`chosen_food_ids` go away; `liked_foods` reaches recipes for free. Fit stays a **filter**.
+
+**Gate — do not apply until these are measured on the seeded catalogue:**
+
+| Test | Pass condition |
+|---|---|
+| Distribution of recipe scores vs template scores | same scale, overlapping ranges |
+| Recipes with more ingredients | score does not fall with count |
+| A core ingredient vs a garnish | chosen staple moves the score; chosen condiment barely does |
+| Pairing affinity vs preference | affinity never exceeds ~20% of a chosen-food score |
+| `SOFTMAX_T` after unifying | P(chosen recipe wins) stays in 0.85–0.96 |
+| Benchmark | `chosen_ingredient_share` and `distinct_dishes` both rise |
+
+If any row fails, fix the aggregation, not the temperature.
 
 **9.3 Judge the path; do not rank it.** `_plan_meal` is first-wins. Build the best recipe
 candidate *and* the best template candidate, each carrying `(portions, deviation,
@@ -290,8 +307,15 @@ turkey nudged up, without anyone telling the engine that.
 rise; absurd portions and same-day repeats must not move.
 
 **Do not** add language-model embeddings here. They encode real culinary association
-but cannot be audited, drift with the model version, and need a corpus you do not have.
-Revisit when P11 has produced data and the library is past two hundred recipes.
+but cannot be audited and drift with the model version.
+
+**12.4 Pre-train the culinary layer from a recipe corpus.** `pairing_edges`, `meal_foods`
+and `derive_templates` are co-occurrence counts over 16 recipes. The same three functions
+over a public corpus (Recipe1M+, RecipeNLG, or an Arabic recipe scrape mapped onto the
+133-food catalogue) give pairing coverage for every food, meal shapes at scale, and
+cuisine-specific patterns — with no model, still counts, still auditable. This is the one
+kind of "trained before launch" that is real: the internet can teach the engine what goes
+together. It cannot teach it what one client likes; that is P11 and only P11.
 
 ---
 
