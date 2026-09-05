@@ -131,6 +131,13 @@ class FoodItem(RowValidationMixin, models.Model):
         help_text="Whether a meal can be built on this food, served alongside it, or "
                   "only seasoned with it.",
     )
+    #: Which meals this food suits. Meal-appropriateness was derived entirely from the
+    #: recipe library, so it existed only for the 16 foods that appeared in a recipe and
+    #: the other 85 had no signal at all — which is how a breakfast came out as grilled
+    #: chicken, white rice and olive oil. A food can say this about itself.
+    meal_slots = models.JSONField(
+        default=list, blank=True,
+        help_text="Meals this food suits, e.g. ['Breakfast', 'Snack']. Empty means any.")
     ingredients_text = models.TextField(
         blank=True, default='',
         help_text="Raw ingredient list, when the source provides one. Scanned for allergens.",
