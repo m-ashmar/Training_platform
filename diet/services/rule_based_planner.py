@@ -10,7 +10,7 @@ import random
 import math
 import hashlib
 
-from ..models import FoodItem, UserFoodCategoryPreference, DietConfig
+from ..models import FoodItem, UserFoodCategoryPreference
 from ..ai_models import DietPlanOutput, AIMeal, AIIngredient
 from ..utils.nutrition import (
     get_macro_densities_for_food,
@@ -34,29 +34,21 @@ class MealTarget:
 
 @dataclass
 class PlannerContext:
-    user: object
+    """What a generation needs that does not change from day to day."""
     goal: str
-    macro_order: List[str]
-    meal_names: List[str]
     allowed_map: Dict[str, Dict[str, List[FoodItem]]]
-    piece_weights: Dict[str, float]
-    common_veggies: List[FoodItem]
-    common_fruits: List[FoodItem]
 
 
 @dataclass
 class DayContext:
     date: object
     meal_kcal: Dict[str, float]
-    meal_distribution: Dict[str, float]
     meal_targets: Dict[str, MealTarget]
+    #: Food ids served for this slot inside the no-repeat window, persisted history
+    #: and this run's earlier days combined.
     recent_exclusions_ids: Dict[str, Set[int]]
-    recent_exclusions_names: Dict[str, Set[str]]
     used_in_window: Dict[str, Set[int]]
-    used_names_window: Dict[str, Set[str]]
-    #: Recipe ids served for this meal inside the no-repeat window. The food-level
-    #: window above was already computed and threaded into component assembly; the
-    #: recipe path ignored it, which is half of why one dish was served 48 times.
+    #: Recipe ids served for this slot inside the no-repeat window.
     recent_recipe_ids: Dict[str, Set[int]] = field(default_factory=dict)
     #: Recipes already served TODAY, across every slot. The window above is a snapshot
     #: taken before the day starts and never updated while it runs, and the set the
@@ -110,30 +102,6 @@ class RuleBasedPlanner:
         #: and 9.2% on consecutive runs of identical code.
         self._seed_salt = seed_salt
 
-    def _normalize_name_for_repeat(self, name: str) -> str:
-        n = (name or '').strip().lower()
-        # Collapse common variants to base token to reduce repetition (best-effort)
-        mapping = [
-            ('sweet potato', 'sweet potato'),
-            ('chicken', 'chicken'),
-            ('breast', 'chicken'),
-            ('tuna', 'tuna'),
-            ('fish', 'fish'),
-            ('egg', 'egg'),
-            ('rice', 'rice'),
-            ('potato', 'potato'),
-            ('almond', 'almonds'),
-            ('banana', 'banana'),
-            ('oats', 'oats'),
-            ('apple', 'apple'),
-            ('broccoli', 'broccoli'),
-            ('asparagus', 'asparagus'),
-        ]
-        for key, base in mapping:
-            if key in n:
-                return base
-        return n
-
     def _resolve_goal(self) -> str:
         """The user's goal in this planner's lower-case vocabulary.
 
@@ -162,47 +130,12 @@ class RuleBasedPlanner:
 
         # Allowed foods per meal/macro (static per user)
         allowed = self._build_allowed_foods_map()
-        order = self._macro_priority_order()
         goal = self._resolve_goal()
-
-        # Preload commonly used fallbacks and piece weights to avoid repeated DB hits
-        try:
-            self._common_veggies = self._load_common_foods([
-                'Broccoli', 'Spinach', 'Carrot', 'Green Bean', 'Zucchini',
-                'Bell Pepper', 'Cucumber', 'Lettuce', 'Tomato', 'Asparagus',
-                'Cauliflower', 'Kale', 'Brussels Sprouts'
-            ])
-        except Exception:
-            self._common_veggies = []
-        try:
-            self._common_fruits = self._load_common_foods([
-                'Apple', 'Banana', 'Orange', 'Strawberry', 'Blueberry',
-                'Mango', 'Pineapple', 'Grapes', 'Watermelon', 'Kiwi'
-            ])
-        except Exception:
-            self._common_fruits = []
-        try:
-            cfg = DietConfig.objects.last()
-            self._piece_weights = (cfg.piece_weights if cfg and cfg.piece_weights else {})
-        except Exception:
-            self._piece_weights = {}
-
-        # Build planner context (read-only use for now)
-        ctx = self._build_planner_context(
-            user=self.user,
-            goal=goal,
-            macro_order=order,
-            meal_names=meals,
-            allowed_map=allowed,
-            piece_weights=self._piece_weights,
-            common_veggies=self._common_veggies,
-            common_fruits=self._common_fruits,
-        )
+        ctx = PlannerContext(goal=goal, allowed_map=allowed)
 
         planned_meals: List[AIMeal] = []
         # Track foods chosen in this generation window to prevent reuse within next 3 days
         used_in_window: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
-        used_names_window: Dict[str, Set[str]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
         # Maintain per-day sliding windows of chosen FoodItem IDs (ID-only)
         day_windows: List[Dict[str, Set[int]]] = []
         recipe_windows: List[Dict[str, Set[int]]] = []
@@ -235,8 +168,6 @@ class RuleBasedPlanner:
                     for _m in rebuilt:
                         rebuilt[_m].update(w.get(_m, set()))
                 used_in_window = rebuilt
-                # Always exclude by id only (names unused)
-                used_names_window = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
             except Exception:
                 # Optional side effect: swallowing this silently is what made the
                 # surrounding failures invisible in logs. Control flow is unchanged.
@@ -252,7 +183,6 @@ class RuleBasedPlanner:
                 recent_recipe_ids=recent_recipes,
                 meals=meals,
                 used_in_window=used_in_window,
-                used_names_window=used_names_window,
                 no_repeat_days=no_repeat_days,
             )
             try:
@@ -374,28 +304,6 @@ class RuleBasedPlanner:
     # builder and the old rebalancer, both of which are gone: a quantity is chosen from
     # the food's own ladder now and never re-derived from its own display text.
 
-    def _build_planner_context(
-        self,
-        user,
-        goal: str,
-        macro_order: List[str],
-        meal_names: List[str],
-        allowed_map: Dict[str, Dict[str, List[FoodItem]]],
-        piece_weights: Dict[str, float],
-        common_veggies: List[FoodItem],
-        common_fruits: List[FoodItem],
-    ) -> PlannerContext:
-        return PlannerContext(
-            user=user,
-            goal=goal,
-            macro_order=macro_order,
-            meal_names=meal_names,
-            allowed_map=allowed_map,
-            piece_weights=piece_weights,
-            common_veggies=common_veggies,
-            common_fruits=common_fruits,
-        )
-
     def _prepare_day(
         self,
         ctx: PlannerContext,
@@ -404,21 +312,18 @@ class RuleBasedPlanner:
         snack_count: int,
         meals: List[str],
         used_in_window: Dict[str, Set[int]],
-        used_names_window: Dict[str, Set[str]],
         no_repeat_days: int,
         recent_recipe_ids: Dict[str, Set[int]] | None = None,
     ) -> DayContext:
-        # Recent history (ids and normalized names)
+        # Recent history: persisted meals plus this run's earlier days, by food id.
         try:
-            ids_by_meal, norm_names_by_meal = self._get_recent_food_history(days=no_repeat_days, until=current_date)
+            ids_by_meal = self._get_recent_food_history(days=no_repeat_days, until=current_date)
         except Exception:
+            logger.warning("could not read recent food history; variety window is this run only",
+                           exc_info=True)
             ids_by_meal = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
-            norm_names_by_meal = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
-        recent_ids = {}
-        recent_names = {}
-        for m in ("Breakfast", "Lunch", "Dinner", "Snack"):
-            recent_ids[m] = set(ids_by_meal.get(m, set())) | set(used_in_window.get(m, set()))
-            recent_names[m] = set(norm_names_by_meal.get(m, set())) | set(used_names_window.get(m, set()))
+        recent_ids = {m: set(ids_by_meal.get(m, set())) | set(used_in_window.get(m, set()))
+                      for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
 
         # Kcal allocation. `snack_kcal` comes from the policy rather than a literal:
         # the number lived in `PlannerPolicy` and this line hardcoded it, so a
@@ -472,12 +377,9 @@ class RuleBasedPlanner:
         return DayContext(
             date=current_date,
             meal_kcal=per_meal_kcal,
-            meal_distribution=meal_distribution,
             meal_targets=meal_targets,
             recent_exclusions_ids=recent_ids,
-            recent_exclusions_names=recent_names,
             used_in_window=used_in_window,
-            used_names_window=used_names_window,
             recent_recipe_ids=recent_recipe_ids or {},
         )
     def _plan_meal(self, meal_name: str, ctx: PlannerContext, day_ctx: DayContext) -> AIMeal:
@@ -571,8 +473,13 @@ class RuleBasedPlanner:
                 difficulty_level="easy",
             )
         except Exception:
-            logger.debug("template path unavailable for %s; using components",
-                         meal_name, exc_info=True)
+            # Loud. This used to log at DEBUG and return None, so any bug inside
+            # diet/planner/ presented as "the engine built a pile" and nothing else.
+            # Re-raised where a developer will see it; in production the recipe path
+            # and NoServableMealError still stand between the client and silence.
+            logger.error("template path failed for %s", meal_name, exc_info=True)
+            if getattr(settings, "DIET_PLANNER_STRICT", settings.DEBUG):
+                raise
             return None
 
     def _templates(self):
@@ -686,7 +593,9 @@ class RuleBasedPlanner:
                 difficulty_level="easy",
             )
         except Exception:
-            logger.debug("recipe path unavailable for %s; using components", meal_name, exc_info=True)
+            logger.error("recipe path failed for %s", meal_name, exc_info=True)
+            if getattr(settings, "DIET_PLANNER_STRICT", settings.DEBUG):
+                raise
             return None
 
     def _macro_ratios_for_goal_value(self, goal: str) -> Dict[str, float]:
@@ -696,14 +605,6 @@ class RuleBasedPlanner:
         if 'gain' in g:
             return {"protein": 0.25, "carb": 0.55, "fat": 0.20}
         return {"protein": 0.30, "carb": 0.50, "fat": 0.20}
-
-    def _macro_priority_order(self) -> List[str]:
-        goal = self._resolve_goal()
-        if "lose" in goal:
-            return ["protein", "carb", "fat"]
-        if "gain" in goal:
-            return ["carb", "protein", "fat"]
-        return ["protein", "carb", "fat"]
 
     def _choose_distribution_for_goal_value(self, goal: str, meals: List[str]) -> Dict[str, float]:
         g = (goal or '').lower()
@@ -740,43 +641,21 @@ class RuleBasedPlanner:
         self._pool = pool
         return pool.by_slot
 
-    def _get_recent_food_history(self, days: int, until) -> Tuple[Dict[str, Set[int]], Dict[str, Set[str]]]:
+    def _get_recent_food_history(self, days: int, until) -> Dict[str, Set[int]]:
         """
         Batch query of recent MealComponents across all meals for the user, returning:
         - ids_by_meal: {meal_type: set(food_id)}
-        - norm_names_by_meal: {meal_type: set(normalized_name)}
         """
         from datetime import timedelta as _timedelta
-        from ..models import MealComponent, FoodItem
+        from ..models import MealComponent
         ids_by_meal: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
-        norm_names_by_meal: Dict[str, Set[str]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
         since = until - _timedelta(days=days)
         rows = MealComponent.objects.filter(
             meal__diet_plan__user=self.user,
             meal__date__gte=since,
             meal__date__lt=until,
         ).values_list('meal__meal_type', 'food_id')
-        all_ids: Set[int] = set()
         for meal_type, food_id in rows:
             if meal_type in ids_by_meal:
                 ids_by_meal[meal_type].add(food_id)
-                all_ids.add(food_id)
-        id_to_name: Dict[int, str] = {}
-        if all_ids:
-            try:
-                id_to_name = {fid: name for fid, name in FoodItem.objects.filter(id__in=list(all_ids)).values_list('id', 'name')}
-            except Exception:
-                id_to_name = {}
-        for m in ids_by_meal:
-            norm_names_by_meal[m] = set(self._normalize_name_for_repeat(id_to_name.get(fid, '') or '') for fid in ids_by_meal[m])
-        return ids_by_meal, norm_names_by_meal
-
-    def _load_common_foods(self, names: List[str]) -> List[FoodItem]:
-        from ..models import FoodItem
-        if not names:
-            return []
-        try:
-            return list(FoodItem.objects.filter(name__in=names))
-        except Exception:
-            return []
-
+        return ids_by_meal
