@@ -2137,11 +2137,13 @@ def test_breakfast_is_the_weakest_slot(diet_quality):
     Tightens in P3 and P6 to >= 0.85."""
     breakfast = diet_quality.dish_rate_by_slot.get("Breakfast", 0.0)
     assert breakfast >= 0.45, f"breakfast dish rate fell to {breakfast:.0%}"
-    # 0.72 after P7.5 moved protein to grams per kilogram: the maintain profile went
-    # from 202 g to 125 g and the chicken-heavy dinners stopped fitting (3 recipes to 1).
-    # A corrected target the library meets less well, not a selection regression. P9.4
-    # is the recovery; this floor rises with it.
-    assert diet_quality.dish_rate_overall >= 0.70, \
+    # 0.72 after P7.5 moved protein to grams per kilogram and the chicken-heavy dinners
+    # stopped fitting. 0.70 after P9.3 began judging the two paths by one rule: when a
+    # plate built from the client's own foods and a library dish both fit, and only the
+    # plate contains what they chose, the plate wins. That is the product, and it moved
+    # chosen-ingredient share from 0.10 to 0.23 and unchanged-after-choosing from 27 to
+    # 17 in the same measurement. P9.4 lets a dish absorb a chosen food; this rises then.
+    assert diet_quality.dish_rate_overall >= 0.65, \
         f"overall dish rate fell to {diet_quality.dish_rate_overall:.0%}"
 
 

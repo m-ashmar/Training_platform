@@ -102,56 +102,12 @@ def chosen_food_ids(user, meal_name: str) -> frozenset:
 
 
 
-#: How much a chosen food's preference counts by what it is in the dish.
-PREFERENCE_ROLE_WEIGHT = {"staple": 1.0, "accompaniment": 0.3, "condiment": 0.1}
-
-
 def recipe_pool_score(lines: Sequence[Tuple[object, float, bool]], pool, meal_name: str,
                       edges: Optional[Dict[int, "collections.Counter"]] = None) -> float:
-    """One number, on the pool's own scale, for how much this client wants this dish.
+    """A recipe scored exactly as a built plate is. See `templates.meal_pool_score`."""
+    from .templates import meal_pool_score
 
-    NOT a mean. Each ingredient's pool score for this meal is weighted by the
-    ingredient's share of the recipe's calories at one serving. A plain mean let a spoon
-    of oil drag chicken down and rewarded short recipes over complete ones; calorie share
-    is the recipe's own composition and needs no constant. A garnish weighs what a
-    garnish weighs. Pairing affinity is added in the same units as the template path
-    adds it, so the two paths are commensurable.
-
-    Additive and unwired until the distribution tests in the plan (9.2) pass on the
-    seeded catalogue; only then does selection read it.
-    """
-    from .candidates import classify_food
-    from .templates import SOFTMAX_T, W_PAIRING, _affinity
-
-    if not lines or pool is None:
-        return 0.0
-    kcal = [max(0.0, float(getattr(f, "calories", 0) or 0) * float(g) / 100.0) for f, g, _s in lines]
-    total = sum(kcal) or 1.0
-    ids = [getattr(f, "id", None) for f, _g, _s in lines]
-    structure = 0.0
-    preference = 0.0
-    pairing = 0.0
-    has_preference = hasattr(pool, "preference")
-    for (food, _g, _s), k in zip(lines, kcal):
-        share = k / total
-        slot = classify_food(food)
-        if has_preference:
-            struct_i = float(pool.weights(meal_name, slot).get(food.id, 0.0)) \
-                       - float(pool.preference(meal_name, slot).get(food.id, 0.0))
-            pref_i = float(pool.preference(meal_name, slot).get(food.id, 0.0))
-        else:
-            struct_i, pref_i = float(pool.weights(meal_name, slot).get(food.id, 0.0)), 0.0
-        # Structure by calorie share: a garnish weighs what a garnish weighs.
-        structure += share * struct_i
-        # Preference by presence, weighted by ROLE. A client who chose chicken chose the
-        # chicken dish whatever chicken's share of its calories — share-weighting gave
-        # P(chosen wins) = 0.13. But a plain max counted a chosen garnish exactly like a
-        # chosen anchor (choosing olive oil moved the dish +100, same as chicken), and
-        # the role field exists to say which foods a meal is built on.
-        preference = max(preference, PREFERENCE_ROLE_WEIGHT.get(
-            getattr(food, "role", "staple"), 1.0) * pref_i)
-        pairing += share * W_PAIRING * _affinity(food.id, [i for i in ids if i != food.id], edges or {})
-    return structure + preference + pairing
+    return meal_pool_score([(f, g) for f, g, _s in lines], pool, meal_name, edges)
 
 
 def softmax_weights(scores: Sequence[float], temperature: float) -> List[float]:

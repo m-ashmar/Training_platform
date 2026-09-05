@@ -438,12 +438,21 @@ class RuleBasedPlanner:
         # unlike a recipe it can express a client nobody wrote a dish for. Component
         # assembly hits the macro targets and produces a pile: "chicken 180 g, oats
         # 90 g, olive oil 12 g, broccoli 400 g" is not something anyone cooks.
-        recipe_meal = self._plan_meal_from_recipe(meal_name, ctx, day_ctx)
-        if recipe_meal is not None:
-            return recipe_meal
-        template_meal = self._plan_meal_from_template(meal_name, ctx, day_ctx)
-        if template_meal is not None:
-            return template_meal
+        # Judged, not ranked. First-wins made "which path served this meal" an
+        # accident of ordering: the recipe path ran first and was the impersonal one,
+        # so a client who chose their foods got the library's dish whenever one fit
+        # (21 of 21 recipe meals unchanged after choosing; 0 of 7 built ones). Both
+        # candidates are built and one rule chooses: inside tolerance first, then the
+        # higher preference score on the shared scale, then not recent, then the lower
+        # deviation. Only the winner is marked as served.
+        recipe = self._plan_meal_from_recipe(meal_name, ctx, day_ctx)
+        template = self._plan_meal_from_template(meal_name, ctx, day_ctx)
+        candidates = [c for c in (recipe, template) if c is not None]
+        if candidates:
+            meal, _within, _pref, _recent, _dev, commit = max(
+                candidates, key=lambda c: (c[1], c[2], not c[3], -c[4]))
+            commit()
+            return meal
         # No third path. Component assembly — a greedy fill with its own optimiser, its
         # own floors and its own rounding — executed zero times in 168 instrumented
         # meals and was deleted. A pool that can supply neither a dish nor a shape is a
@@ -453,7 +462,7 @@ class RuleBasedPlanner:
             f"no dish or meal shape can be built for {meal_name} from this client's pool")
 
     def _plan_meal_from_template(self, meal_name: str, ctx: PlannerContext,
-                                 day_ctx: DayContext) -> AIMeal | None:
+                                 day_ctx: DayContext):
         """Build a meal from a shape and this client's pool.
 
         The shapes come from the recipe library rather than from anyone's judgement, and
@@ -463,7 +472,10 @@ class RuleBasedPlanner:
         try:
             from diet.planner.portion import totals as portion_totals
             from diet.planner.candidates import classify_food
+            from diet.planner.policy import load_policy
             from diet.planner.templates import plan_meal as plan_from_template
+
+            policy = load_policy(ctx.goal)
 
             target = day_ctx.meal_targets.get(meal_name)
             if target is None:
@@ -478,7 +490,7 @@ class RuleBasedPlanner:
             if targets["calories"] <= 0:
                 return None
 
-            portions, _score, template = plan_from_template(
+            portions, score, template = plan_from_template(
                 meal_name,
                 getattr(self, "_pool", None) or _PoolView(ctx.allowed_map),
                 targets,
@@ -496,6 +508,13 @@ class RuleBasedPlanner:
 
             nutrition = portion_totals(portions)
             pool_obj = getattr(self, "_pool", None)
+            from diet.planner.report import deviation_of
+            from diet.planner.templates import meal_pool_score
+            deviation = deviation_of(nutrition, targets)
+            preference = meal_pool_score([(p.food, p.grams) for p in portions],
+                                         pool_obj, meal_name, self._pairings())
+            recent_ids = set(day_ctx.recent_exclusions_ids.get(meal_name, ()))
+            is_recent = any(p.food.id in recent_ids for p in portions)
             chosen_here = []
             if pool_obj is not None:
                 for p in portions:
@@ -503,7 +522,7 @@ class RuleBasedPlanner:
                         chosen_here.append(p.food.name)
             reason = (f"because you chose {', '.join(chosen_here[:2])} for {meal_name.lower()}"
                       if chosen_here else f"built from your {meal_name.lower()} foods to fit your target")
-            return AIMeal(
+            meal = AIMeal(
                 meal_name=meal_name,
                 description=f"Built from your {meal_name.lower()} foods.",
                 reason=reason,
@@ -532,6 +551,8 @@ class RuleBasedPlanner:
                 preparation_time=15,
                 difficulty_level="easy",
             )
+            return (meal, deviation.within(policy.tolerance), preference, is_recent,
+                    float(deviation.magnitude), lambda: None)
         except Exception:
             # Loud. This used to log at DEBUG and return None, so any bug inside
             # diet/planner/ presented as "the engine built a pile" and nothing else.
@@ -586,7 +607,7 @@ class RuleBasedPlanner:
         return self._constraint_cache
 
     def _plan_meal_from_recipe(self, meal_name: str, ctx: PlannerContext,
-                               day_ctx: DayContext) -> AIMeal | None:
+                               day_ctx: DayContext):
         """Build the meal from a recipe when one fits inside tolerance.
 
         Returns None when the library has nothing suitable, so component assembly stays
@@ -636,6 +657,10 @@ class RuleBasedPlanner:
             )
             if match is None or not match.deviation.within(policy.tolerance):
                 return None
+            from diet.planner.recipes import recipe_pool_score, _recipe_lines
+            preference = recipe_pool_score(_recipe_lines(match.recipe), getattr(self, "_pool", None),
+                                           meal_name, self._pairings())
+            is_recent = match.recipe.id in served
 
             ingredients = [
                 AIIngredient(
@@ -651,10 +676,14 @@ class RuleBasedPlanner:
                 for food, grams in match.components
             ]
             totals = totals_of(match.components)
-            today = getattr(self, "_recipes_today", None)
-            if today is not None:
-                today.setdefault(meal_name, set()).add(match.recipe.id)
-            day_ctx.served_today.add(match.recipe.id)
+
+            def commit(recipe_id=match.recipe.id):
+                # Only the dish that WINS the judgement is marked served. Marking it
+                # here would ban a dish that lost to a template from the rest of the day.
+                today = getattr(self, "_recipes_today", None)
+                if today is not None:
+                    today.setdefault(meal_name, set()).add(recipe_id)
+                day_ctx.served_today.add(recipe_id)
             picked = chosen_food_ids(self.user, meal_name)
             chosen_here = sorted(f.name for f, _g in match.components if f.id in picked)
             cuisine = (getattr(match.recipe, "cuisine", "") or "").strip()
@@ -662,7 +691,7 @@ class RuleBasedPlanner:
                       if chosen_here else
                       (f"a {cuisine} dish that fits your {meal_name.lower()} target" if cuisine
                        else f"a dish that fits your {meal_name.lower()} target"))
-            return AIMeal(
+            meal = AIMeal(
                 meal_name=match.name,
                 description=getattr(match.recipe, "description", "") or "",
                 reason=reason,
@@ -679,6 +708,7 @@ class RuleBasedPlanner:
                 preparation_time=int(getattr(match.recipe, "prep_minutes", 15) or 15),
                 difficulty_level="easy",
             )
+            return (meal, True, preference, is_recent, float(match.deviation.magnitude), commit)
         except Exception:
             logger.error("recipe path failed for %s", meal_name, exc_info=True)
             if getattr(settings, "DIET_PLANNER_STRICT", settings.DEBUG):

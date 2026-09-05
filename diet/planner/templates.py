@@ -198,6 +198,42 @@ def _affinity(candidate_id: int, chosen_ids: Sequence[int],
     return (sum(neighbours.get(other, 0) for other in chosen_ids) / len(chosen_ids)) / strongest
 
 
+#: How much a chosen food's preference counts by what it is in the dish.
+PREFERENCE_ROLE_WEIGHT = {"staple": 1.0, "accompaniment": 0.3, "condiment": 0.1}
+
+
+def meal_pool_score(foods_with_grams, pool, meal_name: str,
+                    edges: Optional[Dict[int, collections.Counter]] = None) -> float:
+    """One number, on the pool's scale, for how much this client wants THIS plate.
+
+    The one scorer. Recipes and template-built meals are judged by it alike, which is
+    what lets the planner choose between the two paths rather than rank them.
+    Structure by calorie share (a garnish weighs what a garnish weighs); preference by
+    presence weighted by role (a chosen anchor is the dish, a chosen garnish is not);
+    pairing bounded. Two drafts failed the measured gate before this one passed.
+    """
+    from .candidates import classify_food
+
+    rows = [(f, float(g)) for f, g in foods_with_grams if f is not None]
+    if not rows or pool is None:
+        return 0.0
+    kcal = [max(0.0, float(getattr(f, "calories", 0) or 0) * g / 100.0) for f, g in rows]
+    total = sum(kcal) or 1.0
+    ids = [getattr(f, "id", None) for f, _g in rows]
+    structure = preference = pairing = 0.0
+    has_pref = hasattr(pool, "preference")
+    for (food, _g), k in zip(rows, kcal):
+        share = k / total
+        slot = classify_food(food)
+        w = float(pool.weights(meal_name, slot).get(food.id, 0.0))
+        pref_i = float(pool.preference(meal_name, slot).get(food.id, 0.0)) if has_pref else 0.0
+        structure += share * (w - pref_i)
+        preference = max(preference, PREFERENCE_ROLE_WEIGHT.get(
+            getattr(food, "role", "staple"), 1.0) * pref_i)
+        pairing += share * W_PAIRING * _affinity(food.id, [i for i in ids if i != food.id], edges or {})
+    return structure + preference + pairing
+
+
 def _pick(candidates: Sequence, chosen_ids: List[int],
           edges: Dict[int, collections.Counter], recent: Set[int], rng,
           scores: Optional[Dict[int, float]] = None) -> Optional[object]:
