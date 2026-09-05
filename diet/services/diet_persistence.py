@@ -13,13 +13,6 @@ from ..exceptions import PersistenceError, ConstraintViolationError
 from ..utils.logging_utils import get_logger, log_json, log_day_macros
 from .meal_plan_factory import MealPlanFactory
 from .meal_validator import MealValidator
-from .meal_rebalancer import MealRebalancer
-from .calorie_trimmer import CalorieTrimmer
-from .macro_cap_enforcer import MacroCapEnforcer
-from .snack_enforcer import SnackCalorieEnforcer
-from .per_meal_fat_capper import PerMealFatCapper
-from .macro_shortage_booster import MacroShortageBooster
-from .macro_balancer import MacroBalancer as LegacyMacroBalancer  # reuse macro rebalance logic
 import logging
 
 logger = logging.getLogger(__name__)

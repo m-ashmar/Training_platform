@@ -433,9 +433,7 @@ AI_CHEF_CONFIG = {
     },
 }
 
-DIET_SMART_MACRO_PLANNER = True
 DIET_DYNAMIC_MEAL_ALLOCATION = True
-DIET_STAGED_MEAL_FILL = True
 
 # Edamam API — optional; empty disables nutrition lookups (graceful degradation)
 EDAMAM_APP_ID = get_env("EDAMAM_APP_ID", "")
