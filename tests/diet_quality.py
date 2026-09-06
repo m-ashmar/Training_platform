@@ -132,6 +132,11 @@ class QualityReport:
     twin_identical_built: int = 0
     twin_built_meals: int = 0
     chosen_ingredient_share: float = 0.0
+    #: Of the foods the chooser picked for a slot, the share that appeared on that
+    #: slot's plate at least once in the week. Recall, to chosen share's precision.
+    preference_satisfaction: float = 0.0
+    #: The most times one dish was served to one client in one week.
+    max_repeats_per_client_week: int = 0
     chooser_pool_ranked_first: bool = False
 
     condiment_slots: List[str] = field(default_factory=list)
@@ -156,6 +161,8 @@ class QualityReport:
             f"twin meals identical      {self.twin_identical_meals} of {self.twin_total_meals}",
             f"  of the meals we built     {self.twin_identical_built} of {self.twin_built_meals}",
             f"chosen ingredient share   {self.chosen_ingredient_share:.0%}",
+            f"preference satisfaction   {self.preference_satisfaction:.0%}",
+            f"worst repeat in a week    {self.max_repeats_per_client_week}",
             f"chooser ranked first      {self.chooser_pool_ranked_first}",
             f"condiment-topped slots    {len(self.condiment_slots)}",
         ]
@@ -184,6 +191,8 @@ class QualityReport:
             "twin_identical_built": self.twin_identical_built,
             "twin_built_meals": self.twin_built_meals,
             "chosen_ingredient_share": round(self.chosen_ingredient_share, 4),
+            "preference_satisfaction": round(self.preference_satisfaction, 4),
+            "max_repeats_per_client_week": self.max_repeats_per_client_week,
             "chooser_pool_ranked_first": self.chooser_pool_ranked_first,
             "condiment_slots": sorted(self.condiment_slots),
             "catalogue_gaps": sorted(self.catalogue_gaps),
@@ -342,6 +351,10 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
             report.catalogue_gaps.append(f"generation failed for profile {index}")
             continue
         meals = _meals_of(plan)
+        week_counts = collections.Counter(m.recipe_id for m in meals if m.recipe_id)
+        if week_counts:
+            report.max_repeats_per_client_week = max(
+                report.max_repeats_per_client_week, max(week_counts.values()))
         by_day: Dict[object, list] = collections.defaultdict(list)
         for meal in meals:
             by_day[meal.date].append(meal)
@@ -492,6 +505,20 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
                 if food.name in chosen_names:
                     chosen_hits += 1
         report.chosen_ingredient_share = chosen_hits / seen if seen else 0.0
+
+        # Recall: each food the chooser picked for a slot, did it reach that slot's
+        # plate at least once in the week?
+        chosen_by_slot: Dict[str, set] = collections.defaultdict(set)
+        for meal_slot, _macro, names in SLOT_CHOICES:
+            for name in names:
+                if name in resolved:
+                    chosen_by_slot[meal_slot].add(resolved[name].id)
+        seen_by_slot: Dict[str, set] = collections.defaultdict(set)
+        for meal in after_meals:
+            seen_by_slot[meal.meal_type] |= {f.id for f, _g in _components(meal)}
+        wanted = sum(len(v) for v in chosen_by_slot.values())
+        satisfied = sum(len(chosen_by_slot[s] & seen_by_slot.get(s, set())) for s in chosen_by_slot)
+        report.preference_satisfaction = satisfied / wanted if wanted else 0.0
 
     # ---- pool sanity -------------------------------------------------------
     plain = _make_client(f"qp{tag}", ["Maintain"], 175, 78, 28, "Male", "Moderate")

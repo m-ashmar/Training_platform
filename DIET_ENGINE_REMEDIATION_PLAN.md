@@ -75,6 +75,24 @@ an objective: within one generation, a dish's weight falls with how many times i
 already been served that week, and the judge prefers an unserved dish among equals.
 Measure: most-repeated dish, distinct per slot.
 
+**Done.** The planner counts each dish's servings over a seven-day window (persisted days
+plus this run's), the sampling weight is `RECENCY_PENALTY ** count`, and a dish already
+served `WEEK_MAX_SERVINGS` times loses the judge to any fitting built plate. The penalty
+alone was not enough: at a 1,133 kcal breakfast one dish reaches the target, and it was
+served six days of seven. The cap is a product decision, measured:
+
+| weekly cap | dish rate | breakfast | distinct | worst repeat in a week |
+|---|---|---|---|---|
+| none | 0.821 | 0.79 | 81 | 6 |
+| **2** | **0.774** | 0.67 | 79 | **2** |
+| 3 | 0.792 | 0.71 | 78 | 3 |
+| 4 | 0.815 | 0.74 | 82 | 4 |
+
+Kept at 2: a dish three times in a week is what a client notices, and the dish rate it
+costs sits at the ends of the calorie range, where the remedy is library breadth (see
+after launch), not the same dish again. The harness records the worst repeat in one
+client's week and ratchets it; the owner can move the cap in one constant.
+
 ---
 
 ## D — The owner's four
@@ -96,6 +114,14 @@ the swap? Learning stays hand-set until this says yes on real data.
 the existing completed / rated / swapped. One endpoint. Report later. Viewed and accepted
 are client-side; the app emits them.
 
+**Done.** D1 `preference_satisfaction` in the harness, recorded and ratcheted. D2
+`MealSwap.similarity` written by the swap endpoint. D3 an invariant test (every vegetable
+at the learned floor, one starch at the ceiling: vegetables stay at every main, no slot
+empties) and `learning.replay_swaps(user)`, which reports how many recorded swaps the next
+plan would avoid — a report, never a target, until it says yes on real data. D4 `MealEvent`
+(migration 0060), recorded by the completion, rating and swap endpoints, and by
+`action: "event"` with `kind: viewed | accepted` on the interaction endpoint.
+
 ---
 
 ## E — Production review, no corner left
@@ -110,9 +136,27 @@ serving, Arabic name. Only lunch is covered today.
 **E7** Migrations apply clean from zero on Postgres; catalogue rebuilds from one command.
 **E8** Final adversarial pass on the whole path with the new library.
 
+**Done, E1–E8.** One meal payload builder feeds every meal-bearing endpoint, with the
+engine's name, reason, dish, shape and built-to target in English and Arabic
+(`DIET_API_CHANGES.md` is the client's diff). The unservable slot is a 422 with a code.
+One generation function serves the view, the new `generate_rule_based_plan` task
+(`engine: "rule"` on the async endpoint, up to 30 days) and the AI path's fallback, which
+had read a stale calorie field. A 7-day plan is 85 queries to generate and ~200 to persist,
+held by a budget test. Migrations apply from zero (`--create-db`); one command rebuilds
+the catalogue and the library. The adversarial pass: an Arabic client reads Arabic names
+and servings throughout; Levantine-only with two dislikes and a nut allergy serves 25
+dishes and nothing forbidden; Western-only serves no Levantine dish; a trainer is refused;
+another client's meal is 403 on every endpoint.
+
 ---
 
 ## Deliberately after launch
 
 Weight tuning from production signal (a month of D4 first). Corpus pre-training for
 pairing (the Levantine library is the higher-value path for this market).
+
+Library breadth at the ends of the calorie range: above ~900 kcal only one breakfast dish
+reaches the target and below ~350 kcal only a few do, which is where the weekly cap costs
+dish rate. Ten substantial breakfasts (eggs with bread and cheese, ful with eggs, oats
+with nut butter and milk) and ten light ones would lift the 1,200 and 3,400 kcal clients
+to the middle's dish rate. Owner reviews grams, as for A1.

@@ -14,7 +14,7 @@ from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.utils.translation import gettext as _
-from .tasks import generate_ai_diet_plan
+from .tasks import generate_ai_diet_plan, generate_rule_based_plan
 from .ai_services import DietGenerator
 from .exceptions import OpenAIError, DietParsingError, PersistenceError
 from .engine.rule_based_planner import RuleBasedPlanner
@@ -22,6 +22,7 @@ from .services.rule_based_planner import NoServableMealError
 from .services.meal_payload import component_payload, day_targets, meal_payload, target_payload
 from .models import (
     MealSwap,
+    MealEvent,
     DailyAdvice, FoodItem, UserFoodPreference, FoodCategory, 
     DietPlan, DietPlanTemplate, Meal, MealComponent, UserFoodCategoryPreference
 )
@@ -34,6 +35,7 @@ from django.shortcuts import render
 from django.http import JsonResponse
 from .ai_services import DietGenerator
 from django.core.exceptions import PermissionDenied
+from django.core.exceptions import ValidationError as DjangoValidationError
 from datetime import date, time, datetime
 from django.db import models
 
@@ -810,6 +812,26 @@ class GenerateDietPlanView(APIView):
                 # Normalize to ISO string for Celery serialization
                 start_date_str = parsed.isoformat()
             
+            # The deterministic engine, off the request thread, for plans longer than
+            # the synchronous endpoint's seven days. Same planner, same persistence,
+            # same refusals as generate-rule; the result is the task's return value.
+            if (request.data.get('engine') or 'ai').lower() == 'rule':
+                from diet.services.plan_generation import MAX_TASK_DAYS
+                task = generate_rule_based_plan.delay(
+                    user_id=request.user.id,
+                    meal_count=int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10),
+                    snack_count=int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10),
+                    start_date=start_date_str,
+                    duration_days=int_param(request.data, 'duration_days', default=7, minimum=1, maximum=MAX_TASK_DAYS),
+                )
+                quota.record_on_commit(request.user, "daily_meals")
+                return Response({
+                    "message": _("Diet plan generation started"),
+                    "task_id": task.id,
+                    "engine": "rule",
+                    "estimated_time": "under a minute",
+                })
+
             # Trigger async generation
             task = generate_ai_diet_plan.delay(
                 user_id=request.user.id,
@@ -1829,7 +1851,8 @@ class MealCompletionView(APIView):
                 # Complete entire meal
                 client_service = ClientProgressService(request.user)
                 result = client_service.complete_entire_meal(meal)
-                
+                MealEvent.objects.create(user=request.user, meal=meal, kind=MealEvent.COMPLETED)
+
                 return Response({
                     "message": _("Meal completed successfully"),
                     "meal_id": meal.id,
@@ -2005,7 +2028,9 @@ class ClientMealInteractionView(APIView):
                     component.quantity = grams
                     component.save(update_fields=['food', 'quantity'])
                     MealSwap.objects.create(user=request.user, meal=component.meal,
-                                            rejected_food=rejected, chosen_food=chosen)
+                                            rejected_food=rejected, chosen_food=chosen,
+                                            similarity=round(index.similarity(rejected.id, chosen.id), 4))
+                    MealEvent.objects.create(user=request.user, meal=component.meal, kind=MealEvent.SWAPPED)
                 return Response({"message": _("Swapped"), "component": {
                     "id": component.id, "food_id": chosen.id, "name": chosen.name,
                     "quantity": grams}})
@@ -2018,7 +2043,20 @@ class ClientMealInteractionView(APIView):
                     return Response({"error": _("is_liked is required")}, status=status.HTTP_400_BAD_REQUEST)
                 component.is_liked = bool(is_liked)
                 component.save(update_fields=['is_liked'])
+                MealEvent.objects.create(user=request.user, meal=component.meal, kind=MealEvent.RATED)
                 return Response({"message": _("Rated"), "component": {"id": component.id, "is_liked": component.is_liked}})
+
+            if action == 'event':
+                # The client-side steps of the funnel. Generated is the meal row;
+                # completed, rated and swapped are recorded by the endpoints that do
+                # them; viewed and accepted only the app can know.
+                kind = (request.data.get('kind') or '').lower()
+                if kind not in (MealEvent.VIEWED, MealEvent.ACCEPTED):
+                    return Response({"error": _("kind must be viewed or accepted")},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                meal = get_object_or_404(Meal, id=request.data.get('meal_id'), diet_plan__user=request.user)
+                MealEvent.objects.create(user=request.user, meal=meal, kind=kind)
+                return Response({"message": _("Recorded"), "meal_id": meal.id, "kind": kind})
 
             if action == 'complete_component':
                 component_id = request.data.get('component_id')
@@ -2102,11 +2140,14 @@ class ClientMealDetailsView(APIView):
                 )
             
             meal = get_object_or_404(Meal, id=meal_id)
-            
-            # Get meal details
             client_service = ClientProgressService(request.user)
-            meal_details = client_service.get_meal_details(meal)
-            
+            try:
+                meal_details = client_service.get_meal_details(meal)
+            except DjangoValidationError:
+                # Another client's meal. This was the broad handler's 400 "Request
+                # could not be completed", which is the wrong status and no reason.
+                return Response({"error": _("You can only view your own meals")},
+                                status=status.HTTP_403_FORBIDDEN)
             return Response(meal_details)
             
         except PASSTHROUGH_EXCEPTIONS:

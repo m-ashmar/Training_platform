@@ -267,7 +267,8 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
                 recent_ids: Sequence[int] = (),
                 ladders: Optional[Dict[int, List[float]]] = None,
                 pool=None, edges: Optional[Dict[int, "collections.Counter"]] = None,
-                index=None, chosen_ids: Optional[frozenset] = None) -> Optional[RecipeMatch]:
+                index=None, chosen_ids: Optional[frozenset] = None,
+                served_counts: Optional[Dict[int, int]] = None) -> Optional[RecipeMatch]:
     """A dish for this meal's macro target, or None if nothing fits.
 
     Every serving size between half and double is tried, each one snapped to the
@@ -456,8 +457,14 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
                 # A dish from the cuisine the client asked for less of is still
                 # servable at a mixed ratio; it is simply chosen less often.
                 weights[i] *= max(0.1, constraints.cuisine.weight(getattr(r, "cuisine", None)))
-            if r.id in recent:
-                weights[i] *= RECENCY_PENALTY
+            # Variety is an objective over the week: each earlier serving of this dish
+            # in the window multiplies its weight by the penalty again. The 3-day
+            # flag stays as the floor for callers that pass only that.
+            n = int((served_counts or {}).get(r.id, 0))
+            if n == 0 and r.id in recent:
+                n = 1
+            if n:
+                weights[i] *= RECENCY_PENALTY ** n
         return rng.choices(matches, weights=weights, k=1)[0]
 
     if best is not None:

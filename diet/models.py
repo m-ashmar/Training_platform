@@ -394,6 +394,11 @@ class MealSwap(models.Model):
     rejected_food = models.ForeignKey(FoodItem, on_delete=models.CASCADE, related_name='rejected_in_swaps')
     chosen_food = models.ForeignKey(FoodItem, on_delete=models.CASCADE, related_name='chosen_in_swaps')
     at = models.DateTimeField(auto_now_add=True, db_index=True)
+    #: Cosine similarity of rejected -> chosen at the moment of the swap. High means the
+    #: food was fine and the client wanted a variant; low means the meal's shape was
+    #: wrong for them. Stored at write time so the report does not depend on the
+    #: catalogue the index was built from. Reported, not targeted.
+    similarity = models.FloatField(null=True, blank=True)
 
     class Meta:
         ordering = ['-at', '-id']
@@ -401,6 +406,29 @@ class MealSwap(models.Model):
 
     def __str__(self):
         return f"{self.user_id}: {self.rejected_food_id} -> {self.chosen_food_id}"
+
+
+class MealEvent(models.Model):
+    """One step of the funnel: generated -> viewed -> accepted -> completed -> rated -> swapped.
+
+    Generated is the meal row itself. Viewed and accepted are the client's to emit;
+    completed, rated and swapped are recorded by the endpoints that do them. A report
+    reads this table; nothing in the planner does.
+    """
+    VIEWED, ACCEPTED, COMPLETED, RATED, SWAPPED = 'viewed', 'accepted', 'completed', 'rated', 'swapped'
+    KINDS = [(VIEWED, 'Viewed'), (ACCEPTED, 'Accepted'), (COMPLETED, 'Completed'),
+             (RATED, 'Rated'), (SWAPPED, 'Swapped')]
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='meal_events')
+    meal = models.ForeignKey('Meal', on_delete=models.CASCADE, related_name='events')
+    kind = models.CharField(max_length=12, choices=KINDS)
+    at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-at', '-id']
+        indexes = [models.Index(fields=['user', 'kind', 'at'])]
+
+    def __str__(self):
+        return f"{self.user_id}: meal {self.meal_id} {self.kind}"
 
 
 class UserFoodWeight(models.Model):

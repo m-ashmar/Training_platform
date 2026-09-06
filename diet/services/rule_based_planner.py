@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import collections
 import logging
 
 from typing import Dict, List, Tuple, Set
@@ -50,6 +52,12 @@ class DayContext:
     used_in_window: Dict[str, Set[int]]
     #: Recipe ids served for this slot inside the no-repeat window.
     recent_recipe_ids: Dict[str, Set[int]] = field(default_factory=dict)
+    #: How many times each dish has been served to this client in the last week,
+    #: persisted days and this run's earlier days combined, across every slot. A
+    #: dish's sampling weight falls with this count, and the judge prefers the less
+    #: served dish among equals. The 3-day window above made a dish served on Monday
+    #: fully eligible again on Thursday, so a week held the same dish three times.
+    recipe_counts: Dict[int, int] = field(default_factory=dict)
     #: Recipes already served TODAY, across every slot. The window above is a snapshot
     #: taken before the day starts and never updated while it runs, and the set the
     #: recipe path wrote to during the day was only read the following morning — two
@@ -107,6 +115,14 @@ def _reasons(meal_name: str, chosen_foods, cuisine: str = "", built: bool = Fals
         return (f"a {c} dish that fits your {meal_name.lower()} target",
                 f"طبق {c_ar} يناسب هدف {slot_ar}" if c_ar else f"طبق يناسب هدف {slot_ar}")
     return (f"a dish that fits your {meal_name.lower()} target", f"طبق يناسب هدف {slot_ar}")
+
+
+#: The window over which a dish's servings count against it. Seven days: a plan is
+#: read as a week, and a client generating each morning is served against the week
+#: behind them.
+WEEK_WINDOW_DAYS = 7
+#: The most times one dish is served in that window while anything else fits.
+WEEK_MAX_SERVINGS = 2
 
 
 class RuleBasedPlanner:
@@ -200,6 +216,12 @@ class RuleBasedPlanner:
                 for _m in recent_recipes:
                     recent_recipes[_m].update(window.get(_m, set()))
             self._recipes_today = {m: set() for m in recent_recipes}
+            # Week-level counts: persisted history plus every earlier day of this run.
+            recipe_counts: Dict[int, int] = collections.Counter(
+                self._get_recent_recipe_counts(WEEK_WINDOW_DAYS, current_date))
+            for window in recipe_windows[-WEEK_WINDOW_DAYS:]:
+                for ids in window.values():
+                    recipe_counts.update(ids)
             # Rebuild in-run recency from last `no_repeat_days` day windows
             try:
                 rebuilt: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
@@ -221,6 +243,7 @@ class RuleBasedPlanner:
                 daily_kcal=daily_kcal,
                 snack_count=snack_count,
                 recent_recipe_ids=recent_recipes,
+                recipe_counts=recipe_counts,
                 meals=meals,
                 used_in_window=used_in_window,
                 no_repeat_days=no_repeat_days,
@@ -296,7 +319,7 @@ class RuleBasedPlanner:
                 while len(day_windows) > int(no_repeat_days):
                     day_windows.pop(0)
                 recipe_windows.append(dict(self._recipes_today))
-                while len(recipe_windows) > int(no_repeat_days):
+                while len(recipe_windows) > WEEK_WINDOW_DAYS:
                     recipe_windows.pop(0)
                 try:
                     dbg_counts = {k: len(v) for k,v in today_used.items()}
@@ -390,6 +413,7 @@ class RuleBasedPlanner:
         used_in_window: Dict[str, Set[int]],
         no_repeat_days: int,
         recent_recipe_ids: Dict[str, Set[int]] | None = None,
+        recipe_counts: Dict[int, int] | None = None,
     ) -> DayContext:
         # Recent history: persisted meals plus this run's earlier days, by food id.
         try:
@@ -457,6 +481,7 @@ class RuleBasedPlanner:
             recent_exclusions_ids=recent_ids,
             used_in_window=used_in_window,
             recent_recipe_ids=recent_recipe_ids or {},
+            recipe_counts=dict(recipe_counts or {}),
         )
     def _plan_meal(self, meal_name: str, ctx: PlannerContext, day_ctx: DayContext) -> AIMeal:
         # Three paths, in descending order of how much a person had to do with the
@@ -479,8 +504,14 @@ class RuleBasedPlanner:
             # When NEITHER candidate is inside tolerance, the closer one is served.
             # Preference used to decide that case too, so a plate of chosen foods
             # 20% under its snack target beat a dish 11% under it.
-            meal, _within, _pref, _recent, _dev, commit = max(
-                candidates, key=lambda c: (c[1], c[2] if c[1] else 0.0, not c[3], -c[4]))
+            # A dish already served WEEK_MAX_SERVINGS times this week is judged as if
+            # it did not fit, so a fitting built plate beats it. The sampling penalty
+            # cannot help when one dish is the only one that reaches the target: a
+            # 1,133 kcal breakfast served "Almond Butter Oat Bowl" six days of seven.
+            def rank(c):
+                within = c[1] and int(c[3]) < WEEK_MAX_SERVINGS
+                return (within, c[2] if within else 0.0, -int(c[3]), -c[4])
+            meal, _within, _pref, _recent, _dev, commit = max(candidates, key=rank)
             commit()
             return meal
         # No third path. Component assembly — a greedy fill with its own optimiser, its
@@ -700,6 +731,7 @@ class RuleBasedPlanner:
             # is a meal built from the client's own foods, so nobody is served the same
             # dish at lunch and dinner to save a recipe for tomorrow.
             served = set(getattr(day_ctx, "recent_recipe_ids", {}).get(meal_name, ()))
+            counts = getattr(day_ctx, "recipe_counts", {}) or {}
             picked = self._chosen(meal_name)
             match = find_recipe(
                 meal_name, targets, policy,
@@ -711,6 +743,7 @@ class RuleBasedPlanner:
                 index=self._similarity(),
                 exclude_ids=tuple(getattr(day_ctx, "served_today", ())),
                 recent_ids=tuple(served),
+                served_counts=counts,
                 user=self.user,
                 rng=getattr(self, "_rng", None),
                 chosen_ids=picked,
@@ -720,7 +753,9 @@ class RuleBasedPlanner:
             from diet.planner.recipes import recipe_pool_score, _recipe_lines
             preference = recipe_pool_score(_recipe_lines(match.recipe), getattr(self, "_pool", None),
                                            meal_name, self._pairings())
-            is_recent = match.recipe.id in served
+            # Handed to the judge as a count, so among equals the less served dish
+            # wins; the flag used to be "served in the last three days".
+            is_recent = int(counts.get(match.recipe.id, 0))
 
             ingredients = [
                 AIIngredient(
@@ -817,6 +852,21 @@ class RuleBasedPlanner:
         # template path needs the scores behind that order, not just the order.
         self._pool = pool
         return pool.by_slot
+
+    def _get_recent_recipe_counts(self, days: int, until) -> Dict[int, int]:
+        """How often each dish was served to this client in the window, any slot."""
+        from datetime import timedelta as _timedelta
+        from ..models import Meal
+        counts: Dict[int, int] = collections.Counter()
+        try:
+            rows = Meal.objects.filter(
+                diet_plan__user=self.user, recipe__isnull=False,
+                date__gte=until - _timedelta(days=days), date__lt=until,
+            ).values_list('recipe_id', flat=True)
+            counts.update(rows)
+        except Exception:
+            logger.warning("could not read recipe counts", exc_info=True)
+        return dict(counts)
 
     def _get_recent_recipe_history(self, days: int, until) -> Dict[str, Set[int]]:
         """Dishes served to this client in the window, from persisted meals."""

@@ -2700,15 +2700,21 @@ def _grant_diet_access(user):
 
     from django.utils import timezone
 
+    from django.utils import translation
+
     from subscription.models import Subscription, SubscriptionPlan
 
-    plan, _ = SubscriptionPlan.objects.get_or_create(
-        name="gate_diet_plan",
-        defaults=dict(plan_type="premium", description="gate", price="5000.00",
-                      currency="SYP", duration_days=30, is_active=True,
-                      has_diet_access=True, has_routine_access=True,
-                      has_challenges_access=True, has_ai_advice=True,
-                      has_priority_support=True))
+    # Under modeltranslation `name` resolves to the ACTIVE language's column, and the
+    # test client leaves the language a request activated; after an Arabic request the
+    # lookup missed the English row and the create collided on the unique name.
+    with translation.override("en"):
+        plan, _ = SubscriptionPlan.objects.get_or_create(
+            name="gate_diet_plan",
+            defaults=dict(plan_type="premium", description="gate", price="5000.00",
+                          currency="SYP", duration_days=30, is_active=True,
+                          has_diet_access=True, has_routine_access=True,
+                          has_challenges_access=True, has_ai_advice=True,
+                          has_priority_support=True))
     return Subscription.objects.create(
         user=user, plan=plan, status="active",
         end_date=timezone.now() + timedelta(days=30))
@@ -2885,6 +2891,14 @@ def test_the_goal_metrics_never_move_the_wrong_way(diet_quality):
     assert diet_quality.distinct_dishes >= recorded["distinct_dishes"]
     assert diet_quality.absurd_portion_rate == 0.0
     assert diet_quality.days_repeating_a_dish == 0
+    # D1: recall. Of the foods the chooser picked for a slot, the share that reached
+    # that slot's plate at least once in the week. Chosen share is the precision side.
+    assert diet_quality.preference_satisfaction >= recorded["preference_satisfaction"] - 5e-5, (
+        f"preference satisfaction fell: {diet_quality.preference_satisfaction:.3f} "
+        f"< recorded {recorded['preference_satisfaction']:.3f}")
+    # C: no client is served one dish more often in a week than the recorded worst.
+    assert diet_quality.max_repeats_per_client_week <= recorded["max_repeats_per_client_week"], (
+        f"a dish was served {diet_quality.max_repeats_per_client_week} times in one client's week")
 
 
 # ---------------------------------------------------------------------------
@@ -3018,6 +3032,10 @@ def test_a_client_can_swap_a_food_and_learning_hears_it(seeded_catalogue):
 
     swap = MealSwap.objects.get(user=user, meal=component.meal)
     assert (swap.rejected_food_id, swap.chosen_food_id) == (rejected_id, chosen_id)
+    # D2: swap distance, stored at write time. High means the food was fine and the
+    # client wanted a variant; low means the shape was wrong for them.
+    assert swap.similarity is not None and 0.0 <= swap.similarity <= 1.0
+    assert abs(swap.similarity - offered[0]["similarity"]) < 0.02
 
     stats = observations_for(user)
     assert stats[rejected_id]["refused"] >= 1 and stats[chosen_id]["liked"] >= 1
@@ -3147,7 +3165,10 @@ def test_every_meal_payload_carries_what_the_engine_decided(seeded_catalogue):
             for key in ("food_id", "name", "name_ar", "serving", "serving_ar", "quantity_grams"):
                 assert key in comp, f"{key} missing from component"
     assert any(m["is_dish"] for m in meals), "a chooser's day has no named dish"
-    assert any(_ARABIC.search(m["name_ar"]) for m in meals), "no Arabic meal name"
+    # Every meal, dish or built, has an Arabic name with no English left in it.
+    for m in meals:
+        assert _ARABIC.search(m["name_ar"]), m["name_ar"]
+        assert not re.search(r"[A-Za-z]{3,}", m["name_ar"].replace("(", " ")), f"English in an Arabic name: {m['name_ar']}"
     assert all(_ARABIC.search(m["reason_ar"]) for m in meals), "a reason has no Arabic"
     plan_id, meal_id = body["diet_plan_id"], meals[0]["id"]
 
@@ -3278,3 +3299,125 @@ def test_a_week_is_generated_and_saved_within_the_query_budget(seeded_catalogue)
     assert len(generating) <= 120, f"generating a week took {len(generating)} queries"
     assert len(persisting) <= 300, f"persisting a week took {len(persisting)} queries"
     assert elapsed < 20, f"a week took {elapsed:.1f}s"
+
+
+def test_the_async_endpoint_can_run_the_deterministic_engine_for_a_month(seeded_catalogue):
+    """E3. The synchronous endpoint caps at seven days and pointed at "the Celery task,
+    which already exists for this planner" — it did not; the only task ran the LLM
+    path with a stale-calorie fallback. `engine: "rule"` on /plans/generate/ enqueues
+    the deterministic engine for up to thirty days."""
+    from diet.models import DietPlan, Meal
+
+    user, _chosen = _chooser("async-gate")
+    c = _api_client_for(user)
+    r = c.post("/api/diet/v1/plans/generate/", {"engine": "rule", "duration_days": 10, "snack_count": 1},
+               content_type="application/json")
+    assert r.status_code == 200, r.content
+    assert r.json()["engine"] == "rule" and r.json()["task_id"]
+    plan = DietPlan.objects.filter(user=user).order_by("-id").first()   # CELERY_TASK_ALWAYS_EAGER
+    assert plan is not None and Meal.objects.filter(diet_plan=plan).count() == 40
+    assert plan.generation_strategy == "FALLBACK"
+
+
+# ---------------------------------------------------------------------------
+# Phase C/D — variety over the week, and the owner's four
+# ---------------------------------------------------------------------------
+
+def test_learning_never_changes_a_meals_shape(seeded_catalogue):
+    """D3 invariant. Whatever the learned weights say, lunch and dinner keep a
+    vegetable, no slot empties, and the plan still lands inside tolerance as often.
+    Learning may reorder what fills a shape; it may not change the shape."""
+    from diet.models import FoodItem, UserFoodWeight
+    from diet.planner.candidates import classify_food
+    from diet.planner.learning import MAX_WEIGHT, MIN_WEIGHT
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    def plan_for(user):
+        out = RuleBasedPlanner(user, seed_salt="shape").generate(
+            daily_kcal=user.calculate_daily_calories(), meal_count=3, snack_count=1, duration_days=7)
+        return out.plan
+
+    def shape_of(meals):
+        veg_at_mains = sum(1 for m in meals if m.meal_type in ("Lunch", "Dinner")
+                           and any(classify_food(FoodItem.objects.get(pk=i.food_id)) == "vegetable"
+                                   for i in m.ingredients if i.food_id))
+        mains = sum(1 for m in meals if m.meal_type in ("Lunch", "Dinner"))
+        empty = sum(1 for m in meals if not m.ingredients)
+        return veg_at_mains / mains, empty
+
+    user, _chosen = _chooser("shape-gate")
+    before_veg, before_empty = shape_of(plan_for(user))
+
+    # The most hostile weights learning is allowed to produce: every vegetable at the
+    # floor, one starch at the ceiling.
+    foods = list(FoodItem.objects.filter(needs_review=False))
+    rows = [UserFoodWeight(user=user, food=f, weight=MIN_WEIGHT, observations=9)
+            for f in foods if classify_food(f) == "vegetable"]
+    starch = next(f for f in foods if classify_food(f) == "carb")
+    rows.append(UserFoodWeight(user=user, food=starch, weight=MAX_WEIGHT, observations=9))
+    UserFoodWeight.objects.bulk_create(rows)
+
+    after_veg, after_empty = shape_of(plan_for(user))
+    assert after_empty == before_empty == 0
+    assert after_veg >= before_veg - 1e-9, f"vegetables at mains fell {before_veg:.2f} -> {after_veg:.2f}"
+    assert after_veg >= 0.9
+
+
+def test_recorded_swaps_can_be_replayed_offline(seeded_catalogue):
+    """D3 replay. Given what a client swapped away, would the next plan avoid it? A
+    report, not a target: the client's signal may be biased, so learning stays hand-set
+    until this says yes on real data."""
+    from diet.models import Meal, MealComponent, MealSwap
+    from diet.planner.learning import replay_swaps
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("replay-gate")
+    assert replay_swaps(user)["swaps"] == 0
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="replay-seed")
+    lunch = Meal.objects.get(diet_plan=plan, meal_type="Lunch")
+    comp = MealComponent.objects.filter(meal=lunch).select_related("food").first()
+    other = MealComponent.objects.exclude(food=comp.food).select_related("food").first()
+    MealSwap.objects.create(user=user, meal=lunch, rejected_food=comp.food, chosen_food=other.food, similarity=0.9)
+    report = replay_swaps(user, days=7)
+    assert report["swaps"] == 1 and report["avoided"] in (0, 1)
+    assert 0.0 <= report["avoided_share"] <= 1.0
+    assert all(" at Lunch" in line for line in report["still_served"])
+
+
+def test_the_funnel_records_every_step_a_client_takes(seeded_catalogue):
+    """D4. Generated -> viewed -> accepted -> completed -> rated -> swapped. Viewed and
+    accepted come from the app through one action; the rest are recorded by the
+    endpoints that do them. A report reads the table; the planner never does."""
+    from diet.models import Meal, MealComponent, MealEvent
+
+    user, _chosen = _chooser("funnel-gate")
+    c = _api_client_for(user)
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
+    assert r.status_code == 201, r.content
+    meal_id = r.json()["meals"][0]["id"]
+    url = "/api/diet/v1/client/meals/interact/"
+
+    for kind in ("viewed", "accepted"):
+        r = c.post(url, {"action": "event", "meal_id": meal_id, "kind": kind}, content_type="application/json")
+        assert r.status_code == 200, r.content
+    r = c.post(url, {"action": "event", "meal_id": meal_id, "kind": "generated"}, content_type="application/json")
+    assert r.status_code == 400
+    r = c.post(url, {"action": "event", "meal_id": meal_id, "kind": "viewed"}, content_type="application/json")
+    assert r.status_code == 200
+
+    comp = MealComponent.objects.filter(meal_id=meal_id).first()
+    r = c.post(url, {"action": "rate_component", "component_id": comp.id, "is_liked": True}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    r = c.post(f"/api/diet/v1/client/meals/{meal_id}/complete/", {"action": "complete_meal"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+
+    kinds = collections.Counter(MealEvent.objects.filter(user=user, meal_id=meal_id).values_list("kind", flat=True))
+    assert kinds == {"viewed": 2, "accepted": 1, "rated": 1, "completed": 1}, kinds
+
+    # Another client's meal cannot be marked, and the details endpoint says why.
+    other, _ = _chooser("funnel-other")
+    o = _api_client_for(other)
+    r = o.post(url, {"action": "event", "meal_id": meal_id, "kind": "viewed"}, content_type="application/json")
+    assert r.status_code == 404
+    r = o.get(f"/api/diet/v1/client/meals/{meal_id}/")
+    assert r.status_code == 403

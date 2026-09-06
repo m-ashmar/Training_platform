@@ -111,3 +111,37 @@ def update_weights(user, dry_run: bool = False) -> Dict[int, float]:
         logger.info("Adjusted %s food weights from consumption by user %s",
                     len(changes), getattr(user, "id", "?"))
     return changes
+
+
+def replay_swaps(user, days: int = 7, seed_salt: str = "replay") -> Dict[str, float]:
+    """Would the next plan have avoided what this client swapped away?
+
+    Offline evaluation, before any weight is trusted: for every recorded swap, plan
+    `days` ahead with the weights as they stand and ask whether the rejected food is
+    served again in that slot. Reported, never asserted against a target — the client's
+    own signal can be biased (someone who dislikes vegetables is not evidence against
+    vegetables), which is why learning stays hand-set until this says yes on real data.
+
+    Returns {"swaps": n, "avoided": k, "avoided_share": k/n, "still_served": [...]}.
+    """
+    from diet.models import MealSwap
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    swaps = list(MealSwap.objects.filter(user=user).select_related("meal", "rejected_food"))
+    if not swaps:
+        return {"swaps": 0, "avoided": 0, "avoided_share": 0.0, "still_served": []}
+    out = RuleBasedPlanner(user, seed_salt=seed_salt).generate(
+        daily_kcal=float(user.calculate_daily_calories()), meal_count=3, snack_count=1,
+        duration_days=days)
+    served: Dict[str, set] = {}
+    for meal in out.plan:
+        served.setdefault(meal.meal_type, set()).update(
+            i.food_id for i in meal.ingredients if i.food_id is not None)
+    still = []
+    for swap in swaps:
+        slot = swap.meal.meal_type
+        if swap.rejected_food_id in served.get(slot, set()):
+            still.append(f"{swap.rejected_food.name} at {slot}")
+    avoided = len(swaps) - len(still)
+    return {"swaps": len(swaps), "avoided": avoided,
+            "avoided_share": avoided / len(swaps), "still_served": still}

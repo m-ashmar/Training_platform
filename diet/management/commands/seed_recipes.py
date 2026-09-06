@@ -12,6 +12,88 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 # name, meal types, cuisine, prep minutes, [(food name, grams, scalable)]
+#: The dish names a Syrian client reads. The recipe row is translated; the foods
+#: carry their own Arabic names, so a substitution or an addition composes in Arabic.
+NAMES_AR = {
+    'Grilled Chicken with Rice and Greens': 'دجاج مشوي مع أرز وخضار',
+    'Chicken and Rice with Spinach': 'دجاج وأرز مع سبانخ',
+    'Baked Salmon with Sweet Potato': 'سلمون مشوي مع بطاطا حلوة',
+    'Lentil Soup with Greens': 'شوربة عدس بالخضار',
+    'Overnight Oats with Banana': 'شوفان منقوع بالموز',
+    'Egg White Scramble with Avocado': 'بياض بيض مقلي مع أفوكادو',
+    'Yogurt, Apple and Almond Butter': 'لبن وتفاح وزبدة لوز',
+    'Chicken and Rice Meal Prep': 'وجبة دجاج وأرز',
+    'Banana Almond Snack': 'موز ولوز',
+    'Greek Yogurt Protein Bowl': 'طبق لبن يوناني بالبروتين',
+    'Salmon Rice Bowl': 'طبق سلمون مع أرز',
+    'Lentils and Rice (Mujadara style)': 'عدس وأرز على طريقة المجدرة',
+    'Avocado Toast with Eggs': 'توست أفوكادو مع بيض',
+    'Almond Butter Oat Bowl': 'طبق شوفان بزبدة اللوز',
+    'Salmon and Avocado Breakfast': 'فطور سلمون وأفوكادو',
+    'Chicken Avocado Rice Bowl': 'طبق دجاج وأفوكادو مع أرز',
+    'Ful Medames Plate': 'صحن فول مدمس',
+    "Labneh and Za'atar Plate": 'صحن لبنة وزعتر',
+    "Za'atar Manakish": 'مناقيش زعتر',
+    'Shakshuka': 'شكشوكة',
+    'Eggs with Sumac and Pita': 'بيض بالسماق مع خبز',
+    'Halloumi, Tomato and Cucumber': 'حلوم وبندورة وخيار',
+    'Kishk Breakfast': 'فطور كشك',
+    'Cheese and Olive Plate': 'صحن جبنة وزيتون',
+    'Labneh with Honey and Walnuts': 'لبنة بالعسل والجوز',
+    'Yogurt with Dates and Pistachios': 'لبن بالتمر والفستق الحلبي',
+    'Oats with Dates and Tahini': 'شوفان بالتمر والطحينة',
+    'Shanklish Salad Breakfast': 'فطور سلطة شنكليش',
+    'Egg White Omelette with Vegetables': 'عجة بياض بيض بالخضار',
+    'Shish Tawook Plate': 'صحن شيش طاووق',
+    'Kafta with Bulgur': 'كفتة مع برغل',
+    'Kafta and Potato Tray': 'صينية كفتة وبطاطا',
+    'Kibbeh Plate with Salad': 'صحن كبة مع سلطة',
+    'Mansaf': 'منسف',
+    'Maqluba': 'مقلوبة',
+    'Molokhia with Chicken and Rice': 'ملوخية بالدجاج مع أرز',
+    'Fasolia with Rice': 'فاصولياء مع أرز',
+    'Bamia with Lamb and Rice': 'بامية باللحم مع أرز',
+    'Mujadara with Salad': 'مجدرة مع سلطة',
+    'Freekeh with Chicken': 'فريكة بالدجاج',
+    'Bulgur Pilaf with Lamb': 'برغل مفلفل باللحم',
+    'Fatteh with Chickpeas': 'فتة حمص',
+    'Chicken Fatteh': 'فتة دجاج',
+    'Sayadieh': 'صيادية',
+    'Grilled Sea Bass with Tabbouleh': 'سمك قاروص مشوي مع تبولة',
+    'Grilled Chicken with Fattoush': 'دجاج مشوي مع فتوش',
+    'Lentil Soup with Pita and Lemon': 'شوربة عدس مع خبز وليمون',
+    'Rice, Lentils and Chickpeas': 'أرز وعدس وحمص',
+    'Stuffed Grape Leaves Plate': 'صحن ورق عنب محشي',
+    'Chicken Shawarma Plate': 'صحن شاورما دجاج',
+    'Lamb Liver with Onion': 'كبدة غنم بالبصل',
+    'Eggplant Moussaka (Levantine)': 'مسقعة باذنجان',
+    'Spinach and Onion with Pita': 'سبانخ بالبصل مع خبز',
+    'Green Beans in Olive Oil with Rice': 'فاصولياء خضراء بالزيت مع أرز',
+    'Peas with Beef and Rice': 'بازلاء باللحم مع أرز',
+    'Cauliflower with Tahini and Rice': 'قرنبيط بالطحينة مع أرز',
+    'Chicken with Freekeh and Yogurt': 'دجاج مع فريكة ولبن',
+    'Grilled Salmon with Bulgur': 'سلمون مشوي مع برغل',
+    'Tilapia with Rice and Salad': 'سمك بلطي مع أرز وسلطة',
+    'Veal with Potatoes and Peas': 'لحم عجل مع بطاطا وبازلاء',
+    'Tuna, Chickpea and Parsley Salad': 'سلطة تونة وحمص وبقدونس',
+    'Pasta with Chicken and Vegetables': 'معكرونة بالدجاج والخضار',
+    'Dates and Walnuts': 'تمر وجوز',
+    'Labneh and Cucumber': 'لبنة وخيار',
+    'Hummus with Pita': 'حمص مع خبز',
+    'Ayran and Almonds': 'عيران ولوز',
+    'Fruit and Pistachios': 'فواكه وفستق حلبي',
+    'Halawa with Bread': 'حلاوة مع خبز',
+    'Cheese, Olives and Tomato': 'جبنة وزيتون وبندورة',
+    'Pomegranate and Yogurt': 'رمان ولبن',
+    'Baba Ghanoush with Pita': 'بابا غنوج مع خبز',
+    'Makdous and Bread': 'مكدوس مع خبز',
+    'Boiled Egg and Cucumber': 'بيض مسلوق وخيار',
+    'Cottage Cheese and Fruit': 'جبنة قريش وفواكه',
+    'Carrots and Hummus': 'جزر وحمص',
+    'Walnuts and Figs': 'جوز وتين',
+}
+
+
 RECIPES = [
     ("Grilled Chicken with Rice and Greens", ["Lunch", "Dinner"], "Levantine", 25, [
         ("Chicken Breast", 150, True), ("White Rice", 180, True),
@@ -323,6 +405,10 @@ class Command(BaseCommand):
                 updated += 1
             else:
                 created += 1
+            name_ar = NAMES_AR.get(name)
+            if name_ar and getattr(recipe, "name_ar", None) != name_ar:
+                recipe.name_ar = name_ar
+                recipe.save(update_fields=["name_ar"])
 
             wanted = {foods[food_name].id: (grams, scalable)
                       for food_name, grams, scalable in lines}
