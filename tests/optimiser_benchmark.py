@@ -237,7 +237,11 @@ def run(days: int = 3, kcal_targets: Sequence[int] = BENCH_KCAL,
     for kcal in kcal_targets:
         for profile in profiles:
             user = _make_client(f"bm{uuid.uuid4().hex[:8]}", *profile)
-            planner = RuleBasedPlanner(user)
+            # A fixed salt, as the quality harness uses. Unsalted, the planner seeds
+            # each day from the client's row id, which is fresh every run, so the
+            # benchmark judged a different set of meals each time and its gate flipped
+            # between green and red on identical code.
+            planner = RuleBasedPlanner(user, seed_salt=f"bench:{kcal}:{profiles.index(profile)}")
             t0 = time.perf_counter()
             out = planner.generate(daily_kcal=kcal, duration_days=days, snack_count=1)
             report.plan_seconds += time.perf_counter() - t0

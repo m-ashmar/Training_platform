@@ -1,51 +1,51 @@
 {
-  "_comment": "Diet engine quality baseline, phase 0.2 of the rebuild. Measured against the catalogue built by `add_healthy_foods` and `seed_recipes`, which is what a fresh production database contains. The gate asserts these as bounds in the direction of improvement and tightens them phase by phase.",
+  "_comment": "Diet engine quality baseline, re-recorded after Phase A (76-recipe library, 136-food catalogue). The previous chosen-ingredient share of 0.379 was measured while the recipe path was dead for any client who had chosen foods (a loop variable shadowed the similarity index; the planner failed open to templates), so it graded template-only plates, which are chosen foods by construction. 0.291 is the first honest figure for the judged two-path engine: dishes bring their own structure, and the client's choices reach them by substitution. Weekly preference satisfaction (D1) is the recall-side metric; this is precision. The gate asserts these as bounds in the direction of improvement.",
   "recorded": "2026-09-06",
   "catalogue": {
-    "foods": 133,
-    "recipes": 16
+    "foods": 136,
+    "recipes": 76
   },
   "measured": {
-    "dish_rate_overall": 0.7976,
+    "dish_rate_overall": 0.8393,
     "dish_rate_by_slot": {
-      "Breakfast": 0.7619,
-      "Lunch": 1.0,
-      "Dinner": 0.6905,
-      "Snack": 0.7381
+      "Breakfast": 0.7857,
+      "Lunch": 0.9524,
+      "Dinner": 0.8095,
+      "Snack": 0.8095
     },
     "meals_measured": 168,
-    "distinct_dishes": 43,
-    "max_repeats_of_one_dish": 29,
+    "distinct_dishes": 81,
+    "max_repeats_of_one_dish": 8,
     "absurd_portion_rate": 0.0,
     "max_repeats_by_slot": {
-      "Lunch": 10,
-      "Snack": 24,
-      "Breakfast": 11,
-      "Dinner": 11
+      "Lunch": 4,
+      "Snack": 6,
+      "Breakfast": 3,
+      "Dinner": 5
     },
     "distinct_dishes_by_slot": {
-      "Lunch": 15,
-      "Snack": 4,
-      "Breakfast": 15,
-      "Dinner": 14
+      "Lunch": 25,
+      "Snack": 18,
+      "Breakfast": 25,
+      "Dinner": 22
     },
     "days_repeating_a_dish": 0,
-    "portions_measured": 601,
+    "portions_measured": 748,
     "min_distinct_portions_per_food": 1,
     "drift_by_target": {
-      "1400": 1.729,
-      "1800": -1.885,
-      "2200": 4.027,
-      "2600": -4.25,
-      "3000": -4.63
+      "1400": -3.511,
+      "1800": -3.848,
+      "2200": -0.829,
+      "2600": -1.298,
+      "3000": -3.437
     },
-    "drift_all_one_sided": false,
-    "drift_worst_abs": 4.63,
+    "drift_all_one_sided": true,
+    "drift_worst_abs": 3.848,
     "twin_identical_meals": 0,
     "twin_total_meals": 28,
     "twin_identical_built": 0,
-    "twin_built_meals": 28,
-    "chosen_ingredient_share": 0.3789,
+    "twin_built_meals": 9,
+    "chosen_ingredient_share": 0.2906,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],
     "catalogue_gaps": []

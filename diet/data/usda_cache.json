@@ -1076,5 +1076,27 @@
     "carbs": 9.32,
     "fat": 0.3,
     "fiber": 2.8
+  },
+  "Honey": {
+    "fdc_id": 169640,
+    "usda_description": "Honey",
+    "data_type": "SR Legacy",
+    "query": "fdc:169640",
+    "calories": 304.0,
+    "protein": 0.3,
+    "carbs": 82.4,
+    "fat": 0.0,
+    "fiber": 0.2
+  },
+  "Lamb Mince (Lean)": {
+    "fdc_id": 172544,
+    "usda_description": "Lamb, ground, cooked, broiled",
+    "data_type": "SR Legacy",
+    "query": "lamb ground cooked broiled",
+    "calories": 283.0,
+    "protein": 24.8,
+    "carbs": 0.0,
+    "fat": 19.6,
+    "fiber": 0.0
   }
 }

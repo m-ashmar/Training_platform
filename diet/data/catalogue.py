@@ -152,6 +152,9 @@ USDA = [
     ("Mango", "mangos raw", "Fruits", MORNING, "مانجا"),
     ("Pear", "pears raw", "Fruits", MORNING, "إجاص"),
     ("Lemon", "lemons raw without peel", "Fruits", ALL, "ليمون"),
+    # --- added for the Levantine library ------------------------------------
+    ("Honey", "fdc:169640", "Fats", MORNING, "عسل"),
+    ("Lamb Mince (Lean)", "lamb ground cooked broiled", "Proteins", MAIN, "لحم غنم مفروم"),
 ]
 
 # Foods USDA does not carry. Macros are per 100 g. Review these first.
@@ -192,6 +195,7 @@ LEVANTINE = [
     ("Arabic Coffee", "قهوة عربية", 2, 0.1, 0.3, 0.0, "Other", ALL),
     ("Ayran", "عيران", 40, 1.7, 3.0, 2.0, "Proteins", ALL),
     ("Jallab", "جلاب", 120, 0.2, 30.0, 0.1, "Other", S),
+    ("Pomegranate Molasses", "دبس رمان", 270, 0.5, 66.0, 0.2, "Other", ALL),
 ]
 
 

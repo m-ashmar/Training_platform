@@ -56,6 +56,191 @@ RECIPES = [
     ("Chicken Avocado Rice Bowl", ["Lunch", "Dinner"], "Everyday", 25, [
         ("Chicken Breast", 140, True), ("White Rice", 160, True),
         ("Avocado", 70, True), ("Broccoli", 100, True)]),
+
+    # ======================= Levantine library =======================
+    # Every line is a catalogue food; grams are one person's plate as a Syrian kitchen
+    # serves it. The engine reads meal shapes, food pairings and meal-appropriateness
+    # off this list, so every dish here widens all three. Amounts are a first pass for
+    # the owner to review; the macros come from the catalogue rows, not from here.
+
+    # --- breakfasts -------------------------------------------------------
+    ("Ful Medames Plate", ["Breakfast"], "Levantine", 10, [
+        ("Ful Medames (Prepared)", 220, True), ("Pita Bread (White)", 80, True),
+        ("Tomato", 80, True), ("Extra Virgin Olive Oil", 10, True), ("Lemon", 20, True)]),
+    ("Labneh and Za'atar Plate", ["Breakfast"], "Levantine", 5, [
+        ("Labneh", 120, True), ("Pita Bread (White)", 80, True),
+        ("Za'atar Mix", 10, True), ("Extra Virgin Olive Oil", 10, True),
+        ("Cucumber", 80, True), ("Green Olives", 25, True)]),
+    ("Za'atar Manakish", ["Breakfast", "Snack"], "Levantine", 15, [
+        ("Markook Bread", 100, True), ("Za'atar Mix", 15, True),
+        ("Extra Virgin Olive Oil", 14, True), ("Tomato", 60, True), ("Mint (Fresh)", 5, True)]),
+    ("Shakshuka", ["Breakfast", "Dinner"], "Levantine", 20, [
+        ("Egg (Whole)", 120, True), ("Tomato", 200, True), ("Onion", 50, True),
+        ("Bell Pepper (Red)", 60, True), ("Extra Virgin Olive Oil", 10, True),
+        ("Pita Bread (White)", 60, True)]),
+    ("Eggs with Sumac and Pita", ["Breakfast"], "Levantine", 10, [
+        ("Egg (Whole)", 110, True), ("Pita Bread (White)", 70, True),
+        ("Sumac", 3, True), ("Extra Virgin Olive Oil", 8, True), ("Tomato", 80, True)]),
+    ("Halloumi, Tomato and Cucumber", ["Breakfast"], "Levantine", 10, [
+        ("Halloumi", 90, True), ("Tomato", 100, True), ("Cucumber", 100, True),
+        ("Pita Bread (Whole Wheat)", 70, True), ("Extra Virgin Olive Oil", 7, True)]),
+    ("Kishk Breakfast", ["Breakfast"], "Levantine", 15, [
+        ("Kishk (Dry)", 60, True), ("Onion", 40, True), ("Extra Virgin Olive Oil", 10, True),
+        ("Pita Bread (White)", 60, True)]),
+    ("Cheese and Olive Plate", ["Breakfast"], "Levantine", 5, [
+        ("Akkawi Cheese", 80, True), ("Black Olives", 30, True), ("Tomato", 100, True),
+        ("Cucumber", 80, True), ("Pita Bread (White)", 80, True), ("Mint (Fresh)", 5, True)]),
+    ("Labneh with Honey and Walnuts", ["Breakfast", "Snack"], "Levantine", 3, [
+        ("Labneh", 150, True), ("Honey", 15, True), ("Walnuts", 20, True),
+        ("Pita Bread (Whole Wheat)", 50, True)]),
+    ("Yogurt with Dates and Pistachios", ["Breakfast", "Snack"], "Levantine", 3, [
+        ("Plain Yogurt", 200, True), ("Dates (Medjool)", 40, True), ("Pistachios", 20, True)]),
+    ("Oats with Dates and Tahini", ["Breakfast"], "Levantine", 8, [
+        ("Oats (Rolled, Dry)", 60, True), ("Whole Milk", 200, True),
+        ("Dates (Medjool)", 30, True), ("Tahini", 12, True)]),
+    ("Shanklish Salad Breakfast", ["Breakfast"], "Levantine", 8, [
+        ("Shanklish", 60, True), ("Tomato", 120, True), ("Onion", 30, True),
+        ("Extra Virgin Olive Oil", 10, True), ("Pita Bread (White)", 70, True)]),
+    ("Egg White Omelette with Vegetables", ["Breakfast"], "Everyday", 12, [
+        ("Egg White", 180, True), ("Spinach", 60, True), ("Mushrooms (White)", 60, True),
+        ("Extra Virgin Olive Oil", 7, True), ("Pita Bread (Whole Wheat)", 50, True)]),
+
+    # --- lunches and dinners: grills and plates ---------------------------
+    ("Shish Tawook Plate", ["Lunch", "Dinner"], "Levantine", 30, [
+        ("Chicken Breast", 160, True), ("White Rice", 180, True), ("Garlic", 6, True),
+        ("Tomato", 80, True), ("Cucumber", 80, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Kafta with Bulgur", ["Lunch", "Dinner"], "Levantine", 30, [
+        ("Lamb Mince (Lean)", 150, True), ("Parsley", 20, True), ("Onion", 50, True),
+        ("Bulgur (Cooked)", 200, True), ("Tomato", 100, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Kafta and Potato Tray", ["Dinner"], "Levantine", 45, [
+        ("Beef Mince (Lean)", 150, True), ("White Potato (Baked)", 200, True),
+        ("Tomato", 120, True), ("Onion", 50, True), ("Extra Virgin Olive Oil", 10, True)]),
+    ("Kibbeh Plate with Salad", ["Lunch", "Dinner"], "Levantine", 20, [
+        ("Kibbeh (Baked)", 180, True), ("Plain Yogurt", 120, True),
+        ("Cucumber", 80, True), ("Tomato", 80, True), ("Mint (Fresh)", 5, True)]),
+    ("Mansaf", ["Lunch", "Dinner"], "Levantine", 60, [
+        ("Lamb Leg (Lean)", 150, True), ("White Rice", 200, True),
+        ("Jameed (Dried Yogurt)", 30, True), ("Almonds", 15, True), ("Markook Bread", 40, True)]),
+    ("Maqluba", ["Lunch", "Dinner"], "Levantine", 60, [
+        ("Chicken Thigh (Skinless)", 150, True), ("White Rice", 180, True),
+        ("Eggplant", 120, True), ("Cauliflower", 80, True), ("Extra Virgin Olive Oil", 10, True),
+        ("Plain Yogurt", 100, True)]),
+    ("Molokhia with Chicken and Rice", ["Lunch", "Dinner"], "Levantine", 50, [
+        ("Molokhia (Cooked)", 250, True), ("Chicken Thigh (Skinless)", 140, True),
+        ("White Rice", 180, True), ("Garlic", 8, True), ("Lemon", 20, True)]),
+    ("Fasolia with Rice", ["Lunch", "Dinner"], "Levantine", 45, [
+        ("White Beans (Cooked)", 200, True), ("Beef Mince (Lean)", 100, True),
+        ("Tomato", 150, True), ("White Rice", 180, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Bamia with Lamb and Rice", ["Lunch", "Dinner"], "Levantine", 50, [
+        ("Okra", 200, True), ("Lamb Shoulder", 130, True), ("Tomato", 150, True),
+        ("White Rice", 180, True), ("Garlic", 6, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Mujadara with Salad", ["Lunch", "Dinner"], "Levantine", 45, [
+        ("Lentils (Cooked)", 180, True), ("White Rice", 120, True), ("Onion", 80, True),
+        ("Extra Virgin Olive Oil", 14, True), ("Cucumber", 80, True), ("Tomato", 80, True)]),
+    ("Freekeh with Chicken", ["Lunch", "Dinner"], "Levantine", 45, [
+        ("Freekeh (Cooked)", 220, True), ("Chicken Thigh (Skinless)", 150, True),
+        ("Almonds", 15, True), ("Extra Virgin Olive Oil", 8, True), ("Plain Yogurt", 100, True)]),
+    ("Bulgur Pilaf with Lamb", ["Lunch", "Dinner"], "Levantine", 45, [
+        ("Bulgur (Cooked)", 220, True), ("Lamb Shoulder", 130, True), ("Onion", 50, True),
+        ("Tomato", 80, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Fatteh with Chickpeas", ["Lunch", "Dinner"], "Levantine", 20, [
+        ("Chickpeas (Cooked)", 200, True), ("Pita Bread (White)", 60, True),
+        ("Plain Yogurt", 150, True), ("Tahini", 15, True), ("Garlic", 4, True),
+        ("Almonds", 10, True), ("Extra Virgin Olive Oil", 7, True)]),
+    ("Chicken Fatteh", ["Lunch", "Dinner"], "Levantine", 30, [
+        ("Chicken Breast", 140, True), ("Pita Bread (White)", 60, True),
+        ("Plain Yogurt", 150, True), ("Tahini", 12, True), ("Garlic", 4, True),
+        ("Almonds", 10, True), ("White Rice", 100, True)]),
+    ("Sayadieh", ["Lunch", "Dinner"], "Levantine", 45, [
+        ("Sea Bass", 170, True), ("White Rice", 200, True), ("Onion", 80, True),
+        ("Extra Virgin Olive Oil", 12, True), ("Almonds", 10, True), ("Lemon", 20, True)]),
+    ("Grilled Sea Bass with Tabbouleh", ["Lunch", "Dinner"], "Levantine", 30, [
+        ("Sea Bass", 180, True), ("Tabbouleh", 180, True), ("Pita Bread (White)", 50, True),
+        ("Lemon", 20, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Grilled Chicken with Fattoush", ["Lunch", "Dinner"], "Levantine", 30, [
+        ("Chicken Breast", 160, True), ("Fattoush", 200, True), ("Hummus (Prepared)", 60, True),
+        ("Pita Bread (White)", 50, True)]),
+    ("Lentil Soup with Pita and Lemon", ["Lunch", "Dinner"], "Levantine", 40, [
+        ("Lentils (Cooked)", 250, True), ("Onion", 50, True), ("Carrot", 60, True),
+        ("Extra Virgin Olive Oil", 10, True), ("Pita Bread (White)", 60, True), ("Lemon", 20, True)]),
+    ("Rice, Lentils and Chickpeas", ["Lunch", "Dinner"], "Levantine", 40, [
+        ("White Rice", 150, True), ("Lentils (Cooked)", 120, True),
+        ("Chickpeas (Cooked)", 80, True), ("Onion", 60, True), ("Tomato", 100, True),
+        ("Extra Virgin Olive Oil", 10, True)]),
+    ("Stuffed Grape Leaves Plate", ["Lunch", "Dinner"], "Levantine", 15, [
+        ("Grape Leaves (Stuffed)", 250, True), ("Plain Yogurt", 120, True),
+        ("Cucumber", 80, True), ("Lemon", 20, True)]),
+    ("Chicken Shawarma Plate", ["Lunch", "Dinner"], "Levantine", 15, [
+        ("Shawarma (Chicken)", 180, True), ("Pita Bread (White)", 80, True),
+        ("Mixed Pickles", 40, True), ("Tomato", 80, True), ("Garlic", 6, True),
+        ("Hummus (Prepared)", 50, True)]),
+    ("Lamb Liver with Onion", ["Lunch", "Dinner"], "Levantine", 20, [
+        ("Liver (Lamb)", 150, True), ("Onion", 100, True), ("Extra Virgin Olive Oil", 10, True),
+        ("Pita Bread (White)", 80, True), ("Lemon", 20, True), ("Parsley", 10, True)]),
+    ("Eggplant Moussaka (Levantine)", ["Lunch", "Dinner"], "Levantine", 45, [
+        ("Eggplant", 250, True), ("Chickpeas (Cooked)", 120, True), ("Tomato", 150, True),
+        ("Onion", 60, True), ("Extra Virgin Olive Oil", 14, True), ("Pita Bread (White)", 60, True)]),
+    ("Spinach and Onion with Pita", ["Lunch", "Dinner"], "Levantine", 25, [
+        ("Spinach", 250, True), ("Onion", 80, True), ("Extra Virgin Olive Oil", 12, True),
+        ("Lemon", 20, True), ("Pita Bread (Whole Wheat)", 80, True), ("Plain Yogurt", 100, True)]),
+    ("Green Beans in Olive Oil with Rice", ["Lunch", "Dinner"], "Levantine", 35, [
+        ("Green Beans", 220, True), ("Tomato", 120, True), ("Onion", 50, True),
+        ("Extra Virgin Olive Oil", 14, True), ("White Rice", 160, True)]),
+    ("Peas with Beef and Rice", ["Lunch", "Dinner"], "Levantine", 40, [
+        ("Green Peas (Cooked)", 200, True), ("Beef Mince (Lean)", 110, True),
+        ("Tomato", 100, True), ("White Rice", 170, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Cauliflower with Tahini and Rice", ["Lunch", "Dinner"], "Levantine", 35, [
+        ("Cauliflower", 250, True), ("Tahini", 20, True), ("Lemon", 20, True),
+        ("Garlic", 4, True), ("White Rice", 150, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Chicken with Freekeh and Yogurt", ["Dinner"], "Levantine", 40, [
+        ("Chicken Breast", 150, True), ("Freekeh (Cooked)", 180, True),
+        ("Plain Yogurt", 120, True), ("Cucumber", 80, True)]),
+    ("Grilled Salmon with Bulgur", ["Dinner"], "Mediterranean", 25, [
+        ("Salmon Fillet", 150, True), ("Bulgur (Cooked)", 180, True), ("Spinach", 80, True),
+        ("Lemon", 20, True), ("Extra Virgin Olive Oil", 7, True)]),
+    ("Tilapia with Rice and Salad", ["Lunch", "Dinner"], "Levantine", 25, [
+        ("Tilapia", 170, True), ("White Rice", 170, True), ("Tomato", 80, True),
+        ("Cucumber", 80, True), ("Lemon", 20, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Veal with Potatoes and Peas", ["Dinner"], "Levantine", 40, [
+        ("Veal Cutlet", 150, True), ("White Potato (Baked)", 180, True),
+        ("Green Peas (Cooked)", 100, True), ("Extra Virgin Olive Oil", 8, True)]),
+    ("Tuna, Chickpea and Parsley Salad", ["Lunch"], "Mediterranean", 10, [
+        ("Tuna (Canned in Water)", 120, True), ("Chickpeas (Cooked)", 150, True),
+        ("Parsley", 15, True), ("Tomato", 100, True), ("Extra Virgin Olive Oil", 12, True),
+        ("Lemon", 20, True), ("Pita Bread (Whole Wheat)", 50, True)]),
+    ("Pasta with Chicken and Vegetables", ["Lunch", "Dinner"], "Everyday", 25, [
+        ("Pasta (Cooked)", 200, True), ("Chicken Breast", 130, True), ("Tomato", 100, True),
+        ("Zucchini", 80, True), ("Extra Virgin Olive Oil", 8, True)]),
+
+    # --- snacks -------------------------------------------------------------
+    ("Dates and Walnuts", ["Snack"], "Levantine", 1, [
+        ("Dates (Medjool)", 40, True), ("Walnuts", 20, True)]),
+    ("Labneh and Cucumber", ["Snack"], "Levantine", 3, [
+        ("Labneh", 100, True), ("Cucumber", 100, True), ("Extra Virgin Olive Oil", 5, True)]),
+    ("Hummus with Pita", ["Snack"], "Levantine", 3, [
+        ("Hummus (Prepared)", 100, True), ("Pita Bread (Whole Wheat)", 50, True), ("Cucumber", 60, True)]),
+    ("Ayran and Almonds", ["Snack"], "Levantine", 1, [
+        ("Ayran", 250, True), ("Almonds", 25, True)]),
+    ("Fruit and Pistachios", ["Snack"], "Levantine", 2, [
+        ("Apple", 120, True), ("Pistachios", 20, True)]),
+    ("Halawa with Bread", ["Snack"], "Levantine", 2, [
+        ("Halawa (Tahini Sweet)", 30, True), ("Pita Bread (White)", 50, True)]),
+    ("Cheese, Olives and Tomato", ["Snack"], "Levantine", 3, [
+        ("Nabulsi Cheese", 50, True), ("Green Olives", 25, True), ("Tomato", 100, True)]),
+    ("Pomegranate and Yogurt", ["Snack"], "Levantine", 3, [
+        ("Plain Yogurt", 150, True), ("Pomegranate", 100, True)]),
+    ("Baba Ghanoush with Pita", ["Snack"], "Levantine", 3, [
+        ("Baba Ghanoush", 100, True), ("Pita Bread (White)", 50, True)]),
+    ("Makdous and Bread", ["Snack", "Breakfast"], "Levantine", 2, [
+        ("Makdous", 60, True), ("Pita Bread (White)", 60, True), ("Cucumber", 60, True)]),
+    ("Boiled Egg and Cucumber", ["Snack"], "Everyday", 8, [
+        ("Egg (Whole)", 100, True), ("Cucumber", 100, True), ("Za'atar Mix", 3, True)]),
+    ("Cottage Cheese and Fruit", ["Snack", "Breakfast"], "Everyday", 2, [
+        ("Cottage Cheese (Low-Fat)", 150, True), ("Peach", 120, True)]),
+    ("Carrots and Hummus", ["Snack"], "Everyday", 2, [
+        ("Carrot", 120, True), ("Hummus (Prepared)", 80, True)]),
+    ("Walnuts and Figs", ["Snack"], "Levantine", 1, [
+        ("Walnuts", 20, True), ("Fig (Fresh)", 100, True)]),
 ]
 
 

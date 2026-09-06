@@ -593,6 +593,16 @@ class RuleBasedPlanner:
             self._similarity_cache = SimilarityIndex(foods)
         return self._similarity_cache
 
+    def _chosen(self, meal_name: str) -> frozenset:
+        """What the client picked for this meal, read once per generation per meal."""
+        cache = getattr(self, "_chosen_cache", None)
+        if cache is None:
+            cache = self._chosen_cache = {}
+        if meal_name not in cache:
+            from diet.planner.recipes import chosen_food_ids
+            cache[meal_name] = chosen_food_ids(self.user, meal_name)
+        return cache[meal_name]
+
     def _templates(self):
         """Derived once per generation; they only change when a recipe does."""
         if getattr(self, "_template_cache", None) is None:
@@ -632,7 +642,7 @@ class RuleBasedPlanner:
         try:
             from diet.planner.optimize import totals_of
             from diet.planner.policy import load_policy
-            from diet.planner.recipes import chosen_food_ids, find_recipe
+            from diet.planner.recipes import find_recipe
 
             target = day_ctx.meal_targets.get(meal_name)
             if target is None:
@@ -659,6 +669,7 @@ class RuleBasedPlanner:
             # is a meal built from the client's own foods, so nobody is served the same
             # dish at lunch and dinner to save a recipe for tomorrow.
             served = set(getattr(day_ctx, "recent_recipe_ids", {}).get(meal_name, ()))
+            picked = self._chosen(meal_name)
             match = find_recipe(
                 meal_name, targets, policy,
                 constraints=self._constraints(),
@@ -671,6 +682,7 @@ class RuleBasedPlanner:
                 recent_ids=tuple(served),
                 user=self.user,
                 rng=getattr(self, "_rng", None),
+                chosen_ids=picked,
             )
             if match is None or not match.deviation.within(policy.tolerance):
                 return None
@@ -701,7 +713,6 @@ class RuleBasedPlanner:
                 if today is not None:
                     today.setdefault(meal_name, set()).add(recipe_id)
                 day_ctx.served_today.add(recipe_id)
-            picked = chosen_food_ids(self.user, meal_name)
             chosen_here = sorted(f.name for f, _g in match.components if f.id in picked)
             cuisine = (getattr(match.recipe, "cuisine", "") or "").strip()
             reason = (f"because you chose {', '.join(chosen_here[:2])} for {meal_name.lower()}"

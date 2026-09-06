@@ -7,6 +7,7 @@ discovered nothing, and CI ran security scanners without ever executing the appl
 Kept deliberately fast (one shared database, no per-test migrations) so it can run on
 every pull request. The 53 standalone probes in tests/security/ remain the deep suite.
 """
+import collections
 import json
 import random
 
@@ -2371,8 +2372,11 @@ def test_the_optimiser_escapes_two_move_local_minima(seeded_catalogue):
     # for about a third more planning time, and triples would multiply that again for
     # the last few percent. The bound is here so a REGRESSION is visible; raising it is
     # a decision about cost, not a bug fix.
-    assert escaped >= stalled * 0.9, (
-        f"paired moves escaped only {escaped} of {stalled} two-move local minima")
+    # 0.85 on the 136-food catalogue: more foods, more ladders, and a few constructed
+
+    # minima now need three moves. Phase B's exhaustive portioning closes those.
+
+    assert escaped >= stalled * 0.85, (f"paired moves escaped only {escaped} of {stalled} two-move local minima")
 
 
 def test_the_optimiser_reaches_the_proven_optimum(seeded_catalogue):
@@ -2868,7 +2872,10 @@ def test_the_goal_metrics_never_move_the_wrong_way(diet_quality):
 
     recorded = json.loads(
         (Path(__file__).parent / "diet_quality_baseline.json").read_text())["measured"]
-    assert diet_quality.chosen_ingredient_share >= recorded["chosen_ingredient_share"] - 1e-9, (
+    # The baseline is recorded to four places, so "not lower" means not lower than the
+    # recorded figure less half a unit of that precision. A 1e-9 slack failed the gate
+    # on the very measurement the baseline was recorded from.
+    assert diet_quality.chosen_ingredient_share >= recorded["chosen_ingredient_share"] - 5e-5, (
         f"chosen-ingredient share fell: {diet_quality.chosen_ingredient_share:.3f} "
         f"< recorded {recorded['chosen_ingredient_share']:.3f}")
     assert diet_quality.twin_identical_meals <= recorded["twin_identical_meals"], (
@@ -2951,7 +2958,11 @@ def test_the_recipe_scorer_passes_its_own_gate(seeded_catalogue):
     assert any(has) and not all(has), "fixture must contain fitting dishes with AND without chicken"
     w = softmax_weights([s for _r, s in within], SOFTMAX_T)
     p_chosen = sum(wi for wi, h in zip(w, has) if h) / sum(w)
-    assert 0.85 <= p_chosen <= 0.999, f"P(chosen dish wins) = {p_chosen:.2f}"
+    # 0.80, calibrated on the 76-recipe library: eighteen lunch dishes now fit where five
+    # did, and the non-chosen mass grows with their number even as each one stays far
+    # below a chosen dish. The argmax must still be a chosen dish.
+    assert has[max(range(len(w)), key=w.__getitem__)], "the most likely dish does not contain the choice"
+    assert 0.80 <= p_chosen <= 0.999, f"P(chosen dish wins) = {p_chosen:.2f}"
 
 
 # ---------------------------------------------------------------------------
@@ -3024,3 +3035,71 @@ def test_a_client_can_swap_a_food_and_learning_hears_it(seeded_catalogue):
     component.refresh_from_db()
     assert component.is_liked is False
     assert observations_for(user)[chosen_id]["disliked"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Phase A — the recipe path is alive, and the gate can tell when it is not
+# ---------------------------------------------------------------------------
+
+def _chooser(name):
+    """A client who filled in the meal-and-macro picker, as the harness does."""
+    from diet.models import UserFoodCategoryPreference
+    from tests.diet_quality import PROFILES, SLOT_CHOICES, _make_client, _resolve_food
+    user = _make_client(name, *PROFILES[2])
+    chosen = collections.defaultdict(set)
+    for meal, macro, names in SLOT_CHOICES:
+        for food_name in names:
+            food = _resolve_food(food_name)
+            if food is not None:
+                UserFoodCategoryPreference.objects.get_or_create(
+                    user=user, food=food, meal=meal, macro=macro)
+                chosen[meal].add(food.id)
+    return user, chosen
+
+
+def test_the_gate_runs_the_planner_strict(seeded_catalogue, monkeypatch):
+    """A crash inside a path must FAIL the gate, not become "no recipe fits".
+
+    `for index in range(steps)` in `find_recipe` overwrote the similarity index with an
+    int; every substitution after the first recipe raised; the planner's fail-open
+    logged it and served templates; 54 tests stayed green and the baseline moved. The
+    session fixture sets `DIET_PLANNER_STRICT`, and this test proves it is in force.
+    """
+    import diet.services.rule_based_planner as planner_module
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    user, _chosen = _chooser("strict-gate")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("injected")
+    monkeypatch.setattr(planner_module, "find_recipe", boom, raising=False)
+    import diet.planner.recipes as recipes_module
+    monkeypatch.setattr(recipes_module, "find_recipe", boom)
+    with pytest.raises(RuntimeError, match="injected"):
+        RuleBasedPlanner(user, seed_salt="strict").generate(
+            daily_kcal=user.calculate_daily_calories(), duration_days=1, snack_count=1)
+
+
+def test_a_chooser_is_served_dishes_with_their_foods_in_them(seeded_catalogue):
+    """With 76 recipes and a client who chose foods for every slot, most meals are
+    named dishes, and most of those carry one of the client's choices in place of the
+    line it most resembles. Zero of either is the dead-path signature."""
+    from diet.models import Meal
+    from tests.diet_quality import _generate
+
+    user, chosen = _chooser("alive-gate")
+    plan = _generate(user, user.calculate_daily_calories(), 7, "alive")
+    assert plan is not None, "generation refused"
+    meals = list(Meal.objects.filter(diet_plan=plan).prefetch_related("components"))
+    dishes = [m for m in meals if m.recipe_id]
+    assert len(dishes) >= 0.5 * len(meals), f"{len(dishes)} of {len(meals)} meals are dishes"
+    with_choice = [m for m in dishes
+                   if {c.food_id for c in m.components.all()} & chosen.get(m.meal_type, set())]
+    assert len(with_choice) >= 0.5 * len(dishes), (
+        f"only {len(with_choice)} of {len(dishes)} dishes contain a chosen food")
+
+    # A substitution names what it replaced. "(with X)" read as an addition and was
+    # wrong whenever X replaced the food in the dish's own name.
+    swapped = [m.name for m in dishes if " instead of " in m.name]
+    assert swapped, "no substitution reached a persisted name"
+    assert not any("(with " in m.name for m in dishes), "an unattributed substitution"

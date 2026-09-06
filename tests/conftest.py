@@ -15,6 +15,21 @@ def django_db_setup(django_db_setup, django_db_blocker):
     return django_db_setup
 
 
+@pytest.fixture(scope="session", autouse=True)
+def strict_planner():
+    """The planner must RAISE in the gate, never fail open.
+
+    `RuleBasedPlanner` logs and swallows a path's exception unless `DIET_PLANNER_STRICT`
+    (default: `DEBUG`) is set, and pytest-django runs with `DEBUG = False`. That is how a
+    crash inside the recipe path hid behind "no recipe fits" for two commits: every meal
+    was silently template-built and the metrics simply moved. In production fail-open
+    is the right call — a client gets dinner, an engineer gets an error log. In the gate
+    it is a defect detector switched off.
+    """
+    from django.conf import settings
+    settings.DIET_PLANNER_STRICT = True
+
+
 @pytest.fixture
 def make_user(db):
     from users.models import CustomUser

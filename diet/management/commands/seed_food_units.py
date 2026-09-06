@@ -61,7 +61,7 @@ UNIT_RULES = [
     (r"(parsley|mint|coriander|cilantro|dill|basil|thyme|oregano|rosemary|sage|"
      r"chives?|herbs?|zaatar|za'atar|sumac)\b", "sprig", 5, 1, 3),
     (r"(soy sauce|vinegars?|hot sauce|mustard|ketchup)\b", "tbsp", 15, 0.5, 2),
-    (r"(sauces?|dressings?|mayo|jell(y|ies)|jams?|syrups?|honey)\b", "tbsp", 20, 1, 2),
+    (r"(sauces?|dressings?|mayo|jell(y|ies)|jams?|syrups?|molasses|honey)\b", "tbsp", 20, 1, 2),
     # --- fats -----------------------------------------------------------------
     (r"(almond butter|peanut butter|tahini)\b", "tbsp", 16, 0.5, 2),
     (r"oils?\b", "tbsp", 14, 0.5, 2),
@@ -123,7 +123,7 @@ UNIT_RULES = [
 # and "Sauces" must match "sauce". The trailing boundary still keeps "Butternut" clear
 # of "butter".
 CONDIMENT_PATTERN = re.compile(
-    r"(sauces?|dressings?|jell(y|ies)|jams?|syrups?|ketchup|mayo|mustards?|"
+    r"(sauces?|dressings?|jell(y|ies)|jams?|syrups?|molasses|ketchup|mayo|mustards?|"
     r"seasonings?|spices?|salt|vinegars?|colas?|sodas?|pepsi|coke|drinks?|"
     r"juices?|lemonade|-q)\b")
 ACCOMPANIMENT_PATTERN = re.compile(

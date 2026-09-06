@@ -1,354 +1,99 @@
-# Diet engine — final plan
+# Diet engine — production plan, 10 days
 
-**Status, 2026-09-05: P0 through P12 executed. Gate at 54 tests, green, deterministic.**
+Phases P0–P12 of the previous plan are executed and pushed (`2418f01`). Gate 54 tests,
+green, deterministic across database rebuilds. This is what remains between here and
+production, in the order it will be done. Each step is measured; each commit carries
+its numbers.
 
-Verdict was evolve, and it held. `diet/planner/` was the asset; everything below either
-restored the core feature, deleted what did not run, wired what the engine already
-produced, closed a safety gap, or made selection smarter on the architecture that exists.
-
-Measured on the seeded catalogue, persisted rows after convergence, same fixed seeds:
-
-| | before | after |
-|---|---|---|
-| chosen-ingredient share | 0.097 | **0.361** |
-| meals unchanged after the client chooses | 21 of 28 | **0 of 28** |
-| named-dish rate | 0.79 | 0.80 |
-| calorie drift, worst | 3.2% one-sided | 4.5% both directions |
-| portions above a food's own ceiling | 0 | 0 |
-| a dish served twice in one day | 0 of 42 | 0 of 42 |
-| feasible meals at the proven optimum | 99% | 95% (see the open decision) |
-
-**Left open on purpose, not forgotten.**
-
-*The objective's calorie weight.* Enumerating every portion jointly for an augmented
-dish lifts the optimiser gate to 305 of 306 and, in the same run, moves chosen share
-0.229 to 0.210 and drift 4.0% to 5.3% the wrong way. The exhaustive optimum is optimal
-for a blended objective that weights calories at 0.5, so it sits further from the calorie
-target than the pair search lands. That is a product decision about `CALORIE_WEIGHT`,
-held behind `recipes.EXHAUSTIVE_PORTIONING = False` until it is made. Do not tune the
-search to avoid making it.
-
-*The recipe corpus* (12.4). Pairing still covers 16 of 133 foods. The mechanism to widen
-it exists and is auditable; the corpus is content work.
-
-*Weight tuning from production data* (11.4). The signal is collected now. A month of it
-first.
+Run `.venv/bin/python -m pytest -q` after every step. Check `$?`.
 
 ---
 
-## P0 — Food identity survives persistence  `BLOCKING`  ✅ done
+## A — Culinary breadth  `THE CEILING`
 
-The planner constraint-filters and preference-ranks a `FoodItem`, then hands persistence a
-name string and a `"180g"` string. Persistence re-resolves the name (fuzzy fallback, then
-auto-create) and re-parses the grams.
+Sixteen recipes. Pairing covers 16 of 133 foods. Dinner and snack at 69% named dishes.
+Every selection improvement ran into this wall from a different side; nothing in code
+lifts it.
 
-**0.1** `diet/ai_models.py` `AIIngredient`: add `food_id: Optional[int]` and
-`grams: Optional[float]`. `AIMeal`: add `recipe_id: Optional[int]` and
-`shape: Optional[str]` (the template slots, for template-built meals). Populate in
-`_plan_meal_from_recipe` and `_plan_meal_from_template`. Keep `name` and `quantity` for
-the LLM path and the client.
+**A1** Levantine recipe library, 60–80 dishes, in `diet/management/commands/seed_recipes.py`:
+mezze, mains, breakfasts, snacks. Every line a catalogue food; grams a Syrian kitchen would
+plate. **Owner reviews gram amounts.**
 
-**0.2** `diet/meal_processor.py` `resolve_ingredients_from_ai_meal`: when `food_id` is
-present, resolve by id and use `grams` directly; raise if unresolvable. Never reach
-`_fuzzy_match_ingredient` or `_create_ai_generated_food_item` on the deterministic path.
+**A2** Foods the recipes need that the catalogue lacks → `diet/data/catalogue.py`, then
+`fetch_usda` / `load_food_catalogue --apply`.
 
-**0.3** Migration: `UniqueConstraint(meal, food)` on `MealComponent`.
+**A3** Measure: dish rate by slot, distinct dishes, pairing coverage, shapes.
 
-**Done when:** a test asserts persisted `(food_id, quantity)` pairs equal the planner's
-output exactly. No `AI-%` row is ever created by a rule-based generation.
+**Done.** 76 recipes (60 Levantine), 136 foods, pairing 88/136, 17 shapes. Dish rate
+0.798 → 0.839 (L 0.95, D 0.81, S 0.81), distinct dishes 43 → 81, worst repeat 29 → 8,
+same-day repeats 0, absurd portions 0, optimiser 94% at the proven optimum.
 
----
-
-## P1 — Restore the core feature  `CHEAP, DO EARLY`  ✅ done; cuisine ratio added
-
-The product is "a plan from the foods you like, by meal and macro, never what you dislike".
-Dislikes and allergies are done and verified. Likes are not.
-
-**Measured:** 405 categorisation rows, zero stored in more than one meal/macro slot.
-"Chicken is my lunch protein AND my dinner protein" has never once happened.
-
-**1.1** `diet/views.py` categorisation POST: `update_or_create` keyed on `(user, food)`
-while the constraint is `(user, food, meal, macro)`. Key it on all four. Two lines.
-
-**1.2** The same view rejects categorisation unless the food is already liked. Decide
-deliberately. If kept, a client who only likes foods contributes nothing to 79% of meals.
-
-**1.3** `UserFoodPreference.user` → `OneToOneField`. A second row silently zeroes all
-likes, dislikes and allergies.
-
-**1.4** `UserPreferencesView` has no write branch for `protein_choices` / `carb_choices` /
-`fat_choices` and does not return `vegetable_choices` / `fruit_choices`. A 50-point ranking
-signal no user can set.
-
-*(The recipe path reading `liked_foods` moves to P9.2, where both paths get one scorer.)*
-
-**Done when:** one food in several slots works end to end; `chosen_ingredient_share` rises.
+Found on the way, fixed at the root: the recipe path was DEAD for any client who had
+chosen foods since P12 — `for index in range(steps)` in `find_recipe` overwrote the
+similarity index, every substitution after the first recipe raised, and the planner failed
+open to templates while the gate stayed green. The gate now runs the planner strict, so a
+path's exception fails a test instead of becoming "no recipe fits"; the optimiser benchmark
+is salted so it judges the same meals every run; the baseline is re-recorded (chosen share
+0.379 was a template-only figure; 0.291 is the judged engine's) with the reason in the file.
+A substitution now names what it replaced ("Orange instead of Pomegranate"), and chosen
+foods are read once per meal, not once per recipe (924 → 85 queries per 7-day plan).
 
 ---
 
-## P2 — Delete the legacy engine  ✅ done; 1,857 → 661 lines
+## B — The calorie weight, decided with data
 
-`_plan_meal_from_components` and `_staged_fill` ran **0 times in 168 meals**. All 7
-corrector services have **0 instantiations**.
-
-**2.1** Instrument the router in staging for one week. Log at WARNING on entry to
-`_plan_meal_from_components`. Confirm zero.
-
-**2.2** Delete from `diet/services/rule_based_planner.py`: `_plan_meal_from_components`,
-`_finalize_meal`, `_staged_fill`, the corrector chain (`_components_contributions`,
-`_apply_grams`, `_min_floor_for`, `_reduce_macro_over`, `_increase_macro_under`,
-`_reduce_kcal_over`), `_within_band`, and the dead methods `_is_oil_like`,
-`_macro_ratios_for_goal`, `_choose_distribution_for_goal`, `_filter_pool_for_allergens`,
-`_get_recent_food_ids`. Re-run the no-caller check; delete what it newly orphans.
-
-**2.3** Third branch of `_plan_meal` becomes `NoServableMealError`.
-
-**2.4** `git rm` the 7 correctors and `diet/experimental/staged_fill.py`; remove their
-imports at `diet_persistence.py:16-22`.
-
-**2.5** Remove `DIET_STAGED_MEAL_FILL`, `DIET_SMART_MACRO_PLANNER` and every reader.
-
-**2.6** 15 `print()` → `logger`.
-
-**Done when:** `rule_based_planner.py` under 700 lines, every method reachable, gate green.
+`CALORIE_WEIGHT = 0.5` and `EXHAUSTIVE_PORTIONING = False` were held open as a product
+decision. Decide it with the benchmark: run the harness across a grid of weights, with
+exhaustive on and off, report the table, apply the setting that improves drift without
+moving chosen share, dish rate or variety the wrong way. Owner can override.
 
 ---
 
-## P3 — Rebuild the catalogue  ✅ done 2026-09-05
+## C — Week-level variety
 
-133 rows: 98 USDA-pinned by FoodData Central id, 35 curated Levantine. Zero duplicates,
-100% household units, every row with an Arabic name and meal slots. The gate seeds it.
-Source of truth: `diet/data/catalogue.py`. Numbers: `fetch_usda`. Load: `load_food_catalogue`.
-
----
-
-## P4 — Freeze and lock  ✅ done; harness measures persisted rows
-
-**4.1** Freeze `diet/planner/`. Changes only by PR carrying a benchmark delta.
-
-**4.2** Re-point `tests/diet_quality.py` at persisted rows **after** `converge_plan`.
-Re-record the baseline **once**.
-
-**4.3** Ratchet assertions:
-
-| Metric | Assertion |
-|---|---|
-| `absurd_portion_rate` | `== 0` |
-| `drift_worst_abs` | `<= 5.0` |
-| `days_repeating_a_dish` | `== 0` |
-| optimiser optimality | `>= 0.99` of feasible |
-| `chosen_ingredient_share` | must not fall |
-| `twin_identical_meals` | must not rise |
-| `distinct_dishes` | must not fall |
-
-**4.4** Binding test: plan-time per-meal targets `==` converge-time targets.
+Variety is a penalty today (a dish served in the last three days is sampled less). Make it
+an objective: within one generation, a dish's weight falls with how many times it has
+already been served that week, and the judge prefers an unserved dish among equals.
+Measure: most-repeated dish, distinct per slot.
 
 ---
 
-## P5 — Schema: somewhere to put what the engine decided  ✅ done
+## D — The owner's four
 
-**5.1** `Meal.name` + `Meal.recipe` (nullable FK) + `Meal.reason` (short text). Written in
-`meal_plan_factory.create_meal`. The dish name dies at the DB boundary today; dish recency
-exists only in memory; nothing records provenance; no dish name can be Arabic. `reason` is
-one sentence the engine already knows — "because you chose chicken for lunch" — and it is
-a differentiator no black-box competitor can ship.
+**D1 Preference Satisfaction Rate.** Of the foods a client chose for a slot, the share that
+appeared on that slot's plate in a staple role. Recall to chosen-share's precision. On the
+gate as a ratchet.
 
-**5.2** Read persisted recipe recency in `_prepare_day`. `duration_days` defaults to 1.
+**D2 Swap Distance.** Cosine similarity of rejected→chosen, stored on `MealSwap` at write
+time. A high value means the food was fine; a low value means the shape was wrong.
+Reported, not targeted.
 
-**5.3** `DietPlan.target_protein / target_carbs / target_fat`, written at creation.
+**D3 Learning never changes a meal's shape.** An invariant test: with any learned weights,
+vegetables stay a slot at lunch and dinner, no slot empties, no macro floor moves. Plus an
+offline replay harness: given recorded swaps and ratings, would the next plan have avoided
+the swap? Learning stays hand-set until this says yes on real data.
 
-**5.4** `UserFoodWeight(user, food, weight, observations, updated_at)`. Point `learning.py`
-and `candidates.py` at it; drop the global `FoodItem.smart_score_weight`.
-
-**5.5** Register `Recipe` + `RecipeIngredient` in admin with an inline. `unique=True` on
-`Recipe.name`. Register `Recipe` in `diet/translation.py`.
-
----
-
-## P6 — One target, read everywhere  ✅ done
-
-Six sites hardcode 30/50/20. `trainer_services` **persists** them into `DailyProgress`.
-
-Replace with P5.3: `diet/views.py:921-923, 959-961, 1505-1507, 1689-1691`;
-`diet/trainer_services.py:395-397, 532-534, 694-696`. Also `views.py:906-923` splits
-calories equally across meals while the engine builds to the policy split.
+**D4 The funnel.** `MealEvent(user, meal, kind, at)` with kinds viewed / accepted, plus
+the existing completed / rated / swapped. One endpoint. Report later. Viewed and accepted
+are client-side; the app emits them.
 
 ---
 
-## P7 — Safety and physiology  ✅ done
+## E — Production review, no corner left
 
-**7.1** `users/models.py` compares `goal == 'Lose'` exactly; `trainer_services.py:97`
-passes a raw string. Normalise before comparing.
-
-**7.2** `calculate_daily_calories` guards `is None`; `calculate_bmr` guards truthiness.
-Height `0` becomes a 0 kcal plan. Align the guards.
-
-**7.3** Bound `height` (100–250 cm), `weight` (30–300 kg), `age` (13–100) at model and
-serializer. `1.75` today silently yields a 1200 kcal floor plan. Under 18: no deficit.
-
-**7.4** Replace the flat ±500 with a sized deficit: `clamp(0.20 × TDEE, 300, 750)`, never
-below BMR, and **no deficit when BMI < 18.5**. Surplus the same way, capped at 500. This is
-where BMI finally feeds a decision.
-
-**7.5** Protein in g/kg, not % of energy. In `targets.py` and `_prepare_day`:
-`protein_g = clamp(weight_kg × g_per_kg[goal], 60, 250)` with lose 2.0, maintain 1.6,
-gain 1.8; then carbs and fat split the **remaining** energy by the policy ratio. A 110 kg
-client cutting currently lands near 0.95 g/kg.
-
-**7.6** Delete the duplicate activity table at `ai_assistant/tools/user_tools.py:54-66`.
-
-**7.7** Feasibility **before** planning. Three meals and a snack top out near 3,700 kcal.
-If the request exceeds what the meal structure can carry, return that and suggest the
-structure that can, instead of building a plan labelled 5,000 that delivers 3,900. Keep
-`plan_metadata['delivery']` as the after-the-fact report and surface both in the API.
+**E1** Every meal-bearing API payload walked by a test: name, reason, target, food_id,
+serving, Arabic name. Only lunch is covered today.
+**E2** `NoServableMealError` and the feasibility 422 reach the client as messages, not 500s.
+**E3** The Celery generation task uses the same planner, seeds, and persistence path.
+**E4** N+1 sweep on diet views with the new columns.
+**E5** Inline generation at 7 days under the connection budget.
+**E6** API contract diff for the Flutter client: what changed, what was added.
+**E7** Migrations apply clean from zero on Postgres; catalogue rebuilds from one command.
+**E8** Final adversarial pass on the whole path with the new library.
 
 ---
 
-## P8 — Scale  ✅ done
+## Deliberately after launch
 
-**8.1** Move `converge_plan` out of the `select_for_update` transaction.
-
-**8.2** Cap `duration_days` at 7 inline, or move to Celery with a task-status route. Fix
-the off-by-one (view accepts 31, validator rejects above 30).
-
-**8.3** Build once per generation and pass down: recipe lines, `portions_for` ladders,
-templates, pairings, `meal_foods`. All are pure functions of the catalogue and are
-recomputed per meal today. Generation is linear in library size and inline:
-16 recipes 1.8s, 256 recipes 13.9s, ~1000 recipes ~54s for 30 days.
-
-**8.4** Index recipes by base kcal and meal type. Before the servings search, keep only
-recipes whose `0.5× … 2.0×` kcal window contains the target. At 1000 recipes that is a
-scan of ~80, not 1000.
-
----
-
-## P9 — Make the engine smarter  `THE UPGRADE`  ✅ done; 9.1–9.4 measured, 9.5 schema in P5, 9.6 held
-
-Every item here runs on the existing solver and the existing pool. None needs training
-data. Ordered by cost.
-
-**9.1 Meals compensate each other.** Each meal is optimised to a fixed target and the day
-is summed afterwards, so drift is per-meal by construction. In `generate()`, after each
-meal, add its signed residual (kcal, protein, carb, fat) to the next meal's target,
-bounded to ±15% of that meal. Ten lines. Attacks the remaining 3.9% directly.
-
-**9.2 One scorer for both paths — measured before applied.** Recipes weight preference
-at ~1.7:1, templates at ~148:1. Do not tune two ratios to agree; delete one.
-
-Score a recipe as the **calorie-share-weighted** pool score of its ingredients for this
-meal: `Σ share_i × pool.weights(meal, slot_i)[food_i]`, where `share_i` is the
-ingredient's fraction of the recipe's calories at one serving. Not a plain mean. A mean
-lets a spoon of oil drag chicken down and rewards short recipes over complete ones;
-calorie share is the recipe's own composition and needs no constant. Add the same pairing
-affinity as the template path, then softmax at `SOFTMAX_T`. `W_FIT`, `W_PREFERENCE` and
-`chosen_food_ids` go away; `liked_foods` reaches recipes for free. Fit stays a **filter**.
-
-**Gate — do not apply until these are measured on the seeded catalogue:**
-
-| Test | Pass condition |
-|---|---|
-| Distribution of recipe scores vs template scores | same scale, overlapping ranges |
-| Recipes with more ingredients | score does not fall with count |
-| A core ingredient vs a garnish | chosen staple moves the score; chosen condiment barely does |
-| Pairing affinity vs preference | affinity never exceeds ~20% of a chosen-food score |
-| `SOFTMAX_T` after unifying | P(chosen recipe wins) stays in 0.85–0.96 |
-| Benchmark | `chosen_ingredient_share` and `distinct_dishes` both rise |
-
-If any row fails, fix the aggregation, not the temperature.
-
-**9.3 Judge the path; do not rank it.** `_plan_meal` is first-wins. Build the best recipe
-candidate *and* the best template candidate, each carrying `(portions, deviation,
-preference_score, is_recent)`. Choose by one rule: inside tolerance first; then higher
-preference score; then not recent; then lower deviation. This replaces the "bias toward
-templates" hack and is what makes 9.2 matter — the two paths are now commensurable.
-
-**9.4 Augment a recipe instead of rejecting it.** Overnight oats is 500 kcal and breakfast
-wants 870, so today the recipe is discarded and the library collapses onto 7 dishes. When
-a recipe's best serving is under target by more than tolerance, fill the residual with one
-template slot from the client's pool (fruit or protein for breakfast, vegetable or carb for
-main meals), then re-solve portions jointly. The dish keeps its name: "Overnight Oats with
-Banana + Greek Yogurt". This is the root fix for the concentration and it multiplies the
-reach of every recipe in the library.
-
-**9.5 `RecipeIngredient.swap_group`** as the recipe author's explicit override: "any lean
-protein". P12 generalises it automatically; this is for the cases an author wants to pin.
-
-**9.6** Do **not** lower `SOFTMAX_T`. Measured P(chosen food wins) is 0.91–0.96.
-
-**Done when:** on the benchmark, `distinct_dishes` rises, `twin_identical_meals` falls,
-`chosen_ingredient_share` rises, `drift_worst_abs` falls, and the optimiser optimality
-stays at 99%. If any of the first four moves the wrong way, the item that moved it is
-reverted, not tuned.
-
----
-
-## P10 — Close the fail-open boundary  `AFTER P2`  ✅ done
-
-`rule_based_planner.py` `_plan_meal_from_recipe` and `_plan_meal_from_template` swallow
-every exception from `diet/planner/` and silently downgrade. Log at ERROR with the
-exception, emit a metric, re-raise in staging. After P2, because until then there is
-nothing safe to fail into.
-
----
-
-## P11 — Collect the signal learning needs  ✅ done; swap endpoint, per-food rating, learning reads both
-
-`learning.py` reads `is_completed`, `actual_quantity_consumed` and `is_liked`. Nothing
-writes them. Zero rows exist. A learning engine on this is a slogan.
-
-**11.1** Mark a meal eaten, with optional actual amount per component.
-
-**11.2** Swap this meal / swap this food. Record `MealSwap(user, meal, rejected_food,
-chosen_food, at)`. A swap is the strongest preference signal a client will ever give you.
-
-**11.3** Per-component rating. `Meal.is_liked` credits every food in a meal equally.
-
-**11.4** Only after a month of production data: tune the eight `candidates.py` weights
-from accept/swap/refuse outcomes. Until then they stay hand-set and documented.
-
----
-
-## P12 — Food similarity from features, not training  ✅ done; 12.2(a)(b)(c)(d) wired, 12.4 open
-
-The honest form of "vectors" for a catalogue with no consumption data. No model, no
-training, no cold start, fully auditable.
-
-**12.1** `diet/planner/similarity.py`: per food, a feature vector — macro profile per
-100 g normalised, category one-hot, role one-hot, meal-slot multi-hot, cooked/dry flag —
-and cosine similarity. Chicken lands beside turkey and tilapia; rice beside bulgur and
-couscous; labneh beside Greek yogurt.
-
-**12.2** Use it in four places. (a) A recipe line with no `swap_group` accepts any food
-above a threshold in the same slot. (b) When a chosen food is in no fitting recipe,
-substitute it into the nearest recipe line — preference reaches a named dish without a
-recipe author. (c) "Swap this food" (P11.2) offers the top-k neighbours, re-portioned to
-the same macros. (d) **Preference propagation:** in `build_pool`, a food similar to a
-chosen food gets `W_MEAL_MACRO_PREF × similarity × 0.5`. A client who chose chicken sees
-turkey nudged up, without anyone telling the engine that.
-
-**12.3** Threshold and feature weights live in `policy.py`. Benchmark: chosen share must
-rise; absurd portions and same-day repeats must not move.
-
-**Do not** add language-model embeddings here. They encode real culinary association
-but cannot be audited and drift with the model version.
-
-**12.4 Pre-train the culinary layer from a recipe corpus.** `pairing_edges`, `meal_foods`
-and `derive_templates` are co-occurrence counts over 16 recipes. The same three functions
-over a public corpus (Recipe1M+, RecipeNLG, or an Arabic recipe scrape mapped onto the
-133-food catalogue) give pairing coverage for every food, meal shapes at scale, and
-cuisine-specific patterns — with no model, still counts, still auditable. This is the one
-kind of "trained before launch" that is real: the internet can teach the engine what goes
-together. It cannot teach it what one client likes; that is P11 and only P11.
-
----
-
-## Considered and rejected
-
-**A constraint solver over the whole day** (OR-Tools CP-SAT), choosing foods and portions
-jointly. It is the textbook formulation and would do P9.1 natively. At 99% measured
-optimality on a search space this small, the gain is marginal, the dependency is real,
-and the step-by-step explanation is lost. Revisit if the catalogue reaches thousands of
-foods or the meal shapes get materially richer.
-
-**An LLM as meal composer.** Cannot guarantee a portion, a calorie or an allergen. Fine as
-a *namer* or a *describer* on top of a plan the solver built. Never as the builder.
+Weight tuning from production signal (a month of D4 first). Corpus pre-training for
+pairing (the Levantine library is the higher-value path for this market).
