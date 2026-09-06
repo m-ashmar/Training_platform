@@ -22,6 +22,7 @@ class AIIngredient(BaseModel):
     #: had constraint-filtered and ranked. When these are set, persistence uses them and
     #: nothing else.
     food_id: Optional[int] = Field(default=None, description="FoodItem pk chosen by the planner")
+    name_ar: Optional[str] = Field(default=None, description="The food's Arabic name, for composing the meal's")
     grams: Optional[float] = Field(default=None, description="Amount in grams as decided")
     estimated_calories: Optional[float] = Field(default=None, description="Estimated calories")
     estimated_protein: Optional[float] = Field(default=None, description="Estimated protein in grams")
@@ -58,6 +59,10 @@ class AIMeal(BaseModel):
     recipe_id: Optional[int] = Field(default=None, description="Recipe pk, if a library dish")
     shape: Optional[str] = Field(default=None, description="Template shape, if engine-built")
     reason: Optional[str] = Field(default=None, description="Why the engine chose this meal")
+    #: The same two strings for an Arabic client. Composed where the foods are known,
+    #: because a persisted English name cannot be translated back into its parts.
+    meal_name_ar: Optional[str] = Field(default=None, description="Meal name in Arabic")
+    reason_ar: Optional[str] = Field(default=None, description="Reason in Arabic")
     #: The target this meal was actually built to. Meals compensate each other, so a
     #: later slot's target is the policy split plus the earlier slots' signed residual.
     #: Anything that judges a meal — the API, the benchmark — must judge it against

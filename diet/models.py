@@ -698,6 +698,10 @@ class Meal(models.Model):
     shape = models.CharField(max_length=80, blank=True, default='')
     #: One sentence the engine already knew: "because you chose chicken for lunch".
     reason = models.CharField(max_length=200, blank=True, default='')
+    #: Both in Arabic. Composed at generation time from the foods' own translations;
+    #: "Mujadara (Quinoa instead of Rice)" cannot be translated after the fact.
+    name_ar = models.CharField(max_length=160, blank=True, default='')
+    reason_ar = models.CharField(max_length=200, blank=True, default='')
     scheduled_time = models.TimeField(null=True, blank=True, help_text="Scheduled time for this meal")
     estimated_duration = models.PositiveIntegerField(
         null=True, 

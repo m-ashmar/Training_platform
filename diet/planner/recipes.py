@@ -46,6 +46,21 @@ class RecipeMatch:
             return base
         return f"{base} + {' + '.join(getattr(f, 'name', str(f)) for f in self.extras)}"
 
+    @property
+    def name_ar(self) -> str:
+        """The same name for an Arabic client: the recipe's own translation, the
+        substituted and added foods by their Arabic names."""
+        def ar(obj, fallback="اختيارك"):
+            return getattr(obj, "name_ar", None) or getattr(obj, "name", None) or fallback
+        base = getattr(self.recipe, "name_ar", None) or getattr(self.recipe, "name", "وجبة")
+        if self.substituted is not None:
+            new = ar(self.substituted)
+            old = ar(self.replaced, None) if self.replaced is not None else None
+            base = f"{base} ({new} بدلاً من {old})" if old else f"{base} (مع {new})"
+        if not self.extras:
+            return base
+        return f"{base} + {' + '.join(ar(f) for f in self.extras)}"
+
 
 def _recipe_lines(recipe) -> List[Tuple[object, float, bool]]:
     """A recipe's ingredients as plain data, read from the prefetched rows.

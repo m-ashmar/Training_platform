@@ -19,6 +19,8 @@ class MealPlanFactory:
         # A recipe meal is named after its dish; an engine-built meal arrives named after
         # the slot, which is not a name. Compose one from what is on the plate.
         name = ai_meal.meal_name if ai_meal.meal_name != slot else self._compose_name(ai_meal)
+        name_ar = (ai_meal.meal_name_ar if ai_meal.meal_name_ar and ai_meal.meal_name != slot
+                   else self._compose_name(ai_meal, lang="ar"))
         return Meal.objects.create(
             diet_plan=diet_plan,
             template=self._determine_meal_template(ai_meal),
@@ -27,14 +29,23 @@ class MealPlanFactory:
             meal_type=slot,
             is_ai_generated=True,
             name=name[:160],
+            name_ar=name_ar[:160],
             recipe_id=ai_meal.recipe_id,
             shape=(ai_meal.shape or '')[:80],
             reason=(ai_meal.reason or '')[:200],
+            reason_ar=(ai_meal.reason_ar or '')[:200],
         )
 
     @staticmethod
-    def _compose_name(ai_meal: AIMeal) -> str:
-        """"Chicken, Rice and Broccoli" from the components."""
+    def _compose_name(ai_meal: AIMeal, lang: str = "en") -> str:
+        """"Chicken, Rice and Broccoli" from the components; "دجاج، أرز وبروكلي" in Arabic."""
+        if lang == "ar":
+            names = [ing.name_ar or ing.name for ing in ai_meal.ingredients][:4]
+            if not names:
+                return "وجبة"
+            if len(names) == 1:
+                return names[0]
+            return "، ".join(names[:-1]) + " و" + names[-1]
         names = [ing.name for ing in ai_meal.ingredients][:4]
         if not names:
             return ai_meal.meal_type or 'Meal'
@@ -43,6 +54,10 @@ class MealPlanFactory:
         return ", ".join(names[:-1]) + " and " + names[-1]
 
     def add_components(self, meal: Meal, resolved: Iterable[Tuple[FoodItem, str]]) -> None:
+        # Components created in THIS call, by food id. The meal is new, so a food can
+        # only already be on it if this loop put it there; asking the database per
+        # component was a query that always answered "no" on the planner's path.
+        added: dict = {}
         for food_item, quantity in resolved:
             if isinstance(quantity, (int, float)):
                 # A gram figure the planner decided. It is not text to be parsed, not a
@@ -57,7 +72,9 @@ class MealPlanFactory:
             
             # Merge with existing component of the same food within this meal if present
             # First try exact ID match
-            existing = MealComponent.objects.filter(meal=meal, food=food_item).select_related('food', 'food__category').first()
+            existing = added.get(food_item.id)
+            if existing is None and not decided:
+                existing = MealComponent.objects.filter(meal=meal, food=food_item).select_related('food', 'food__category').first()
             
             # If not found, try normalized name match to prevent visual duplicates
             if not existing and not decided:
@@ -91,7 +108,7 @@ class MealPlanFactory:
                     existing.quantity = cap
                 existing.save(update_fields=['quantity'])
             else:
-                MealComponent.objects.create(
+                added[food_item.id] = MealComponent.objects.create(
                     meal=meal,
                     food=food_item,
                     quantity=grams,

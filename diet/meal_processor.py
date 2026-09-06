@@ -70,13 +70,18 @@ class MealProcessor:
         """
         self.ai_meal = ai_meal
         resolved_ingredients = []
-        
+
+        # One query for every row the planner named, not one per line: a week-long
+        # plan resolved ~110 ingredients with ~110 identical lookups.
+        decided_ids = [i.food_id for i in ai_meal.ingredients if i.food_id is not None]
+        decided = FoodItem.objects.in_bulk(decided_ids) if decided_ids else {}
+
         for ingredient in ai_meal.ingredients:
             # The deterministic path names the row it chose. Nothing below may reinterpret
             # that: not a name lookup, not a fuzzy scan, not a fallback row. A food the
             # planner cleared for allergens and dislikes must be the food that is saved.
             if ingredient.food_id is not None:
-                food_item = FoodItem.objects.filter(pk=ingredient.food_id).first()
+                food_item = decided.get(ingredient.food_id)
                 if food_item is None:
                     raise ValueError(
                         f"planner chose FoodItem {ingredient.food_id} ({ingredient.name!r}) "

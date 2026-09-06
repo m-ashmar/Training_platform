@@ -46,24 +46,19 @@ def _generate_rule_based_fallback(user_id, meal_count, snack_count, start_date):
     """Produce a plan with the deterministic planner when the AI path fails for good.
 
     Returns the plan id, or None if the fallback itself fails (in which case the
-    caller re-raises the original error).
+    caller re-raises the original error). The same function the synchronous endpoint
+    calls: it used to read a stale `daily_calorie_target` (default 2000) and skip the
+    feasibility check, so the fallback plan was not the plan the client would have
+    received by pressing the other button.
     """
     try:
         from django.contrib.auth import get_user_model
 
-        from .services.rule_based_planner import RuleBasedPlanner
-        from .services.diet_persistence import DietPersistenceService
+        from .services.plan_generation import generate_and_save
 
         user = get_user_model().objects.get(id=user_id)
-        daily_kcal = float(getattr(user, 'daily_calorie_target', 0) or 2000)
-        planner = RuleBasedPlanner(user)
-        output = planner.generate(
-            daily_kcal=daily_kcal,
-            meal_count=meal_count,
-            snack_count=snack_count,
-            start_date=start_date,
-        )
-        plan = DietPersistenceService(user).save_plan(output, meal_count, snack_count, start_date)
+        _output, plan = generate_and_save(
+            user, meal_count=meal_count, snack_count=snack_count, start_date=start_date)
         logger.warning(
             "AI generation failed permanently for user %s; served a rule-based plan instead",
             user_id,
@@ -72,6 +67,42 @@ def _generate_rule_based_fallback(user_id, meal_count, snack_count, start_date):
     except Exception:
         logger.exception("Rule-based fallback also failed for user %s", user_id)
         return None
+
+
+@shared_task(
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+def generate_rule_based_plan(user_id, meal_count=3, snack_count=1, start_date=None, duration_days=7):
+    """The deterministic planner, off the request thread, for plans longer than the
+    synchronous endpoint allows. Same planner, same persistence, same refusals.
+
+    Returns a dict the caller can show: `{"plan_id": ...}` or `{"error": ..., "code": ...}`.
+    A refusal (infeasible calories, an unservable slot, an incomplete profile) is the
+    client's to act on and is not retried.
+    """
+    from django.contrib.auth import get_user_model
+
+    from .services.plan_generation import (
+        MAX_TASK_DAYS, InfeasibleCaloriesError, generate_and_save)
+    from .services.rule_based_planner import NoServableMealError
+
+    user = get_user_model().objects.get(id=user_id)
+    try:
+        _output, plan = generate_and_save(
+            user, meal_count=meal_count, snack_count=snack_count, start_date=start_date,
+            duration_days=duration_days, max_days=MAX_TASK_DAYS)
+    except InfeasibleCaloriesError as e:
+        return {"error": str(e), "code": "infeasible_calories",
+                "max_feasible_kcal": round(e.ceiling), "suggestion": e.suggestion}
+    except NoServableMealError as e:
+        return {"error": str(e), "code": "no_servable_meal"}
+    except (ValueError, PermissionError) as e:
+        return {"error": str(e), "code": "invalid_request"}
+    return {"plan_id": plan.id}
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)

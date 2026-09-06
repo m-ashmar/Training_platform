@@ -149,7 +149,18 @@ def ceiling_grams(food) -> float:
     return max(p.grams for p in options) if options else FALLBACK_MAX_G
 
 
-def describe(food, grams: float) -> str:
+#: The serving units in Arabic. The catalogue's units are English words chosen by
+#: `seed_food_units`; a Syrian client reads "كوب", not "cup".
+UNIT_AR = {
+    "cup": "كوب", "tbsp": "ملعقة كبيرة", "tsp": "ملعقة صغيرة", "slice": "شريحة",
+    "piece": "قطعة", "egg": "بيضة", "egg white": "بياض بيضة", "clove": "فص", "sprig": "عود",
+    "pinch": "رشة", "handful": "حفنة", "half": "نصف", "medium": "حبة متوسطة", "palm": "كف",
+    "fillet": "شريحة فيليه", "block": "مكعب", "bowl": "زبدية", "glass": "كأس", "plate": "طبق",
+    "pot": "علبة", "serving": "حصة", "avocado": "حبة أفوكادو",
+}
+
+
+def describe(food, grams: float, lang: str = "en") -> str:
     """What a person would say they are eating, given a food and an amount.
 
     A module function rather than a property of `Portion`, because a portion object
@@ -161,11 +172,13 @@ def describe(food, grams: float) -> str:
     per_unit = float(getattr(food, "unit_grams", 0) or 0)
     grams = float(grams or 0)
     if not unit or per_unit <= 0 or grams <= 0:
-        return f"{grams:.0f} g"
+        return f"{grams:.0f} g" if lang != "ar" else f"{grams:.0f} غ"
     step = step_for(food)
     units = round(grams / per_unit / step) * step
     if units <= 0:
-        return f"{grams:.0f} g"
+        return f"{grams:.0f} g" if lang != "ar" else f"{grams:.0f} غ"
+    if lang == "ar":
+        return f"{spell(units)} {UNIT_AR.get(unit.lower(), unit)}"
     return f"{spell(units)} {unit}{plural_suffix(unit, units)}"
 
 

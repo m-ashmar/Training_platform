@@ -13,6 +13,7 @@ from django.core.exceptions import ValidationError
 from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
+from diet.services.meal_payload import component_payload, meal_payload
 from .models import (
     DietPlan, DietPlanTemplate, Meal, MealComponent, 
     FoodItem, DailyProgress
@@ -453,29 +454,15 @@ class ClientProgressService:
         
         components = []
         for component in meal.components.all():
-            components.append({
-                'id': component.id,
+            entry = component_payload(component)
+            entry.update({
                 'food_name': component.food.name,
                 'food_image': component.food.image_url,
                 'quantity': component.quantity,
-                'is_completed': component.is_completed,
-                'completed_at': component.completed_at,
-                'nutrition': component.calculate_nutrition()
             })
-        
-        return {
-            'id': meal.id,
-            'meal_type': meal.meal_type,
-            'date': meal.date,
-            'scheduled_time': meal.scheduled_time,
-            'description': meal.description,
-            'is_completed': meal.is_completed,
-            'completion_percentage': meal.completion_percentage,
-            'is_liked': meal.is_liked,
-            'notes': meal.notes,
-            'nutrition': meal.calculate_nutrition(),
-            'components': components
-        }
+            components.append(entry)
+
+        return {**meal_payload(meal), 'notes': meal.notes, 'components': components}
     
     def get_enhanced_daily_progress(self, target_date: date = None) -> Dict[str, Any]:
         """
@@ -568,12 +555,10 @@ class ClientProgressService:
                 total_carbs += comp_carbs
                 total_fat += comp_fat
                 
-                components_data.append({
-                    'id': component.id,
+                entry = component_payload(component)
+                entry.update({
                     'food_name': food.name,
                     'quantity': component.quantity,
-                    'is_completed': component.is_completed,
-                    'completed_at': component.completed_at,
                     'nutrition': {
                         'calories': comp_cals,
                         'protein': comp_prot,
@@ -581,22 +566,18 @@ class ClientProgressService:
                         'fat': comp_fat
                     }
                 })
+                components_data.append(entry)
 
-            meal_data = {
-                'id': meal.id,
-                'meal_type': meal.meal_type,
-                'scheduled_time': meal.scheduled_time,
-                'description': meal.description,
-                'is_completed': meal.is_completed,
-                'completion_percentage': meal.completion_percentage,
-                'nutrition': {
-                    'calories': round(total_calories, 1),
-                    'protein': round(total_protein, 1),
-                    'carbs': round(total_carbs, 1),
-                    'fat': round(total_fat, 1)
-                },
-                'components': components_data
+            # The shared meal shape (name, reason, dish, both languages), with the
+            # totals computed in memory above rather than a second pass.
+            meal_data = meal_payload(meal)
+            meal_data['nutrition'] = {
+                'calories': round(total_calories, 1),
+                'protein': round(total_protein, 1),
+                'carbs': round(total_carbs, 1),
+                'fat': round(total_fat, 1)
             }
+            meal_data['components'] = components_data
             meals_data.append(meal_data)
         
         # Calculate plan nutrition in-memory from the meals we just processed

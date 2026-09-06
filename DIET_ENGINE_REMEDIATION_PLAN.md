@@ -43,9 +43,28 @@ foods are read once per meal, not once per recipe (924 → 85 queries per 7-day 
 ## B — The calorie weight, decided with data
 
 `CALORIE_WEIGHT = 0.5` and `EXHAUSTIVE_PORTIONING = False` were held open as a product
-decision. Decide it with the benchmark: run the harness across a grid of weights, with
-exhaustive on and off, report the table, apply the setting that improves drift without
-moving chosen share, dish rate or variety the wrong way. Owner can override.
+decision. Decided with the harness and the exhaustive benchmark, 7 days × 6 profiles:
+
+| weight | exhaustive | worst drift | one-sided | day mean | chosen | dish | distinct | optimal | plan time |
+|---|---|---|---|---|---|---|---|---|---|
+| **0.5** | **off** | **3.85** | yes | −2.58 | 0.291 | **0.839** | **81** | 0.940 | 33 s |
+| 0.5 | on | 6.24 | yes | −2.49 | 0.333 | 0.827 | 78 | 0.949 | 112 s |
+| 1.0 | off | 4.12 | yes | −1.78 | 0.305 | 0.804 | 73 | 0.942 | 30 s |
+| 1.0 | on | 2.06 | no | −1.22 | 0.311 | 0.798 | 73 | 0.969 | 108 s |
+| 2.0 | off | 2.35 | no | −0.73 | 0.331 | 0.786 | 68 | 0.931 | 29 s |
+| 2.0 | on | 3.17 | no | −1.70 | 0.322 | 0.815 | 65 | 0.943 | 101 s |
+
+**Kept: 0.5, off.** Exhaustive portioning triples planning time (a 7-day inline plan
+would go from 3.6 s to about 12 s). A heavier calorie weight halves drift but takes dish
+rate and variety with it: not through the optimiser, but through the judge — more
+templates land inside tolerance and beat dishes on preference. No cell meets the
+criterion. The bias is real but small: day-level mean −1.3%, p10 −2.3%; recipes land
+under because a dish whose macro ratio differs from the target is cheapest to serve
+slightly short. The snack slot sits at −9% because the 40 kcal negligible floor is 18%
+of a 216 kcal snack; floors of 25 and 15 kcal were measured and cost chosen share
+(0.291 → 0.275) and a twin, so the floor stays. One rule changed: when neither candidate
+is inside tolerance the judge serves the closer one, not the preferred one (no measurable
+change at today's floor; pinned by a test). Revisit the weight with a month of D4 signal.
 
 ---
 

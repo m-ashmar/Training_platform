@@ -18,6 +18,8 @@ from .tasks import generate_ai_diet_plan
 from .ai_services import DietGenerator
 from .exceptions import OpenAIError, DietParsingError, PersistenceError
 from .engine.rule_based_planner import RuleBasedPlanner
+from .services.rule_based_planner import NoServableMealError
+from .services.meal_payload import component_payload, day_targets, meal_payload, target_payload
 from .models import (
     MealSwap,
     DailyAdvice, FoodItem, UserFoodPreference, FoodCategory, 
@@ -903,63 +905,36 @@ class GenerateDietPlanRuleBasedView(APIView):
             if request.user.is_trainer:
                 return Response({"error": _("Trainers cannot generate client plans here.")}, status=status.HTTP_403_FORBIDDEN)
 
-            # Rule-Based Planner only supports Breakfast/Lunch/Dinner (max 3 meals)
-            requested_meals = int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10)
-            meal_count = min(3, requested_meals)
-            # Rule-Based Planner only supports 1 snack max. Requesting more causes stride verification issues in persistence.
-            requested_snacks = int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10)
-            snack_count = min(1, requested_snacks)
-            # Seven days inline. This endpoint is synchronous and CPU-bound, and it
-            # accepted 31 while the validator rejected above 30. Anything longer belongs
-            # on the Celery task, which already exists for this planner.
-            duration_days = int_param(request.data, 'duration_days', default=1, minimum=1, maximum=7)
+            from diet.services.plan_generation import (
+                MAX_INLINE_DAYS, InfeasibleCaloriesError, generate_and_save)
+
+            meal_count = int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10)
+            snack_count = int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10)
+            # Seven days inline. This endpoint is synchronous and CPU-bound; anything
+            # longer belongs on `generate_rule_based_plan`, the Celery task.
+            duration_days = int_param(request.data, 'duration_days', default=1, minimum=1, maximum=MAX_INLINE_DAYS)
             start_date = request.data.get('start_date')
-            # Reserve 200 kcal for snack from daily calories by giving planner full daily calories; planner subtracts snack internally
             try:
-                daily_kcal = float(request.user.calculate_daily_calories() or 0.0)
+                plan_output, diet_plan = generate_and_save(
+                    request.user, meal_count=meal_count, snack_count=snack_count,
+                    duration_days=duration_days, start_date=start_date)
+            except InfeasibleCaloriesError as e:
+                # Refuse what the meal structure cannot carry, before building it. A
+                # 5,000 kcal request used to return a correct 3,900 kcal plan labelled 5,000.
+                return Response({
+                    "error": _("This many calories cannot be served in %(m)d meals and %(s)d snacks.")
+                             % {"m": e.meal_count, "s": e.snack_count},
+                    "requested_kcal": round(e.requested),
+                    "max_feasible_kcal": round(e.ceiling),
+                    "suggestion": e.suggestion,
+                }, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
             except ValueError as e:
                 return Response(
                     {"error": "Incomplete profile for calorie calculation", "detail": str(e)},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            except Exception:
-                return Response(
-                    {"error": "Failed to calculate daily calories"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Refuse what the meal structure cannot carry, before building it. Three
-            # meals and a snack top out near 3,700 kcal in servable portions; a 5,000
-            # kcal request used to return a correct 3,900 kcal plan labelled 5,000.
-            from diet.services.rule_based_planner import feasible_kcal_ceiling
-            ceiling = feasible_kcal_ceiling(meal_count, snack_count, request.user.resolve_fitness_goal())
-            if daily_kcal > ceiling * 1.05:
-                suggested_meals = min(6, int(-(-daily_kcal // 1250)))
-                return Response({
-                    "error": _("This many calories cannot be served in %(m)d meals and %(s)d snacks.")
-                             % {"m": meal_count, "s": snack_count},
-                    "requested_kcal": round(daily_kcal),
-                    "max_feasible_kcal": round(ceiling),
-                    "suggestion": {"meal_count": suggested_meals, "snack_count": 2},
-                }, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-
-            planner = RuleBasedPlanner(request.user)
-            plan_output = planner.generate(
-                daily_kcal=daily_kcal,
-                meal_count=meal_count,
-                snack_count=snack_count,
-                start_date=start_date,
-                duration_days=duration_days,
-                no_repeat_days=3,
-            )
-
-            generator = DietGenerator(request.user)
-            diet_plan = generator.save_plan_to_database(
-                plan_output,
-                meal_count=meal_count,
-                snack_count=snack_count,
-                start_date=start_date
-            )
+            meal_count = min(3, meal_count)
+            snack_count = min(1, snack_count)
 
             # FIX #5: Collect training data for rule-based plans (was only done for AI plans)
             try:
@@ -973,7 +948,8 @@ class GenerateDietPlanRuleBasedView(APIView):
             try:
                 # Determine which date to present (start_date if provided, else plan start date or today)
                 present_date = parse_date(start_date) if start_date else (diet_plan.start_date or timezone.localdate())
-                meals_qs = diet_plan.meals.filter(date=present_date).order_by('scheduled_time')
+                meals_qs = (diet_plan.meals.filter(date=present_date)
+                            .prefetch_related('components__food').order_by('scheduled_time'))
                 # Plan-level daily nutrition for the date
                 plan_nutrition = diet_plan.calculate_daily_nutrition(present_date)
                 # Meal targets (match MealComponentsView logic)
@@ -986,27 +962,9 @@ class GenerateDietPlanRuleBasedView(APIView):
 
                 meals_payload = []
                 for meal in meals_qs:
-                    meal_nutrition = meal.calculate_nutrition()
-                    t = by_slot.get(meal.meal_type) or by_slot.get('Snack') or next(iter(by_slot.values()))
-                    meal_calorie_target = t.calories
-                    meal_protein_target = t.protein
-                    meal_carbs_target = t.carb
-                    meal_fat_target = t.fat
-                    meals_payload.append({
-                        "id": meal.id,
-                        "meal_type": meal.meal_type,
-                        "scheduled_time": meal.scheduled_time,
-                        "description": meal.description,
-                        "is_completed": meal.is_completed,
-                        "components_count": meal.components.count(),
-                        "nutrition": meal_nutrition,
-                        "targets": {
-                            "calories": meal_calorie_target,
-                            "protein": meal_protein_target,
-                            "carbs": meal_carbs_target,
-                            "fat": meal_fat_target,
-                        }
-                    })
+                    entry = meal_payload(meal, targets=target_payload(by_slot, meal), with_components=True)
+                    entry["components_count"] = len(entry["components"])
+                    meals_payload.append(entry)
             except Exception:
                 # If anything fails in rich payload, fallback to minimal response
                 meals_payload = []
@@ -1040,6 +998,15 @@ class GenerateDietPlanRuleBasedView(APIView):
                 "allergen_report": diet_plan.allergen_report or {},
                 "smart_macro_summary": plan_output.plan_metadata.get("smart_macro_summary") if hasattr(plan_output, "plan_metadata") else None
             }, status=status.HTTP_201_CREATED)
+        except NoServableMealError as e:
+            # The pool cannot supply a dish or a shape for a slot. That is a message
+            # for the client — choose more foods, loosen a constraint — not a 500.
+            logger.warning("no servable meal for user %s: %s", request.user.id, e)
+            return Response({
+                "error": _("We could not build one of your meals from the foods you allow."),
+                "code": "no_servable_meal",
+                "detail": str(e),
+            }, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
         except PersistenceError as e:
             logger.error(f"Rule-based persistence error: {str(e)}")
             return Response({"error": _("Persistence error")}, status=status.HTTP_400_BAD_REQUEST)
@@ -1544,32 +1511,17 @@ class DietPlanNutritionView(APIView):
                     if meals.count() > 0:
                         target_date = fallback_date
             meals_data = []
-            
-            from django.utils import translation
-            lang_code = translation.get_language() or 'en'
-            
+            meals = list(meals.prefetch_related('components__food'))
+            by_slot = day_targets(diet_plan, meals)
             for meal in meals:
-                meal_nutrition = meal.calculate_nutrition()
-                
-                # Dynamic translation unpacking
-                description = meal.description
-                if meal.translations and lang_code in meal.translations:
-                    description = meal.translations[lang_code].get('description', description)
-                    
-                meals_data.append({
-                    'id': meal.id,
-                    'meal_type': meal.meal_type,
-                    'scheduled_time': meal.scheduled_time,
-                    'description': description,
-                    'is_completed': meal.is_completed,
-                    'completion_percentage': meal.completion_percentage,
-                    'nutrition': meal_nutrition,
-                    'components_count': meal.components.count(),
-                    'completed_components': meal.components.filter(is_completed=True).count()
-                })
+                entry = meal_payload(meal, targets=target_payload(by_slot, meal))
+                comps = list(meal.components.all())
+                entry['components_count'] = len(comps)
+                entry['completed_components'] = sum(1 for c in comps if c.is_completed)
+                meals_data.append(entry)
             
             # Calculate totals
-            total_meals = meals.count()
+            total_meals = len(meals)
             completed_meals = sum(1 for meal in meals if meal.is_completed)
             
             # Calculate nutritional targets (based on standard ratios)
@@ -1708,7 +1660,8 @@ class MealComponentsView(APIView):
                     'fat': round(food.fat * scale_factor, 1)
                 }
 
-                components_data.append({
+                entry = component_payload(component)
+                entry.update({
                     'id': component.id,
                     'food': {
                         'id': food.id,
@@ -1736,6 +1689,7 @@ class MealComponentsView(APIView):
                     'actual_quantity_consumed': component.actual_quantity_consumed,
                     'nutrition': component_nutrition
                 })
+                components_data.append(entry)
             
             # Calculate meal totals
             meal_nutrition = meal.calculate_nutrition()
@@ -1762,16 +1716,8 @@ class MealComponentsView(APIView):
             meal_fat_percentage = round((meal_nutrition['fat'] / meal_fat_target * 100), 1) if meal_fat_target > 0 else 0
             
             return Response({
-                'meal': {
-                    'id': meal.id,
-                    'meal_type': meal.meal_type,
-                    'date': meal.date,
-                    'scheduled_time': meal.scheduled_time,
-                    'description': description,
-                    'is_completed': meal.is_completed,
-                    'completion_percentage': meal.completion_percentage,
-                    'diet_plan_id': meal.diet_plan.id
-                },
+                'meal': {**meal_payload(meal), 'description': description,
+                         'diet_plan_id': meal.diet_plan.id},
                 'components': components_data,
                 'nutrition': {
                     'calories': meal_nutrition['calories'],
@@ -2254,121 +2200,32 @@ class DietPlanMealsWithIngredientsView(APIView):
             if request.user.is_trainer and plan.created_by_id not in (None, request.user.id):
                 return Response({'error': _('You can only view plans you created')}, status=status.HTTP_403_FORBIDDEN)
             
-            # --- Add Daily & Meal Targets ---
-            
-            # Allow query to be defined first
             meals = (Meal.objects
                      .filter(diet_plan=plan)
                      .prefetch_related('components__food')
                      .order_by('date', 'scheduled_time'))
-            
-            # 1. Daily Targets
-            from .utils.nutrition import get_macro_ratios, goal_meal_kcal_split
-            
-            daily_cals = float(plan.daily_calories or 0)
-            goal = plan.goal or 'Maintain'
-            ratios = get_macro_ratios(goal)
-            
+            # The targets the plan was built to. This view used to run its own split
+            # arithmetic (a fixed 200 kcal snack, generic B/L/D ratios) and disagreed
+            # with the components view about the same meal.
+            daily = plan.macro_targets()
             daily_targets = {
-                'calories': daily_cals,
-                'protein': round((daily_cals * ratios['protein']) / 4.0, 1),
-                'carbs': round((daily_cals * ratios['carb']) / 4.0, 1),
-                'fat': round((daily_cals * ratios['fat']) / 9.0, 1),
+                'calories': float(plan.daily_calories or 0),
+                'protein': daily['protein'], 'carbs': daily['carbs'], 'fat': daily['fat'],
             }
-            
-            # 2. Meal Targets
-            # We need to know the split for this user's goal
-            meal_split = goal_meal_kcal_split(goal)
-            # Default snack target (approximate, since dynamic number of snacks)
-            # In persistence, snacks are ~200kcal. We'll use a dynamic approach:
-            # Main meals take their % of (Daily - Snacks).
-            # But simplest approach: 
-            # - Snack = 200 kcal fixed target? Or remaining?
-            # Let's align with MealComponentsView logic:
-            # "Snack = 200, Meals share the rest"
-            
-            # Determine count of snacks/meals in the plan (average per day)
-            # This is hard because explicit days aren't loopable easily here without extra query.
-            # We will use the meal_type of the specific meal row.
-            
-            # Heuristic:
-            # If Meal Type is Snack -> 200 kcal
-            # If Meal Type is B/L/D -> share of (Daily - Est.Snack.Kcal)
-            
-            # Estimate number of snacks per day from Plan or Template
-            est_snack_count = 0
-            if plan.template:
-                est_snack_count = plan.template.snacks_per_day
-            else:
-                # Fallback: check one day of meals
-                try:
-                    one_day = meals[0].date
-                    est_snack_count = meals.filter(date=one_day, meal_type='Snack').count()
-                except IndexError:
-                    est_snack_count = 0
-            
-            # The snack budget is policy, not a literal. It was declared in
-            # `PlannerPolicy` and written as 200.0 in two other places, so a deployment
-            # that changed it changed one third of the arithmetic.
-            from diet.planner.policy import load_policy
-
-            snack_reserve = est_snack_count * float(load_policy().snack_kcal)
-            main_cal_pool = max(0.0, daily_cals - snack_reserve)
-            
+            by_day = {}
+            for m in meals:
+                by_day.setdefault(m.date, []).append(m)
+            targets_by_day = {d: day_targets(plan, ms) for d, ms in by_day.items()}
             out_meals = []
             for m in meals:
-                components = []
-                for c in m.components.all():
-                    f = c.food
-                    components.append({
-                        'id': c.id,
-                        'food_id': f.id,
-                        'food_name': f.name,
-                        'quantity_grams': c.quantity,
-                        'serving': describe(f, c.quantity),
-                        'image_url': f.image_url,
-                        'macros': c.calculate_nutrition(),
-                        'is_completed': c.is_completed,
-                        'completed_at': c.completed_at,
-                        'actual_quantity_consumed': c.actual_quantity_consumed,
-                    })
-                
-                # Calculate Target for this meal
-                if m.meal_type == 'Snack':
-                    target_cal = 200.0
-                else:
-                    # Use split % if available (Breakfast/Lunch/Dinner)
-                    split_pct = meal_split.get(m.meal_type, 0.33) 
-                    # Normalize split?? 
-                    # Actually `goal_meal_kcal_split` returns generic B/L/D ratios summing to ~1.0.
-                    # Correct logic: (Daily * Split) could work if NO snacks.
-                    # With snacks, we should scale those ratios to the main_cal_pool?
-                    # Let's use: Target = main_cal_pool * (split_pct / sum_of_active_splits)
-                    # Assuming standard B+L+D = 1.0 roughly.
-                    target_cal = main_cal_pool * split_pct
-                
-                # Macro targets for this meal (using daily ratios)
-                m_targets = {
-                    'calories': round(target_cal, 1),
-                    'protein': round((target_cal * ratios['protein']) / 4.0, 1),
-                    'carbs': round((target_cal * ratios['carb']) / 4.0, 1),
-                    'fat': round((target_cal * ratios['fat']) / 9.0, 1),
-                }
-
-                out_meals.append({
-                    'id': m.id,
-                    'date': m.date,
-                    'meal_type': m.meal_type,
-                    'scheduled_time': m.scheduled_time,
-                    'description': m.description,
-                    'image_url': m.image_url,
-                    'is_ai_generated': m.is_ai_generated,
-                    'nutrition': m.calculate_nutrition(),
-                    'target_nutrition': m_targets,  # <--- NEW FIELD
-                    'components': components,
-                    'is_completed': m.is_completed,
-                    'completion_percentage': m.completion_percentage,
-                })
+                entry = meal_payload(m, with_components=True)
+                t = target_payload(targets_by_day[m.date], m)
+                entry['targets'] = t
+                entry['target_nutrition'] = t  # the key the client already reads
+                for c in entry['components']:
+                    c['food_name'] = c['name']    # keys the client already reads
+                    c['macros'] = c['nutrition']
+                out_meals.append(entry)
             
             payload = {
                 'plan': {

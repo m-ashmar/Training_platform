@@ -10,6 +10,7 @@ every pull request. The 53 standalone probes in tests/security/ remain the deep 
 import collections
 import json
 import random
+import re
 
 import pytest
 from django.urls import get_resolver
@@ -3103,3 +3104,177 @@ def test_a_chooser_is_served_dishes_with_their_foods_in_them(seeded_catalogue):
     swapped = [m.name for m in dishes if " instead of " in m.name]
     assert swapped, "no substitution reached a persisted name"
     assert not any("(with " in m.name for m in dishes), "an unattributed substitution"
+
+
+# ---------------------------------------------------------------------------
+# Phase E — what the client actually receives
+# ---------------------------------------------------------------------------
+
+def _api_client_for(user):
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+    _grant_diet_access(user)
+    c = Client()
+    c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(user).access_token}"
+    return c
+
+
+_ARABIC = re.compile(r"[؀-ۿ]")
+
+
+def test_every_meal_payload_carries_what_the_engine_decided(seeded_catalogue):
+    """E1. Five endpoints serialised a meal by hand and none carried its name, the
+    reason it was chosen, the dish it is, or the target it was built to. The client
+    read "Levantine · 25 minutes" where the engine had said "Mujadara with Salad".
+    Every meal-bearing payload now comes from one builder, in both languages.
+    """
+    user, _chosen = _chooser("payload-gate")
+    c = _api_client_for(user)
+
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1, "snack_count": 1},
+               content_type="application/json")
+    assert r.status_code == 201, r.content
+    body = r.json()
+    meals = body["meals"]
+    assert len(meals) == 4
+    for m in meals:
+        for key in ("name", "name_ar", "display_name", "reason", "reason_ar", "recipe_id",
+                    "is_dish", "targets", "components", "nutrition"):
+            assert key in m, f"{key} missing from generate payload"
+        assert m["name"] and m["reason"], m
+        assert m["targets"]["calories"] > 0
+        for comp in m["components"]:
+            for key in ("food_id", "name", "name_ar", "serving", "serving_ar", "quantity_grams"):
+                assert key in comp, f"{key} missing from component"
+    assert any(m["is_dish"] for m in meals), "a chooser's day has no named dish"
+    assert any(_ARABIC.search(m["name_ar"]) for m in meals), "no Arabic meal name"
+    assert all(_ARABIC.search(m["reason_ar"]) for m in meals), "a reason has no Arabic"
+    plan_id, meal_id = body["diet_plan_id"], meals[0]["id"]
+
+    r = c.get(f"/api/diet/v1/nutrition/plan/{plan_id}/")
+    assert r.status_code == 200, r.content
+    by_id = {m["id"]: m for m in r.json()["meals"]}
+    assert by_id[meal_id]["name"] == meals[0]["name"]
+    assert by_id[meal_id]["targets"] == meals[0]["targets"], "two views, two targets"
+
+    r = c.get(f"/api/diet/v1/meals/{meal_id}/components/")
+    assert r.status_code == 200, r.content
+    j = r.json()
+    assert j["meal"]["name"] == meals[0]["name"] and j["meal"]["reason"]
+    assert j["nutrition"]["targets"]["calories"] == meals[0]["targets"]["calories"]
+    comp = j["components"][0]
+    assert comp["food_id"] == comp["food"]["id"] and comp["serving_ar"] and comp["name_ar"]
+
+    r = c.get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/")
+    assert r.status_code == 200, r.content
+    m0 = next(m for m in r.json()["meals"] if m["id"] == meal_id)
+    assert m0["name"] == meals[0]["name"]
+    assert m0["target_nutrition"] == m0["targets"] == meals[0]["targets"]
+    assert m0["components"][0]["food_name"] == m0["components"][0]["name"]
+
+    r = c.get(f"/api/diet/v1/client/meals/{meal_id}/")
+    assert r.status_code == 200, r.content
+    assert r.json()["name"] == meals[0]["name"] and r.json()["reason"]
+
+    # An Arabic client reads Arabic where the engine had a translation.
+    r = c.get(f"/api/diet/v1/meals/{meal_id}/components/", HTTP_ACCEPT_LANGUAGE="ar")
+    assert r.status_code == 200, r.content
+    j = r.json()
+    assert j["meal"]["display_name"] == j["meal"]["name_ar"]
+    assert j["components"][0]["display_name"] == j["components"][0]["name_ar"]
+
+
+def test_an_unservable_slot_is_a_422_not_a_500(seeded_catalogue, monkeypatch):
+    """E2. `NoServableMealError` fell into the view's broad handler and reached the
+    client as "Failed to generate rule-based plan", status 500. It is the client's to
+    act on: choose more foods, loosen a constraint."""
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    user, _chosen = _chooser("unservable-gate")
+    c = _api_client_for(user)
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_recipe", lambda *a, **k: None)
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_template", lambda *a, **k: None)
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
+    assert r.status_code == 422, r.content
+    assert r.json()["code"] == "no_servable_meal"
+
+
+def test_the_task_and_the_endpoint_generate_the_same_plan(seeded_catalogue):
+    """E3. The Celery fallback read a stale `daily_calorie_target` (default 2000) and
+    skipped the feasibility check; the synchronous view did neither. One function now
+    serves the view, the task and the fallback, so pressing either button yields the
+    plan the other would have.
+    """
+    from diet.models import DietPlan, Meal
+    from diet.services.plan_generation import generate_and_save
+    from diet.tasks import _generate_rule_based_fallback, generate_rule_based_plan
+    from tests.diet_quality import _make_client
+
+    user, _chosen = _chooser("task-gate")
+    _output, direct = generate_and_save(user, duration_days=2, seed_salt="parity")
+    result = generate_rule_based_plan(user.id, duration_days=2)
+    assert "plan_id" in result, result
+    via_task = DietPlan.objects.get(pk=result["plan_id"])
+    assert via_task.daily_calories == direct.daily_calories
+    assert Meal.objects.filter(diet_plan=via_task).count() == Meal.objects.filter(diet_plan=direct).count() == 8
+    assert via_task.generation_strategy == direct.generation_strategy == "FALLBACK"
+
+    fallback_id = _generate_rule_based_fallback(user.id, 3, 1, None)
+    assert fallback_id and DietPlan.objects.get(pk=fallback_id).daily_calories == direct.daily_calories
+
+    # A profile the meal structure cannot carry is refused with a reason, not retried.
+    heavy = _make_client("task-heavy", ["Muscle Gain"], 250, 300, 20, "Male", "VeryActive")
+    result = generate_rule_based_plan(heavy.id, duration_days=1)
+    assert result.get("code") == "infeasible_calories", result
+
+
+def test_when_neither_candidate_fits_the_closer_one_is_served(seeded_catalogue, monkeypatch):
+    """The judge ranked preference before deviation even when both candidates missed
+    tolerance, so a plate of chosen foods 20% under its target beat a dish 11% under."""
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    user, _chosen = _chooser("judge-gate")
+    planner = RuleBasedPlanner(user, seed_salt="judge")
+    served = []
+    recipe = ("dish", False, 10.0, False, 0.11, lambda: served.append("dish"))
+    template = ("plate", False, 500.0, False, 0.20, lambda: served.append("plate"))
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_recipe", lambda *a, **k: recipe)
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_template", lambda *a, **k: template)
+    assert planner._plan_meal("Lunch", None, None) == "dish" and served == ["dish"]
+
+    # Inside tolerance, preference decides, as before.
+    served.clear()
+    both_in = ("plate", True, 500.0, False, 0.05, lambda: served.append("plate"))
+    dish_in = ("dish", True, 10.0, False, 0.01, lambda: served.append("dish"))
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_recipe", lambda *a, **k: dish_in)
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_template", lambda *a, **k: both_in)
+    assert planner._plan_meal("Lunch", None, None) == "plate"
+
+
+def test_a_week_is_generated_and_saved_within_the_query_budget(seeded_catalogue):
+    """E4/E5. A 7-day plan ran 924 queries to generate (a chosen-foods lookup per
+    recipe per meal) and 479 to persist (a food lookup per ingredient, an existence
+    check per component). Both were fixed at the source; this holds the budget so a
+    loop cannot creep back in. Wall-clock is bounded loosely — it is a CPU-bound path
+    on a shared CI box — and the query counts are the real assertion.
+    """
+    import time
+
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from diet.services.diet_persistence import DietPersistenceService
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    user, _chosen = _chooser("budget-gate")
+    t0 = time.perf_counter()
+    with CaptureQueriesContext(connection) as generating:
+        out = RuleBasedPlanner(user, seed_salt="budget").generate(
+            daily_kcal=user.calculate_daily_calories(), meal_count=3, snack_count=1, duration_days=7)
+    with CaptureQueriesContext(connection) as persisting:
+        plan = DietPersistenceService(user).save_plan(out, meal_count=3, snack_count=1)
+    elapsed = time.perf_counter() - t0
+    assert plan is not None and len(out.plan) == 28
+    assert len(generating) <= 120, f"generating a week took {len(generating)} queries"
+    assert len(persisting) <= 300, f"persisting a week took {len(persisting)} queries"
+    assert elapsed < 20, f"a week took {elapsed:.1f}s"

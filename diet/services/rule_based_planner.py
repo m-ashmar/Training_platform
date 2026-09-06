@@ -82,6 +82,33 @@ def feasible_kcal_ceiling(meal_count: int, snack_count: int, goal: str = "mainta
             + max(0, int(snack_count)) * policy.max_kcal_per_snack)
 
 
+SLOT_AR = {"Breakfast": "الفطور", "Lunch": "الغداء", "Dinner": "العشاء", "Snack": "الوجبة الخفيفة"}
+CUISINE_AR = {"levantine": "شامي", "western": "غربي", "universal": ""}
+
+
+def _reasons(meal_name: str, chosen_foods, cuisine: str = "", built: bool = False):
+    """The one sentence the client reads under a meal, in English and Arabic.
+
+    Composed here, where the foods are objects with both names, because the persisted
+    English sentence cannot be translated back into its parts.
+    """
+    slot_ar = SLOT_AR.get(meal_name, meal_name)
+    if chosen_foods:
+        en = [f.name for f in chosen_foods[:2]]
+        ar = [getattr(f, "name_ar", None) or f.name for f in chosen_foods[:2]]
+        return (f"because you chose {', '.join(en)} for {meal_name.lower()}",
+                f"لأنك اخترت {' و'.join(ar)} لوجبة {slot_ar}")
+    if built:
+        return (f"built from your {meal_name.lower()} foods to fit your target",
+                f"مكوَّنة من أطعمتك المختارة لوجبة {slot_ar} لتناسب هدفك")
+    c = (cuisine or "").strip().lower()
+    c_ar = CUISINE_AR.get(c, c)
+    if c:
+        return (f"a {c} dish that fits your {meal_name.lower()} target",
+                f"طبق {c_ar} يناسب هدف {slot_ar}" if c_ar else f"طبق يناسب هدف {slot_ar}")
+    return (f"a dish that fits your {meal_name.lower()} target", f"طبق يناسب هدف {slot_ar}")
+
+
 class RuleBasedPlanner:
     """
     Deterministic diet planner that uses user category preferences and macro density.
@@ -449,8 +476,11 @@ class RuleBasedPlanner:
         template = self._plan_meal_from_template(meal_name, ctx, day_ctx)
         candidates = [c for c in (recipe, template) if c is not None]
         if candidates:
+            # When NEITHER candidate is inside tolerance, the closer one is served.
+            # Preference used to decide that case too, so a plate of chosen foods
+            # 20% under its snack target beat a dish 11% under it.
             meal, _within, _pref, _recent, _dev, commit = max(
-                candidates, key=lambda c: (c[1], c[2], not c[3], -c[4]))
+                candidates, key=lambda c: (c[1], c[2] if c[1] else 0.0, not c[3], -c[4]))
             commit()
             return meal
         # No third path. Component assembly — a greedy fill with its own optimiser, its
@@ -519,16 +549,17 @@ class RuleBasedPlanner:
             if pool_obj is not None:
                 for p in portions:
                     if pool_obj.weights(meal_name, classify_food(p.food)).get(p.food.id, 0) >= 80:
-                        chosen_here.append(p.food.name)
-            reason = (f"because you chose {', '.join(chosen_here[:2])} for {meal_name.lower()}"
-                      if chosen_here else f"built from your {meal_name.lower()} foods to fit your target")
+                        chosen_here.append(p.food)
+            reason, reason_ar = _reasons(meal_name, chosen_here, built=True)
             meal = AIMeal(
                 meal_name=meal_name,
                 description=f"Built from your {meal_name.lower()} foods.",
                 reason=reason,
+                reason_ar=reason_ar,
                 ingredients=[
                     AIIngredient(
                         name=p.food.name,
+                        name_ar=getattr(p.food, "name_ar", None) or p.food.name,
                         quantity=f"{p.grams:g}g",
                         food_id=p.food.id,
                         grams=float(p.grams),
@@ -694,6 +725,7 @@ class RuleBasedPlanner:
             ingredients = [
                 AIIngredient(
                     name=food.name,
+                    name_ar=getattr(food, "name_ar", None) or food.name,
                     quantity=f"{grams:g}g",
                     food_id=food.id,
                     grams=float(grams),
@@ -713,16 +745,16 @@ class RuleBasedPlanner:
                 if today is not None:
                     today.setdefault(meal_name, set()).add(recipe_id)
                 day_ctx.served_today.add(recipe_id)
-            chosen_here = sorted(f.name for f, _g in match.components if f.id in picked)
+            chosen_here = sorted((f for f, _g in match.components if f.id in picked),
+                                 key=lambda f: f.name)
             cuisine = (getattr(match.recipe, "cuisine", "") or "").strip()
-            reason = (f"because you chose {', '.join(chosen_here[:2])} for {meal_name.lower()}"
-                      if chosen_here else
-                      (f"a {cuisine} dish that fits your {meal_name.lower()} target" if cuisine
-                       else f"a dish that fits your {meal_name.lower()} target"))
+            reason, reason_ar = _reasons(meal_name, chosen_here, cuisine)
             meal = AIMeal(
                 meal_name=match.name,
+                meal_name_ar=match.name_ar,
                 description=getattr(match.recipe, "description", "") or "",
                 reason=reason,
+                reason_ar=reason_ar,
                 ingredients=ingredients,
                 total_nutrition={
                     "calories": round(totals["calories"], 1),
