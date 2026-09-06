@@ -142,3 +142,12 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(
                 f"  {FoodItem.objects.count() - unitless}/{FoodItem.objects.count()} "
                 f"food(s) have a household unit"))
+
+        # The recipe library is the engine's culinary knowledge — every shape, pairing and
+        # meal-appropriateness is derived from it — and `--wipe` deletes it. Rebuilding
+        # the catalogue without it left a database with 133 foods and no dishes at all.
+        # Seed it here so one command really does rebuild the whole thing.
+        self.stdout.write("seeding the recipe library")
+        call_command("seed_recipes", verbosity=0)
+        self.stdout.write(self.style.SUCCESS(
+            f"  {Recipe.objects.filter(is_active=True).count()} recipe(s) active"))

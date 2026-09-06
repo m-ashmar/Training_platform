@@ -325,7 +325,12 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         for macro in MACROS:
             parts = {f.id: score_parts(f, meal, macro) for f in by_slot[meal][macro]}
             table = {fid: st + pr for fid, (st, pr) in parts.items()}
-            by_slot[meal][macro].sort(key=lambda f: table[f.id], reverse=True)
+            # Ties break on the name, never on the row id. A stable sort on score alone
+            # left tied foods in query order, which is id order, which changes every time
+            # the database is rebuilt — so the same code measured 41 distinct dishes on
+            # one database and 39 on the next, and a ratchet gate failed with no change
+            # to the engine. Determinism must hold across rebuilds, not just within one.
+            by_slot[meal][macro].sort(key=lambda f: (table[f.id], f.name), reverse=True)
             scores[meal][macro] = table
             preference_scores[meal][macro] = {fid: pr for fid, (_st, pr) in parts.items()}
 

@@ -1,51 +1,51 @@
 {
   "_comment": "Diet engine quality baseline, phase 0.2 of the rebuild. Measured against the catalogue built by `add_healthy_foods` and `seed_recipes`, which is what a fresh production database contains. The gate asserts these as bounds in the direction of improvement and tightens them phase by phase.",
-  "recorded": "2026-09-05",
+  "recorded": "2026-09-06",
   "catalogue": {
     "foods": 133,
     "recipes": 16
   },
   "measured": {
-    "dish_rate_overall": 0.8036,
+    "dish_rate_overall": 0.7976,
     "dish_rate_by_slot": {
-      "Breakfast": 0.7857,
+      "Breakfast": 0.7619,
       "Lunch": 1.0,
-      "Dinner": 0.6667,
-      "Snack": 0.7619
+      "Dinner": 0.6905,
+      "Snack": 0.7381
     },
     "meals_measured": 168,
-    "distinct_dishes": 41,
+    "distinct_dishes": 43,
     "max_repeats_of_one_dish": 29,
     "absurd_portion_rate": 0.0,
     "max_repeats_by_slot": {
-      "Breakfast": 10,
-      "Lunch": 14,
+      "Lunch": 10,
       "Snack": 24,
-      "Dinner": 10
-    },
-    "distinct_dishes_by_slot": {
-      "Breakfast": 18,
-      "Lunch": 13,
-      "Snack": 4,
+      "Breakfast": 11,
       "Dinner": 11
     },
+    "distinct_dishes_by_slot": {
+      "Lunch": 15,
+      "Snack": 4,
+      "Breakfast": 15,
+      "Dinner": 14
+    },
     "days_repeating_a_dish": 0,
-    "portions_measured": 596,
+    "portions_measured": 601,
     "min_distinct_portions_per_food": 1,
     "drift_by_target": {
-      "1400": -3.121,
-      "1800": -1.109,
-      "2200": 4.462,
-      "2600": -2.228,
-      "3000": -1.909
+      "1400": 1.729,
+      "1800": -1.885,
+      "2200": 4.027,
+      "2600": -4.25,
+      "3000": -4.63
     },
     "drift_all_one_sided": false,
-    "drift_worst_abs": 4.462,
+    "drift_worst_abs": 4.63,
     "twin_identical_meals": 0,
     "twin_total_meals": 28,
     "twin_identical_built": 0,
     "twin_built_meals": 28,
-    "chosen_ingredient_share": 0.3608,
+    "chosen_ingredient_share": 0.3789,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],
     "catalogue_gaps": []
