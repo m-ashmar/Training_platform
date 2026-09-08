@@ -183,6 +183,23 @@ the working tree after E8. Everything they confirmed is fixed and pinned by a te
   are read once, and the pair pass sums only the two moving lines. 7-day generation
   3–4 s on the 105-recipe library.
 
+## G — The client's own journey, walked end to end
+
+Every diet route walked as a real client would: browse the catalogue, choose foods per
+meal and macro, remove one, set preferences, generate, read the four plan screens, swap,
+rate, complete, and read progress. Three defects only this walk could find:
+
+- **Removing a chosen food was a 500.** `deleted, _ = rows.delete()` rebound gettext to
+  the per-model dict, so every translated string after it raised. The same shadowing
+  class as the loop variable that killed the recipe path; the codebase was swept for
+  others (one more, in `file_security`).
+- **Food import let any client create a plannable food** with macros of their choosing,
+  no meal slots and no household unit — how the old database reached 327 rows of noise.
+  Imported rows are now `needs_review`, so they are visible but never planned.
+- **Food search offered rows nothing else accepts.** External results carry ids the
+  preference endpoints reject; they are off by default and marked `selectable: false`.
+  `?query=` is accepted alongside `?q=`.
+
 ## Release steps
 
 1. `python manage.py migrate` (0059 name_ar/reason_ar, 0060 MealEvent + swap similarity,

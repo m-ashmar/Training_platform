@@ -268,6 +268,10 @@ class FoodCategoryListView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+class _SkipExternalSearch(Exception):
+    """External food search is switched off; local results only."""
+
+
 class FoodSearchView(APIView):
     """
     API endpoint to search for food items from both local database and Edamam API.
@@ -278,7 +282,8 @@ class FoodSearchView(APIView):
     
     def get(self, request):
         try:
-            query = request.GET.get('q', '').strip()
+            # `query` as well as `q`: the client sent the longer name and got a 400.
+            query = (request.GET.get('q') or request.GET.get('query') or '').strip()
             if not query:
                 return Response(
                     {"error": _("Query parameter 'q' is required")},
@@ -303,12 +308,17 @@ class FoodSearchView(APIView):
                     'serving_size': food.serving_size,
                     'category': food.category.name if food.category else None,
                     'source': 'local',
+                    'selectable': True,
                     'api_id': food.api_id
                 })
             
-            # Search Edamam API
+            # The curated catalogue is the source of truth since the USDA rebuild, and
+            # an external row cannot be chosen, categorised or planned until it is
+            # imported and vetted. Off unless DIET_EXTERNAL_FOOD_SEARCH is set.
             edamam_results = []
             try:
+                if not getattr(settings, "DIET_EXTERNAL_FOOD_SEARCH", False):
+                    raise _SkipExternalSearch()
                 edamam_response = search_food(query)
                 hints = edamam_response.get('hints', [])
                 
@@ -324,8 +334,13 @@ class FoodSearchView(APIView):
                         'image_url': food_data.get('image', ''),
                         'serving_size': '100g',
                         'source': 'edamam',
+                        # Not a FoodItem id: it must be imported first, and the import
+                        # is unvetted, so the client must not offer it as a choice.
+                        'selectable': False,
                         'api_id': food_data.get('foodId', '')
                     })
+            except _SkipExternalSearch:
+                pass
             except Exception as e:
                 logger.warning(f"Edamam API search failed: {str(e)}")
             
@@ -520,7 +535,11 @@ class UserFoodCategoryPreferenceDetailView(APIView):
                 rows = rows.filter(meal=request.data['meal'])
             if request.data.get('macro'):
                 rows = rows.filter(macro=request.data['macro'])
-            deleted, _ = rows.delete()
+            # NOT `deleted, _ = ...`: `_` is gettext in this module, and rebinding it
+            # to the per-model dict made every translated string below a TypeError —
+            # a 500 on "remove a food I chose", the same shadowing class as the loop
+            # variable that killed the recipe path.
+            deleted, _per_model = rows.delete()
             if not deleted:
                 return Response({"error": _("Not found")}, status=status.HTTP_404_NOT_FOUND)
             return Response({"message": _("Category preference deleted"), "deleted": deleted})
@@ -567,6 +586,12 @@ class FoodImportView(APIView):
             
             # Create new food item
             food_item = FoodItem.objects.create(
+                # Unvetted. This endpoint lets any authenticated client create a
+                # FoodItem with arbitrary macros, no meal slots and no household unit
+                # — which is how the database reached 327 rows of development noise.
+                # `needs_review` keeps it out of every pool and every recipe until a
+                # human accepts it; the client can still see and like it.
+                needs_review=True,
                 api_id=food_data.get('api_id', ''),
                 name=food_data.get('name', ''),
                 image_url=food_data.get('image_url', ''),
@@ -668,7 +693,7 @@ class FoodImportView(APIView):
         if category_name == 'Other':
             defaults = {'is_protein': False, 'is_carb': False, 'is_fat': False}
 
-        category, _ = FoodCategory.objects.get_or_create(name=category_name, defaults=defaults)
+        category, _created = FoodCategory.objects.get_or_create(name=category_name, defaults=defaults)
         food_item.category = category
         food_item.save()
 

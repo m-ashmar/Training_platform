@@ -86,6 +86,19 @@ The outcome of an asynchronous generation. `{task_id, state}` while running; on 
 
 - Food id lists must be lists of integers (a comma-separated string is accepted); anything else is a 400 naming the field (was a 500).
 
+## `GET food/search/`
+
+- Accepts `?query=` as well as `?q=` (the longer name used to be a 400).
+- Every row carries `selectable`. Local catalogue rows are `true` and their `id` is a real food id. External rows are `false`, their id is not a food id, and they are **off by default** (`DIET_EXTERNAL_FOOD_SEARCH`): the curated catalogue is the source of truth since the rebuild, and an external row cannot be chosen, categorised or planned until it is imported and vetted.
+
+## `POST food/import/`
+
+- An imported food is created with `needs_review: true`. It appears in the client's lists but is never put in a plan until a human accepts it. Any authenticated client can call this endpoint with arbitrary macros, which is how the previous database reached 327 rows of noise.
+
+## `DELETE preferences/food-category/<food_id>/`
+
+- Fixed: removing a food you had chosen returned 500. It returns `{message, deleted}`, or 404 if that choice is not there.
+
 ## Localisation
 
 `Accept-Language: ar` selects `display_name` / `display_reason`; `name`, `name_ar`, `serving`, `serving_ar` are always both present so the app can switch without a refetch. Food names come from the catalogue's Arabic column; recipe names from the recipe's translation where one exists.

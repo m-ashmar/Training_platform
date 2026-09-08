@@ -438,6 +438,10 @@ DIET_DYNAMIC_MEAL_ALLOCATION = True
 # logged and served around. The gate and settings_local set it; production leaves
 # it off so a client gets dinner and an engineer gets an error log.
 DIET_PLANNER_STRICT = get_bool_env_optional("DIET_PLANNER_STRICT", False)
+# Whether food search also queries the external food database. Off: the curated
+# catalogue (diet/data/catalogue.py) is the source of truth since the rebuild, and an
+# external row cannot be chosen or planned until it is imported and vetted.
+DIET_EXTERNAL_FOOD_SEARCH = get_bool_env_optional("DIET_EXTERNAL_FOOD_SEARCH", False)
 
 # Edamam API — optional; empty disables nutrition lookups (graceful degradation)
 EDAMAM_APP_ID = get_env("EDAMAM_APP_ID", "")

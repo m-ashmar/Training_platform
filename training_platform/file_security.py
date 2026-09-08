@@ -168,7 +168,7 @@ class FileSecurityValidator:
                 # Fallback to mimetypes based on file extension
                 import mimetypes
                 if hasattr(file, 'name'):
-                    mime_type, _ = mimetypes.guess_type(file.name)
+                    mime_type, _encoding = mimetypes.guess_type(file.name)
                     return mime_type or 'application/octet-stream'
                 return 'application/octet-stream'
             

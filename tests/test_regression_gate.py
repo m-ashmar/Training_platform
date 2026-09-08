@@ -3773,3 +3773,71 @@ def test_the_daily_generation_quota_is_enforced(seeded_catalogue, django_capture
         assert r.status_code == 201, r.content
     r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
     assert r.status_code in (403, 429), (r.status_code, r.content[:200])
+
+
+def test_a_client_can_remove_a_food_they_chose(seeded_catalogue):
+    """`deleted, _ = rows.delete()` rebound gettext to the per-model dict, so every
+    translated string after it raised: removing a chosen food was a 500. Same shadowing
+    class as the loop variable that killed the recipe path."""
+    from diet.models import FoodItem, UserFoodCategoryPreference
+
+    user, _chosen = _chooser("remove-choice")
+    c = _api_client_for(user)
+    food = FoodItem.objects.get(name="Chicken Breast (Grilled)")
+    r = c.post("/api/diet/v1/preferences/food-category/",
+               {"food_id": food.id, "meal": "Lunch", "macro": "protein"}, content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    r = c.delete(f"/api/diet/v1/preferences/food-category/{food.id}/",
+                 {"meal": "Lunch", "macro": "protein"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    assert r.json()["deleted"] >= 1
+    assert not UserFoodCategoryPreference.objects.filter(
+        user=user, food=food, meal="Lunch", macro="protein").exists()
+    # Removing it again says so, in words, rather than crashing.
+    r = c.delete(f"/api/diet/v1/preferences/food-category/{food.id}/",
+                 {"meal": "Lunch", "macro": "protein"}, content_type="application/json")
+    assert r.status_code == 404, r.content
+
+
+def test_an_imported_food_is_never_planned_until_it_is_vetted(seeded_catalogue):
+    """Any authenticated client can create a FoodItem through the import endpoint, with
+    macros of their choosing and no meal slots. Such a row must stay out of every pool
+    and every plate until a human accepts it, or the catalogue rebuild is undone one
+    import at a time."""
+    from diet.models import FoodItem, Meal
+    from diet.planner.candidates import build_pool
+    from diet.planner.policy import load_policy
+    from tests.diet_quality import _generate
+
+    user, _chosen = _chooser("import-gate")
+    c = _api_client_for(user)
+    r = c.post("/api/diet/v1/food/import/",
+               {"food_data": {"api_id": "edamam_food_test1", "name": "Free Cake",
+                              "calories": 5, "protein": 0, "carbs": 1, "fat": 0}},
+               content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    imported = FoodItem.objects.get(api_id="edamam_food_test1")
+    assert imported.needs_review is True
+
+    pool = build_pool(user, load_policy("maintain"))
+    in_pool = {f.id for macros in pool.by_slot.values() for lst in macros.values() for f in lst}
+    assert imported.id not in in_pool
+    plan = _generate(user, user.calculate_daily_calories(), 2, "import")
+    assert plan is not None
+    served = {c.food_id for m in Meal.objects.filter(diet_plan=plan) for c in m.components.all()}
+    assert imported.id not in served
+
+
+def test_food_search_offers_only_what_can_be_chosen(seeded_catalogue):
+    """The catalogue is the source of truth since the rebuild. External rows carry ids
+    no other endpoint accepts, so they are off by default and marked unselectable."""
+    user, _chosen = _chooser("search-gate")
+    c = _api_client_for(user)
+    for url in ("/api/diet/v1/food/search/?q=chicken", "/api/diet/v1/food/search/?query=chicken"):
+        r = c.get(url)
+        assert r.status_code == 200, (url, r.content[:120])
+        body = r.json()
+        assert body["results"], url
+        assert body["edamam_count"] == 0
+        assert all(f["selectable"] and isinstance(f["id"], int) for f in body["results"])
+    assert c.get("/api/diet/v1/food/search/").status_code == 400
