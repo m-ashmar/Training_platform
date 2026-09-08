@@ -284,7 +284,13 @@ def _resolve_food(name: str):
     return candidates[0] if candidates else None
 
 
-def _generate(user, kcal: float, days: int, salt: str):
+#: Every harness plan starts on this date. The planner seeds each day's generator from
+#: the salt AND the date, so without it the baseline was a different draw on every
+#: calendar day and the ratchets compared against one day's lottery.
+HARNESS_START_DATE = "2026-01-05"
+
+
+def _generate(user, kcal: float, days: int, salt: str, start_date: str = HARNESS_START_DATE):
     """One PERSISTED plan, or None if the engine refused. Refusals are a finding.
 
     Persisted, because that is what the client receives. Measuring the in-memory output
@@ -296,11 +302,18 @@ def _generate(user, kcal: float, days: int, salt: str):
     from diet.services.diet_persistence import DietPersistenceService
     from diet.services.rule_based_planner import RuleBasedPlanner
 
+    from diet.services.rule_based_planner import NoServableMealError
+
     try:
         out = RuleBasedPlanner(user, seed_salt=salt).generate(
-            daily_kcal=float(kcal), meal_count=3, snack_count=1, duration_days=days)
-        return DietPersistenceService(user).save_plan(out, meal_count=3, snack_count=1)
-    except Exception:
+            daily_kcal=float(kcal), meal_count=3, snack_count=1, duration_days=days,
+            start_date=start_date)
+        return DietPersistenceService(user).save_plan(out, meal_count=3, snack_count=1,
+                                                      start_date=start_date)
+    except (NoServableMealError, ValueError):
+        # A refusal is a finding, recorded by the caller. Anything else is a crash and
+        # must fail the run: this used to swallow every exception, which is how a dead
+        # path could hide inside shifted metrics.
         return None
 
 
@@ -338,6 +351,7 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     # ---- dish rate, variety, portions -------------------------------------
     slot_counts: Dict[str, List[int]] = collections.defaultdict(lambda: [0, 0])
     dish_tally: collections.Counter = collections.Counter()
+    dish_names: Dict[int, str] = {}
     portions_by_food: Dict[str, List[float]] = collections.defaultdict(list)
     absurd = 0
     per_slot_tally: Dict[str, collections.Counter] = collections.defaultdict(
@@ -369,8 +383,11 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
             slot_counts[slot][0 if is_dish else 1] += 1
             report.meals_measured += 1
             if is_dish:
-                dish_tally[meal.name] += 1
-                per_slot_tally[slot][meal.name] += 1
+                # By identity, not by name: "(X instead of Y)" and "+ extra" suffixes
+                # made one dish count as several.
+                dish_names.setdefault(meal.recipe_id, meal.name.split(" (")[0].split(" + ")[0])
+                dish_tally[meal.recipe_id] += 1
+                per_slot_tally[slot][meal.recipe_id] += 1
             for food, grams in _components(meal):
                 total_portions += 1
                 portions_by_food[food.name].append(grams)
@@ -387,7 +404,7 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
         report.dish_rate_by_slot[slot] = d / (d + p) if (d + p) else 0.0
     served = sum(d for d, _ in slot_counts.values())
     report.dish_rate_overall = served / report.meals_measured if report.meals_measured else 0.0
-    report.dishes_served = dict(dish_tally)
+    report.dishes_served = {dish_names[k]: v for k, v in dish_tally.items()}
     report.distinct_dishes = len(dish_tally)
     report.max_repeats_of_one_dish = max(dish_tally.values()) if dish_tally else 0
     report.max_repeats_by_slot = {
@@ -471,8 +488,16 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
                 ranked_first = False
     report.chooser_pool_ranked_first = ranked_first
 
+    # The before-plan's meals are HISTORY when the after-plan is generated for the
+    # same dates, so the recency penalty alone would have changed every dish. Keep
+    # the signatures, remove the plan, then generate again.
+    before_meals = _meals_of(before_plan) if before_plan else []
+    before_sigs = [(m.name, tuple(sorted(f.name for f, _g in _components(m))), m.recipe_id is None)
+                   for m in before_meals]
+    if before_plan:
+        before_plan.delete()
     after_plan = _generate(chooser, kcal_before, days, "twin")
-    if before_plan and after_plan:
+    if before_sigs and after_plan:
         # Compared by what is on the plate, not by what the meal is called. A meal built
         # from a template is named after its slot — "Breakfast" — so two plates made of
         # entirely different food carry the same name, and comparing names reported no
@@ -480,8 +505,8 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
         def signature(meal):
             return (meal.name, tuple(sorted(f.name for f, _g in _components(meal))))
 
-        before_meals, after_meals = _meals_of(before_plan), _meals_of(after_plan)
-        a = [signature(m) for m in before_meals]
+        after_meals = _meals_of(after_plan)
+        a = [(n, foods) for n, foods, _built in before_sigs]
         b = [signature(m) for m in after_meals]
         report.twin_total_meals = min(len(a), len(b))
         report.twin_identical_meals = sum(1 for x, y in zip(a, b) if x == y)

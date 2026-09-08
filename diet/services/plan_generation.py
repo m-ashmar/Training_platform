@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Optional, Tuple
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+
 logger = logging.getLogger(__name__)
 
 #: What the deterministic planner can structure. More meals than this is a request for
@@ -52,15 +54,23 @@ def generate_and_save(user, *, meal_count: int = 3, snack_count: int = 1, durati
     snack_count = max(0, min(MAX_SNACKS, int(snack_count)))
     duration_days = max(1, min(max_days, int(duration_days)))
 
-    daily_kcal = float(user.calculate_daily_calories() or 0.0)   # ValueError if incomplete
+    kcal = user.calculate_daily_calories()   # ValueError if the profile is incomplete
+    if not kcal or float(kcal) <= 0:
+        raise ValueError("Complete profile required: height, weight, age, gender")
+    daily_kcal = float(kcal)
     ceiling = feasible_kcal_ceiling(meal_count, snack_count, user.resolve_fitness_goal())
     if daily_kcal > ceiling * 1.05:
         raise InfeasibleCaloriesError(daily_kcal, ceiling, meal_count, snack_count)
 
     planner = RuleBasedPlanner(user, seed_salt=seed_salt)
-    plan_output = planner.generate(
-        daily_kcal=daily_kcal, meal_count=meal_count, snack_count=snack_count,
-        start_date=start_date, duration_days=duration_days, no_repeat_days=no_repeat_days)
+    try:
+        plan_output = planner.generate(
+            daily_kcal=daily_kcal, meal_count=meal_count, snack_count=snack_count,
+            start_date=start_date, duration_days=duration_days, no_repeat_days=no_repeat_days)
+    except DjangoValidationError as exc:
+        # `validate_diet_generation` refuses e.g. under 1,000 kcal/day. A legitimate
+        # small profile used to reach the view's broad handler as a 500, forever.
+        raise ValueError("; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)) from exc
     diet_plan = DietPersistenceService(user).save_plan(
         plan_output, meal_count=meal_count, snack_count=snack_count, start_date=start_date)
     return plan_output, diet_plan

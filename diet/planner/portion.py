@@ -205,35 +205,6 @@ def plural_suffix(unit: str, count) -> str:
     return "es" if unit.endswith(("ch", "sh", "s", "x", "z")) else "s"
 
 
-def toward(food, current_grams: float, wanted_grams: float) -> float:
-    """The servable amount nearest `wanted_grams`, never on the wrong side of `current`.
-
-    This is what makes the ladder an invariant rather than a suggestion. Every stage
-    that adjusts a portion goes through here, so an adjustment can move a food between
-    the amounts a person serves and can never invent one in between or beyond.
-
-    When the ladder has nothing left in the requested direction the food is already at
-    its ceiling or its floor, and the answer is the nearest rung to where it is — which
-    also repairs a portion that arrived off the ladder.
-    """
-    options = [p.grams for p in portions_for(food)]
-    if not options:
-        capped = max(FALLBACK_MIN_G, min(fallback_cap(food), float(wanted_grams)))
-        return round(capped, 1)
-
-    current = float(current_grams or 0)
-    wanted = float(wanted_grams or 0)
-    if wanted > current:
-        side = [g for g in options if g > current + 1e-6]
-    elif wanted < current:
-        side = [g for g in options if g < current - 1e-6]
-    else:
-        side = []
-    if not side:
-        return min(options, key=lambda g: abs(g - current))
-    return min(side, key=lambda g: abs(g - wanted))
-
-
 def nearest_portion(food, target_grams: float) -> Portion:
     """The servable amount closest to `target_grams`.
 
@@ -270,7 +241,7 @@ def totals(portions: Sequence[Portion]) -> dict:
 
 
 def solve(foods: Sequence, targets: dict, max_combinations: int = 20000
-          ) -> Tuple[List[Portion], float]:
+          , tolerance: Optional[Dict[str, float]] = None) -> Tuple[List[Portion], float]:
     """Choose one portion of each food so the meal lands as close to target as possible.
 
     A bounded search, not a fill. With one food per slot and roughly eight servable
@@ -289,7 +260,7 @@ def solve(foods: Sequence, targets: dict, max_combinations: int = 20000
     alone. This engine has made the two-measures mistake once before, with a duplicated
     macro-ratio table; two answers to "which meal is better" will always drift apart.
     """
-    from .report import deviation_of
+    from .report import better, deviation_of
 
     foods = [f for f in foods if f is not None]
     if not foods:
@@ -300,24 +271,35 @@ def solve(foods: Sequence, targets: dict, max_combinations: int = 20000
     for ladder in ladders:
         space *= max(len(ladder), 1)
 
+    from .policy import load_policy
+    tolerance = tolerance or load_policy().tolerance
+
     if space > max_combinations:
+        # Too many combinations to enumerate. Seed every food at an equal share of
+        # the energy, then hand the plate to the same pair search the recipe path
+        # uses, so the result is optimised rather than left where the seed fell.
+        # This used to return the seed itself, unlogged.
+        from .optimize import refine
         share = 1.0 / len(foods)
-        chosen = []
+        seed = []
         for food in foods:
             kcal_per_gram = kcal_of(food) or 0.01
             want_grams = float(targets.get("calories", 0) or 0) * share / kcal_per_gram
-            chosen.append(nearest_portion(food, want_grams))
-        return chosen, deviation_of(totals(chosen), targets).magnitude
+            seed.append(nearest_portion(food, want_grams))
+        logger.info("portion space %d exceeds %d; seeded and refined", space, max_combinations)
+        tuned, dev = refine([(pt.food, float(pt.grams)) for pt in seed], targets, tolerance,
+                            list(range(len(seed))))
+        return [Portion(f, float(g)) for f, g in tuned], dev.magnitude
 
     best: Optional[List[Portion]] = None
-    best_score = float("inf")
+    best_dev = None
 
     def walk(index: int, picked: List[Portion]) -> None:
-        nonlocal best, best_score
+        nonlocal best, best_dev
         if index == len(ladders):
-            score = deviation_of(totals(picked), targets).magnitude
-            if score < best_score:
-                best_score, best = score, list(picked)
+            dev = deviation_of(totals(picked), targets)
+            if better(dev, best_dev, tolerance):
+                best_dev, best = dev, list(picked)
             return
         for portion in ladders[index]:
             picked.append(portion)
@@ -325,4 +307,4 @@ def solve(foods: Sequence, targets: dict, max_combinations: int = 20000
             picked.pop()
 
     walk(0, [])
-    return (best or []), best_score
+    return (best or []), (best_dev.magnitude if best_dev is not None else float("inf"))

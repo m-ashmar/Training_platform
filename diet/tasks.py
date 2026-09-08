@@ -96,13 +96,16 @@ def generate_rule_based_plan(user_id, meal_count=3, snack_count=1, start_date=No
             user, meal_count=meal_count, snack_count=snack_count, start_date=start_date,
             duration_days=duration_days, max_days=MAX_TASK_DAYS)
     except InfeasibleCaloriesError as e:
-        return {"error": str(e), "code": "infeasible_calories",
+        return {"error": str(e), "code": "infeasible_calories", "user_id": user_id,
                 "max_feasible_kcal": round(e.ceiling), "suggestion": e.suggestion}
     except NoServableMealError as e:
-        return {"error": str(e), "code": "no_servable_meal"}
+        return {"error": str(e), "code": "no_servable_meal", "user_id": user_id}
     except (ValueError, PermissionError) as e:
-        return {"error": str(e), "code": "invalid_request"}
-    return {"plan_id": plan.id}
+        return {"error": str(e), "code": "invalid_request", "user_id": user_id}
+    # The quota is spent when a plan exists, not when the request was accepted.
+    from subscription import quota
+    quota.record_on_commit(user, "daily_meals")
+    return {"plan_id": plan.id, "user_id": user_id}
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
@@ -214,7 +217,7 @@ def generate_ai_diet_plan(self, user_id, meal_count=3, snack_count=0, start_date
         # beyond a log line.
         fallback = _generate_rule_based_fallback(user_id, meal_count, snack_count, start_date)
         if fallback is not None:
-            return fallback
+            return {"plan_id": fallback, "user_id": user_id}
         raise
     except Exception as e:
         log_json(

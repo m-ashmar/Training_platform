@@ -15,6 +15,35 @@ from django.db import transaction
 #: The dish names a Syrian client reads. The recipe row is translated; the foods
 #: carry their own Arabic names, so a substitution or an addition composes in Arabic.
 NAMES_AR = {
+    'Grilled Chicken with Steamed Vegetables': 'دجاج مشوي مع خضار مسلوقة',
+    'Shrimp and Vegetable Saute': 'جمبري مع خضار سوتيه',
+    'Turkey Breast Salad': 'سلطة صدر حبش',
+    'Tuna and Egg Salad': 'سلطة تونة وبيض',
+    'Cottage Cheese and Vegetable Plate': 'صحن جبنة قريش مع خضار',
+    'Tilapia with Salad': 'سمك بلطي مع سلطة',
+    'Eggs, Halloumi and Pita Breakfast': 'فطور بيض وحلوم مع خبز',
+    'Ful with Eggs and Bread': 'فول مع بيض وخبز',
+    'Oats with Milk, Banana and Peanut Butter': 'شوفان بالحليب والموز وزبدة الفول السوداني',
+    'Cheese Manakish with Egg': 'مناقيش جبنة مع بيض',
+    'Labneh, Egg and Avocado Plate': 'صحن لبنة وبيض وأفوكادو',
+    'Shakshuka with Feta and Bread': 'شكشوكة بالجبنة مع خبز',
+    'Date and Walnut Oats with Milk': 'شوفان بالتمر والجوز مع حليب',
+    'Cheese Omelette with Potatoes': 'عجة جبنة مع بطاطا',
+    'Peanut Butter Banana Toast with Milk': 'توست زبدة فول سوداني وموز مع حليب',
+    'Sardines, Eggs and Bread': 'سردين وبيض وخبز',
+    'Boiled Eggs with Tomato and Cucumber': 'بيض مسلوق مع بندورة وخيار',
+    'Light Labneh with Cucumber and Bread': 'لبنة خفيفة مع خيار وخبز',
+    'Yogurt with Strawberries and Chia': 'لبن بالفراولة وبذور الشيا',
+    'Cottage Cheese with Cucumber and Bread': 'جبنة قريش مع خيار وخبز',
+    'Skim Milk Oats with Apple': 'شوفان بحليب خالي الدسم مع تفاح',
+    'Light Ful with Tomato and Lemon': 'فول خفيف مع بندورة وليمون',
+    'Halloumi with Watermelon': 'حلوم مع بطيخ',
+    'Grilled Chicken Salad': 'سلطة دجاج مشوي',
+    'Tuna Salad with Lemon': 'سلطة تونة بالليمون',
+    'Vegetable Soup with Chickpeas': 'شوربة خضار بالحمص',
+    'Baked Cod with Vegetables': 'سمك قد مشوي مع خضار',
+    'Yogurt Cucumber Salad with Eggs': 'خيار بلبن مع بيض',
+    'Molokhia with Rice': 'ملوخية مع أرز',
     'Grilled Chicken with Rice and Greens': 'دجاج مشوي مع أرز وخضار',
     'Chicken and Rice with Spinach': 'دجاج وأرز مع سبانخ',
     'Baked Salmon with Sweet Potato': 'سلمون مشوي مع بطاطا حلوة',
@@ -294,6 +323,110 @@ RECIPES = [
         ("Pasta (Cooked)", 200, True), ("Chicken Breast", 130, True), ("Tomato", 100, True),
         ("Zucchini", 80, True), ("Extra Virgin Olive Oil", 8, True)]),
 
+    # --- substantial breakfasts: the 3,000+ kcal client's morning ------------
+    # Above ~900 kcal one breakfast dish reached the target and was served six days
+    # of seven. These are what a Syrian kitchen plates for someone who trains hard.
+    ("Eggs, Halloumi and Pita Breakfast", ["Breakfast"], "Levantine", 15, [
+        ("Egg (Whole)", 120, True), ("Halloumi", 80, True), ("Pita Bread (White)", 120, True),
+        ("Tomato", 80, True), ("Cucumber", 60, True), ("Black Olives", 25, True),
+        ("Extra Virgin Olive Oil", 10, True)]),
+    ("Ful with Eggs and Bread", ["Breakfast"], "Levantine", 15, [
+        ("Ful Medames (Prepared)", 250, True), ("Egg (Whole)", 100, True),
+        ("Pita Bread (White)", 120, True), ("Tomato", 80, True), ("Onion", 30, True),
+        ("Lemon", 15, True), ("Extra Virgin Olive Oil", 12, True)]),
+    ("Oats with Milk, Banana and Peanut Butter", ["Breakfast"], "Everyday", 8, [
+        ("Oats (Rolled, Dry)", 90, True), ("Whole Milk", 300, True), ("Banana", 120, True),
+        ("Peanut Butter (Natural)", 30, True), ("Honey", 15, True)]),
+    ("Cheese Manakish with Egg", ["Breakfast"], "Levantine", 20, [
+        ("Pita Bread (White)", 120, True), ("Akkawi Cheese", 80, True), ("Egg (Whole)", 60, True),
+        ("Za'atar Mix", 8, True), ("Tomato", 80, True), ("Extra Virgin Olive Oil", 15, True)]),
+    ("Labneh, Egg and Avocado Plate", ["Breakfast"], "Levantine", 10, [
+        ("Labneh", 120, True), ("Egg (Whole)", 120, True), ("Avocado", 80, True),
+        ("Pita Bread (Whole Wheat)", 100, True), ("Mint (Fresh)", 5, True),
+        ("Extra Virgin Olive Oil", 8, True)]),
+    ("Shakshuka with Feta and Bread", ["Breakfast"], "Levantine", 20, [
+        ("Egg (Whole)", 150, True), ("Tomato", 200, True), ("Onion", 50, True),
+        ("Bell Pepper (Red)", 60, True), ("Feta Cheese", 50, True),
+        ("Pita Bread (White)", 120, True), ("Extra Virgin Olive Oil", 12, True)]),
+    ("Date and Walnut Oats with Milk", ["Breakfast"], "Levantine", 8, [
+        ("Oats (Rolled, Dry)", 80, True), ("Whole Milk", 250, True), ("Dates (Medjool)", 50, True),
+        ("Walnuts", 30, True), ("Tahini", 15, True)]),
+    ("Cheese Omelette with Potatoes", ["Breakfast"], "Everyday", 20, [
+        ("Egg (Whole)", 150, True), ("Mozzarella (Part-Skim)", 60, True),
+        ("White Potato (Baked)", 200, True), ("Onion", 40, True), ("Parsley", 10, True),
+        ("Extra Virgin Olive Oil", 12, True)]),
+    ("Peanut Butter Banana Toast with Milk", ["Breakfast"], "Everyday", 5, [
+        ("Whole Wheat Bread", 90, True), ("Peanut Butter (Natural)", 40, True),
+        ("Banana", 120, True), ("Whole Milk", 250, True), ("Honey", 10, True)]),
+    ("Sardines, Eggs and Bread", ["Breakfast"], "Levantine", 10, [
+        ("Sardines (Canned)", 100, True), ("Egg (Whole)", 100, True),
+        ("Pita Bread (Whole Wheat)", 100, True), ("Tomato", 100, True), ("Lemon", 15, True),
+        ("Extra Virgin Olive Oil", 8, True)]),
+    # --- light breakfasts: the 1,200 kcal client's morning ---------------------
+    ("Boiled Eggs with Tomato and Cucumber", ["Breakfast"], "Levantine", 12, [
+        ("Egg (Whole)", 100, True), ("Tomato", 100, True), ("Cucumber", 100, True),
+        ("Pita Bread (Whole Wheat)", 30, True), ("Mint (Fresh)", 5, True)]),
+    ("Light Labneh with Cucumber and Bread", ["Breakfast"], "Levantine", 5, [
+        ("Labneh (Low-Fat)", 100, True), ("Cucumber", 100, True),
+        ("Pita Bread (Whole Wheat)", 40, True), ("Za'atar Mix", 5, True),
+        ("Extra Virgin Olive Oil", 5, True)]),
+    ("Yogurt with Strawberries and Chia", ["Breakfast", "Snack"], "Everyday", 3, [
+        ("Greek Yogurt (Non-Fat)", 170, True), ("Strawberries", 100, True),
+        ("Chia Seeds", 10, True), ("Honey", 8, True)]),
+    ("Cottage Cheese with Cucumber and Bread", ["Breakfast"], "Everyday", 5, [
+        ("Cottage Cheese (Low-Fat)", 150, True), ("Cucumber", 100, True),
+        ("Whole Wheat Bread", 30, True), ("Tomato", 80, True)]),
+    ("Skim Milk Oats with Apple", ["Breakfast"], "Everyday", 8, [
+        ("Oats (Rolled, Dry)", 40, True), ("Skim Milk", 200, True), ("Apple", 120, True)]),
+    ("Light Ful with Tomato and Lemon", ["Breakfast"], "Levantine", 10, [
+        ("Ful Medames (Prepared)", 150, True), ("Tomato", 100, True), ("Lemon", 15, True),
+        ("Parsley", 10, True), ("Pita Bread (Whole Wheat)", 30, True),
+        ("Extra Virgin Olive Oil", 5, True)]),
+    ("Halloumi with Watermelon", ["Breakfast", "Snack"], "Levantine", 5, [
+        ("Halloumi", 50, True), ("Watermelon", 200, True), ("Mint (Fresh)", 5, True)]),
+    # --- light dinners: the 1,200 kcal client's evening ------------------------
+    ("Grilled Chicken Salad", ["Lunch", "Dinner"], "Everyday", 15, [
+        ("Chicken Breast (Grilled)", 100, True), ("Lettuce (Romaine)", 100, True),
+        ("Tomato", 100, True), ("Cucumber", 100, True), ("Lemon", 15, True),
+        ("Extra Virgin Olive Oil", 7, True)]),
+    ("Tuna Salad with Lemon", ["Lunch", "Dinner"], "Mediterranean", 10, [
+        ("Tuna (Canned in Water)", 100, True), ("Lettuce (Romaine)", 80, True),
+        ("Tomato", 100, True), ("Cucumber", 80, True), ("Onion", 30, True), ("Lemon", 15, True),
+        ("Extra Virgin Olive Oil", 7, True)]),
+    ("Vegetable Soup with Chickpeas", ["Lunch", "Dinner"], "Levantine", 30, [
+        ("Chickpeas (Cooked)", 100, True), ("Carrot", 80, True), ("Zucchini", 100, True),
+        ("Tomato", 100, True), ("Onion", 40, True), ("Celery", 40, True),
+        ("Extra Virgin Olive Oil", 7, True)]),
+    ("Baked Cod with Vegetables", ["Dinner"], "Mediterranean", 25, [
+        ("Cod Fillet", 150, True), ("Zucchini", 100, True), ("Carrot", 80, True),
+        ("Lemon", 15, True), ("Extra Virgin Olive Oil", 7, True)]),
+    ("Yogurt Cucumber Salad with Eggs", ["Dinner"], "Levantine", 12, [
+        ("Plain Yogurt", 150, True), ("Cucumber", 150, True), ("Garlic", 3, True),
+        ("Mint (Fresh)", 5, True), ("Egg (Whole)", 100, True)]),
+    ("Molokhia with Rice", ["Lunch", "Dinner"], "Levantine", 20, [
+        ("Molokhia (Cooked)", 200, True), ("White Rice (Cooked)", 100, True), ("Lemon", 15, True)]),
+    # --- protein-dense light dinners: a 1,200 kcal weight-loss client eats ~280 kcal
+    # at dinner with 2 g/kg of protein, which is 40% of the plate's energy. Salads and
+    # soups do not reach that; lean protein with vegetables does.
+    ("Grilled Chicken with Steamed Vegetables", ["Lunch", "Dinner"], "Everyday", 20, [
+        ("Chicken Breast (Grilled)", 120, True), ("Broccoli", 100, True), ("Carrot", 80, True),
+        ("Lemon", 15, True), ("Extra Virgin Olive Oil", 5, True)]),
+    ("Shrimp and Vegetable Saute", ["Dinner"], "Mediterranean", 15, [
+        ("Shrimp", 150, True), ("Zucchini", 100, True), ("Bell Pepper (Red)", 80, True),
+        ("Garlic", 3, True), ("Extra Virgin Olive Oil", 7, True)]),
+    ("Turkey Breast Salad", ["Lunch", "Dinner"], "Everyday", 10, [
+        ("Turkey Breast", 120, True), ("Lettuce (Romaine)", 100, True), ("Tomato", 100, True),
+        ("Cucumber", 80, True), ("Lemon", 15, True), ("Extra Virgin Olive Oil", 5, True)]),
+    ("Tuna and Egg Salad", ["Lunch", "Dinner"], "Mediterranean", 12, [
+        ("Tuna (Canned in Water)", 100, True), ("Egg (Whole)", 50, True),
+        ("Lettuce (Romaine)", 80, True), ("Tomato", 100, True), ("Lemon", 15, True),
+        ("Extra Virgin Olive Oil", 5, True)]),
+    ("Cottage Cheese and Vegetable Plate", ["Dinner"], "Everyday", 5, [
+        ("Cottage Cheese (Low-Fat)", 200, True), ("Cucumber", 100, True), ("Tomato", 100, True),
+        ("Bell Pepper (Red)", 60, True), ("Whole Wheat Bread", 30, True)]),
+    ("Tilapia with Salad", ["Dinner"], "Levantine", 20, [
+        ("Tilapia", 150, True), ("Lettuce (Romaine)", 80, True), ("Tomato", 100, True),
+        ("Cucumber", 80, True), ("Lemon", 15, True), ("Extra Virgin Olive Oil", 5, True)]),
     # --- snacks -------------------------------------------------------------
     ("Dates and Walnuts", ["Snack"], "Levantine", 1, [
         ("Dates (Medjool)", 40, True), ("Walnuts", 20, True)]),

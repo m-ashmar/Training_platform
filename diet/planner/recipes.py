@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from .optimize import Components, _better, refine, totals_of
 from .policy import PlannerPolicy
-from .report import deviation_of
+from .report import NEGLIGIBLE, deviation_of
 # One temperature for both paths. templates does not import this module, so it is safe.
 from .templates import SOFTMAX_T
 
@@ -221,9 +221,7 @@ def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids):
 
     Preference used to reach a named dish only if a recipe author had written that
     exact food in. With 16 recipes over 133 foods, a client who chose bulgur for lunch
-    was served rice in every rice dish and bulgur in none. The line's `swap_group`, if
-    the author set one, is honoured as the class; otherwise similarity in the same slot
-    decides. One substitution per dish, of the strongest choice, so the dish stays the
+    was served rice in every rice dish and bulgur in none. Similarity in the same slot decides. One substitution per dish, of the strongest choice, so the dish stays the
     dish.
     """
     from .candidates import classify_food
@@ -236,15 +234,16 @@ def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids):
         if not scalable:
             continue
         slot = classify_food(food)
-        for cid in chosen_ids:
+        # Sorted: a frozenset iterates in id-hash order, and an exact tie in
+        # similarity then resolved differently across database rebuilds.
+        for cid in sorted(chosen_ids):
             if cid in present:
                 continue
             chosen = index.foods.get(cid)
             if chosen is None or classify_food(chosen) != slot:
                 continue
-            group = (getattr(getattr(food, "_line", None), "swap_group", "") or "")
             sim = index.similarity(cid, food.id)
-            if (group and getattr(chosen, "swap_group_tag", "") == group) or sim >= policy.similarity_threshold:
+            if sim >= policy.similarity_threshold:
                 if best is None or sim > best[0]:
                     best = (sim, i, chosen)
     if best is None:
@@ -268,7 +267,8 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
                 ladders: Optional[Dict[int, List[float]]] = None,
                 pool=None, edges: Optional[Dict[int, "collections.Counter"]] = None,
                 index=None, chosen_ids: Optional[frozenset] = None,
-                served_counts: Optional[Dict[int, int]] = None) -> Optional[RecipeMatch]:
+                served_counts: Optional[Dict[int, int]] = None,
+                max_servings: Optional[int] = None) -> Optional[RecipeMatch]:
     """A dish for this meal's macro target, or None if nothing fits.
 
     Every serving size between half and double is tried, each one snapped to the
@@ -323,6 +323,17 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
     if chosen_ids is None:
         chosen_ids = chosen_food_ids(user, meal_name) if (index is not None and pool is not None) else frozenset()
     steps = int(round((SERVINGS_HI - SERVINGS_LO) / SERVINGS_STEP)) + 1
+    augment_reach = 0.0
+    if pool is not None:
+        if ladders is None:
+            ladders = {}
+        for foods in pool.by_slot.get(meal_name, {}).values():
+            for f in foods:
+                key = getattr(f, "id", None) or id(f)
+                if key not in ladders:
+                    ladders[key] = [p.grams for p in portions_for(f)]
+                augment_reach = max(augment_reach,
+                                    max(ladders[key]) * float(getattr(f, "calories", 0) or 0) / 100.0)
     within: List[Tuple[RecipeMatch, float]] = []
     best: Optional[RecipeMatch] = None
     for recipe in recipes:
@@ -372,7 +383,14 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         reach_hi = sum(max(line_ladders[id(f)]) * float(getattr(f, "calories", 0) or 0) / 100.0
                        for f, _g, _s in lines)
         tol = float(policy.tolerance.get("calories", 0.10))
-        if reach_hi <= 0 or not (reach_lo * (1.0 - tol) <= target_kcal <= reach_hi * (1.0 + tol)):
+        # The upper bound includes what augmentation can add: one food from the pool
+        # at its ladder ceiling. Without it the filter discarded exactly the dishes
+        # augmentation exists for, and the library collapsed onto the largest ones.
+        # The lower bound allows the negligible floor, so a 230 kcal snack against a
+        # 200 kcal target is not skipped when `within` would have accepted it.
+        hi_bound = reach_hi * (1.0 + tol) + (augment_reach if pool is not None else 0.0)
+        lo_bound = reach_lo * (1.0 - tol) - NEGLIGIBLE.get("calories", 0.0)
+        if reach_hi <= 0 or not (lo_bound <= target_kcal <= hi_bound):
             continue
 
         # Prefer a serving that is inside tolerance over the one with the smallest
@@ -413,7 +431,12 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         # of the same dish sat one move away. Against exhaustive search that accounted
         # for most of the meals the engine served that it could have beaten.
         movable = [i for i, (_f, _g, scalable) in enumerate(lines) if scalable]
-        if movable:
+        # A dish that cannot reach the target on its own is not refined on its own:
+        # augmentation below re-solves every line jointly with the added food, and
+        # refining first was a second pair search per dish that the widened reach
+        # filter multiplied by forty.
+        alone_can_reach = reach_hi * (1.0 + tol) >= target_kcal
+        if movable and alone_can_reach:
             tuned, dev = _best_portioning(match.components, targets, policy, movable)
             if _better(dev, match.deviation, policy.tolerance):
                 match = RecipeMatch(recipe, tuned, match.servings, dev,
@@ -448,6 +471,14 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             within.append((match, score, recipe))
 
     if within:
+        # A dish already served `max_servings` times this week is not sampled while
+        # any other fitting dish exists. The multiplicative penalty (about 60 points
+        # a serving) could not outweigh a 100-point chosen-food bonus, so a chooser's
+        # favourite dish came back a fourth time in a week.
+        if max_servings is not None and served_counts:
+            fresh = [t for t in within if int(served_counts.get(t[2].id, 0)) < max_servings]
+            if fresh:
+                within = fresh
         if rng is None or len(within) == 1:
             return max(within, key=lambda triple: triple[1])[0]
         matches = [m for m, _s, _r in within]

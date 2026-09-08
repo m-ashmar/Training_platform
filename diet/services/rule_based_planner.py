@@ -19,7 +19,6 @@ from ..utils.nutrition import (
     macro_efficiency_score,
     portion_sanity_cap_grams,
     is_piece_food_name,
-    goal_meal_kcal_split,
     SAFE_FALLBACK_FOODS,
 )
 from ..utils.logging_utils import safe_json_log
@@ -304,16 +303,14 @@ class RuleBasedPlanner:
             try:
                 today_meals = planned_meals[day_start_idx:]
                 today_used: Dict[str, Set[int]] = {m: set() for m in ("Breakfast","Lunch","Dinner","Snack")}
-                from diet.models import FoodItem as _FoodItem
+                # By id. Every ingredient carries the row the planner chose; this used
+                # to look each one up by NAME (not unique) with a query per line, and
+                # could ban a different row than the one served.
                 for m in today_meals:
                     meal_key = m.meal_type if m.meal_type in today_used else "Dinner"
                     for ing in m.ingredients:
-                        try:
-                            fi = _FoodItem.objects.filter(name=ing.name).first() or _FoodItem.objects.filter(name__iexact=ing.name).first()
-                            if fi and getattr(fi, "id", None):
-                                today_used[meal_key].add(int(fi.id))
-                        except Exception:
-                            continue
+                        if ing.food_id is not None:
+                            today_used[meal_key].add(int(ing.food_id))
                 day_windows.append(today_used)
                 # Prune to last `no_repeat_days`
                 while len(day_windows) > int(no_repeat_days):
@@ -329,9 +326,8 @@ class RuleBasedPlanner:
                     # surrounding failures invisible in logs. Control flow is unchanged.
                     logger.debug('suppressed non-fatal error', exc_info=True)
             except Exception:
-                # Optional side effect: swallowing this silently is what made the
-                # surrounding failures invisible in logs. Control flow is unchanged.
-                logger.debug('suppressed non-fatal error', exc_info=True)
+                # Recency for the rest of the run is lost if this fails; say so.
+                logger.warning("could not accumulate recency for %s", current_date, exc_info=True)
 
         output = DietPlanOutput(plan=planned_meals)
         self._record_delivery(output, daily_kcal, max(1, duration_days))
@@ -433,11 +429,10 @@ class RuleBasedPlanner:
         policy = load_policy(ctx.goal)
         snack_kcal = float(policy.snack_kcal) if snack_count else 0.0
         meal_kcal_budget = max(0.0, daily_kcal - snack_kcal)
-        if getattr(settings, 'DIET_DYNAMIC_MEAL_ALLOCATION', False):
-            split = goal_meal_kcal_split(ctx.goal)
-            meal_distribution = {m: split.get(m, 1.0/len(meals)) for m in meals}
-        else:
-            meal_distribution = self._choose_distribution_for_goal_value(ctx.goal, meals)
+        # The policy's split, the same table `plan_targets` judges against. A second
+        # copy lived here behind DIET_DYNAMIC_MEAL_ALLOCATION and disagreed with it.
+        split = policy.meal_kcal_split
+        meal_distribution = {m: split.get(m, 1.0/len(meals)) for m in meals}
         # Normalize shares to sum to 1.0 over the ACTUAL meals. The goal patterns are
         # defined for 3 meals, so with meal_count of 1 or 2 the raw shares sum to <1,
         # which would silently under-deliver both calories and macros for the day.
@@ -509,8 +504,11 @@ class RuleBasedPlanner:
             # cannot help when one dish is the only one that reaches the target: a
             # 1,133 kcal breakfast served "Almond Butter Oat Bowl" six days of seven.
             def rank(c):
-                within = c[1] and int(c[3]) < WEEK_MAX_SERVINGS
-                return (within, c[2] if within else 0.0, -int(c[3]), -c[4])
+                # Fits and under the weekly cap; then preference among those; then
+                # fits at all — so a fitting dish at the cap still beats a plate that
+                # misses the target; then fewer servings; then closer.
+                fresh = bool(c[1]) and int(c[3]) < WEEK_MAX_SERVINGS
+                return (fresh, c[2] if fresh else 0.0, bool(c[1]), -int(c[3]), -c[4])
             meal, _within, _pref, _recent, _dev, commit = max(candidates, key=rank)
             commit()
             return meal
@@ -559,6 +557,7 @@ class RuleBasedPlanner:
                 edges=self._pairings(),
                 recent=set(day_ctx.recent_exclusions_ids.get(meal_name, ())),
                 rng=getattr(self, "_rng", None),
+                tolerance=policy.tolerance,
             )
             if not portions or template is None:
                 return None
@@ -578,8 +577,13 @@ class RuleBasedPlanner:
             is_recent = any(p.food.id in recent_ids for p in portions)
             chosen_here = []
             if pool_obj is not None:
+                from diet.planner.candidates import W_MEAL_PREF
                 for p in portions:
-                    if pool_obj.weights(meal_name, classify_food(p.food)).get(p.food.id, 0) >= 80:
+                    # The preference part alone. The total score counts structure too,
+                    # and a universal library staple reaches 105 on structure with no
+                    # choice made, so a client who chose nothing read "because you
+                    # chose Chicken Breast, White Rice for lunch".
+                    if pool_obj.preference(meal_name, classify_food(p.food)).get(p.food.id, 0) >= W_MEAL_PREF:
                         chosen_here.append(p.food)
             reason, reason_ar = _reasons(meal_name, chosen_here, built=True)
             meal = AIMeal(
@@ -633,8 +637,11 @@ class RuleBasedPlanner:
         """
         if getattr(self, "_recipe_cache", None) is None:
             from diet.models import Recipe
+            # A row whose nutrition failed its own sanity check must not be summed
+            # into a plate. The pool excludes such foods; the library did not.
             self._recipe_cache = list(
                 Recipe.objects.filter(is_active=True)
+                .exclude(ingredients__food__needs_review=True)
                 .prefetch_related("ingredients__food__category"))
             self._ladder_cache = {}
         return self._recipe_cache
@@ -690,8 +697,12 @@ class RuleBasedPlanner:
             try:
                 self._constraint_cache = ClientConstraints.for_user(self.user)
             except Exception:
-                logger.debug("could not load client constraints", exc_info=True)
-                self._constraint_cache = ClientConstraints()
+                # Fail CLOSED. This used to fall back to an empty ClientConstraints at
+                # DEBUG level, so a transient error while reading a nut allergy served
+                # the whole catalogue. No plan is better than a plan that can hurt.
+                logger.error("could not load client constraints for user %s",
+                             getattr(self.user, "id", "?"), exc_info=True)
+                raise
         return self._constraint_cache
 
     def _plan_meal_from_recipe(self, meal_name: str, ctx: PlannerContext,
@@ -744,15 +755,19 @@ class RuleBasedPlanner:
                 exclude_ids=tuple(getattr(day_ctx, "served_today", ())),
                 recent_ids=tuple(served),
                 served_counts=counts,
+                max_servings=WEEK_MAX_SERVINGS,
                 user=self.user,
                 rng=getattr(self, "_rng", None),
                 chosen_ids=picked,
             )
             if match is None or not match.deviation.within(policy.tolerance):
                 return None
-            from diet.planner.recipes import recipe_pool_score, _recipe_lines
-            preference = recipe_pool_score(_recipe_lines(match.recipe), getattr(self, "_pool", None),
-                                           meal_name, self._pairings())
+            # Scored on what is SERVED — with the substitution and any added food —
+            # not the recipe's original lines. Otherwise the sampler picks a dish
+            # because bulgur was swapped in and the judge scores it with rice.
+            from diet.planner.templates import meal_pool_score
+            preference = meal_pool_score(match.components, getattr(self, "_pool", None),
+                                         meal_name, self._pairings())
             # Handed to the judge as a count, so among equals the less served dish
             # wins; the flag used to be "served in the last three days".
             is_recent = int(counts.get(match.recipe.id, 0))
@@ -818,19 +833,6 @@ class RuleBasedPlanner:
             return {"protein": 0.25, "carb": 0.55, "fat": 0.20}
         return {"protein": 0.30, "carb": 0.50, "fat": 0.20}
 
-    def _choose_distribution_for_goal_value(self, goal: str, meals: List[str]) -> Dict[str, float]:
-        g = (goal or '').lower()
-        if 'gain' in g:
-            pattern = [0.40, 0.40, 0.20]
-        elif 'lose' in g:
-            pattern = [0.30, 0.40, 0.30]
-        else:
-            pattern = [0.35, 0.35, 0.30]
-        distribution: Dict[str, float] = {}
-        for idx, m in enumerate(meals):
-            distribution[m] = pattern[idx] if idx < len(pattern) else pattern[-1]
-        return distribution
-
     def _build_allowed_foods_map(self) -> Dict[str, Dict[str, List[FoodItem]]]:
         """Candidate foods per (meal, macro), ranked.
 
@@ -860,7 +862,7 @@ class RuleBasedPlanner:
         counts: Dict[int, int] = collections.Counter()
         try:
             rows = Meal.objects.filter(
-                diet_plan__user=self.user, recipe__isnull=False,
+                diet_plan__user=self.user, diet_plan__is_active=True, recipe__isnull=False,
                 date__gte=until - _timedelta(days=days), date__lt=until,
             ).values_list('recipe_id', flat=True)
             counts.update(rows)
@@ -875,7 +877,7 @@ class RuleBasedPlanner:
         out: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
         try:
             rows = Meal.objects.filter(
-                diet_plan__user=self.user, recipe__isnull=False,
+                diet_plan__user=self.user, diet_plan__is_active=True, recipe__isnull=False,
                 date__gte=until - _timedelta(days=days), date__lt=until,
             ).values_list('meal_type', 'recipe_id')
             for meal_type, recipe_id in rows:
@@ -895,7 +897,7 @@ class RuleBasedPlanner:
         ids_by_meal: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
         since = until - _timedelta(days=days)
         rows = MealComponent.objects.filter(
-            meal__diet_plan__user=self.user,
+            meal__diet_plan__user=self.user, meal__diet_plan__is_active=True,
             meal__date__gte=since,
             meal__date__lt=until,
         ).values_list('meal__meal_type', 'food_id')

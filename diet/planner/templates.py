@@ -128,6 +128,12 @@ def derive_templates(recipes: Optional[Sequence] = None) -> List[MealTemplate]:
     return templates
 
 
+class PairingEdges(collections.defaultdict):
+    """Co-occurrence counts with the strongest edge remembered. `_affinity` used to
+    rescan every edge for the maximum on every call — hundreds of full scans per meal."""
+    strongest: int = 1
+
+
 def pairing_edges(recipes: Optional[Sequence] = None) -> Dict[int, collections.Counter]:
     """How often each pair of foods appears in the same dish.
 
@@ -142,7 +148,7 @@ def pairing_edges(recipes: Optional[Sequence] = None) -> Dict[int, collections.C
         recipes = list(
             Recipe.objects.filter(is_active=True).prefetch_related("ingredients__food"))
 
-    edges: Dict[int, collections.Counter] = collections.defaultdict(collections.Counter)
+    edges = PairingEdges(collections.Counter)
     for recipe in recipes:
         ids = [line.food_id for line in recipe.ingredients.all()]
         for i, left in enumerate(ids):
@@ -151,6 +157,7 @@ def pairing_edges(recipes: Optional[Sequence] = None) -> Dict[int, collections.C
                     continue
                 edges[left][right] += 1
                 edges[right][left] += 1
+    edges.strongest = max((max(c.values()) for c in edges.values() if c), default=1) or 1
     return edges
 
 
@@ -194,7 +201,8 @@ def _affinity(candidate_id: int, chosen_ids: Sequence[int],
     neighbours = edges.get(candidate_id)
     if not neighbours:
         return 0.0
-    strongest = max((max(c.values()) for c in edges.values() if c), default=1) or 1
+    strongest = getattr(edges, "strongest", None) or \
+        (max((max(c.values()) for c in edges.values() if c), default=1) or 1)
     return (sum(neighbours.get(other, 0) for other in chosen_ids) / len(chosen_ids)) / strongest
 
 
@@ -274,13 +282,13 @@ def _pick(candidates: Sequence, chosen_ids: List[int],
 
 def build_meal(meal_name: str, template: MealTemplate, pool, targets: Dict[str, float],
                edges: Dict[int, collections.Counter], recent: Optional[Set[int]] = None,
-               rng=None):
+               rng=None, tolerance: Optional[Dict[str, float]] = None):
     """Fill a template from this client's pool and portion it.
 
     Returns `(portions, deviation)`. An empty list means the pool could not supply the
     shape, and the caller should try another template.
     """
-    from .portion import solve
+    from .portion import solve, totals
 
     recent = recent or set()
     wanted = list(template.slots)
@@ -307,14 +315,14 @@ def build_meal(meal_name: str, template: MealTemplate, pool, targets: Dict[str, 
     if not chosen:
         return [], float("inf")
 
-    portions, score = solve(chosen, targets)
+    portions, score = solve(chosen, targets, tolerance=tolerance)
     return portions, score
 
 
 def plan_meal(meal_name: str, pool, targets: Dict[str, float],
               templates: Optional[Sequence[MealTemplate]] = None,
               edges: Optional[Dict[int, collections.Counter]] = None,
-              recent: Optional[Set[int]] = None, rng=None):
+              recent: Optional[Set[int]] = None, rng=None, tolerance: Optional[Dict[str, float]] = None):
     """Best meal this client's pool can make for this target, across every shape.
 
     Returns `(portions, deviation, template)`, or `([], inf, None)` when nothing fits.
@@ -335,14 +343,23 @@ def plan_meal(meal_name: str, pool, targets: Dict[str, float],
                     meal_name)
         return [], float("inf"), None
 
+    from .policy import load_policy
+    from .portion import totals
+    from .report import better, deviation_of
+    tolerance = tolerance or load_policy().tolerance
+
     best_portions: List = []
-    best_score = float("inf")
+    best_dev = None
     best_template: Optional[MealTemplate] = None
 
     for template in usable:
-        portions, score = build_meal(
-            meal_name, template, pool, targets, edges, recent=recent, rng=rng)
-        if portions and score < best_score:
-            best_portions, best_score, best_template = portions, score, template
+        portions, _score = build_meal(
+            meal_name, template, pool, targets, edges, recent=recent, rng=rng, tolerance=tolerance)
+        if not portions:
+            continue
+        # The engine's one rule: a plate inside tolerance beats a closer average.
+        dev = deviation_of(totals(portions), targets)
+        if better(dev, best_dev, tolerance):
+            best_portions, best_dev, best_template = portions, dev, template
 
-    return best_portions, best_score, best_template
+    return best_portions, (best_dev.magnitude if best_dev is not None else float("inf")), best_template

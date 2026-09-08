@@ -184,7 +184,8 @@ def judge_meal(meal, targets: Dict[str, float], tolerance: Dict[str, float],
 
     served = []
     for ingredient in meal.ingredients:
-        food = resolve(ingredient.name)
+        # By id. Names are not unique and are a translated column.
+        food = resolve(ingredient.food_id) if ingredient.food_id is not None else None
         if food is None:
             return None
         served.append((food, float(str(ingredient.quantity).replace("g", ""))))
@@ -222,15 +223,15 @@ def run(days: int = 3, kcal_targets: Sequence[int] = BENCH_KCAL,
     from diet.planner.targets import compute_targets
     from diet.services.rule_based_planner import RuleBasedPlanner
 
-    from tests.diet_quality import PROFILES, _make_client
+    from tests.diet_quality import HARNESS_START_DATE, PROFILES, _make_client
 
     profiles = profiles if profiles is not None else PROFILES
-    cache: Dict[str, object] = {}
+    cache: Dict[int, object] = {}
 
-    def resolve(name: str):
-        if name not in cache:
-            cache[name] = FoodItem.objects.filter(name=name).first()
-        return cache[name]
+    def resolve(food_id: int):
+        if food_id not in cache:
+            cache[food_id] = FoodItem.objects.filter(pk=food_id).first()
+        return cache[food_id]
 
     report = BenchmarkReport()
     started = time.perf_counter()
@@ -243,7 +244,8 @@ def run(days: int = 3, kcal_targets: Sequence[int] = BENCH_KCAL,
             # between green and red on identical code.
             planner = RuleBasedPlanner(user, seed_salt=f"bench:{kcal}:{profiles.index(profile)}")
             t0 = time.perf_counter()
-            out = planner.generate(daily_kcal=kcal, duration_days=days, snack_count=1)
+            out = planner.generate(daily_kcal=kcal, duration_days=days, snack_count=1,
+                                   start_date=HARNESS_START_DATE)
             report.plan_seconds += time.perf_counter() - t0
 
             # The client's OWN policy. Judging a muscle-gain plan against the maintain

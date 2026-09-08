@@ -58,7 +58,12 @@ def converge_plan(diet_plan, policy: PlannerPolicy | None = None) -> Dict:
             if not components:
                 continue
 
-            result = optimize_meal(components, target.as_dict(), policy)
+            # The target the planner BUILT this meal to, residual carry included, when
+            # it recorded one; the split only for rows that predate the column.
+            built = getattr(meal, "target", None)
+            aim = (dict(built) if isinstance(built, dict) and built.get("calories")
+                   else target.as_dict())
+            result = optimize_meal(components, aim, policy)
             _write_back(meal, result.components, MealComponent)
 
             for key, value in totals_of(result.components).items():

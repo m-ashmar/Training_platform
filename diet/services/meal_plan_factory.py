@@ -34,6 +34,7 @@ class MealPlanFactory:
             shape=(ai_meal.shape or '')[:80],
             reason=(ai_meal.reason or '')[:200],
             reason_ar=(ai_meal.reason_ar or '')[:200],
+            target=dict(ai_meal.target) if ai_meal.target else None,
         )
 
     @staticmethod

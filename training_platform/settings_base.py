@@ -11,7 +11,7 @@ import os
 import logging
 from datetime import timedelta
 
-from .settings_secrets import require_env, get_env, get_int_env, get_secret
+from .settings_secrets import require_env, get_env, get_int_env, get_secret, get_bool_env_optional
 
 # ========================
 # Path Configuration
@@ -434,6 +434,10 @@ AI_CHEF_CONFIG = {
 }
 
 DIET_DYNAMIC_MEAL_ALLOCATION = True
+# When True, a failure inside one of the planner's paths raises instead of being
+# logged and served around. The gate and settings_local set it; production leaves
+# it off so a client gets dinner and an engineer gets an error log.
+DIET_PLANNER_STRICT = get_bool_env_optional("DIET_PLANNER_STRICT", False)
 
 # Edamam API — optional; empty disables nutrition lookups (graceful degradation)
 EDAMAM_APP_ID = get_env("EDAMAM_APP_ID", "")

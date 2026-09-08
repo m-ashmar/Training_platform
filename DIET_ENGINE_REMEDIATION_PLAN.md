@@ -150,6 +150,52 @@ another client's meal is 403 on every endpoint.
 
 ---
 
+## F — Independent review, and what it found
+
+Three read-only reviewers (planner core, API and persistence, gate blind spots) went over
+the working tree after E8. Everything they confirmed is fixed and pinned by a test:
+
+- **Safety.** `_constraints()` failed OPEN — an error reading a client's allergies fell
+  back to no constraints at DEBUG level. It now raises. The template solver chose by
+  magnitude alone, discarding fitting plates for closer averages; it uses the engine's one
+  rule (inside tolerance first). The judge scored a dish from its original lines, not the
+  substituted plate it would serve. "Because you chose X" was decided on the total score,
+  which a universal staple reaches with no choice made. The recency window was rebuilt
+  by name lookup (not unique, one query per line). Reviewed-out foods could reach a
+  recipe. A dish already served twice lost to any plate, even one off target.
+- **Authorization.** `meals-with-ingredients` let every trainer read every engine plan and
+  let other roles read all of them. Default-deny now. Another client's meal is a 404 on
+  complete/rate. A task id belongs to the client who started it.
+- **Contract.** Ids as strings, flags as strings, unparseable dates and a sub-1,000 kcal
+  profile were 500s; they are 400s naming the field. The built-to target is persisted on
+  the meal (`Meal.target`, migration 0061) and served identically by every endpoint;
+  convergence optimises toward it. `plans/tasks/<id>/` reads an async outcome; the quota
+  is spent when a plan exists. `rate_meal` records its funnel event. The swap answers
+  with the shared component shape. A meal with no stored name is named from its plate.
+- **Gate.** The harness seeded from today's date, so the baseline was a calendar lottery;
+  it plans from a fixed date. It swallowed crashes into an unread list; crashes fail
+  the run. The active language leaked between requests into name lookups; English is
+  active per test. Dishes were counted by name, so "(X instead of Y)" inflated variety;
+  they count by identity. Superseded plans counted as history. Stale literal bounds
+  were raised to the measured values.
+- **Speed.** The widened reach filter sent forty dishes a meal through the pair search;
+  a dish that cannot reach its target alone skips the pre-augment refine, per-food macros
+  are read once, and the pair pass sums only the two moving lines. 7-day generation
+  3–4 s on the 105-recipe library.
+
+## Release steps
+
+1. `python manage.py migrate` (0059 name_ar/reason_ar, 0060 MealEvent + swap similarity,
+   0061 Meal.target) against the production database, after a backup.
+2. `python manage.py load_food_catalogue --apply --wipe` once: the production catalogue is
+   development data. This deletes every meal component and food preference; do it before
+   clients exist, or export preferences first.
+3. Env: `DIET_PLANNER_STRICT` unset (fail-open, error-logged) in production;
+   `CELERY_RESULT_BACKEND` reachable so `plans/tasks/<id>/` can read outcomes.
+4. Flutter: `DIET_API_CHANGES.md`.
+5. Watch: the ERROR log lines "recipe path failed", "template path failed", "could not
+   load client constraints"; the 422 rate on generate-rule; `MealEvent` counts per kind.
+
 ## Deliberately after launch
 
 Weight tuning from production signal (a month of D4 first). Corpus pre-training for

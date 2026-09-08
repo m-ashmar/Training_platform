@@ -21,12 +21,8 @@ pytestmark = pytest.mark.skipif(
 
 def test_record(diet_quality, seeded_catalogue):
     payload = {
-        "_comment": (
-            "Diet engine quality baseline, phase 0.2 of the rebuild. Measured against the "
-            "catalogue built by `add_healthy_foods` and `seed_recipes`, which is what a "
-            "fresh production database contains. The gate asserts these as bounds in the "
-            "direction of improvement and tightens them phase by phase."
-        ),
+        # Keep the reason already recorded; a re-record updates numbers, not history.
+        "_comment": json.loads(Path("tests/diet_quality_baseline.json").read_text()).get("_comment", ""),
         "recorded": datetime.date.today().isoformat(),
         "catalogue": seeded_catalogue,
         "measured": diet_quality.as_dict(),

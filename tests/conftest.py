@@ -30,6 +30,17 @@ def strict_planner():
     settings.DIET_PLANNER_STRICT = True
 
 
+@pytest.fixture(autouse=True)
+def english_active():
+    """`FoodItem.name` is a translated column, so `filter(name=...)` resolves against the
+    ACTIVE language, and the test client leaves whatever an Arabic request activated.
+    A chooser then resolved zero foods and the dislike test passed vacuously."""
+    from django.utils import translation
+    translation.activate("en")
+    yield
+    translation.deactivate()
+
+
 @pytest.fixture
 def make_user(db):
     from users.models import CustomUser

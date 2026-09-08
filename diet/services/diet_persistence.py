@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, Optional, Tuple, Iterable
 from datetime import date as _date, timedelta as _timedelta
 from django.utils import timezone
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, InterfaceError, OperationalError, transaction
 from django.core.exceptions import ValidationError
 
 from ..models import DietPlan, Meal, MealComponent, FoodItem, DietConfig, UserFoodCategoryPreference
@@ -183,7 +183,14 @@ class DietPersistenceService:
             # failure here leaves a valid, unconverged plan rather than no plan.
             from diet.planner.converge import converge_plan
 
-            convergence = converge_plan(diet_plan)
+            try:
+                convergence = converge_plan(diet_plan)
+            except Exception:
+                # The plan is committed and active. A failure here must not turn
+                # into a 400 that makes the client retry and supersede a good plan.
+                log_json(self.logger, "error", "convergence failed after commit",
+                         plan_id=diet_plan.id)
+                return diet_plan
             try:
                 payload = diet_plan.generated_plan
                 if not isinstance(payload, dict):
@@ -227,6 +234,10 @@ class DietPersistenceService:
             raise ConstraintViolationError(str(e))
         except PersistenceError:
             raise
+        except (OperationalError, InterfaceError):
+            # Transient. Wrapping it as PersistenceError defeated the task's
+            # autoretry and answered a database blip with a 400.
+            raise
         except Exception as e:
             log_json(self.logger, "error", "Unexpected persistence error", error=str(e))
             raise PersistenceError(str(e))
@@ -238,6 +249,8 @@ class DietPersistenceService:
         original_names = set()
         for m in plan_output.plan:
             for ing in getattr(m, 'ingredients', []) or []:
+                if getattr(ing, 'food_id', None) is not None:
+                    continue  # resolved by id; the name is display text
                 n_raw = (getattr(ing, 'name', '') or '').strip()
                 if n_raw:
                     original_names.add(n_raw)

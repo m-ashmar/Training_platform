@@ -38,32 +38,24 @@ class MacroDeviation:
     def as_dict(self) -> Dict[str, float]:
         return {m: getattr(self, m) for m in MACROS}
 
-    def worst(self, tolerance: Dict[str, float]) -> tuple[str, float]:
-        """The macro furthest outside its own tolerance band.
-
-        Normalising by each macro's tolerance is what lets protein (0.15) outrank carbs
-        (0.20) at the same raw deviation — the tolerances were declared in settings and
-        previously read by nothing.
-        """
-        worst_macro, worst_score = "calories", 0.0
-        for macro in MACROS:
-            tol = max(tolerance.get(macro, 0.10), 1e-9)
-            score = abs(getattr(self, macro)) / tol
-            if score > worst_score:
-                worst_macro, worst_score = macro, score
-        return worst_macro, worst_score
-
     def within(self, tolerance: Dict[str, float]) -> bool:
         """Inside every macro's own band, or missing it by an amount too small to mean
         anything."""
+        cached = self.__dict__.get("_within")
+        if cached is not None and cached[0] is tolerance:
+            return cached[1]
+        result = True
         for macro in MACROS:
             if abs(getattr(self, macro)) <= tolerance.get(macro, 0.10):
                 continue
             missed = abs(self.absolute.get(macro, float("inf")))
             if missed <= NEGLIGIBLE.get(macro, 0.0):
                 continue
-            return False
-        return True
+            result = False
+            break
+        # `better` asks the incumbent the same question at every step of a search.
+        self.__dict__["_within"] = (tolerance, result)
+        return result
 
     #: Energy's share of the objective. Calories used to be excluded entirely, because
     #: the optimiser was a hill-climb that stopped as soon as a move failed to improve:
@@ -85,6 +77,24 @@ class MacroDeviation:
         return ", ".join(f"{m} {getattr(self, m):+.1%}" for m in MACROS)
 
 
+def better(candidate, incumbent, tolerance: Dict[str, float]) -> bool:
+    """Is `candidate` the deviation to keep?
+
+    Inside tolerance beats lowest magnitude, because they are not the same point.
+    Magnitude averages the four numbers; `within` demands each one separately, so the
+    smallest average is regularly a portioning that fails on one macro while a
+    neighbouring one passes on all of them. This is the ONLY comparison the engine
+    makes between two portionings; the template solver used to keep its own
+    (magnitude alone) and discarded fitting plates for closer-on-average ones.
+    """
+    if incumbent is None:
+        return True
+    inside, was_inside = candidate.within(tolerance), incumbent.within(tolerance)
+    if inside != was_inside:
+        return inside
+    return candidate.magnitude < incumbent.magnitude - 1e-9
+
+
 def totals_of(components) -> Dict[str, float]:
     """Calories and macros for a list of (food, grams).
 
@@ -94,14 +104,21 @@ def totals_of(components) -> Dict[str, float]:
     `calories_per_gram` are separate stored columns reconciled only when one of them is
     zero, so two stages could add the same meal up and disagree.
     """
-    out = {"calories": 0.0, "protein": 0.0, "carb": 0.0, "fat": 0.0}
+    kcal = protein = carb = fat = 0.0
     for food, grams in components:
-        g = float(grams or 0.0) / 100.0
-        out["calories"] += float(getattr(food, "calories", 0) or 0) * g
-        out["protein"] += float(getattr(food, "protein", 0) or 0) * g
-        out["carb"] += float(getattr(food, "carbs", 0) or 0) * g
-        out["fat"] += float(getattr(food, "fat", 0) or 0) * g
-    return out
+        g = float(grams or 0.0)
+        try:
+            k, p, c, f = food._per_gram
+        except AttributeError:
+            # Read once per food instance. This is the innermost loop of every search
+            # (700k calls per week-long plan) and the attribute reads dominated it.
+            k, p, c, f = food._per_gram = (
+                float(getattr(food, "calories", 0) or 0) / 100.0,
+                float(getattr(food, "protein", 0) or 0) / 100.0,
+                float(getattr(food, "carbs", 0) or 0) / 100.0,
+                float(getattr(food, "fat", 0) or 0) / 100.0)
+        kcal += k * g; protein += p * g; carb += c * g; fat += f * g
+    return {"calories": kcal, "protein": protein, "carb": carb, "fat": fat}
 
 
 def deviation_of(totals: Dict[str, float], targets: Dict[str, float]) -> MacroDeviation:

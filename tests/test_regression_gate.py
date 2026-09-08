@@ -395,9 +395,9 @@ def test_a_recipe_containing_an_allergen_is_never_offered(make_user, diet_catalo
 
     match = find_recipe("Dinner", dinner.as_dict(), policy,
                         allergen_checker=AllergenChecker("fish"))
-    if match is not None:
-        names = " ".join(f.name.lower() for f, _g in match.components)
-        assert "salmon" not in names and "fish" not in names
+    assert match is not None, "a fish-free dinner exists in the library; none was offered"
+    names = " ".join(f.name.lower() for f, _g in match.components)
+    assert "salmon" not in names and "fish" not in names and "tilapia" not in names
 
 
 # ------------------------------------------------------------------------- wiring
@@ -1996,8 +1996,6 @@ def test_the_library_is_barely_used(diet_quality):
     A dish is now banned for the rest of the day it is served and penalised for three
     days after, so this is zero and stays zero.
     """
-    assert diet_quality.distinct_dishes >= 7, \
-        f"dish variety regressed to {diet_quality.distinct_dishes}"
     assert diet_quality.days_repeating_a_dish == 0, \
         f"a dish was served twice in one day on " \
         f"{diet_quality.days_repeating_a_dish} of {diet_quality.days_measured} days"
@@ -2100,11 +2098,9 @@ def test_a_portion_sticks_at_one_or_two_sizes(diet_quality):
 
     Tightens in P4 to >= 4 once floors become min_units inside the search space."""
     assert diet_quality.min_distinct_portions_per_food >= 1
-    assert diet_quality.min_distinct_portions_per_food <= 3, \
-        "portion diversity improved; tighten this bound"
 
 
-def test_calorie_drift_only_ever_goes_up(diet_quality):
+def test_calorie_drift_stays_bounded(diet_quality):
     """Round-up steps, floors firing after the target is met, and residual filling all
     push one way. Noise would fall both ways, so this is a bias with a cause.
 
@@ -2138,14 +2134,14 @@ def test_breakfast_is_the_weakest_slot(diet_quality):
 
     Tightens in P3 and P6 to >= 0.85."""
     breakfast = diet_quality.dish_rate_by_slot.get("Breakfast", 0.0)
-    assert breakfast >= 0.45, f"breakfast dish rate fell to {breakfast:.0%}"
+    assert breakfast >= 0.60, f"breakfast dish rate fell to {breakfast:.0%}"
     # 0.72 after P7.5 moved protein to grams per kilogram and the chicken-heavy dinners
     # stopped fitting. 0.70 after P9.3 began judging the two paths by one rule: when a
     # plate built from the client's own foods and a library dish both fit, and only the
     # plate contains what they chose, the plate wins. That is the product, and it moved
     # chosen-ingredient share from 0.10 to 0.23 and unchanged-after-choosing from 27 to
     # 17 in the same measurement. P9.4 lets a dish absorb a chosen food; this rises then.
-    assert diet_quality.dish_rate_overall >= 0.65, \
+    assert diet_quality.dish_rate_overall >= 0.72, \
         f"overall dish rate fell to {diet_quality.dish_rate_overall:.0%}"
 
 
@@ -2200,7 +2196,7 @@ def test_the_two_seed_commands_agree_on_food_names(seeded_catalogue, db):
             unresolvable[name] = missing
 
     seeded = Recipe.objects.filter(is_active=True).count()
-    assert seeded >= 12, f"only {seeded} of {len(RECIPES)} recipes survived seeding"
+    assert seeded == len(RECIPES), f"only {seeded} of {len(RECIPES)} recipes survived seeding"
     assert not unresolvable, (
         f"{len(unresolvable)} of {len(RECIPES)} recipes cannot be built from the seeded "
         f"catalogue: {unresolvable}"
@@ -2891,6 +2887,8 @@ def test_the_goal_metrics_never_move_the_wrong_way(diet_quality):
     assert diet_quality.distinct_dishes >= recorded["distinct_dishes"]
     assert diet_quality.absurd_portion_rate == 0.0
     assert diet_quality.days_repeating_a_dish == 0
+    # A crash inside generation is recorded here by the harness; it is never a metric.
+    assert diet_quality.catalogue_gaps == [], diet_quality.catalogue_gaps
     # D1: recall. Of the foods the chooser picked for a slot, the share that reached
     # that slot's plate at least once in the week. Chosen share is the precision side.
     assert diet_quality.preference_satisfaction >= recorded["preference_satisfaction"] - 5e-5, (
@@ -3220,7 +3218,7 @@ def test_an_unservable_slot_is_a_422_not_a_500(seeded_catalogue, monkeypatch):
     assert r.json()["code"] == "no_servable_meal"
 
 
-def test_the_task_and_the_endpoint_generate_the_same_plan(seeded_catalogue):
+def test_the_task_and_the_endpoint_generate_plans_of_the_same_shape(seeded_catalogue):
     """E3. The Celery fallback read a stale `daily_calorie_target` (default 2000) and
     skipped the feasibility check; the synchronous view did neither. One function now
     serves the view, the task and the fallback, so pressing either button yields the
@@ -3338,12 +3336,14 @@ def test_learning_never_changes_a_meals_shape(seeded_catalogue):
         return out.plan
 
     def shape_of(meals):
-        veg_at_mains = sum(1 for m in meals if m.meal_type in ("Lunch", "Dinner")
-                           and any(classify_food(FoodItem.objects.get(pk=i.food_id)) == "vegetable"
-                                   for i in m.ingredients if i.food_id))
-        mains = sum(1 for m in meals if m.meal_type in ("Lunch", "Dinner"))
+        # On the plates the engine BUILDS. A library dish is what its author wrote
+        # (Mujadara has no salad); learning cannot change that and is not asked to.
+        built = [m for m in meals if m.recipe_id is None and m.meal_type in ("Lunch", "Dinner")]
+        veg_at_mains = sum(1 for m in built
+                           if any(classify_food(FoodItem.objects.get(pk=i.food_id)) == "vegetable"
+                                  for i in m.ingredients if i.food_id))
         empty = sum(1 for m in meals if not m.ingredients)
-        return veg_at_mains / mains, empty
+        return (veg_at_mains / len(built) if built else 1.0), empty
 
     user, _chosen = _chooser("shape-gate")
     before_veg, before_empty = shape_of(plan_for(user))
@@ -3359,8 +3359,8 @@ def test_learning_never_changes_a_meals_shape(seeded_catalogue):
 
     after_veg, after_empty = shape_of(plan_for(user))
     assert after_empty == before_empty == 0
-    assert after_veg >= before_veg - 1e-9, f"vegetables at mains fell {before_veg:.2f} -> {after_veg:.2f}"
-    assert after_veg >= 0.9
+    assert after_veg >= before_veg - 1e-9, f"vegetables at built mains fell {before_veg:.2f} -> {after_veg:.2f}"
+    assert after_veg == 1.0
 
 
 def test_recorded_swaps_can_be_replayed_offline(seeded_catalogue):
@@ -3421,3 +3421,337 @@ def test_the_funnel_records_every_step_a_client_takes(seeded_catalogue):
     assert r.status_code == 404
     r = o.get(f"/api/diet/v1/client/meals/{meal_id}/")
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Review findings, pinned
+# ---------------------------------------------------------------------------
+
+def test_a_plan_is_readable_only_by_its_client_or_its_author(seeded_catalogue):
+    """meals-with-ingredients let every trainer read every engine plan (created_by is
+    None) and let any other role read all of them. Default-deny now."""
+    from tests.diet_quality import PROFILES, _make_client
+
+    owner, _chosen = _chooser("plan-owner")
+    c = _api_client_for(owner)
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
+    assert r.status_code == 201, r.content
+    plan_id = r.json()["diet_plan_id"]
+
+    trainer = _make_client("plan-trainer", *PROFILES[0]); trainer.user_type = "trainer"; trainer.save()
+    assert _api_client_for(trainer).get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 403
+    agent = _make_client("plan-agent", *PROFILES[0]); agent.user_type = "agent"; agent.save()
+    assert _api_client_for(agent).get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 403
+    other, _ = _chooser("plan-other")
+    assert _api_client_for(other).get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 403
+    assert c.get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 200
+
+
+def test_wrong_shaped_input_is_a_400_never_a_500(seeded_catalogue):
+    """Ids as strings, flags as strings, dates in the wrong format, and a tiny profile
+    all used to reach the broad handlers as 500s."""
+    from tests.diet_quality import PROFILES, _make_client
+
+    user, _chosen = _chooser("input-gate")
+    c = _api_client_for(user)
+    # A single id, as a string or a bare int, is accepted as a list of one; anything
+    # that is not an id is a 400 naming the field, never a 500.
+    for body, expected in (({"liked_foods": "12"}, 200), ({"liked_foods": 5}, 200),
+                           ({"disliked_foods": ["a"]}, 400), ({"protein_choices": "x,y"}, 400),
+                           ({"liked_foods": {"id": 1}}, 400)):
+        r = c.post("/api/diet/v1/preferences/", body, content_type="application/json")
+        assert r.status_code == expected, (body, r.status_code, r.content[:120])
+    r = c.post("/api/diet/v1/preferences/food-category/", {"food_id": "abc", "meal": "Lunch", "macro": "protein"},
+               content_type="application/json")
+    assert r.status_code == 400, r.content
+    # A parseable date in another notation is normalised to ISO; garbage is a 400.
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1, "start_date": "next tuesday"},
+               content_type="application/json")
+    assert r.status_code == 400 and "start_date" in r.json()["error"], r.content
+    r = c.post("/api/diet/v1/plans/generate/", {"meal_count": "x"}, content_type="application/json")
+    assert r.status_code == 400, r.content
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
+    assert r.status_code == 201, r.content
+    plan_id, meal_id = r.json()["diet_plan_id"], r.json()["meals"][0]["id"]
+    comp_id = r.json()["meals"][0]["components"][0]["id"]
+    for url in (f"/api/diet/v1/nutrition/plan/{plan_id}/?date=2026/09/08",
+                "/api/diet/v1/client/progress/enhanced/?date=yesterday"):
+        assert c.get(url).status_code == 400, url
+    url = "/api/diet/v1/client/meals/interact/"
+    r = c.post(url, {"action": "rate_component", "component_id": comp_id, "is_liked": "false"},
+               content_type="application/json")
+    assert r.status_code == 200 and r.json()["component"]["is_liked"] is False, r.content
+    r = c.post(url, {"action": "rate_component", "component_id": comp_id, "is_liked": "maybe"},
+               content_type="application/json")
+    assert r.status_code == 400, r.content
+    assert c.get("/api/diet/v1/meals/999999/components/").status_code == 404
+
+    # The smallest profile the bounds allow is clamped to 1,200 kcal and served; the
+    # validator's 1,000 kcal floor is unreachable through the API, and a profile the
+    # engine cannot serve is a 4xx with a reason, never a 500.
+    small = _make_client("input-small", ["Weight Loss"], 100, 30, 100, "Female", "Sedentary")
+    r = _api_client_for(small).post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1},
+                                    content_type="application/json")
+    assert r.status_code in (201, 400, 422), r.content
+    if r.status_code == 201:
+        assert r.json()["plan_nutrition"]["targets"]["calories"] >= 1200
+
+
+def test_the_async_outcome_is_readable_and_private(seeded_catalogue):
+    """The async endpoints returned a task id that nothing could read, and the quota
+    was spent before the task ran. `plans/tasks/<id>/` reads the outcome; the quota
+    is recorded by the task when a plan exists."""
+    from diet.models import DietPlan
+
+    user, _chosen = _chooser("task-status")
+    c = _api_client_for(user)
+    r = c.post("/api/diet/v1/plans/generate/", {"engine": "rule", "duration_days": 2}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    task_id = r.json()["task_id"]
+    r = c.get(f"/api/diet/v1/plans/tasks/{task_id}/")
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["state"] == "SUCCESS" and body["plan_id"] == DietPlan.objects.filter(user=user).latest("id").id
+    assert "user_id" not in body
+    other, _ = _chooser("task-status-other")
+    assert _api_client_for(other).get(f"/api/diet/v1/plans/tasks/{task_id}/").status_code == 404
+
+
+def test_targets_and_events_reach_every_endpoint(seeded_catalogue):
+    """The built-to target is persisted on the meal and served by every endpoint (the
+    components view kept it under nutrition.targets and the details/progress views had
+    none); rating a whole meal records the funnel step; a swap answers with the shared
+    component shape."""
+    from diet.models import Meal, MealEvent
+
+    user, _chosen = _chooser("targets-gate")
+    c = _api_client_for(user)
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
+    assert r.status_code == 201, r.content
+    meal = r.json()["meals"][0]
+    meal_id = meal["id"]
+    stored = Meal.objects.get(pk=meal_id)
+    assert stored.target and abs(stored.target["calories"] - meal["targets"]["calories"]) < 0.6
+    for url, path in ((f"/api/diet/v1/meals/{meal_id}/components/", ("meal", "targets")),
+                      (f"/api/diet/v1/client/meals/{meal_id}/", ("targets",)),
+                      ("/api/diet/v1/client/progress/enhanced/", None)):
+        body = c.get(url).json()
+        if path is None:
+            found = next(m for m in body["meals"] if m["id"] == meal_id)["targets"]
+        else:
+            found = body
+            for key in path:
+                found = found[key]
+        assert found == meal["targets"], (url, found, meal["targets"])
+
+    url = "/api/diet/v1/client/meals/interact/"
+    r = c.post(url, {"action": "rate_meal", "meal_id": meal_id, "is_liked": "false"}, content_type="application/json")
+    assert r.status_code == 200 and r.json()["meal"]["is_liked"] is False, r.content
+    assert MealEvent.objects.filter(user=user, meal_id=meal_id, kind=MealEvent.RATED).count() == 1
+    comp = meal["components"][0]
+    offers = c.post(url, {"action": "swap_food", "component_id": comp["id"]}, content_type="application/json").json()["offers"]
+    r = c.post(url, {"action": "swap_food", "component_id": comp["id"], "chosen_food_id": offers[0]["food_id"]},
+               content_type="application/json")
+    assert r.status_code == 200, r.content
+    assert {"food_id", "name_ar", "serving", "serving_ar", "nutrition"} <= set(r.json()["component"])
+
+
+def test_constraints_fail_closed_and_reasons_are_honest(seeded_catalogue, monkeypatch):
+    """A failure reading a client's allergies used to fall back to no constraints at
+    DEBUG level; it now raises. And "because you chose X" used to be decided on the
+    total score, which a universal staple reaches with no choice made."""
+    from diet.planner.constraints import ClientConstraints
+    from diet.services.rule_based_planner import RuleBasedPlanner
+    from tests.diet_quality import PROFILES, _make_client
+
+    user = _make_client("closed-gate", *PROFILES[2])
+    def boom(*_a, **_k):
+        raise RuntimeError("allergy read failed")
+    monkeypatch.setattr(ClientConstraints, "for_user", classmethod(lambda cls, u: boom()))
+    with pytest.raises(RuntimeError, match="allergy read failed"):
+        RuleBasedPlanner(user, seed_salt="closed").generate(
+            daily_kcal=user.calculate_daily_calories(), duration_days=1, snack_count=1)
+    monkeypatch.undo()
+
+    plain = _make_client("plain-reason", *PROFILES[3])
+    out = RuleBasedPlanner(plain, seed_salt="plain").generate(
+        daily_kcal=plain.calculate_daily_calories(), duration_days=3, snack_count=1)
+    assert out.plan and not any("because you chose" in (m.reason or "") for m in out.plan), \
+        [m.reason for m in out.plan if "because you chose" in (m.reason or "")]
+
+
+# ---------------------------------------------------------------------------
+# Gate blind spots, closed
+# ---------------------------------------------------------------------------
+
+def test_every_day_of_a_week_lands_near_its_energy_target(seeded_catalogue):
+    """Drift was measured on one-day plans only; a week's later days carry residuals
+    and are the ones a client actually eats."""
+    from diet.models import Meal
+    from tests.diet_quality import _generate
+
+    user, _chosen = _chooser("week-days")
+    kcal = user.calculate_daily_calories()
+    plan = _generate(user, kcal, 7, "week-days")
+    assert plan is not None
+    by_day = collections.defaultdict(float)
+    for m in Meal.objects.filter(diet_plan=plan).prefetch_related("components__food"):
+        by_day[m.date] += m.calculate_nutrition()["calories"]
+    assert len(by_day) == 7
+    worst = max(abs(v - kcal) / kcal for v in by_day.values())
+    assert worst <= 0.10, f"a day landed {worst:.0%} from its target: {dict(by_day)}"
+
+
+def test_in_production_a_path_failure_is_logged_and_served_around(seeded_catalogue, monkeypatch, settings, caplog):
+    """The non-strict contract: with DIET_PLANNER_STRICT off, a crash inside the recipe
+    path is an ERROR log and a plan built from the other path, never silence."""
+    import logging
+
+    import diet.planner.recipes as recipes_module
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    settings.DIET_PLANNER_STRICT = False
+    user, _chosen = _chooser("fail-open")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("injected recipe failure")
+    import diet.services.rule_based_planner as planner_module
+    from unittest import mock
+
+    monkeypatch.setattr(recipes_module, "find_recipe", boom)
+    # The diet loggers do not propagate to the root handler caplog installs, so the
+    # ERROR call is observed on the planner's own logger.
+    with mock.patch.object(planner_module.logger, "error") as error:
+        out = RuleBasedPlanner(user, seed_salt="open").generate(
+            daily_kcal=user.calculate_daily_calories(), duration_days=1, snack_count=1)
+    assert len(out.plan) == 4 and all(m.recipe_id is None for m in out.plan)
+    assert error.call_count >= 4 and any("recipe" in str(c.args[0]).lower() for c in error.call_args_list)
+
+
+def test_a_meal_with_no_stored_name_is_named_from_its_plate(seeded_catalogue):
+    """Trainer-written meals and rows older than the name column have name=''. The
+    client must never read an empty title, in either language."""
+    from diet.models import FoodItem, Meal, MealComponent
+
+    user, _chosen = _chooser("noname")
+    c = _api_client_for(user)
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
+    assert r.status_code == 201, r.content
+    plan_id = r.json()["diet_plan_id"]
+    first = Meal.objects.get(pk=r.json()["meals"][0]["id"])
+    bare = Meal.objects.create(diet_plan_id=plan_id, date=first.date, meal_type="Dinner", name="", name_ar="")
+    foods = list(FoodItem.objects.filter(name__in=["Chicken Breast (Grilled)", "White Rice (Cooked)", "Broccoli"]))
+    assert len(foods) == 3
+    for f in foods:
+        MealComponent.objects.create(meal=bare, food=f, quantity=100.0, meal_time="Dinner")
+    body = c.get(f"/api/diet/v1/meals/{bare.id}/components/").json()
+    assert body["meal"]["name"] and " and " in body["meal"]["name"]
+    assert _ARABIC.search(body["meal"]["name_ar"])
+    body = c.get(f"/api/diet/v1/meals/{bare.id}/components/", HTTP_ACCEPT_LANGUAGE="ar").json()
+    assert body["meal"]["display_name"] == body["meal"]["name_ar"]
+
+
+def test_a_week_without_snacks_through_the_api(seeded_catalogue):
+    """snack_count=0 and duration_days=7 on the synchronous endpoint: 21 meals, no
+    Snack slot, and each day's targets sum to the day."""
+    from diet.models import Meal
+
+    user, _chosen = _chooser("nosnack")
+    c = _api_client_for(user)
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 7, "snack_count": 0},
+               content_type="application/json")
+    assert r.status_code == 201, r.content
+    plan_id = r.json()["diet_plan_id"]
+    meals = list(Meal.objects.filter(diet_plan=plan_id))
+    assert len(meals) == 21 and not any(m.meal_type == "Snack" for m in meals)
+    body = c.get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").json()
+    daily = body["plan"]["daily_calories"]
+    by_day = collections.defaultdict(float)
+    for m in body["meals"]:
+        by_day[m["date"]] += m["targets"]["calories"]
+    assert len(by_day) == 7
+    assert all(abs(v - daily) <= 0.16 * daily for v in by_day.values()), dict(by_day)
+
+
+def test_a_chosen_food_that_is_an_allergen_is_never_served_nor_mentioned(seeded_catalogue):
+    """Choosing shrimp for dinner and declaring a shellfish allergy: the allergy wins on
+    every path, including substitution and the reason sentence."""
+    from diet.models import FoodItem, Meal, UserFoodCategoryPreference, UserFoodPreference
+    from tests.diet_quality import PROFILES, _generate, _make_client
+
+    user = _make_client("allergy-chooser", *PROFILES[2])
+    shrimp = FoodItem.objects.get(name="Shrimp")
+    UserFoodCategoryPreference.objects.get_or_create(user=user, food=shrimp, meal="Dinner", macro="protein")
+    pref, _ = UserFoodPreference.objects.get_or_create(user=user)
+    pref.allergies = "shellfish"; pref.save()
+    plan = _generate(user, user.calculate_daily_calories(), 7, "allergy")
+    assert plan is not None
+    for m in Meal.objects.filter(diet_plan=plan).prefetch_related("components__food"):
+        assert all(c.food_id != shrimp.id for c in m.components.all()), m.name
+        assert "shrimp" not in (m.reason or "").lower() and "shrimp" not in (m.name or "").lower()
+
+
+def test_the_residual_carry_is_bounded_and_never_negative():
+    """A 500 kcal miss moves the next slot by at most 15% of its base, in the direction
+    of the miss, and can never drive a target below zero."""
+    from types import SimpleNamespace
+
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    planner = RuleBasedPlanner.__new__(RuleBasedPlanner)
+    def target(kcal, p, c, f):
+        return SimpleNamespace(kcal_target=kcal, macro_targets={"protein": p, "carb": c, "fat": f})
+    served = target(700, 40, 90, 20)
+    meal = SimpleNamespace(total_nutrition={"calories": 200, "protein": 10, "carbs": 30, "fat": 5})
+    nxt = target(800, 50, 100, 25)
+    planner._carry_residual(meal, served, nxt)
+    assert nxt.kcal_target == 800 + 0.15 * 800
+    assert nxt.macro_targets["protein"] == 50 + 0.15 * 50
+    over = SimpleNamespace(total_nutrition={"calories": 1400, "protein": 90, "carbs": 200, "fat": 60})
+    nxt = target(800, 50, 100, 25)
+    planner._carry_residual(over, served, nxt)
+    assert nxt.kcal_target == 800 - 0.15 * 800 and nxt.macro_targets["fat"] == 25 - 0.15 * 25
+    tiny = target(20, 1, 2, 1)
+    planner._carry_residual(over, served, tiny)
+    assert tiny.kcal_target >= 0 and all(v >= 0 for v in tiny.macro_targets.values())
+
+
+def test_an_unknown_task_id_is_pending_not_an_error(seeded_catalogue):
+    user, _chosen = _chooser("task-garbage")
+    r = _api_client_for(user).get("/api/diet/v1/plans/tasks/not-a-real-id/")
+    assert r.status_code == 200 and r.json()["state"] == "PENDING"
+
+
+def test_a_fitting_dish_at_the_weekly_cap_beats_a_plate_that_misses(seeded_catalogue, monkeypatch):
+    """The cap demotes a dish only below a FITTING plate; it must never hand the client
+    an off-target plate to avoid a third serving."""
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    user, _chosen = _chooser("cap-judge")
+    planner = RuleBasedPlanner(user, seed_salt="cap")
+    capped_dish = ("dish", True, 10.0, 2, 0.01, lambda: None)
+    missing_plate = ("plate", False, 500.0, False, 0.20, lambda: None)
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_recipe", lambda *a, **k: capped_dish)
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_template", lambda *a, **k: missing_plate)
+    assert planner._plan_meal("Lunch", None, None) == "dish"
+    fitting_plate = ("plate", True, 5.0, False, 0.05, lambda: None)
+    monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_template", lambda *a, **k: fitting_plate)
+    assert planner._plan_meal("Lunch", None, None) == "plate"
+
+
+def test_a_superseded_plan_is_not_history(seeded_catalogue):
+    """Regenerating today replaces today's plan. Its dishes must not count toward the
+    weekly cap, or two taps put every dish at the cap for tomorrow."""
+    import datetime as dt
+
+    from diet.models import DietPlan
+    from diet.services.plan_generation import generate_and_save
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    user, _chosen = _chooser("supersede")
+    day = "2026-02-02"
+    generate_and_save(user, duration_days=1, start_date=day, seed_salt="s1")
+    generate_and_save(user, duration_days=1, start_date=day, seed_salt="s2")
+    assert DietPlan.objects.filter(user=user, is_active=True).count() == 1
+    counts = RuleBasedPlanner(user)._get_recent_recipe_counts(7, dt.date(2026, 2, 3))
+    assert counts and max(counts.values()) <= 1, counts

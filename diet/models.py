@@ -730,6 +730,10 @@ class Meal(models.Model):
     #: "Mujadara (Quinoa instead of Rice)" cannot be translated after the fact.
     name_ar = models.CharField(max_length=160, blank=True, default='')
     reason_ar = models.CharField(max_length=200, blank=True, default='')
+    #: The calories/protein/carb/fat this meal was BUILT to, residual carry included.
+    #: The API used to re-derive a target from the plan's split, which is not the
+    #: number the planner aimed at, so a correct meal could read as off-target.
+    target = models.JSONField(null=True, blank=True)
     scheduled_time = models.TimeField(null=True, blank=True, help_text="Scheduled time for this meal")
     estimated_duration = models.PositiveIntegerField(
         null=True, 

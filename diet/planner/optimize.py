@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .policy import PlannerPolicy
-from .report import MacroDeviation, deviation_of, totals_of
+from .report import better as _better, MacroDeviation, deviation_of, totals_of
 
 logger = logging.getLogger(__name__)
 
@@ -65,22 +65,6 @@ def _snapped(components: Components, factor: float) -> Components:
 SCALE_LO, SCALE_HI, SCALE_STEP = 0.4, 2.5, 0.01
 
 
-def _better(candidate, incumbent, tolerance: Dict[str, float]) -> bool:
-    """Is `candidate` the deviation to keep?
-
-    Inside tolerance beats lowest magnitude, because they are not the same point.
-    Magnitude averages the four numbers; `within` demands each one separately, so the
-    smallest average is regularly a portioning that fails on one macro while a
-    neighbouring one passes on all of them.
-    """
-    if incumbent is None:
-        return True
-    inside, was_inside = candidate.within(tolerance), incumbent.within(tolerance)
-    if inside != was_inside:
-        return inside
-    return candidate.magnitude < incumbent.magnitude - 1e-9
-
-
 #: A pair pass costs C(n,2) x |ladder_i| x |ladder_j|. A meal is one food per slot, so
 #: five foods at thirteen rungs is about 1,700 evaluations — nothing. The guard is here
 #: so a future meal shape with more parts degrades to single moves rather than stalling
@@ -122,16 +106,24 @@ def _pair_pass(best: Components, best_dev, targets, tolerance, indices, ladders)
             if len(ladders[left]) * len(ladders[right]) > MAX_PAIR_EVALUATIONS:
                 continue
             left_food, right_food = best[left][0], best[right][0]
+            # Everything but the two lines being moved is summed once per pair; the
+            # candidate's totals are that plus the two lines. This loop is the
+            # engine's hottest (700k evaluations per week-long plan) and summing all
+            # five lines for every combination was most of its cost.
+            rest = totals_of([c for i, c in enumerate(best) if i not in (left, right)])
             for left_option in ladders[left]:
+                left_part = totals_of([(left_food, left_option.grams)])
                 for right_option in ladders[right]:
                     if (abs(left_option.grams - best[left][1]) < 1e-6
                             and abs(right_option.grams - best[right][1]) < 1e-6):
                         continue
-                    candidate = list(best)
-                    candidate[left] = (left_food, left_option.grams)
-                    candidate[right] = (right_food, right_option.grams)
-                    dev = deviation_of(totals_of(candidate), targets)
+                    right_part = totals_of([(right_food, right_option.grams)])
+                    totals = {k: rest[k] + left_part[k] + right_part[k] for k in rest}
+                    dev = deviation_of(totals, targets)
                     if _better(dev, best_dev, tolerance):
+                        candidate = list(best)
+                        candidate[left] = (left_food, left_option.grams)
+                        candidate[right] = (right_food, right_option.grams)
                         best, best_dev, improved = candidate, dev, True
     return best, best_dev, improved
 

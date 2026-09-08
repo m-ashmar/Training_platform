@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 # Local Overrides
 # ========================
 DEBUG = True
+# The planner raises on a path failure here; production logs and serves around it.
+DIET_PLANNER_STRICT = True
 ALLOWED_HOSTS = ['*']
 
 # Local database
@@ -77,6 +79,10 @@ CACHES = {
 
 # Celery runs synchronously in local dev
 CELERY_TASK_ALWAYS_EAGER = True
+# Eager tasks keep their result in memory so plans/tasks/<id>/ can be exercised
+# without a broker; production stores results in Redis (settings_base).
+CELERY_TASK_STORE_EAGER_RESULT = True
+CELERY_RESULT_BACKEND = 'cache+memory://'
 
 # Email — console backend for local dev
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'

@@ -16,7 +16,7 @@ New keys on each meal:
 | `recipe_id` | int or null | The library dish this is, if it is one |
 | `is_dish` | bool | `recipe_id != null` |
 | `shape` | string | The template shape when engine-built, else `""` |
-| `targets` | object | `{calories, protein, carbs, fat}` the meal was **built to** (see below) |
+| `targets` | object | `{calories, protein, carbs, fat}` the meal was **built to** — persisted on the meal at generation time, residual carry included; present on every endpoint below, including `meal.targets` in the components view and the meal-details and enhanced-progress views |
 | `is_liked` | bool or null | The client's rating of the meal |
 | `date`, `image_url`, `is_ai_generated` | | present everywhere now |
 
@@ -36,10 +36,17 @@ New keys on each component (ingredient):
 - Request: `duration_days` 1–7; a larger value is clamped to 7 (was accepted up to 31). `meal_count` above 3 and `snack_count` above 1 are clamped, not refused.
 - Response `meals[]`: full meal objects with `components[]` (were id/meal_type/description/nutrition/targets only).
 - **New status 422** with `code: "no_servable_meal"` when the client's allowed foods cannot fill a slot (was a 500). The existing 422 for infeasible calories is unchanged.
+- `start_date` must be `YYYY-MM-DD` (400 otherwise; other formats used to surface as a profile error). A profile whose energy is below the validator's floor is a 400 with the reason (was a 500).
 
 ## `POST plans/generate/`
 
 - New optional `engine: "rule"` runs the deterministic engine on Celery for `duration_days` 1–30 (default 7). Response adds `engine: "rule"`. Without it the endpoint behaves as before.
+- `meal_count` and `snack_count` are validated as integers (400 on anything else); they were forwarded raw and could fail the task after retries.
+- With `engine: "rule"` the daily quota is spent when the plan exists, not when the request is accepted.
+
+## `GET plans/tasks/<task_id>/` (new)
+
+The outcome of an asynchronous generation. `{task_id, state}` while running; on success `{state: "SUCCESS", plan_id}` or `{state: "SUCCESS", error, code}` when the engine refused (`infeasible_calories`, `no_servable_meal`, `invalid_request`), with `max_feasible_kcal` and `suggestion` for the first; `{state: "FAILURE", error}` on a crash. A task started by another client is a 404.
 
 ## `GET nutrition/plan/<id>/`
 
@@ -47,7 +54,8 @@ New keys on each component (ingredient):
 
 ## `GET meals/<id>/components/`
 
-- `meal` gains the meal keys above. `components[]` gains the component keys above; the nested `food{}` object and `quantity` are unchanged.
+- `meal` gains the meal keys above, including `targets` (still also under `nutrition.targets`). `components[]` gains the component keys above; the nested `food{}` object and `quantity` are unchanged.
+- A missing meal is a 404 (was a 400).
 
 ## `GET plan/<id>/meals-with-ingredients/`
 
@@ -58,6 +66,25 @@ New keys on each component (ingredient):
 ## `GET client/meals/<id>/` and `GET client/progress/enhanced/`
 
 - Meal gains the meal keys; `notes` unchanged. Components keep `food_name`, `food_image`, `quantity`; gain the component keys above.
+
+## `POST client/meals/interact/`
+
+- `swap_food` (with `chosen_food_id`) now answers with the full component object (`component_payload`: `food_id`, `name`, `name_ar`, `serving`, `serving_ar`, `nutrition`, …) instead of `{id, food_id, name, quantity}`.
+- `rate_meal` and `rate_component` accept `is_liked` as a boolean or `"true"`/`"false"`; anything else is a 400 (`"false"` used to be read as true). `rate_meal` records a funnel event like `rate_component`.
+- `complete_component` and `rate_meal` on another client's meal are a 404.
+- `action: "event"` with `kind: "viewed" | "accepted"` records the client-side funnel steps.
+
+## `GET nutrition/plan/<id>/` and `GET client/progress/enhanced/`
+
+- An unparseable `?date=` is a 400 (it used to fall back to today silently).
+
+## `GET plan/<id>/meals-with-ingredients/` authorisation
+
+- A trainer can read only plans they created; engine-generated plans belong to the client alone. Other roles are refused. (Any trainer could read any engine plan before.)
+
+## `POST preferences/` and `preferences/food-category/`
+
+- Food id lists must be lists of integers (a comma-separated string is accepted); anything else is a 400 naming the field (was a 500).
 
 ## Localisation
 

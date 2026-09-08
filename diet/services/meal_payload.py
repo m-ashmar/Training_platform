@@ -36,8 +36,30 @@ def day_targets(diet_plan, meals_of_day: Iterable) -> Dict[str, object]:
 
 
 def target_payload(by_slot: Dict[str, object], meal) -> Dict[str, float]:
+    """The target the meal was built to when the planner recorded one; the plan's
+    split for meals that predate the column or were written by a trainer."""
+    built = getattr(meal, "target", None)
+    if isinstance(built, dict) and built.get("calories"):
+        return {"calories": round(float(built.get("calories", 0)), 1),
+                "protein": round(float(built.get("protein", 0)), 1),
+                "carbs": round(float(built.get("carb", built.get("carbs", 0)) or 0), 1),
+                "fat": round(float(built.get("fat", 0)), 1)}
     t = by_slot.get(meal.meal_type) or by_slot.get("Snack") or next(iter(by_slot.values()))
     return {"calories": t.calories, "protein": t.protein, "carbs": t.carb, "fat": t.fat}
+
+
+def _composed_name(meal, lang: str) -> str:
+    names = []
+    for c in list(meal.components.all())[:4]:
+        f = c.food
+        names.append((getattr(f, "name_ar", None) or f.name) if lang == "ar" else f.name)
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if lang == "ar":
+        return "، ".join(names[:-1]) + " و" + names[-1]
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def component_payload(component, lang: Optional[str] = None) -> dict:
@@ -71,8 +93,10 @@ def meal_payload(meal, lang: Optional[str] = None, targets: Optional[dict] = Non
     description = meal.description
     if meal.translations and lang in meal.translations:
         description = meal.translations[lang].get("description", description)
-    name = meal.name or ""
-    name_ar = meal.name_ar or name
+    # A meal without a stored name (written by a trainer, or before the column
+    # existed) is named from what is on it, in both languages, rather than "".
+    name = meal.name or _composed_name(meal, "en")
+    name_ar = meal.name_ar or _composed_name(meal, "ar") or name
     reason = meal.reason or ""
     reason_ar = meal.reason_ar or reason
     out = {

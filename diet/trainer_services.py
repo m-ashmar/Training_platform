@@ -462,7 +462,10 @@ class ClientProgressService:
             })
             components.append(entry)
 
-        return {**meal_payload(meal), 'notes': meal.notes, 'components': components}
+        from diet.services.meal_payload import day_targets, target_payload
+        day = list(meal.diet_plan.meals.filter(date=meal.date))
+        return {**meal_payload(meal), 'notes': meal.notes, 'components': components,
+                'targets': target_payload(day_targets(meal.diet_plan, day), meal)}
     
     def get_enhanced_daily_progress(self, target_date: date = None) -> Dict[str, Any]:
         """
@@ -531,6 +534,8 @@ class ClientProgressService:
         meals = active_plan.meals.all() # This uses the Prefetch from above!
         meals_data = []
         
+        from diet.services.meal_payload import day_targets, target_payload
+        by_slot = day_targets(active_plan, list(meals))
         for meal in meals:
             # Calculate nutrition in-memory
             # (Duplicate logic from Meal.calculate_nutrition but strictly in-memory)
@@ -571,6 +576,7 @@ class ClientProgressService:
             # The shared meal shape (name, reason, dish, both languages), with the
             # totals computed in memory above rather than a second pass.
             meal_data = meal_payload(meal)
+            meal_data['targets'] = target_payload(by_slot, meal)
             meal_data['nutrition'] = {
                 'calories': round(total_calories, 1),
                 'protein': round(total_protein, 1),
