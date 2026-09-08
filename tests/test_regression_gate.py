@@ -3755,3 +3755,21 @@ def test_a_superseded_plan_is_not_history(seeded_catalogue):
     assert DietPlan.objects.filter(user=user, is_active=True).count() == 1
     counts = RuleBasedPlanner(user)._get_recent_recipe_counts(7, dt.date(2026, 2, 3))
     assert counts and max(counts.values()) <= 1, counts
+
+
+def test_the_daily_generation_quota_is_enforced(seeded_catalogue, django_capture_on_commit_callbacks):
+    """The quota is spent on commit, so every test that generated a plan inside a
+    rolled-back transaction never exercised it. With the callbacks executed, the
+    plan's daily limit refuses the request after it is reached."""
+    from subscription.models import Subscription
+
+    user, _chosen = _chooser("quota-gate")
+    c = _api_client_for(user)
+    plan = Subscription.objects.get(user=user).plan
+    plan.max_meals_per_day = 1
+    plan.save(update_fields=["max_meals_per_day"])
+    with django_capture_on_commit_callbacks(execute=True):
+        r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
+        assert r.status_code == 201, r.content
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
+    assert r.status_code in (403, 429), (r.status_code, r.content[:200])

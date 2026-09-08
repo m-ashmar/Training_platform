@@ -222,7 +222,7 @@ class FoodListView(APIView):
         except Exception as e:
             logger.error(f"Food list error: {str(e)}")
             return Response(
-                {"error": "Failed to retrieve food items"},
+                {"error": _("Failed to retrieve food items")},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -264,7 +264,7 @@ class FoodCategoryListView(APIView):
         except Exception as e:
             logger.error(f"Food category list error: {str(e)}")
             return Response(
-                {"error": "Failed to retrieve food categories"},
+                {"error": _("Failed to retrieve food categories")},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -281,7 +281,7 @@ class FoodSearchView(APIView):
             query = request.GET.get('q', '').strip()
             if not query:
                 return Response(
-                    {"error": "Query parameter 'q' is required"},
+                    {"error": _("Query parameter 'q' is required")},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -348,7 +348,7 @@ class FoodSearchView(APIView):
         except Exception as e:
             logger.error(f"Food search error: {str(e)}")
             return Response(
-                {"error": "Failed to search food items"},
+                {"error": _("Failed to search food items")},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -859,7 +859,7 @@ class GenerateDietPlanView(APIView):
             # Check if user is a client (trainers cannot use AI generation)
             if request.user.is_trainer:
                 return Response(
-                    {"error": "Trainers cannot generate AI diet plans. Use trainer diet plan creation instead."},
+                    {"error": _("Trainers cannot generate AI diet plans. Use trainer diet plan creation instead.")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -871,7 +871,7 @@ class GenerateDietPlanView(APIView):
                 parsed = parse_date(start_date_str)
                 if not parsed:
                     return Response(
-                        {"error": "Invalid start_date format. Use YYYY-MM-DD."},
+                        {"error": _("Invalid start_date format. Use YYYY-MM-DD.")},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 # Normalize to ISO string for Celery serialization
@@ -928,7 +928,7 @@ class GenerateDietPlanView(APIView):
         except Exception as e:
             logger.error(f"Diet plan generation error: {str(e)}")
             return Response(
-                {"error": "Failed to start diet plan generation"},
+                {"error": _("Failed to start diet plan generation")},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1183,7 +1183,7 @@ class DailyAdviceView(APIView):
         except Exception as e:
             logger.error(f"Daily advice error: {str(e)}")
             return Response(
-                {"error": "Failed to retrieve daily advice"},
+                {"error": _("Failed to retrieve daily advice")},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1202,7 +1202,7 @@ class TrainerTemplatesView(APIView):
             # Check if user is a trainer
             if not request.user.is_trainer:
                 return Response(
-                    {"error": "Only trainers can access diet plan templates"},
+                    {"error": _("Only trainers can access diet plan templates")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1236,7 +1236,7 @@ class TrainerTemplatesView(APIView):
         except Exception as e:
             logger.error(f"Trainer templates error: {str(e)}")
             return Response(
-                {"error": "Failed to retrieve templates"},
+                {"error": _("Failed to retrieve templates")},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1252,7 +1252,7 @@ class TrainerDietPlanView(APIView):
             # Check if user is a trainer
             if not request.user.is_trainer:
                 return Response(
-                    {"error": "Only trainers can create diet plans"},
+                    {"error": _("Only trainers can create diet plans")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1263,7 +1263,7 @@ class TrainerDietPlanView(APIView):
             
             if not all([client_id, template_id, start_date_str]):
                 return Response(
-                    {"error": "client_id, template_id, and start_date are required"},
+                    {"error": _("client_id, template_id, and start_date are required")},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
@@ -1275,7 +1275,7 @@ class TrainerDietPlanView(APIView):
             
             if not start_date:
                 return Response(
-                    {"error": "Invalid start_date format"},
+                    {"error": _("Invalid start_date format")},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1323,14 +1323,14 @@ class TrainerDietPlanView(APIView):
             # Check if user is a trainer
             if not request.user.is_trainer:
                 return Response(
-                    {"error": "Only trainers can access client diet plans"},
+                    {"error": _("Only trainers can access client diet plans")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
             client_id = request.GET.get('client_id')
             if not client_id:
                 return Response(
-                    {"error": "client_id parameter is required"},
+                    {"error": _("client_id parameter is required")},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1385,7 +1385,7 @@ class TrainerMealView(APIView):
             # Check if user is a trainer
             if not request.user.is_trainer:
                 return Response(
-                    {"error": "Only trainers can manage meals"},
+                    {"error": _("Only trainers can manage meals")},
                     status=status.HTTP_403_FORBIDDEN
                 )
 
@@ -1462,7 +1462,7 @@ class TrainerMealView(APIView):
             
             if not all([diet_plan_id, meal_type, target_date_str, food_items]):
                 return Response(
-                    {"error": "diet_plan_id, meal_type, target_date, and food_items are required"},
+                    {"error": _("diet_plan_id, meal_type, target_date, and food_items are required")},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
@@ -1475,7 +1475,7 @@ class TrainerMealView(APIView):
             
             if not target_date:
                 return Response(
-                    {"error": "Invalid target_date format"},
+                    {"error": _("Invalid target_date format")},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1522,7 +1522,7 @@ class TrainerMealView(APIView):
             # Check if user is a trainer
             if not request.user.is_trainer:
                 return Response(
-                    {"error": "Only trainers can update meals"},
+                    {"error": _("Only trainers can update meals")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1574,7 +1574,7 @@ class TrainerMealView(APIView):
             # Check if user is a trainer
             if not request.user.is_trainer:
                 return Response(
-                    {"error": "Only trainers can delete meals"},
+                    {"error": _("Only trainers can delete meals")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1622,19 +1622,19 @@ class DietPlanNutritionView(APIView):
             if request.user.is_trainer:
                 if diet_plan.created_by != request.user:
                     return Response(
-                        {"error": "You can only view nutrition for plans you created"},
+                        {"error": _("You can only view nutrition for plans you created")},
                         status=status.HTTP_403_FORBIDDEN
                     )
             elif request.user.is_client:
                 if diet_plan.user != request.user:
                     return Response(
-                        {"error": "You can only view your own diet plan nutrition"},
+                        {"error": _("You can only view your own diet plan nutrition")},
                         status=status.HTTP_403_FORBIDDEN
                     )
             elif not request.user.is_admin:
                 # Default-deny: any other role (e.g. agent) has no ownership claim.
                 return Response(
-                    {"error": "You do not have access to this diet plan"},
+                    {"error": _("You do not have access to this diet plan")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1935,7 +1935,7 @@ class EnhancedClientProgressView(APIView):
             # Check if user is a client
             if not request.user.is_client:
                 return Response(
-                    {"error": "Only clients can access progress tracking"},
+                    {"error": _("Only clients can access progress tracking")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1970,7 +1970,7 @@ class MealCompletionView(APIView):
             # Check if user is a client
             if not request.user.is_client:
                 return Response(
-                    {"error": "Only clients can complete meals"},
+                    {"error": _("Only clients can complete meals")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1979,7 +1979,7 @@ class MealCompletionView(APIView):
             # Validate client owns this meal
             if meal.diet_plan.user != request.user:
                 return Response(
-                    {"error": "You can only complete your own meals"},
+                    {"error": _("You can only complete your own meals")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2005,7 +2005,7 @@ class MealCompletionView(APIView):
                 
                 if not component_id:
                     return Response(
-                        {"error": "component_id is required"},
+                        {"error": _("component_id is required")},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
@@ -2026,7 +2026,7 @@ class MealCompletionView(APIView):
             
             else:
                 return Response(
-                    {"error": "Invalid action. Use 'complete_meal' or 'complete_component'"},
+                    {"error": _("Invalid action. Use 'complete_meal' or 'complete_component'")},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -2060,7 +2060,7 @@ class ClientProgressView(APIView):
             # Check if user is a client
             if not request.user.is_client:
                 return Response(
-                    {"error": "Only clients can access progress tracking"},
+                    {"error": _("Only clients can access progress tracking")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2094,7 +2094,7 @@ class ClientWeeklyProgressView(APIView):
             # Check if user is a client
             if not request.user.is_client:
                 return Response(
-                    {"error": "Only clients can access progress tracking"},
+                    {"error": _("Only clients can access progress tracking")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2131,7 +2131,7 @@ class ClientMealInteractionView(APIView):
             # Check if user is a client
             if not request.user.is_client:
                 return Response(
-                    {"error": "Only clients can interact with meals"},
+                    {"error": _("Only clients can interact with meals")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2203,7 +2203,7 @@ class ClientMealInteractionView(APIView):
                 
                 if not component_id:
                     return Response(
-                        {"error": "component_id is required"},
+                        {"error": _("component_id is required")},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
@@ -2278,7 +2278,7 @@ class ClientMealDetailsView(APIView):
             # Check if user is a client
             if not request.user.is_client:
                 return Response(
-                    {"error": "Only clients can access meal details"},
+                    {"error": _("Only clients can access meal details")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
