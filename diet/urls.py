@@ -24,7 +24,6 @@ app_name = 'diet'
 urlpatterns = [
     # --- Plan generation (clients) ---
     path('v1/plans/generate/', views.GenerateDietPlanView.as_view(), name='generate-diet-plan'),
-    path('v1/plans/generate-sync/', views.GenerateDietPlanSyncView.as_view(), name='v1_generate_plan_sync'),
     path('v1/plans/generate-rule/', views.GenerateDietPlanRuleBasedView.as_view(), name='v1_generate_plan_rule'),
     path('v1/plans/tasks/<str:task_id>/', views.PlanTaskStatusView.as_view(), name='v1_plan_task_status'),
 

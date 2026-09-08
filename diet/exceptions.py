@@ -11,14 +11,6 @@ class DietError(Exception):
     """Base class for all Diet-related errors."""
 
 
-class OpenAIError(DietError):
-    """Failures when calling or handling responses from OpenAI or LLM providers."""
-
-
-class DietParsingError(DietError):
-    """Failures when parsing AI output into structured models."""
-
-
 class PersistenceError(DietError):
     """General database persistence failures when saving diet plans/meals/components."""
 

@@ -3221,12 +3221,13 @@ def test_an_unservable_slot_is_a_422_not_a_500(seeded_catalogue, monkeypatch):
 def test_the_task_and_the_endpoint_generate_plans_of_the_same_shape(seeded_catalogue):
     """E3. The Celery fallback read a stale `daily_calorie_target` (default 2000) and
     skipped the feasibility check; the synchronous view did neither. One function now
-    serves the view, the task and the fallback, so pressing either button yields the
-    plan the other would have.
+    serves the inline endpoint and the task, so pressing either button yields the plan
+    the other would have. The GPT path that the fallback existed for is gone: there is
+    one engine, and both endpoints run it.
     """
     from diet.models import DietPlan, Meal
     from diet.services.plan_generation import generate_and_save
-    from diet.tasks import _generate_rule_based_fallback, generate_rule_based_plan
+    from diet.tasks import generate_rule_based_plan
     from tests.diet_quality import _make_client
 
     user, _chosen = _chooser("task-gate")
@@ -3237,9 +3238,6 @@ def test_the_task_and_the_endpoint_generate_plans_of_the_same_shape(seeded_catal
     assert via_task.daily_calories == direct.daily_calories
     assert Meal.objects.filter(diet_plan=via_task).count() == Meal.objects.filter(diet_plan=direct).count() == 8
     assert via_task.generation_strategy == direct.generation_strategy == "FALLBACK"
-
-    fallback_id = _generate_rule_based_fallback(user.id, 3, 1, None)
-    assert fallback_id and DietPlan.objects.get(pk=fallback_id).daily_calories == direct.daily_calories
 
     # A profile the meal structure cannot carry is refused with a reason, not retried.
     heavy = _make_client("task-heavy", ["Muscle Gain"], 250, 300, 20, "Male", "VeryActive")
@@ -3865,3 +3863,106 @@ def test_a_meal_title_reads_like_something_a_person_would_write(seeded_catalogue
             assert replaced not in dish.lower(), f"{dish!r} lost its namesake: {name!r}"
             new = name.split("(")[1].split(" instead of ")[0].strip().lower()
             assert new != replaced, f"a substitution nobody can see: {name!r}"
+
+
+def test_the_diet_app_calls_no_external_model(seeded_catalogue):
+    """One engine. The GPT path — a prompt builder, a response parser, a sync endpoint,
+    a Celery task and a training-data collector — was deleted: the deterministic planner
+    replaced it, and an external model is no longer part of the diet app. This keeps it
+    out, because a reintroduced import is how a deleted dependency comes back.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "diet"
+    offenders = []
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for needle in ("import openai", "api.openai.com", "OPENAI_API_KEY", "DietGenerator"):
+            if needle in text:
+                offenders.append(f"{path.relative_to(root.parent)}: {needle}")
+    assert not offenders, offenders
+
+    # And the route is gone, rather than left returning 500 from a missing import.
+    from django.urls import NoReverseMatch, reverse
+    with pytest.raises(NoReverseMatch):
+        reverse("diet:v1_generate_plan_sync")
+
+
+def test_the_admin_can_review_a_dishes_gram_amounts(seeded_catalogue, make_user):
+    """The 105 dishes were written to a macro target, not to a plate, and reviewing
+    them needs the grams AND what they add up to. This is the screen that job happens
+    on, so it has to load and it has to show the numbers."""
+    from django.test import Client
+
+    from diet.models import Recipe
+
+    admin = make_user("recipe-admin", user_type="admin")
+    admin.set_password("Xx!23456"); admin.save()
+    c = Client()
+    assert c.login(email=admin.email, password="Xx!23456")
+
+    dish = Recipe.objects.filter(is_active=True, ingredients__isnull=False).distinct().first()
+    assert dish is not None
+    nutrition = dish.nutrition()
+    assert nutrition["calories"] > 0 and nutrition["protein"] >= 0
+
+    r = c.get("/dj-admin/diet/recipe/")
+    assert r.status_code == 200, r.status_code
+    assert str(round(nutrition["calories"])).encode() in r.content
+
+    r = c.get(f"/dj-admin/diet/recipe/{dish.id}/change/")
+    assert r.status_code == 200, r.status_code
+    body = r.content.decode()
+    assert "reviewed" in body
+    first = dish.ingredients.select_related("food").first()
+    assert first.food.name in body and str(round(first.grams)) in body
+
+    # The review flag is what the owner's pass is tracked with.
+    assert Recipe.objects.filter(reviewed=False).exists()
+    Recipe.objects.filter(pk=dish.pk).update(reviewed=True)
+    assert Recipe.objects.get(pk=dish.pk).reviewed is True
+
+
+def test_the_admin_can_vet_a_food_and_the_planner_obeys(seeded_catalogue, make_user):
+    """`needs_review` is the gate that stops the import endpoint re-creating the noise
+    the catalogue rebuild removed. Approving a food in admin must actually let the
+    planner serve it, and every field the planner reads must be editable there."""
+    from django.test import Client
+
+    from diet.models import FoodItem
+    from diet.planner.candidates import build_pool
+    from diet.planner.policy import load_policy
+
+    admin = make_user("food-admin", user_type="admin")
+    admin.set_password("Xx!23456"); admin.save()
+    c = Client()
+    assert c.login(email=admin.email, password="Xx!23456")
+
+    food = FoodItem.objects.create(
+        api_id="hand-curated-1", name="Hand Added Cheese", calories=250, protein=18,
+        carbs=2, fat=19, serving_size="100g", serving_size_grams=100,
+        needs_review=True, meal_slots=["Breakfast", "Snack"], cuisine="levantine")
+    user, _chosen = _chooser("vetting-client")
+
+    def in_pool():
+        pool = build_pool(user, load_policy("maintain"))
+        return food.id in {f.id for macros in pool.by_slot.values()
+                           for lst in macros.values() for f in lst}
+
+    assert not in_pool(), "an unvetted food reached the planner"
+
+    r = c.get(f"/dj-admin/diet/fooditem/{food.id}/change/")
+    assert r.status_code == 200
+    body = r.content.decode()
+    for field in ("needs_review", "meal_slots", "household_unit", "unit_grams", "cuisine", "role"):
+        assert f'name="{field}"' in body, f"{field} is not editable in admin"
+
+    r = c.post("/dj-admin/diet/fooditem/",
+               {"action": "approve_foods", "_selected_action": [str(food.id)],
+                "index": "0", "select_across": "0"}, follow=True)
+    assert r.status_code == 200
+    food.refresh_from_db()
+    assert food.needs_review is False
+    assert in_pool(), "an approved food still does not reach the planner"

@@ -200,6 +200,30 @@ rate, complete, and read progress. Three defects only this walk could find:
   preference endpoints reject; they are off by default and marked `selectable: false`.
   `?query=` is accepted alongside `?q=`.
 
+## H — One engine, and the two screens the owner works in
+
+**The GPT path is deleted.** `plans/generate-sync/`, the Celery task behind it, the
+prompt builder, the response parser, the training-data collector and the diet app's
+whole OpenAI surface are gone; `plans/generate/` runs the deterministic engine. A test
+walks `diet/` and fails on any reintroduced external-model import. The in-app chat
+assistant is a separate feature and is untouched.
+
+**The recipe library is reviewable.** `Recipe.reviewed` tracks the pass, and the admin
+screen shows what one serving of each dish comes to, what every line contributes in
+kcal and household servings, and flags a dish in red at the ends of the range where a
+gram amount has slipped. Filter by `reviewed = No` and work through them.
+
+**The food library is curatable by hand.** Meal slots, role, cuisine, household unit
+and unit grams are what the planner actually reads, and none of them used to be
+editable: a food added by hand was invisible to the engine however good its macros
+were. They are on the form now, with a panel showing the portions that food can be
+served in and why it is or is not plannable. `needs_review` is the vetting gate, with
+Approve and Send-back actions.
+
+Both screens are registered on `/dj-admin/`, the site the owner uses. That site had its
+own simpler `FoodItemAdmin` and no `Recipe` at all, so the library was unreachable from
+the admin that matters. One definition now, registered on both.
+
 ## Release steps
 
 1. `python manage.py migrate` (0059 name_ar/reason_ar, 0060 MealEvent + swap similarity,

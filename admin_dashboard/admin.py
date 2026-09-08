@@ -38,8 +38,19 @@ from routine.models import (
     RoutineTemplateExercise, ExerciseMedia
 )
 from diet.models import (
-    FoodItem, FoodCategory, UserFoodPreference, DietPlan, 
-    Meal, MealComponent, DailyAdvice
+    FoodItem, FoodCategory, UserFoodPreference, DietPlan,
+    Meal, MealComponent, DailyAdvice, Recipe, RecipeIngredient,
+    UserFoodCategoryPreference, UserFoodWeight, MealSwap, MealEvent,
+)
+# The diet app's own admin classes. This site had a second, simpler FoodItemAdmin that
+# could not edit meal slots, household units or the review flag, and it did not carry
+# Recipe at all — so the recipe library, which is the engine's culinary knowledge, was
+# unreachable from the admin the owner actually uses. One definition, registered on
+# both sites, rather than two that drift.
+from diet.admin import (
+    ImprovedFoodItemAdmin as DietFoodItemAdmin,
+    RecipeAdmin as DietRecipeAdmin,
+    ImprovedUserFoodCategoryPreferenceAdmin as DietFoodChoiceAdmin,
 )
 from subscription.models import (
     SubscriptionPlan, Subscription, Payment, 
@@ -444,34 +455,6 @@ class WorkoutSessionAdmin(admin.ModelAdmin):
 # NUTRITION MANAGEMENT
 # ============================================================================
 
-class FoodItemAdmin(admin.ModelAdmin):
-    """Food item management with nutritional data"""
-    
-    # Without this each row re-queried category — ~100 extra
-    # queries per changelist page.
-    list_select_related = ('category',)
-    list_display = ('name', 'category', 'calories', 'protein', 'carbs', 'fat', 'serving_size')
-    list_filter = ('category', 'calories')
-    search_fields = ('name', 'category__name')
-    list_editable = ('category',)
-    
-    fieldsets = (
-        ('Basic Information', {
-            'fields': ('api_id', 'name', 'image_url')
-        }),
-        ('Nutritional Information', {
-            'fields': ('calories', 'protein', 'carbs', 'fat')
-        }),
-        ('Serving Information', {
-            'fields': ('serving_size', 'serving_size_grams')
-        }),
-        ('Classification', {
-            'fields': ('category',)
-        }),
-    )
-    
-    actions = ['recalculate_nutrition', 'import_from_edamam']
-
 class DietPlanAdmin(admin.ModelAdmin):
     """Diet plan management"""
     
@@ -702,12 +685,19 @@ admin_site.register(RoutineTemplate)
 admin_site.register(RoutineTemplateExercise)
 admin_site.register(ExerciseMedia)
 
-admin_site.register(FoodItem, FoodItemAdmin)
+admin_site.register(FoodItem, DietFoodItemAdmin)
 admin_site.register(FoodCategory)
 admin_site.register(UserFoodPreference)
+# The recipe library: 105 dishes whose gram amounts a person has to check against a
+# real plate, and the one screen where that job can be done.
+admin_site.register(Recipe, DietRecipeAdmin)
+admin_site.register(UserFoodCategoryPreference, DietFoodChoiceAdmin)
 admin_site.register(DietPlan, DietPlanAdmin)
 admin_site.register(Meal, MealAdmin)
 admin_site.register(MealComponent)
+admin_site.register(MealSwap)
+admin_site.register(MealEvent)
+admin_site.register(UserFoodWeight)
 admin_site.register(DailyAdvice)
 
 admin_site.register(SubscriptionPlan, SubscriptionPlanAdmin)

@@ -322,7 +322,6 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 | `GET` | `/api/diet/v1/nutrition/plan/{plan_id}/` | auth, HasDietAccess | `DietPlanNutritionView` |
 | `GET` | `/api/diet/v1/plan/{plan_id}/meals-with-ingredients/` | auth, HasDietAccess | `DietPlanMealsWithIngredientsView` |
 | `POST` | `/api/diet/v1/plans/generate-rule/` | auth, HasDietAccess, MealUsageLimit | `GenerateDietPlanRuleBasedView` |
-| `POST` | `/api/diet/v1/plans/generate-sync/` | auth, HasDietAccess, MealUsageLimit | `GenerateDietPlanSyncView` |
 | `POST` | `/api/diet/v1/plans/generate/` | auth, HasDietAccess, MealUsageLimit | `GenerateDietPlanView` |
 | `DELETE, GET, POST` | `/api/diet/v1/preferences/` | auth | `UserPreferencesView` |
 | `GET, POST` | `/api/diet/v1/preferences/food-category/` | auth, HasDietAccess | `UserFoodCategoryPreferenceView` |

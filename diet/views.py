@@ -2,7 +2,7 @@
 views.py - API and Web Views for Diet App
 
 This module provides API endpoints and web views for diet plan generation, daily advice,
-and plan reporting. Integrates with DietGenerator and background tasks.
+and plan reporting. One engine: the deterministic planner in services/.
 Enhanced to support both AI-generated and trainer-created diet plans.
 """
 
@@ -14,9 +14,8 @@ from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.utils.translation import gettext as _
-from .tasks import generate_ai_diet_plan, generate_rule_based_plan
-from .ai_services import DietGenerator
-from .exceptions import OpenAIError, DietParsingError, PersistenceError
+from .tasks import generate_rule_based_plan
+from .exceptions import PersistenceError
 from .engine.rule_based_planner import RuleBasedPlanner
 from .services.rule_based_planner import NoServableMealError
 from .services.meal_payload import component_payload, day_targets, meal_payload, target_payload
@@ -28,12 +27,10 @@ from .models import (
 )
 from .api import search_food
 from .trainer_services import TrainerDietPlanService, ClientProgressService
-from .data_collection import TrainingDataCollector
 import json
 import logging
 from django.shortcuts import render
 from django.http import JsonResponse
-from .ai_services import DietGenerator
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from datetime import date, time, datetime
@@ -873,18 +870,23 @@ class UserPreferencesView(APIView):
 
 class GenerateDietPlanView(APIView):
     """
-    API endpoint to trigger asynchronous diet plan generation for the authenticated user.
-    Requires active subscription with diet access and meal usage limits.
-    Only available for clients, not trainers.
+    Generate a plan off the request thread, for durations the synchronous endpoint
+    will not run inline.
+
+    One engine. This used to enqueue a GPT call whose output was parsed back into
+    meals; the deterministic planner replaced it, and no external model is part of the
+    diet app any more. `engine` is still accepted and ignored, so a client that sends
+    it keeps working.
+
+    Read the outcome at plans/tasks/<task_id>/.
     """
     permission_classes = [IsAuthenticated, HasDietAccess, MealUsageLimit]
     
     def post(self, request):
         try:
-            # Check if user is a client (trainers cannot use AI generation)
             if request.user.is_trainer:
                 return Response(
-                    {"error": _("Trainers cannot generate AI diet plans. Use trainer diet plan creation instead.")},
+                    {"error": _("Trainers cannot generate client plans here. Use trainer diet plan creation instead.")},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -902,45 +904,21 @@ class GenerateDietPlanView(APIView):
                 # Normalize to ISO string for Celery serialization
                 start_date_str = parsed.isoformat()
             
-            # The deterministic engine, off the request thread, for plans longer than
-            # the synchronous endpoint's seven days. Same planner, same persistence,
-            # same refusals as generate-rule; the result is the task's return value.
-            if str(request.data.get('engine') or 'ai').lower() == 'rule':
-                from diet.services.plan_generation import MAX_TASK_DAYS
-                task = generate_rule_based_plan.delay(
-                    user_id=request.user.id,
-                    meal_count=int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10),
-                    snack_count=int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10),
-                    start_date=start_date_str,
-                    duration_days=int_param(request.data, 'duration_days', default=7, minimum=1, maximum=MAX_TASK_DAYS),
-                )
-                # The task records the quota when a plan exists; read the outcome at
-                # plans/tasks/<task_id>/.
-                return Response({
-                    "message": _("Diet plan generation started"),
-                    "task_id": task.id,
-                    "engine": "rule",
-                    "estimated_time": "under a minute",
-                })
-
-            # Trigger async generation
-            task = generate_ai_diet_plan.delay(
+            from diet.services.plan_generation import MAX_TASK_DAYS
+            task = generate_rule_based_plan.delay(
                 user_id=request.user.id,
-                meal_count=meal_count,
-                snack_count=snack_count,
-                start_date=start_date_str
+                meal_count=int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10),
+                snack_count=int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10),
+                start_date=start_date_str,
+                duration_days=int_param(request.data, 'duration_days', default=7, minimum=1, maximum=MAX_TASK_DAYS),
             )
-            
-            # The daily limit these three endpoints declare was enforced by nothing:
-            # the only increment in the codebase had no callers, so usage_count stayed
-            # at 0 and every check passed. Spend the quota on the way out, once the
-            # plan actually exists.
-            quota.record_on_commit(request.user, "daily_meals")
-
+            # The task records the quota when a plan exists; read the outcome at
+            # plans/tasks/<task_id>/.
             return Response({
                 "message": _("Diet plan generation started"),
                 "task_id": task.id,
-                "estimated_time": "2-3 minutes"
+                "engine": "rule",
+                "estimated_time": "under a minute",
             })
             
         except BadInput as e:
@@ -984,59 +962,6 @@ class PlanTaskStatusView(APIView):
         body = {"task_id": task_id, "state": state}
         body.update({k: v for k, v in payload.items() if k != "user_id"})
         return Response(body)
-
-
-class GenerateDietPlanSyncView(APIView):
-    """
-    DEBUG/ops endpoint to trigger synchronous GPT plan generation without Celery.
-    Uses same permissions as async version.
-    """
-    permission_classes = [IsAuthenticated, HasDietAccess, MealUsageLimit]
-
-    def post(self, request):
-        try:
-            if request.user.is_trainer:
-                return Response({"error": _("Trainers cannot generate AI diet plans.")}, status=status.HTTP_403_FORBIDDEN)
-
-            meal_count = int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10)
-            snack_count = int_param(request.data, 'snack_count', default=0, minimum=0, maximum=10)
-            start_date_str = request.data.get('start_date')
-            if start_date_str:
-                parsed = parse_date(start_date_str)
-                if not parsed:
-                    return Response({"error": _("Invalid start_date format. Use YYYY-MM-DD.")}, status=status.HTTP_400_BAD_REQUEST)
-                start_date_str = parsed.isoformat()
-
-            generator = DietGenerator(request.user)
-            plan_output = generator.generate_plan(meal_count=meal_count, snack_count=snack_count)
-            diet_plan = generator.save_plan_to_database(plan_output, meal_count, snack_count, start_date=start_date_str)
-
-            quota.record_on_commit(request.user, "daily_meals")
-
-            return Response({
-                "status": "ok",
-                "diet_plan_id": diet_plan.id,
-                "meals_count": len(plan_output.plan),
-            }, status=status.HTTP_201_CREATED)
-        except (OpenAIError,) as e:
-            logger.error(f"Sync GPT generation provider error: {str(e)}")
-            return Response({"error": _("OpenAI provider error")}, status=status.HTTP_502_BAD_GATEWAY)
-        except (DietParsingError,) as e:
-            logger.error(f"Sync GPT parsing error: {str(e)}")
-            return Response({"error": _("AI output parsing error")}, status=status.HTTP_502_BAD_GATEWAY)
-        except (PersistenceError,) as e:
-            logger.error(f"Sync GPT persistence error: {str(e)}")
-            return Response({"error": _("Persistence error")}, status=status.HTTP_400_BAD_REQUEST)
-        except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except PASSTHROUGH_EXCEPTIONS:
-            # Control-flow exceptions carry their own correct status (404/403/401/400).
-            # The broad handler below turned every one of them into a 500, which is the
-            # wrong contract for the client and hides real faults in the error budget.
-            raise
-        except Exception as e:
-            logger.error(f"Sync GPT unexpected error: {str(e)}")
-            return Response({"error": _("Failed to generate plan")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class GenerateDietPlanRuleBasedView(APIView):
@@ -1086,14 +1011,6 @@ class GenerateDietPlanRuleBasedView(APIView):
                 )
             meal_count = min(3, meal_count)
             snack_count = min(1, snack_count)
-
-            # FIX #5: Collect training data for rule-based plans (was only done for AI plans)
-            try:
-                data_collector = TrainingDataCollector()
-                data_collector.collect_diet_plan_data(diet_plan, plan_output)
-                logger.info(f"Training data collected for rule-based plan {diet_plan.id}")
-            except Exception as e:
-                logger.warning(f"Failed to collect training data for plan {diet_plan.id}: {e}")
 
             # Build rich payload for mobile to display immediately
             try:

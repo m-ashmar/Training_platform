@@ -99,6 +99,12 @@ The outcome of an asynchronous generation. `{task_id, state}` while running; on 
 
 - Fixed: removing a food you had chosen returned 500. It returns `{message, deleted}`, or 404 if that choice is not there.
 
+## Removed: the GPT path
+
+- `POST plans/generate-sync/` is **gone** (404). It called an external model, parsed the answer back into meals, and the deterministic engine replaced it.
+- `POST plans/generate/` now always runs the deterministic engine on Celery. It still accepts `engine`, and ignores it. Response adds `engine: "rule"`. Read the outcome at `plans/tasks/<task_id>/`.
+- No diet endpoint calls an external model any more. The in-app chat assistant is a separate feature and is unaffected.
+
 ## Localisation
 
 `Accept-Language: ar` selects `display_name` / `display_reason`; `name`, `name_ar`, `serving`, `serving_ar` are always both present so the app can switch without a refetch. Food names come from the catalogue's Arabic column; recipe names from the recipe's translation where one exists.

@@ -1045,8 +1045,35 @@ class Recipe(models.Model):
     instructions = models.TextField(blank=True, default='')
     image_url = models.URLField(blank=True, default='')
     is_active = models.BooleanField(default=True, db_index=True)
+    #: Whether a human has checked this dish's gram amounts against a real kitchen.
+    #: The library was written to a macro target, not to a plate: it is plausible and
+    #: unverified, and a dish nobody has cooked is the one thing tests cannot catch.
+    #: The admin filters on this so the review can be done a few dishes at a time.
+    reviewed = models.BooleanField(
+        default=False, db_index=True,
+        help_text="A person has checked these gram amounts against a real plate.")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def nutrition(self) -> dict:
+        """What one serving of this dish, as written, actually comes to.
+
+        The reviewer needs this next to the grams: a number is only wrong relative to
+        the plate it produces, and 180 g of rice is right or absurd depending on what
+        else is on it.
+        """
+        totals = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+        for line in self.ingredients.all():
+            food, grams = line.food, float(line.grams or 0)
+            if food is None:
+                continue
+            k = grams / 100.0
+            totals["calories"] += float(food.calories or 0) * k
+            totals["protein"] += float(food.protein or 0) * k
+            totals["carbs"] += float(food.carbs or 0) * k
+            totals["fat"] += float(food.fat or 0) * k
+        return {key: round(value, 1) for key, value in totals.items()}
 
     class Meta:
         ordering = ['name', 'id']

@@ -21,6 +21,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from .planner.portion import describe
 from .models import (
     FoodItem, FoodCategory, UserFoodPreference, UserFoodCategoryPreference,
     DietPlan, Meal, MealComponent, DietConfig, DailyAdvice, DietPlanTemplate,
@@ -87,24 +88,56 @@ class CalorieRangeFilter(SimpleListFilter):
 # Improved FoodItem Admin
 @admin.register(FoodItem)
 class ImprovedFoodItemAdmin(TranslAdmin):
+    """The food library, curated by hand.
+
+    Everything the planner reads about a food lives here and none of it used to be
+    editable: meal slots, role, household unit, cuisine and the review flag were set
+    only by `seed_food_units` and could not be corrected without a code change. A food
+    with no meal slot is invisible to the planner however good its macros are, so this
+    screen is where a new food actually becomes usable.
+
+    `needs_review` is the vetting gate. A food carrying it is visible to clients but
+    never planned, which is what keeps the import endpoint from re-creating the 327
+    rows of noise the catalogue rebuild removed.
+    """
     list_display = [
-        'name', 'category_badge', 'calories_display', 'macro_display',
-        'serving_info', 'per_gram_info', 'has_image'
+        'name', 'review_badge', 'category_badge', 'calories_display', 'macro_display',
+        'slots_display', 'unit_display', 'cuisine', 'role'
     ]
-    list_filter = ['category', MacroDominantFilter, CalorieRangeFilter]
+    list_filter = ['needs_review', 'cuisine', 'role', 'category',
+                   MacroDominantFilter, CalorieRangeFilter]
+    list_editable = ['cuisine', 'role']
     search_fields = ['name', 'api_id']
-    readonly_fields = ['image_preview', 'nutrition_analysis']
-    
+    readonly_fields = ['image_preview', 'nutrition_analysis', 'planner_view']
+
     fieldsets = (
+        ('Vetting', {
+            'fields': ('needs_review', 'planner_view'),
+            'description': ('A food with "needs review" ticked is shown to clients but '
+                            'never put in a plan. Untick it once the macros, the meal '
+                            'slots and the household unit below are right.')
+        }),
         ('Basic Information', {
             'fields': ('name', 'category', 'api_id', 'image_url', 'image_preview')
         }),
         ('Nutrition Per Serving', {
             'fields': ('calories', 'protein', 'carbs', 'fat', 'serving_size', 'serving_size_grams'),
-            'description': 'Nutrition values per serving'
+            'description': 'Per 100 g, which is what the whole catalogue uses.'
+        }),
+        ('How the planner uses it', {
+            'fields': ('meal_slots', 'cuisine', 'role', 'household_unit', 'unit_grams'),
+            'description': ('meal_slots decides which meals it can appear in — a food '
+                            'with none is never planned. household_unit and unit_grams '
+                            'are what the client reads ("1½ cups"), and they set the '
+                            'portion sizes the engine is allowed to serve.')
+        }),
+        ('Allergens', {
+            'fields': ('allergens', 'allergen_source'),
+            'classes': ('collapse',)
         }),
         ('Nutrition Per Gram', {
             'fields': ('calories_per_gram', 'protein_per_gram', 'carbs_per_gram', 'fat_per_gram'),
+            'classes': ('collapse',),
             'description': 'Automatically calculated or manually set per-gram values'
         }),
         ('Analysis', {
@@ -112,6 +145,76 @@ class ImprovedFoodItemAdmin(TranslAdmin):
             'classes': ('collapse',)
         })
     )
+
+    @admin.display(description='vetted', ordering='needs_review')
+    def review_badge(self, obj):
+        if obj.needs_review:
+            return format_html(
+                '<span style="background:#b00;color:#fff;padding:2px 7px;'
+                'border-radius:3px">needs review</span>')
+        return format_html('<span style="color:#080">✓</span>')
+
+    @admin.display(description='meals')
+    def slots_display(self, obj):
+        slots = obj.meal_slots or []
+        if not slots:
+            return format_html('<span style="color:#b00" title="never planned">none</span>')
+        return ', '.join(s[:2] for s in slots)
+
+    @admin.display(description='serving')
+    def unit_display(self, obj):
+        if not obj.household_unit or not obj.unit_grams:
+            return format_html('<span style="color:#b00">no unit</span>')
+        return f"{obj.household_unit} = {obj.unit_grams:g} g"
+
+    @admin.display(description='What the planner sees')
+    def planner_view(self, obj):
+        """The portions this food can actually be served in, and why."""
+        if obj is None or obj.pk is None:
+            return 'Save the food first.'
+        from .planner.candidates import classify_food
+        from .planner.portion import portions_for
+
+        rungs = portions_for(obj)
+        ladder = ', '.join(f"{describe(obj, p.grams)} ({p.grams:g} g)" for p in rungs[:8]) or 'none'
+        blocked = []
+        if obj.needs_review:
+            blocked.append('needs review, so it is never planned')
+        if not (obj.meal_slots or []):
+            blocked.append('no meal slots, so it is never planned')
+        note = ('<p style="color:#b00"><b>{}</b></p>'.format('; '.join(blocked))
+                if blocked else '')
+        return format_html(
+            '{}<p>macro slot: <b>{}</b></p><p>servings it can be given in:<br>{}</p>',
+            format_html(note), classify_food(obj), ladder)
+
+    @admin.action(description='Approve: allow the planner to serve these')
+    def approve_foods(self, request, queryset):
+        missing = [f.name for f in queryset if not (f.meal_slots or [])]
+        n = queryset.update(needs_review=False)
+        self.message_user(request, f"{n} food(s) approved.", messages.SUCCESS)
+        if missing:
+            self.message_user(
+                request,
+                "Still never planned, because they have no meal slots: "
+                + ', '.join(missing[:8]),
+                messages.WARNING)
+
+    @admin.action(description='Send back: stop the planner serving these')
+    def send_back_for_review(self, request, queryset):
+        n = queryset.update(needs_review=True)
+        self.message_user(request, f"{n} food(s) held for review.", messages.SUCCESS)
+
+    @admin.action(description='Guess household unit, role and slots from the name')
+    def assign_units_and_roles(self, request, queryset):
+        """The same patterns `seed_food_units` applies, for a food added by hand."""
+        from django.core.management import call_command
+        try:
+            call_command('seed_food_units', '--apply', verbosity=0)
+            self.message_user(request, "Units and roles reassigned across the catalogue.",
+                              messages.SUCCESS)
+        except Exception as exc:
+            self.message_user(request, f"Could not assign units: {exc}", messages.ERROR)
     
     def category_badge(self, obj):
         if not obj.category:
@@ -196,7 +299,10 @@ class ImprovedFoodItemAdmin(TranslAdmin):
                 obj.fat_per_gram = obj.fat / obj.serving_size_grams
         super().save_model(request, obj, form, change)
     
-    actions = ['export_as_csv', 'calculate_per_gram_values', 'import_from_edamam']
+    # One list. A second `actions = [...]` further down this class body silently
+    # replaced the first, so the vetting actions were defined and unreachable.
+    actions = ['approve_foods', 'send_back_for_review', 'assign_units_and_roles',
+               'export_as_csv', 'calculate_per_gram_values', 'import_from_edamam']
     
     def export_as_csv(self, request, queryset):
         response = HttpResponse(content_type='text/csv')
@@ -682,17 +788,107 @@ class RecipeIngredientInline(admin.TabularInline):
     model = RecipeIngredient
     extra = 1
     autocomplete_fields = ['food']
-    fields = ('food', 'grams', 'scalable', 'swap_group', 'note')
+    fields = ('food', 'grams', 'line_nutrition', 'scalable', 'swap_group', 'note')
+    readonly_fields = ('line_nutrition',)
+    autocomplete_fields = ('food',)
+
+    @admin.display(description='this line')
+    def line_nutrition(self, obj):
+        """What this one amount contributes. A gram figure means nothing on its own;
+        180 g of rice is 234 kcal and 180 g of lettuce is 27, and the reviewer is
+        judging the plate, not the number."""
+        if obj is None or obj.pk is None or obj.food is None:
+            return '—'
+        grams, food = float(obj.grams or 0), obj.food
+        k = grams / 100.0
+        serving = describe(food, grams)
+        return format_html(
+            '<b>{}</b> &nbsp; {} kcal &nbsp; <span style="color:#666">P {} · C {} · F {}</span>',
+            serving,
+            round(float(food.calories or 0) * k),
+            round(float(food.protein or 0) * k, 1),
+            round(float(food.carbs or 0) * k, 1),
+            round(float(food.fat or 0) * k, 1))
 
 
 @admin.register(Recipe)
 class RecipeAdmin(TranslAdmin):
     """The recipe library had no write path: no admin, no endpoint, reachable only by
-    the seed command, so sixteen rows were the ceiling on culinary knowledge."""
-    list_display = ('name', 'cuisine', 'meal_types', 'prep_minutes', 'is_active', 'updated_at')
-    list_filter = ('cuisine', 'is_active')
+    the seed command, so sixteen rows were the ceiling on culinary knowledge.
+
+    It is also where the gram amounts get reviewed. 89 of the 105 dishes were written
+    to a macro target rather than to a plate, and no test can tell whether 180 g of
+    bulgur is what a Syrian kitchen serves. So this screen shows what each dish comes
+    to and what each line contributes, and `reviewed` tracks the pass.
+    """
+    list_display = ('name', 'reviewed_flag', 'cuisine', 'meal_types', 'dish_kcal',
+                    'dish_macros', 'line_count', 'prep_minutes', 'is_active')
+    list_filter = ('reviewed', 'cuisine', 'is_active')
+    list_editable = ('prep_minutes',)
     search_fields = ('name', 'description')
     inlines = [RecipeIngredientInline]
+    actions = ['mark_reviewed', 'mark_unreviewed']
+    readonly_fields = ('nutrition_panel', 'reviewed_at')
+    fieldsets = (
+        ('Dish', {'fields': ('name', 'description', 'cuisine', 'meal_types',
+                             'prep_minutes', 'instructions', 'image_url', 'is_active')}),
+        ('Review', {'fields': ('reviewed', 'reviewed_at', 'nutrition_panel'),
+                    'description': 'Check the gram amounts against a real plate, then tick reviewed.'}),
+    )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related('ingredients__food')
+
+    @admin.display(description='reviewed', ordering='reviewed', boolean=True)
+    def reviewed_flag(self, obj):
+        return obj.reviewed
+
+    @admin.display(description='kcal')
+    def dish_kcal(self, obj):
+        kcal = obj.nutrition()['calories']
+        # Red at the ends of the range: a 200 kcal main or a 1,200 kcal snack is a
+        # gram amount that slipped, and it is visible from the list without opening it.
+        colour = '#b00' if kcal < 150 or kcal > 1100 else '#111'
+        return format_html('<b style="color:{}">{}</b>', colour, round(kcal))
+
+    @admin.display(description='P / C / F')
+    def dish_macros(self, obj):
+        n = obj.nutrition()
+        return f"{n['protein']:.0f} / {n['carbs']:.0f} / {n['fat']:.0f}"
+
+    @admin.display(description='lines')
+    def line_count(self, obj):
+        return len(obj.ingredients.all())
+
+    @admin.display(description='Nutrition of one serving as written')
+    def nutrition_panel(self, obj):
+        if obj is None or obj.pk is None:
+            return 'Save the dish first, then its lines appear here.'
+        n = obj.nutrition()
+        rows = ''.join(
+            '<tr><td style="padding:2px 12px 2px 0">{}</td>'
+            '<td style="padding:2px 12px 2px 0">{}</td>'
+            '<td style="padding:2px 12px 2px 0">{} g</td>'
+            '<td style="padding:2px 12px 2px 0">{} kcal</td></tr>'.format(
+                line.food.name, describe(line.food, float(line.grams or 0)),
+                round(float(line.grams or 0)),
+                round(float(line.food.calories or 0) * float(line.grams or 0) / 100))
+            for line in obj.ingredients.all() if line.food)
+        return format_html(
+            '<table style="border-collapse:collapse">{}</table>'
+            '<p style="margin-top:8px"><b>{} kcal</b> &nbsp; protein {} g &nbsp; '
+            'carbs {} g &nbsp; fat {} g</p>',
+            format_html(rows), n['calories'], n['protein'], n['carbs'], n['fat'])
+
+    @admin.action(description='Mark selected dishes reviewed')
+    def mark_reviewed(self, request, queryset):
+        n = queryset.update(reviewed=True, reviewed_at=timezone.now())
+        self.message_user(request, f"{n} dish(es) marked reviewed.", messages.SUCCESS)
+
+    @admin.action(description='Mark selected dishes NOT reviewed')
+    def mark_unreviewed(self, request, queryset):
+        n = queryset.update(reviewed=False, reviewed_at=None)
+        self.message_user(request, f"{n} dish(es) sent back for review.", messages.SUCCESS)
 
 
 @admin.register(UserFoodWeight)
