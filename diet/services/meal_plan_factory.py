@@ -40,6 +40,8 @@ class MealPlanFactory:
     @staticmethod
     def _compose_name(ai_meal: AIMeal, lang: str = "en") -> str:
         """"Chicken, Rice and Broccoli" from the components; "دجاج، أرز وبروكلي" in Arabic."""
+        from diet.planner.recipes import plain_name
+
         if lang == "ar":
             names = [ing.name_ar or ing.name for ing in ai_meal.ingredients][:4]
             if not names:
@@ -47,7 +49,9 @@ class MealPlanFactory:
             if len(names) == 1:
                 return names[0]
             return "، ".join(names[:-1]) + " و" + names[-1]
-        names = [ing.name for ing in ai_meal.ingredients][:4]
+        # Without the catalogue qualifier: "Cottage Cheese, Whole Wheat Bread, Green
+        # Peas and Apple", not "Cottage Cheese (Low-Fat), ... Green Peas (Cooked) ...".
+        names = [plain_name(ing) for ing in ai_meal.ingredients][:4]
         if not names:
             return ai_meal.meal_type or 'Meal'
         if len(names) == 1:

@@ -39,12 +39,12 @@ class RecipeMatch:
     def name(self) -> str:
         base = getattr(self.recipe, "name", "meal")
         if self.substituted is not None:
-            new = getattr(self.substituted, "name", "your choice")
-            old = getattr(self.replaced, "name", None)
+            new = plain_name(self.substituted)
+            old = plain_name(self.replaced) if self.replaced is not None else None
             base = f"{base} ({new} instead of {old})" if old else f"{base} (with {new})"
         if not self.extras:
             return base
-        return f"{base} + {' + '.join(getattr(f, 'name', str(f)) for f in self.extras)}"
+        return f"{base} + {' + '.join(plain_name(f) for f in self.extras)}"
 
     @property
     def name_ar(self) -> str:
@@ -60,6 +60,18 @@ class RecipeMatch:
         if not self.extras:
             return base
         return f"{base} + {' + '.join(ar(f) for f in self.extras)}"
+
+
+def plain_name(food) -> str:
+    """A food's name without its catalogue qualifier.
+
+    The catalogue distinguishes "Pita Bread (White)" from "Pita Bread (Whole Wheat)"
+    and that belongs in a food list. Inside a meal title it nests parentheses inside
+    parentheses — "Labneh with Honey (Pita Bread (White) instead of Pita Bread (Whole
+    Wheat))" — which no one would write down. The Arabic names never carried them.
+    """
+    name = getattr(food, "name", None) or str(food)
+    return name.split(" (")[0].strip() or name
 
 
 def _recipe_lines(recipe) -> List[Tuple[object, float, bool]]:
@@ -215,7 +227,7 @@ def _augment(match: RecipeMatch, lines, targets, policy, pool, meal_name, edges,
                        substituted=match.substituted, replaced=match.replaced)
 
 
-def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids):
+def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids, recipe_name=""):
     """Put a food the client chose for this meal into the dish, in place of the line
     it most resembles, when that line is a substitute for it.
 
@@ -229,9 +241,16 @@ def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids):
     if not chosen_ids or index is None:
         return lines, None, None
     present = {getattr(f, "id", None) for f, _g, _s in lines}
+    title = (recipe_name or "").lower()
     best = None  # (similarity, line_index, chosen_food)
     for i, (food, grams, scalable) in enumerate(lines):
         if not scalable:
+            continue
+        # Never the ingredient the dish is named after. "Lentil Soup with Greens
+        # (Chickpeas instead of Lentils)" is a lentil soup with no lentils in it, and
+        # that is not the client's choice reaching a dish — it is a different dish
+        # wearing its name.
+        if title and plain_name(food).lower() in title:
             continue
         slot = classify_food(food)
         # Sorted: a frozenset iterates in id-hash order, and an exact tie in
@@ -241,6 +260,11 @@ def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids):
                 continue
             chosen = index.foods.get(cid)
             if chosen is None or classify_food(chosen) != slot:
+                continue
+            # Two qualifiers of one food are the same food to a reader: swapping
+            # "Pita Bread (Whole Wheat)" for "Pita Bread (White)" announces a change
+            # nobody asked for and nobody can see.
+            if plain_name(chosen).lower() == plain_name(food).lower():
                 continue
             sim = index.similarity(cid, food.id)
             if sim >= policy.similarity_threshold:
@@ -347,7 +371,8 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         substituted = replaced = None
         if index is not None and pool is not None:
             lines, substituted, replaced = _substitute_chosen(
-                lines, pool, meal_name, policy, index, chosen_ids)
+                lines, pool, meal_name, policy, index, chosen_ids,
+                recipe_name=getattr(recipe, "name", ""))
 
         # Every hard constraint, not just allergens. This checked allergies and nothing
         # else, so a dish built on a food the client had explicitly rejected was served

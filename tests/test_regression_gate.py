@@ -3841,3 +3841,27 @@ def test_food_search_offers_only_what_can_be_chosen(seeded_catalogue):
         assert body["edamam_count"] == 0
         assert all(f["selectable"] and isinstance(f["id"], int) for f in body["results"])
     assert c.get("/api/diet/v1/food/search/").status_code == 400
+
+
+def test_a_meal_title_reads_like_something_a_person_would_write(seeded_catalogue):
+    """The catalogue's qualifiers belong in a food list, not in a meal title: clients
+    were reading "Labneh with Honey (Pita Bread (White) instead of Pita Bread (Whole
+    Wheat))". And a substitution must never replace the ingredient the dish is named
+    after — a lentil soup with chickpeas instead of lentils is a different dish."""
+    from diet.models import Meal
+    from tests.diet_quality import _generate
+
+    user, _chosen = _chooser("title-gate")
+    plan = _generate(user, user.calculate_daily_calories(), 7, "titles")
+    assert plan is not None
+    names = [(m.name, m.name_ar, m.recipe.name if m.recipe else "") for m in
+             Meal.objects.filter(diet_plan=plan).select_related("recipe")]
+    assert names
+    for name, name_ar, dish in names:
+        assert name.count("(") <= 1, f"nested parentheses in {name!r}"
+        assert name and name_ar
+        if " instead of " in name:
+            replaced = name.split(" instead of ")[1].split(")")[0].strip().lower()
+            assert replaced not in dish.lower(), f"{dish!r} lost its namesake: {name!r}"
+            new = name.split("(")[1].split(" instead of ")[0].strip().lower()
+            assert new != replaced, f"a substitution nobody can see: {name!r}"

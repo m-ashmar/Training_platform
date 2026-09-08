@@ -55,7 +55,7 @@ NAMES_AR = {
     'Banana Almond Snack': 'موز ولوز',
     'Greek Yogurt Protein Bowl': 'طبق لبن يوناني بالبروتين',
     'Salmon Rice Bowl': 'طبق سلمون مع أرز',
-    'Lentils and Rice (Mujadara style)': 'عدس وأرز على طريقة المجدرة',
+    'Mujadara Style Lentils and Rice': 'عدس وأرز على طريقة المجدرة',
     'Avocado Toast with Eggs': 'توست أفوكادو مع بيض',
     'Almond Butter Oat Bowl': 'طبق شوفان بزبدة اللوز',
     'Salmon and Avocado Breakfast': 'فطور سلمون وأفوكادو',
@@ -95,7 +95,7 @@ NAMES_AR = {
     'Stuffed Grape Leaves Plate': 'صحن ورق عنب محشي',
     'Chicken Shawarma Plate': 'صحن شاورما دجاج',
     'Lamb Liver with Onion': 'كبدة غنم بالبصل',
-    'Eggplant Moussaka (Levantine)': 'مسقعة باذنجان',
+    'Levantine Eggplant Moussaka': 'مسقعة باذنجان',
     'Spinach and Onion with Pita': 'سبانخ بالبصل مع خبز',
     'Green Beans in Olive Oil with Rice': 'فاصولياء خضراء بالزيت مع أرز',
     'Peas with Beef and Rice': 'بازلاء باللحم مع أرز',
@@ -151,7 +151,7 @@ RECIPES = [
     ("Salmon Rice Bowl", ["Lunch"], "Mediterranean", 25, [
         ("Salmon", 130, True), ("White Rice", 170, True),
         ("Broccoli", 100, True), ("Olive Oil", 6, True)]),
-    ("Lentils and Rice (Mujadara style)", ["Lunch", "Dinner"], "Levantine", 45, [
+    ("Mujadara Style Lentils and Rice", ["Lunch", "Dinner"], "Levantine", 45, [
         ("Lentils", 150, True), ("White Rice", 120, True), ("Olive Oil", 10, True)]),
     # Higher-fat breakfasts. The first library skewed low-fat, so a 700 kcal breakfast
     # target with ~17 g fat had nothing that fit and fell back to component assembly.
@@ -288,7 +288,7 @@ RECIPES = [
     ("Lamb Liver with Onion", ["Lunch", "Dinner"], "Levantine", 20, [
         ("Liver (Lamb)", 150, True), ("Onion", 100, True), ("Extra Virgin Olive Oil", 10, True),
         ("Pita Bread (White)", 80, True), ("Lemon", 20, True), ("Parsley", 10, True)]),
-    ("Eggplant Moussaka (Levantine)", ["Lunch", "Dinner"], "Levantine", 45, [
+    ("Levantine Eggplant Moussaka", ["Lunch", "Dinner"], "Levantine", 45, [
         ("Eggplant", 250, True), ("Chickpeas (Cooked)", 120, True), ("Tomato", 150, True),
         ("Onion", 60, True), ("Extra Virgin Olive Oil", 14, True), ("Pita Bread (White)", 60, True)]),
     ("Spinach and Onion with Pita", ["Lunch", "Dinner"], "Levantine", 25, [
@@ -465,7 +465,11 @@ RECIPES = [
 #: because the catalogue holds none, and "Avocado Toast with Eggs" carried oats and no
 #: bread while the catalogue held six breads. Renaming here rather than in the table
 #: alone, so a database that already ran the seed converges too.
-RENAMED = {"Chicken Freekeh Bowl": "Chicken and Rice with Spinach"}
+# A dish whose own name carries a parenthetical nests inside a substitution:
+# "Lentils and Rice (Mujadara style) (Quinoa instead of White Rice)".
+RENAMED = {"Chicken Freekeh Bowl": "Chicken and Rice with Spinach",
+           "Lentils and Rice (Mujadara style)": "Mujadara Style Lentils and Rice",
+           "Eggplant Moussaka (Levantine)": "Levantine Eggplant Moussaka"}
 
 
 class Command(BaseCommand):

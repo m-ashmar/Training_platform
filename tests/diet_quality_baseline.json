@@ -1,52 +1,52 @@
 {
-  "_comment": "Diet engine quality baseline, re-recorded after Phases A-E (76-recipe library, 136-food catalogue). chosen_ingredient_share: the earlier 0.379 was measured while the recipe path was dead for any client who had chosen foods (a loop variable shadowed the similarity index; the planner failed open to templates), so it graded template-only plates. preference_satisfaction (D1) is the recall side: of the foods the chooser picked for a slot, the share that reached that slot's plate at least once in the week. Phase C made variety a week-level objective: a dish's sampling weight falls with its servings in the last seven days, and a dish already served WEEK_MAX_SERVINGS (2) times loses the judge to any fitting built plate. That cap is why distinct_dishes moved 81 -> 79 and dish_rate 0.839 -> 0.774: at a 1,133 kcal breakfast one dish reaches the target and was served six days of seven; those days are now built plates. Measured caps 3 and 4 give dish 0.792 / 0.815 with worst repeats 3 / 4. The gate asserts these as bounds in the direction of improvement. Re-recorded after the independent review: the harness now plans from a fixed date (the seed used to include today's date), dishes are counted by recipe identity rather than by name (substitution suffixes had inflated distinct_dishes), the template solver and the judge use the engine's one rule (inside tolerance first), the judge scores the served plate, augmentation can reach dishes the reach filter used to discard, and the library holds 105 dishes (23 for the ends of the calorie range, 6 protein-dense light dinners). max_repeats_per_client_week is 4, not 2, because the judge no longer serves an off-target plate to avoid a repeat (a reviewer's finding): a 1,200 kcal client's snack carries the day's protein residual, and only one snack dish fits it on three days. That is the library at the end of the calorie range, listed under after-launch, not the sampler: a dish at the cap is never sampled while another fitting dish exists.",
+  "_comment": "Diet engine quality baseline, re-recorded after Phases A-E (76-recipe library, 136-food catalogue). chosen_ingredient_share: the earlier 0.379 was measured while the recipe path was dead for any client who had chosen foods (a loop variable shadowed the similarity index; the planner failed open to templates), so it graded template-only plates. preference_satisfaction (D1) is the recall side: of the foods the chooser picked for a slot, the share that reached that slot's plate at least once in the week. Phase C made variety a week-level objective: a dish's sampling weight falls with its servings in the last seven days, and a dish already served WEEK_MAX_SERVINGS (2) times loses the judge to any fitting built plate. That cap is why distinct_dishes moved 81 -> 79 and dish_rate 0.839 -> 0.774: at a 1,133 kcal breakfast one dish reaches the target and was served six days of seven; those days are now built plates. Measured caps 3 and 4 give dish 0.792 / 0.815 with worst repeats 3 / 4. The gate asserts these as bounds in the direction of improvement. Re-recorded after the independent review: the harness now plans from a fixed date (the seed used to include today's date), dishes are counted by recipe identity rather than by name (substitution suffixes had inflated distinct_dishes), the template solver and the judge use the engine's one rule (inside tolerance first), the judge scores the served plate, augmentation can reach dishes the reach filter used to discard, and the library holds 105 dishes (23 for the ends of the calorie range, 6 protein-dense light dinners). max_repeats_per_client_week is 4, not 2, because the judge no longer serves an off-target plate to avoid a repeat (a reviewer's finding): a 1,200 kcal client's snack carries the day's protein residual, and only one snack dish fits it on three days. That is the library at the end of the calorie range, listed under after-launch, not the sampler: a dish at the cap is never sampled while another fitting dish exists. chosen_ingredient_share falls 0.325 -> 0.290 and preference_satisfaction 0.750 -> 0.688 deliberately: a substitution may no longer replace the ingredient a dish is named after, nor swap one qualifier of a food for another. 'Lentil Soup with Greens (Chickpeas instead of Lentils)' had been counted as a chosen food reaching a dish; it is a different dish wearing the name, and no client would accept it. Dish rate rises 0.833 -> 0.845 in the same measurement.",
   "recorded": "2026-09-09",
   "catalogue": {
     "foods": 136,
     "recipes": 105
   },
   "measured": {
-    "dish_rate_overall": 0.8333,
+    "dish_rate_overall": 0.8452,
     "dish_rate_by_slot": {
       "Breakfast": 0.8571,
-      "Lunch": 0.8095,
-      "Dinner": 0.881,
-      "Snack": 0.7857
+      "Lunch": 0.8571,
+      "Dinner": 0.9048,
+      "Snack": 0.7619
     },
     "meals_measured": 168,
-    "distinct_dishes": 60,
-    "max_repeats_of_one_dish": 9,
+    "distinct_dishes": 61,
+    "max_repeats_of_one_dish": 8,
     "absurd_portion_rate": 0.0,
     "max_repeats_by_slot": {
-      "Lunch": 3,
+      "Lunch": 4,
       "Dinner": 5,
-      "Snack": 8,
+      "Snack": 7,
       "Breakfast": 4
     },
     "distinct_dishes_by_slot": {
-      "Lunch": 22,
-      "Dinner": 18,
+      "Lunch": 24,
+      "Dinner": 16,
       "Snack": 11,
       "Breakfast": 20
     },
     "days_repeating_a_dish": 0,
-    "portions_measured": 796,
+    "portions_measured": 807,
     "min_distinct_portions_per_food": 1,
     "drift_by_target": {
       "1400": 0.332,
       "1800": -2.539,
-      "2200": -0.754,
+      "2200": -2.706,
       "2600": -2.219,
       "3000": -2.272
     },
     "drift_all_one_sided": false,
-    "drift_worst_abs": 2.539,
+    "drift_worst_abs": 2.706,
     "twin_identical_meals": 0,
     "twin_total_meals": 28,
     "twin_identical_built": 0,
-    "twin_built_meals": 5,
-    "chosen_ingredient_share": 0.3252,
-    "preference_satisfaction": 0.75,
+    "twin_built_meals": 6,
+    "chosen_ingredient_share": 0.2901,
+    "preference_satisfaction": 0.6875,
     "max_repeats_per_client_week": 4,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],

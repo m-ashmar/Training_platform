@@ -49,10 +49,12 @@ def target_payload(by_slot: Dict[str, object], meal) -> Dict[str, float]:
 
 
 def _composed_name(meal, lang: str) -> str:
+    from diet.planner.recipes import plain_name
+
     names = []
     for c in list(meal.components.all())[:4]:
         f = c.food
-        names.append((getattr(f, "name_ar", None) or f.name) if lang == "ar" else f.name)
+        names.append((getattr(f, "name_ar", None) or f.name) if lang == "ar" else plain_name(f))
     if not names:
         return ""
     if len(names) == 1:
