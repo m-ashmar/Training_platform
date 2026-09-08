@@ -224,6 +224,53 @@ Both screens are registered on `/dj-admin/`, the site the owner uses. That site 
 own simpler `FoodItemAdmin` and no `Recipe` at all, so the library was unreachable from
 the admin that matters. One definition now, registered on both.
 
+## I — The trainer path
+
+Reviewed end to end for the first time. The client side was hardened; this side had
+never been looked at, and it held the worst defect in the codebase.
+
+**A trainer could take over any unassigned client's account in two calls.**
+`trainer/assign-client/` created a pending relation, and `trainer/respond-to-request/`
+approved it — the same trainer on both sides. `assigned_trainer` was then set, and with
+it went that person's height, weight, goals, training history and write access to their
+diet plan, without them ever being asked. `TrainerClientRelation.initiated_by` (migration
+users/0033) records which side asked; each side may only approve what the other one
+requested. A trainer's assign-client is now an invitation, with two new endpoints for the
+client to see and answer it: `client/trainer-invites/` and `client/respond-to-invite/`.
+One approval implementation serves both sides, and it holds the trainer's charge in
+escrow **before** granting the relation rather than after.
+
+**A trainer could strip another trainer's client.** Unassign matched a relation of any
+status, so an intruder created a pending row and then cleared `assigned_trainer`, leaving
+the real trainer's approved row behind and the two records disagreeing. It now requires
+an approved relation of one's own.
+
+**Authority granted once was never revoked.** Create, update and delete authorised on
+`created_by` alone, so a trainer the client had dismissed could still rewrite or delete
+every meal of that client's live plan. One gate now: author *and* still this client's
+trainer, where being their trainer means both the pointer and an approved relation.
+
+**The trainer write path was a second, unvalidated engine.** No transaction, so a
+failing line left a half-written meal; no `meal_type` check, so "Brunch" was persisted
+and then matched no slot downstream; no gram bounds, so a negative quantity became
+negative calories on the client's progress screen; no plan-window check, so a meal could
+be written to a date the client can never see; and none of the fields the client payload
+was rebuilt around, so a hand-written meal arrived with no title and no reason. All
+validated and atomic now, and a trainer meal carries its name and reason in both
+languages like every other meal.
+
+**Trainer plan creation could not succeed at all** for any client who already had an
+active plan, because the model refuses two over one window — and it failed as an opaque
+400. Creating a plan retires the one it replaces, inside a transaction, and sets the same
+macro targets a generated plan carries instead of leaving them null.
+
+Also: five handlers turned every authorization refusal into `400 "Request could not be
+completed."`, so the app could not tell "not your client" from a server fault; admins
+were locked out of every trainer diet endpoint; the plan list ran two queries per plan;
+`/routine/trainer/client-progress/abc/` was a 500; the routine template generator
+crashed on a bad date and would build half a million rows for `days: 500000`; and a
+block of unreachable code referenced names that do not exist in its scope.
+
 ## Release steps
 
 1. `python manage.py migrate` (0059 name_ar/reason_ar, 0060 MealEvent + swap similarity,

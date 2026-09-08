@@ -5,6 +5,7 @@ This module provides services for trainers to create and manage diet plans for t
 Includes template management, meal scheduling, and nutritional calculations.
 """
 
+import logging
 from typing import List, Dict, Any, Optional
 from datetime import date, timedelta, time
 from django.db import transaction
@@ -19,6 +20,8 @@ from .models import (
     FoodItem, DailyProgress
 )
 from users.models import CustomUser
+
+logger = logging.getLogger(__name__)
 
 class TrainerDietPlanService:
     """
@@ -102,22 +105,53 @@ class TrainerDietPlanService:
         from .validators import DietInputValidator
         daily_calories = DietInputValidator.validate_daily_calories(daily_calories)
 
-        # Calculate end date
+        try:
+            duration_weeks = int(duration_weeks)
+        except (TypeError, ValueError):
+            raise ValidationError(_("duration_weeks must be a whole number"),
+                                  code="bad_duration")
+        if not 1 <= duration_weeks <= 52:
+            raise ValidationError(_("duration_weeks must be between 1 and 52"),
+                                  code="bad_duration")
+
         end_date = start_date + timedelta(weeks=duration_weeks)
-        
-        # Create the diet plan
-        diet_plan = DietPlan.objects.create(
-            user=client,
-            goal=DietPlan.normalise_goal(goal),
-            daily_calories=daily_calories,
-            start_date=start_date,
-            end_date=end_date,
-            duration_weeks=duration_weeks,
-            generation_strategy='TRAINER',
-            template=template,
-            created_by=self.trainer
-        )
-        
+        resolved_goal = DietPlan.normalise_goal(goal)
+
+        # The same macro split the deterministic planner builds to. A trainer plan
+        # left these null, so the client's progress screen fell back to a generic
+        # ratio and disagreed with every generated plan about the same numbers.
+        from diet.planner.policy import load_policy
+        from diet.planner.targets import day_macro_grams
+        macros = day_macro_grams(float(daily_calories), load_policy(resolved_goal),
+                                 getattr(client, 'weight', None))
+
+        # One active plan per client per window is a model constraint, and it made
+        # trainer plan creation fail with an opaque 400 for any client who already
+        # had one — which is every client the engine has ever served. Retiring the
+        # overlap is what the trainer means by "here is your new plan".
+        with transaction.atomic():
+            superseded = DietPlan.objects.filter(
+                user=client, is_active=True,
+                start_date__lte=end_date, end_date__gte=start_date,
+            ).update(is_active=False)
+
+            diet_plan = DietPlan.objects.create(
+                user=client,
+                goal=resolved_goal,
+                daily_calories=daily_calories,
+                target_protein=macros['protein'],
+                target_carbs=macros['carb'],
+                target_fat=macros['fat'],
+                start_date=start_date,
+                end_date=end_date,
+                duration_weeks=duration_weeks,
+                generation_strategy='TRAINER',
+                template=template,
+                created_by=self.trainer
+            )
+        if superseded:
+            logger.info("Trainer %s replaced %s active plan(s) for client %s",
+                        self.trainer.id, superseded, client.id)
         return diet_plan
     
     def add_meal_to_plan(
@@ -143,30 +177,42 @@ class TrainerDietPlanService:
         Returns:
             Created Meal instance
         """
-        # Validate trainer can manage this plan
-        if diet_plan.created_by != self.trainer:
-            raise ValidationError(_("You can only modify diet plans you created"), code="not_plan_owner")
-        
-        # Create the meal
-        meal = Meal.objects.create(
-            diet_plan=diet_plan,
-            meal_type=meal_type,
-            date=target_date,
-            scheduled_time=scheduled_time,
-            description=description,
-            is_ai_generated=False
-        )
-        
-        # Add meal components
-        for food_data in food_items:
-            food_item = FoodItem.objects.get(id=food_data['food_id'])
-            MealComponent.objects.create(
-                meal=meal,
-                food=food_item,
-                quantity=food_data['quantity'],
-                meal_time=meal_type
+        self._authorize_plan(diet_plan)
+
+        # `choices` is a form-layer rule; nothing called full_clean(), so "Brunch" was
+        # persisted and then matched no slot in the target split downstream.
+        if meal_type not in dict(Meal.MEAL_TYPES):
+            raise ValidationError(_("%(value)s is not a meal type") % {"value": meal_type},
+                                  code="bad_meal_type")
+        if diet_plan.start_date and diet_plan.end_date and not (
+                diet_plan.start_date <= target_date <= diet_plan.end_date):
+            raise ValidationError(
+                _("That date is outside the plan (%(a)s to %(b)s)")
+                % {"a": diet_plan.start_date, "b": diet_plan.end_date},
+                code="date_outside_plan")
+
+        components = self._validated_items(food_items, meal_type)
+        name, name_ar, reason, reason_ar = self._meal_names(meal_type, components)
+
+        # Atomic. A second line failing left the Meal row and the first component
+        # behind, so the client saw a half-written meal the trainer never saved.
+        with transaction.atomic():
+            meal = Meal.objects.create(
+                diet_plan=diet_plan,
+                meal_type=meal_type,
+                date=target_date,
+                scheduled_time=scheduled_time,
+                description=description,
+                is_ai_generated=False,
+                name=name[:160],
+                name_ar=name_ar[:160],
+                reason=reason[:200],
+                reason_ar=reason_ar[:200],
             )
-        
+            MealComponent.objects.bulk_create([
+                MealComponent(meal=meal, food=food, quantity=grams, meal_time=meal_type)
+                for food, grams in components
+            ])
         return meal
     
     def update_meal(
@@ -188,32 +234,29 @@ class TrainerDietPlanService:
         Returns:
             Updated Meal instance
         """
-        # Validate trainer can manage this meal
-        if meal.diet_plan.created_by != self.trainer:
-            raise ValidationError(_("You can only modify meals in plans you created"), code="not_meal_owner")
-        
-        # Update meal fields
-        if scheduled_time is not None:
-            meal.scheduled_time = scheduled_time
-        if description is not None:
-            meal.description = description
-        meal.save()
-        
-        # Update food items if provided
-        if food_items is not None:
-            # Remove existing components
-            meal.components.all().delete()
-            
-            # Add new components
-            for food_data in food_items:
-                food_item = FoodItem.objects.get(id=food_data['food_id'])
-                MealComponent.objects.create(
-                    meal=meal,
-                    food=food_item,
-                    quantity=food_data['quantity'],
-                    meal_time=meal.meal_type
-                )
-        
+        self._authorize_plan(meal.diet_plan)
+
+        components = (self._validated_items(food_items, meal.meal_type)
+                      if food_items is not None else None)
+
+        # Atomic, because the old components are deleted before the new ones exist:
+        # a failure halfway through emptied the client's meal.
+        with transaction.atomic():
+            if scheduled_time is not None:
+                meal.scheduled_time = scheduled_time
+            if description is not None:
+                meal.description = description
+            if components is not None:
+                name, name_ar, reason, reason_ar = self._meal_names(meal.meal_type, components)
+                meal.name, meal.name_ar = name[:160], name_ar[:160]
+                meal.reason, meal.reason_ar = reason[:200], reason_ar[:200]
+                meal.components.all().delete()
+                MealComponent.objects.bulk_create([
+                    MealComponent(meal=meal, food=food, quantity=grams,
+                                  meal_time=meal.meal_type)
+                    for food, grams in components
+                ])
+            meal.save()
         return meal
     
     def delete_meal(self, meal: Meal) -> bool:
@@ -226,10 +269,7 @@ class TrainerDietPlanService:
         Returns:
             True if deleted successfully
         """
-        # Validate trainer can manage this meal
-        if meal.diet_plan.created_by != self.trainer:
-            raise ValidationError(_("You can only delete meals in plans you created"), code="not_meal_delete_owner")
-        
+        self._authorize_plan(meal.diet_plan)
         meal.delete()
         return True
     
@@ -246,10 +286,16 @@ class TrainerDietPlanService:
         if not self._can_manage_client(client):
             raise ValidationError(_("You can only view diet plans for your assigned clients"), code="not_assigned_view")
         
-        return DietPlan.objects.filter(
-            user=client,
-            created_by=self.trainer
-        ).order_by('-start_date')
+        # Counted in the query and the template fetched with it: the view read
+        # `plan.meals.count()` and `plan.template` per row, so a trainer with a long
+        # history paid two queries per plan to render one list.
+        from django.db.models import Count
+
+        return (DietPlan.objects
+                .filter(user=client, created_by=self.trainer)
+                .select_related('template')
+                .annotate(meals_count=Count('meals'))
+                .order_by('-start_date')[:200])
     
     def get_plan_nutrition_summary(self, diet_plan: DietPlan, target_date: date = None) -> Dict[str, Any]:
         """
@@ -300,8 +346,101 @@ class TrainerDietPlanService:
         Returns:
             True if trainer can manage this client
         """
-        # Check if client is assigned to this trainer
-        return client.assigned_trainer == self.trainer
+        # Both halves. `assigned_trainer` is the pointer the app reads, and the
+        # approved relation is the record of consent; a trainer who was unassigned
+        # keeps neither. This used to be the pointer alone.
+        if client.assigned_trainer_id != self.trainer.id:
+            return False
+        from users.models import TrainerClientRelation
+        return TrainerClientRelation.objects.filter(
+            trainer=self.trainer, client=client, status='approved').exists()
+
+    def _authorize_plan(self, diet_plan: DietPlan) -> None:
+        """Every write to a plan, checked the same way.
+
+        Authorship alone was the test, so authority granted once was never revoked:
+        a trainer the client had dismissed could still rewrite or delete every meal of
+        that client's live plan, because they had created it. Being the author AND
+        still being this client's trainer are both required.
+        """
+        if diet_plan.created_by_id != self.trainer.id:
+            raise ValidationError(_("You can only modify diet plans you created"),
+                                  code="not_plan_owner")
+        if not self._can_manage_client(diet_plan.user):
+            raise ValidationError(_("This client is no longer assigned to you"),
+                                  code="not_assigned_client")
+
+    #: What a person can be served in one sitting. A trainer typing 5000 into a
+    #: quantity box wrote it straight to the column, and every reader multiplies it.
+    MAX_COMPONENT_GRAMS = 2000.0
+
+    def _validated_items(self, food_items, meal_type: str):
+        """Turn the request's food list into rows we are willing to persist.
+
+        Nothing here was checked: a missing food id raised `DoesNotExist` into a
+        generic 400, a negative quantity became negative calories on the client's
+        progress screen, and two lines naming the same food hit the unique constraint
+        halfway through and left the meal half-built.
+        """
+        if not food_items:
+            raise ValidationError(_("A meal needs at least one food"), code="no_food_items")
+        if not isinstance(food_items, (list, tuple)):
+            raise ValidationError(_("food_items must be a list"), code="bad_food_items")
+
+        seen, rows = set(), []
+        for entry in food_items:
+            if not isinstance(entry, dict):
+                raise ValidationError(_("Each food item must be an object"), code="bad_food_item")
+            try:
+                food_id = int(entry.get('food_id'))
+                grams = float(entry.get('quantity'))
+            except (TypeError, ValueError):
+                raise ValidationError(_("Each food item needs a numeric food_id and quantity"),
+                                      code="bad_food_item")
+            if not 0 < grams <= self.MAX_COMPONENT_GRAMS:
+                raise ValidationError(
+                    _("Quantity for food %(id)s must be between 0 and %(max)d grams")
+                    % {"id": food_id, "max": int(self.MAX_COMPONENT_GRAMS)},
+                    code="bad_quantity")
+            if food_id in seen:
+                raise ValidationError(
+                    _("Food %(id)s appears twice in this meal") % {"id": food_id},
+                    code="duplicate_food")
+            seen.add(food_id)
+            rows.append((food_id, grams))
+
+        found = FoodItem.objects.in_bulk([fid for fid, _g in rows])
+        missing = [fid for fid, _g in rows if fid not in found]
+        if missing:
+            raise ValidationError(_("No such food: %(ids)s") % {"ids": missing},
+                                  code="unknown_food")
+        return [(found[fid], grams) for fid, grams in rows]
+
+    @staticmethod
+    def _meal_names(meal_type: str, components):
+        """The title and reason the client app reads, in both languages.
+
+        A trainer meal set none of them, so a hand-written meal reached the client with
+        an empty reason where a generated one explains itself.
+        """
+        from diet.planner.recipes import plain_name
+
+        en = [plain_name(f) for f, _g in components][:4]
+        ar = [(getattr(f, 'name_ar', None) or f.name) for f, _g in components][:4]
+
+        def join(parts, sep, last):
+            if not parts:
+                return ''
+            if len(parts) == 1:
+                return parts[0]
+            return sep.join(parts[:-1]) + last + parts[-1]
+
+        slot_ar = {'Breakfast': 'الفطور', 'Lunch': 'الغداء',
+                   'Dinner': 'العشاء', 'Snack': 'الوجبة الخفيفة'}.get(meal_type, meal_type)
+        return (join(en, ', ', ' and ') or meal_type,
+                join(ar, '، ', ' و') or slot_ar,
+                "chosen for you by your trainer",
+                f"اختارها لك مدربك لوجبة {slot_ar}")
 
 class ClientProgressService:
     """

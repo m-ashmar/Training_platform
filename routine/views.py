@@ -1731,15 +1731,31 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         end_date = request.data.get('end_date')
         routine_days = request.data.get('days')
 
+        # Parsed, not assumed, and bounded. `strptime` on "2026-13-45" raised into the
+        # generic handler as a 500, and `days: 500000` built half a million exercise
+        # rows in memory before bulk_create was ever reached.
+        MAX_GENERATED_DAYS = 365
         if start_date and end_date and not routine_days:
-            from datetime import datetime
-            d1 = datetime.strptime(start_date, '%Y-%m-%d').date()
-            d2 = datetime.strptime(end_date, '%Y-%m-%d').date()
-            routine_days = max(1, (d2 - d1).days + 1)
+            d1, d2 = parse_date(str(start_date)), parse_date(str(end_date))
+            if not d1 or not d2:
+                return Response({'error': 'start_date and end_date must be YYYY-MM-DD'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if d2 < d1:
+                return Response({'error': 'end_date is before start_date'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            routine_days = (d2 - d1).days + 1
         elif routine_days:
-            routine_days = int(routine_days)
+            try:
+                routine_days = int(routine_days)
+            except (TypeError, ValueError):
+                return Response({'error': 'days must be a whole number'},
+                                status=status.HTTP_400_BAD_REQUEST)
         else:
             routine_days = template.days
+        if not 1 <= int(routine_days) <= MAX_GENERATED_DAYS:
+            return Response({'error': f'days must be between 1 and {MAX_GENERATED_DAYS}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        routine_days = int(routine_days)
 
         # Create Routine for client
         from .models import Routine, RoutineExercise
@@ -2494,7 +2510,10 @@ class ExerciseAddMediaView(APIView):
 class TrainerClientProgressViewSet(viewsets.ViewSet):
     permission_classes = [IsTrainerOrAdmin]
 
-    @action(detail=False, methods=['get'], url_path='(?P<client_id>[^/.]+)')
+    # Digits only. `[^/.]+` matched anything, so /client-progress/abc/ reached the
+    # ORM as a filter on an integer column and raised ValueError — a 500 on a URL any
+    # crawler can construct.
+    @action(detail=False, methods=['get'], url_path='(?P<client_id>[0-9]+)')
     def client_progress(self, request, client_id=None):
         """
         Optimized client progress with prefetched data.
@@ -2609,28 +2628,6 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                 'error': 'Client not found.'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        if not latest_progress:
-            return Response({
-                'client_info': {
-                    'id': client.id,
-                    'name': client.username,
-                    'full_name': client.full_name,
-                    'profile_picture': client.profile_picture.url if client.profile_picture else None,
-                    'last_workout': None,
-                    'total_workouts': 0,
-                    'completion_rate': 0.0
-                },
-                'recent_sessions': [],
-                'progress_summary': {
-                    'this_week': {'sessions': 0, 'total_volume': 0, 'exercises_completed': 0},
-                    'this_month': {'sessions': 0, 'total_volume': 0, 'exercises_completed': 0}
-                }
-            })
-        
-        # Use the enhanced serializer
-        serializer = DetailedClientProgressSerializer(latest_progress)
-        return Response(serializer.data)
-
     @action(detail=False, methods=['get'], url_path='recent')
     def recent_progress(self, request):
         """

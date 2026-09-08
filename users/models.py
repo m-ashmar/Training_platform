@@ -588,6 +588,15 @@ class TrainerClientRelation(models.Model):
         limit_choices_to={'user_type': 'client'}
     )
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    #: Who asked. Without it, "approve this pending request" could be aimed at a row
+    #: the approver had created themselves: a trainer called assign-client on any
+    #: unassigned client, then approved their own row, and owned that person's body
+    #: metrics, training history and diet plan without the client ever being asked.
+    #: A request is approved by the OTHER party, and this is what says who that is.
+    INITIATOR_CHOICES = [('client', 'Client'), ('trainer', 'Trainer')]
+    initiated_by = models.CharField(
+        max_length=8, choices=INITIATOR_CHOICES, default='client', db_index=True,
+        help_text="Which side asked. The other side approves.")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

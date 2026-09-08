@@ -1133,6 +1133,35 @@ class DailyAdviceView(APIView):
 # TRAINER DIET PLAN MANAGEMENT ENDPOINTS
 # ============================================================================
 
+#: Refusals the trainer service raises that are the caller's to fix, and the status
+#: each deserves. Every one of them used to arrive as `400 "Request could not be
+#: completed."`, so the app could not tell "not your client" from a server fault, and
+#: real faults were invisible in the error budget.
+TRAINER_REFUSALS = {
+    'not_plan_owner': status.HTTP_403_FORBIDDEN,
+    'not_meal_owner': status.HTTP_403_FORBIDDEN,
+    'not_meal_delete_owner': status.HTTP_403_FORBIDDEN,
+    'not_assigned_client': status.HTTP_403_FORBIDDEN,
+    'not_assigned_view': status.HTTP_403_FORBIDDEN,
+    'not_trainer': status.HTTP_403_FORBIDDEN,
+    'not_meal_viewer': status.HTTP_403_FORBIDDEN,
+}
+
+
+def trainer_refusal(exc):
+    """A Response for a service ValidationError, or None if it is not one of ours."""
+    code = getattr(exc, 'code', None)
+    messages = getattr(exc, 'messages', None) or [str(exc)]
+    if code in TRAINER_REFUSALS:
+        return Response({"error": messages[0], "code": code}, status=TRAINER_REFUSALS[code])
+    if code or messages:
+        # A validation failure the trainer can act on: a bad meal type, a quantity out
+        # of range, a date outside the plan. Say which.
+        return Response({"error": messages[0], "code": code or "invalid"},
+                        status=status.HTTP_400_BAD_REQUEST)
+    return None
+
+
 class TrainerTemplatesView(APIView):
     """
     API endpoint for trainers to get available diet plan templates.
@@ -1142,7 +1171,9 @@ class TrainerTemplatesView(APIView):
     def get(self, request):
         try:
             # Check if user is a trainer
-            if not request.user.is_trainer:
+            # Admins too. Support could not read or repair a trainer's plan, while
+            # the client-side plan views have admitted admins all along.
+            if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
                     {"error": _("Only trainers can access diet plan templates")},
                     status=status.HTTP_403_FORBIDDEN
@@ -1175,6 +1206,11 @@ class TrainerTemplatesView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
+        except DjangoValidationError as e:
+            refusal = trainer_refusal(e)
+            if refusal is not None:
+                return refusal
+            raise
         except Exception as e:
             logger.error(f"Trainer templates error: {str(e)}")
             return Response(
@@ -1192,7 +1228,9 @@ class TrainerDietPlanView(APIView):
         """Create a new diet plan for a client."""
         try:
             # Check if user is a trainer
-            if not request.user.is_trainer:
+            # Admins too. Support could not read or repair a trainer's plan, while
+            # the client-side plan views have admitted admins all along.
+            if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
                     {"error": _("Only trainers can create diet plans")},
                     status=status.HTTP_403_FORBIDDEN
@@ -1227,7 +1265,7 @@ class TrainerDietPlanView(APIView):
                 client=client,
                 template=template,
                 start_date=start_date,
-                duration_weeks=request.data.get('duration_weeks', 4),
+                duration_weeks=int_param(request.data, 'duration_weeks', default=4, minimum=1, maximum=52),
                 goal=DietPlan.normalise_goal(request.data.get('goal')),
                 daily_calories=request.data.get('daily_calories')
             )
@@ -1252,6 +1290,11 @@ class TrainerDietPlanView(APIView):
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
+        except DjangoValidationError as e:
+            refusal = trainer_refusal(e)
+            if refusal is not None:
+                return refusal
+            raise
         except Exception as e:
             logger.error(f"Trainer diet plan creation error: {str(e)}")
             return Response(
@@ -1263,7 +1306,9 @@ class TrainerDietPlanView(APIView):
         """Get diet plans for a specific client."""
         try:
             # Check if user is a trainer
-            if not request.user.is_trainer:
+            # Admins too. Support could not read or repair a trainer's plan, while
+            # the client-side plan views have admitted admins all along.
+            if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
                     {"error": _("Only trainers can access client diet plans")},
                     status=status.HTTP_403_FORBIDDEN
@@ -1292,7 +1337,8 @@ class TrainerDietPlanView(APIView):
                     'end_date': plan.end_date,
                     'is_active': plan.is_active,
                     'template_name': plan.template.name if plan.template else None,
-                    'meals_count': plan.meals.count()
+                    'meals_count': getattr(plan, 'meals_count', None)
+                                   if getattr(plan, 'meals_count', None) is not None else plan.meals.count()
                 })
             
             # Return response outside the loop
@@ -1307,6 +1353,11 @@ class TrainerDietPlanView(APIView):
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
+            raise
+        except DjangoValidationError as e:
+            refusal = trainer_refusal(e)
+            if refusal is not None:
+                return refusal
             raise
         except Exception as e:
             logger.error(f"Trainer diet plan retrieval error: {str(e)}")
@@ -1325,7 +1376,9 @@ class TrainerMealView(APIView):
         """Add a meal or multiple meals to a diet plan."""
         try:
             # Check if user is a trainer
-            if not request.user.is_trainer:
+            # Admins too. Support could not read or repair a trainer's plan, while
+            # the client-side plan views have admitted admins all along.
+            if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
                     {"error": _("Only trainers can manage meals")},
                     status=status.HTTP_403_FORBIDDEN
@@ -1451,6 +1504,11 @@ class TrainerMealView(APIView):
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
+        except DjangoValidationError as e:
+            refusal = trainer_refusal(e)
+            if refusal is not None:
+                return refusal
+            raise
         except Exception as e:
             logger.error(f"Trainer meal creation error: {str(e)}")
             return Response(
@@ -1462,7 +1520,9 @@ class TrainerMealView(APIView):
         """Update a meal."""
         try:
             # Check if user is a trainer
-            if not request.user.is_trainer:
+            # Admins too. Support could not read or repair a trainer's plan, while
+            # the client-side plan views have admitted admins all along.
+            if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
                     {"error": _("Only trainers can update meals")},
                     status=status.HTTP_403_FORBIDDEN
@@ -1503,6 +1563,11 @@ class TrainerMealView(APIView):
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
+        except DjangoValidationError as e:
+            refusal = trainer_refusal(e)
+            if refusal is not None:
+                return refusal
+            raise
         except Exception as e:
             logger.error(f"Trainer meal update error: {str(e)}")
             return Response(
@@ -1514,7 +1579,9 @@ class TrainerMealView(APIView):
         """Delete a meal."""
         try:
             # Check if user is a trainer
-            if not request.user.is_trainer:
+            # Admins too. Support could not read or repair a trainer's plan, while
+            # the client-side plan views have admitted admins all along.
+            if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
                     {"error": _("Only trainers can delete meals")},
                     status=status.HTTP_403_FORBIDDEN
@@ -1536,6 +1603,11 @@ class TrainerMealView(APIView):
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
+            raise
+        except DjangoValidationError as e:
+            refusal = trainer_refusal(e)
+            if refusal is not None:
+                return refusal
             raise
         except Exception as e:
             logger.error(f"Trainer meal deletion error: {str(e)}")

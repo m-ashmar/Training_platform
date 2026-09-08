@@ -5,6 +5,7 @@ from .views import (
     AssignClientView, UnassignClientView, ClientProfileView, AvailableTrainersView,
     PublicTrainersListView, PublicTrainerClientStatsView, ClientProfileViewSet, CustomTokenObtainPairView,
     ClientRequestTrainerView, TrainerPendingRequestsView, TrainerRespondToRequestView,
+    ClientRespondToTrainerInviteView, ClientPendingTrainerInvitesView,
     ClientRequestStatusView, ProfilePictureUploadView, OTPVerificationView, ResendOTPView,
     ClientUnassignTrainerView, ClientCancelTrainerRequestView,
     PasswordResetRequestView, PasswordResetVerifyView, PasswordResetConfirmView,
@@ -58,6 +59,8 @@ urlpatterns = [
     path('client/request-status/', ClientRequestStatusView.as_view(), name='client_request_status'),
     path('trainer/pending-requests/', TrainerPendingRequestsView.as_view(), name='trainer_pending_requests'),
     path('trainer/respond-to-request/', TrainerRespondToRequestView.as_view(), name='trainer_respond_to_request'),
+    path('client/trainer-invites/', ClientPendingTrainerInvitesView.as_view(), name='client_trainer_invites'),
+    path('client/respond-to-invite/', ClientRespondToTrainerInviteView.as_view(), name='client_respond_to_invite'),
     
     # Password reset endpoints (OTP-based REST API)
     path('forgot-password/', PasswordResetRequestView.as_view(), name='password_reset_request'),

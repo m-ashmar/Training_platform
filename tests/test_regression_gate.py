@@ -9,6 +9,7 @@ every pull request. The 53 standalone probes in tests/security/ remain the deep 
 """
 import collections
 import json
+from datetime import date
 import random
 import re
 
@@ -3966,3 +3967,278 @@ def test_the_admin_can_vet_a_food_and_the_planner_obeys(seeded_catalogue, make_u
     food.refresh_from_db()
     assert food.needs_review is False
     assert in_pool(), "an approved food still does not reach the planner"
+
+
+# ---------------------------------------------------------------------------
+# The trainer path
+# ---------------------------------------------------------------------------
+
+def _trainer_and_client(make_user, tag):
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    trainer = make_user(f"tr-{tag}", user_type="trainer")
+    client_user = make_user(f"cl-{tag}", user_type="client")
+    for u in (trainer, client_user):
+        _grant_diet_access(u)
+
+    def api(user):
+        c = Client()
+        c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(user).access_token}"
+        return c
+    return trainer, client_user, api(trainer), api(client_user)
+
+
+def test_a_trainer_cannot_claim_a_client_who_never_agreed(seeded_catalogue, make_user):
+    """A trainer called assign-client on any unassigned client, which created a pending
+    row, then approved that row at respond-to-request. Two calls, no consent, and the
+    trainer then owned that person's height, weight, goals, training history and diet
+    plan. A request is approved by the side that did not make it."""
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, "claim")
+
+    r = t_api.post("/api/auth/trainer/assign-client/", {"client_id": client_user.id},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client_user)
+    assert relation.status == "pending" and relation.initiated_by == "trainer"
+
+    # The trainer cannot approve their own invitation.
+    r = t_api.post("/api/auth/trainer/respond-to-request/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 403, r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id is None, "a trainer claimed a client who never agreed"
+
+    # The client can see it and accept it, and only then is the trainer assigned.
+    r = c_api.get("/api/auth/client/trainer-invites/")
+    assert r.status_code == 200, r.content
+    invites = r.json()["invitations"]
+    assert [i["request_id"] for i in invites] == [relation.id]
+
+    r = c_api.post("/api/auth/client/respond-to-invite/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id == trainer.id
+
+
+def test_a_client_request_is_approved_by_the_trainer_and_not_by_the_client(seeded_catalogue, make_user):
+    """The mirror image: the client asks, the trainer accepts. A client must not be
+    able to accept their own request either."""
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, "mirror")
+    r = c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client_user)
+    assert relation.initiated_by == "client"
+
+    r = c_api.post("/api/auth/client/respond-to-invite/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 403, r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id is None
+
+    r = t_api.post("/api/auth/trainer/respond-to-request/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id == trainer.id
+
+
+def test_a_trainer_cannot_unassign_someone_elses_client(seeded_catalogue, make_user):
+    """Unassign matched a relation of ANY status, so a second trainer could create a
+    pending row and then strip the real trainer's client: the approved row survived
+    while assigned_trainer went null, and the two disagreed."""
+    from users.models import TrainerClientRelation
+
+    owner, client_user, o_api, c_api = _trainer_and_client(make_user, "own")
+    intruder = make_user("tr-intruder", user_type="trainer")
+    _grant_diet_access(intruder)
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+    i_api = Client()
+    i_api.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(intruder).access_token}"
+
+    c_api.post("/api/auth/client/request-trainer/", {"trainer_id": owner.id}, content_type="application/json")
+    relation = TrainerClientRelation.objects.get(trainer=owner, client=client_user)
+    o_api.post("/api/auth/trainer/respond-to-request/",
+               {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id == owner.id
+
+    i_api.post("/api/auth/trainer/assign-client/", {"client_id": client_user.id},
+               content_type="application/json")
+    r = i_api.post("/api/auth/trainer/unassign-client/", {"client_id": client_user.id},
+                   content_type="application/json")
+    assert r.status_code in (400, 403, 404), r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id == owner.id, "an intruder stripped another trainer's client"
+    assert TrainerClientRelation.objects.get(trainer=owner, client=client_user).status == "approved"
+
+
+def _a_template():
+    """Any plan template. The trainer endpoint requires one."""
+    from diet.models import DietPlanTemplate
+    t = DietPlanTemplate.objects.first()
+    if t is None:
+        t = DietPlanTemplate.objects.create(name="gate template", meals_per_day=3,
+                                            snacks_per_day=1)
+    return t
+
+
+def _assigned_pair(make_user, tag):
+    """A trainer and a client who actually agreed, through the real endpoints."""
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, tag)
+    c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
+               content_type="application/json")
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client_user)
+    t_api.post("/api/auth/trainer/respond-to-request/",
+               {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id == trainer.id
+    for field, value in (("height", 175), ("weight", 78), ("age", 28),
+                         ("gender", "Male"), ("activity_level", "Moderate")):
+        setattr(client_user, field, value)
+    client_user.client_goals = ["Maintain"]
+    client_user.save()
+    return trainer, client_user, t_api, c_api
+
+
+def test_a_trainer_can_build_a_plan_for_a_client_who_already_has_one(seeded_catalogue, make_user):
+    """`DietPlan.clean()` refuses a second active plan over the same window, so trainer
+    plan creation failed for every client the engine had ever served — and failed as an
+    opaque 400. Creating a plan retires the one it replaces."""
+    from diet.models import DietPlan, Meal
+    from diet.services.plan_generation import generate_and_save
+
+    trainer, client_user, t_api, _c = _assigned_pair(make_user, "build")
+    _out, generated = generate_and_save(client_user, duration_days=2, seed_salt="trainer")
+    assert generated.is_active
+
+    r = t_api.post("/api/diet/v1/trainer/diet-plans/",
+                   {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 2,
+                    "template_id": _a_template().id, "start_date": str(date.today())},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    plan = DietPlan.objects.filter(user=client_user, created_by=trainer).first()
+    assert plan is not None and plan.is_active
+    generated.refresh_from_db()
+    assert not generated.is_active, "two active plans over one window"
+    # The same macro targets a generated plan carries, not nulls.
+    assert plan.target_protein and plan.target_carbs and plan.target_fat
+    assert plan.macro_targets()["protein"] == plan.target_protein
+
+    # And a meal the trainer adds reads like every other meal.
+    from diet.models import FoodItem
+    chicken = FoodItem.objects.get(name="Chicken Breast (Grilled)")
+    rice = FoodItem.objects.get(name="White Rice (Cooked)")
+    r = t_api.post("/api/diet/v1/trainer/meals/", {
+        "diet_plan_id": plan.id, "meal_type": "Lunch",
+        "target_date": str(plan.start_date),
+        "food_items": [{"food_id": chicken.id, "quantity": 150},
+                       {"food_id": rice.id, "quantity": 180}]},
+        content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    meal = Meal.objects.get(diet_plan=plan, meal_type="Lunch")
+    assert meal.name and meal.name_ar and meal.reason and meal.reason_ar
+    assert meal.components.count() == 2
+
+
+def test_a_trainer_meal_refuses_what_it_cannot_serve(seeded_catalogue, make_user):
+    """None of this was checked: a meal type off the list, a negative quantity, the
+    same food twice, a date outside the plan, a food that does not exist. Each was a
+    persisted bad row or an opaque 400."""
+    from diet.models import DietPlan, FoodItem, Meal
+
+    trainer, client_user, t_api, _c = _assigned_pair(make_user, "refuse")
+    r = t_api.post("/api/diet/v1/trainer/diet-plans/",
+                   {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 1,
+                    "template_id": _a_template().id, "start_date": str(date.today())},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    plan = DietPlan.objects.get(user=client_user, created_by=trainer)
+    food = FoodItem.objects.filter(needs_review=False).first()
+    good = [{"food_id": food.id, "quantity": 100}]
+
+    def post(**over):
+        body = {"diet_plan_id": plan.id, "meal_type": "Lunch",
+                "target_date": str(plan.start_date), "food_items": good}
+        body.update(over)
+        return t_api.post("/api/diet/v1/trainer/meals/", body, content_type="application/json")
+
+    for label, over in (
+        ("meal type", {"meal_type": "Brunch"}),
+        ("negative quantity", {"food_items": [{"food_id": food.id, "quantity": -500}]}),
+        ("huge quantity", {"food_items": [{"food_id": food.id, "quantity": 99999}]}),
+        ("duplicate food", {"food_items": good + good}),
+        ("unknown food", {"food_items": [{"food_id": 99999999, "quantity": 100}]}),
+        ("empty meal", {"food_items": []}),
+        ("date outside plan", {"target_date": "2099-01-01"}),
+        ("bad quantity type", {"food_items": [{"food_id": food.id, "quantity": "lots"}]}),
+    ):
+        r = post(**over)
+        assert r.status_code == 400, f"{label} was accepted: {r.status_code} {r.content[:120]}"
+        # A reason the trainer can act on, either the view's own required-field
+        # message or the service's code. Not "Request could not be completed."
+        body = r.json()
+        assert body.get("code") or "required" in body.get("error", ""), \
+            f"{label} gave no reason: {r.content[:120]}"
+    assert not Meal.objects.filter(diet_plan=plan).exists(), "a refused meal was persisted"
+
+    # duration_weeks is bounded like every other numeric input: it was passed
+    # straight to timedelta(weeks=...), where a string was a TypeError and a huge
+    # number an OverflowError, both arriving as an opaque 400.
+    r = t_api.post("/api/diet/v1/trainer/diet-plans/",
+                   {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 9999,
+                    "template_id": _a_template().id, "start_date": str(date.today())},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    clamped = DietPlan.objects.filter(user=client_user, created_by=trainer).order_by("-id").first()
+    assert clamped.duration_weeks == 52, clamped.duration_weeks
+    r = t_api.post("/api/diet/v1/trainer/diet-plans/",
+                   {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": "many",
+                    "template_id": _a_template().id, "start_date": str(date.today())},
+                   content_type="application/json")
+    assert r.status_code == 400, r.content
+
+
+def test_a_dismissed_trainer_cannot_touch_the_plan_they_wrote(seeded_catalogue, make_user):
+    """Authorship alone was the test, so authority granted once was never revoked: a
+    trainer the client had dismissed could still rewrite or delete every meal of that
+    client's live plan."""
+    from diet.models import DietPlan, FoodItem, Meal
+
+    trainer, client_user, t_api, c_api = _assigned_pair(make_user, "revoke")
+    r = t_api.post("/api/diet/v1/trainer/diet-plans/",
+                   {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 1,
+                    "template_id": _a_template().id, "start_date": str(date.today())},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    plan = DietPlan.objects.get(user=client_user, created_by=trainer)
+    food = FoodItem.objects.filter(needs_review=False).first()
+    r = t_api.post("/api/diet/v1/trainer/meals/", {
+        "diet_plan_id": plan.id, "meal_type": "Lunch", "target_date": str(plan.start_date),
+        "food_items": [{"food_id": food.id, "quantity": 120}]}, content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    meal = Meal.objects.get(diet_plan=plan)
+
+    r = c_api.post("/api/auth/client/unassign-trainer/", {}, content_type="application/json")
+    assert r.status_code in (200, 204), r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id is None
+
+    r = t_api.put(f"/api/diet/v1/trainer/meals/{meal.id}/",
+                  {"food_items": [{"food_id": food.id, "quantity": 400}]},
+                  content_type="application/json")
+    assert r.status_code == 403, r.content
+    r = t_api.delete(f"/api/diet/v1/trainer/meals/{meal.id}/")
+    assert r.status_code == 403, r.content
+    assert Meal.objects.filter(pk=meal.pk).exists()
+    meal.refresh_from_db()
+    assert meal.components.first().quantity == 120

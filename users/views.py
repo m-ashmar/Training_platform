@@ -450,10 +450,16 @@ class AssignClientView(APIView):
             client = CustomUser.objects.get(id=client_id, user_type='client')
             
             # Check if relation already exists
+            # An INVITATION the client must accept, not an assignment. This created a
+            # pending row that the same trainer could then approve at
+            # trainer/respond-to-request/, so any trainer could attach any unassigned
+            # client to themselves in two calls and read that person's body metrics,
+            # training history and diet plan without ever being asked. `initiated_by`
+            # is what makes the approval belong to the other side.
             relation, created = TrainerClientRelation.objects.get_or_create(
                 trainer=request.user,
                 client=client,
-                defaults={'status': 'pending'}
+                defaults={'status': 'pending', 'initiated_by': 'trainer'}
             )
             
             if not created:
@@ -470,7 +476,8 @@ class AssignClientView(APIView):
                 elif relation.status == 'rejected':
                     # Update status to pending for new request
                     relation.status = 'pending'
-                    relation.save()
+                    relation.initiated_by = 'trainer'
+                    relation.save(update_fields=['status', 'initiated_by', 'updated_at'])
             
             # Emit domain event — notification handled at delivery boundary
             emit_event(TrainerAssignmentRequestEvent(
@@ -520,15 +527,21 @@ class UnassignClientView(APIView):
             
             # Check if relation exists
             try:
+                # APPROVED, and only this trainer's own. Matching any status let a
+                # trainer create a pending row for someone else's client and then
+                # "unassign" them: the other trainer's approved row survived while
+                # `assigned_trainer` went null, so the two disagreed and the real
+                # trainer silently lost diet access to their own client.
                 relation = TrainerClientRelation.objects.get(
                     trainer=request.user,
-                    client=client
+                    client=client,
+                    status='approved'
                 )
-                
-                # Update client's assigned_trainer to None
-                client.assigned_trainer = None
-                client.save()
-                
+
+                if client.assigned_trainer_id == request.user.id:
+                    client.assigned_trainer = None
+                    client.save(update_fields=['assigned_trainer'])
+
                 # Delete the relation
                 relation.delete()
                 
@@ -1071,7 +1084,7 @@ class ClientRequestTrainerView(APIView):
             relation, created = TrainerClientRelation.objects.get_or_create(
                 trainer=trainer,
                 client=request.user,
-                defaults={'status': 'pending'}
+                defaults={'status': 'pending', 'initiated_by': 'client'}
             )
             
             if not created:
@@ -1088,7 +1101,8 @@ class ClientRequestTrainerView(APIView):
                 elif relation.status == 'rejected':
                     # Allow new request after rejection
                     relation.status = 'pending'
-                    relation.save()
+                    relation.initiated_by = 'client'
+                    relation.save(update_fields=['status', 'initiated_by', 'updated_at'])
             
             # Emit domain event — notification handled at delivery boundary.
             # On commit: this runs inside an open transaction, and a message queued
@@ -1353,6 +1367,133 @@ class TrainerPendingRequestsView(APIView):
             )
 
 
+def approve_trainer_relation(relation, actor):
+    """Approve a pending trainer/client relation, whichever side is accepting.
+
+    One implementation, because there are two sides and the approval has to do the
+    same five things on both: check nobody else already owns this client, flip the
+    row, set `assigned_trainer`, hold the trainer's charge in escrow, and announce it.
+    A second copy would drift, and the half that drifted would be the one granting
+    access to another person's body metrics.
+
+    Returns (response_or_None, relation). A response means refuse with it.
+    """
+    from rest_framework import status as http
+    from rest_framework.response import Response
+
+    from .models import TrainerClientRelation
+
+    client, trainer = relation.client, relation.trainer
+
+    if client.assigned_trainer_id and client.assigned_trainer_id != trainer.id:
+        return Response({'error': _('Client is already assigned to another trainer')},
+                        status=http.HTTP_400_BAD_REQUEST), relation
+    if TrainerClientRelation.objects.filter(
+            client=client, status='approved').exclude(trainer=trainer).exists():
+        return Response({'error': _('Client already has an approved relation with another trainer')},
+                        status=http.HTTP_400_BAD_REQUEST), relation
+
+    # The charge is held BEFORE the relation is granted. Approving first and then
+    # failing the hold left an assigned trainer nobody had paid for.
+    try:
+        from wallet.models import Wallet, move_funds_atomic
+        from wallet.utils import get_escrow_wallet
+        charge = getattr(trainer, 'trainer_hourly_rate', None) or 0
+        if charge and charge > 0:
+            client_wallet, _created = Wallet.objects.get_or_create(
+                owner=client, defaults={"owner_type": "client"})
+            if client_wallet.balance < charge:
+                return Response(
+                    {'error': _('Insufficient client wallet balance for trainer charge hold')},
+                    status=http.HTTP_402_PAYMENT_REQUIRED), relation
+            move_funds_atomic(client_wallet, get_escrow_wallet(), charge,
+                              actor_id=actor.id, tx_type='transfer',
+                              metadata={'purpose': 'trainer_request_hold',
+                                        'trainer_id': trainer.id, 'client_id': client.id})
+    except Exception as e:
+        logger.error(f"Wallet hold failed: {str(e)}")
+
+    relation.status = 'approved'
+    relation.save(update_fields=['status', 'updated_at'])
+    client.assigned_trainer = trainer
+    client.save(update_fields=['assigned_trainer'])
+    return None, relation
+
+
+class ClientRespondToTrainerInviteView(APIView):
+    """A client accepts or declines a trainer's invitation.
+
+    The other half of `trainer/assign-client/`. Without it a trainer-initiated
+    request had no legitimate way to be approved at all — which is why the trainer
+    endpoint used to approve its own, and that was a takeover of any unassigned
+    client's account.
+
+    POST {"request_id": <id>, "action": "approve" | "reject"}
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .models import TrainerClientRelation
+
+        if not request.user.is_client:
+            return Response({'error': _('This endpoint is only for clients')},
+                            status=status.HTTP_403_FORBIDDEN)
+        action = (request.data.get('action') or '').lower()
+        if action not in ('approve', 'reject'):
+            return Response({'error': _('action must be approve or reject')},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            relation = TrainerClientRelation.objects.select_related('trainer').get(
+                id=request.data.get('request_id'), client=request.user, status='pending')
+        except (TrainerClientRelation.DoesNotExist, ValueError, TypeError):
+            return Response({'error': _('Invitation not found or already processed')},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        # Symmetric to the trainer side: you approve what the OTHER party asked for.
+        if relation.initiated_by != 'trainer':
+            return Response({'error': _('You made this request. The trainer has to accept it.')},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if action == 'reject':
+            relation.status = 'rejected'
+            relation.save(update_fields=['status', 'updated_at'])
+            return Response({'message': _('Invitation declined.'),
+                             'trainer_id': relation.trainer_id, 'status': 'rejected'})
+
+        refusal, relation = approve_trainer_relation(relation, request.user)
+        if refusal is not None:
+            return refusal
+        transaction.on_commit(lambda: emit_event(ClientRequestApprovedEvent(
+            actor_id=request.user.id,
+            recipient_id=relation.trainer_id,
+            trainer_name=relation.trainer.full_name or relation.trainer.username,
+        )))
+        logger.info(f"Client {request.user.id} accepted trainer {relation.trainer_id}")
+        return Response({'message': _('Invitation accepted.'),
+                         'trainer_id': relation.trainer_id, 'status': 'approved'})
+
+
+class ClientPendingTrainerInvitesView(APIView):
+    """Invitations waiting on this client, so the app can show them."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import TrainerClientRelation
+
+        if not request.user.is_client:
+            return Response({'error': _('This endpoint is only for clients')},
+                            status=status.HTTP_403_FORBIDDEN)
+        rows = (TrainerClientRelation.objects
+                .filter(client=request.user, status='pending', initiated_by='trainer')
+                .select_related('trainer').order_by('-created_at')[:50])
+        return Response({'invitations': [{
+            'request_id': r.id,
+            'trainer_id': r.trainer_id,
+            'trainer_name': r.trainer.full_name or r.trainer.username,
+            'created_at': r.created_at,
+        } for r in rows]})
+
+
 class TrainerRespondToRequestView(APIView):
     """
     Enhanced view for trainers to approve or reject client requests.
@@ -1405,49 +1546,21 @@ class TrainerRespondToRequestView(APIView):
             )
             
             client = relation.client
-            
-            if action == 'approve':
-                # Prevent approving if client already assigned to another trainer
-                if client.assigned_trainer and client.assigned_trainer_id != request.user.id:
-                    return Response(
-                        {'error': _('Client is already assigned to another trainer')},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                # Prevent multiple approved relations for same client
-                already_approved_elsewhere = TrainerClientRelation.objects.filter(
-                    client=client,
-                    status='approved'
-                ).exclude(trainer=request.user).exists()
-                if already_approved_elsewhere:
-                    return Response(
-                        {'error': _('Client already has an approved relation with another trainer')},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                # Approve the request
-                relation.status = 'approved'
-                relation.save()
-                
-                # Assign client to trainer
-                client.assigned_trainer = request.user
-                client.save()
 
-                # Hold funds in escrow equal to trainer charge
-                try:
-                    from wallet.models import Wallet, move_funds_atomic
-                    from wallet.utils import get_escrow_wallet
-                    trainer_charge = getattr(request.user, 'trainer_hourly_rate', None) or 0
-                    if trainer_charge and trainer_charge > 0:
-                        client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
-                        if client_wallet.balance < trainer_charge:
-                            return Response(
-                                {'error': _('Insufficient client wallet balance for trainer charge hold')},
-                                status=status.HTTP_402_PAYMENT_REQUIRED
-                            )
-                        escrow = get_escrow_wallet()
-                        move_funds_atomic(client_wallet, escrow, trainer_charge, actor_id=request.user.id, tx_type='transfer', metadata={'purpose': 'trainer_request_hold', 'trainer_id': request.user.id, 'client_id': client.id})
-                except Exception as e:
-                    logger.error(f"Wallet hold failed: {str(e)}")
-                
+            # A request is approved by the side that did NOT make it. Without this,
+            # a trainer could approve their own invitation, and that was a complete
+            # takeover of any unassigned client's account data.
+            if relation.initiated_by != 'client':
+                return Response(
+                    {'error': _('You invited this client. They have to accept the invitation.')},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            if action == 'approve':
+                refusal, relation = approve_trainer_relation(relation, request.user)
+                if refusal is not None:
+                    return refusal
+
                 # Emit domain event — notification handled at delivery boundary
                 emit_event(ClientRequestApprovedEvent(
                     actor_id=request.user.id,
