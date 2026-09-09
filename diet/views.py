@@ -609,8 +609,8 @@ class FoodImportView(APIView):
             except Exception as _e:
                 logger.warning(f"Auto-assign category failed: {_e}")
                 try:
-                    category, _created = FoodCategory.objects.get_or_create(
-                        name='Other', defaults={'is_protein': False, 'is_carb': False, 'is_fat': False}
+                    category, _created = FoodCategory.by_canonical_name(
+                        'Other', is_protein=False, is_carb=False, is_fat=False
                     )
                     food_item.category = category
                     food_item.save()
@@ -693,7 +693,7 @@ class FoodImportView(APIView):
         if category_name == 'Other':
             defaults = {'is_protein': False, 'is_carb': False, 'is_fat': False}
 
-        category, _created = FoodCategory.objects.get_or_create(name=category_name, defaults=defaults)
+        category, _created = FoodCategory.by_canonical_name(category_name, **defaults)
         food_item.category = category
         food_item.save()
 
@@ -1079,10 +1079,21 @@ class GenerateDietPlanRuleBasedView(APIView):
                     entry["components_count"] = len(entry["components"])
                     meals_payload.append(entry)
             except Exception:
-                # If anything fails in rich payload, fallback to minimal response
-                meals_payload = []
-                plan_nutrition = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
-                present_date = start_date or timezone.localdate()
+                # The plan EXISTS — it was committed above — so this must not read as a
+                # failure. But answering 201 with `meals: []` and zeroed nutrition told
+                # the client "here is your plan" and showed them nothing, while the
+                # quota was spent and nothing entered the error budget. Say plainly
+                # that the plan was created and could not be rendered, and give them
+                # the id to fetch it with.
+                logger.exception("plan %s was created but its payload could not be built",
+                                 diet_plan.id)
+                quota.record_on_commit(request.user, "daily_meals")
+                return Response({
+                    "status": "created_but_not_rendered",
+                    "diet_plan_id": diet_plan.id,
+                    "message": _("Your plan was created. Open it to see today's meals."),
+                    "code": "payload_unavailable",
+                }, status=status.HTTP_201_CREATED)
 
             quota.record_on_commit(request.user, "daily_meals")
 
@@ -2301,7 +2312,15 @@ class ClientMealInteractionView(APIView):
                     MealComponent.objects.select_related('meal', 'food'),
                     id=request.data.get('component_id'), meal__diet_plan__user=request.user)
                 chosen_id = request.data.get('chosen_food_id')
-                index = SimilarityIndex(list(FoodItem.objects.filter(needs_review=False)))
+                # Built AFTER the component is resolved and only for foods that could
+                # actually replace it — the same macro slot. This loaded and vectorised
+                # the entire catalogue on every tap, including the "just show me the
+                # offers" call and the ones that end in a 404 or a 409.
+                from diet.planner.candidates import classify_food
+                slot = classify_food(component.food)
+                candidates = [f for f in FoodItem.objects.filter(needs_review=False)
+                              if classify_food(f) == slot]
+                index = SimilarityIndex(candidates)
                 if not chosen_id:
                     offered = index.neighbours(component.food_id, k=6)
                     return Response({"component_id": component.id, "food": component.food.name,
@@ -2562,10 +2581,30 @@ class DietPlanMealsWithIngredientsView(APIView):
             elif not getattr(request.user, 'is_admin', False):
                 return Response({'error': _('You do not have access to this plan')}, status=status.HTTP_403_FORBIDDEN)
             
+            # Bounded, and filterable by date. A 30-day plan is 120 meals and 600
+            # components, each carrying two servings, two names and its nutrition —
+            # close to a megabyte of JSON in one response over a mobile connection.
             meals = (Meal.objects
                      .filter(diet_plan=plan)
                      .prefetch_related('components__food')
                      .order_by('date', 'scheduled_time'))
+            from_str, to_str = request.GET.get('from'), request.GET.get('to')
+            if from_str:
+                from_date = parse_date(from_str)
+                if from_date is None:
+                    return Response({'error': _('from must be YYYY-MM-DD'), 'code': 'bad_date'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                meals = meals.filter(date__gte=from_date)
+            if to_str:
+                to_date = parse_date(to_str)
+                if to_date is None:
+                    return Response({'error': _('to must be YYYY-MM-DD'), 'code': 'bad_date'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                meals = meals.filter(date__lte=to_date)
+            MAX_MEALS_IN_ONE_RESPONSE = 60
+            meals = list(meals[:MAX_MEALS_IN_ONE_RESPONSE + 1])
+            truncated = len(meals) > MAX_MEALS_IN_ONE_RESPONSE
+            meals = meals[:MAX_MEALS_IN_ONE_RESPONSE]
             # The targets the plan was built to. This view used to run its own split
             # arithmetic (a fixed 200 kcal snack, generic B/L/D ratios) and disagreed
             # with the components view about the same meal.
@@ -2603,6 +2642,10 @@ class DietPlanMealsWithIngredientsView(APIView):
                 },
                 'meals': out_meals,
                 'meals_count': len(out_meals),
+                # True when the plan holds more than one response carries. Narrow the
+                # window with ?from=&to= rather than paging, because the client reads
+                # this a week at a time.
+                'truncated': truncated,
             }
             return Response(payload)
         except BadInput as e:

@@ -26,7 +26,40 @@ class FoodCategory(models.Model):
         ('LUNCH', 'Lunch'),
         ('DINNER', 'Dinner'),
     ]
-    name = models.CharField(max_length=50)
+    # Unique: four call sites `get_or_create` on this name, and without a database
+    # constraint two concurrent imports create two 'Other' rows. Everything that
+    # then resolves a category by name — the macro filters, the admin's
+    # `filter(is_protein=True).first()` — picks one of them arbitrarily, so one
+    # macro's foods end up split across two categories.
+    name = models.CharField(max_length=50, unique=True)
+
+    @classmethod
+    def by_canonical_name(cls, label: str, **defaults):
+        """Get or create a category by its ENGLISH name.
+
+        `name` is a modeltranslation virtual field, so `filter(name=...)` and
+        `get_or_create(name=...)` both read whatever column the ACTIVE language
+        selects. Under an Arabic request they looked at `name_ar`, found nothing, and
+        created a second row whose `name_en` already existed — which is how one macro's
+        foods ended up split across two categories. Identity is the English column.
+        """
+        from django.db import IntegrityError, transaction
+        from django.db.models import Q
+
+        # Both columns: `name_en` for rows the translation layer has filled, and the
+        # base column for rows written before it did. `filter(name=...)` alone is the
+        # bug — it reads whichever language is active.
+        existing = cls.objects.filter(Q(name_en=label) | Q(name=label)).first()
+        if existing is not None:
+            return existing, False
+        payload = dict(defaults)
+        payload.setdefault("name_en", label)
+        try:
+            with transaction.atomic():
+                return cls.objects.create(name=label, **payload), True
+        except IntegrityError:
+            # Someone else created it between the read and the write.
+            return cls.objects.filter(Q(name_en=label) | Q(name=label)).first(), False
     meal_times = models.CharField(max_length=20, choices=MEAL_TIME_CHOICES, default='ANY')
     is_protein = models.BooleanField(default=False)
     is_carb = models.BooleanField(default=False)
@@ -975,6 +1008,17 @@ class DailyProgress(models.Model):
         )
         self.total_meals = counts['total'] or 0
         self.meals_completed = counts['completed'] or 0
+
+        # Targets follow the plan. They were written once, into `get_or_create`'s
+        # defaults, and never again — so editing a plan's calories or macros left every
+        # existing day comparing consumption against a target the plan no longer has,
+        # and the percentages the client reads were computed from it.
+        plan = self.diet_plan
+        macros = plan.macro_targets()
+        self.target_calories = float(plan.daily_calories or 0)
+        self.target_protein = macros.get('protein', 0)
+        self.target_carbs = macros.get('carbs', 0)
+        self.target_fat = macros.get('fat', 0)
         
         # 2. Calculate nutrition via database aggregation (Single Complex Query)
         # We need to aggregate across all components of completed meals

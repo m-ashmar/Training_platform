@@ -25,6 +25,10 @@ MEALS = ("Breakfast", "Lunch", "Dinner", "Snack")
 
 # Ranking weights. Higher wins.
 W_MEAL_MACRO_PREF = 100.0   # user put this food in exactly this meal+macro slot
+#: The most that role, library membership, cuisine and density can contribute
+#: together. Strictly below `W_MEAL_MACRO_PREF`, so no combination of them can
+#: lift a food the client did not choose above one they did.
+STRUCTURE_CEILING = 90.0
 #: The user named this food for this meal but filed it under a different macro than the
 #: engine classifies it as. That disagreement is not the user being wrong: someone who
 #: says chickpeas are their lunch protein is describing how they eat, while the
@@ -362,12 +366,42 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         for macro in MACROS:
             parts = {f.id: score_parts(f, meal, macro) for f in by_slot[meal][macro]}
             table = {fid: st + pr for fid, (st, pr) in parts.items()}
-            # Ties break on the name, never on the row id. A stable sort on score alone
-            # left tied foods in query order, which is id order, which changes every time
-            # the database is rebuilt — so the same code measured 41 distinct dishes on
-            # one database and 39 on the next, and a ratchet gate failed with no change
-            # to the engine. Determinism must hold across rebuilds, not just within one.
-            by_slot[meal][macro].sort(key=lambda f: (table[f.id], canonical_name(f)), reverse=True)
+            # Ties break on PREFERENCE first, then on the name, never on the row id.
+            #
+            # Preference first, because two foods can reach the same total by different
+            # routes — one because the client chose it, the other because it is a
+            # staple of this meal in the library — and resolving that tie
+            # alphabetically put a food the client never asked for ahead of one they
+            # did. A tie must never be settled against what the client said.
+            #
+            # Then the name, never the row id. A stable sort on score alone left tied
+            # foods in query order, which is id order, which changes every time the
+            # database is rebuilt — so the same code measured 41 distinct dishes on one
+            # database and 39 on the next, and a ratchet failed with no change to the
+            # engine. Determinism must hold across rebuilds, not just within one.
+            prefs = {fid: pr for fid, (_st, pr) in parts.items()}
+            # What the client ASKED FOR comes first, by construction.
+            #
+            # Not by weight tuning: an explicit choice is worth 100 and similarity
+            # propagation gives a neighbour 50, so a food the client never named could
+            # still overtake one they did whenever the structural gap exceeded 50 —
+            # and it did, with White Beans (similar to a chosen legume, and a stronger
+            # dinner carbohydrate) ahead of Quinoa, which the client had chosen. No
+            # arrangement of weights makes that impossible; ordering does.
+            # ORDER on a bounded structure, score on the real one.
+            #
+            # Structure is a tiebreak among comparable foods, not a rival to what the
+            # client said, but its terms sum to as much as 115 — more than the 100 an
+            # explicit choice is worth — so a food the client never named could lead
+            # the list ahead of one they did, purely on role, cuisine and library
+            # membership. Bounding it below the explicit bonus for the ORDER makes a
+            # choice always come first; leaving `scores` untouched means the judge that
+            # weighs a dish against a plate still sees the real numbers, which is what
+            # keeps named dishes on the plate.
+            ranked = {fid: min(st, STRUCTURE_CEILING) + pr for fid, (st, pr) in parts.items()}
+            by_slot[meal][macro].sort(
+                key=lambda f: (ranked[f.id], prefs.get(f.id, 0.0), canonical_name(f)),
+                reverse=True)
             scores[meal][macro] = table
             preference_scores[meal][macro] = {fid: pr for fid, (_st, pr) in parts.items()}
 

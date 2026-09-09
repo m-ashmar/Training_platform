@@ -175,6 +175,18 @@ def exhaustive_optimum(foods: Sequence, ladders: Sequence[Sequence[float]],
     return best_mag, best_kcal, combos
 
 
+def _pinned_food_ids(meal) -> set:
+    """Food ids this meal's recipe marks as not scalable, if it is a library dish."""
+    recipe_id = getattr(meal, "recipe_id", None)
+    if not recipe_id:
+        return set()
+    from diet.models import RecipeIngredient
+
+    return set(RecipeIngredient.objects
+               .filter(recipe_id=recipe_id, scalable=False)
+               .values_list("food_id", flat=True))
+
+
 def judge_meal(meal, targets: Dict[str, float], tolerance: Dict[str, float],
                resolve) -> Optional[MealResult]:
     """Compare one served meal against every portioning it could have had."""
@@ -193,7 +205,15 @@ def judge_meal(meal, targets: Dict[str, float], tolerance: Dict[str, float],
         return None
 
     foods = [f for f, _g in served]
-    ladders = [[p.grams for p in portions_for(f)] for f in foods]
+    # A line the recipe's author PINNED is not a line the engine may move, so an
+    # "optimum" that moves it is not an optimum the engine was allowed to reach.
+    # Enumerating those made the benchmark grade the planner against portionings it is
+    # forbidden to produce — a pinch of salt at its ladder ceiling — and reported the
+    # difference as the optimiser settling for less.
+    pinned = _pinned_food_ids(meal)
+    ladders = [([grams] if getattr(f, "id", None) in pinned
+                else [p.grams for p in portions_for(f)])
+               for (f, grams) in served]
     space = 1
     for ladder in ladders:
         space *= max(len(ladder), 1)

@@ -68,7 +68,10 @@ def _snap_pieces_if_needed(food: FoodItem, grams: float, piece_weights: Optional
     try:
         pw_map = piece_weights
         if pw_map is None:
-            cfg = DietConfig.objects.last()
+            # `.first()`, not `.last()`. `DietConfig.Meta.ordering` is ['-id'], so
+            # `.last()` reverses it and returns the OLDEST row — the planner read a
+            # stale piece-weight table while the admin edited the current one.
+            cfg = DietConfig.objects.first()
             pw_map = (cfg.piece_weights if cfg and cfg.piece_weights else {})
         key = is_piece_food_name((food.name or "").lower(), pw_map)
         if key:

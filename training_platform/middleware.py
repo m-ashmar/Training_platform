@@ -125,12 +125,31 @@ class RateLimitMiddleware(MiddlewareMixin):
         return any(request.path.startswith(path) for path in skip_paths)
     
     def _get_client_id(self, request):
+        """Who this request is, for rate-limiting purposes.
+
+        The JWT is read here because DRF's authentication runs in the VIEW, after every
+        middleware. `request.user` is populated only by session auth, so every request
+        from the mobile app — which authenticates with a bearer token — fell through to
+        the IP bucket. Behind carrier-grade NAT that is one shared bucket for a whole
+        network: a few hundred users exhaust the anonymous allowance and everyone on
+        that carrier gets 429. The two middlewares beside this one already read the
+        token for exactly this reason.
         """
-        Get unique client identifier
-        """
-        # Use user ID if authenticated, otherwise IP address
         if hasattr(request, 'user') and request.user.is_authenticated:
             return f"user_{request.user.id}"
+
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            try:
+                from rest_framework_simplejwt.tokens import AccessToken
+
+                user_id = AccessToken(auth_header.split(' ', 1)[1]).get('user_id')
+                if user_id:
+                    return f"user_{user_id}"
+            except Exception:
+                # An invalid or expired token is an anonymous caller, and the IP
+                # bucket is the right place for it.
+                logger.debug("rate limit: unusable bearer token", exc_info=True)
         return f"ip_{self._get_client_ip(request)}"
     
     def _get_client_ip(self, request):

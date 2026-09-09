@@ -137,12 +137,11 @@ class Command(BaseCommand):
 
             categories = {}
             for label in {r["category"] for r in rows}:
-                categories[label] = FoodCategory.objects.filter(name=label).first() \
-                    or FoodCategory.objects.create(
-                        name=label,
-                        is_protein=label == "Proteins",
-                        is_carb=label in ("Carbs", "Fruits", "Vegetables"),
-                        is_fat=label == "Fats")
+                categories[label], _created = FoodCategory.by_canonical_name(
+                    label,
+                    is_protein=label == "Proteins",
+                    is_carb=label in ("Carbs", "Fruits", "Vegetables"),
+                    is_fat=label == "Fats")
 
             created = updated = 0
             for row in rows:

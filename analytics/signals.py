@@ -15,11 +15,27 @@ logger = logging.getLogger(__name__)
 
 
 def _safe(fn):
+    """Run `fn` after commit, and never let it reach the user's request.
+
+    The try/except used to wrap only `on_commit(...)`, which merely REGISTERS the
+    callback — it cannot raise anything the callback will raise. The body ran later,
+    unguarded, and any failure inside it (a deleted parent row, a dropped connection,
+    a schema change mid-deploy) propagated out of the atomic block and turned a meal
+    completion the database had already committed into a 500 for the client. The
+    guard has to be inside the callback, which is where the work happens.
+    """
     def wrapper(sender, instance, **kwargs):
+        def run():
+            try:
+                fn(sender, instance, **kwargs)
+            except Exception:
+                logger.warning("analytics receiver %s failed", fn.__name__, exc_info=True)
+
         try:
-            transaction.on_commit(lambda: fn(sender, instance, **kwargs))
+            transaction.on_commit(run)
         except Exception:
-            logger.debug("analytics receiver %s failed", fn.__name__, exc_info=True)
+            logger.warning("could not schedule analytics receiver %s", fn.__name__,
+                           exc_info=True)
     wrapper.__name__ = fn.__name__
     return wrapper
 

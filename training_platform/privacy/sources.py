@@ -95,6 +95,14 @@ register(PersonalDataSource(label="food_category_preferences", model="diet.UserF
 register(PersonalDataSource(label="learned_food_weights", model="diet.UserFoodWeight", user_field="user"))
 register(PersonalDataSource(label="meal_swaps", model="diet.MealSwap", user_field="user"))
 register(PersonalDataSource(label="meal_events", model="diet.MealEvent", user_field="user"))
+# The meals themselves, and what was on them. These reach the client through
+# `DietPlan.user`, two hops from CustomUser, which is why the coverage audit could not
+# see them and an Art. 15 export left out everything the client had actually eaten —
+# names, foods, grams, what they finished and what they rated.
+register(PersonalDataSource(label="meals", model="diet.Meal",
+                            user_field="diet_plan__user"))
+register(PersonalDataSource(label="meal_components", model="diet.MealComponent",
+                            user_field="meal__diet_plan__user"))
 
 register(PersonalDataSource(label="ai_usage_cost", model="ai_assistant.UsageCost", user_field="user", on_erase="keep"))
 register(PersonalDataSource(label="ai_insights", model="ai_assistant.UserInsight", user_field="user"))

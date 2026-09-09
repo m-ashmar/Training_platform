@@ -190,8 +190,32 @@ class ImprovedFoodItemAdmin(TranslAdmin):
 
     @admin.action(description='Approve: allow the planner to serve these')
     def approve_foods(self, request, queryset):
-        missing = [f.name for f in queryset if not (f.meal_slots or [])]
-        n = queryset.update(needs_review=False)
+        # Row by row, so `save()` runs. `needs_review` is the flag that SUPPRESSES the
+        # nutrition checks (an impossible kcal/g, an Atwater mismatch), so approving
+        # with `queryset.update()` let exactly the rows that were flagged for being
+        # impossible into the planner's pool without ever re-running those checks —
+        # and left them permanently unsaveable through the form afterwards.
+        from django.core.exceptions import ValidationError as _Invalid
+
+        missing, refused, approved = [], [], []
+        for food in queryset:
+            if not (food.meal_slots or []):
+                missing.append(food.name)
+            food.needs_review = False
+            try:
+                food.save()
+            except _Invalid as exc:
+                food.needs_review = True
+                refused.append(f"{food.name}: {'; '.join(exc.messages)}")
+                continue
+            approved.append(food.name)
+        n = len(approved)
+        if refused:
+            self.message_user(
+                request,
+                "Held back because their nutrition does not check out: "
+                + " | ".join(refused[:5]),
+                messages.ERROR)
         self.message_user(request, f"{n} food(s) approved.", messages.SUCCESS)
         if missing:
             self.message_user(

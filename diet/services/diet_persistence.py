@@ -368,7 +368,10 @@ class DietPersistenceService:
             "cherry tomato": 17.0,
         }
         try:
-            cfg = DietConfig.objects.last()
+            # `.first()`, not `.last()`. `DietConfig.Meta.ordering` is ['-id'], so
+            # `.last()` reverses it and returns the OLDEST row — the planner read a
+            # stale piece-weight table while the admin edited the current one.
+            cfg = DietConfig.objects.first()
             if cfg and cfg.piece_weights:
                 pw.update(cfg.piece_weights)
         except Exception:

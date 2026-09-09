@@ -6,6 +6,7 @@ Includes template management, meal scheduling, and nutritional calculations.
 """
 
 import logging
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 from datetime import date, timedelta, time
 from django.db import transaction
@@ -302,7 +303,12 @@ class TrainerDietPlanService:
             True if deleted successfully
         """
         self._authorize_plan(meal.diet_plan)
+        # Remember the day before the row is gone: `DailyProgress` counts this plan's
+        # meals for that date, and deleting one left the client's day showing 3 of 4
+        # forever. `update_meal` and `add_meal_to_plan` both recompute; this did not.
+        stale = SimpleNamespace(diet_plan=meal.diet_plan, date=meal.date, pk=meal.pk)
         meal.delete()
+        self._recompute_day(stale)
         return True
     
     def get_client_diet_plans(self, client: CustomUser) -> List[DietPlan]:
