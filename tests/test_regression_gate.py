@@ -4242,3 +4242,21 @@ def test_a_dismissed_trainer_cannot_touch_the_plan_they_wrote(seeded_catalogue, 
     assert Meal.objects.filter(pk=meal.pk).exists()
     meal.refresh_from_db()
     assert meal.components.first().quantity == 120
+
+
+def test_every_import_path_produces_an_unvetted_food(seeded_catalogue):
+    """Two ways in: the client endpoint and the admin's Edamam screen. Both create a
+    FoodItem with no meal slots, no household unit and no cuisine, so both must leave
+    it unvetted or the curated catalogue is undone one import at a time."""
+    import inspect
+
+    from diet import admin as diet_admin
+    from diet import views as diet_views
+
+    for source, label in ((inspect.getsource(diet_admin.ImprovedFoodItemAdmin.import_food_from_edamam),
+                           "admin Edamam import"),
+                          (inspect.getsource(diet_views.FoodImportView), "client import endpoint")):
+        assert "FoodItem.objects.create(" in source, label
+        create_at = source.index("FoodItem.objects.create(")
+        window = source[create_at:create_at + 900]
+        assert "needs_review=True" in window, f"{label} creates a plannable food"

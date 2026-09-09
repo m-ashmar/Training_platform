@@ -415,6 +415,11 @@ class ImprovedFoodItemAdmin(TranslAdmin):
                     # Create food item
                     try:
                         food = FoodItem.objects.create(
+                            # Unvetted, like every other import. An external row
+                            # arrives with no meal slots, no household unit and no
+                            # cuisine, so the planner must not serve it until a person
+                            # has filled those in and approved it.
+                            needs_review=True,
                             api_id=api_id,
                             name=name,
                             image_url=image,
