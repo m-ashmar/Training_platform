@@ -100,9 +100,16 @@ class DietPersistenceService:
                 piece_weights = self._load_piece_weights()
                 factory = MealPlanFactory(piece_weights)
                 slot_occurrences: dict = {}
-                # BUG FIX: Safer nested attribute access to prevent AttributeError
-                user_pref = getattr(self.user, 'userfoodpreference', None)
-                user_allergies = getattr(user_pref, 'allergies', None) if user_pref else None
+                # From the DATABASE, like `ClientConstraints.for_user` does, not from
+                # `self.user.userfoodpreference`. That reverse accessor caches on the
+                # instance at first access, so a client who changed their allergies in
+                # the same request that generated their plan was checked against the
+                # allergies they had before. The safety check must not depend on when
+                # something else last looked at the row.
+                from ..models import UserFoodPreference
+
+                user_allergies = (UserFoodPreference.objects.filter(user=self.user)
+                                  .values_list('allergies', flat=True).first())
                 validator = MealValidator(
                     user_allergies=user_allergies,
                     category_pool=None,

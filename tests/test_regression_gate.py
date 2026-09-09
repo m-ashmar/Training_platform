@@ -5232,3 +5232,130 @@ def test_generating_again_replaces_the_plan_it_overlaps(seeded_catalogue):
     assert r.status_code == 201, r.content[:200]
     assert DietPlan.objects.filter(user=user, is_active=True).count() == 1
     assert DietPlan.objects.filter(user=user).count() == 3
+
+
+# ============================================================================
+# The safety and locale properties, asserted end to end rather than by reading
+# the code that is supposed to provide them.
+# ============================================================================
+
+def test_a_declared_allergy_survives_the_whole_pipeline(seeded_catalogue):
+    """Not one ingredient a client cannot eat, on any path, and the plan says so.
+
+    Every stage has its own reason to be trusted — the pool filters, the recipe path
+    re-checks, persistence validates — and each of those was true at some point while an
+    allergen still reached the plate. The only assertion worth having is over the rows
+    that were actually written.
+    """
+    from diet.models import MealComponent, UserFoodPreference
+    from diet.services.meal_validator import AllergenChecker, SAFE
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("allergy-pipeline")
+    UserFoodPreference.objects.update_or_create(
+        user=user, defaults={"allergies": "nuts, dairy"})
+
+    _out, plan = generate_and_save(user, duration_days=3, seed_salt="allergy")
+    checker = AllergenChecker("nuts, dairy")
+    served = {c.food for c in
+              MealComponent.objects.filter(meal__diet_plan=plan).select_related("food")}
+    assert served, "nothing was served, so nothing was proven"
+    # Not "no violation" — no ingredient the checker cannot positively clear. An
+    # UNVERIFIED row is one whose composition nobody has written down, and the catalogue
+    # declares one for every food it holds.
+    unclear = sorted(f.name_en for f in served
+                     if checker.check_food(f).verdict != SAFE)
+    assert not unclear, unclear
+    assert plan.allergen_report.get("is_safe") is True, plan.allergen_report
+
+
+def test_a_trainer_cannot_serve_a_food_the_client_declared(seeded_catalogue, make_user):
+    """The generator has checked allergies since the allergen work landed. The trainer's
+    own write never did, and `allergen_report` is written once at generation — so a
+    client who declared peanuts could be given peanut butter by their trainer and their
+    plan still said `is_safe: true`."""
+    from django.core.exceptions import ValidationError
+
+    from diet.models import FoodItem, UserFoodPreference
+    from diet.trainer_services import TrainerDietPlanService
+
+    trainer, client_user, _t_api, _c_api = _trainer_and_client(make_user, "tr-allergy")
+    UserFoodPreference.objects.update_or_create(
+        user=client_user, defaults={"allergies": "peanuts"})
+
+    peanut = FoodItem.objects.filter(name_en__icontains="Peanut").first()
+    assert peanut is not None, "the catalogue has no peanut food to test with"
+    with pytest.raises(ValidationError) as refused:
+        TrainerDietPlanService(trainer)._validated_items(
+            [{"food_id": peanut.id, "quantity": 30}], "Lunch", client=client_user)
+    assert refused.value.code == "declared_allergen", refused.value.code
+
+
+def test_every_diet_error_carries_a_machine_readable_code(seeded_catalogue):
+    """API_CONTRACT.md: "Branch on `code`, never on `detail`" — and 128 of this app's
+    error returns carried neither `code` nor `detail`, so an Arabic client received a
+    translated sentence and no way to tell a bad date from a server fault."""
+    user, _chosen = _chooser("error-codes")
+    c = _api_client_for(user)
+    probes = [
+        ("get", "/api/diet/v1/food/list/?page=notanumber", None),
+        ("post", "/api/diet/v1/plans/generate-rule/", []),
+        ("get", "/api/diet/v1/client/meals/99999999/", None),
+        ("get", "/api/diet/v1/nutrition/plan/99999999/", None),
+        ("post", "/api/diet/v1/client/meals/interact/", {"action": "nope"}),
+        ("post", "/api/diet/v1/trainer/meals/", {"meal_type": "Lunch"}),
+    ]
+    for method, url, body in probes:
+        r = (c.get(url) if method == "get"
+             else c.post(url, body, content_type="application/json"))
+        assert r.status_code >= 400, (url, r.status_code)
+        data = r.json()
+        assert data.get("code"), (url, data)
+        assert data.get("error") and data.get("detail"), (url, data)
+
+
+def test_an_arabic_request_still_carries_the_english_name(seeded_catalogue):
+    """`FoodItem.name` is a modeltranslation virtual field, so `{"name": food.name,
+    "name_ar": ...}` emitted the SAME Arabic string twice under an Arabic request and
+    dropped the English name entirely — while the contract promises both languages on
+    every row so the app can switch without a refetch."""
+    from django.utils import translation
+
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("both-languages")
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="lang")
+    c = _api_client_for(user)
+    try:
+        r = c.get(f"/api/diet/v1/plan/{plan.id}/meals-with-ingredients/",
+                  HTTP_ACCEPT_LANGUAGE="ar")
+        assert r.status_code == 200, r.content[:200]
+        rows = [comp for meal in r.json()["meals"] for comp in meal.get("components", [])]
+        assert rows, r.json()
+        assert not [x for x in rows if x["name"] == x["name_ar"]], rows[:3]
+    finally:
+        translation.deactivate()
+
+
+def test_the_plan_is_the_same_whichever_language_asked_for_it(seeded_catalogue):
+    """`Meta.ordering = ['name', 'id']` is rewritten by modeltranslation to the ACTIVE
+    language, so the recipe population `random.choices` samples from was ordered
+    differently under Arabic and the same client with the same seed on the same day got
+    a different dish from the Arabic app than from the English one."""
+    from django.utils import translation
+
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    user, _chosen = _chooser("locale-stable")
+    kcal = user.calculate_daily_calories()
+
+    def plan_under(language):
+        with translation.override(language):
+            out = RuleBasedPlanner(user, seed_salt="locale").generate(
+                daily_kcal=kcal, duration_days=3, snack_count=1, start_date="2026-03-02")
+        return [tuple(sorted((i.food_id, i.grams) for i in meal.ingredients))
+                for meal in out.plan]
+
+    english = plan_under("en")
+    assert english, "nothing was planned"
+    assert english == plan_under("ar"), "the plan changed with the display language"

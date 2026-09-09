@@ -18,8 +18,8 @@ from django.utils.translation import gettext_lazy as _
 from diet.services.meal_payload import component_payload, meal_payload, name_en_of
 from .validators import DietInputValidator
 from .models import (
-    DietPlan, DietPlanTemplate, Meal, MealComponent, 
-    FoodItem, DailyProgress
+    DietPlan, DietPlanTemplate, Meal, MealComponent,
+    FoodItem, DailyProgress, UserFoodPreference
 )
 from users.models import CustomUser
 
@@ -455,8 +455,14 @@ class TrainerDietPlanService:
         from diet.allergens import label
         from diet.services.meal_validator import AllergenChecker, VIOLATION
 
-        pref = getattr(client, "userfoodpreference", None)
-        checker = AllergenChecker(getattr(pref, "allergies", None) if pref else None)
+        # Read from the DATABASE, not from the reverse accessor. `client.userfoodpreference`
+        # is cached on the instance from the first access, so a caller that touched it
+        # before the client edited their allergies — or in the same request that wrote
+        # them — got the value as it was, and this check silently did nothing. An
+        # allergy check must not depend on when someone last looked.
+        allergies = (UserFoodPreference.objects.filter(user=client)
+                     .values_list("allergies", flat=True).first())
+        checker = AllergenChecker(allergies)
         if not checker.active:
             return
         refused = [(food, v) for food, _g in items
@@ -480,8 +486,9 @@ class TrainerDietPlanService:
         from .models import MealComponent
 
         try:
-            pref = getattr(plan.user, "userfoodpreference", None)
-            checker = AllergenChecker(getattr(pref, "allergies", None) if pref else None)
+            allergies = (UserFoodPreference.objects.filter(user=plan.user)
+                         .values_list("allergies", flat=True).first())
+            checker = AllergenChecker(allergies)
             foods = {c.food for c in MealComponent.objects
                      .filter(meal__diet_plan=plan).select_related("food")}
             report = AllergenReport([checker.check_food(f) for f in foods])
