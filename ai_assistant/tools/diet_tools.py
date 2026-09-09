@@ -21,7 +21,6 @@ def get_active_diet_plan(user, **kwargs):
     if not plan:
         return {"active_plan": None, "message": str(_("No active diet plan found."))}
     
-    print(f"[AI Tool] Found plan ID: {plan.id}, Goal: {plan.goal}, Calories: {plan.daily_calories}")
 
     return {
         "active_plan": {
@@ -46,7 +45,6 @@ def get_meal_details(user, date_str=None, **kwargs):
     """
     from diet.models import DietPlan, Meal
 
-    print(f"[AI Tool] get_meal_details called for {user.username}, date={date_str}")
     
     if date_str:
         from datetime import date as dt_date
@@ -56,14 +54,12 @@ def get_meal_details(user, date_str=None, **kwargs):
 
     plan = DietPlan.objects.filter(user=user, is_active=True).first()
     if not plan:
-        print("[AI Tool] No active plan.")
         return {"meals": [], "message": str(_("No active diet plan."))}
 
     meals = Meal.objects.filter(
         diet_plan=plan, date=target_date,
     ).prefetch_related('components__food').order_by('scheduled_time')
     
-    print(f"[AI Tool] Found {meals.count()} meals for {target_date}")
 
     results = []
     for meal in meals:
@@ -100,11 +96,9 @@ def get_diet_adherence(user, days=7, **kwargs):
     """
     from diet.models import DailyProgress, DietPlan
 
-    print(f"[AI Tool] get_diet_adherence called for {user.username}, days={days}")
 
     plan = DietPlan.objects.filter(user=user, is_active=True).first()
     if not plan:
-        print("[AI Tool] No active plan.")
         return {"adherence": None, "message": str(_("No active diet plan."))}
 
     since = timezone.localdate() - timedelta(days=days)
@@ -112,7 +106,6 @@ def get_diet_adherence(user, days=7, **kwargs):
         user=user, diet_plan=plan, date__gte=since,
     ).order_by('date')
     
-    print(f"[AI Tool] Found {progress_qs.count()} DailyProgress records since {since}")
 
     daily_data = []
     total_adherence = 0
@@ -140,8 +133,15 @@ def get_diet_adherence(user, days=7, **kwargs):
     avg_adherence = round(total_adherence / count, 1) if count else 0
 
     # Find best and worst days
-    best_day = max(daily_data, key=lambda d: d["calories_pct"]) if daily_data else None
-    worst_day = min(daily_data, key=lambda d: d["calories_pct"]) if daily_data else None
+    # Closest to target, not the largest. Ranking by `calories_pct` reported a 200%
+    # binge as the client's best adherence day and a fasting day as their worst — the
+    # opposite of the adherence score computed a few lines above, which this tool then
+    # hands to the model as fact.
+    def _distance_from_target(day):
+        return abs(day["calories_pct"] - 100)
+
+    best_day = min(daily_data, key=_distance_from_target) if daily_data else None
+    worst_day = max(daily_data, key=_distance_from_target) if daily_data else None
 
     return {
         "average_adherence_pct": avg_adherence,

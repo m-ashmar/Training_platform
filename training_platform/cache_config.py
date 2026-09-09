@@ -39,9 +39,8 @@ cache key, so a bump instantly orphans every stale entry with no key scanning.
 # shared by every caller: a subscriber's response would be served to non-subscribers.
 CACHEABLE_ROUTES = {
     # ---- Global catalogs: identical for every viewer -> shared entry ----
-    "/api/diet/api/food/list/":       {"scope": "private",  "model": "FOODITEM",         "ttl": 600},
-    "/api/diet/api/food/categories/": {"scope": "private",  "model": "FOODCATEGORY",     "ttl": 3600},
-    "/api/diet/v1/food/categories/":  {"scope": "private",  "model": "FOODCATEGORY",     "ttl": 3600},
+    "/api/diet/v1/food/list/":       {"scope": "private",  "model": "FOODITEM",         "ttl": 600},
+    "/api/diet/v1/food/categories/": {"scope": "private",  "model": "FOODCATEGORY",     "ttl": 3600},
     "/api/subscription/v1/plans/":    {"scope": "public",  "model": "SUBSCRIPTIONPLAN", "ttl": 600},
 
     # ---- User-scoped: queryset depends on the caller -> per-user entry in DB3 ----

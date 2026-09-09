@@ -9,7 +9,9 @@ Now supports meal count and snack preferences.
 
 from celery import shared_task
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.utils import timezone
+from django.utils.translation import gettext as _
 from django.db import transaction
 from .models import DietPlan, Meal, DailyAdvice, MealComponent
 from .meal_processor import MealProcessor
@@ -96,40 +98,54 @@ def generate_daily_advice(user_id=None):
         if user_id:
             users = [get_user_model().objects.get(id=user_id)]
         else:
-            users = get_user_model().objects.all()
+            # Clients with an active plan, in batches. This was `objects.all()` —
+            # every account on the platform, trainers and admins included, held in
+            # memory, and one user whose profile raised aborted every remaining one.
+            users = (get_user_model().objects
+                     .filter(user_type='client', is_active=True,
+                             diet_plans__is_active=True)
+                     .distinct()
+                     .iterator(chunk_size=200))
             
         for user in users:
-            # Generate personalized advice based on user data
-            advice_text = _generate_personalized_advice(user)
+            try:
+                # Generate personalized advice based on user data
+                advice_text = _generate_personalized_advice(user)
             
-            # Create advice with comprehensive context data
-            advice = DailyAdvice.objects.create(
-                user=user,
-                text=advice_text,
-                context_data={
-                    "advice_type": "daily_nutrition",
-                    "generation_timestamp": timezone.now().isoformat(),
-                    "user_metrics": {
-                        "bmi": user.calculate_bmi() if hasattr(user, 'calculate_bmi') else None,
-                        "daily_calories": user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None,
-                        "fitness_goal": user.resolve_fitness_goal()
-                    },
-                    "advice_effectiveness_tracking": {
-                        "views_count": 0,
-                        "engagement_score": 0,
-                        "user_feedback": None
+                # Create advice with comprehensive context data
+                advice = DailyAdvice.objects.create(
+                    user=user,
+                    text=advice_text,
+                    context_data={
+                        "advice_type": "daily_nutrition",
+                        "generation_timestamp": timezone.now().isoformat(),
+                        "user_metrics": {
+                            "bmi": user.calculate_bmi() if hasattr(user, 'calculate_bmi') else None,
+                            "daily_calories": user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None,
+                            "fitness_goal": user.resolve_fitness_goal()
+                        },
+                        "advice_effectiveness_tracking": {
+                            "views_count": 0,
+                            "engagement_score": 0,
+                            "user_feedback": None
+                        }
                     }
-                }
-            )
+                )
             
-            logger.info(
-                f"Daily advice generated for user {user.id}",
-                extra={
-                    "user_id": user.id,
-                    "advice_id": advice.id,
-                    "advice_type": "daily_nutrition"
-                }
-            )
+                logger.info(
+                    f"Daily advice generated for user {user.id}",
+                    extra={
+                        "user_id": user.id,
+                        "advice_id": advice.id,
+                        "advice_type": "daily_nutrition"
+                    }
+                )
+            except Exception:
+                # One user's bad profile must not cancel everyone else's
+                # advice. This exception reached the task-level handler,
+                # which logged once against user_id=None and stopped.
+                logger.exception("daily advice failed for user %s", user.id)
+                continue
             
     except Exception as e:
         logger.error(
@@ -153,18 +169,29 @@ def _generate_personalized_advice(user):
         daily_calories = user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None
         goal = user.resolve_fitness_goal()
         
-        # Generate advice based on user profile
-        if goal == 'Lose':
-            advice = f"Focus on creating a moderate calorie deficit of 300-500 calories per day. Your target is {daily_calories} calories."
-        elif goal == 'Gain':
-            advice = f"Ensure you're consuming {daily_calories} calories daily with adequate protein for muscle growth."
-        else:
-            advice = f"Maintain your current calorie intake of {daily_calories} calories to sustain your weight."
-        
-        if bmi and bmi > 25:
-            advice += " Consider incorporating more vegetables and lean proteins into your meals."
-        
-        return advice
+        # In the CLIENT'S language, not the worker's. This was hardcoded English and
+        # then persisted into `DailyAdvice.text`, so an Arabic client got English prose
+        # and activating Arabic later could not fix the stored rows. Render it under
+        # the client's own language so the text is right when it is written.
+        from django.utils import translation
+
+        language = (getattr(user, 'preferred_language', None)
+                    or getattr(settings, 'LANGUAGE_CODE', 'en'))
+        with translation.override(language):
+            if goal == 'Lose':
+                advice = _("Aim for a moderate deficit of 300 to 500 calories a day. "
+                           "Your target is %(kcal)s calories.") % {"kcal": daily_calories}
+            elif goal == 'Gain':
+                advice = _("Eat %(kcal)s calories a day, with enough protein to build "
+                           "muscle.") % {"kcal": daily_calories}
+            else:
+                advice = _("Keep your intake at %(kcal)s calories a day to hold your "
+                           "weight.") % {"kcal": daily_calories}
+
+            if bmi and bmi > 25:
+                advice += " " + str(_("More vegetables and lean protein would help."))
+
+        return str(advice)
         
     except Exception as e:
         log_json(logger, "error", "Error generating personalized advice", error=str(e))

@@ -32,7 +32,6 @@ def get_user_profile(user, **kwargs):
 
 def get_body_stats(user, **kwargs):
     """Return calculated body metrics."""
-    print(f"[AI Tool] get_body_stats called for {user.username}")
     bmi = user.calculate_bmi()
     bmr = user.calculate_bmr()
 
@@ -48,7 +47,6 @@ def get_body_stats(user, **kwargs):
         else:
             bmi_category = "obese"
     
-    print(f"[AI Tool] BMI: {bmi}, BMR: {bmr}, Category: {bmi_category}")
 
     # The model owns the arithmetic. A second multiplier table lived here with the
     # exact `.get(level, 1.2)` fallback the model was fixed to raise on, so the coach

@@ -9,7 +9,7 @@ Enhanced to support both AI-generated and trainer-created diet plans.
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from django.db import transaction
@@ -131,6 +131,24 @@ def _as_bool(value, field: str) -> bool:
     raise BadInput(f"{field} must be true or false")
 
 
+def listing(results, *, count=None, extra=None):
+    """The one list shape the contract promises: {count, next, previous, results}.
+
+    Five diet list endpoints answered with `{results, total_count}` or a nested
+    `pagination` object instead, so a client reading `count`/`next` — as it does for
+    every other list on the platform — got null on most of the catalogue.
+    """
+    body = {
+        "count": len(results) if count is None else count,
+        "next": None,
+        "previous": None,
+        "results": results,
+    }
+    if extra:
+        body.update(extra)
+    return body
+
+
 class FoodListView(APIView):
     """
     API endpoint to get all food items from the local database with pagination.
@@ -173,6 +191,7 @@ class FoodListView(APIView):
                 results.append({
                     'id': food.id,
                     'name': food.name,
+                    'name_ar': getattr(food, 'name_ar', None) or food.name,
                     'calories': food.calories,
                     'protein': food.protein,
                     'carbs': food.carbs,
@@ -194,8 +213,9 @@ class FoodListView(APIView):
             has_next = page < total_pages
             has_previous = page > 1
             
-            return Response({
-                'results': results,
+            return Response(listing(results, count=total_count, extra={
+                'next': page + 1 if has_next else None,
+                'previous': page - 1 if has_previous else None,
                 'pagination': {
                     'page': page,
                     'page_size': page_size,
@@ -210,7 +230,7 @@ class FoodListView(APIView):
                     'category': category,
                     'search': search_query
                 }
-            })
+            }))
             
         except BadInput as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -249,10 +269,7 @@ class FoodCategoryListView(APIView):
                     'food_count': category.fooditem_set.count()
                 })
             
-            return Response({
-                'results': results,
-                'total_count': len(results)
-            })
+            return Response(listing(results))
             
         except BadInput as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -300,6 +317,7 @@ class FoodSearchView(APIView):
                 local_results.append({
                     'id': food.id,
                     'name': food.name,
+                    'name_ar': getattr(food, 'name_ar', None) or food.name,
                     'calories': food.calories,
                     'protein': food.protein,
                     'carbs': food.carbs,
@@ -345,13 +363,11 @@ class FoodSearchView(APIView):
                 logger.warning(f"Edamam API search failed: {str(e)}")
             
             results = local_results + edamam_results
-            return Response({
+            return Response(listing(results, extra={
                 'query': query,
                 'local_count': len(local_results),
                 'edamam_count': len(edamam_results),
-                'total_count': len(results),
-                'results': results
-            })
+            }))
             
         except BadInput as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -559,7 +575,11 @@ class FoodImportView(APIView):
     API endpoint to import food items from Edamam API into local database.
     """
     # Relaxed to authenticated-only to match tests
-    permission_classes = [IsAuthenticated]
+    # Staff only. Any authenticated account could insert rows into the SHARED
+    # catalogue, unbounded and unrated — which is how the previous database
+    # reached 327 rows of noise. `needs_review` keeps them off plates; it does
+    # not stop the table growing. Curation is an admin job.
+    permission_classes = [IsAuthenticated, IsAdminUser]
     
     # Atomic: these writes were independent, so a failure part-way left the
     # records inconsistent (a half-applied password reset either locks the
@@ -1266,10 +1286,7 @@ class TrainerTemplatesView(APIView):
                     'total_meals_per_cycle': template.total_meals_per_cycle
                 })
             
-            return Response({
-                'results': results,
-                'total_count': len(results)
-            })
+            return Response(listing(results))
             
         except BadInput as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1419,10 +1436,7 @@ class TrainerDietPlanView(APIView):
                 })
             
             # Return response outside the loop
-            return Response({
-                'results': results,
-                'total_count': len(results)
-            })
+            return Response(listing(results))
                 
         except BadInput as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2129,7 +2143,11 @@ class MealCompletionView(APIView):
                 # Complete entire meal
                 client_service = ClientProgressService(request.user)
                 result = client_service.complete_entire_meal(meal)
-                MealEvent.objects.create(user=request.user, meal=meal, kind=MealEvent.COMPLETED)
+                # One COMPLETED event per meal. The endpoint is otherwise idempotent,
+                # so a retry on a flaky connection answered 200 again and inflated the
+                # funnel with a second completion.
+                MealEvent.objects.get_or_create(
+                    user=request.user, meal=meal, kind=MealEvent.COMPLETED)
 
                 return Response({
                     "message": _("Meal completed successfully"),
@@ -2344,8 +2362,13 @@ class ClientMealInteractionView(APIView):
                     # credited calories nobody consumed.
                     component.is_completed = False
                     component.completed_at = None
+                    # And it does not inherit the REJECTED food's history: the new food
+                    # was never eaten and has never been rated.
+                    component.actual_quantity_consumed = None
+                    component.is_liked = None
                     component.save(update_fields=['food', 'quantity', 'is_completed',
-                                                  'completed_at'])
+                                                  'completed_at',
+                                                  'actual_quantity_consumed', 'is_liked'])
                     component.meal.is_completed = False
                     component.meal.save(update_fields=['is_completed'])
                     TrainerDietPlanService._recompute_day(component.meal)
@@ -2547,7 +2570,11 @@ class MyDietPlansView(APIView):
 
             if page is not None:
                 return paginator.get_paginated_response(results)
-            return Response({'results': results, 'total_count': len(results)})
+            return Response(listing(results))
+        except PASSTHROUGH_EXCEPTIONS:
+            # DRF's NotFound from `paginate_queryset(?page=9999)` was being flattened
+            # into a 400 with a generic message, and so was every genuine fault.
+            raise
         except Exception as e:
             logger.error(f"MyDietPlansView error: {str(e)}")
             return Response({'error': _("An error occurred while loading your plans.")}, status=status.HTTP_400_BAD_REQUEST)

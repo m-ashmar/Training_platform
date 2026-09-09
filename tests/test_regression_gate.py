@@ -3858,7 +3858,7 @@ def test_a_client_can_remove_a_food_they_chose(seeded_catalogue):
     assert r.status_code == 404, r.content
 
 
-def test_an_imported_food_is_never_planned_until_it_is_vetted(seeded_catalogue):
+def test_an_imported_food_is_never_planned_until_it_is_vetted(seeded_catalogue, make_user):
     """Any authenticated client can create a FoodItem through the import endpoint, with
     macros of their choosing and no meal slots. Such a row must stay out of every pool
     and every plate until a human accepts it, or the catalogue rebuild is undone one
@@ -3869,7 +3869,21 @@ def test_an_imported_food_is_never_planned_until_it_is_vetted(seeded_catalogue):
     from tests.diet_quality import _generate
 
     user, _chosen = _chooser("import-gate")
-    c = _api_client_for(user)
+    # Staff: the catalogue is shared, so only staff may add to it. A client trying is
+    # refused, which is the other half of this rule.
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    staff = make_user("import-staff", user_type="admin")
+    c = Client()
+    c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(staff).access_token}"
+    refused = _api_client_for(user).post(
+        "/api/diet/v1/food/import/",
+        {"food_data": {"api_id": "edamam_client_try", "name": "Client Cake",
+                       "calories": 5, "protein": 0, "carbs": 1, "fat": 0}},
+        content_type="application/json")
+    assert refused.status_code == 403, refused.content
+
     r = c.post("/api/diet/v1/food/import/",
                {"food_data": {"api_id": "edamam_food_test1", "name": "Free Cake",
                               "calories": 5, "protein": 0, "carbs": 1, "fat": 0}},
@@ -4926,3 +4940,99 @@ def test_the_progress_endpoints_refuse_a_date_they_cannot_read(seeded_catalogue)
         r = c.get(url)
         assert r.status_code == 400, (url, r.status_code, r.content[:120])
         assert r.json().get("code") == "bad_date"
+
+
+def test_the_daily_quota_follows_the_users_day(seeded_catalogue, make_user):
+    """`timezone.now()` is UTC and TIME_ZONE is Asia/Damascus, so a daily allowance
+    rolled over at 03:00 local: a client generating at 01:00 was still spending
+    yesterday's."""
+    from django.utils import timezone
+
+    from subscription import quota
+
+    start, end = quota._period(None, "day", timezone.now())
+    local_start = timezone.localtime(start)
+    assert (local_start.hour, local_start.minute) == (0, 0), local_start
+    assert (end - start).days == 1
+
+
+def test_an_achievement_counts_meals_not_mouthfuls(seeded_catalogue, django_capture_on_commit_callbacks):
+    """Analytics writes one `meal_completed` row per COMPONENT, so a four-food meal
+    counted as four: "log your first meal" fired on the first food and "log 100 meals"
+    at about twenty-five."""
+    from django.test import Client
+
+    from achievements.engine import AchievementEngine
+    from diet.models import Meal
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("achieve-meals")
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="ach")
+    meal = Meal.objects.filter(diet_plan=plan).first()
+    assert meal.components.count() >= 2, "fixture needs a multi-food meal"
+
+    c = _api_client_for(user)
+    with django_capture_on_commit_callbacks(execute=True):
+        r = c.post(f"/api/diet/v1/client/meals/{meal.id}/complete/",
+                   {"action": "complete_meal"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+
+    counted = AchievementEngine._get_metric_value(user, "meal_count", {})
+    assert counted == 1, f"one meal counted as {counted}"
+
+
+def test_the_ai_calls_the_closest_day_the_best_one(seeded_catalogue):
+    """Ranking by `calories_pct` reported a 200% binge as the client's best adherence
+    day and a fasting day as their worst — the opposite of the adherence score computed
+    beside it, which this tool hands to the model as fact."""
+    import inspect
+
+    from ai_assistant.tools import diet_tools
+
+    source = inspect.getsource(diet_tools)
+    assert 'max(daily_data, key=lambda d: d["calories_pct"])' not in source
+    assert "_distance_from_target" in source
+
+
+def test_no_tool_prints_health_data_to_stdout(seeded_catalogue):
+    """Username plus BMI, BMR, goal and calorie target were printed to the log stream,
+    unredacted and outside every retention window the privacy registry enforces on the
+    same data everywhere else."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "ai_assistant" / "tools"
+    offenders = [f"{p.name}:{n}" for p in root.glob("*.py")
+                 for n, line in enumerate(p.read_text().splitlines(), 1)
+                 if line.strip().startswith("print(")]
+    assert not offenders, offenders
+
+
+def test_every_diet_list_endpoint_answers_in_one_shape(seeded_catalogue):
+    """The contract promises {count, next, previous, results} everywhere. Five diet
+    lists answered with `total_count` or a nested `pagination` object instead, so a
+    client reading `count` and `next` — as it does for every other list — got null."""
+    user, _chosen = _chooser("list-shape")
+    c = _api_client_for(user)
+    for url in ("/api/diet/v1/food/list/?page=1",
+                "/api/diet/v1/food/categories/",
+                "/api/diet/v1/food/search/?q=chicken",
+                "/api/diet/v1/my/diet-plans/"):
+        r = c.get(url)
+        assert r.status_code == 200, (url, r.content[:120])
+        body = r.json()
+        for key in ("count", "next", "previous", "results"):
+            assert key in body, f"{url} is missing {key}"
+        assert isinstance(body["results"], list)
+        assert isinstance(body["count"], int)
+
+
+def test_the_catalogue_speaks_arabic_too(seeded_catalogue):
+    """An Arabic client browsing foods saw English names, then Arabic ones for the same
+    foods inside a meal."""
+    user, _chosen = _chooser("catalogue-ar")
+    c = _api_client_for(user)
+    for url in ("/api/diet/v1/food/list/?page=1", "/api/diet/v1/food/search/?q=rice"):
+        rows = c.get(url).json()["results"]
+        assert rows, url
+        assert all("name_ar" in row for row in rows), url
+        assert any(_ARABIC.search(row["name_ar"] or "") for row in rows), url

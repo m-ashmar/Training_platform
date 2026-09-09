@@ -100,7 +100,6 @@ def get_training_volume(user, days=28, **kwargs):
     """
     from routine.models import ExerciseSetLog, UserExerciseProgress
 
-    print(f"[AI Tool] get_training_volume called for {user.username}, days={days}")
     
     since = timezone.localdate() - timedelta(days=days)
 
@@ -119,7 +118,6 @@ def get_training_volume(user, days=28, **kwargs):
         .order_by('-total_volume')
     )
     
-    print(f"[AI Tool] Volume query retrieved {len(volume_by_muscle)} muscle groups")
 
     return {
         "volume_by_muscle": [

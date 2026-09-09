@@ -193,12 +193,27 @@ class AchievementEngine:
                     activity_type__in=['routine_completed', 'exercise_completed']
                 ).count()
             
-            # Meal counts - use CORRECT activity type
+            # MEALS, not meal components. Analytics writes one `meal_completed` row
+            # per component (`session_id="meal-component-<pk>"`, analytics/signals.py),
+            # so a four-food meal counted as four: "log your first meal" fired on the
+            # first FOOD, and "log 100 meals" at about 25. The component id is in the
+            # session_id, so the meal is recovered by counting distinct meals behind
+            # them rather than the rows themselves.
             elif criteria_type == 'meal_count':
-                return UserActivity.objects.filter(
-                    user=user, 
-                    activity_type='meal_completed'
-                ).count()
+                from diet.models import MealComponent
+
+                component_ids = [
+                    int(sid.rsplit("-", 1)[-1])
+                    for sid in UserActivity.objects.filter(
+                        user=user, activity_type='meal_completed'
+                    ).values_list('session_id', flat=True)
+                    if sid and sid.rsplit("-", 1)[-1].isdigit()
+                ]
+                if not component_ids:
+                    return 0
+                return (MealComponent.objects
+                        .filter(id__in=component_ids)
+                        .values('meal_id').distinct().count())
             
             # Social metrics
             elif criteria_type == 'post_count':

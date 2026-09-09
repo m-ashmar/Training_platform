@@ -46,7 +46,12 @@ def _period(subscription, granularity, now):
     `get_or_create` race-safe.
     """
     if granularity == "day":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # The user's calendar day, not UTC's. `timezone.now()` is UTC and TIME_ZONE is
+        # Asia/Damascus, so a "daily" allowance rolled over at 03:00 local — a client
+        # generating a plan at 01:00 was still spending yesterday's.
+        local_midnight = timezone.localtime(now).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        start = local_midnight
         return start, start + timezone.timedelta(days=1)
     # "subscription": the current paid period, so a limit like max_routines resets
     # when the customer renews rather than on an arbitrary rolling date.

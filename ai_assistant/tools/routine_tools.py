@@ -12,7 +12,6 @@ def get_routine_schedule(user, **kwargs):
     """Get the user's active routines with day-by-day exercise breakdown."""
     from routine.models import Routine, RoutineExercise
 
-    print(f"[AI Tool] get_routine_schedule called for user: {user.username}")
     
     routines = Routine.objects.filter(
         assigned_to=user, is_active=True,
@@ -21,12 +20,10 @@ def get_routine_schedule(user, **kwargs):
     ).order_by('-created_at')[:3]
 
     if not routines:
-        print("[AI Tool] No active routines found.")
         return {"routines": [], "message": str(_("No active routines found."))}
 
     results = []
     for routine in routines:
-        print(f"[AI Tool] Processing routine: {routine.name}")
         days = {}
         for re in routine.routine_exercises.all().order_by('day', 'order'):
             day_key = f"Day {re.day}"

@@ -20,7 +20,6 @@ def get_overall_progress(user, days=30, **kwargs):
     )
     from diet.models import DailyProgress, DietPlan
 
-    print(f"[AI Tool] get_overall_progress called for {user.username}, days={days}")
     
     since_date = timezone.localdate() - timedelta(days=days)
     since_dt = timezone.now() - timedelta(days=days)

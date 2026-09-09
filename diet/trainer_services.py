@@ -444,7 +444,7 @@ class TrainerDietPlanService:
                    'Dinner': 'العشاء', 'Snack': 'الوجبة الخفيفة'}.get(meal_type, meal_type)
         return (join(en, ', ', ' and ') or meal_type,
                 join(ar, '، ', ' و') or slot_ar,
-                "chosen for you by your trainer",
+                str(_("chosen for you by your trainer")),
                 f"اختارها لك مدربك لوجبة {slot_ar}")
 
 class ClientProgressService:
