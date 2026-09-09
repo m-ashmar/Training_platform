@@ -204,12 +204,20 @@ class Subscription(RowValidationMixin, models.Model):
         self.validate_row()
         super().save(*args, **kwargs)
     
+    #: Statuses that entitle the holder to the plan's features.
+    ENTITLED_STATUSES = ('active', 'trial')
+
     @property
     def is_active(self):
-        """Check if subscription is currently active"""
+        """Whether this subscription entitles its holder to the plan's features right now.
+
+        A trial did not. Trials are created with `status='trial'` and this required
+        `'active'`, so every trial user was refused on all 25 diet endpoints and on
+        routine and challenges — the whole point of the trial.
+        """
         now = timezone.now()
         return (
-            self.status == 'active' and 
+            self.status in self.ENTITLED_STATUSES and
             self.end_date > now and
             (not self.trial_end_date or self.trial_end_date > now)
         )

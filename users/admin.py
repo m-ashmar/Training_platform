@@ -30,16 +30,9 @@ def make_available(modeladmin, request, queryset):
     queryset.filter(user_type='trainer').update(trainer_is_available=True)
     messages.success(request, f"Marked {queryset.filter(user_type='trainer').count()} trainers as available.")
 
-@admin.action(description="Reset password to 'testpass123' for selected users")
-def reset_password_to_default(modeladmin, request, queryset):
-    default_password = "testpass123"
-    count = 0
-    for user in queryset:
-        user.password = make_password(default_password)
-        user.save()
-        count += 1
-    messages.success(request, f"Reset password to '{default_password}' for {count} users.")
-
+# The bulk "reset to a known password" action is gone. It set every selected account
+# to one shared, source-visible string, which is an account takeover of every user an
+# operator can select. Password recovery goes through the OTP flow like everyone else.
 @admin.action(description="Activate selected users")
 def activate_users(modeladmin, request, queryset):
     queryset.update(is_active=True)
@@ -84,7 +77,6 @@ class CustomUserAdmin(UserAdmin):
     actions = [
         make_verified, 
         make_available, 
-        reset_password_to_default,
         activate_users,
         deactivate_users
     ]
@@ -146,7 +138,12 @@ class CustomUserAdmin(UserAdmin):
     password_status.short_description = 'Password Status'
     
     def save_model(self, request, obj, form, change):
-        """Keep the pointer and the relationship in step.
+        """Hash a changed password, and keep the pointer and the relationship in step.
+
+        There were TWO `save_model` definitions in this class body. The second replaced
+        the first, so only the password half ever ran and the consent sync below was
+        dead code — an admin setting `assigned_trainer` wrote the pointer with no
+        relation, no consent and no charge.
 
         `assigned_trainer` is editable here, and every authorization check in the diet
         app requires BOTH the pointer and an approved `TrainerClientRelation`. Setting
@@ -155,6 +152,9 @@ class CustomUserAdmin(UserAdmin):
         """
         from .models import TrainerClientRelation
 
+        if change and 'password' in form.changed_data:
+            if obj.password and not obj.password.startswith('pbkdf2'):
+                obj.password = make_password(obj.password)
         super().save_model(request, obj, form, change)
         if 'assigned_trainer' not in getattr(form, 'changed_data', []):
             return
@@ -172,24 +172,23 @@ class CustomUserAdmin(UserAdmin):
         """Optimize queryset with select_related"""
         return super().get_queryset(request).select_related('assigned_trainer')
     
-    def save_model(self, request, obj, form, change):
-        """Handle password changes properly"""
-        if change and 'password' in form.changed_data:
-            # If password field was changed, hash it properly
-            if obj.password and not obj.password.startswith('pbkdf2'):
-                obj.password = make_password(obj.password)
-        super().save_model(request, obj, form, change)
+
     
     def response_change(self, request, obj):
-        """Custom response after user change"""
+        """Custom response after user change.
+
+        The reset button set the account to one shared, source-visible password and
+        told the operator what it was. Anyone who read this file could sign in as any
+        account an operator had ever "helped". An account is recovered through the OTP
+        flow, which is the only path that proves the person owns the address.
+        """
         if '_reset_password' in request.POST:
-            # Handle password reset action
-            default_password = "testpass123"
-            obj.password = make_password(default_password)
-            obj.save()
+            obj.set_unusable_password()
+            obj.save(update_fields=['password'])
             messages.success(
-                request, 
-                f"Password for {obj.email} has been reset to '{default_password}'"
+                request,
+                f"{obj.email} can no longer sign in with a password. "
+                f"Ask them to use 'forgot password' to set a new one."
             )
             return HttpResponseRedirect('.')
         return super().response_change(request, obj)

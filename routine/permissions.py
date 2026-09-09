@@ -1,3 +1,10 @@
+"""Who may act on whom.
+
+SOURCE OF TRUTH: an approved `TrainerClientRelation`, read through
+`can_access_user_data` / `accessible_user_ids` below. Nothing in this module may test
+`CustomUser.assigned_trainer` — that column is a denormalised pointer for display, and
+when the two disagreed it was the pointer that granted access without consent.
+"""
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 
@@ -91,7 +98,7 @@ class IsClientOrTrainerOrAdmin(BasePermission):
         # For user objects, check if it's the user themselves or their trainer
         if hasattr(obj, 'user_type'):
             if obj.user_type == 'client':
-                return (user == obj or user == obj.assigned_trainer)
+                return user == obj or can_access_user_data(user, obj.id)
             elif obj.user_type == 'trainer':
                 return user == obj
             else:
@@ -126,11 +133,11 @@ class IsTrainerForClient(BasePermission):
         
         # For client objects, check if user is their assigned trainer
         if hasattr(obj, 'user_type') and obj.user_type == 'client':
-            return user == obj.assigned_trainer
+            return can_access_user_data(user, obj.id)
         
         # For other objects, check if they belong to a client assigned to this trainer
         if hasattr(obj, 'user') and obj.user.user_type == 'client':
-            return user == obj.user.assigned_trainer
+            return can_access_user_data(user, obj.user_id)
         
         return False
 
@@ -153,14 +160,14 @@ class IsClientOrAssignedTrainer(BasePermission):
         # For user objects
         if hasattr(obj, 'user_type'):
             if obj.user_type == 'client':
-                return (user == obj or user == obj.assigned_trainer)
+                return user == obj or can_access_user_data(user, obj.id)
             elif obj.user_type == 'trainer':
                 return user == obj
         
         # For objects with user field
         if hasattr(obj, 'user'):
             if obj.user.user_type == 'client':
-                return (user == obj.user or user == obj.user.assigned_trainer)
+                return user == obj.user or can_access_user_data(user, obj.user_id)
             else:
                 return user == obj.user
         
@@ -196,7 +203,8 @@ class IsRoutineOwnerOrAssigned(BasePermission):
         
         # Trainers can access routines assigned to their clients
         if user.is_trainer and hasattr(obj, 'assigned_to'):
-            return obj.assigned_to.filter(assigned_trainer=user).exists()
+            return any(can_access_user_data(user, cid)
+                   for cid in obj.assigned_to.values_list('id', flat=True))
         
         return False
 
@@ -330,7 +338,7 @@ class IsSetLogCreatorOrTrainerOrAdmin(BasePermission):
         if request.user.is_authenticated and request.user.is_trainer:
             # Trainers can update/delete if they are assigned trainer of the client
             if hasattr(obj, 'user_exercise_progress') and obj.user_exercise_progress:
-                return obj.user_exercise_progress.user.assigned_trainer == request.user
+                return can_access_user_data(request.user, obj.user_exercise_progress.user_id)
         return False 
 
 

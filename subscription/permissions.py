@@ -10,11 +10,19 @@ class HasActiveSubscription(permissions.BasePermission):
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             return False
+
+        # Staff and trainers are not subscribers. This read `request.user.subscription`
+        # for everyone, so a trainer or admin with no subscription row was refused on
+        # every trainer endpoint — including the ones deliberately widened to admit
+        # them, which made the widening unreachable.
+        user = request.user
+        if getattr(user, 'is_admin', False) or user.is_staff or getattr(user, 'is_trainer', False):
+            return True
         
         try:
             subscription = request.user.subscription
             return subscription.is_active
-        except:
+        except Exception:
             return False
 
 class HasSubscriptionFeature(permissions.BasePermission):
@@ -49,7 +57,7 @@ class HasSubscriptionFeature(permissions.BasePermission):
             else:
                 return True
                 
-        except:
+        except Exception:
             return False
 
 class HasDietAccess(permissions.BasePermission):

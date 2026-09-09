@@ -73,40 +73,74 @@ def take_hold(relation, actor) -> None:
     relation.save(update_fields=['hold_reference', 'updated_at'])
 
 
-def release_hold(relation, actor):
-    """Give the held money back to the client and forget the hold.
+def _move_hold(relation, actor, destination_owner, owner_type, purpose):
+    """Move this relation's held money to `destination_owner`, once.
 
-    Called when the relationship ends. Never raises: a refund that fails must not trap
-    a client in a relationship they are trying to leave, and the hold stays recorded.
+    One body for the refund and the payout, because they differ only in where the
+    money goes and are otherwise the same three steps under the same lock: read the
+    hold, move it, forget it. Doing them in separate unlocked code was how the same
+    hold could be settled twice.
+
+    Everything happens inside one transaction with the relation row locked, so a
+    concurrent caller waits and then finds `hold_reference` already cleared. The lock
+    used to be taken outside any transaction, which PostgreSQL refuses outright — so
+    in production every settlement raised and no trainer was ever paid.
     """
     from wallet.models import Transaction, move_funds_atomic
     from wallet.utils import get_escrow_wallet
 
-    if not relation.hold_reference:
+    from .models import TrainerClientRelation
+
+    if not relation.pk:
         return None
     try:
-        held = Transaction.objects.filter(reference_id=relation.hold_reference).first()
-        if held is None:
+        with transaction.atomic():
+            locked = (TrainerClientRelation.objects
+                      .select_for_update()
+                      .select_related('trainer', 'client')
+                      .get(pk=relation.pk))
+            if not locked.hold_reference:
+                return None
+            held = Transaction.objects.filter(reference_id=locked.hold_reference).first()
+            if held is None:
+                locked.hold_reference = ''
+                locked.save(update_fields=['hold_reference', 'updated_at'])
+                return None
+
+            escrow = get_escrow_wallet()
+            if escrow.balance < held.amount:
+                # Do NOT clear the reference: the money is still owed, and the row is
+                # the only record of who it belongs to.
+                logger.error("Escrow cannot cover hold %s (%s)", locked.hold_reference, purpose)
+                raise HoldFailed("escrow cannot cover this hold")
+
+            tx = move_funds_atomic(
+                escrow, _wallet_for(destination_owner(locked), owner_type), held.amount,
+                actor_id=getattr(actor, 'id', None), tx_type='transfer',
+                metadata={'purpose': purpose,
+                          'hold_reference': locked.hold_reference,
+                          'trainer_id': locked.trainer_id,
+                          'client_id': locked.client_id})
+            locked.hold_reference = ''
+            locked.save(update_fields=['hold_reference', 'updated_at'])
             relation.hold_reference = ''
-            relation.save(update_fields=['hold_reference', 'updated_at'])
-            return None
-        escrow = get_escrow_wallet()
-        if escrow.balance < held.amount:
-            logger.error("Escrow cannot cover hold %s", relation.hold_reference)
-            return None
-        tx = move_funds_atomic(
-            escrow, _wallet_for(relation.client, "client"), held.amount,
-            actor_id=getattr(actor, 'id', None), tx_type='transfer',
-            metadata={'purpose': 'trainer_hold_release',
-                      'hold_reference': relation.hold_reference,
-                      'trainer_id': relation.trainer_id,
-                      'client_id': relation.client_id})
-        relation.hold_reference = ''
-        relation.save(update_fields=['hold_reference', 'updated_at'])
-        return tx
+            return tx
+    except HoldFailed:
+        raise
     except Exception:
-        logger.exception("Could not release hold %s", relation.hold_reference)
-        return None
+        logger.exception("Could not %s hold on relation %s", purpose, relation.pk)
+        raise HoldFailed(f"could not {purpose}")
+
+
+def release_hold(relation, actor):
+    """Give the held money back to the client and forget the hold.
+
+    Raises `HoldFailed` if it cannot. The caller decides what to do about it — the
+    one thing it must not do is delete the relation anyway, because that row is the
+    only record of whose money is sitting in escrow.
+    """
+    return _move_hold(relation, actor, lambda r: r.client, "client",
+                      'trainer_hold_release')
 
 
 def settle_hold(relation, actor):
@@ -114,44 +148,16 @@ def settle_hold(relation, actor):
 
     The routine app used to move `trainer_hourly_rate` from the shared escrow wallet
     to the trainer on every routine assignment, with no link to any hold: fifty
-    assignments were fifty payouts, drawn from whatever other clients had deposited,
-    and a trainer who set a rate after approval collected against a hold that never
-    existed.
+    assignments were fifty payouts, drawn from whatever other clients had deposited.
     """
-    from wallet.models import Transaction, move_funds_atomic
-    from wallet.utils import get_escrow_wallet
-
-    if not relation.hold_reference:
-        return None
-    try:
-        held = Transaction.objects.filter(reference_id=relation.hold_reference).first()
-        if held is None:
-            relation.hold_reference = ''
-            relation.save(update_fields=['hold_reference', 'updated_at'])
-            return None
-        escrow = get_escrow_wallet()
-        if escrow.balance < held.amount:
-            logger.error("Escrow cannot cover hold %s", relation.hold_reference)
-            return None
-        tx = move_funds_atomic(
-            escrow, _wallet_for(relation.trainer, "trainer"), held.amount,
-            actor_id=getattr(actor, 'id', None), tx_type='transfer',
-            metadata={'purpose': 'trainer_assignment_settlement',
-                      'hold_reference': relation.hold_reference,
-                      'trainer_id': relation.trainer_id,
-                      'client_id': relation.client_id})
-        relation.hold_reference = ''
-        relation.save(update_fields=['hold_reference', 'updated_at'])
-        return tx
-    except Exception:
-        logger.exception("Could not settle hold %s", relation.hold_reference)
-        return None
+    return _move_hold(relation, actor, lambda r: r.trainer, "trainer",
+                      'trainer_assignment_settlement')
 
 
 def active_relation(trainer, client):
-    """The approved relation for this pair, locked for update, or None."""
+    """The approved relation for this pair, or None. Takes no lock; the money
+    helpers lock the row inside their own transaction."""
     from .models import TrainerClientRelation
     return (TrainerClientRelation.objects
-            .select_for_update()
             .filter(trainer=trainer, client=client, status='approved')
             .first())

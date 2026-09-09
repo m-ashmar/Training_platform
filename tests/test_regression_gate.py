@@ -3723,10 +3723,34 @@ def test_the_residual_carry_is_bounded_and_never_negative():
     assert tiny.kcal_target >= 0 and all(v >= 0 for v in tiny.macro_targets.values())
 
 
-def test_an_unknown_task_id_is_pending_not_an_error(seeded_catalogue):
-    user, _chosen = _chooser("task-garbage")
-    r = _api_client_for(user).get("/api/diet/v1/plans/tasks/not-a-real-id/")
-    assert r.status_code == 200 and r.json()["state"] == "PENDING"
+def test_a_task_status_is_only_readable_by_whoever_started_it(seeded_catalogue):
+    """Celery reports PENDING for ANY id it has never seen, so an unclaimed id used to
+    look like a real pending task — and the pending and failed branches answered before
+    the ownership check, which asked the task RESULT who owned it. A pending or failed
+    task has no result. The owner is recorded when the task is enqueued.
+    """
+    from diet.models import DietPlan
+
+    user, _chosen = _chooser("task-owner")
+    other, _o = _chooser("task-stranger")
+    c, o = _api_client_for(user), _api_client_for(other)
+
+    # A guessed id is not a task to report on.
+    r = c.get("/api/diet/v1/plans/tasks/not-a-real-id/")
+    assert r.status_code == 404, r.content
+
+    r = c.post("/api/diet/v1/plans/generate/", {"engine": "rule", "duration_days": 1},
+               content_type="application/json")
+    assert r.status_code == 200, r.content
+    task_id = r.json()["task_id"]
+
+    mine = c.get(f"/api/diet/v1/plans/tasks/{task_id}/")
+    assert mine.status_code == 200, mine.content
+    assert mine.json()["task_id"] == task_id
+
+    theirs = o.get(f"/api/diet/v1/plans/tasks/{task_id}/")
+    assert theirs.status_code == 404, theirs.content
+    assert "state" not in theirs.json()
 
 
 def test_a_fitting_dish_at_the_weekly_cap_beats_a_plate_that_misses(seeded_catalogue, monkeypatch):

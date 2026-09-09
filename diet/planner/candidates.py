@@ -141,6 +141,20 @@ _VEGETABLE_WORDS = {
 # and land as produce, black beans are not.
 
 
+def canonical_name(food) -> str:
+    """A food's name in the language the engine's word lists are written in.
+
+    `FoodItem.name` is a modeltranslation virtual field: it returns whatever the
+    ACTIVE language column holds, and the middleware activates the request's language.
+    So under an Arabic request every English word list below matched nothing, fruit and
+    vegetables fell through to the macro-share fallback and were filed as carbohydrate,
+    and the candidate sort — which breaks ties on the name — reordered. The same client
+    got a different plan from the Arabic app than from the English one, from identical
+    data. Read the English column explicitly.
+    """
+    return (getattr(food, "name_en", None) or getattr(food, "name", "") or "")
+
+
 def classify_food(food) -> str:
     """Which slot this food belongs in.
 
@@ -153,10 +167,12 @@ def classify_food(food) -> str:
          optimiser and leaving every plan ~40% over on carbohydrate
       4. calorie share, as the fallback
     """
-    name = (getattr(food, "name", "") or "").lower().replace(",", " ")
+    name = canonical_name(food).lower().replace(",", " ")
     words = set(name.split())
 
-    category = (getattr(getattr(food, "category", None), "name", "") or "").strip().lower()
+    cat = getattr(food, "category", None)
+    category = ((getattr(cat, "name_en", None) or getattr(cat, "name", "") or "")
+                if cat is not None else "").strip().lower()
     for token, slot in _CATEGORY_HINTS.items():
         if token in category:
             return slot
@@ -330,7 +346,7 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
             # the database is rebuilt — so the same code measured 41 distinct dishes on
             # one database and 39 on the next, and a ratchet gate failed with no change
             # to the engine. Determinism must hold across rebuilds, not just within one.
-            by_slot[meal][macro].sort(key=lambda f: (table[f.id], f.name), reverse=True)
+            by_slot[meal][macro].sort(key=lambda f: (table[f.id], canonical_name(f)), reverse=True)
             scores[meal][macro] = table
             preference_scores[meal][macro] = {fid: pr for fid, (_st, pr) in parts.items()}
 

@@ -46,13 +46,18 @@ def features(food) -> List[float]:
     density = min(kcal / 900.0, 1.0)  # 0 for water, 1 for pure fat
     vec = [W_MACRO * p, W_MACRO * c, W_MACRO * f, W_MACRO * density]
 
-    category = (getattr(getattr(food, "category", None), "name", "") or "Other")
+    # The English column, not the active language's: a feature vector that changes
+    # with the request's locale makes "similar" mean different things to the same
+    # client on two devices.
+    cat = getattr(food, "category", None)
+    category = ((getattr(cat, "name_en", None) or getattr(cat, "name", "") or "Other")
+                if cat is not None else "Other")
     vec += _onehot(category, CATEGORIES, W_CATEGORY)
     vec += _onehot(getattr(food, "role", "staple") or "staple", ROLES, W_ROLE)
     slots = set(getattr(food, "meal_slots", None) or ())
     vec += [W_SLOT if (not slots or s in slots) else 0.0 for s in SLOTS]
     vec += _onehot(getattr(food, "cuisine", "universal") or "universal", CUISINES, W_CUISINE)
-    name = (getattr(food, "name", "") or "").lower()
+    name = (getattr(food, "name_en", None) or getattr(food, "name", "") or "").lower()
     vec += [W_STATE if "cooked" in name else 0.0, W_STATE if "dry" in name or "raw" in name else 0.0]
     return vec
 

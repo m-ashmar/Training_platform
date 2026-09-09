@@ -594,10 +594,15 @@ class RoutineViewSet(viewsets.ModelViewSet):
             # trainer who set a rate after approval collected against a hold that had
             # never existed. `settle_hold` pays exactly what was held for this pair
             # and then forgets it, so a repeat moves nothing.
-            from users.trainer_relations import active_relation, settle_hold
+            from users.trainer_relations import HoldFailed, active_relation, settle_hold
             relation = active_relation(request.user, client)
             if relation is not None:
-                settle_hold(relation, request.user)
+                try:
+                    settle_hold(relation, request.user)
+                except HoldFailed as exc:
+                    # The routine is assigned either way; the payment is retried on
+                    # the next assignment because the hold is still on the relation.
+                    logger.error("Settlement deferred for relation %s: %s", relation.id, exc)
             
             # Log the assignment
             logger.info(

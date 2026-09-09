@@ -21,10 +21,13 @@ rather than breaks.
 """
 from __future__ import annotations
 
+import logging
 import math
 
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 #: How finely each unit divides. A single global step was wrong in both directions: a
 #: quarter of an egg is not a thing, and half a pot of yogurt is a 75 g quantum, which

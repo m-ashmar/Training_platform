@@ -262,7 +262,13 @@ class ClientProfileSerializer(serializers.ModelSerializer):
             'activity_level', 'assigned_trainer', 'assigned_trainer_name',
             'client_goals', 'client_preferences'
         ]
-        read_only_fields = ['id', 'username', 'email']
+        # `assigned_trainer` is READ-ONLY. It was writable here, so a client could
+        # PATCH their own profile and attach any trainer to themselves — no request,
+        # no approval, no charge — and every gate that still reads the pointer then
+        # treated that stranger as their trainer. Setting it to null while an approved
+        # relation held their money stranded the payment. The bond is created only by
+        # the request/approve pair.
+        read_only_fields = ['id', 'username', 'email', 'assigned_trainer']
 
     def get_assigned_trainer_name(self, obj):
         if obj.assigned_trainer:

@@ -558,14 +558,23 @@ class UnassignClientView(APIView):
                     client.assigned_trainer = None
                     client.save(update_fields=['assigned_trainer'])
 
-                # The hold taken when this pair was approved goes back to the client.
-                # Before the delete, because the hold is named on the row.
-                from .trainer_relations import release_hold
-                release_hold(relation, request.user)
-                # Every row for this pair, not just the approved one: a stale
-                # pending or rejected row left the client's own request-status
-                # screen contradicting itself, and could re-trigger the block
-                # on choosing another trainer.
+                # Refund first, and only then let go of the record. `release_hold`
+                # raises when it cannot move the money, and deleting the relation
+                # anyway would destroy the only record of whose money is in escrow.
+                from .trainer_relations import HoldFailed, release_hold
+                try:
+                    release_hold(relation, request.user)
+                except HoldFailed as exc:
+                    logger.error("Refund failed for relation %s: %s", relation.id, exc)
+                    return Response(
+                        {'error': _('We could not return the held payment. '
+                                    'Nothing was changed; please try again.')},
+                        status=status.HTTP_409_CONFLICT
+                    )
+                # Every row for this pair, not just the approved one: a stale pending
+                # or rejected row left the client's own request-status screen
+                # contradicting itself, and could re-trigger the block on choosing
+                # another trainer.
                 TrainerClientRelation.objects.filter(
                     trainer=request.user, client=client).delete()
                 
@@ -1217,9 +1226,17 @@ class ClientUnassignTrainerView(APIView):
                     client=request.user,
                     status='approved'
                 )
-                # Release BEFORE deleting the row: the hold is named on it.
-                from .trainer_relations import release_hold
-                release_hold(relation, request.user)
+                # Refund first, and only then let go of the record.
+                from .trainer_relations import HoldFailed, release_hold
+                try:
+                    release_hold(relation, request.user)
+                except HoldFailed as exc:
+                    logger.error("Refund failed for relation %s: %s", relation.id, exc)
+                    return Response(
+                        {'error': _('We could not return your held payment. '
+                                    'Nothing was changed; please try again.')},
+                        status=status.HTTP_409_CONFLICT
+                    )
                 TrainerClientRelation.objects.filter(
                     trainer=trainer, client=request.user).delete()
             except TrainerClientRelation.DoesNotExist:

@@ -670,8 +670,29 @@ admin_site.index = dashboard_view.index
 # ============================================================================
 
 # Register all models with the custom admin site
-admin_site.register(CustomUser, CustomUserAdmin)
-admin_site.register(TrainerClientRelation)
+# The users app's own admin, which hashes a changed password AND keeps
+# `assigned_trainer` in step with the approved relation. This site had its own simpler
+# class that wrote the pointer with no relation, no consent and no charge.
+from users.admin import CustomUserAdmin as UsersCustomUserAdmin
+
+admin_site.register(CustomUser, UsersCustomUserAdmin)
+# Read-only: this row carries consent, the agreed price and the escrow reference.
+# Registered bare, any staff account could set status='approved' with no client
+# consent and no money held, or point `hold_reference` at nothing.
+@admin.register(TrainerClientRelation, site=admin_site)
+class TrainerClientRelationAdmin(admin.ModelAdmin):
+    list_display = ('trainer', 'client', 'status', 'initiated_by', 'agreed_rate',
+                    'hold_reference', 'created_at')
+    list_filter = ('status', 'initiated_by')
+    search_fields = ('trainer__email', 'client__email')
+    readonly_fields = ('trainer', 'client', 'status', 'initiated_by', 'agreed_rate',
+                       'hold_reference', 'created_at', 'updated_at')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 admin_site.register(DeviceToken)
 
 admin_site.register(Exercise, ExerciseAdmin)

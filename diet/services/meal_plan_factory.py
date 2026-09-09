@@ -99,6 +99,7 @@ class MealPlanFactory:
         # only already be on it if this loop put it there; asking the database per
         # component was a query that always answered "no" on the planner's path.
         added: dict = {}
+        pending: list = []
         for food_item, quantity in resolved:
             if isinstance(quantity, (int, float)):
                 # A gram figure the planner decided. It is not text to be parsed, not a
@@ -147,14 +148,26 @@ class MealPlanFactory:
                     cap = min(cap, 300.0)
                 if existing.quantity > cap:
                     existing.quantity = cap
-                existing.save(update_fields=['quantity'])
+                if existing.pk:
+                    existing.save(update_fields=['quantity'])
+                # else: it is still in `pending` and will be written with the merged
+                # quantity when the batch goes in.
             else:
-                added[food_item.id] = MealComponent.objects.create(
+                row = MealComponent(
                     meal=meal,
                     food=food_item,
                     quantity=grams,
                     meal_time=meal.meal_type,
                 )
+                added[food_item.id] = row
+                pending.append(row)
+
+        # One INSERT for the meal's components, not one per component. A seven-day
+        # plan wrote 127 of them. `MealComponent` has no custom save(), and the only
+        # receiver on it returns early unless the row is completed — which a new row
+        # never is — so nothing is skipped by writing them together.
+        if pending:
+            MealComponent.objects.bulk_create(pending)
 
     def _determine_meal_template(self, ai_meal: AIMeal) -> str:
         nutrition = ai_meal.total_nutrition

@@ -870,6 +870,39 @@ class UserPreferencesView(APIView):
             logger.error(f"User preferences clear error: {str(e)}")
             return Response({"error": _("Failed to clear preferences")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+#: How long a caller may poll for a task they started. Longer than any generation.
+TASK_OWNER_TTL = 60 * 60
+
+
+def _task_owner_key(task_id) -> str:
+    return f"diet:task-owner:{task_id}"
+
+
+def remember_task_owner(task_id, user) -> None:
+    """Record who started a generation, so its status can be scoped to them."""
+    from django.core.cache import cache
+    try:
+        cache.set(_task_owner_key(task_id), user.id, TASK_OWNER_TTL)
+    except Exception:
+        logger.warning("could not record the owner of task %s", task_id, exc_info=True)
+
+
+def task_belongs_to(task_id, user) -> bool:
+    """Whether `user` started this task.
+
+    Unknown means no. A task id nobody claims is not one to report on, and the
+    alternative is disclosing strangers' failures to anyone who guesses an id.
+    """
+    from django.core.cache import cache
+    if getattr(user, "is_admin", False):
+        return True
+    try:
+        return cache.get(_task_owner_key(task_id)) == user.id
+    except Exception:
+        logger.warning("could not read the owner of task %s", task_id, exc_info=True)
+        return False
+
+
 class GenerateDietPlanView(APIView):
     """
     Generate a plan off the request thread, for durations the synchronous endpoint
@@ -914,6 +947,7 @@ class GenerateDietPlanView(APIView):
                 start_date=start_date_str,
                 duration_days=int_param(request.data, 'duration_days', default=7, minimum=1, maximum=MAX_TASK_DAYS),
             )
+            remember_task_owner(task.id, request.user)
             # The task records the quota when a plan exists; read the outcome at
             # plans/tasks/<task_id>/.
             return Response({
@@ -949,18 +983,26 @@ class PlanTaskStatusView(APIView):
     def get(self, request, task_id: str):
         from celery.result import AsyncResult
 
+        # Ownership BEFORE any state is disclosed. This asked the task RESULT who owned
+        # it, which cannot work: a pending or failed task has no result, so those two
+        # branches answered first and any authenticated caller could read the state and
+        # error text of anybody's task. When the result was not a dict the owner also
+        # read as None, which the check treated as "mine". The owner is recorded when
+        # the task is enqueued instead, so it is known from the first poll.
+        if not task_belongs_to(task_id, request.user):
+            return Response({"error": _("Task not found")}, status=status.HTTP_404_NOT_FOUND)
+
         result = AsyncResult(str(task_id))
         state = result.state
         if state in ("PENDING", "STARTED", "RETRY", "RECEIVED"):
             return Response({"task_id": task_id, "state": state})
+
         if state == "FAILURE":
             logger.error("generation task %s failed: %s", task_id, result.result)
             return Response({"task_id": task_id, "state": "FAILURE",
                              "error": _("Plan generation failed. Please try again.")})
+
         payload = result.result if isinstance(result.result, dict) else {}
-        if payload.get("user_id") not in (None, request.user.id):
-            # Another client's task id. Say nothing about it.
-            return Response({"error": _("Task not found")}, status=status.HTTP_404_NOT_FOUND)
         body = {"task_id": task_id, "state": state}
         body.update({k: v for k, v in payload.items() if k != "user_id"})
         return Response(body)
