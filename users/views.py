@@ -562,7 +562,12 @@ class UnassignClientView(APIView):
                 # Before the delete, because the hold is named on the row.
                 from .trainer_relations import release_hold
                 release_hold(relation, request.user)
-                relation.delete()
+                # Every row for this pair, not just the approved one: a stale
+                # pending or rejected row left the client's own request-status
+                # screen contradicting itself, and could re-trigger the block
+                # on choosing another trainer.
+                TrainerClientRelation.objects.filter(
+                    trainer=request.user, client=client).delete()
                 
                 # Emit domain event — notification handled at delivery boundary
                 emit_event(TrainerUnassignmentEvent(
@@ -1215,7 +1220,8 @@ class ClientUnassignTrainerView(APIView):
                 # Release BEFORE deleting the row: the hold is named on it.
                 from .trainer_relations import release_hold
                 release_hold(relation, request.user)
-                relation.delete()
+                TrainerClientRelation.objects.filter(
+                    trainer=trainer, client=request.user).delete()
             except TrainerClientRelation.DoesNotExist:
                 # Relation may not exist, but we still proceed to clear assigned_trainer
                 # Optional side effect: swallowing this silently is what made the

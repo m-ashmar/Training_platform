@@ -109,6 +109,10 @@ class CustomUserAdmin(UserAdmin):
         }),
         ('Client info', {
             'fields': ('assigned_trainer', 'client_goals', 'client_preferences'),
+            'description': ('Setting a trainer here writes the pointer only. The '
+                            'relationship, the client\'s consent and the escrow hold '
+                            'live on TrainerClientRelation, and save() below keeps '
+                            'them in step.'),
             'classes': ('collapse',)
         }),
         ('Permissions', {
@@ -141,6 +145,29 @@ class CustomUserAdmin(UserAdmin):
             )
     password_status.short_description = 'Password Status'
     
+    def save_model(self, request, obj, form, change):
+        """Keep the pointer and the relationship in step.
+
+        `assigned_trainer` is editable here, and every authorization check in the diet
+        app requires BOTH the pointer and an approved `TrainerClientRelation`. Setting
+        the pointer alone produced a client whose app showed a trainer who could not
+        actually do anything, and clearing it left an approved relation behind.
+        """
+        from .models import TrainerClientRelation
+
+        super().save_model(request, obj, form, change)
+        if 'assigned_trainer' not in getattr(form, 'changed_data', []):
+            return
+        if obj.assigned_trainer_id:
+            TrainerClientRelation.objects.update_or_create(
+                trainer_id=obj.assigned_trainer_id, client=obj,
+                defaults={'status': 'approved', 'initiated_by': 'trainer'})
+            TrainerClientRelation.objects.filter(client=obj, status='approved').exclude(
+                trainer_id=obj.assigned_trainer_id).update(status='rejected')
+        else:
+            TrainerClientRelation.objects.filter(client=obj, status='approved').update(
+                status='rejected')
+
     def get_queryset(self, request):
         """Optimize queryset with select_related"""
         return super().get_queryset(request).select_related('assigned_trainer')

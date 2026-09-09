@@ -4656,3 +4656,32 @@ def test_the_collection_routes_answer_405_not_a_crash(seeded_catalogue, make_use
     for method in ("put", "delete"):
         r = getattr(t_api, method)("/api/diet/v1/trainer/meals/", {}, content_type="application/json")
         assert r.status_code == 405, (method, r.status_code, r.content[:100])
+
+
+def test_leaving_a_trainer_leaves_no_contradictory_history(seeded_catalogue, make_user):
+    """Unassign deleted only the approved row, so a stale pending or rejected row for
+    the same pair survived: the client's own request-status screen then contradicted
+    itself, and the leftover could re-trigger the block on choosing anyone else."""
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, "history")
+    c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
+               content_type="application/json")
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client_user)
+    t_api.post("/api/auth/trainer/respond-to-request/",
+               {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    # A leftover from an earlier cycle.
+    TrainerClientRelation.objects.create(
+        trainer=make_user("tr-old", user_type="trainer"), client=client_user,
+        status="rejected", initiated_by="client")
+
+    r = c_api.post("/api/auth/client/unassign-trainer/", {}, content_type="application/json")
+    assert r.status_code in (200, 204), r.content
+    assert not TrainerClientRelation.objects.filter(trainer=trainer, client=client_user).exists()
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id is None
+
+    # And they can immediately choose again.
+    r = c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
