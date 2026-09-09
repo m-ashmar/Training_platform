@@ -70,7 +70,12 @@ def plain_name(food) -> str:
     parentheses — "Labneh with Honey (Pita Bread (White) instead of Pita Bread (Whole
     Wheat))" — which no one would write down. The Arabic names never carried them.
     """
-    name = getattr(food, "name", None) or str(food)
+    # The English column when one exists. `plain_name` feeds `_names_the_dish`, which
+    # decides whether a line may be substituted — a decision, not a display. Under an
+    # Arabic request both the food and the recipe returned Arabic, the ASCII word match
+    # found nothing, and the "never replace the ingredient the dish is named after"
+    # rule was silently off for every dish.
+    name = getattr(food, "name_en", None) or getattr(food, "name", None) or str(food)
     return name.split(" (")[0].strip() or name
 
 
@@ -227,14 +232,47 @@ def _augment(match: RecipeMatch, lines, targets, policy, pool, meal_name, edges,
                        substituted=match.substituted, replaced=match.replaced)
 
 
+#: Words that describe a food rather than name it. They appear in catalogue names as
+#: qualifiers ("White Rice", "Greek Yogurt (Non-Fat)") and in dish titles as ordinary
+#: English, so matching on them protects lines the dish is not actually named after.
+_QUALIFIER_WORDS = frozenset({
+    "with", "and", "the", "for", "raw", "dry", "low", "non", "fat", "free", "lean",
+    "whole", "half", "white", "red", "green", "brown", "black", "fresh", "plain",
+    "cooked", "baked", "grilled", "roasted", "boiled", "canned", "prepared", "dried",
+    "ground", "sweet", "medium", "large", "small", "extra", "virgin", "light",
+    "style", "mix", "mixed", "natural", "salted", "unsalted",
+})
+
+
 def _names_the_dish(food_name: str, title: str) -> bool:
     """Whether the dish is named after this food, by whole words."""
     import re
 
-    words = [w for w in re.findall(r"[a-z]+", food_name.lower()) if len(w) > 2]
+    def stem(word: str) -> str:
+        """Enough of a word to match its plural, and no more."""
+        for suffix in ("ies", "es", "s"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                return word[: -len(suffix)]
+        return word
+
+    # Words long enough to identify a food. `any()` over every word of three letters
+    # or more blocked far too much — "oat" protected any title containing it — and
+    # cost the client's chosen foods a sixth of the dishes they used to reach.
+    # A word identifies a food unless it is a QUALIFIER. Length was the wrong test in
+    # both directions: it dropped "egg" and "oat", which name dishes, and it kept
+    # "white" and "lean", which do not. "Egg" is three letters and "Ful with Eggs and
+    # Bread" is named after it.
+    words = [w for w in re.findall(r"[a-z]+", food_name.lower())
+             if len(w) >= 3 and w not in _QUALIFIER_WORDS]
     if not words:
         return False
-    return all(re.search(rf"\b{re.escape(w)}\b", title) for w in words)
+    # ANY significant word, stemmed. `all()` over exact words failed twice over: the
+    # dish "Lentil Soup" did not match the food "Lentils" because of one letter, and
+    # "White Rice" did not match "Rice, Lentils and Chickpeas" because "white" is
+    # absent — so both lines were substitutable and a lentil soup could be served with
+    # chickpeas instead of lentils. Matching any stem over-blocks slightly and never
+    # under-blocks, which is the right direction for a rule about a dish's identity.
+    return any(re.search(rf"\b{re.escape(stem(w))}(?:s|es|ies)?\b", title) for w in words)
 
 
 def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids, recipe_name=""):
@@ -394,7 +432,8 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         if index is not None and pool is not None:
             lines, substituted, replaced = _substitute_chosen(
                 lines, pool, meal_name, policy, index, chosen_ids,
-                recipe_name=getattr(recipe, "name", ""))
+                recipe_name=(getattr(recipe, "name_en", None)
+                             or getattr(recipe, "name", "") or ""))
 
         # Every hard constraint, not just allergens. This checked allergies and nothing
         # else, so a dish built on a food the client had explicitly rejected was served

@@ -231,8 +231,16 @@ def _density(food, macro: str) -> float:
     # the shortlist `_pick` samples from was the reverse-alphabetical head of the
     # catalogue. Zucchini and Watermelon were always in it and Broccoli never was.
     if macro == "vegetable":
-        # How much food a calorie buys — the reason a vegetable is on the plate.
-        return 1.0 / kcal_pg
+        # Grams of NON-energy bulk per kcal, so the number is on the same 0-0.3 scale
+        # as protein, carb and fat. `1.0 / kcal_pg` was grams of food per kcal, which
+        # is ~6.7 for cucumber against ~0.3 for a lean protein — a 66-point structure
+        # term against a 3-point one. That made the wateriest vegetable win nearly
+        # every draw, and `meal_pool_score` sums across slots, so the vegetable line
+        # dominated the score that decides recipe against template.
+        grams_of_macro = (float(getattr(food, "protein_per_gram", 0) or 0)
+                          + float(getattr(food, "carbs_per_gram", 0) or 0)
+                          + float(getattr(food, "fat_per_gram", 0) or 0))
+        return max(0.0, 1.0 - grams_of_macro) / kcal_pg / 10.0
     if macro == "fruit":
         return float(getattr(food, "carbs_per_gram", 0) or 0) / kcal_pg
     attr = {"protein": "protein_per_gram", "carb": "carbs_per_gram", "fat": "fat_per_gram"}.get(macro)

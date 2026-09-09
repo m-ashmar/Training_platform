@@ -35,8 +35,15 @@ class HasSubscriptionFeature(permissions.BasePermission):
         super().__init__()
     
     def has_permission(self, request, view):
-        if not request.user.is_authenticated:
+        # Staff, trainers and admins are not subscribers. `HasDietAccess` delegates
+        # here, so without this every trainer diet endpoint was refused before its own
+        # `is_trainer or is_admin` check could run — the four trainer routes were dead.
+        # The bypass existed only on `HasActiveSubscription`, which these do not use.
+        user = request.user
+        if not user.is_authenticated:
             return False
+        if getattr(user, 'is_admin', False) or user.is_staff or getattr(user, 'is_trainer', False):
+            return True
         
         try:
             subscription = request.user.subscription

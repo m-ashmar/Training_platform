@@ -2001,13 +2001,26 @@ def test_the_library_is_barely_used(diet_quality):
         f"a dish was served twice in one day on " \
         f"{diet_quality.days_repeating_a_dish} of {diet_quality.days_measured} days"
 
+    import json
+    from pathlib import Path as _Path
+
+    recorded_slots = json.loads(
+        (_Path(__file__).parent / "diet_quality_baseline.json").read_text()
+    )["measured"].get("distinct_dishes_by_slot", {})
+
     for slot, distinct in diet_quality.distinct_dishes_by_slot.items():
         # A slot with two dishes cannot serve either under 60% of the time without
         # alternating perfectly, so the rule would read the library's breadth as the
         # engine's behaviour. Residual carry made a second snack dish reachable and
         # concentration fell from 100% to 64% — an improvement this rule then failed.
         if distinct < 3:
-            continue  # nothing else fits this slot; that is the library, not the engine
+            # Skipping means a change that DROPS a slot to two dishes turns its own
+            # concentration check off — degrading the measured thing satisfies the
+            # test. The slot still has to justify itself against the baseline.
+            assert distinct >= recorded_slots.get(slot, 0), (
+                f"{slot} fell to {distinct} distinct dishes, from "
+                f"{recorded_slots.get(slot, 0)}")
+            continue
         served = diet_quality.meals_by_slot.get(slot, 0)
         repeats = diet_quality.max_repeats_by_slot.get(slot, 0)
         assert repeats <= 0.6 * served, \
@@ -2098,7 +2111,12 @@ def test_a_portion_sticks_at_one_or_two_sizes(diet_quality):
     and stops, so the floor becomes the permanent answer.
 
     Tightens in P4 to >= 4 once floors become min_units inside the search space."""
-    assert diet_quality.min_distinct_portions_per_food >= 1
+    # >= 2, not >= 1. The metric is a minimum over foods served four or more times, so
+    # its smallest possible non-empty value IS 1 — the assertion could only fail if no
+    # food was served four times at all, and "a portion sticks at one size", the defect
+    # named in this docstring, passed it.
+    assert diet_quality.min_distinct_portions_per_food >= 2, (
+        "some food is always served at exactly one amount")
 
 
 def test_calorie_drift_stays_bounded(diet_quality):
@@ -4748,6 +4766,14 @@ def test_a_trainer_sees_only_clients_who_approved_them(seeded_catalogue, make_us
     trainer, client_user, t_api, c_api = _assigned_pair(make_user, "scope")
     routine = Routine.objects.create(name="Scoped", days=1, created_by=trainer)
     routine.assigned_to.set([client_user])
+    # Reachable ONLY through the client, not through authorship.
+    other_trainer = make_user("tr-foreign-author", user_type="trainer")
+    foreign = Routine.objects.create(name="Foreign", days=1, created_by=other_trainer)
+    foreign.assigned_to.set([client_user])
+    assert any(x["id"] == foreign.id
+               for x in (lambda b: b.get("results", b) if isinstance(b, dict) else b)(
+                   t_api.get("/api/routine/routines/").json())), \
+        "the fixture does not reproduce client-reachable visibility"
 
     r = t_api.get("/api/routine/routines/")
     body = r.json()
@@ -4757,11 +4783,17 @@ def test_a_trainer_sees_only_clients_who_approved_them(seeded_catalogue, make_us
     # The client leaves. The routine is no longer theirs to see through the client.
     c_api.post("/api/auth/client/unassign-trainer/", {}, content_type="application/json")
     TrainerClientRelation.objects.filter(trainer=trainer, client=client_user).delete()
+    # A routine written by ANOTHER trainer and reachable only through this client must
+    # disappear. The previous assertion here was `... or routine.created_by_id ==
+    # trainer.id`, and the routine was created by that trainer two lines above, so the
+    # right-hand side was always true and the test proved nothing.
     r = t_api.get("/api/routine/routines/")
     body = r.json()
     rows = body.get("results", body) if isinstance(body, dict) else body
-    # Still visible as its AUTHOR, which is correct; the point is the client link is gone.
-    assert all(x["id"] != routine.id for x in rows) or routine.created_by_id == trainer.id
+    assert all(x["id"] != foreign.id for x in rows), \
+        "a dismissed trainer still sees a routine reachable only through that client"
+    # Their own authorship still stands.
+    assert any(x["id"] == routine.id for x in rows)
 
 
 def test_every_engine_meal_says_when_it_is_eaten(seeded_catalogue, make_user):

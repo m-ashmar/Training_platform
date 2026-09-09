@@ -391,8 +391,10 @@ class MealSwap(models.Model):
     """
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='meal_swaps')
     meal = models.ForeignKey('Meal', on_delete=models.CASCADE, related_name='swaps')
-    rejected_food = models.ForeignKey(FoodItem, on_delete=models.CASCADE, related_name='rejected_in_swaps')
-    chosen_food = models.ForeignKey(FoodItem, on_delete=models.CASCADE, related_name='chosen_in_swaps')
+    # PROTECT: a swap is the strongest preference signal a client ever gives, and
+    # learning reads it. Deleting a food erased the evidence that they refused it.
+    rejected_food = models.ForeignKey(FoodItem, on_delete=models.PROTECT, related_name='rejected_in_swaps')
+    chosen_food = models.ForeignKey(FoodItem, on_delete=models.PROTECT, related_name='chosen_in_swaps')
     at = models.DateTimeField(auto_now_add=True, db_index=True)
     #: Cosine similarity of rejected -> chosen at the moment of the swap. High means the
     #: food was fine and the client wanted a variant; low means the meal's shape was
@@ -816,7 +818,14 @@ class MealComponent(models.Model):
     Enhanced with completion tracking.
     """
     meal = models.ForeignKey('Meal', on_delete=models.CASCADE, related_name='components')
-    food = models.ForeignKey(FoodItem, on_delete=models.CASCADE)
+    #: PROTECT, not CASCADE. This row is the client's record of what they ate, and
+    #: cascading meant that deleting or retiring ONE catalogue food silently emptied
+    #: every historical meal that used it — and `load_food_catalogue --wipe`, which
+    #: the release plan runs, deletes every food and therefore every component ever
+    #: recorded. This database holds 2,720 meals and zero components for exactly that
+    #: reason. The recipe library was already protected; the client's own history was
+    #: not. A food that has been eaten is retired with `needs_review`, never deleted.
+    food = models.ForeignKey(FoodItem, on_delete=models.PROTECT)
     quantity = models.FloatField(help_text="Quantity in grams")
     meal_time = models.CharField(max_length=20, choices=Meal.MEAL_TYPES, default='Lunch')
     

@@ -31,6 +31,7 @@ import json
 import logging
 from django.shortcuts import render
 from django.http import JsonResponse
+from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from datetime import date, time, datetime
@@ -2552,8 +2553,12 @@ class DietPlanMealsWithIngredientsView(APIView):
                 if plan.user_id != request.user.id:
                     return Response({'error': _('You can only view your own diet plans')}, status=status.HTTP_403_FORBIDDEN)
             elif request.user.is_trainer:
-                if plan.created_by_id != request.user.id:
-                    return Response({'error': _('You can only view plans you created')}, status=status.HTTP_403_FORBIDDEN)
+                # Authorship AND still this client's trainer, the same rule the other
+                # two plan reads use. This tested authorship alone, so a dismissed
+                # trainer kept reading every meal, ingredient and target through it.
+                if not _trainer_may_read_plan(request.user, plan):
+                    return Response({'error': _('You can only view plans for your current clients')},
+                                    status=status.HTTP_403_FORBIDDEN)
             elif not getattr(request.user, 'is_admin', False):
                 return Response({'error': _('You do not have access to this plan')}, status=status.HTTP_403_FORBIDDEN)
             

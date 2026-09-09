@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 #: cup in quarters and an egg in whole eggs, so the step belongs to the unit.
 UNIT_STEP = 0.5
 UNIT_STEPS = {
+    # A drink measured in half-glasses has three rungs between its floor and ceiling,
+    # and the engine parked both milks on the top one every time — a ladder so coarse
+    # that the ceiling is the only place a calorie gap can be closed. A quarter of a
+    # glass is a serving a person recognises, and it gives the optimiser somewhere to
+    # land that is not the maximum.
+    "glass": 0.25,
     "cup": 0.25, "pot": 0.25, "serving": 0.25,
     "tbsp": 0.5, "slice": 0.5, "palm": 0.5, "fillet": 0.5, "block": 0.5,
     "handful": 0.5, "half": 0.5, "medium": 0.5,

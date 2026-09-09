@@ -86,7 +86,13 @@ class AllergenChecker:
         return bool(self.user_tags)
 
     def check_food(self, food: FoodItem) -> IngredientVerdict:
-        name = getattr(food, "name", "") or ""
+        # The ENGLISH column. `FoodItem.name` is a modeltranslation virtual field that
+        # returns whatever the active language selects, and the allergen markers are
+        # English words — so under an Arabic request this text matched nothing and an
+        # uncurated row named "Peanut Butter Cookie" came back UNVERIFIED instead of
+        # VIOLATION, and was served to a peanut-allergic client. Same allergy, same
+        # food, opposite outcome depending on which app made the request.
+        name = getattr(food, "name_en", None) or getattr(food, "name", "") or ""
         source = getattr(food, "allergen_source", "unknown") or "unknown"
         stored = set(getattr(food, "allergens", None) or [])
         text = f"{name} {getattr(food, 'ingredients_text', '') or ''}"

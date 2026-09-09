@@ -390,7 +390,12 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
                 per_slot_tally[slot][meal.recipe_id] += 1
             for food, grams in _components(meal):
                 total_portions += 1
-                portions_by_food[food.name].append(grams)
+                # Only meals the ENGINE portioned. A recipe author's pinned line is
+                # meant to be the same every time — a clove of garlic, a pinch of salt
+                # — so counting those made "a portion sticks at one size" unmeasurable,
+                # and the bound had to sit at its own floor to stay green.
+                if not is_dish:
+                    portions_by_food[food.name].append(grams)
                 ceiling = _declared_ceiling(food)
                 if ceiling is None:
                     ceiling = _portion_ceiling(food.name)
@@ -416,6 +421,7 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     report.absurd_portion_rate = absurd / total_portions if total_portions else 0.0
 
     # A food served often but at one or two amounts is a floor acting as an attractor.
+    # Measured over engine-built plates only; see above.
     repeated = [vals for vals in portions_by_food.values() if len(vals) >= 4]
     report.min_distinct_portions_per_food = (
         min(len({round(v) for v in vals}) for vals in repeated) if repeated else 0)

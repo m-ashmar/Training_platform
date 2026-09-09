@@ -29,7 +29,13 @@ def _movable_indices(meal, components):
     try:
         pinned = {line.food_id for line in recipe.ingredients.all() if not line.scalable}
     except Exception:
-        return None
+        # Fail CLOSED. `None` means "every line movable", so an error reading the
+        # recipe's lines sent the pinch of salt to its ladder ceiling — the exact
+        # regression this function exists to prevent, silently. Moving nothing is the
+        # safe answer: the meal keeps the portions the planner chose.
+        logger.warning("could not read pinned lines for meal %s", getattr(meal, "pk", None),
+                       exc_info=True)
+        return []
     if not pinned:
         return None
     return [i for i, (food, _g) in enumerate(components)

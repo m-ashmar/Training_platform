@@ -25,7 +25,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from diet.data.catalogue import LEVANTINE, USDA, WESTERN
-from diet.models import FoodCategory, FoodItem, Recipe, RecipeIngredient
+from diet.models import FoodCategory, FoodItem, MealComponent, Recipe, RecipeIngredient
 
 CACHE = Path(__file__).resolve().parents[2] / "data" / "usda_cache.json"
 
@@ -41,6 +41,9 @@ class Command(BaseCommand):
         parser.add_argument("--apply", action="store_true")
         parser.add_argument("--wipe", action="store_true",
                             help="Delete the existing catalogue first. Destructive.")
+        parser.add_argument("--force", action="store_true",
+                            help="Wipe even though meals reference these foods. This "
+                                 "erases what clients have eaten. Development only.")
         parser.add_argument("--skip-units", action="store_true",
                             help="Do not run seed_food_units afterwards.")
 
@@ -90,8 +93,38 @@ class Command(BaseCommand):
         if opts["wipe"] and not rows:
             raise CommandError("refusing to wipe with nothing to load")
 
+        # A food that has been EATEN cannot be deleted. `MealComponent.food` is PROTECT
+        # now, so the wipe below would raise mid-transaction; refuse before starting,
+        # and say what to do instead. This command destroyed every component in the
+        # development database — 2,720 meals with nothing on them — and the release
+        # plan runs it against production.
+        if opts["wipe"]:
+            from diet.models import MealComponent
+            eaten = MealComponent.objects.count()
+            if eaten and not opts.get("force"):
+                raise CommandError(
+                    f"refusing to wipe: {eaten} meal component(s) reference these foods, "
+                    f"and deleting them would erase what clients have already eaten. "
+                    f"Run without --wipe to converge the catalogue on the file instead, "
+                    f"or pass --force if this database has no real client history."
+                )
+
         with transaction.atomic():
             if opts["wipe"]:
+                # `MealComponent.food` and the two `MealSwap` foods are PROTECT, so a
+                # plain delete raises. `--force` means "this database holds no real
+                # client history", and the only honest way to honour it is to say
+                # exactly what is being destroyed and then destroy it.
+                from diet.models import MealSwap
+                n_comps = MealComponent.objects.count()
+                n_swaps = MealSwap.objects.count()
+                if n_comps or n_swaps:
+                    self.stdout.write(self.style.WARNING(
+                        f"  --force: erasing {n_comps} meal component(s) and {n_swaps} "
+                        f"swap(s) — this is what clients had eaten"))
+                    MealSwap.objects.all().delete()
+                    MealComponent.objects.all().delete()
+
                 # RecipeIngredient.food is PROTECT, so recipes go first.
                 n_lines = RecipeIngredient.objects.count()
                 n_recipes = Recipe.objects.count()
