@@ -25,6 +25,7 @@ import re
 from django.core.management.base import BaseCommand
 
 from diet.allergens import infer_allergens
+from diet.data.food_allergens import CURATED
 from diet.models import FoodItem
 
 # Single-ingredient whole foods. Matched as whole words against the full name; every
@@ -74,7 +75,17 @@ _WORD = re.compile(r"[a-z]+")
 
 
 def classify(name: str):
-    """Return (source, tags, reason)."""
+    """Return (source, tags, reason).
+
+    The curated table wins outright. It is the only input that can say "this food carries
+    none of the 14" about a composite dish, and the only one that knows an ingredient the
+    name does not mention. Inference below it is a fallback for rows that arrived from an
+    import rather than from `diet/data/catalogue.py`.
+    """
+    curated = CURATED.get((name or "").strip())
+    if curated is not None:
+        return "verified", sorted(curated), "curated composition"
+
     tags = sorted(infer_allergens(name))
     if tags:
         return "inferred", tags, "allergen marker detected"
@@ -111,8 +122,12 @@ class Command(BaseCommand):
         buckets = {"verified": [], "inferred": [], "unknown": []}
         to_save = []
         for food in FoodItem.objects.all():
-            source, tags, reason = classify(food.name or "")
-            buckets[source].append((food.name, tags, reason))
+            # The ENGLISH column. `name` is a modeltranslation virtual field, so under a
+            # non-English active language every marker word missed and the whole
+            # catalogue classified as "unknown".
+            name = getattr(food, "name_en", None) or food.name or ""
+            source, tags, reason = classify(name)
+            buckets[source].append((name, tags, reason))
             if food.allergen_source != source or sorted(food.allergens or []) != tags:
                 food.allergen_source = source
                 food.allergens = tags

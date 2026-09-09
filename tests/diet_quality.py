@@ -121,6 +121,13 @@ class QualityReport:
     absurd_examples: List[str] = field(default_factory=list)
     portions_measured: int = 0
     min_distinct_portions_per_food: int = 0
+    #: Foods served four or more times that took the SAME amount every time, split by
+    #: where on their own ladder that amount sits. Pinned at the floor is the defect the
+    #: portion work exists to prevent — a minimum acting as an attractor. Pinned at the
+    #: ceiling is the optimiser closing a small energy deficit with a line that costs
+    #: almost nothing, which is what it should do.
+    floor_pinned_foods: List[str] = field(default_factory=list)
+    ceiling_pinned_foods: List[str] = field(default_factory=list)
 
     drift_by_target: Dict[int, float] = field(default_factory=dict)
     drift_all_one_sided: bool = True
@@ -183,6 +190,8 @@ class QualityReport:
             "days_repeating_a_dish": self.days_repeating_a_dish,
             "portions_measured": self.portions_measured,
             "min_distinct_portions_per_food": self.min_distinct_portions_per_food,
+            "floor_pinned_foods": list(self.floor_pinned_foods),
+            "ceiling_pinned_foods": list(self.ceiling_pinned_foods),
             "drift_by_target": {str(k): round(v, 3) for k, v in self.drift_by_target.items()},
             "drift_all_one_sided": self.drift_all_one_sided,
             "drift_worst_abs": round(self.drift_worst_abs, 3),
@@ -426,6 +435,25 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     report.min_distinct_portions_per_food = (
         min(len({round(v) for v in vals}) for vals in repeated) if repeated else 0)
 
+    # WHERE a pinned portion sits, which the count alone cannot say. A food served at one
+    # amount because that amount is the smallest it has is a floor acting as an attractor;
+    # a food served at one amount because that is the most of it there is, on a day the
+    # plan is under target, is the optimiser doing its job with a line that costs 4 kcal.
+    from diet.planner.portion import portions_for
+
+    for name, vals in portions_by_food.items():
+        if len(vals) < 4 or len({round(v) for v in vals}) != 1:
+            continue
+        food = _resolve_food(name)
+        rungs = [p.grams for p in portions_for(food)] if food is not None else []
+        if len(rungs) < 2:
+            continue  # one servable amount; it cannot vary and that is not a defect
+        served = vals[0]
+        if abs(served - min(rungs)) < 0.5:
+            report.floor_pinned_foods.append(f"{name} at {served:g}g (its minimum)")
+        elif abs(served - max(rungs)) < 0.5:
+            report.ceiling_pinned_foods.append(f"{name} at {served:g}g (its maximum)")
+
     # ---- drift -------------------------------------------------------------
     signs = set()
     for target in drift_targets:
@@ -472,12 +500,18 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
     # question this measures is whether the choice reached the top of a list, not
     # whether the two agree about what a chickpea is.
     pool = build_pool(chooser, load_policy("maintain"))
+    # Counted, not just flagged. `ranked_first = True` with a `continue` for every
+    # unresolved name meant that if NO choice resolved — a renamed catalogue, a
+    # non-English active language — the flag stayed True and "the client's choices lead
+    # their own lists" was reported as proven having checked nothing.
+    checked = 0
     ranked_first = True
     for meal_slot, macro, names in SLOT_CHOICES:
         for name in names:
             food = resolved.get(name)
             if food is None:
                 continue
+            checked += 1
             lists = [lst for lst in pool.by_slot.get(meal_slot, {}).values()
                      if any(f.id == food.id for f in lst)]
             if not lists:
@@ -492,7 +526,8 @@ def measure(profiles: Sequence[tuple] = PROFILES, days: int = 7,
                 for lst in lists
             ):
                 ranked_first = False
-    report.chooser_pool_ranked_first = ranked_first
+    # Nothing checked is not "everything passed".
+    report.chooser_pool_ranked_first = bool(ranked_first and checked >= len(SLOT_CHOICES))
 
     # The before-plan's meals are HISTORY when the after-plan is generated for the
     # same dates, so the recency penalty alone would have changed every dish. Keep

@@ -1,52 +1,52 @@
 {
-  "_comment": "Diet engine quality baseline. Re-recorded after the whole-app fresh dive. Two deliberate trades are priced into these numbers. (1) A substitution may no longer replace the ingredient a dish is named after, and the rule now matches plurals and multi-word names, so 'Lentil Soup (Chickpeas instead of Lentils)' cannot be served; it also reads the English column, so it is no longer silently off for Arabic requests. (2) Candidate ORDER is computed on a structure score bounded below the value of an explicit choice, because role, cuisine and library membership summed to more than a choice is worth and a food the client never named could lead the list ahead of one they did. `scores` keeps the real numbers, so the judge that weighs a dish against a plate is unchanged. Together these cost dish rate (0.845 -> 0.79) and a little chosen share, and buy: no dish served without its namesake ingredient, and the client's choices always at the head of their own lists. min_distinct_portions_per_food is measured over engine-BUILT plates only, because a recipe author's pinned clove of garlic is meant to be identical every time and counting it made the metric unmeasurable.",
+  "_comment": "Diet engine quality baseline. Re-recorded because the CATALOGUE the gate measures against was wrong, not because the engine changed direction. FoodCategory.by_canonical_name used `Q(name_en=label) | Q(name=label)`, and modeltranslation rewrites the second arm to `name_en` as well, so a category row written before the translation columns existed was invisible: the INSERT that followed hit UNIQUE(name), the retry re-ran the same blind query, and the method returned None. `load_food_catalogue` assigned that None. Measured on the gate's own database: 86 of 136 foods came out of a rebuild with NO category, three categories had no English name and two were missing entirely, and `classify_food` fell back to guessing a food's macro role from its numbers. Every figure recorded before this describes that database. On the corrected one the engine serves richer plates: dish rate 0.792 -> 0.804, chosen-ingredient share 0.239 -> 0.307, preference satisfaction 0.625 -> 0.688, twin identical meals 1 -> 0, per-client weekly repeats 4 -> 3. Distinct dishes 63 -> 60 and worst calorie drift 2.57 -> 3.33 move the other way: a six-line dinner is harder to portion than a four-line one, which is also why the optimiser gained a three-at-once move (see diet/planner/optimize.py for the measured trade-off table). Two earlier deliberate trades still hold: a substitution may not replace the ingredient a dish is named after, and candidate ORDER is bounded below the value of an explicit choice. min_distinct_portions_per_food is measured over engine-BUILT plates only, because a recipe author's pinned clove of garlic is meant to be identical every time.",
   "recorded": "2026-09-09",
   "catalogue": {
     "foods": 136,
     "recipes": 105
   },
   "measured": {
-    "dish_rate_overall": 0.7917,
+    "dish_rate_overall": 0.8036,
     "dish_rate_by_slot": {
-      "Breakfast": 0.7857,
+      "Breakfast": 0.8333,
       "Lunch": 0.8333,
-      "Dinner": 0.881,
-      "Snack": 0.6667
+      "Dinner": 0.8571,
+      "Snack": 0.6905
     },
     "meals_measured": 168,
-    "distinct_dishes": 63,
-    "max_repeats_of_one_dish": 6,
+    "distinct_dishes": 60,
+    "max_repeats_of_one_dish": 7,
     "absurd_portion_rate": 0.0,
     "max_repeats_by_slot": {
-      "Lunch": 5,
+      "Breakfast": 6,
+      "Lunch": 4,
       "Dinner": 4,
-      "Snack": 6,
-      "Breakfast": 4
+      "Snack": 5
     },
     "distinct_dishes_by_slot": {
-      "Lunch": 24,
-      "Dinner": 21,
-      "Snack": 10,
-      "Breakfast": 18
+      "Breakfast": 20,
+      "Lunch": 20,
+      "Dinner": 19,
+      "Snack": 11
     },
     "days_repeating_a_dish": 0,
-    "portions_measured": 788,
-    "min_distinct_portions_per_food": 2,
+    "portions_measured": 790,
+    "min_distinct_portions_per_food": 1,
     "drift_by_target": {
-      "1400": -0.392,
-      "1800": -2.156,
-      "2200": -2.572,
-      "2600": 0.388,
-      "3000": -1.935
+      "1400": -0.369,
+      "1800": -2.315,
+      "2200": -0.562,
+      "2600": -3.287,
+      "3000": -3.33
     },
-    "drift_all_one_sided": false,
-    "drift_worst_abs": 2.572,
-    "twin_identical_meals": 1,
+    "drift_all_one_sided": true,
+    "drift_worst_abs": 3.33,
+    "twin_identical_meals": 0,
     "twin_total_meals": 28,
     "twin_identical_built": 0,
-    "twin_built_meals": 7,
-    "chosen_ingredient_share": 0.2385,
-    "preference_satisfaction": 0.625,
+    "twin_built_meals": 11,
+    "chosen_ingredient_share": 0.3066,
+    "preference_satisfaction": 0.6875,
     "max_repeats_per_client_week": 3,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],

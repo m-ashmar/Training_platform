@@ -134,3 +134,33 @@ register(PersonalDataSource(label="transactions", model="wallet.Transaction", us
 register(PersonalDataSource(label="wallet_audit_log", model="wallet.WalletAuditLog", user_field="actor", on_erase="keep"))
 register(PersonalDataSource(label="idempotency_keys", model="wallet.IdempotencyKey", user_field="created_by",
                             on_erase="keep", retention_days=30))
+
+# --- reachable only through another row ---------------------------------------
+# Everything below holds data about a person but does not point at them directly, so
+# the coverage audit's old "does this model have a ForeignKey to CustomUser" test could
+# not see any of it. `_reaches_a_user` follows the chain now, and these are what it
+# found.
+register(PersonalDataSource(label="assistant_messages", model="ai_assistant.ChatMessage",
+                            user_field="session__user"))
+# What the client actually lifted, set by set. The most personal thing the training
+# side records, and it was in no export.
+register(PersonalDataSource(label="exercise_set_logs", model="routine.ExerciseSetLog",
+                            user_field=("user_exercise_progress__user",
+                                        "workout_session__user")))
+# Authored content: kept on erasure, exactly like the Exercise/Routine/Template rows
+# they hang off, so another user's routine does not lose its exercises.
+register(PersonalDataSource(label="exercise_media", model="routine.ExerciseMedia",
+                            user_field="exercise__created_by", on_erase="keep"))
+register(PersonalDataSource(label="routine_exercises", model="routine.RoutineExercise",
+                            user_field="routine__created_by", on_erase="keep"))
+register(PersonalDataSource(label="template_exercises", model="routine.RoutineTemplateExercise",
+                            user_field="template__created_by", on_erase="keep"))
+# Financial, and therefore kept: a payment is part of the ledger the wallet sources
+# already protect.
+register(PersonalDataSource(label="payments", model="subscription.Payment",
+                            user_field="subscription__user", on_erase="keep"))
+register(PersonalDataSource(label="subscription_usage", model="subscription.SubscriptionUsage",
+                            user_field="subscription__user", on_erase="keep"))
+# A live credential, not a record. An erased account must not keep one.
+register(PersonalDataSource(label="agent_api_keys", model="wallet.AgentAPIKey",
+                            user_field="agent__user"))

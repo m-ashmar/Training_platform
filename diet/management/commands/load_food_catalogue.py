@@ -136,19 +136,33 @@ class Command(BaseCommand):
                     f"  deleted {n_foods} food(s), {n_recipes} recipe(s), {n_lines} line(s)"))
 
             categories = {}
-            for label in {r["category"] for r in rows}:
+            # `sorted`, not set-iteration order: string hashing is randomised per
+            # process, so the ids handed to the categories changed from run to run and
+            # nothing that depends on them was reproducible.
+            for label in sorted({r["category"] for r in rows}):
                 categories[label], _created = FoodCategory.by_canonical_name(
                     label,
                     is_protein=label == "Proteins",
                     is_carb=label in ("Carbs", "Fruits", "Vegetables"),
                     is_fat=label == "Fats")
+                if categories[label] is None:
+                    # It used to be assigned anyway, and every food in that macro was
+                    # stored with no category.
+                    raise CommandError(f"could not resolve or create category {label!r}")
 
             created = updated = 0
             for row in rows:
+                # Keyed on `api_id`, the only UNIQUE column on this table. `name` is not
+                # unique — the admin's Edamam import dedups on `api_id` alone — so a
+                # duplicate name raised `MultipleObjectsReturned` and rolled the whole
+                # catalogue load back; and `name` is a translated virtual field, so the
+                # lookup silently moved to `name_ar` under a non-English locale and
+                # matched nothing, re-creating all 136 rows.
                 obj, was_new = FoodItem.objects.update_or_create(
-                    name=row["name"],
+                    api_id=row["api_id"],
                     defaults=dict(
-                        api_id=row["api_id"],
+                        name=row["name"],
+                        name_en=row["name"],
                         calories=row["calories"], protein=row["protein"],
                         carbs=row["carbs"], fat=row["fat"],
                         serving_size="100g", serving_size_grams=100,
@@ -183,3 +197,18 @@ class Command(BaseCommand):
         call_command("seed_recipes", verbosity=0)
         self.stdout.write(self.style.SUCCESS(
             f"  {Recipe.objects.filter(is_active=True).count()} recipe(s) active"))
+
+        # Allergen data is not on the FoodItem defaults above, so `--wipe` used to leave
+        # every row at `allergen_source='unknown'` with `allergens=[]` — the state the
+        # model's own help text calls out as "must NEVER be treated as safe". A rebuild
+        # that restores the food but not what it is made of is not a rebuild.
+        self.stdout.write("curating allergen composition")
+        call_command("curate_food_allergens", "--apply", verbosity=0)
+        unverified = FoodItem.objects.exclude(allergen_source="verified").count()
+        self.stdout.write(self.style.SUCCESS(
+            f"  {FoodItem.objects.count() - unverified}/{FoodItem.objects.count()} "
+            f"food(s) have a verified composition"))
+        if unverified:
+            self.stdout.write(self.style.WARNING(
+                f"  {unverified} row(s) are not verified and will not be served to a "
+                f"client with a declared allergy — add them to diet/data/food_allergens.py"))

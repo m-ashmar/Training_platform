@@ -14,7 +14,6 @@ try:
 except Exception:  # pragma: no cover
     structlog = None
 
-from .nutrition import get_macro_ratios
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +80,6 @@ def safe_json_log(stage: str, data: Dict[str, Any], logger_name: str = __name__)
         logger.debug('suppressed non-fatal error', exc_info=True)
 
 
-def _macro_ratios_for_goal(goal: str) -> Dict[str, float]:
-    """Use centralized macro ratios from nutrition.py"""
-    return get_macro_ratios(goal)
-
-
 def log_day_macros(label: str, diet_plan, day, logger_name: str = __name__):
     """
     Log totals and targets for a given plan/day with a stage label.
@@ -93,13 +87,19 @@ def log_day_macros(label: str, diet_plan, day, logger_name: str = __name__):
     logger = get_logger(logger_name)
     try:
         totals = diet_plan.calculate_daily_nutrition(day)
-        ratios = _macro_ratios_for_goal(getattr(diet_plan, 'goal', 'Maintain'))
-        tgt_kcal = float(getattr(diet_plan, 'daily_calories', 0.0) or 0.0)
+        # The plan's OWN targets, which are what it was built to. This used to re-derive
+        # them from a percentage table — a fourth copy of the split — while the planner
+        # builds to grams per kilogram of bodyweight. For a 78 kg client at 2,695 kcal
+        # the table said 202 g of protein and the plan was built to 125, so the log
+        # reported a plan that is within 4% on every macro as missing protein by 38%.
+        # A diagnostic that measures against the wrong number is worse than none: it
+        # sends whoever reads it looking for a defect that is not there.
+        macros = diet_plan.macro_targets()
         targets = {
-            'calories': tgt_kcal,
-            'protein': tgt_kcal * ratios['protein'] / 4.0,
-            'carbs': tgt_kcal * ratios['carb'] / 4.0,
-            'fat': tgt_kcal * ratios['fat'] / 9.0,
+            'calories': float(getattr(diet_plan, 'daily_calories', 0.0) or 0.0),
+            'protein': macros['protein'],
+            'carbs': macros['carbs'],
+            'fat': macros['fat'],
         }
         log_json(
             logger,

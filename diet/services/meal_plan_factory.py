@@ -106,32 +106,27 @@ class MealPlanFactory:
         pending: list = []
         for food_item, quantity in resolved:
             if isinstance(quantity, (int, float)):
-                # A gram figure the planner decided. It is not text to be parsed, not a
-                # piece count to be reinterpreted, and not something to merge with a
-                # different row that happens to share a normalised name.
+                # A gram figure the planner decided. It is not text to be parsed and not
+                # a piece count to be reinterpreted.
                 grams = float(quantity)
-                decided = True
             else:
                 grams = convert_to_grams(quantity)
-                grams = piece_based_grams_if_appropriate(quantity, grams, food_item.name, self.piece_weights)
-                decided = False
-            
-            # Merge with existing component of the same food within this meal if present
-            # First try exact ID match
+                grams = piece_based_grams_if_appropriate(
+                    quantity, grams, getattr(food_item, "name_en", None) or food_item.name,
+                    self.piece_weights)
+
+            # The SAME food twice on one plate is one portion split in two, so the grams
+            # are summed. Two DIFFERENT foods are two foods.
+            #
+            # There used to be a third rule between those: a normalised-name match, where
+            # `_normalize_food_name` mapped 'chicken breast' and 'chicken thigh' both to
+            # 'chicken', and 'brown rice' and 'white rice' both to 'rice'. A meal holding
+            # two of them was persisted as one component with the summed grams — then
+            # clamped to a cap, losing the calories too — and the second food was never
+            # written at all. The client was shown a meal that was never generated, and
+            # `DailyProgress` summed the wrong food.
             existing = added.get(food_item.id)
-            if existing is None and not decided:
-                existing = MealComponent.objects.filter(meal=meal, food=food_item).select_related('food', 'food__category').first()
-            
-            # If not found, try normalized name match to prevent visual duplicates
-            if not existing and not decided:
-                normalized_name = self._normalize_food_name(food_item.name)
-                # BUG FIX: Fetch all components with select_related once instead of N queries
-                all_components = list(MealComponent.objects.filter(meal=meal).select_related('food', 'food__category'))
-                for comp in all_components:
-                    if self._normalize_food_name(comp.food.name) == normalized_name:
-                        existing = comp
-                        break
-            
+
             if existing:
                 existing.quantity = float(existing.quantity or 0.0) + float(grams or 0.0)
                 # Clamp per-item cap
@@ -144,7 +139,7 @@ class MealPlanFactory:
                     cap = min(cap, 350.0)
                 if dom == 'fat':
                     cap = min(cap, 100.0)
-                name_l = (existing.food.name or '').lower()
+                name_l = (getattr(existing.food, "name_en", None) or existing.food.name or '').lower()
                 veg_keywords = ('lettuce','tomato','tomatoes','cucumber','green bean',
                               'spinach','zucchini','broccoli','asparagus','carrot',
                               'pepper','cabbage','cauliflower','celery')
@@ -185,35 +180,3 @@ class MealPlanFactory:
         else:
             return 'COMPLETE'
     
-    def _normalize_food_name(self, name: str) -> str:
-        """Normalize food name for comparison to prevent duplicates."""
-        n = (name or '').strip().lower()
-        # Collapse common variants to base token to reduce duplication
-        mapping = [
-            ('sweet potato', 'sweet potato'),
-            ('egg whites', 'egg whites'),
-            ('egg white', 'egg whites'),
-            ('chicken breast', 'chicken'),
-            ('breast', 'chicken'),
-            ('tuna', 'tuna'),
-            ('fish', 'fish'),
-            ('egg', 'egg'),
-            ('rice', 'rice'),
-            ('white rice', 'rice'),
-            ('brown rice', 'rice'),
-            ('potato', 'potato'),
-            ('almond', 'almonds'),
-            ('banana', 'banana'),
-            ('oats', 'oats'),
-            ('apple', 'apple'),
-            ('broccoli', 'broccoli'),
-            ('asparagus', 'asparagus'),
-            ('olive oil', 'olive oil'),
-            ('oil', 'oil'),
-        ]
-        for key, base in mapping:
-            if key in n:
-                return base
-        return n
-
-

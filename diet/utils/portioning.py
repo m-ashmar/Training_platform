@@ -73,7 +73,10 @@ def _snap_pieces_if_needed(food: FoodItem, grams: float, piece_weights: Optional
             # stale piece-weight table while the admin edited the current one.
             cfg = DietConfig.objects.first()
             pw_map = (cfg.piece_weights if cfg and cfg.piece_weights else {})
-        key = is_piece_food_name((food.name or "").lower(), pw_map)
+        # The piece-weight table is keyed by English name; `food.name` is the active
+        # language's column.
+        name = getattr(food, "name_en", None) or food.name or ""
+        key = is_piece_food_name(name.lower(), pw_map)
         if key:
             pw = float(pw_map.get(key, 0.0) or 0.0)
             if pw > 0.0:

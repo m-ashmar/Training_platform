@@ -44,12 +44,22 @@ class FoodCategory(models.Model):
         foods ended up split across two categories. Identity is the English column.
         """
         from django.db import IntegrityError, transaction
-        from django.db.models import Q
 
-        # Both columns: `name_en` for rows the translation layer has filled, and the
-        # base column for rows written before it did. `filter(name=...)` alone is the
-        # bug — it reads whichever language is active.
-        existing = cls.objects.filter(Q(name_en=label) | Q(name=label)).first()
+        def find():
+            # TWO queries, because one cannot ask both questions. `Q(name=label)` looks
+            # like it reads the base column and does not: modeltranslation rewrites the
+            # lookup key to the active language, so `Q(name_en=...) | Q(name=...)` was
+            # `name_en` OR `name_en`, and a row written before the translation columns
+            # existed — `name='Proteins'`, `name_en=NULL` — was invisible to it. The
+            # INSERT that followed then hit `UNIQUE (name)`, the except branch re-ran the
+            # same blind query, and this returned None. `load_food_catalogue` assigned
+            # that None as the category: 86 of 136 foods came out of a rebuild with no
+            # category at all, and `classify_food` fell back to guessing from macros.
+            # `.rewrite(False)` is modeltranslation's own escape hatch to the real column.
+            return (cls.objects.filter(name_en=label).first()
+                    or cls.objects.rewrite(False).filter(name=label).first())
+
+        existing = find()
         if existing is not None:
             return existing, False
         payload = dict(defaults)
@@ -58,8 +68,12 @@ class FoodCategory(models.Model):
             with transaction.atomic():
                 return cls.objects.create(name=label, **payload), True
         except IntegrityError:
-            # Someone else created it between the read and the write.
-            return cls.objects.filter(Q(name_en=label) | Q(name=label)).first(), False
+            # Someone else created it between the read and the write — or a row exists
+            # that `find()` could not see, which is now a fault rather than a silent None.
+            found = find()
+            if found is None:
+                raise
+            return found, False
     meal_times = models.CharField(max_length=20, choices=MEAL_TIME_CHOICES, default='ANY')
     is_protein = models.BooleanField(default=False)
     is_carb = models.BooleanField(default=False)
@@ -70,7 +84,15 @@ class FoodCategory(models.Model):
     class Meta:
         # Deterministic total order. Without it Postgres returns rows in whatever order it
         # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
-        ordering = ['name', 'id']
+        #
+        # `name_en`, not `name`. `name` is a modeltranslation virtual field and
+        # modeltranslation rewrites ordering keys through the ACTIVE language, so this
+        # read `ORDER BY name_ar` for an Arabic request. Every consumer of the order
+        # then changed with the locale: the planner samples recipes with
+        # `random.choices` over the population as ordered, so the same client with the
+        # same seed on the same day got a different dish from the Arabic app than from
+        # the English one. An engine's output must not depend on the display language.
+        ordering = ['name_en', 'id']
 
 class FoodItem(RowValidationMixin, models.Model):
     """
@@ -284,7 +306,26 @@ class FoodItem(RowValidationMixin, models.Model):
     class Meta:
         # Deterministic total order. Without it Postgres returns rows in whatever order it
         # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
-        ordering = ['name', 'id']
+        #
+        # `name_en`, not `name`. `name` is a modeltranslation virtual field and
+        # modeltranslation rewrites ordering keys through the ACTIVE language, so this
+        # read `ORDER BY name_ar` for an Arabic request. Every consumer of the order
+        # then changed with the locale: the planner samples recipes with
+        # `random.choices` over the population as ordered, so the same client with the
+        # same seed on the same day got a different dish from the Arabic app than from
+        # the English one. An engine's output must not depend on the display language.
+        ordering = ['name_en', 'id']
+        constraints = [
+            # Every nutrition figure in the app is
+            # `quantity / serving_size_grams * per 100 g`. The field is a
+            # PositiveIntegerField, so 0 is legal, and `save()` coerces it to 100 — but
+            # `queryset.update()`, `bulk_update` and a fixture all bypass `save()`. One
+            # 0-gram row anywhere in a plan raised ZeroDivisionError in four endpoints,
+            # each of which reported it as a 400: the plan became permanently unreadable
+            # and it read as the client's mistake.
+            models.CheckConstraint(condition=models.Q(serving_size_grams__gt=0),
+                                   name="serving_size_is_a_real_amount"),
+        ]
 
     # Physical ceilings. Nothing validated nutrition before, so the catalogue contains
     # `Cheese, Brick` at 12.00 kcal/g — above the 9 kcal/g maximum for pure fat — and
@@ -484,7 +525,8 @@ class UserFoodWeight(models.Model):
         # Deterministic total order, like every other model here.
         ordering = ['-updated_at', '-id']
         unique_together = [('user', 'food')]
-        indexes = [models.Index(fields=['user'])]
+        # No `Index(fields=['user'])`: the ForeignKey indexes it, and `unique_together`
+        # adds a (user, food) index whose leading column is the same one.
 
     def __str__(self):
         return f"{self.user_id}:{self.food_id}={self.weight:.2f}"
@@ -531,7 +573,13 @@ class DietPlan(RowValidationMixin, models.Model):
     Represents a generated diet plan for a user, including goal, calories, and plan data.
     Enhanced to support both AI-generated and trainer-created plans.
     """
-    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    # `related_name`, because the default accessor is `dietplan` and the code that
+    # reads it back had already guessed `diet_plans`: the nightly advice sweep
+    # filtered `diet_plans__is_active=True` and raised FieldError on its first
+    # query, so daily advice has never been generated for anyone on the scheduled
+    # path. Naming the relation the way it reads is the fix; guessing was the bug.
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE,
+                             related_name='diet_plans')
     GOAL_CHOICES = [
         ('Lose', 'Lose Weight'),
         ('Maintain', 'Maintain Weight'),
@@ -588,10 +636,17 @@ class DietPlan(RowValidationMixin, models.Model):
     #    "violations": [{"food": str, "allergens": [str]}],
     #    "unverified": [str]}
     allergen_report = models.JSONField(default=dict, blank=True)
+    #: Who built this plan. There were three values for two producers: 'GPT' (the
+    #: default, and what an empty plan got), 'FALLBACK' (what the deterministic engine
+    #: actually wrote — a name that describes the engine as a last resort when it is the
+    #: only one) and 'TRAINER'. No external model is used and none will be, so the
+    #: vocabulary says what is true: the engine, or a person.
+    ENGINE = 'ENGINE'
+    TRAINER = 'TRAINER'
     generation_strategy = models.CharField(
         max_length=20,
-        choices=[('GPT', 'AI Generated'), ('TRAINER', 'Trainer Created'), ('FALLBACK', 'Rule-Based')],
-        default='GPT'
+        choices=[(ENGINE, 'Rule-Based Engine'), (TRAINER, 'Trainer Created')],
+        default=ENGINE,
     )
     
     # New fields for trainer-created plans
@@ -647,14 +702,14 @@ class DietPlan(RowValidationMixin, models.Model):
         return 'weekly' if days == 7 else 'monthly' if days > 14 else 'daily'
     
     @property
-    def is_ai_generated(self):
-        """Check if this plan was generated by AI."""
-        return self.generation_strategy == 'GPT'
-    
+    def is_engine_generated(self):
+        """Built by the deterministic planner rather than by a person."""
+        return self.generation_strategy == self.ENGINE
+
     @property
     def is_trainer_created(self):
         """Check if this plan was created by a trainer."""
-        return self.generation_strategy == 'TRAINER'
+        return self.generation_strategy == self.TRAINER
     
     def calculate_daily_nutrition(self, target_date=None):
         """
@@ -684,30 +739,37 @@ class DietPlan(RowValidationMixin, models.Model):
         }
 
     def clean(self):
-        """Reject an overlapping active plan for the same user.
+        """This ROW's own rules, and only those.
 
-        Nothing prevented two active plans covering the same dates, so for any shared
-        day it was undefined which plan applied — and `Meal`'s unique_together is
-        scoped to the plan, not the user, so both could write a breakfast for that day
-        and the client saw duplicates.
+        The overlapping-active-plan check used to live here. It is a CROSS-ROW question,
+        which `training_platform/model_validation.py` explicitly forbids in `clean()`,
+        and putting it here had two consequences. It ran on EVERY save, including
+        `save(update_fields=[...])` long after the plan was committed: request A commits
+        and releases the user lock, request B supersedes it and creates its own plan, and
+        A's next field update then re-asked the question, saw B's plan, and raised for a
+        plan that is already committed and active. And it was a pure check-then-act — two
+        requests could both pass it and both insert.
+
+        The rule itself is real and is still enforced, in the one place that can enforce
+        it: `DietPersistenceService.save_plan` takes `select_for_update` on the user row
+        and supersedes any overlapping active plan before inserting, so the invariant
+        holds by serialisation rather than by hope. `overlapping_active_plans()` below
+        reports violations for anyone who wants to assert on them.
         """
         from django.core.exceptions import ValidationError
 
         super().clean()
-        if not (self.start_date and self.end_date):
-            return
-        if self.end_date < self.start_date:
+        if self.start_date and self.end_date and self.end_date < self.start_date:
             raise ValidationError({'end_date': 'Must not be before start_date.'})
 
-        clash = DietPlan.objects.filter(
+    def overlapping_active_plans(self):
+        """Other active plans of this user's covering any of the same days."""
+        if not (self.start_date and self.end_date and self.is_active):
+            return DietPlan.objects.none()
+        return DietPlan.objects.filter(
             user=self.user, is_active=True,
             start_date__lte=self.end_date, end_date__gte=self.start_date,
         ).exclude(pk=self.pk)
-        if getattr(self, 'is_active', False) and clash.exists():
-            raise ValidationError(
-                'This user already has an active plan covering those dates '
-                f'({clash.first().start_date} to {clash.first().end_date}).'
-            )
 
     def save(self, *args, **kwargs):
         self.validate_row()
@@ -784,14 +846,21 @@ class Meal(models.Model):
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
         # paging repeated and hid rows whenever two records shared the value.
         ordering = ['date', 'scheduled_time', 'id']
-        unique_together = ['diet_plan', 'date', 'meal_type', 'scheduled_time']
-        # NOTE: `unique_together` above is void whenever `scheduled_time` is null,
-        # because Postgres treats NULLs as distinct — and the engine never sets one.
-        # A database constraint on (plan, date, meal_type) cannot go here: a plan may
-        # legitimately hold two snacks in a day. The retry that actually duplicates is
-        # the trainer's, and `add_meal_to_plan` refuses it explicitly. Giving every
-        # meal a real scheduled time would make this constraint expressible, and is
-        # the better fix once the engine can be changed.
+        constraints = [
+            # `unique_together` was void for 94% of the rows. Postgres treats NULLs as
+            # distinct, `scheduled_time` is nullable, and nothing wrote one — so the key
+            # never fired and a plan could hold seven breakfasts on one date, which the
+            # client saw as seven and could never complete. `nulls_distinct=False`
+            # (PostgreSQL 15+) makes two timeless meals in the same slot collide, which
+            # is the thing the key was always meant to say. The engine now writes a real
+            # time as well (`scheduled_time_for`), so two snacks in a day stay legal and
+            # distinguishable — the case that stopped this being a plain
+            # (plan, date, meal_type) constraint.
+            models.UniqueConstraint(
+                fields=['diet_plan', 'date', 'meal_type', 'scheduled_time'],
+                nulls_distinct=False,
+                name='one_meal_per_slot_per_day'),
+        ]
         indexes = [
             models.Index(fields=['is_completed']),
             models.Index(fields=['diet_plan', 'date']),
@@ -909,10 +978,11 @@ class MealComponent(models.Model):
         # Deterministic total order. Without it Postgres returns rows in whatever order it
         # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
         ordering = ['-id']
-        indexes = [
-            models.Index(fields=['meal']),
-            models.Index(fields=['food']),
-        ]
+        # No `Index(fields=['meal'])` / `Index(fields=['food'])`: a ForeignKey already
+        # gets `db_index=True`, so declaring them here built a SECOND btree on each
+        # column. This is the hottest insert path in the app — a week-long plan
+        # bulk-creates over a hundred rows — and it was paying twice for every index
+        # entry, with no read benefit at all.
         # The planner never serves a food twice in one meal, and `converge._write_back`
         # collapses duplicates into one gram figure if it ever sees them. Make the
         # database say so, rather than two code paths each half-guarding it.
@@ -1054,15 +1124,29 @@ class DailyAdvice(models.Model):
     """
     Stores AI-generated daily dietary advice for a user.
     """
-    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE,
+                             related_name='daily_advice')
     text = models.TextField()
     generated_at = models.DateTimeField(auto_now_add=True)
+    #: The day this advice is FOR, in the client's own calendar. `generated_at` is when
+    #: the worker happened to run, which is not the same question and cannot carry a
+    #: uniqueness key.
+    for_date = models.DateField(null=True, blank=True, db_index=True)
     context_data = models.JSONField()
 
     class Meta:
         # Deterministic total order. Without it Postgres returns rows in whatever order it
         # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
         ordering = ['-id']
+        constraints = [
+            # One piece of advice per client per day. `CELERY_TASK_ACKS_LATE` and
+            # `CELERY_TASK_REJECT_ON_WORKER_LOST` are both on, so losing a worker
+            # redelivers the whole sweep — and with a bare `create()` every client got a
+            # second row, and a third. Nothing deduplicated them and the endpoint returns
+            # the latest, so the duplicates were invisible while the table grew.
+            models.UniqueConstraint(fields=["user", "for_date"],
+                                    name="one_advice_per_client_per_day"),
+        ]
 
 
 class DietConfig(models.Model):
@@ -1136,8 +1220,11 @@ class Recipe(models.Model):
         return {key: round(value, 1) for key, value in totals.items()}
 
     class Meta:
-        ordering = ['name', 'id']
-        indexes = [models.Index(fields=['is_active'])]
+        # `name_en`: see FoodItem.Meta — ordering by the translated `name` made recipe
+        # sampling locale-dependent.
+        ordering = ['name_en', 'id']
+        # No `Index(fields=['is_active'])`: the field already declares `db_index=True`,
+        # so this built the same btree twice.
 
     def __str__(self):
         return self.name

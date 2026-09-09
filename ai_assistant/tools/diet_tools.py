@@ -46,11 +46,18 @@ def get_meal_details(user, date_str=None, **kwargs):
     from diet.models import DietPlan, Meal
 
     
+    # These arguments come from the MODEL's function call, not from a validated
+    # serializer, so a hallucinated "next tuesday" or a `days` of "seven" reached
+    # `fromisoformat` and `timedelta` as-is and raised out of the tool. A tool answers
+    # the model; it does not crash the conversation.
+    target_date = timezone.localdate()
     if date_str:
         from datetime import date as dt_date
-        target_date = dt_date.fromisoformat(date_str)
-    else:
-        target_date = timezone.localdate()
+        try:
+            target_date = dt_date.fromisoformat(str(date_str))
+        except (TypeError, ValueError):
+            return {"meals": [],
+                    "message": str(_("I need the date as YYYY-MM-DD."))}
 
     plan = DietPlan.objects.filter(user=user, is_active=True).first()
     if not plan:
@@ -101,6 +108,11 @@ def get_diet_adherence(user, days=7, **kwargs):
     if not plan:
         return {"adherence": None, "message": str(_("No active diet plan."))}
 
+    try:
+        days = max(1, min(365, int(days)))
+    except (TypeError, ValueError):
+        return {"adherence": None,
+                "message": str(_("I need the number of days as a whole number."))}
     since = timezone.localdate() - timedelta(days=days)
     progress_qs = DailyProgress.objects.filter(
         user=user, diet_plan=plan, date__gte=since,
@@ -130,7 +142,10 @@ def get_diet_adherence(user, days=7, **kwargs):
             total_adherence += adherence
             count += 1
 
-    avg_adherence = round(total_adherence / count, 1) if count else 0
+    # `0` here read as "this client scored zero on adherence" for a client who has
+    # simply never tracked a day, and the assistant answers from the first field it
+    # finds. No data is not a score.
+    avg_adherence = round(total_adherence / count, 1) if count else None
 
     # Find best and worst days
     # Closest to target, not the largest. Ranking by `calories_pct` reported a 200%
@@ -143,7 +158,7 @@ def get_diet_adherence(user, days=7, **kwargs):
     best_day = min(daily_data, key=_distance_from_target) if daily_data else None
     worst_day = max(daily_data, key=_distance_from_target) if daily_data else None
 
-    return {
+    payload = {
         "average_adherence_pct": avg_adherence,
         "days_tracked": count,
         "daily_data": daily_data,
@@ -151,6 +166,10 @@ def get_diet_adherence(user, days=7, **kwargs):
         "worst_day": worst_day,
         "period_days": days,
     }
+    if not count:
+        # Said in words as well as by a null, because the model reads the message.
+        payload["message"] = str(_("This client has not tracked any days yet."))
+    return payload
 
 
 # --- OpenAI Function Schemas ---

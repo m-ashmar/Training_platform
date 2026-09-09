@@ -23,9 +23,17 @@ logger = logging.getLogger(__name__)
 
 def record_activity(user, activity_type: str, **details) -> None:
     """Write one UserActivity row. Never raises — analytics must not break a save."""
+    from analytics.activity_types import ALL
     from analytics.models import UserActivity
 
     if user is None or not getattr(user, "pk", None):
+        return
+    if activity_type not in ALL:
+        # A name no reader knows is a row that will never be counted. The readers in
+        # `social` and `achievements` filter on exact strings, so a typo here is
+        # invisible until someone notices an achievement that cannot be earned.
+        logger.error("refusing to record unknown activity type %r; add it to "
+                     "analytics/activity_types.py", activity_type)
         return
     try:
         UserActivity.objects.create(

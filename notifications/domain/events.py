@@ -79,6 +79,14 @@ class AchievementAwardedEvent(BaseDomainEvent):
     achievement_id: int = 0
     achievement_name: str = ""
     points: int = 0
+    #: Which achievement system awarded this. There are two — `achievements.Achievement`
+    #: and `social.Achievement` — with separate tables and independent primary key
+    #: sequences, and the notification dedup key is (recipient, event_type,
+    #: related_object_id) where the id is the achievement's pk. A user who earned
+    #: achievement #5 in one system and later #5 in the other was told about only the
+    #: first, and silently: the Redis layer dropped it before the database constraint
+    #: was even reached.
+    source: str = "achievements"
 
 @dataclass
 class ChallengeProgressEvent(BaseDomainEvent):

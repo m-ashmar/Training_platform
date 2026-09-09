@@ -169,8 +169,11 @@ def load_policy(goal: str = "maintain") -> PlannerPolicy:
         policy = replace(policy, **{k: v for k, v in merged.items()
                                     if k in PlannerPolicy.__dataclass_fields__})
 
-    tol = getattr(settings, "DIET_CONFIG", {}).get("MACRO_TOLERANCE") if hasattr(settings, "DIET_CONFIG") else None
-    if isinstance(tol, dict) and tol:
-        policy = replace(policy, tolerance={**policy.tolerance, **tol})
-
+    # `DIET_CONFIG` does not exist and never has — `grep -rn DIET_CONFIG` matched this
+    # line and nothing else, so the comment fifty lines above claiming MACRO_TOLERANCE
+    # was now honoured described a second dead read. The dict that IS declared is
+    # `AI_CHEF_CONFIG["MACRO_TOLERANCE"]`, and it keys carbohydrate as "carbs" where
+    # `report.MACROS` reads "carb", so wiring that one up unchanged would have left carb
+    # at its default while silently moving fat. `DIET_PLANNER_POLICY` above is the one
+    # override path, it takes `tolerance` like any other field, and it is tested.
     return policy

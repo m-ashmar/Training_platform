@@ -6,35 +6,45 @@ from django.db import migrations
 
 def set_initial_categories(apps, schema_editor):
     FoodCategory = apps.get_model('diet', 'FoodCategory')
-    FoodItem = apps.get_model('diet', 'FoodItem')
-    
     # Create categories
-    breakfast_proteins = FoodCategory.objects.create(
+    FoodCategory.objects.create(
         name="Morning Proteins",
         meal_times="BREAKFAST",
         is_protein=True
     )
-    
-    
-    
-    breakfast_carbs = FoodCategory.objects.create(
+
+    FoodCategory.objects.create(
         name="Morning Carbs",
         meal_times="BREAKFAST",
-        is_protein=True
+        # A CARB category flagged `is_protein=True`. `auto_assign_category` picks a
+        # protein category with `filter(is_protein=True).first()`, so an imported protein
+        # could be filed here.
+        is_carb=True,
     )
-    
-   
-    
-    # Auto-categorize existing items (example logic)
-    for item in FoodItem.objects.all():
-        if item.protein > 10:  # Example threshold
-            item.category = 'PROTEIN'
-            item.save()
-            
+
+    # The line that used to sit here assigned the STRING 'PROTEIN' to `item.category`,
+    # which is a ForeignKey — `ValueError: Cannot assign "'PROTEIN'"` on any database
+    # holding a FoodItem when this migration runs. A deploy from zero survived it only
+    # because the table is empty at 0004. The categories the catalogue actually uses are
+    # created by `load_food_catalogue` through `FoodCategory.by_canonical_name`, and 0066
+    # removes the two rows this function creates, so there is nothing here to salvage.
+
+
+def unset_initial_categories(apps, schema_editor):
+    """Reverse: remove the two rows this migration creates, if they are still empty."""
+    FoodCategory = apps.get_model('diet', 'FoodCategory')
+    for label in ("Morning Proteins", "Morning Carbs"):
+        for row in FoodCategory.objects.filter(name=label):
+            if not row.fooditem_set.exists():
+                row.delete()
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
         ("diet", "0004_foodcategory_alter_fooditem_category"),
     ]
 
-    operations = [ migrations.RunPython(set_initial_categories),]
+    operations = [
+        migrations.RunPython(set_initial_categories, unset_initial_categories),
+    ]

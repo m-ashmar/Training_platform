@@ -194,14 +194,29 @@ class RateLimitMiddleware(MiddlewareMixin):
         return current > limits['requests']
 
 
+#: Status -> the `code` an error carries when the view did not name one. Not a
+#: substitute for a specific code, but the contract says every error response has one
+#: and a client that must branch on `code` cannot branch on its absence.
+STATUS_CODES = {
+    400: "bad_request", 401: "not_authenticated", 403: "permission_denied",
+    404: "not_found", 405: "method_not_allowed", 409: "conflict",
+    413: "payload_too_large", 415: "unsupported_media_type",
+    422: "unprocessable", 429: "throttled",
+}
+
+
 def normalize_error_envelope(response):
     """
-    Give every error response ONE shape.
+    Give every error response ONE shape: `error`, `detail` and `code`, always.
 
     DRF emits {"detail": ...} for 401/403/404/405 while the project's own views emit
-    {"error": ...}. A mobile client had to branch on both. This adds the missing key
-    as a mirror (keeping the original for backward compatibility) so clients can read
-    `error` everywhere.
+    {"error": ...}, so a mobile client had to branch on both. Worse, the contract makes
+    `code` mandatory and says to branch on it rather than on `detail` — which is
+    translated — and 128 of the diet app's error returns carried neither. An Arabic
+    client received `{"error": "تعذّر إتمام الطلب."}` and could not tell a bad date from
+    a server fault in any language.
+
+    Only fills what is missing: a view that names its own `code` keeps it.
     """
     try:
         if not (400 <= response.status_code < 600):
@@ -209,11 +224,21 @@ def normalize_error_envelope(response):
         data = getattr(response, 'data', None)
         if not isinstance(data, dict):
             return response
+        changed = False
         if 'error' not in data and 'detail' in data:
             data['error'] = data['detail']
-            if hasattr(response, '_is_rendered'):
-                response._is_rendered = False
-                response.render()
+            changed = True
+        if 'detail' not in data and 'error' in data:
+            data['detail'] = data['error']
+            changed = True
+        if 'code' not in data:
+            data['code'] = STATUS_CODES.get(
+                response.status_code,
+                "server_error" if response.status_code >= 500 else "bad_request")
+            changed = True
+        if changed and hasattr(response, '_is_rendered'):
+            response._is_rendered = False
+            response.render()
     except Exception:
         # Optional side effect: swallowing this silently is what made the
         # surrounding failures invisible in logs. Control flow is unchanged.

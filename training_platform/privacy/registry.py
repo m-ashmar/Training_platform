@@ -16,7 +16,10 @@ class PersonalDataSource:
 
     ``label``        human name used in the export
     ``model``        "app_label.ModelName"
-    ``user_field``   how the row is tied to a user ("user", "author", "session__user")
+    ``user_field``   how the row is tied to a user ("user", "author", "session__user").
+                     A tuple names SEVERAL paths, for a model that reaches its owner by
+                     more than one nullable route; a row matching any of them belongs to
+                     that user.
     ``fields``       what to include in an export; None means every concrete field
     ``on_erase``     "delete" | "anonymise" | "keep"
     ``anonymise``    field -> value (or callable) applied when on_erase="anonymise"
@@ -26,7 +29,7 @@ class PersonalDataSource:
 
     label: str
     model: str
-    user_field: str
+    user_field: str | tuple[str, ...]
     fields: list[str] | None = None
     on_erase: str = "delete"
     anonymise: dict[str, object] = field(default_factory=dict)
@@ -39,10 +42,16 @@ class PersonalDataSource:
         return apps.get_model(*self.model.split("."))
 
     def queryset_for(self, user):
+        from django.db.models import Q
+
+        paths = ((self.user_field,) if isinstance(self.user_field, str)
+                 else tuple(self.user_field))
         # `pk`/`id` take the primary key value; a ForeignKey takes the instance. Passing
         # the instance to `pk` raises "Field 'id' expected a number".
-        value = user.pk if self.user_field in ("pk", "id") else user
-        return self.get_model()._default_manager.filter(**{self.user_field: value})
+        query = Q()
+        for path in paths:
+            query |= Q(**{path: user.pk if path in ("pk", "id") else user})
+        return self.get_model()._default_manager.filter(query).distinct()
 
 
 registry: dict[str, PersonalDataSource] = {}
@@ -67,11 +76,29 @@ def export_user_data(user) -> dict:
     for source in registry.values():
         try:
             qs = source.queryset_for(user)
+            model = source.get_model()
+            # Concrete COLUMNS only. `ManyToManyField.concrete` is True, so this list
+            # used to include every M2M on the model and `.values()` turned each one into
+            # a LEFT JOIN: `diet.UserFoodPreference` has seven, and one client with eight
+            # likes, eight dislikes and four foods in each of five choice lists produced
+            # 8 x 8 x 4^5 = 65,536 rows for a single record. The request hung, the broad
+            # handler below filed the section as an error, and the person received a
+            # silently incomplete export of their own data.
             names = source.fields or [
-                f.name for f in source.get_model()._meta.get_fields()
-                if getattr(f, "concrete", False)
+                f.name for f in model._meta.get_fields()
+                if getattr(f, "concrete", False) and not f.many_to_many
             ]
-            out["sections"][source.label] = list(qs.values(*names))
+            rows = list(qs.values(*names))
+            # The M2M contents are still theirs. Attached as lists of ids, one extra
+            # query per relation, instead of multiplying the row out.
+            links = [f for f in model._meta.get_fields()
+                     if f.many_to_many and getattr(f, "concrete", False)]
+            if links and rows:
+                for row, obj in zip(rows, qs):
+                    for link in links:
+                        row[link.name] = list(
+                            getattr(obj, link.name).values_list("pk", flat=True))
+            out["sections"][source.label] = rows
         except Exception:
             # One unexportable model must not deny the whole request.
             logger.exception("Export failed for %s", source.model)
@@ -172,12 +199,18 @@ def validate_sources() -> list[str]:
             continue
 
         names = {f.name for f in model._meta.get_fields()}
-        # `pk`/`id` are valid lookups even though `pk` is not a field name.
-        head = source.user_field.split("__")[0]
-        if head not in names and head not in ("pk", "id"):
-            problems.append(
-                f"{source.label}: user_field {source.user_field!r} is not on {source.model}"
-            )
+        # `pk`/`id` are valid lookups even though `pk` is not a field name. A tuple names
+        # several routes to the owner; every one of them has to resolve.
+        paths = ((source.user_field,) if isinstance(source.user_field, str)
+                 else tuple(source.user_field))
+        if not paths:
+            problems.append(f"{source.label}: user_field is empty")
+        for path in paths:
+            head = path.split("__")[0]
+            if head not in names and head not in ("pk", "id"):
+                problems.append(
+                    f"{source.label}: user_field {path!r} is not on {source.model}"
+                )
         if source.retention_days and source.retention_field not in names:
             problems.append(
                 f"{source.label}: retention_field {source.retention_field!r} is not on "
@@ -220,10 +253,39 @@ def audit_coverage() -> list[str]:
         dotted = f"{model._meta.app_label}.{model.__name__}"
         if dotted in claimed:
             continue
-        has_user_fk = any(
-            isinstance(f, M.ForeignKey) and f.related_model._meta.label_lower.endswith("customuser")
-            for f in model._meta.get_fields()
-        )
-        if has_user_fk:
+        if _reaches_a_user(model):
             missing.append(dotted)
     return sorted(missing)
+
+
+def _reaches_a_user(model, *, depth: int = 3) -> bool:
+    """Whether rows of `model` belong to a person, directly or through a chain of FKs.
+
+    Direct-FK-only was the whole test, and it is why the audit could not see the two
+    models that were in fact missed: `diet.Meal` reaches its owner through
+    `diet_plan__user` and `diet.MealComponent` through `meal__diet_plan__user`. The gate
+    test asserts `audit_coverage() == []`, so it passed whether or not a two-hop model
+    was registered, and the next `Recipe`-shaped model hung under `DietPlan` would have
+    escaped export, erasure and retention with a green suite.
+    """
+    from django.db import models as M
+
+    seen = set()
+
+    def walk(current, left):
+        if left < 0 or current._meta.label in seen:
+            return False
+        seen.add(current._meta.label)
+        for field in current._meta.get_fields():
+            if not isinstance(field, (M.ForeignKey, M.OneToOneField)):
+                continue
+            related = field.related_model
+            if related is None:
+                continue
+            if related._meta.label_lower.endswith("customuser"):
+                return True
+            if walk(related, left - 1):
+                return True
+        return False
+
+    return walk(model, depth)

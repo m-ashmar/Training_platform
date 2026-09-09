@@ -554,10 +554,13 @@ class ImprovedFoodItemAdmin(TranslAdmin):
                 category = FoodCategory.objects.filter(is_fat=True).first()
             
             if not category:
-                category, _ = FoodCategory.objects.get_or_create(
-                    name='Other', 
-                    defaults={'is_protein': False, 'is_carb': False, 'is_fat': False}
-                )
+                # `get_or_create(name=...)` reads whichever column the ACTIVE language
+                # selects, so under a non-English admin session it looked at `name_ar`,
+                # missed, and the INSERT violated `UNIQUE (name)` — swallowed by the
+                # `except Exception` below, leaving the imported food with no category
+                # and no message. Identity is the English column.
+                category, _ = FoodCategory.by_canonical_name(
+                    'Other', is_protein=False, is_carb=False, is_fat=False)
             
             food_item.category = category
             food_item.save()
@@ -585,6 +588,10 @@ class ImprovedDietPlanAdmin(admin.ModelAdmin):
     list_filter = ['goal', 'generation_strategy', 'created_at']
     search_fields = ['user__email', 'user__username']
     date_hierarchy = 'start_date'
+    # `user_link` reads `obj.user.email`, `meal_count` counts meals and
+    # `compliance_rate` runs two more aggregates — about four queries per ROW, on a
+    # page of a hundred. Fetched in the changelist query instead.
+    list_select_related = ['user', 'template']
     
     readonly_fields = ['nutrition_summary', 'meal_breakdown']
     
@@ -709,6 +716,13 @@ class ImprovedMealAdmin(admin.ModelAdmin):
     list_filter = ['meal_type', 'date']
     search_fields = ['diet_plan__user__email', 'description']
     date_hierarchy = 'date'
+    list_select_related = ['diet_plan', 'diet_plan__user']
+
+    def get_queryset(self, request):
+        # `nutrition_info` calls `calculate_nutrition()`, which walks the meal's
+        # components and dereferences each one's food. Without this the meal
+        # changelist cost one query per component per row.
+        return super().get_queryset(request).prefetch_related('components__food')
     
     def user_email(self, obj):
         return obj.diet_plan.user.email

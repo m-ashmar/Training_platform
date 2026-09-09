@@ -123,7 +123,8 @@ def handle_achievement_awarded(event: AchievementAwardedEvent):
         NotificationService.create_and_send(
             recipient=recipient,
             event_type='achievement_awarded',
-            related_object_id=str(event.achievement_id),
+            # Qualified by the system that awarded it — see AchievementAwardedEvent.
+            related_object_id=f"{getattr(event, 'source', 'achievements')}:{event.achievement_id}",
             metadata=metadata,
             event_id=event.event_id
         )

@@ -60,9 +60,20 @@ def converge_plan(diet_plan, policy: PlannerPolicy | None = None) -> Dict:
     daily_kcal = float(getattr(diet_plan, "daily_calories", 0) or 0)
     summary: Dict[str, Dict] = {}
 
-    dates = sorted({m.date for m in diet_plan.meals.all()})
-    for day in dates:
-        meals = list(diet_plan.meals.filter(date=day).prefetch_related("components__food"))
+    # Every meal of the plan, with its components, its foods AND its recipe's lines, in
+    # one round trip. `_movable_indices` reads `meal.recipe` (an unfetched FK) and
+    # `recipe.ingredients` (an unprefetched reverse relation), so each meal cost two
+    # extra queries — about 240 on a thirty-day plan; and the day loop re-queried the
+    # meals table once per date after this had already loaded them all.
+    all_meals = list(diet_plan.meals
+                     .select_related("recipe")
+                     .prefetch_related("components__food", "recipe__ingredients"))
+    by_date: Dict[object, list] = {}
+    for meal in all_meals:
+        by_date.setdefault(meal.date, []).append(meal)
+
+    for day in sorted(by_date):
+        meals = by_date[day]
         names = [m.meal_type for m in meals if (m.meal_type or "").lower() != "snack"]
         snacks = sum(1 for m in meals if (m.meal_type or "").lower() == "snack")
         # The same targets the plan was built to, bodyweight included. Without the
@@ -74,6 +85,9 @@ def converge_plan(diet_plan, policy: PlannerPolicy | None = None) -> Dict:
         by_name = {t.name: t for t in targets.meals}
 
         day_totals = {"calories": 0.0, "protein": 0.0, "carb": 0.0, "fat": 0.0}
+        # The signed miss of the meal just optimised, carried into the next one's aim.
+        # See `_shift` below for why the stored `meal.target` cannot be reused.
+        carried = {"calories": 0.0, "protein": 0.0, "carb": 0.0, "fat": 0.0}
         for meal in meals:
             target = by_name.get(meal.meal_type)
             if target is None:
@@ -98,15 +112,24 @@ def converge_plan(diet_plan, policy: PlannerPolicy | None = None) -> Dict:
             # ceiling — so the plan that was saved was not the plan that was planned.
             movable = _movable_indices(meal, components)
 
-            # The target the planner BUILT this meal to, residual carry included, when
-            # it recorded one; the split only for rows that predate the column.
-            built = getattr(meal, "target", None)
-            aim = (dict(built) if isinstance(built, dict) and built.get("calories")
-                   else target.as_dict())
+            # The split's own target for this slot, plus what the PREVIOUS meal missed
+            # by after convergence.
+            #
+            # It used to be `meal.target` — the figure the planner built to, which
+            # already had the previous meal's PRE-convergence miss folded in. Convergence
+            # then removed that miss from the earlier meal and honoured it again here, so
+            # the same 60 kcal was counted twice: breakfast optimised back toward its
+            # true 600 and lunch still optimised toward 660. Bounded per macro exactly as
+            # generation bounds it, so one bad meal cannot drag the next into something
+            # nobody would serve.
+            aim = _shift(target.as_dict(), carried)
             result = optimize_meal(components, aim, policy, movable=movable)
-            _write_back(meal, result.components, MealComponent)
+            _write_back(meal, result.components, MealComponent, aim)
 
-            for key, value in totals_of(result.components).items():
+            got = totals_of(result.components)
+            carried = {macro: (aim.get(macro, 0.0) - got.get(macro, 0.0))
+                       for macro in day_totals}
+            for key, value in got.items():
                 day_totals[key] += value
 
             if not result.converged:
@@ -127,6 +150,23 @@ def converge_plan(diet_plan, policy: PlannerPolicy | None = None) -> Dict:
     return summary
 
 
+#: How far a later meal's aim may move to absorb an earlier one's miss. The same bound
+#: generation uses (`RuleBasedPlanner.RESIDUAL_CARRY_CAP`).
+RESIDUAL_CARRY_CAP = 0.15
+
+
+def _shift(target: Dict[str, float], carried: Dict[str, float]) -> Dict[str, float]:
+    """`target` moved by the previous meal's signed miss, bounded per macro."""
+    out = dict(target)
+    for macro, base in target.items():
+        base = float(base or 0.0)
+        if base <= 0:
+            continue
+        limit = RESIDUAL_CARRY_CAP * base
+        out[macro] = base + max(-limit, min(limit, float(carried.get(macro, 0.0))))
+    return out
+
+
 def _grams(quantity) -> float:
     """Quantity is stored numerically, but tolerate a "180g" string from older rows."""
     try:
@@ -135,8 +175,15 @@ def _grams(quantity) -> float:
         return 0.0
 
 
-def _write_back(meal, components, MealComponent) -> None:
-    """Persist adjusted portions. Only the quantity changes; nothing is added or removed."""
+def _write_back(meal, components, MealComponent, aim=None) -> None:
+    """Persist adjusted portions, and the target they were optimised for.
+
+    Only quantities change; nothing is added or removed. `meal.target` is rewritten
+    because after convergence it would otherwise still describe the figure GENERATION
+    aimed at — a number the served portions no longer answer to. Everything downstream
+    reads it as "what this meal was built to": the API's per-meal target, and the
+    optimiser benchmark, which judges the served portions against it.
+    """
     by_food = {food.id: grams for food, grams in components}
     for comp in meal.components.all():
         grams = by_food.get(comp.food_id)
@@ -146,3 +193,9 @@ def _write_back(meal, components, MealComponent) -> None:
         if abs(float(comp.quantity or 0) - grams) > 1e-6:
             comp.quantity = grams
             comp.save(update_fields=["quantity"])
+
+    if aim:
+        rounded = {macro: round(float(value), 2) for macro, value in aim.items()}
+        if meal.target != rounded:
+            meal.target = rounded
+            meal.save(update_fields=["target"])

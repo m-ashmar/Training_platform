@@ -235,12 +235,24 @@ def _density(food, macro: str) -> float:
     # the shortlist `_pick` samples from was the reverse-alphabetical head of the
     # catalogue. Zucchini and Watermelon were always in it and Broccoli never was.
     if macro == "vegetable":
-        # Grams of NON-energy bulk per kcal, so the number is on the same 0-0.3 scale
-        # as protein, carb and fat. `1.0 / kcal_pg` was grams of food per kcal, which
-        # is ~6.7 for cucumber against ~0.3 for a lean protein — a 66-point structure
-        # term against a 3-point one. That made the wateriest vegetable win nearly
-        # every draw, and `meal_pool_score` sums across slots, so the vegetable line
-        # dominated the score that decides recipe against template.
+        # Grams of NON-energy bulk per kcal. `1.0 / kcal_pg` was grams of food per kcal,
+        # which is ~6.7 for cucumber against ~0.3 for a lean protein — a 66-point
+        # structure term against a 3-point one. That made the wateriest vegetable win
+        # nearly every draw, and `meal_pool_score` sums across slots, so the vegetable
+        # line dominated the score that decides recipe against template.
+        #
+        # It is NOT on the same scale as protein, carb and fat, whatever an earlier
+        # comment here claimed: those are bounded at 0.25 by arithmetic and this reaches
+        # ~0.64 for cucumber. That is deliberate and it is measured. Density is only ever
+        # compared WITHIN a macro's own slot, so cross-macro comparability buys nothing,
+        # and both ways of imposing it cost the product real ground (dish rate /
+        # distinct dishes / chosen share, over 168 meals):
+        #
+        #     as it stands            0.804  60  0.307
+        #     clamped at 0.25         0.804  57  0.295
+        #     rescaled to /26         0.762  59  0.289
+        #
+        # Left as it is, with the scale stated rather than misdescribed.
         grams_of_macro = (float(getattr(food, "protein_per_gram", 0) or 0)
                           + float(getattr(food, "carbs_per_gram", 0) or 0)
                           + float(getattr(food, "fat_per_gram", 0) or 0))
@@ -254,8 +266,16 @@ def _density(food, macro: str) -> float:
 
 
 def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None,
-               allergen_checker=None, constraints=None) -> CandidatePool:
-    """Rank the whole catalogue into (meal, macro) slots for this user."""
+               allergen_checker=None, constraints=None,
+               recipes: Optional[Sequence] = None) -> CandidatePool:
+    """Rank the whole catalogue into (meal, macro) slots for this user.
+
+    `recipes` is the library the planner will actually serve. Called without it,
+    `meal_foods()` re-ran `Recipe.objects.filter(is_active=True)` — a third full recipe
+    query, and over a DIFFERENT library: the planner excludes recipes containing an
+    unvetted food, so `W_MEAL_LIBRARY` rewarded membership of meals that can never be
+    served. `_templates()` was given the same treatment for the same reason.
+    """
     from diet.models import FoodItem, UserFoodCategoryPreference, UserFoodPreference
 
     foods = list(catalogue) if catalogue is not None else list(
@@ -311,7 +331,7 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
     from .templates import meal_foods
     from diet.models import UserFoodWeight
 
-    served_at = meal_foods()
+    served_at = meal_foods(recipes)
     learned = (dict(UserFoodWeight.objects.filter(user=user).values_list("food_id", "weight"))
                if getattr(user, "pk", None) else {})
     from .similarity import SimilarityIndex
@@ -350,10 +370,6 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         # This client's learned weight, neutral at 1.0 until they have eaten something.
         preference += W_LEARNED * (float(learned.get(food.id, 1.0)) - 1.0)
         return structure, preference
-
-    def score(food, meal: str, macro: str) -> float:
-        structure, preference = score_parts(food, meal, macro)
-        return structure + preference
 
     by_slot: Dict[str, Dict[str, List]] = {m: {mac: [] for mac in MACROS} for m in MEALS}
     for food in safe:

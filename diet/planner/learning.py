@@ -68,15 +68,26 @@ def observations_for(user) -> Dict[int, Dict[str, float]]:
     return stats
 
 
-def score_from(rec: Dict[str, float]) -> float:
-    """Turn evidence into a target weight in [MIN_WEIGHT, MAX_WEIGHT]."""
+def score_from(rec: Dict[str, float], uses_completion: bool = True) -> float:
+    """Turn evidence into a target weight in [MIN_WEIGHT, MAX_WEIGHT].
+
+    `uses_completion` says whether this client has ever marked anything complete. It is
+    not a refinement, it is the difference between a rule that works and one that
+    inverts. The completion term is `0.3 * (completed/served - 0.5)`, so a client who
+    has never opened the completion screen scores 0.85 for every food they were served —
+    while a food they have never been served has no row at all and scores the neutral
+    1.0. The nightly job then walks each served food toward 0.85, `W_LEARNED` turns that
+    into -3.0 points, and the engine steadily steers the client away from everything it
+    has ever given them. Silence was being read as dislike. It is read as silence now.
+    """
     served = rec["served"] or 1.0
-    completion = rec["completed"] / served
     refusal = rec["refused"] / served
     liking = (rec["liked"] - rec["disliked"]) / served
 
     # Centred on 1.0: finishing and liking push up, refusing pushes down.
-    target = 1.0 + 0.3 * (completion - 0.5) + 0.3 * liking - 0.5 * refusal
+    target = 1.0 + 0.3 * liking - 0.5 * refusal
+    if uses_completion:
+        target += 0.3 * (rec["completed"] / served - 0.5)
     return max(MIN_WEIGHT, min(MAX_WEIGHT, target))
 
 
@@ -92,13 +103,17 @@ def update_weights(user, dry_run: bool = False) -> Dict[int, float]:
         return {}
 
     changes: Dict[int, float] = {}
+    # Whether this client uses the completion feature AT ALL, decided once over their
+    # whole history rather than per food — a food they happen not to have finished yet
+    # says nothing on its own.
+    uses_completion = any(rec["completed"] for rec in stats.values())
     existing = {w.food_id: w for w in UserFoodWeight.objects.filter(user=user, food_id__in=stats)}
     for food_id, rec in stats.items():
         if rec["served"] < 2:
             continue  # one observation is noise
         row = existing.get(food_id)
         current = float(row.weight if row else 1.0)
-        target = score_from(rec)
+        target = score_from(rec, uses_completion)
         new = current + LEARNING_RATE * (target - current)
         new = round(max(MIN_WEIGHT, min(MAX_WEIGHT, new)), 4)
         if abs(new - current) > 1e-4:
@@ -141,7 +156,8 @@ def replay_swaps(user, days: int = 7, seed_salt: str = "replay") -> Dict[str, fl
     for swap in swaps:
         slot = swap.meal.meal_type
         if swap.rejected_food_id in served.get(slot, set()):
-            still.append(f"{swap.rejected_food.name} at {slot}")
+            name = getattr(swap.rejected_food, "name_en", None) or swap.rejected_food.name
+            still.append(f"{name} at {slot}")
     avoided = len(swaps) - len(still)
     return {"swaps": len(swaps), "avoided": avoided,
             "avoided_share": avoided / len(swaps), "still_served": still}

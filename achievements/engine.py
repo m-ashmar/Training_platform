@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.db.models import Sum, Count
 from django.db import transaction
 
+from analytics import activity_types
 from users.models import CustomUser
 
 logger = logging.getLogger(__name__)
@@ -190,7 +191,7 @@ class AchievementEngine:
             if criteria_type == 'workout_count':
                 return UserActivity.objects.filter(
                     user=user, 
-                    activity_type__in=['routine_completed', 'exercise_completed']
+                    activity_type__in=activity_types.WORKOUT
                 ).count()
             
             # MEALS, not meal components. Analytics writes one `meal_completed` row
@@ -205,7 +206,7 @@ class AchievementEngine:
                 component_ids = [
                     int(sid.rsplit("-", 1)[-1])
                     for sid in UserActivity.objects.filter(
-                        user=user, activity_type='meal_completed'
+                        user=user, activity_type__in=activity_types.MEAL
                     ).values_list('session_id', flat=True)
                     if sid and sid.rsplit("-", 1)[-1].isdigit()
                 ]
@@ -308,7 +309,7 @@ class AchievementEngine:
         while True:
             has_workout = UserActivity.objects.filter(
                 user=user,
-                activity_type__in=['routine_completed', 'exercise_completed'],
+                activity_type__in=activity_types.WORKOUT,
                 timestamp__date=current_date
             ).exists()
             
@@ -332,7 +333,7 @@ class AchievementEngine:
         while True:
             has_meal = UserActivity.objects.filter(
                 user=user,
-                activity_type='meal_completed',
+                activity_type__in=activity_types.MEAL,
                 timestamp__date=current_date
             ).exists()
             
@@ -371,14 +372,14 @@ class AchievementEngine:
         # Check for workouts after 10 PM
         late = UserActivity.objects.filter(
             user=user,
-            activity_type__in=['routine_completed', 'exercise_completed'],
+            activity_type__in=activity_types.WORKOUT,
             timestamp__time__gte=time(22, 0)
         ).exists()
         
         # Check for workouts before 6 AM
         early = UserActivity.objects.filter(
             user=user,
-            activity_type__in=['routine_completed', 'exercise_completed'],
+            activity_type__in=activity_types.WORKOUT,
             timestamp__time__lt=time(6, 0)
         ).exists()
         
@@ -392,7 +393,7 @@ class AchievementEngine:
         
         return UserActivity.objects.filter(
             user=user,
-            activity_type__in=['routine_completed', 'exercise_completed'],
+            activity_type__in=activity_types.WORKOUT,
             timestamp__time__lt=time(6, 0)
         ).exists()
 
@@ -474,7 +475,12 @@ class AchievementEngine:
             criteria
         )
         target = criteria.get('target', 1)
-        
+
+        # `_get_metric_value` returns None on any internal error, and dividing by a
+        # target with None on the left is a TypeError -> 500 on the progress endpoint.
+        # `_record_progress` already returns early on None; this path did not.
+        if current_value is None:
+            current_value = 0
         progress_pct = min(100.0, (current_value / target) * 100) if target > 0 else 0
         
         from achievements.models import UserAchievement

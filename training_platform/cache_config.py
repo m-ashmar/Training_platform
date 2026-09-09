@@ -57,14 +57,18 @@ CACHEABLE_ROUTES = {
 # never disagree.
 VERSIONED_MODELS = {entry["model"].title().replace("_", ""): entry["model"]
                     for entry in CACHEABLE_ROUTES.values()}
-# Explicit map (model __name__ as Django reports it -> version key)
+# Explicit map, keyed by `Model._meta.label` -> version key.
+#
+# The bare class name is ambiguous: `Achievement` is a model in `achievements` AND in
+# `social`, and `/api/achievements/` is served by the first. Keyed by class name, a write
+# to a social achievement flushed the cache for a route it has nothing to do with.
 MODEL_VERSION_KEYS = {
-    "FoodItem": "FOODITEM",
-    "FoodCategory": "FOODCATEGORY",
-    "SubscriptionPlan": "SUBSCRIPTIONPLAN",
-    "Exercise": "EXERCISE",
-    "RoutineTemplate": "ROUTINETEMPLATE",
-    "Achievement": "ACHIEVEMENT",
+    "diet.FoodItem": "FOODITEM",
+    "diet.FoodCategory": "FOODCATEGORY",
+    "subscription.SubscriptionPlan": "SUBSCRIPTIONPLAN",
+    "routine.Exercise": "EXERCISE",
+    "routine.RoutineTemplate": "ROUTINETEMPLATE",
+    "achievements.Achievement": "ACHIEVEMENT",
 }
 
 

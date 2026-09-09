@@ -93,7 +93,8 @@ The outcome of an asynchronous generation. `{task_id, state}` while running; on 
 
 ## `POST food/import/`
 
-- An imported food is created with `needs_review: true`. It appears in the client's lists but is never put in a plan until a human accepts it. Any authenticated client can call this endpoint with arbitrary macros, which is how the previous database reached 327 rows of noise.
+- **Admin only.** Letting any authenticated client create a FoodItem with arbitrary macros is how the previous database reached 327 rows of noise; the endpoint now requires staff. A client who wants a food that is not in the catalogue searches for it (`food/search/`) and asks for it to be added.
+- An imported food is still created with `needs_review: true`, so it appears in lists but is never put in a plan until a human accepts it.
 
 ## `DELETE preferences/food-category/<food_id>/`
 
@@ -104,6 +105,16 @@ The outcome of an asynchronous generation. `{task_id, state}` while running; on 
 - `POST plans/generate-sync/` is **gone** (404). It called an external model, parsed the answer back into meals, and the deterministic engine replaced it.
 - `POST plans/generate/` now always runs the deterministic engine on Celery. It still accepts `engine`, and ignores it. Response adds `engine: "rule"`. Read the outcome at `plans/tasks/<task_id>/`.
 - No diet endpoint calls an external model any more. The in-app chat assistant is a separate feature and is unaffected.
+
+## Errors
+
+Every error response carries `error`, `detail` and `code`. `error` and `detail` are the same human sentence, translated into the request's language; `code` is a stable machine string. **Branch on `code`.** A view that names its own code keeps it (`quota_exhausted`, `plan_already_exists`, `bad_date`, `declared_allergen`, `food_not_allowed`, `batch_too_large`, `missing_fields`); anything else gets the status's own name (`bad_request`, `not_found`, `permission_denied`, `throttled`, `server_error`).
+
+A fault on our side is now a **5xx**, not a 400. Fifteen diet handlers used to answer 400 for a database timeout or an internal error, which told the client not to retry and kept the failure out of the error budget.
+
+## Meals that are not yours
+
+`GET client/meals/<id>/` and `POST client/meals/<id>/complete/` answer **404**, not 403, for a meal belonging to another client — the same answer `client/meals/interact/` already gave. 403 told the caller the meal exists.
 
 ## Localisation
 

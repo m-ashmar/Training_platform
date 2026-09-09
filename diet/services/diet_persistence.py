@@ -6,7 +6,7 @@ from django.utils import timezone
 from django.db import IntegrityError, InterfaceError, OperationalError, transaction
 from django.core.exceptions import ValidationError
 
-from ..models import DietPlan, Meal, MealComponent, FoodItem, DietConfig, UserFoodCategoryPreference
+from ..models import DietPlan, Meal, MealComponent, FoodItem, DietConfig
 from ..ai_models import DietPlanOutput, AIMeal
 from ..utils.nutrition import convert_to_grams, is_piece_food_name, piece_based_grams_if_appropriate
 from ..exceptions import PersistenceError, ConstraintViolationError
@@ -66,10 +66,7 @@ class DietPersistenceService:
                     log_json(self.logger, "info", "Superseded overlapping active plans",
                              user_id=self.user.id, count=superseded)
 
-                # Validate AI ingredients are in-DB and allowed by per-meal lists
-                categories, macro_pool, name_to_food = self._build_food_category_maps()
-                self._validate_ingredients_in_db(plan_output)
-                self._validate_ingredients_allowed(plan_output, categories)
+                self._require_decided_foods(plan_output)
 
                 from diet.planner.policy import load_policy
                 from diet.planner.targets import day_macro_grams
@@ -86,9 +83,6 @@ class DietPersistenceService:
                 _day = day_macro_grams(float(daily_calories or 0.0), load_policy(goal),
                                        getattr(self.user, 'weight', None))
                 targets = {k: round(v, 1) for k, v in _day.items()}
-                deterministic = bool(plan_output.plan) and all(
-                    ing.food_id is not None
-                    for m in plan_output.plan for ing in m.ingredients)
                 diet_plan = DietPlan.objects.create(
                     user=self.user,
                     goal=goal,
@@ -97,18 +91,13 @@ class DietPersistenceService:
                     end_date=ed,
                     duration_weeks=(duration_days + 6) // 7,
                     generated_plan=plan_output.dict(),
-                    # The deterministic path names every food by id; the LLM path names
-                    # none. That is the provenance, and the column already had a value
-                    # for it that nothing ever wrote.
-                    generation_strategy=('FALLBACK' if deterministic else 'GPT'),
+                    generation_strategy=DietPlan.ENGINE,
                     target_protein=targets['protein'],
                     target_carbs=targets['carb'],
                     target_fat=targets['fat'],
                 )
 
                 piece_weights = self._load_piece_weights()
-                # Cache preferences per user for strict category mapping
-                strict_index = {k: set(v) for k, v in categories.items()}
                 factory = MealPlanFactory(piece_weights)
                 slot_occurrences: dict = {}
                 # BUG FIX: Safer nested attribute access to prevent AttributeError
@@ -118,7 +107,18 @@ class DietPersistenceService:
                     user_allergies=user_allergies,
                     category_pool=None,
                     strict=False,
+                    # Every catalogue row now carries a curated allergen composition
+                    # (`diet/data/food_allergens.py`), so "we cannot vouch for this" is
+                    # a real signal rather than the default state of 346 legacy rows.
+                    # It is dropped, not reported and served.
+                    drop_unverified=True,
                 )
+
+                # Every food the planner chose, in one query for the whole plan. A
+                # seven-day plan names about 110 ingredients and used to look each one
+                # up on its own.
+                decided = FoodItem.objects.in_bulk(
+                    {ing.food_id for m in plan_output.plan for ing in m.ingredients})
 
                 for i, ai_meal in enumerate(plan_output.plan):
                     meal_date = sd + _timedelta(days=i // (meal_count + snack_count if (meal_count + snack_count) else 1))
@@ -130,34 +130,7 @@ class DietPersistenceService:
                     meal = factory.create_meal(diet_plan, ai_meal, meal_date,
                                                occurrence=occurrence)
 
-                    from ..meal_processor import MealProcessor
-                    meal_processor = MealProcessor(self.user)  # BUG FIX: Pass user instead of None
-                    try:
-                        resolved = meal_processor.resolve_ingredients_from_ai_meal(ai_meal)
-                    except Exception as e:
-                        log_json(self.logger, "error", "Failed to resolve ingredients from AI meal", error=str(e))
-                        raise PersistenceError(str(e))
-
-                    # Strict mapping only: replace fuzzy with dictionary/index lookups
-                    mapped: list[tuple[FoodItem, str]] = []
-                    meal_type = ai_meal.meal_type or 'Lunch'
-                    identified = {ing.food_id for ing in ai_meal.ingredients if ing.food_id}
-                    for food_item, quantity in resolved:
-                        if food_item.id in identified:
-                            # Chosen by id upstream. Re-mapping by name here is the same
-                            # leak in a second place.
-                            mapped.append((food_item, quantity))
-                            continue
-                        dom_macro = self._dominant_macro_of_food(food_item)
-                        cat_key = self._cat_key(meal_type, dom_macro)
-                        pool = strict_index.get(cat_key, set())
-                        if pool and food_item.name not in pool:
-                            # Try exact name match by lowercased map; if not found, keep original
-                            candidate = name_to_food.get(food_item.name.lower())
-                            food_item = candidate or food_item
-                        mapped.append((food_item, quantity))
-
-                    # Validate components (allergy/category strict off by default)
+                    mapped = self._resolve_by_id(ai_meal, decided)
                     validated = list(validator.validate(mapped))
                     factory.add_components(meal, validated)
 
@@ -228,18 +201,38 @@ class DietPersistenceService:
             # ingredient that definitely violates a declared allergy from one whose
             # allergen data is simply missing — the latter must not pass as safe.
             report = validator.report
-            if report.violations or report.unverified:
-                log_json(
-                    self.logger,
-                    "warning" if report.violations else "info",
-                    "Allergen check on generated plan",
-                    user_id=self.user.id,
-                    diet_plan_id=diet_plan.id,
-                    violations=[v.food_name for v in report.violations],
-                    unverified_count=len(report.unverified),
-                )
-            diet_plan.allergen_report = report.as_dict()
-            diet_plan.save(update_fields=['allergen_report'])
+            try:
+                if report.violations or report.unverified:
+                    log_json(
+                        self.logger,
+                        "warning" if report.violations else "info",
+                        "Allergen check on generated plan",
+                        user_id=self.user.id,
+                        diet_plan_id=diet_plan.id,
+                        violations=[v.food_name for v in report.violations],
+                        unverified_count=len(report.unverified),
+                    )
+                diet_plan.allergen_report = report.as_dict()
+                # Not `update_fields=['allergen_report']`. That re-ran `DietPlan.clean()`
+                # through `validate_row()`, which asks a CROSS-ROW question — "does this
+                # user already have an overlapping active plan?" — and by now the lock is
+                # released, so a second request that superseded this one made this save
+                # raise ValidationError for a plan that is already committed and active.
+                # The client got an error for the plan they can see, and the allergen
+                # report was never stored.
+                DietPlan.objects.filter(pk=diet_plan.pk).update(
+                    allergen_report=diet_plan.allergen_report)
+            except (OperationalError, InterfaceError):
+                # The plan is COMMITTED. Letting a transient error escape from here
+                # reaches the task's `autoretry_for`, and the retry builds a SECOND plan
+                # that supersedes the first — up to four plans for one request, with the
+                # client polling the task seeing only the last. Nothing after the commit
+                # may ask to be retried.
+                logger.warning("could not store the allergen report for plan %s",
+                               diet_plan.id, exc_info=True)
+            except Exception:
+                logger.warning("could not store the allergen report for plan %s",
+                               diet_plan.id, exc_info=True)
 
             return diet_plan
         except (IntegrityError, ValidationError) as e:
@@ -256,95 +249,48 @@ class DietPersistenceService:
             raise PersistenceError(str(e))
 
     # ---------------------- validations ----------------------
-    def _validate_ingredients_in_db(self, plan_output: DietPlanOutput) -> None:
-        from ..models import FoodItem
-        wanted_lower = set()
-        original_names = set()
-        for m in plan_output.plan:
-            for ing in getattr(m, 'ingredients', []) or []:
-                if getattr(ing, 'food_id', None) is not None:
-                    continue  # resolved by id; the name is display text
-                n_raw = (getattr(ing, 'name', '') or '').strip()
-                if n_raw:
-                    original_names.add(n_raw)
-                    wanted_lower.add(n_raw.lower())
-        if not wanted_lower:
-            return
-        # Case-insensitive existence check by loading names and normalizing
-        existing_all = set(FoodItem.objects.values_list('name', flat=True))
-        existing_lower = {n.lower() for n in existing_all}
-        missing = wanted_lower - existing_lower
-        if missing:
-            raise PersistenceError(f"unknown_foods:{','.join(sorted(missing))}")
+    @staticmethod
+    def _require_decided_foods(plan_output: DietPlanOutput) -> None:
+        """Every ingredient must name the catalogue row it is.
 
-    def _validate_ingredients_allowed(self, plan_output: DietPlanOutput, categories: Dict[str, set]) -> None:
-        """Ensure all ingredients are allowed for their meal.
+        There used to be a second way in: an ingredient with a `name` and no `food_id`,
+        resolved downstream by an exact-name lookup, then a fuzzy `SequenceMatcher` scan
+        over the whole catalogue, then — failing both — by CREATING a FoodItem with
+        macros from a table of guesses ("Default estimate: 100, 5, 15, 2"). That row
+        entered the catalogue with `needs_review=False`, and once a client had eaten it,
+        `MealComponent.food` PROTECT made it undeletable.
 
-        Relaxation: If the user has NO explicit vegetable/fruit entries for a given meal,
-        auto-allow a curated list of common vegetables/fruits so planner-added produce doesn't fail.
+        That path existed for a generator that no longer exists. The engine names every
+        food by id. A plan that does not is not a plan we can price, portion or check for
+        allergens, so it is refused here rather than guessed at.
         """
+        nameless = [
+            (getattr(meal, "meal_type", "?"), getattr(ing, "name", "") or "?")
+            for meal in plan_output.plan
+            for ing in (getattr(meal, "ingredients", None) or [])
+            if getattr(ing, "food_id", None) is None
+        ]
+        if nameless:
+            raise PersistenceError(
+                "ingredients_without_a_food_id:"
+                + ",".join(f"{slot}/{name}" for slot, name in nameless[:10]))
 
-        DEFAULT_VEGETABLES = {
-            'broccoli', 'spinach', 'carrot', 'green bean', 'zucchini', 'bell pepper',
-            'cucumber', 'lettuce', 'tomato', 'asparagus', 'cauliflower', 'kale', 'brussels sprouts'
-        }
-        DEFAULT_FRUITS = {
-            'apple', 'banana', 'orange', 'strawberry', 'blueberry', 'mango',
-            'pineapple', 'grapes', 'watermelon', 'kiwi'
-        }
+    @staticmethod
+    def _resolve_by_id(ai_meal: AIMeal, decided: dict) -> list:
+        """The rows the planner chose, in the order it chose them.
 
-        def meal_allowed_set(meal_type: str) -> set:
-            keys = [
-                self._cat_key(meal_type, 'protein'),
-                self._cat_key(meal_type, 'carb'),
-                self._cat_key(meal_type, 'fat'),
-                self._cat_key(meal_type, 'vegetable'),
-                self._cat_key(meal_type, 'fruit'),
-            ]
-            allowed = set()
-            for k in keys:
-                allowed.update(categories.get(k, set()))
-
-            # Auto-allow defaults only when the user has no explicit veg/fruit for this meal
-            veg_key = self._cat_key(meal_type, 'vegetable')
-            fruit_key = self._cat_key(meal_type, 'fruit')
-            if not categories.get(veg_key):
-                allowed.update(DEFAULT_VEGETABLES)
-            if not categories.get(fruit_key):
-                allowed.update(DEFAULT_FRUITS)
-
-            return {n.lower() for n in allowed}
-
-        # HARD constraints only. This used to reject any food the user had not explicitly
-        # categorised, which made sense when the planner could only pick from that same
-        # set. Now that preferences RANK the catalogue instead of gating it (see
-        # diet.planner.candidates), re-gating here rejected every plan generated for a
-        # user with partial preferences — a second copy of the bug that produced the
-        # 233 kcal plan. Allergens and explicit dislikes are the real constraints, and
-        # both are already enforced in the pool builder and by MealValidator.
-        from ..models import UserFoodPreference
-
-        pref = UserFoodPreference.objects.filter(user=self.user).first()
-        # By ID, like every other constraint check. Comparing names meant a catalogue
-        # with two rows of one name refused the WHOLE plan because the planner had
-        # legitimately used the other row — and under an Arabic request the two halves
-        # of this comparison read different columns entirely.
-        disliked = {f.id for f in pref.disliked_foods.all()} if pref else set()
-        if not disliked:
-            return
-
-        violations = []
-        for m in plan_output.plan:
-            for ing in getattr(m, 'ingredients', []) or []:
-                food_id = getattr(ing, 'food_id', None)
-                if food_id is not None and food_id in disliked:
-                    violations.append(str(getattr(ing, 'name', food_id)))
-        if violations:
-            raise ConstraintViolationError(
-                f"disliked_foods:{','.join(sorted(set(violations)))}"
-            )
-
-    # ---------------------- internals ----------------------
+        No name lookup and no fuzzy match: a food the planner cleared for allergens,
+        dislikes and cuisine must be the food that is saved.
+        """
+        rows = []
+        for ing in ai_meal.ingredients:
+            food = decided.get(ing.food_id)
+            if food is None:
+                raise PersistenceError(
+                    f"planner chose FoodItem {ing.food_id} ({ing.name!r}) "
+                    f"but no such row exists")
+            rows.append((food, ing.grams if ing.grams is not None else ing.quantity))
+        return rows
 
     def _resolve_start_date(self, start_date: Optional[str]) -> _date:
         if start_date:
@@ -380,43 +326,6 @@ class DietPersistenceService:
             logger.debug('suppressed non-fatal error', exc_info=True)
         return pw
 
-    def _cat_key(self, meal: str, macro: str) -> str:
-        macro_key = 'carbs' if macro == 'carb' else macro
-        return f"{(meal or '').lower()}_{macro_key}"
-
-    def _build_food_category_maps(self):
-        cat_qs = UserFoodCategoryPreference.objects.filter(user=self.user).select_related('food')
-        categories: Dict[str, set] = {}
-        for m in ("Breakfast", "Lunch", "Dinner", "Snack"):
-            for mac in ("carb", "protein", "fat", "vegetable", "fruit"):
-                categories[self._cat_key(m, mac)] = set()
-        for m in cat_qs:
-            categories[self._cat_key(m.meal, m.macro)].add(m.food.name)
-
-        macro_pool: Dict[str, set] = {"carb": set(), "protein": set(), "fat": set(), "vegetable": set(), "fruit": set()}
-        for mac in ("carb", "protein", "fat", "vegetable", "fruit"):
-            for meal_key, names in categories.items():
-                if meal_key.endswith('carbs') and mac == 'carb':
-                    macro_pool['carb'].update(names)
-                if meal_key.endswith('protein') and mac == 'protein':
-                    macro_pool['protein'].update(names)
-                if meal_key.endswith('fat') and mac == 'fat':
-                    macro_pool['fat'].update(names)
-                if meal_key.endswith('vegetable') and mac == 'vegetable':
-                    macro_pool['vegetable'].update(names)
-                if meal_key.endswith('fruit') and mac == 'fruit':
-                    macro_pool['fruit'].update(names)
-
-        name_to_food: Dict[str, FoodItem] = {}
-        all_cat_names = set()
-        for s in categories.values():
-            all_cat_names.update(s)
-        if all_cat_names:
-            for f in FoodItem.objects.filter(name__in=list(all_cat_names)):
-                name_to_food[f.name.lower()] = f
-
-        return categories, macro_pool, name_to_food
-
     def _determine_meal_template(self, ai_meal: AIMeal) -> str:
         nutrition = ai_meal.total_nutrition
         protein = nutrition.get('protein', 0)
@@ -428,28 +337,4 @@ class DietPersistenceService:
             return 'CARB_FAT' if fat > protein else 'PROTEIN_CARB'
         else:
             return 'COMPLETE'
-
-    def _dominant_macro_of_food(self, food: FoodItem) -> str:
-        """Return 'protein' | 'carb' | 'fat' for a FoodItem by dominant calories."""
-        try:
-            if food.category:
-                if getattr(food.category, 'is_protein', False):
-                    return 'protein'
-                if getattr(food.category, 'is_carb', False):
-                    return 'carb'
-                if getattr(food.category, 'is_fat', False):
-                    return 'fat'
-        except Exception:
-            # Optional side effect: swallowing this silently is what made the
-            # surrounding failures invisible in logs. Control flow is unchanged.
-            logger.debug('suppressed non-fatal error', exc_info=True)
-        p_cals = 4.0 * float(getattr(food, 'protein_per_gram', 0.0))
-        c_cals = 4.0 * float(getattr(food, 'carbs_per_gram', 0.0))
-        f_cals = 9.0 * float(getattr(food, 'fat_per_gram', 0.0))
-        if p_cals >= c_cals and p_cals >= f_cals:
-            return 'protein'
-        if c_cals >= p_cals and c_cals >= f_cals:
-            return 'carb'
-        return 'fat'
-
 

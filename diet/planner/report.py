@@ -21,6 +21,26 @@ MACROS = ("calories", "protein", "carb", "fat")
 #: itself, which is quoted to the gram per hundred grams.
 NEGLIGIBLE = {"calories": 40.0, "protein": 4.0, "carb": 6.0, "fat": 3.0}
 
+#: ...but a floor with no ceiling is a second, much wider tolerance for anyone eating
+#: little. A 1,200 kcal client's snack asks for 4.6 g of fat, and 3.0 g of that is 65%,
+#: so a snack could miss its fat target by two thirds and still return `within() == True`
+#: — deviation stopped discriminating between candidate dishes and `find_recipe` sampled
+#: among them on preference alone. The same policy gives a 3,400 kcal client 9% on fat.
+#: One tolerance dict must not mean two contracts.
+#:
+#: The ceiling is 0.75 because that is the widest bound that refuses the absurd case
+#: while costing the product nothing. Measured on 168 meals (dish rate / distinct dishes
+#: / chosen-ingredient share / preference satisfaction):
+#:
+#:     no ceiling    0.804  60  0.307  0.688
+#:     0.75          0.804  60  0.307  0.688   <- chosen; identical, and bounded
+#:     0.60          0.810  60  0.292  0.688
+#:     0.45          0.810  59  0.288  0.688   and a twin meal reappears
+#:
+#: Tightening below 0.75 buys a narrower band on a 4.6 g target and pays for it in the
+#: thing the feature exists for: what the client chose showing up on their plate.
+NEGLIGIBLE_CEILING = 0.75
+
 
 @dataclass(frozen=True)
 class MacroDeviation:
@@ -49,7 +69,8 @@ class MacroDeviation:
             if abs(getattr(self, macro)) <= tolerance.get(macro, 0.10):
                 continue
             missed = abs(self.absolute.get(macro, float("inf")))
-            if missed <= NEGLIGIBLE.get(macro, 0.0):
+            if (missed <= NEGLIGIBLE.get(macro, 0.0)
+                    and abs(getattr(self, macro)) <= NEGLIGIBLE_CEILING):
                 continue
             result = False
             break

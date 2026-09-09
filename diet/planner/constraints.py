@@ -121,9 +121,17 @@ class ClientConstraints:
         if not self.cuisine.allows(getattr(food, "cuisine", None)):
             return True
         if self.checks_allergens:
-            from diet.services.meal_validator import VIOLATION
+            from diet.services.meal_validator import SAFE
 
-            return self.allergen_checker.check_food(food).verdict == VIOLATION
+            # Anything that is not positively SAFE is refused. The gate used to block
+            # only VIOLATION, which meant a row the checker could not vouch for —
+            # `allergen_source='unknown'`, no tags, a name carrying no marker word —
+            # came back UNVERIFIED and was served. `Makdous` is eggplant stuffed with
+            # walnuts and says so nowhere in its name; under the old rule it reached a
+            # nut-allergic client's plate. The catalogue now declares a composition for
+            # every row (`diet/data/food_allergens.py`), so failing closed costs a
+            # client nothing and an unvouched import cannot reach them.
+            return self.allergen_checker.check_food(food).verdict != SAFE
         return False
 
     def forbids_any(self, foods) -> bool:
@@ -136,9 +144,11 @@ class ClientConstraints:
         if not self.cuisine.allows(getattr(food, "cuisine", None)):
             return "outside the cuisine you chose"
         if self.checks_allergens:
-            from diet.services.meal_validator import VIOLATION
+            from diet.services.meal_validator import UNVERIFIED, VIOLATION
 
             verdict = self.allergen_checker.check_food(food)
             if verdict.verdict == VIOLATION:
                 return verdict.human
+            if verdict.verdict == UNVERIFIED:
+                return "we cannot confirm what this contains"
         return None

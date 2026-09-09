@@ -24,7 +24,14 @@ def int_param(params, name, default=None, minimum=None, maximum=None):
     wants rows, not an error; a value that is not a number at all is rejected, because
     there is no sane interpretation of it.
     """
-    raw = params.get(name)
+    # A JSON array body reaches `request.data` as a `list`, which has no `.get`, so
+    # every generate endpoint answered 500 to `POST []`. The shape of the body is the
+    # client's mistake, and it is one 400 rather than an AttributeError in a view.
+    reader = getattr(params, "get", None)
+    if reader is None:
+        raise ValidationError(
+            {"non_field_errors": [_("Expected a JSON object, not a list.")]})
+    raw = reader(name)
     if raw is None or raw == "":
         return default
     try:

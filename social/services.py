@@ -14,6 +14,7 @@ from django.db import transaction
 
 from users.models import CustomUser
 from social.models import Achievement, UserAchievement, Post, UserFollow
+from analytics import activity_types
 from analytics.models import UserActivity, PerformanceMetric, UserGoal
 
 
@@ -107,12 +108,12 @@ class AchievementService:
         try:
             if criteria_type == 'workout_count':
                 return UserActivity.objects.filter(
-                    user=user, activity_type='workout_completed'
+                    user=user, activity_type__in=activity_types.WORKOUT
                 ).count()
             
             elif criteria_type == 'meal_count':
                 return UserActivity.objects.filter(
-                    user=user, activity_type='meal_logged'
+                    user=user, activity_type__in=activity_types.MEAL
                 ).count()
             
             elif criteria_type == 'post_count':
@@ -191,7 +192,7 @@ class AchievementService:
         while True:
             has_workout = UserActivity.objects.filter(
                 user=user,
-                activity_type='workout_completed',
+                activity_type__in=activity_types.WORKOUT,
                 timestamp__date=current_date
             ).exists()
             
@@ -235,7 +236,7 @@ class AchievementService:
         while True:
             has_calorie_log = UserActivity.objects.filter(
                 user=user,
-                activity_type='meal_logged',
+                activity_type__in=activity_types.MEAL,
                 timestamp__date=current_date
             ).exists()
             
@@ -260,11 +261,11 @@ class AchievementService:
             # Check for workouts between 10 PM and 6 AM
             return UserActivity.objects.filter(
                 user=user,
-                activity_type='workout_completed',
+                activity_type__in=activity_types.WORKOUT,
                 timestamp__time__gte='22:00'
             ).exists() or UserActivity.objects.filter(
                 user=user,
-                activity_type='workout_completed',
+                activity_type__in=activity_types.WORKOUT,
                 timestamp__time__lt='06:00'
             ).exists()
         
@@ -272,7 +273,7 @@ class AchievementService:
             # Check for workouts before 6 AM
             return UserActivity.objects.filter(
                 user=user,
-                activity_type='workout_completed',
+                activity_type__in=activity_types.WORKOUT,
                 timestamp__time__lt='06:00'
             ).exists()
         
@@ -318,12 +319,19 @@ class AchievementService:
             from notifications.domain.dispatcher import emit_event
             from notifications.domain.events import AchievementAwardedEvent
 
-            emit_event(AchievementAwardedEvent(
+            # Queued on commit, not now. The caller opens a transaction, creates the
+            # UserAchievement row and calls this INSIDE it, so `.delay()` put the
+            # message on the broker before the row was visible — a worker could read
+            # state that was not there yet, and a rollback still sent the push.
+            # `achievements/engine.py` carries the same guard and the same reason; this
+            # copy of the flow did not.
+            transaction.on_commit(lambda: emit_event(AchievementAwardedEvent(
                 user_id=user.id,
                 achievement_id=achievement.id,
                 achievement_name=achievement.name,
-                points=achievement.points
-            ))
+                points=achievement.points,
+                source="social",
+            )))
         except Exception as e:
             logger.error(f"Error sending achievement notification: {e}")
     

@@ -14,7 +14,6 @@ from django.utils import timezone
 from django.utils.translation import gettext as _
 from django.db import transaction
 from .models import DietPlan, Meal, DailyAdvice, MealComponent
-from .meal_processor import MealProcessor
 import logging
 import json
 from .exceptions import (
@@ -62,20 +61,37 @@ def generate_rule_based_plan(user_id, meal_count=3, snack_count=1, start_date=No
     from .services.rule_based_planner import NoServableMealError
 
     user = get_user_model().objects.get(id=user_id)
+
+    def _refund(client):
+        """Give the allowance back. It was claimed when the request was accepted, so
+        every path that ends without a plan owes it."""
+        from subscription import quota
+        quota.release(client, "daily_meals")
+
     try:
         _output, plan = generate_and_save(
             user, meal_count=meal_count, snack_count=snack_count, start_date=start_date,
             duration_days=duration_days, max_days=MAX_TASK_DAYS)
     except InfeasibleCaloriesError as e:
+        _refund(user)
         return {"error": str(e), "code": "infeasible_calories", "user_id": user_id,
                 "max_feasible_kcal": round(e.ceiling), "suggestion": e.suggestion}
     except NoServableMealError as e:
+        _refund(user)
         return {"error": str(e), "code": "no_servable_meal", "user_id": user_id}
+    except ConstraintViolationError as e:
+        # Two generations for one client raced, or the client already has a plan
+        # covering those dates. Not a fault: the plan they wanted exists.
+        _refund(user)
+        return {"error": str(e), "code": "plan_already_exists", "user_id": user_id}
     except (ValueError, PermissionError) as e:
+        _refund(user)
         return {"error": str(e), "code": "invalid_request", "user_id": user_id}
-    # The quota is spent when a plan exists, not when the request was accepted.
-    from subscription import quota
-    quota.record_on_commit(user, "daily_meals")
+    except Exception:
+        # Including the transient errors Celery will retry: the retry claims nothing
+        # new, so without this a failed attempt would keep the client's allowance.
+        _refund(user)
+        raise
     return {"plan_id": plan.id, "user_id": user_id}
 
 
@@ -112,9 +128,16 @@ def generate_daily_advice(user_id=None):
                 # Generate personalized advice based on user data
                 advice_text = _generate_personalized_advice(user)
             
-                # Create advice with comprehensive context data
-                advice = DailyAdvice.objects.create(
+                # One row per client per day, created or refreshed. A bare `create()`
+                # meant a redelivered sweep — `acks_late` plus `reject_on_worker_lost`
+                # are both on — gave every client a second piece of advice, and a third.
+                from training_platform.user_time import today_for
+
+                today = today_for(user)
+                advice, _created = DailyAdvice.objects.update_or_create(
                     user=user,
+                    for_date=today,
+                    defaults=dict(
                     text=advice_text,
                     context_data={
                         "advice_type": "daily_nutrition",
@@ -129,7 +152,7 @@ def generate_daily_advice(user_id=None):
                             "engagement_score": 0,
                             "user_feedback": None
                         }
-                    }
+                    }),
                 )
             
                 logger.info(
@@ -147,6 +170,11 @@ def generate_daily_advice(user_id=None):
                 logger.exception("daily advice failed for user %s", user.id)
                 continue
             
+    except TRANSIENT_ERRORS:
+        # Let Celery retry. The blanket `except Exception` below swallowed these too, so
+        # `autoretry_for=TRANSIENT_ERRORS` on the decorator could never fire and a
+        # database blip silently cost every client that day's advice.
+        raise
     except Exception as e:
         logger.error(
             f"Error generating daily advice for user {user_id}: {str(e)}",

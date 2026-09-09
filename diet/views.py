@@ -15,10 +15,11 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.utils.translation import gettext as _
 from .tasks import generate_rule_based_plan
-from .exceptions import PersistenceError
+from .exceptions import ConstraintViolationError, PersistenceError
 from .engine.rule_based_planner import RuleBasedPlanner
 from .services.rule_based_planner import NoServableMealError
-from .services.meal_payload import component_payload, day_targets, meal_payload, target_payload
+from .services.meal_payload import (component_payload, day_targets, food_names,
+                                    meal_payload, name_en_of, target_payload)
 from .models import (
     MealSwap,
     MealEvent,
@@ -38,7 +39,7 @@ from datetime import date, time, datetime
 from django.db import models
 
 # Import subscription permissions
-from subscription.permissions import HasDietAccess, MealUsageLimit
+from subscription.permissions import HasDietAccess
 from subscription import quota
 from django.utils import timezone
 from django.http import Http404
@@ -159,8 +160,15 @@ class FoodListView(APIView):
     def get(self, request):
         try:
             # Get query parameters for filtering and pagination
-            page = int_param(request.GET, 'page', default=1, minimum=1)
-            page_size = int_param(request.GET, 'page_size', default=20, minimum=1, maximum=100)
+            # Bounded. Every other number in this module is clamped; this one was not,
+            # so `?page=99999999999999999999` produced an OFFSET past the range of a
+            # bigint, Postgres raised NumericValueOutOfRange, and the broad handler
+            # below answered 500 to what is plainly a bad request.
+            page = int_param(request.GET, 'page', default=1, minimum=1, maximum=100000)
+            # 25, the same default DRF is configured with and the same number the
+            # contract publishes. Two hand-rolled paginators said 20, so a client
+            # that trusted the documented page size mis-sized every request.
+            page_size = int_param(request.GET, 'page_size', default=25, minimum=1, maximum=100)
             category = request.GET.get('category', None)
             search_query = request.GET.get('search', '').strip()
             
@@ -174,8 +182,11 @@ class FoodListView(APIView):
             if search_query:
                 queryset = queryset.filter(name__icontains=search_query)
             
-            # Apply ordering
-            queryset = queryset.order_by('name')
+            # By the ENGLISH name, so a page boundary is the same row whatever language
+            # the client asked in. `order_by('name')` is rewritten to the active
+            # language's column, which reorders the whole catalogue and makes paging
+            # through it in Arabic return a different partition than in English.
+            queryset = queryset.order_by('name_en', 'id')
             
             # Calculate pagination
             total_count = queryset.count()
@@ -190,8 +201,7 @@ class FoodListView(APIView):
             for food in food_items:
                 results.append({
                     'id': food.id,
-                    'name': food.name,
-                    'name_ar': getattr(food, 'name_ar', None) or food.name,
+                    **food_names(food),
                     'calories': food.calories,
                     'protein': food.protein,
                     'carbs': food.carbs,
@@ -213,9 +223,19 @@ class FoodListView(APIView):
             has_next = page < total_pages
             has_previous = page > 1
             
+            # Absolute URLs, which is what the contract says and what `MyDietPlansView`
+            # already emits through DRF's paginator. This returned bare page NUMBERS, so
+            # a client that followed `next` as a link requested "2".
+            def page_url(number):
+                if number is None:
+                    return None
+                query = request.GET.copy()
+                query['page'] = number
+                return request.build_absolute_uri(f"{request.path}?{query.urlencode()}")
+
             return Response(listing(results, count=total_count, extra={
-                'next': page + 1 if has_next else None,
-                'previous': page - 1 if has_previous else None,
+                'next': page_url(page + 1) if has_next else None,
+                'previous': page_url(page - 1) if has_previous else None,
                 'pagination': {
                     'page': page,
                     'page_size': page_size,
@@ -316,8 +336,7 @@ class FoodSearchView(APIView):
             for food in local_qs:
                 local_results.append({
                     'id': food.id,
-                    'name': food.name,
-                    'name_ar': getattr(food, 'name_ar', None) or food.name,
+                    **food_names(food),
                     'calories': food.calories,
                     'protein': food.protein,
                     'carbs': food.carbs,
@@ -398,7 +417,8 @@ class UserFoodCategoryPreferenceView(APIView):
             mapping_data = [
                 {
                     'food_id': m.food.id,
-                    'food_name': m.food.name,
+                    'food_name': name_en_of(m.food),
+                    'food_name_ar': getattr(m.food, 'name_ar', None) or name_en_of(m.food),
                     'meal': m.meal,
                     'macro': m.macro,
                     'updated_at': m.updated_at,
@@ -472,7 +492,8 @@ class UserFoodCategoryPreferenceView(APIView):
             return Response({
                 'created': created,
                 'food_id': obj.food.id,
-                'food_name': obj.food.name,
+                'food_name': name_en_of(obj.food),
+                'food_name_ar': getattr(obj.food, 'name_ar', None) or name_en_of(obj.food),
                 'meal': obj.meal,
                 'macro': obj.macro,
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
@@ -528,7 +549,8 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             obj.save()
             return Response({
                 'food_id': obj.food.id,
-                'food_name': obj.food.name,
+                'food_name': name_en_of(obj.food),
+                'food_name_ar': getattr(obj.food, 'name_ar', None) or name_en_of(obj.food),
                 'meal': obj.meal,
                 'macro': obj.macro,
             })
@@ -598,7 +620,7 @@ class FoodImportView(APIView):
                 return Response({
                     "message": _("Food item already exists"),
                     "food_id": existing_food.id,
-                    "food_name": existing_food.name
+                    "food_name": name_en_of(existing_food)
                 })
             
             # Determine serving size grams robustly
@@ -739,32 +761,32 @@ class UserPreferencesView(APIView):
             
             return Response({
                 'liked_foods': [
-                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.liked_foods.all()
                 ],
                 'disliked_foods': [
-                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.disliked_foods.all()
                 ],
                 'allergies': preferences.allergies,
                 'protein_choices': [
-                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.protein_choices.all()
                 ],
                 'carb_choices': [
-                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.carb_choices.all()
                 ],
                 'fat_choices': [
-                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.fat_choices.all()
                 ],
                 'vegetable_choices': [
-                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.vegetable_choices.all()
                 ],
                 'fruit_choices': [
-                    {'id': food.id, 'name': food.name, 'image_url': food.image_url}
+                    {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.fruit_choices.all()
                 ],
                 'local_ratio': preferences.local_ratio,
@@ -936,8 +958,8 @@ class GenerateDietPlanView(APIView):
 
     Read the outcome at plans/tasks/<task_id>/.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess, MealUsageLimit]
-    
+    permission_classes = [IsAuthenticated, HasDietAccess]
+
     def post(self, request):
         try:
             if request.user.is_trainer:
@@ -945,9 +967,12 @@ class GenerateDietPlanView(APIView):
                     {"error": _("Trainers cannot generate client plans here. Use trainer diet plan creation instead.")},
                     status=status.HTTP_403_FORBIDDEN
                 )
-            
+
+            # Read once. These were computed here and then computed AGAIN at the
+            # `.delay()` call with a different `snack_count` default, so the values
+            # validated were not the values used.
             meal_count = int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10)
-            snack_count = int_param(request.data, 'snack_count', default=0, minimum=0, maximum=10)
+            snack_count = int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10)
             start_date_str = request.data.get('start_date')
             # Validate optional start_date if present
             if start_date_str:
@@ -961,16 +986,33 @@ class GenerateDietPlanView(APIView):
                 start_date_str = parsed.isoformat()
             
             from diet.services.plan_generation import MAX_TASK_DAYS
-            task = generate_rule_based_plan.delay(
-                user_id=request.user.id,
-                meal_count=int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10),
-                snack_count=int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10),
-                start_date=start_date_str,
-                duration_days=int_param(request.data, 'duration_days', default=7, minimum=1, maximum=MAX_TASK_DAYS),
-            )
+            duration_days = int_param(request.data, 'duration_days', default=7,
+                                      minimum=1, maximum=MAX_TASK_DAYS)
+            # Claim the allowance BEFORE the work, in one atomic act. `MealUsageLimit`
+            # only read the counter and nothing was written until the work finished, so
+            # every concurrent tap passed the same check and the limit meant nothing
+            # under exactly the load it exists for. Refunded below if the work does not
+            # produce a plan.
+            if not quota.reserve(request.user, "daily_meals"):
+                return Response(
+                    {"error": _("You have used your meal plan allowance for today."),
+                     "code": "quota_exhausted"},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS)
+            try:
+                task = generate_rule_based_plan.delay(
+                    user_id=request.user.id,
+                    meal_count=meal_count,
+                    snack_count=snack_count,
+                    start_date=start_date_str,
+                    duration_days=duration_days,
+                )
+            except Exception:
+                # The broker refused the job. Nothing will be built, so nothing is owed.
+                quota.release(request.user, "daily_meals")
+                raise
             remember_task_owner(task.id, request.user)
-            # The task records the quota when a plan exists; read the outcome at
-            # plans/tasks/<task_id>/.
+            # The allowance is claimed; the task refunds it if no plan results. Read the
+            # outcome at plans/tasks/<task_id>/.
             return Response({
                 "message": _("Diet plan generation started"),
                 "task_id": task.id,
@@ -1033,7 +1075,7 @@ class GenerateDietPlanRuleBasedView(APIView):
     """
     Generate a deterministic plan using RuleBasedPlanner (no GPT, no Celery).
     """
-    permission_classes = [IsAuthenticated, HasDietAccess, MealUsageLimit]
+    permission_classes = [IsAuthenticated, HasDietAccess]
 
     def post(self, request):
         try:
@@ -1055,11 +1097,21 @@ class GenerateDietPlanRuleBasedView(APIView):
                     return Response({"error": _("Invalid start_date format. Use YYYY-MM-DD.")},
                                     status=status.HTTP_400_BAD_REQUEST)
                 start_date = parsed.isoformat()
+
+            # Claimed before the build, refunded on every path that does not produce a
+            # plan. See the async endpoint above for why reading the counter was not
+            # enough.
+            if not quota.reserve(request.user, "daily_meals"):
+                return Response(
+                    {"error": _("You have used your meal plan allowance for today."),
+                     "code": "quota_exhausted"},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS)
             try:
                 plan_output, diet_plan = generate_and_save(
                     request.user, meal_count=meal_count, snack_count=snack_count,
                     duration_days=duration_days, start_date=start_date)
             except InfeasibleCaloriesError as e:
+                quota.release(request.user, "daily_meals")
                 # Refuse what the meal structure cannot carry, before building it. A
                 # 5,000 kcal request used to return a correct 3,900 kcal plan labelled 5,000.
                 return Response({
@@ -1070,12 +1122,17 @@ class GenerateDietPlanRuleBasedView(APIView):
                     "suggestion": e.suggestion,
                 }, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
             except ValueError as e:
+                quota.release(request.user, "daily_meals")
                 return Response(
-                    {"error": str(e) or _("Incomplete profile for calorie calculation"), "detail": str(e)},
+                    {"error": str(e) or _("Incomplete profile for calorie calculation"),
+                     "detail": str(e), "code": "invalid_request"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            meal_count = min(3, meal_count)
-            snack_count = min(1, snack_count)
+            except Exception:
+                # Anything else: no plan, no charge. Re-raised to the handlers below,
+                # which decide the status.
+                quota.release(request.user, "daily_meals")
+                raise
 
             # Build rich payload for mobile to display immediately
             try:
@@ -1107,15 +1164,14 @@ class GenerateDietPlanRuleBasedView(APIView):
                 # the id to fetch it with.
                 logger.exception("plan %s was created but its payload could not be built",
                                  diet_plan.id)
-                quota.record_on_commit(request.user, "daily_meals")
+                # The allowance was claimed at admission and the plan exists, so it
+                # stays spent.
                 return Response({
                     "status": "created_but_not_rendered",
                     "diet_plan_id": diet_plan.id,
                     "message": _("Your plan was created. Open it to see today's meals."),
                     "code": "payload_unavailable",
                 }, status=status.HTTP_201_CREATED)
-
-            quota.record_on_commit(request.user, "daily_meals")
 
             return Response({
                 "status": "ok",
@@ -1151,6 +1207,16 @@ class GenerateDietPlanRuleBasedView(APIView):
                 "code": "no_servable_meal",
                 "detail": str(e),
             }, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        except ConstraintViolationError as e:
+            # A double-tap on Generate is the common case here: the first request wins
+            # and the second finds a plan already covering those dates. Telling the
+            # client "Persistence error" for something they can see on screen is the
+            # wrong answer; say what happened and let the app show the plan they have.
+            logger.info("generation refused, plan already exists: %s", e)
+            return Response({
+                "error": _("You already have a plan covering those dates."),
+                "code": "plan_already_exists",
+            }, status=status.HTTP_409_CONFLICT)
         except PersistenceError as e:
             logger.error(f"Rule-based persistence error: {str(e)}")
             return Response({"error": _("Persistence error")}, status=status.HTTP_400_BAD_REQUEST)
@@ -1392,8 +1458,8 @@ class TrainerDietPlanView(APIView):
         except Exception as e:
             logger.error(f"Trainer diet plan creation error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
     def get(self, request):
@@ -1453,8 +1519,8 @@ class TrainerDietPlanView(APIView):
         except Exception as e:
             logger.error(f"Trainer diet plan retrieval error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class TrainerMealView(APIView):
@@ -1511,16 +1577,16 @@ class TrainerMealView(APIView):
                             target_date_str = meal_data.get('target_date')
                             food_items = meal_data.get('food_items', [])
                             if not all([diet_plan_id, meal_type, target_date_str, food_items]):
-                                return Response(
+                                raise _Refuse(Response(
                                     {"error": _("Missing required fields"), "index": index,
                                      "code": "missing_fields"},
-                                    status=status.HTTP_400_BAD_REQUEST)
+                                    status=status.HTTP_400_BAD_REQUEST))
                             target_date = parse_date(target_date_str)
                             if not target_date:
-                                return Response(
+                                raise _Refuse(Response(
                                     {"error": _("Invalid target_date format"), "index": index,
                                      "code": "bad_date"},
-                                    status=status.HTTP_400_BAD_REQUEST)
+                                    status=status.HTTP_400_BAD_REQUEST))
                             scheduled_time = None
                             if meal_data.get('scheduled_time'):
                                 scheduled_time = parse_time(meal_data.get('scheduled_time'))
@@ -1614,8 +1680,8 @@ class TrainerMealView(APIView):
         except Exception as e:
             logger.error(f"Trainer meal creation error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
     def put(self, request, meal_id=None):
@@ -1680,8 +1746,8 @@ class TrainerMealView(APIView):
         except Exception as e:
             logger.error(f"Trainer meal update error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
     def delete(self, request, meal_id=None):
@@ -1728,8 +1794,8 @@ class TrainerMealView(APIView):
         except Exception as e:
             logger.error(f"Trainer meal deletion error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 # ============================================================================
@@ -1883,8 +1949,8 @@ class DietPlanNutritionView(APIView):
         except Exception as e:
             logger.error(f"Diet plan nutrition error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
 class MealComponentsView(APIView):
@@ -1955,7 +2021,7 @@ class MealComponentsView(APIView):
                     'id': component.id,
                     'food': {
                         'id': food.id,
-                        'name': food.name,
+                        **food_names(food),
                         'calories': food.calories,
                         'protein': food.protein,
                         'carbs': food.carbs,
@@ -2059,8 +2125,8 @@ class MealComponentsView(APIView):
         except Exception as e:
             logger.error(f"Meal components error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class EnhancedClientProgressView(APIView):
@@ -2108,8 +2174,8 @@ class EnhancedClientProgressView(APIView):
         except Exception as e:
             logger.error(f"Enhanced client progress error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class MealCompletionView(APIView):
@@ -2128,14 +2194,15 @@ class MealCompletionView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
             
-            meal = get_object_or_404(Meal, id=meal_id)
-            
-            # Validate client owns this meal
-            if meal.diet_plan.user != request.user:
-                return Response(
-                    {"error": _("You can only complete your own meals")},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+            # Scoped on the QUERYSET, so another client's meal is a 404 like every
+            # other id this client does not own. Fetching it unscoped and then
+            # answering 403 is an existence oracle: 403 means "this meal exists and is
+            # not yours", 404 means "no such meal", and walking the id space told a
+            # caller exactly how many meals the platform holds. `interact/` already
+            # scopes; these two did not, so three endpoints over the same object gave
+            # two different answers.
+            meal = get_object_or_404(
+                Meal.objects.filter(diet_plan__user=request.user), id=meal_id)
             
             action = request.data.get('action', 'complete_meal')
             
@@ -2198,8 +2265,8 @@ class MealCompletionView(APIView):
         except Exception as e:
             logger.error(f"Meal completion error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 # ============================================================================
@@ -2248,8 +2315,8 @@ class ClientProgressView(APIView):
         except Exception as e:
             logger.error(f"Client progress error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class ClientWeeklyProgressView(APIView):
@@ -2297,8 +2364,8 @@ class ClientWeeklyProgressView(APIView):
         except Exception as e:
             logger.error(f"Client weekly progress error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class ClientMealInteractionView(APIView):
@@ -2335,17 +2402,32 @@ class ClientMealInteractionView(APIView):
                 # the entire catalogue on every tap, including the "just show me the
                 # offers" call and the ones that end in a 404 or a 409.
                 from diet.planner.candidates import classify_food
+                from diet.planner.constraints import ClientConstraints
                 slot = classify_food(component.food)
+                # `classify_food` reads `food.category`, so without select_related this
+                # was one query per catalogue row on every tap.
+                # And the offers are filtered by the same rule the planner uses: a
+                # client who declared an allergy was previously offered, by name and
+                # id, a food the generator would never have put on the plate.
+                limits = ClientConstraints.for_user(request.user)
                 candidates = [f for f in FoodItem.objects.filter(needs_review=False)
-                              if classify_food(f) == slot]
+                                                         .select_related('category')
+                              if classify_food(f) == slot and not limits.forbids(f)]
                 index = SimilarityIndex(candidates)
                 if not chosen_id:
                     offered = index.neighbours(component.food_id, k=6)
-                    return Response({"component_id": component.id, "food": component.food.name,
-                                     "offers": [{"food_id": f.id, "name": f.name,
-                                                 "name_ar": getattr(f, "name_ar", None),
+                    return Response({"component_id": component.id,
+                                     "food": name_en_of(component.food),
+                                     "offers": [{"food_id": f.id, **food_names(f),
                                                  "similarity": round(sim, 2)} for f, sim in offered]})
-                chosen = get_object_or_404(FoodItem, id=chosen_id, needs_review=False)
+                chosen = get_object_or_404(
+                    FoodItem.objects.select_related('category'),
+                    id=chosen_id, needs_review=False)
+                if limits.forbids(chosen):
+                    return Response(
+                        {"error": limits.reason(chosen) or _("That food is not available to you"),
+                         "code": "food_not_allowed"},
+                        status=status.HTTP_400_BAD_REQUEST)
                 k_old = float(component.food.calories or 0); k_new = float(chosen.calories or 0)
                 grams = float(component.quantity) * (k_old / k_new) if k_old > 0 and k_new > 0 else float(component.quantity)
                 grams = nearest_portion(chosen, grams).grams
@@ -2376,6 +2458,9 @@ class ClientMealInteractionView(APIView):
                                             rejected_food=rejected, chosen_food=chosen,
                                             similarity=round(index.similarity(rejected.id, chosen.id), 4))
                     MealEvent.objects.create(user=request.user, meal=component.meal, kind=MealEvent.SWAPPED)
+                # The plan's stored allergen verdict describes the plate. The plate
+                # just changed.
+                TrainerDietPlanService._recompute_allergens(component.meal.diet_plan)
                 component.refresh_from_db()
                 return Response({"message": _("Swapped"), "component": component_payload(component)})
 
@@ -2467,8 +2552,8 @@ class ClientMealInteractionView(APIView):
         except Exception as e:
             logger.error(f"Client meal interaction error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class ClientMealDetailsView(APIView):
@@ -2487,17 +2572,13 @@ class ClientMealDetailsView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
             
+            # Scoped on the queryset — see MealCompletionView for why this is a 404.
             meal = get_object_or_404(
-                Meal.objects.select_related('diet_plan__user').prefetch_related('components__food'),
+                Meal.objects.filter(diet_plan__user=request.user)
+                .select_related('diet_plan__user').prefetch_related('components__food'),
                 id=meal_id)
             client_service = ClientProgressService(request.user)
-            try:
-                meal_details = client_service.get_meal_details(meal)
-            except DjangoValidationError:
-                # Another client's meal. This was the broad handler's 400 "Request
-                # could not be completed", which is the wrong status and no reason.
-                return Response({"error": _("You can only view your own meals")},
-                                status=status.HTTP_403_FORBIDDEN)
+            meal_details = client_service.get_meal_details(meal)
             return Response(meal_details)
             
         except BadInput as e:
@@ -2510,8 +2591,8 @@ class ClientMealDetailsView(APIView):
         except Exception as e:
             logger.error(f"Client meal details error: {str(e)}")
             return Response(
-                {"error": _('Request could not be completed.')},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 # ============================================================================
@@ -2577,7 +2658,9 @@ class MyDietPlansView(APIView):
             raise
         except Exception as e:
             logger.error(f"MyDietPlansView error: {str(e)}")
-            return Response({'error': _("An error occurred while loading your plans.")}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': _("An error occurred while loading your plans."),
+                             'code': 'server_error'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
@@ -2684,4 +2767,6 @@ class DietPlanMealsWithIngredientsView(APIView):
             raise
         except Exception as e:
             logger.error(f"DietPlanMealsWithIngredientsView error: {str(e)}")
-            return Response({'error': _("An error occurred while loading meal details.")}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': _("An error occurred while loading meal details."),
+                             'code': 'server_error'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)

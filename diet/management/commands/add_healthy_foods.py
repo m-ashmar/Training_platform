@@ -12,26 +12,26 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         # First, ensure we have the necessary categories
         categories = {
-            'Proteins': FoodCategory.objects.get_or_create(
-                name='Proteins', defaults={'is_protein': True, 'is_carb': False, 'is_fat': False}
+            'Proteins': FoodCategory.by_canonical_name(
+                'Proteins', is_protein=True, is_carb=False, is_fat=False
             )[0],
-            'Carbs': FoodCategory.objects.get_or_create(
-                name='Carbs', defaults={'is_protein': False, 'is_carb': True, 'is_fat': False}
+            'Carbs': FoodCategory.by_canonical_name(
+                'Carbs', is_protein=False, is_carb=True, is_fat=False
             )[0],
-            'Fats': FoodCategory.objects.get_or_create(
-                name='Fats', defaults={'is_protein': False, 'is_carb': False, 'is_fat': True}
+            'Fats': FoodCategory.by_canonical_name(
+                'Fats', is_protein=False, is_carb=False, is_fat=True
             )[0],
-            'Vegetables': FoodCategory.objects.get_or_create(
-                name='Vegetables', defaults={'is_protein': False, 'is_carb': True, 'is_fat': False}
+            'Vegetables': FoodCategory.by_canonical_name(
+                'Vegetables', is_protein=False, is_carb=True, is_fat=False
             )[0],
-            'Fruits': FoodCategory.objects.get_or_create(
-                name='Fruits', defaults={'is_protein': False, 'is_carb': True, 'is_fat': False}
+            'Fruits': FoodCategory.by_canonical_name(
+                'Fruits', is_protein=False, is_carb=True, is_fat=False
             )[0],
-            'Dairy': FoodCategory.objects.get_or_create(
-                name='Dairy', defaults={'is_protein': True, 'is_carb': False, 'is_fat': False}
+            'Dairy': FoodCategory.by_canonical_name(
+                'Dairy', is_protein=True, is_carb=False, is_fat=False
             )[0],
-            'Legumes': FoodCategory.objects.get_or_create(
-                name='Legumes', defaults={'is_protein': True, 'is_carb': True, 'is_fat': False}
+            'Legumes': FoodCategory.by_canonical_name(
+                'Legumes', is_protein=True, is_carb=True, is_fat=False
             )[0],
         }
 

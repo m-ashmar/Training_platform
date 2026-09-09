@@ -20,14 +20,27 @@ class Migration(migrations.Migration):
         Adding a unique index to a column that already holds duplicates aborts the
         migration mid-deploy. Four call sites `get_or_create` on this name, so
         duplicates are exactly what a production database is likely to hold.
+
+        All THREE columns, not just `name`. The operations below make `name`, `name_en`
+        and `name_ar` unique, so a row that merely shares its English name with another —
+        which is the ordinary outcome of the very `get_or_create(name=...)` bug this
+        migration exists to close, since that wrote the active language's column — would
+        survive a collapse keyed on `name` alone and then abort the `AlterField` two
+        statements later. NULLs are exempt: Postgres allows any number of them.
         """
         FoodCategory = apps.get_model("diet", "FoodCategory")
         FoodItem = apps.get_model("diet", "FoodItem")
         seen = {}
         for category in FoodCategory.objects.order_by("id"):
-            keeper = seen.get(category.name)
+            keys = [(column, value) for column, value in (
+                ("name", category.name),
+                ("name_en", getattr(category, "name_en", None)),
+                ("name_ar", getattr(category, "name_ar", None)),
+            ) if value]
+            keeper = next((seen[k] for k in keys if k in seen), None)
             if keeper is None:
-                seen[category.name] = category.id
+                for k in keys:
+                    seen[k] = category.id
                 continue
             FoodItem.objects.filter(category_id=category.id).update(category_id=keeper)
             category.delete()

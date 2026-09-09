@@ -54,7 +54,8 @@ def _composed_name(meal, lang: str) -> str:
     names = []
     for c in list(meal.components.all())[:4]:
         f = c.food
-        names.append((getattr(f, "name_ar", None) or f.name) if lang == "ar" else plain_name(f))
+        names.append((getattr(f, "name_ar", None) or getattr(f, "name_en", None) or f.name)
+                     if lang == "ar" else plain_name(f))
     if not names:
         return ""
     if len(names) == 1:
@@ -64,17 +65,41 @@ def _composed_name(meal, lang: str) -> str:
     return ", ".join(names[:-1]) + " and " + names[-1]
 
 
+def name_en_of(food) -> str:
+    """The English name, whatever language the request activated.
+
+    `FoodItem.name` is a modeltranslation virtual field: it returns `name_ar` under an
+    Arabic request and `name_en` under an English one. Every wire payload that spelled it
+    `food.name` therefore emitted one language twice and dropped the other, and every
+    comparison against an English string silently stopped matching. There is one English
+    column; read it.
+    """
+    return getattr(food, "name_en", None) or getattr(food, "name", "") or ""
+
+
+def food_names(food) -> dict:
+    """`{"name": ..., "name_ar": ...}` — both languages, always, in that shape."""
+    en = name_en_of(food)
+    return {"name": en, "name_ar": getattr(food, "name_ar", None) or en}
+
+
 def component_payload(component, lang: Optional[str] = None) -> dict:
     lang = lang or current_lang()
     food = component.food
     grams = float(component.quantity or 0)
-    name_ar = getattr(food, "name_ar", None) or food.name
+    # The ENGLISH column, explicitly. `food.name` is a modeltranslation virtual field
+    # that returns whichever column the ACTIVE language selects, so under an Arabic
+    # request `name`, `name_ar` and `display_name` were all the same Arabic string and
+    # the English name was absent from the response entirely — while the contract
+    # promises both languages on every row so the app can switch without a refetch.
+    name_en = name_en_of(food)
+    name_ar = getattr(food, "name_ar", None) or name_en
     return {
         "id": component.id,
         "food_id": food.id,
-        "name": food.name,
+        "name": name_en,
         "name_ar": name_ar,
-        "display_name": name_ar if lang == "ar" else food.name,
+        "display_name": name_ar if lang == "ar" else name_en,
         "quantity_grams": grams,
         # What a person would say they are eating, beside the grams. Derived on read so
         # it cannot drift from the quantity it describes.

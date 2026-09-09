@@ -15,7 +15,7 @@ from django.core.exceptions import ValidationError
 from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
-from diet.services.meal_payload import component_payload, meal_payload
+from diet.services.meal_payload import component_payload, meal_payload, name_en_of
 from .validators import DietInputValidator
 from .models import (
     DietPlan, DietPlanTemplate, Meal, MealComponent, 
@@ -114,6 +114,13 @@ class TrainerDietPlanService:
         # had one — which is every client the engine has ever served. Retiring the
         # overlap is what the trainer means by "here is your new plan".
         with transaction.atomic():
+            # Serialise on the client's row, exactly as `save_plan` does. Superseding
+            # and then inserting is two statements, and without the lock two trainers
+            # (or a trainer and the client's own generate) could each supersede what
+            # they saw and each insert, leaving the client with two active plans over
+            # one window — the thing this block exists to prevent.
+            type(client).objects.select_for_update().filter(pk=client.pk).first()
+
             # Every overlapping active plan, whoever wrote it: a client follows one
             # plan, and the model refuses two over one window. That includes the
             # generated plan the client already had, which is the common case and the
@@ -136,7 +143,7 @@ class TrainerDietPlanService:
                 start_date=start_date,
                 end_date=end_date,
                 duration_weeks=duration_weeks,
-                generation_strategy='TRAINER',
+                generation_strategy=DietPlan.TRAINER,
                 template=template,
                 created_by=self.trainer
             )
@@ -197,7 +204,7 @@ class TrainerDietPlanService:
                 % {"slot": meal_type, "date": target_date},
                 code="duplicate_meal")
 
-        components = self._validated_items(food_items, meal_type)
+        components = self._validated_items(food_items, meal_type, client=diet_plan.user)
         name, name_ar, reason, reason_ar = self._meal_names(meal_type, components)
 
         # Atomic. A second line failing left the Meal row and the first component
@@ -219,6 +226,7 @@ class TrainerDietPlanService:
                 MealComponent(meal=meal, food=food, quantity=grams, meal_time=meal_type)
                 for food, grams in components
             ])
+        self._recompute_allergens(diet_plan)
         return meal
     
     def update_meal(
@@ -242,7 +250,8 @@ class TrainerDietPlanService:
         """
         self._authorize_plan(meal.diet_plan)
 
-        components = (self._validated_items(food_items, meal.meal_type)
+        components = (self._validated_items(food_items, meal.meal_type,
+                                            client=meal.diet_plan.user)
                       if food_items is not None else None)
 
         # Atomic, because the old components are deleted before the new ones exist:
@@ -273,6 +282,7 @@ class TrainerDietPlanService:
             meal.save()
             if components is not None:
                 self._recompute_day(meal)
+        self._recompute_allergens(meal.diet_plan)
         return meal
 
     @staticmethod
@@ -307,8 +317,10 @@ class TrainerDietPlanService:
         # meals for that date, and deleting one left the client's day showing 3 of 4
         # forever. `update_meal` and `add_meal_to_plan` both recompute; this did not.
         stale = SimpleNamespace(diet_plan=meal.diet_plan, date=meal.date, pk=meal.pk)
+        plan = meal.diet_plan
         meal.delete()
         self._recompute_day(stale)
+        self._recompute_allergens(plan)
         return True
     
     def get_client_diet_plans(self, client: CustomUser) -> List[DietPlan]:
@@ -329,8 +341,14 @@ class TrainerDietPlanService:
         # history paid two queries per plan to render one list.
         from django.db.models import Count
 
-        return (DietPlan.objects
-                .filter(user=client, created_by=self.trainer)
+        # Support sees the client's whole history, not just the plans it authored.
+        # `_authorize_plan` already exempts `is_support` from the authorship test and the
+        # view already admits admins, so an admin could WRITE to a plan this list would
+        # not show them: `?client_id=N` came back `{"count": 0, "results": []}`.
+        plans = DietPlan.objects.filter(user=client)
+        if not self.is_support:
+            plans = plans.filter(created_by=self.trainer)
+        return (plans
                 .select_related('template')
                 .annotate(meals_count=Count('meals'))
                 .order_by('-start_date')[:200])
@@ -372,7 +390,7 @@ class TrainerDietPlanService:
     #: used 1-1000, so the same gram figure was accepted here and refused there, and
     #: 0.0001 g passed as a component that renders as "0 g".
 
-    def _validated_items(self, food_items, meal_type: str):
+    def _validated_items(self, food_items, meal_type: str, client=None):
         """Turn the request's food list into rows we are willing to persist.
 
         Nothing here was checked: a missing food id raised `DoesNotExist` into a
@@ -419,7 +437,58 @@ class TrainerDietPlanService:
         if missing:
             raise ValidationError(_("No such food: %(ids)s") % {"ids": missing},
                                   code="unknown_food")
-        return [(found[fid], grams) for fid, grams in rows]
+        items = [(found[fid], grams) for fid, grams in rows]
+        self._refuse_declared_allergens(items, client)
+        return items
+
+    @staticmethod
+    def _refuse_declared_allergens(items, client) -> None:
+        """A trainer may not put a client's declared allergen on their plate.
+
+        The generator has checked this since the allergen work landed; the trainer's own
+        write never did. A client who declared peanuts got a 200 on a peanut-butter meal
+        and `allergen_report` on their plan still said `is_safe: true`, because that field
+        is written once at generation and by nothing else.
+        """
+        if client is None:
+            return
+        from diet.allergens import label
+        from diet.services.meal_validator import AllergenChecker, VIOLATION
+
+        pref = getattr(client, "userfoodpreference", None)
+        checker = AllergenChecker(getattr(pref, "allergies", None) if pref else None)
+        if not checker.active:
+            return
+        refused = [(food, v) for food, _g in items
+                   if (v := checker.check_food(food)).verdict == VIOLATION]
+        if refused:
+            raise ValidationError(
+                _("%(food)s contains %(allergens)s, which this client has declared")
+                % {"food": refused[0][0].name,
+                   "allergens": ", ".join(label(t) for t in refused[0][1].matched)},
+                code="declared_allergen")
+
+    @staticmethod
+    def _recompute_allergens(plan) -> None:
+        """Re-derive `DietPlan.allergen_report` from the meals as they now stand.
+
+        It was written exactly once, by the generator, and never again — so every
+        trainer edit and every client swap left the client and their app reading a
+        verdict about a plate that no longer existed.
+        """
+        from diet.services.meal_validator import AllergenChecker, AllergenReport
+        from .models import MealComponent
+
+        try:
+            pref = getattr(plan.user, "userfoodpreference", None)
+            checker = AllergenChecker(getattr(pref, "allergies", None) if pref else None)
+            foods = {c.food for c in MealComponent.objects
+                     .filter(meal__diet_plan=plan).select_related("food")}
+            report = AllergenReport([checker.check_food(f) for f in foods])
+            plan.allergen_report = report.as_dict()
+            plan.save(update_fields=["allergen_report"])
+        except Exception:
+            logger.exception("Could not recompute the allergen report for plan %s", plan.pk)
 
     @staticmethod
     def _meal_names(meal_type: str, components):
@@ -620,7 +689,8 @@ class ClientProgressService:
         for component in meal.components.all():
             entry = component_payload(component)
             entry.update({
-                'food_name': component.food.name,
+                'food_name': name_en_of(component.food),
+                'food_name_ar': getattr(component.food, 'name_ar', None) or name_en_of(component.food),
                 'food_image': component.food.image_url,
                 'quantity': component.quantity,
             })
@@ -728,7 +798,8 @@ class ClientProgressService:
                 
                 entry = component_payload(component)
                 entry.update({
-                    'food_name': food.name,
+                    'food_name': name_en_of(food),
+                    'food_name_ar': getattr(food, 'name_ar', None) or name_en_of(food),
                     'quantity': component.quantity,
                     'nutrition': {
                         'calories': comp_cals,

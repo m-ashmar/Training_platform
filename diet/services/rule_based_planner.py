@@ -66,27 +66,40 @@ class DayContext:
     served_today: Set[int] = field(default_factory=set)
 
 
-class _PoolView:
-    """Reads `allowed_map` with the same call shape as a CandidatePool."""
-
-    def __init__(self, allowed_map):
-        self._map = allowed_map or {}
-
-    def get(self, meal: str, macro: str):
-        return self._map.get(meal, {}).get(macro, [])
-
-
-
 class NoServableMealError(RuntimeError):
     """The pool cannot supply a dish or a meal shape for this slot."""
 
 
 def feasible_kcal_ceiling(meal_count: int, snack_count: int, goal: str = "maintain") -> float:
-    """The most a day of this shape can carry in servable portions."""
+    """The most a day of this shape can carry in servable portions.
+
+    Bounded by the BIGGEST meal, not by the total. The split is not even — `maintain`
+    gives lunch 40% — so summing the per-meal ceilings said a 3-meal day could carry
+    3 x 1250 + 400 = 4150 kcal, while at 3,400 kcal that day's lunch is already 1,280,
+    above the 1,250 ceiling the same policy declares. Between about 3,320 and 4,150 the
+    gate passed a day the engine then had to build short, and the plan was stored with
+    the requested figure on it. That is precisely the failure this function exists to
+    refuse.
+    """
     from diet.planner.policy import load_policy
     policy = load_policy(goal)
-    return (max(0, int(meal_count)) * policy.max_kcal_per_meal
-            + max(0, int(snack_count)) * policy.max_kcal_per_snack)
+    meals = max(0, int(meal_count))
+    snacks = max(0, int(snack_count))
+    total = meals * policy.max_kcal_per_meal + snacks * policy.max_kcal_per_snack
+    if not meals:
+        return total
+
+    # What the split actually asks of the largest main meal, as a share of the energy
+    # left after snacks — the same arithmetic `compute_targets` uses.
+    names = ["Breakfast", "Lunch", "Dinner", "Meal 4", "Meal 5", "Meal 6"][:meals]
+    default = 1.0 / meals
+    weights = [policy.meal_kcal_split.get(name, default) for name in names]
+    total_weight = sum(weights) or 1.0
+    share = max(weights) / total_weight
+    snack_kcal = snacks * policy.snack_kcal
+    # (daily - snack_kcal) * share <= max_kcal_per_meal
+    by_largest_meal = policy.max_kcal_per_meal / share + snack_kcal if share else total
+    return min(total, by_largest_meal)
 
 
 SLOT_AR = {"Breakfast": "الفطور", "Lunch": "الغداء", "Dinner": "العشاء", "Snack": "الوجبة الخفيفة"}
@@ -122,6 +135,16 @@ def _reasons(meal_name: str, chosen_foods, cuisine: str = "", built: bool = Fals
 WEEK_WINDOW_DAYS = 7
 #: The most times one dish is served in that window while anything else fits.
 WEEK_MAX_SERVINGS = 2
+
+
+def _last(count: int, sequence):
+    """The final `count` items — and NOTHING when `count` is zero.
+
+    `sequence[-0:]` is `sequence[0:]`, which is everything. Every window slice in this
+    module used that form, so the one value that means "do not exclude anything" asked
+    for the widest exclusion there is.
+    """
+    return sequence[-count:] if count > 0 else []
 
 
 class RuleBasedPlanner:
@@ -211,7 +234,11 @@ class RuleBasedPlanner:
             # served the same dish forever while the food-level window reshuffled it.
             for _m, ids in self._get_recent_recipe_history(no_repeat_days, current_date).items():
                 recent_recipes[_m].update(ids)
-            for window in recipe_windows[-int(no_repeat_days):]:
+            # `_last(n, seq)`: `seq[-0:]` is `seq[0:]`, the WHOLE list, so a caller
+            # passing no_repeat_days=0 to mean "repeats are fine" got the maximum
+            # exclusion instead of none. `generate()` takes the parameter publicly and
+            # `generate_and_save` forwards it.
+            for window in _last(int(no_repeat_days), recipe_windows):
                 for _m in recent_recipes:
                     recent_recipes[_m].update(window.get(_m, set()))
             self._recipes_today = {m: set() for m in recent_recipes}
@@ -225,7 +252,7 @@ class RuleBasedPlanner:
             try:
                 rebuilt: Dict[str, Set[int]] = {m: set() for m in ("Breakfast", "Lunch", "Dinner", "Snack")}
                 # Union of previous day windows
-                for w in day_windows[-int(no_repeat_days):]:
+                for w in _last(int(no_repeat_days), day_windows):
                     for _m in rebuilt:
                         rebuilt[_m].update(w.get(_m, set()))
                 used_in_window = rebuilt
@@ -374,11 +401,17 @@ class RuleBasedPlanner:
         delivered = sum(float((m.total_nutrition or {}).get("calories", 0) or 0)
                         for m in output.plan) / max(1, days)
         shortfall = (delivered / requested - 1.0) if requested > 0 else 0.0
+        # The POLICY's calorie tolerance, not a second copy of the number. A deployment
+        # that widens or narrows the band through `DIET_PLANNER_POLICY` moved what the
+        # engine builds to and not what it reports about itself.
+        from diet.planner.policy import load_policy
+
+        band = float(load_policy(self._resolve_goal()).tolerance.get("calories", 0.10))
         report = {
             "requested_kcal_per_day": round(requested, 1),
             "delivered_kcal_per_day": round(delivered, 1),
             "deviation": round(shortfall, 4),
-            "met": abs(shortfall) <= 0.10,
+            "met": abs(shortfall) <= band,
         }
         if not report["met"]:
             report["reason"] = (
@@ -507,6 +540,10 @@ class RuleBasedPlanner:
                 # Fits and under the weekly cap; then preference among those; then
                 # fits at all — so a fitting dish at the cap still beats a plate that
                 # misses the target; then fewer servings; then closer.
+                # c[3] is a COUNT on both paths now — servings of this dish this week
+                # for a recipe, recently-served ingredients for a built plate. Both mean
+                # "how much of this has the client just had", both are gated by the same
+                # cap, and both break ties in the same direction.
                 fresh = bool(c[1]) and int(c[3]) < WEEK_MAX_SERVINGS
                 return (fresh, c[2] if fresh else 0.0, bool(c[1]), -int(c[3]), -c[4])
             meal, _within, _pref, _recent, _dev, commit = max(candidates, key=rank)
@@ -551,7 +588,11 @@ class RuleBasedPlanner:
 
             portions, score, template = plan_from_template(
                 meal_name,
-                getattr(self, "_pool", None) or _PoolView(ctx.allowed_map),
+                # `_build_allowed_foods_map()` sets `_pool` before the first meal is
+                # planned, so the `_PoolView(ctx.allowed_map)` fallback that used to sit
+                # here could never run — and if it ever had, it would have handed the
+                # template path a view with no scores behind the order.
+                self._pool,
                 targets,
                 templates=self._templates(),
                 edges=self._pairings(),
@@ -574,7 +615,13 @@ class RuleBasedPlanner:
             preference = meal_pool_score([(p.food, p.grams) for p in portions],
                                          pool_obj, meal_name, self._pairings())
             recent_ids = set(day_ctx.recent_exclusions_ids.get(meal_name, ()))
-            is_recent = any(p.food.id in recent_ids for p in portions)
+            # A COUNT, like the recipe path's, not a bool. Slot 3 of the rank tuple is
+            # compared against WEEK_MAX_SERVINGS and then used as a tiebreak, and a bool
+            # is always < 2, so the weekly cap could never gate a template and the
+            # tiebreak compared a dish's servings-this-week against a plate's
+            # "some ingredient was recent" flag on the same axis. One meaning per slot:
+            # how many of this candidate's parts the client has had recently.
+            is_recent = sum(1 for p in portions if p.food.id in recent_ids)
             chosen_here = []
             if pool_obj is not None:
                 from diet.planner.candidates import W_MEAL_PREF
@@ -829,14 +876,6 @@ class RuleBasedPlanner:
                 raise
             return None
 
-    def _macro_ratios_for_goal_value(self, goal: str) -> Dict[str, float]:
-        g = (goal or '').lower()
-        if 'lose' in g:
-            return {"protein": 0.35, "carb": 0.40, "fat": 0.25}
-        if 'gain' in g:
-            return {"protein": 0.25, "carb": 0.55, "fat": 0.20}
-        return {"protein": 0.30, "carb": 0.50, "fat": 0.20}
-
     def _build_allowed_foods_map(self) -> Dict[str, Dict[str, List[FoodItem]]]:
         """Candidate foods per (meal, macro), ranked.
 
@@ -853,7 +892,8 @@ class RuleBasedPlanner:
         from diet.planner.policy import load_policy
 
         policy = load_policy(self._resolve_goal())
-        pool = build_pool(self.user, policy, constraints=self._constraints())
+        pool = build_pool(self.user, policy, constraints=self._constraints(),
+                          recipes=self._recipes())
         # Kept whole as well as flattened: `by_slot` is a list per slot and the
         # template path needs the scores behind that order, not just the order.
         self._pool = pool

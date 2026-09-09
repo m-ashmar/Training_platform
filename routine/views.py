@@ -59,7 +59,10 @@ MAX_BACKLOG_DAYS = 365
 
 
 class StandardResultsSetPagination(PageNumberPagination):
-    page_size = 20
+    # 25, matching `REST_FRAMEWORK['PAGE_SIZE']` and what API_CONTRACT.md publishes.
+    # This said 20, so the contract's documented page size was wrong for every list it
+    # paginates and a client sizing its own buffers from the docs got it wrong too.
+    page_size = 25
     page_size_query_param = 'page_size'
     max_page_size = 100
 

@@ -46,12 +46,12 @@ def _period(subscription, granularity, now):
     `get_or_create` race-safe.
     """
     if granularity == "day":
-        # The user's calendar day, not UTC's. `timezone.now()` is UTC and TIME_ZONE is
-        # Asia/Damascus, so a "daily" allowance rolled over at 03:00 local — a client
-        # generating a plan at 01:00 was still spending yesterday's.
-        local_midnight = timezone.localtime(now).replace(
-            hour=0, minute=0, second=0, microsecond=0)
-        start = local_midnight
+        from training_platform.user_time import day_start_for
+
+        # The CLIENT's midnight, not the server's. `timezone.localtime` resolves against
+        # TIME_ZONE (Asia/Damascus) for everyone, so a client in Berlin or the Gulf had
+        # their daily allowance reset at a random hour of their own afternoon or night.
+        start = day_start_for(getattr(subscription, "user", None), now)
         return start, start + timezone.timedelta(days=1)
     # "subscription": the current paid period, so a limit like max_routines resets
     # when the customer renews rather than on an arbitrary rolling date.
@@ -148,3 +148,69 @@ def consume(user, feature_name, amount: int = 1) -> bool:
 def record_on_commit(user, feature_name, amount: int = 1) -> None:
     """Spend quota once the surrounding work is committed, and not if it rolls back."""
     transaction.on_commit(lambda: consume(user, feature_name, amount))
+
+
+def reserve(user, feature_name, amount: int = 1) -> bool:
+    """Claim `amount` of the allowance now, atomically. Returns whether it was claimed.
+
+    `has_headroom` then work then `consume` is check-then-act across two transactions,
+    and the gap is the whole request. Twenty parallel taps on Generate by a client whose
+    plan allows one meal a day all read `usage_count = 0`, all passed, and all enqueued a
+    thirty-day build — about 120 optimiser runs each — because nothing was written until
+    the last of them finished. The plan model supersedes rather than refuses, so not one
+    of them even errored.
+
+    Locking the row and incrementing inside the same transaction makes the check and the
+    spend one act, so the second caller reads the first caller's increment. Work that
+    then fails calls `release`.
+    """
+    from django.db import transaction as _txn
+    from subscription.models import SubscriptionUsage
+
+    try:
+        with _txn.atomic():
+            usage, limit = _row_for(user, feature_name)
+            locked = (SubscriptionUsage.objects.select_for_update()
+                      .filter(pk=usage.pk).first())
+            if locked is None:
+                return False
+            if limit and locked.usage_count + amount > limit:
+                return False
+            locked.usage_count = locked.usage_count + amount
+            locked.save(update_fields=["usage_count"])
+            return True
+    except QuotaUnavailable as exc:
+        logger.info("quota reservation denied for user %s on %s: %s",
+                    getattr(user, "id", None), feature_name, exc)
+        return False
+    except Exception:
+        logger.exception("quota reservation failed for user %s on %s",
+                         getattr(user, "id", None), feature_name)
+        return False
+
+
+def release(user, feature_name, amount: int = 1) -> None:
+    """Give back an allowance claimed by `reserve` for work that did not happen.
+
+    Never drops below zero: a release without a matching reserve must not hand the
+    client a free extra.
+    """
+    from django.db.models import Case, F, Value, When
+    from subscription.models import SubscriptionUsage
+
+    try:
+        usage, _limit = _row_for(user, feature_name)
+    except Exception:
+        logger.exception("could not release %s for user %s",
+                         feature_name, getattr(user, "id", None))
+        return
+    SubscriptionUsage.objects.filter(pk=usage.pk).update(
+        usage_count=Case(
+            When(usage_count__gte=amount, then=F("usage_count") - amount),
+            default=Value(0),
+        )
+    )
+
+
+def release_on_commit(user, feature_name, amount: int = 1) -> None:
+    transaction.on_commit(lambda: release(user, feature_name, amount))

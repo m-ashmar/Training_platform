@@ -9,6 +9,7 @@ every pull request. The 53 standalone probes in tests/security/ remain the deep 
 """
 import collections
 import json
+import pathlib
 from datetime import date
 import random
 import re
@@ -889,7 +890,7 @@ def test_every_registered_event_type_is_actually_emitted():
     from notifications.channels.fcm import EVENT_CLASS_REGISTRY
 
     blob = ""
-    for f in pathlib.Path(".").rglob("*.py"):
+    for f in _repo_python_files():
         s = str(f)
         if any(x in s for x in ("_excluded", ".venv", "migrations", "tests/", "test_")):
             continue
@@ -1018,7 +1019,7 @@ def test_no_unguarded_db_write_recovers_inside_a_loop():
     WRITES = (".create(", ".save(", ".get_or_create(", ".update_or_create(", ".bulk_create(")
 
     offenders = []
-    for f in pathlib.Path(".").rglob("*.py"):
+    for f in _repo_python_files():
         s = str(f)
         if any(x in s for x in ("_excluded", ".venv", "migrations", "tests/", "test_")):
             continue
@@ -1292,7 +1293,7 @@ def test_no_view_hand_writes_the_passthrough_tuple():
     import pathlib
 
     offenders = []
-    for path in pathlib.Path(".").glob("*/views.py"):
+    for path in [p for p in _repo_python_files() if p.name == "views.py"]:
         if "except (Http404, NotFound" in path.read_text():
             offenders.append(str(path))
     assert not offenders, f"hand-written exception tuples returned: {offenders}"
@@ -1852,10 +1853,12 @@ def test_no_template_tag_spans_a_line_break():
     from pathlib import Path
 
     offenders = []
-    for path in Path(".").rglob("*.html"):
-        if any(part in {".venv", "_excluded", "node_modules", "site-packages"}
-               for part in path.parts):
-            continue
+    templates = [q for q in REPO_ROOT.rglob("*.html")
+                 if not ({".venv", "_excluded", "node_modules", "site-packages"}
+                         & set(q.parts))]
+    # From the REPO, not the working directory, and it must actually find some.
+    assert len(templates) > 5, f"only {len(templates)} templates found under {REPO_ROOT}"
+    for path in templates:
         for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             opens = line.count("{%") + line.count("{{")
             closes = line.count("%}") + line.count("}}")
@@ -2004,9 +2007,15 @@ def test_the_library_is_barely_used(diet_quality):
     import json
     from pathlib import Path as _Path
 
-    recorded_slots = json.loads(
-        (_Path(__file__).parent / "diet_quality_baseline.json").read_text()
-    )["measured"].get("distinct_dishes_by_slot", {})
+    recorded = json.loads(
+        (_Path(__file__).parent / "diet_quality_baseline.json").read_text())["measured"]
+    recorded_slots = recorded.get("distinct_dishes_by_slot", {})
+    # Every slot the baseline records must still BE served. Iterating only the slots
+    # the measurement produced meant a slot that stopped being served entirely was
+    # simply not iterated, and satisfied the test by disappearing.
+    assert set(recorded_slots) <= set(diet_quality.distinct_dishes_by_slot), (
+        f"slots vanished from the plan: "
+        f"{sorted(set(recorded_slots) - set(diet_quality.distinct_dishes_by_slot))}")
 
     for slot, distinct in diet_quality.distinct_dishes_by_slot.items():
         # A slot with two dishes cannot serve either under 60% of the time without
@@ -2023,8 +2032,14 @@ def test_the_library_is_barely_used(diet_quality):
             continue
         served = diet_quality.meals_by_slot.get(slot, 0)
         repeats = diet_quality.max_repeats_by_slot.get(slot, 0)
-        assert repeats <= 0.6 * served, \
-            f"{slot} served one of its {distinct} dishes {repeats} times in {served}"
+        # Against the RECORDED figure plus one, not 0.6 x served. Snack's worst is 5 of
+        # about 42, so the proportional bound sat at 25 — the same dish could have been
+        # served five times as often and this still passed. A ratchet nothing can trip
+        # is a comment.
+        allowed = recorded["max_repeats_by_slot"].get(slot, 0) + 1
+        assert repeats <= allowed, (
+            f"{slot} served one of its {distinct} dishes {repeats} times in {served}; "
+            f"the baseline records {allowed - 1}")
 
 
 def test_no_portion_is_larger_than_the_food_allows(diet_quality):
@@ -2106,17 +2121,30 @@ def test_the_catalogue_can_answer_what_a_serving_is(seeded_catalogue, db):
         f"{share:.0%} of selectable foods declare no serving: {sorted(without)[:8]}")
 
 
-def test_a_portion_sticks_at_one_or_two_sizes(diet_quality):
+def test_a_portion_is_never_stuck_at_its_own_minimum(diet_quality):
     """A floor in a greedy filler is an attractor: the algorithm satisfies it minimally
     and stops, so the floor becomes the permanent answer.
 
-    Tightens in P4 to >= 4 once floors become min_units inside the search space."""
-    # >= 2, not >= 1. The metric is a minimum over foods served four or more times, so
-    # its smallest possible non-empty value IS 1 — the assertion could only fail if no
-    # food was served four times at all, and "a portion sticks at one size", the defect
-    # named in this docstring, passed it.
-    assert diet_quality.min_distinct_portions_per_food >= 2, (
-        "some food is always served at exactly one amount")
+    The metric this used to assert — `min_distinct_portions_per_food >= 2` — could not
+    tell that defect from its opposite. It is a minimum over every food served four or
+    more times, so ONE food pins it, and it says nothing about WHERE the food is pinned.
+    Three foods currently take a single amount every time: six figs, a large Arabic
+    coffee, half a lemon — and each of those is the TOP of that food's ladder, on days the
+    plan runs slightly under target. Maximising a line that costs four calories to close
+    an energy deficit is the optimiser working, not an attractor, and failing the gate for
+    it would have pushed someone to weaken the optimiser to satisfy a number.
+
+    So the assertion says what the docstring says: nothing is stuck at its minimum.
+    """
+    assert not diet_quality.floor_pinned_foods, (
+        "a food is served at the smallest amount it has, every single time: "
+        + "; ".join(diet_quality.floor_pinned_foods))
+    # And ceiling-pinning stays the exception. It is legitimate, but a plan where most
+    # lines are maxed out is a plan that cannot reach its target any other way.
+    served_often = max(1, diet_quality.portions_measured // 8)
+    assert len(diet_quality.ceiling_pinned_foods) <= served_often, (
+        f"{len(diet_quality.ceiling_pinned_foods)} foods are always served at their "
+        f"maximum: {diet_quality.ceiling_pinned_foods[:6]}")
 
 
 def test_calorie_drift_stays_bounded(diet_quality):
@@ -2173,11 +2201,19 @@ def test_the_recorded_baseline_still_describes_this_engine(diet_quality):
 
     from diet.models import FoodItem, Recipe
 
-    baseline = json.loads(Path("tests/diet_quality_baseline.json").read_text())
-    assert FoodItem.objects.filter(needs_review=False).count() >= \
-        baseline["catalogue"]["foods"], "catalogue shrank; re-record the baseline"
-    assert Recipe.objects.filter(is_active=True).count() >= \
-        baseline["catalogue"]["recipes"], "recipes were removed; re-record the baseline"
+    baseline = json.loads((Path(__file__).parent / "diet_quality_baseline.json").read_text())
+    # EQUAL, not "at least". `>=` caught a catalogue that shrank and waved through one
+    # that grew — and growing it raises dish rate, distinct dishes, chosen-ingredient
+    # share and preference satisfaction with no engine change at all, so content work
+    # would launder as engine improvement while this guard stayed green.
+    assert FoodItem.objects.filter(needs_review=False).count() == \
+        baseline["catalogue"]["foods"], (
+            "the catalogue is not the one the baseline was recorded against; "
+            "re-record it deliberately")
+    assert Recipe.objects.filter(is_active=True).count() == \
+        baseline["catalogue"]["recipes"], (
+            "the recipe library is not the one the baseline was recorded against; "
+            "re-record it deliberately")
 
 
 def test_the_two_seed_commands_agree_on_food_names(seeded_catalogue, db):
@@ -2408,6 +2444,16 @@ def test_the_optimiser_reaches_the_proven_optimum(seeded_catalogue):
 
     report = run(days=2)
     assert report.feasible, "benchmark produced no feasible meals"
+    # The denominator first. `optimal_share` is judged over feasible, non-skipped meals,
+    # and both exclusions are things a REGRESSION produces: a meal too large to enumerate
+    # is dropped, and a meal that misses tolerance everywhere is filed infeasible. An
+    # engine that put more foods on every plate, or missed tolerance more often, would
+    # remove its own hardest cases from the denominator and the share would RISE.
+    measured = len(report.feasible) + len(report.infeasible) + report.skipped_too_large
+    assert len(report.feasible) >= 0.8 * measured, (
+        f"only {len(report.feasible)} of {measured} meals were judged: "
+        f"{len(report.infeasible)} infeasible, {report.skipped_too_large} too large to "
+        f"enumerate — the share below is measured over what is left")
     assert report.optimal_share >= 0.95, (
         f"only {report.optimal_share:.0%} of feasible meals are at the proven optimum "
         f"({len(report.off_optimum)} of {len(report.feasible)} off it); "
@@ -3087,6 +3133,25 @@ def test_a_client_can_swap_a_food_and_learning_hears_it(seeded_catalogue):
 # Phase A — the recipe path is alive, and the gate can tell when it is not
 # ---------------------------------------------------------------------------
 
+#: The repository, found from THIS file. Three source scans used `pathlib.Path(".")`,
+#: which is the working directory: run pytest from anywhere but the repo root and the
+#: glob matched nothing, `offenders` was empty and the test passed green having read
+#: zero files.
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _repo_python_files():
+    """Every source file in the project, excluding what is not ours to police."""
+    skip = {"__pycache__", ".venv", "_excluded", "node_modules", ".git", "migrations"}
+    found = []
+    for path in REPO_ROOT.rglob("*.py"):
+        if skip & set(path.parts):
+            continue
+        found.append(path)
+    assert len(found) > 100, f"only {len(found)} source files found under {REPO_ROOT}"
+    return found
+
+
 def _chooser(name):
     """A client who filled in the meal-and-macro picker, as the harness does."""
     from diet.models import UserFoodCategoryPreference
@@ -3137,6 +3202,10 @@ def test_a_chooser_is_served_dishes_with_their_foods_in_them(seeded_catalogue):
     plan = _generate(user, user.calculate_daily_calories(), 7, "alive")
     assert plan is not None, "generation refused"
     meals = list(Meal.objects.filter(diet_plan=plan).prefetch_related("components"))
+    # A plan with no meals satisfies every ratio below — `0 >= 0.0` is True — so the
+    # population is asserted before anything is measured over it. `plan is not None`
+    # above does not promise the plan holds anything.
+    assert len(meals) >= 7 * 3, f"a seven-day plan produced {len(meals)} meals"
     dishes = [m for m in meals if m.recipe_id]
     assert len(dishes) >= 0.5 * len(meals), f"{len(dishes)} of {len(meals)} meals are dishes"
     with_choice = [m for m in dishes
@@ -3266,7 +3335,7 @@ def test_the_task_and_the_endpoint_generate_plans_of_the_same_shape(seeded_catal
     via_task = DietPlan.objects.get(pk=result["plan_id"])
     assert via_task.daily_calories == direct.daily_calories
     assert Meal.objects.filter(diet_plan=via_task).count() == Meal.objects.filter(diet_plan=direct).count() == 8
-    assert via_task.generation_strategy == direct.generation_strategy == "FALLBACK"
+    assert via_task.generation_strategy == direct.generation_strategy == "ENGINE"
 
     # A profile the meal structure cannot carry is refused with a reason, not retried.
     heavy = _make_client("task-heavy", ["Muscle Gain"], 250, 300, 20, "Male", "VeryActive")
@@ -3349,7 +3418,7 @@ def test_the_async_endpoint_can_run_the_deterministic_engine_for_a_month(seeded_
     plan = DietPlan.objects.get(pk=outcome["plan_id"])
     assert plan.user_id == user.id
     assert Meal.objects.filter(diet_plan=plan).count() == 40
-    assert plan.generation_strategy == "FALLBACK"
+    assert plan.generation_strategy == "ENGINE"
 
 
 # ---------------------------------------------------------------------------
@@ -3449,13 +3518,18 @@ def test_the_funnel_records_every_step_a_client_takes(seeded_catalogue):
     kinds = collections.Counter(MealEvent.objects.filter(user=user, meal_id=meal_id).values_list("kind", flat=True))
     assert kinds == {"viewed": 2, "accepted": 1, "rated": 1, "completed": 1}, kinds
 
-    # Another client's meal cannot be marked, and the details endpoint says why.
+    # Another client's meal does not exist as far as they are concerned. 404, not 403,
+    # on BOTH endpoints: 403 means "this meal exists and is not yours", which is an
+    # existence oracle over the whole meal table, and the two endpoints used to disagree
+    # about the same object.
     other, _ = _chooser("funnel-other")
     o = _api_client_for(other)
     r = o.post(url, {"action": "event", "meal_id": meal_id, "kind": "viewed"}, content_type="application/json")
     assert r.status_code == 404
     r = o.get(f"/api/diet/v1/client/meals/{meal_id}/")
-    assert r.status_code == 403
+    assert r.status_code == 404
+    r = o.post(f"/api/diet/v1/client/meals/{meal_id}/complete/", {}, content_type="application/json")
+    assert r.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -3831,7 +3905,10 @@ def test_the_daily_generation_quota_is_enforced(seeded_catalogue, django_capture
         r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
         assert r.status_code == 201, r.content
     r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1}, content_type="application/json")
-    assert r.status_code in (403, 429), (r.status_code, r.content[:200])
+    # The QUOTA's answer, by its code. `in (403, 429)` accepted the rate limiter too, so
+    # a completely broken quota passed whenever the limiter happened to fire first.
+    assert r.status_code == 429, (r.status_code, r.content[:200])
+    assert r.json().get("code") == "quota_exhausted", r.content[:200]
 
 
 def test_a_client_can_remove_a_food_they_chose(seeded_catalogue):
@@ -4847,22 +4924,54 @@ def test_every_engine_meal_says_when_it_is_eaten(seeded_catalogue, make_user):
     assert scheduled_time_for("Breakfast", 0) == time_cls(8, 0)
 
 
-def test_the_dashboards_do_not_count_in_python(seeded_catalogue):
+def test_the_dashboards_do_not_count_in_python(seeded_catalogue, make_user):
     """Two analytics paths walked every row they could see and tallied them in the
     worker: completion loaded roughly 200,000 RoutineProgress rows to return at most
     500 summaries, and streaks grouped by the routine's ordinal day instead of the
-    calendar date, so a client training daily scored a streak of one."""
-    import inspect
+    calendar date, so a client training daily scored a streak of one.
 
-    from routine import views as routine_views
+    Measured by COUNTING QUERIES against two row counts. Reading the method's source for
+    the strings `for rp in qs` and `.annotate(` passes any rewrite that keeps the
+    spelling and fails any correct one that changes it; what matters is that the work
+    stays in the database, and the only way to see that is to add rows and watch the
+    cost.
+    """
+    from datetime import timedelta
 
-    completion = inspect.getsource(routine_views.AnalyticsViewSet.completion)
-    assert "for rp in qs" not in completion, "completion still tallies in Python"
-    assert ".annotate(" in completion and "Count(" in completion
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
 
-    dashboard = inspect.getsource(routine_views.AnalyticsViewSet.admin_dashboard)
-    assert "'user', 'day'" not in dashboard, "streaks still keyed on the ordinal day"
-    assert "'user_id', 'date'" in dashboard
+    from routine.models import Routine, RoutineProgress
+
+    admin = make_user("dash-admin", user_type="admin")
+    trainer = make_user("dash-trainer", user_type="trainer")
+    client_user = make_user("dash-client")
+    routine = Routine.objects.create(name="Dash", created_by=trainer)
+    today = timezone.localdate()
+    # Built once: `_api_client_for` gives the user a subscription, and a second call for
+    # the same user collides on `subscription.user` being unique.
+    c = _api_client_for(admin)
+
+    def cost(rows):
+        # `(user, routine, day, date)` is unique, so each row gets its own day AND its
+        # own date.
+        RoutineProgress.objects.all().delete()
+        RoutineProgress.objects.bulk_create([
+            RoutineProgress(user=client_user, routine=routine, day=i + 1,
+                            date=today - timedelta(days=i),
+                            status="completed" if i % 2 else "pending")
+            for i in range(rows)])
+        with CaptureQueriesContext(connection) as captured:
+            r = c.get("/api/routine/analytics/completion/")
+        assert r.status_code == 200, r.content[:200]
+        return len(captured)
+
+    small, large = cost(20), cost(400)
+    # Twenty times the rows must not cost more queries. A Python tally shows up here as
+    # growth; an aggregate does not.
+    assert large <= small, (
+        f"{small} queries for 20 rows, {large} for 400 — the count is being done in "
+        f"Python, not in the query")
 
 
 def test_completing_a_meal_is_visible_to_everything_that_listens(seeded_catalogue):
@@ -4984,14 +5093,49 @@ def test_an_achievement_counts_meals_not_mouthfuls(seeded_catalogue, django_capt
 def test_the_ai_calls_the_closest_day_the_best_one(seeded_catalogue):
     """Ranking by `calories_pct` reported a 200% binge as the client's best adherence
     day and a fasting day as their worst — the opposite of the adherence score computed
-    beside it, which this tool hands to the model as fact."""
-    import inspect
+    beside it, which this tool hands to the model as fact.
 
-    from ai_assistant.tools import diet_tools
+    Asserted by RUNNING the tool on three days with known outcomes. It used to read the
+    module's source for two strings, which fails a correct engine on a rename and passes
+    a reintroduced bug written as `sorted(daily_data, key=...)[-1]`.
+    """
+    from datetime import timedelta
 
-    source = inspect.getsource(diet_tools)
-    assert 'max(daily_data, key=lambda d: d["calories_pct"])' not in source
-    assert "_distance_from_target" in source
+    from ai_assistant.tools.diet_tools import get_diet_adherence
+    from diet.models import DailyProgress
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("adherence-days")
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="adh")
+    today = timezone.localdate()
+    # On target, far over, far under.
+    for offset, consumed in ((1, 2000.0), (2, 4000.0), (3, 300.0)):
+        DailyProgress.objects.update_or_create(
+            user=user, diet_plan=plan, date=today - timedelta(days=offset),
+            defaults={"target_calories": 2000.0, "calories_consumed": consumed,
+                      "meals_completed": 1, "total_meals": 3})
+
+    out = get_diet_adherence(user, days=7)
+    assert out["days_tracked"] == 3, out
+    assert out["best_day"]["calories_consumed"] == 2000.0, out["best_day"]
+    # The worst is whichever is FURTHEST from target, and 4000 (+100%) is further than
+    # 300 (-85%).
+    assert out["worst_day"]["calories_consumed"] == 4000.0, out["worst_day"]
+
+
+def test_no_tool_reports_a_score_for_a_client_who_never_tracked(seeded_catalogue):
+    """`round(total/count, 1) if count else 0` told the assistant a client who has never
+    tracked a day scored ZERO on adherence, beside `days_tracked: 0` that it does not
+    read. No data is not a score."""
+    from ai_assistant.tools.diet_tools import get_diet_adherence
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("adherence-empty")
+    generate_and_save(user, duration_days=1, seed_salt="adh0")
+    out = get_diet_adherence(user, days=7)
+    assert out["days_tracked"] == 0, out
+    assert out["average_adherence_pct"] is None, out
+    assert out.get("message"), "the model is told nothing about why the number is absent"
 
 
 def test_no_tool_prints_health_data_to_stdout(seeded_catalogue):
@@ -5000,10 +5144,23 @@ def test_no_tool_prints_health_data_to_stdout(seeded_catalogue):
     same data everywhere else."""
     import pathlib
 
-    root = pathlib.Path(__file__).resolve().parent.parent / "ai_assistant" / "tools"
-    offenders = [f"{p.name}:{n}" for p in root.glob("*.py")
-                 for n, line in enumerate(p.read_text().splitlines(), 1)
-                 if line.strip().startswith("print(")]
+    root = REPO_ROOT / "ai_assistant" / "tools"
+    files = list(root.glob("*.py"))
+    assert files, f"no tool modules found under {root}"
+    # ANY output call carrying a health field, not just `print(`. The scan looked for
+    # lines starting with `print(`, so `logger.info(f"...{bmi}...")` leaked exactly the
+    # same data past exactly the same test.
+    health = ("bmi", "bmr", "daily_calories", "calorie_target", "weight", "body_fat")
+    emitters = ("print(", "logger.", "logging.", "sys.stdout", "sys.stderr")
+    offenders = []
+    for path in files:
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            body = line.strip()
+            if not any(body.startswith(e) or f" {e}" in body for e in emitters):
+                continue
+            if any(f"{{{h}" in body.lower() or f"%({h})" in body.lower()
+                   or f"' + str({h}" in body.lower() for h in health):
+                offenders.append(f"{path.name}:{n} {body[:80]}")
     assert not offenders, offenders
 
 
@@ -5036,3 +5193,42 @@ def test_the_catalogue_speaks_arabic_too(seeded_catalogue):
         assert rows, url
         assert all("name_ar" in row for row in rows), url
         assert any(_ARABIC.search(row["name_ar"] or "") for row in rows), url
+
+
+
+
+
+
+def test_generating_again_replaces_the_plan_it_overlaps(seeded_catalogue):
+    """Generating again is not an error, and it must not leave two plans behind.
+
+    This asserted a 409 with `code: "plan_already_exists"`, which came from a check in
+    `DietPlan.clean()` — a CROSS-ROW rule in a row validator, so it also re-fired on
+    every later `save(update_fields=[...])` and could refuse a plan that was already
+    committed and live. The rule is enforced by `save_plan`'s lock now. What the client
+    sees is what the code was always written to do: the new plan replaces the old one.
+    """
+    from diet.services.plan_generation import generate_and_save
+
+    from diet.models import DietPlan
+
+    user, _chosen = _chooser("conflict-answer")
+    _out, first = generate_and_save(user, duration_days=2, seed_salt="one")
+    assert first.is_active
+
+    # Sequentially there is no conflict: a new plan SUPERSEDES the one it overlaps,
+    # which is what "generate again" should do.
+    _out, second = generate_and_save(user, duration_days=2, seed_salt="two")
+    first.refresh_from_db()
+    assert second.is_active and not first.is_active
+    assert DietPlan.objects.filter(user=user, is_active=True).count() == 1
+
+    # A third time, through the endpoint, so the wire answer is asserted too and not
+    # just the service. This used to read the view's SOURCE for three strings, which
+    # passes whether or not the endpoint behaves.
+    c = _api_client_for(user)
+    r = c.post("/api/diet/v1/plans/generate-rule/", {"duration_days": 2},
+               content_type="application/json")
+    assert r.status_code == 201, r.content[:200]
+    assert DietPlan.objects.filter(user=user, is_active=True).count() == 1
+    assert DietPlan.objects.filter(user=user).count() == 3

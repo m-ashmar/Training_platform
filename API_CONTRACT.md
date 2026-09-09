@@ -314,15 +314,16 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 | `GET` | `/api/diet/v1/client/progress/enhanced/` | auth, HasDietAccess | `EnhancedClientProgressView` |
 | `GET` | `/api/diet/v1/client/progress/weekly/` | auth, HasDietAccess | `ClientWeeklyProgressView` |
 | `GET` | `/api/diet/v1/food/categories/` | auth, HasDietAccess | `FoodCategoryListView` |
-| `POST` | `/api/diet/v1/food/import/` | auth | `FoodImportView` |
+| `POST` | `/api/diet/v1/food/import/` | auth, **admin** | `FoodImportView` |
 | `GET` | `/api/diet/v1/food/list/` | auth, HasDietAccess | `FoodListView` |
 | `GET` | `/api/diet/v1/food/search/` | auth | `FoodSearchView` |
 | `GET` | `/api/diet/v1/meals/{meal_id}/components/` | auth, HasDietAccess | `MealComponentsView` |
 | `GET` | `/api/diet/v1/my/diet-plans/` | auth, HasDietAccess | `MyDietPlansView` |
 | `GET` | `/api/diet/v1/nutrition/plan/{plan_id}/` | auth, HasDietAccess | `DietPlanNutritionView` |
 | `GET` | `/api/diet/v1/plan/{plan_id}/meals-with-ingredients/` | auth, HasDietAccess | `DietPlanMealsWithIngredientsView` |
-| `POST` | `/api/diet/v1/plans/generate-rule/` | auth, HasDietAccess, MealUsageLimit | `GenerateDietPlanRuleBasedView` |
-| `POST` | `/api/diet/v1/plans/generate/` | auth, HasDietAccess, MealUsageLimit | `GenerateDietPlanView` |
+| `POST` | `/api/diet/v1/plans/generate-rule/` | auth, HasDietAccess | `GenerateDietPlanRuleBasedView` |
+| `POST` | `/api/diet/v1/plans/generate/` | auth, HasDietAccess | `GenerateDietPlanView` |
+| `GET` | `/api/diet/v1/plans/tasks/{task_id}/` | auth, HasDietAccess | `PlanTaskStatusView` |
 | `DELETE, GET, POST` | `/api/diet/v1/preferences/` | auth | `UserPreferencesView` |
 | `GET, POST` | `/api/diet/v1/preferences/food-category/` | auth, HasDietAccess | `UserFoodCategoryPreferenceView` |
 | `DELETE, PUT` | `/api/diet/v1/preferences/food-category/{food_id}/` | auth, HasDietAccess | `UserFoodCategoryPreferenceDetailView` |

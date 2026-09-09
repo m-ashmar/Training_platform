@@ -182,24 +182,16 @@ _FILL_SLOT = {
 #: calories at 0.5, so it sits further from the calorie target than the pair search
 #: lands. That is a question about the objective, which the plan holds open, not about
 #: the search. Flip this after the CALORIE_WEIGHT decision, and re-measure.
-EXHAUSTIVE_PORTIONING = False
-
-
 def _best_portioning(components, targets, policy, movable):
-    """The pair search, or every portion jointly when that is both affordable and
-    switched on. A non-scalable line pins the search to `refine`, which honours it."""
-    if EXHAUSTIVE_PORTIONING and len(movable) == len(components):
-        from .portion import portions_for, solve
-        from .report import deviation_of
+    """Search a dish's portions. A non-scalable line pins the search to the lines the
+    recipe's author allows to move, which `refine` honours.
 
-        space = 1
-        for food, _g in components:
-            space *= max(1, len(portions_for(food)))
-        if space <= 20_000:
-            portions, _score = solve([f for f, _g in components], targets)
-            if portions:
-                tuned = [(pt.food, float(pt.grams)) for pt in portions]
-                return tuned, deviation_of(totals_of(tuned), targets)
+    There was an alternative branch here behind `EXHAUSTIVE_PORTIONING = False` — a
+    constant, never set anywhere, so the branch had been unreachable since it was
+    written. `refine` now does single, pair and three-at-once moves and is measured
+    against the exhaustive optimum by `tests/optimiser_benchmark.py`, which is the
+    honest version of what that branch was reaching for.
+    """
     return refine(components, targets, policy.tolerance, movable)
 
 
@@ -552,6 +544,16 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             # paths, so "which path served this meal" can be a judged decision rather
             # than an accident of ordering. The two paths used to weight preference
             # at 1.7:1 and 148:1 respectively.
+            #
+            # One scorer, two INPUTS, and deliberately so. Here it reads the dish as
+            # WRITTEN — its base grams, no augmentation — because augmentation happens
+            # after a dish is chosen and cannot be known while choosing between them.
+            # The judge in `rule_based_planner._plan_meal` reads the plate as SERVED,
+            # augmented food included, because by then it exists. A dish is therefore
+            # sampled slightly under the value it will have once the client's own food
+            # is added to it, which biases the choice AWAY from dishes that need
+            # augmenting — the conservative direction, and the only one available
+            # without scoring a plate that does not exist yet.
             score = (recipe_pool_score(lines, pool, meal_name, edges) if pool is not None
                      else -float(match.deviation.magnitude))
             within.append((match, score, recipe))

@@ -11,13 +11,25 @@ def bump_cache_version(model_name):
     This acts as a dynamic hash suffix. Instead of O(N) delete_pattern() sweeps,
     all HTTP CacheMiddleware checks immediately miss and regenerate payload on model change.
     """
-    cache = public_cache()
     try:
-        new_version = cache.incr(f"CACHE_VERSION_{model_name}")
-        logger.info(f"Incremented {model_name} cache version to {new_version}")
-    except ValueError:
-        cache.set(f"CACHE_VERSION_{model_name}", 2, None)
-        logger.info(f"Initialized {model_name} cache version to 2")
+        cache = public_cache()
+        try:
+            new_version = cache.incr(f"CACHE_VERSION_{model_name}")
+            logger.info(f"Incremented {model_name} cache version to {new_version}")
+        except ValueError:
+            # The counter does not exist yet. Not an outage; start it.
+            cache.set(f"CACHE_VERSION_{model_name}", 2, None)
+            logger.info(f"Initialized {model_name} cache version to 2")
+    except Exception:
+        # Only `ValueError` was caught, so a Redis outage propagated out of a
+        # `post_save` receiver and failed the WRITE. Every save of a FoodItem,
+        # FoodCategory, Exercise, RoutineTemplate, SubscriptionPlan or Achievement
+        # 500'd while Redis was down — including the FoodItem writes on the diet
+        # generation path, which aborted the plan mid-transaction. Invalidation is an
+        # optimisation and must never be able to fail the operation that triggered it;
+        # the receiver ten lines below already knew that. Stale entries expire on TTL.
+        logger.warning("Could not bump the %s cache version; entries will expire on TTL",
+                       model_name, exc_info=True)
 
 @receiver([post_save, post_delete])
 def increment_model_cache_version(sender, instance, **kwargs):
@@ -30,7 +42,10 @@ def increment_model_cache_version(sender, instance, **kwargs):
     because the middleware matched paths that did not exist.
     """
     from training_platform.cache_config import MODEL_VERSION_KEYS
-    version_key = MODEL_VERSION_KEYS.get(sender.__name__)
+    # Keyed by "app_label.ModelName", not the bare class name: `Achievement` exists in
+    # both `achievements` and `social`, so a write to either bumped the same counter and
+    # flushed the achievements cache for a model that does not feed it.
+    version_key = MODEL_VERSION_KEYS.get(sender._meta.label)
     if version_key:
         bump_cache_version(version_key)
 

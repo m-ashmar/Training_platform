@@ -167,13 +167,18 @@ class Command(BaseCommand):
         updates = []
 
         for food in FoodItem.objects.all().iterator(chunk_size=500):
-            role = role_for(food.name)
+            # ROLE_PATTERNS and UNIT_PATTERNS are English words, and `food.name` returns
+            # whichever column the active language selects. Run under any other locale
+            # this matched nothing: every food came back ROLE_STAPLE with no household
+            # unit, and the planner lost both its portion ladders and its condiment rule.
+            name = getattr(food, "name_en", None) or food.name or ""
+            role = role_for(name)
             by_role[role] += 1
-            unit = unit_for(food.name)
+            unit = unit_for(name)
             if unit is None:
                 unmatched += 1
                 if len(misses) < 25:
-                    misses.append(food.name)
+                    misses.append(name)
             else:
                 matched += 1
             if not apply:
