@@ -53,27 +53,6 @@ class TrainerDietPlanService:
         """
         return DietPlanTemplate.objects.filter(is_active=True).order_by('meals_per_day', 'snacks_per_day')
     
-    def get_client_food_items(self, search_query: str = None, category: str = None) -> List[FoodItem]:
-        """
-        Get food items available for diet plan creation with optional filtering.
-        
-        Args:
-            search_query: Optional search term for food names
-            category: Optional category filter
-            
-        Returns:
-            List of matching food items
-        """
-        queryset = FoodItem.objects.select_related('category').all()
-        
-        if search_query:
-            queryset = queryset.filter(name__icontains=search_query)
-        
-        if category:
-            queryset = queryset.filter(category__name__icontains=category)
-        
-        return queryset.order_by('name')[:100]  # Limit results
-    
     def create_diet_plan(
         self,
         client: CustomUser,
@@ -134,10 +113,17 @@ class TrainerDietPlanService:
         # had one — which is every client the engine has ever served. Retiring the
         # overlap is what the trainer means by "here is your new plan".
         with transaction.atomic():
-            superseded = DietPlan.objects.filter(
+            # Every overlapping active plan, whoever wrote it: a client follows one
+            # plan, and the model refuses two over one window. That includes the
+            # generated plan the client already had, which is the common case and the
+            # reason trainer plan creation used to fail outright. What was missing was
+            # not the scoping but the telling — the ids come back in the response so
+            # the trainer can say what was replaced.
+            superseded_ids = list(DietPlan.objects.filter(
                 user=client, is_active=True,
                 start_date__lte=end_date, end_date__gte=start_date,
-            ).update(is_active=False)
+            ).values_list('id', flat=True))
+            DietPlan.objects.filter(id__in=superseded_ids).update(is_active=False)
 
             diet_plan = DietPlan.objects.create(
                 user=client,
@@ -153,9 +139,12 @@ class TrainerDietPlanService:
                 template=template,
                 created_by=self.trainer
             )
-        if superseded:
-            logger.info("Trainer %s replaced %s active plan(s) for client %s",
-                        self.trainer.id, superseded, client.id)
+        if superseded_ids:
+            logger.info("Trainer %s replaced plan(s) %s for client %s",
+                        self.trainer.id, superseded_ids, client.id)
+        # The caller reports these to the trainer; a plan vanishing with no
+        # explanation is what made this feature look broken.
+        diet_plan.superseded_plan_ids = superseded_ids
         return diet_plan
     
     def add_meal_to_plan(
@@ -339,45 +328,6 @@ class TrainerDietPlanService:
                 .select_related('template')
                 .annotate(meals_count=Count('meals'))
                 .order_by('-start_date')[:200])
-    
-    def get_plan_nutrition_summary(self, diet_plan: DietPlan, target_date: date = None) -> Dict[str, Any]:
-        """
-        Get nutritional summary for a diet plan on a specific date.
-        
-        Args:
-            diet_plan: The diet plan
-            target_date: Target date (defaults to today)
-            
-        Returns:
-            Dictionary with nutritional summary
-        """
-        if target_date is None:
-            target_date = timezone.localdate()
-        
-        meals = diet_plan.meals.filter(date=target_date)
-        total_calories = 0
-        total_protein = 0
-        total_carbs = 0
-        total_fat = 0
-        meal_count = meals.count()
-        
-        for meal in meals:
-            nutrition = meal.calculate_nutrition()
-            total_calories += nutrition['calories']
-            total_protein += nutrition['protein']
-            total_carbs += nutrition['carbs']
-            total_fat += nutrition['fat']
-        
-        return {
-            'date': target_date,
-            'total_calories': round(total_calories, 1),
-            'total_protein': round(total_protein, 1),
-            'total_carbs': round(total_carbs, 1),
-            'total_fat': round(total_fat, 1),
-            'meal_count': meal_count,
-            'target_calories': diet_plan.daily_calories,
-            'calories_percentage': round((total_calories / diet_plan.daily_calories) * 100, 1) if diet_plan.daily_calories > 0 else 0
-        }
     
     def _can_manage_client(self, client: CustomUser) -> bool:
         """
@@ -622,11 +572,31 @@ class ClientProgressService:
             today = timezone.localdate()
             start_date = today - timedelta(days=today.weekday())
         
+        # One plan lookup and one aggregate for the week, not seven of each. This was
+        # seven `get_daily_progress` calls: about forty queries and seven WRITES on a
+        # GET, and an unbounded `start_date` minted DailyProgress rows for any date
+        # asked about.
+        end_date = start_date + timedelta(days=6)
+        plan = self._get_active_diet_plan(start_date) or self._get_active_diet_plan(end_date)
+        meals_by_day: Dict[object, List[int]] = {}
+        if plan is not None:
+            for row in (Meal.objects
+                        .filter(diet_plan=plan, date__gte=start_date, date__lte=end_date)
+                        .values('date', 'is_completed')):
+                total, done = meals_by_day.setdefault(row['date'], [0, 0])
+                meals_by_day[row['date']] = [total + 1, done + (1 if row['is_completed'] else 0)]
+
         week_progress = []
         for i in range(7):
             day_date = start_date + timedelta(days=i)
-            day_progress = self.get_daily_progress(day_date)
-            week_progress.append(day_progress)
+            total, done = meals_by_day.get(day_date, (0, 0))
+            week_progress.append({
+                'date': day_date,
+                'has_active_plan': plan is not None and bool(total),
+                'meals_completed': done,
+                'total_meals': total,
+                'completion_percentage': round((done / total) * 100, 1) if total else 0,
+            })
         
         return week_progress
     

@@ -136,6 +136,21 @@ class RecentActivityProgressView(APIView):
         return Response(data)
 
 
+def _int_or_none(value):
+    """An id from a request body or query string, or None if it is not one.
+
+    These were passed straight to the ORM, where a filter on an integer column raises
+    `ValueError` — which is not a DRF exception, so it left the view as an unhandled
+    500 on a URL or body any client can send.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 class ExerciseViewSet(viewsets.ModelViewSet):
 
     """ViewSet for managing exercises."""
@@ -512,7 +527,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
         TODO: Add assignment history tracking
         """
         routine = self.get_object()
-        client_id = request.data.get('client_id')
+        client_id = _int_or_none(request.data.get('client_id'))
         
         if not client_id:
             return Response(
@@ -624,7 +639,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
         TODO: Implement unassignment history tracking
         """
         routine = self.get_object()
-        client_id = request.data.get('client_id')
+        client_id = _int_or_none(request.data.get('client_id'))
         
         if not client_id:
             return Response(
@@ -892,7 +907,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         )
         
         # Optional filter by routine_id
-        routine_id = self.request.query_params.get('routine_id')
+        routine_id = _int_or_none(self.request.query_params.get('routine_id'))
         if routine_id:
             base_qs = base_qs.filter(workout_session__routine_id=routine_id)
         
@@ -924,7 +939,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         if not user.is_authenticated or not user.is_client:
             return Response({'error': _('Only clients can view their own progress.')}, status=403)
         group_by = request.query_params.get('group_by')
-        routine_id = request.query_params.get('routine_id')
+        routine_id = _int_or_none(request.query_params.get('routine_id'))
         qs = self.get_queryset().filter(user_exercise_progress__user=user)
         if routine_id:
             qs = qs.filter(workout_session__routine_id=routine_id)
@@ -963,8 +978,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         Input: routine_id, day, date, sets, weight, reps
         """
         user = request.user
-        routine_id = request.data.get('routine_id')
-        day = request.data.get('day')
+        routine_id = _int_or_none(request.data.get('routine_id'))
+        day = _int_or_none(request.data.get('day'))
         date = request.data.get('date')
         if not routine_id or not day or not date:
             return Response({'error': _('routine_id, day, and date are required.')}, status=400)
@@ -1171,10 +1186,16 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         PATCH: Used by client to mark session as completed, etc.
         Triggers notification on session completion.
         """
+        # Was it already finished BEFORE this request? The branch below keyed on
+        # "the payload says completed", not on a transition, so a double-tapped finish
+        # button congratulated the client twice, told the trainer twice, and queued the
+        # milestone walk twice.
+        was_completed = self.get_object().status == 'completed'
         response = super().partial_update(request, *args, **kwargs)
         instance = self.get_object()
         # If session is marked as completed, notify trainer and client
-        if 'status' in request.data and request.data['status'] == 'completed':
+        if (not was_completed and 'status' in request.data
+                and request.data['status'] == 'completed'):
             # Stamp end_time so `duration` is computable. Nothing set this before,
             # so every completed session reported duration = None forever.
             if instance.end_time is None:
@@ -1350,7 +1371,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         Output: JSON with completion % per routine/client
         """
         from .models import RoutineProgress, Routine
-        routine_id = request.query_params.get('routine_id')
+        routine_id = _int_or_none(request.query_params.get('routine_id'))
         user_id = request.query_params.get('user_id')
         qs = RoutineProgress.objects.all()
         # DEFAULT SCOPE: without this, calling the endpoint with no parameters
@@ -1742,7 +1763,7 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         Security: Only trainers can generate routines for their own clients
         """
         template = self.get_object()
-        client_id = request.data.get('client_id')
+        client_id = _int_or_none(request.data.get('client_id'))
         
         if not client_id:
             return Response({'detail': _('client_id required')}, status=400)
@@ -2049,8 +2070,8 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         Input: routine_id, day, date, completed_sets, target_sets
         """
         user = request.user
-        routine_id = request.data.get('routine_id')
-        day = request.data.get('day')
+        routine_id = _int_or_none(request.data.get('routine_id'))
+        day = _int_or_none(request.data.get('day'))
         date = request.data.get('date')
         completed_sets = int_param(request.data, 'completed_sets', default=1, minimum=0,
                                    maximum=MAX_SETS_PER_REQUEST)

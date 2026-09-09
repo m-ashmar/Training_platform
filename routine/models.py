@@ -495,6 +495,12 @@ class RoutineExercise(RowValidationMixin, models.Model):
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
         # paging repeated and hid rows whenever two records shared the value.
         ordering = ['day', 'order', 'id']
+        indexes = [
+            # `filter(routine=, day=)` runs on every progress read and on every
+            # assignment; `unique_together` gives only a `routine` prefix, so a
+            # 365-day routine scanned every one of its rows for each day lookup.
+            models.Index(fields=['routine', 'day', 'order'], name='routineex_day_idx'),
+        ]
 
     def __str__(self):
         return f"{self.exercise.name} in {self.routine.name} (Day {self.day}, Order {self.order})"
@@ -700,6 +706,10 @@ class WorkoutSession(models.Model):
             # Measured on a power user with 5,050 rows: 0.682 ms -> 0.089 ms, because
             # the planner stops sorting their entire history to return 25 rows.
             models.Index(fields=['user', '-start_time', '-id'], name='workoutsess_recent_idx'),
+            # Every trainer dashboard filters completed sessions and orders by
+            # `end_time`; every index above is on `start_time`, so those reads sorted
+            # the client's whole history to return the last few.
+            models.Index(fields=['user', 'status', '-end_time'], name='workoutsess_ended_idx'),
         ]
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
         # paging repeated and hid rows whenever two records shared the value.

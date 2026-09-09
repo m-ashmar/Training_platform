@@ -4584,3 +4584,26 @@ def test_deleting_an_exercise_cannot_erase_a_clients_history(seeded_catalogue, m
     # One nobody has trained with can still be removed.
     spare = Exercise.objects.create(name="Gate Spare", created_by=owner)
     assert o_api.delete(f"/api/routine/exercises/{spare.id}/").status_code == 204
+
+
+def test_a_new_trainer_plan_says_what_it_replaced(seeded_catalogue, make_user):
+    """A client follows one plan at a time, and the model refuses two active plans
+    over one window — which is why trainer plan creation used to fail outright for
+    any client the engine had ever served. Creating one retires what overlaps it, and
+    reports which, so the trainer can explain where the old plan went."""
+    from diet.models import DietPlan
+    from diet.services.plan_generation import generate_and_save
+
+    trainer, client_user, t_api, _c = _assigned_pair(make_user, "supersede")
+    _out, generated = generate_and_save(client_user, duration_days=3, seed_salt="sup")
+    assert generated.is_active
+
+    r = t_api.post("/api/diet/v1/trainer/diet-plans/",
+                   {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 1,
+                    "template_id": _a_template().id, "start_date": str(date.today())},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    assert generated.id in r.json()["superseded_plan_ids"]
+    generated.refresh_from_db()
+    assert not generated.is_active
+    assert DietPlan.objects.filter(user=client_user, is_active=True).count() == 1

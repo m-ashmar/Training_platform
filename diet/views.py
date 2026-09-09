@@ -58,13 +58,15 @@ def parse_date(date_str):
     if not date_str:
         return None
     
-    formats = ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d']
-    for fmt in formats:
-        try:
-            return datetime.strptime(date_str, fmt).date()
-        except ValueError:
-            continue
-    return None
+    # ISO-8601 only. The list used to try day-first before month-first, so
+    # "09/03/2026" was read as 3 September from one client and 9 March from another,
+    # silently, with no way for either to know. (It also listed '%Y-%m-%d' twice.)
+    from django.utils.dateparse import parse_date as _iso_date
+
+    try:
+        return _iso_date(str(date_str))
+    except (ValueError, TypeError):
+        return None
 
 def parse_time(time_str):
     """Parse time string in various formats."""
@@ -1288,6 +1290,11 @@ class TrainerDietPlanView(APIView):
             
             return Response({
                 "message": _("Diet plan created successfully"),
+                # What this plan replaced. A client follows one plan at a time, so
+                # creating one retires any that overlap it — including the generated
+                # plan they already had, which is the common case. The trainer needs
+                # to be able to say which.
+                "superseded_plan_ids": getattr(diet_plan, 'superseded_plan_ids', []),
                 "diet_plan": {
                     'id': diet_plan.id,
                     'client_name': client.username,
