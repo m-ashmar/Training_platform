@@ -1536,7 +1536,14 @@ class TrainerMealView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
     
-    def put(self, request, meal_id):
+    def put(self, request, meal_id=None):
+        # Both verbs are routed at `trainer/meals/` as well, where Django
+        # calls them without a meal id: that was a TypeError caught by the
+        # broad handler and reported as a 400, where the honest answer is
+        # that the method is not allowed on the collection.
+        if meal_id is None:
+            return Response({"error": _("A meal id is required")},
+                            status=status.HTTP_405_METHOD_NOT_ALLOWED)
         """Update a meal."""
         try:
             # Check if user is a trainer
@@ -1595,7 +1602,14 @@ class TrainerMealView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
     
-    def delete(self, request, meal_id):
+    def delete(self, request, meal_id=None):
+        # Both verbs are routed at `trainer/meals/` as well, where Django
+        # calls them without a meal id: that was a TypeError caught by the
+        # broad handler and reported as a 400, where the honest answer is
+        # that the method is not allowed on the collection.
+        if meal_id is None:
+            return Response({"error": _("A meal id is required")},
+                            status=status.HTTP_405_METHOD_NOT_ALLOWED)
         """Delete a meal."""
         try:
             # Check if user is a trainer
@@ -1988,6 +2002,11 @@ class EnhancedClientProgressView(APIView):
             
             return Response(progress)
             
+        except PASSTHROUGH_EXCEPTIONS:
+            # 404/403/401 carry their own status. Flattening them into a 400
+            # meant the app could not tell a refusal from a server fault, and
+            # real faults never entered the error budget.
+            raise
         except Exception as e:
             logger.error(f"Enhanced client progress error: {str(e)}")
             return Response(
@@ -2112,6 +2131,11 @@ class ClientProgressView(APIView):
             
             return Response(progress)
             
+        except PASSTHROUGH_EXCEPTIONS:
+            # 404/403/401 carry their own status. Flattening them into a 400
+            # meant the app could not tell a refusal from a server fault, and
+            # real faults never entered the error budget.
+            raise
         except Exception as e:
             logger.error(f"Client progress error: {str(e)}")
             return Response(
@@ -2149,6 +2173,11 @@ class ClientWeeklyProgressView(APIView):
                 'total_days': len(week_progress)
             })
             
+        except PASSTHROUGH_EXCEPTIONS:
+            # 404/403/401 carry their own status. Flattening them into a 400
+            # meant the app could not tell a refusal from a server fault, and
+            # real faults never entered the error budget.
+            raise
         except Exception as e:
             logger.error(f"Client weekly progress error: {str(e)}")
             return Response(

@@ -4607,3 +4607,52 @@ def test_a_new_trainer_plan_says_what_it_replaced(seeded_catalogue, make_user):
     generated.refresh_from_db()
     assert not generated.is_active
     assert DietPlan.objects.filter(user=client_user, is_active=True).count() == 1
+
+
+def test_a_trainer_cannot_lock_a_client_out_of_choosing(seeded_catalogue, make_user):
+    """`trainer/assign-client/` needs no consent to create a pending row, and the
+    client's own request endpoint then refused because "you already have a pending
+    request". Any trainer could freeze any client out of choosing anybody, for free,
+    by inviting them and never withdrawing it."""
+    from users.models import TrainerClientRelation
+
+    wanted, client_user, w_api, c_api = _trainer_and_client(make_user, "lockout")
+    squatter = make_user("tr-squatter", user_type="trainer")
+    _grant_diet_access(squatter)
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+    s_api = Client()
+    s_api.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(squatter).access_token}"
+
+    r = s_api.post("/api/auth/trainer/assign-client/", {"client_id": client_user.id},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+
+    # The client can still choose the trainer they actually want.
+    r = c_api.post("/api/auth/client/request-trainer/", {"trainer_id": wanted.id},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    mine = TrainerClientRelation.objects.get(trainer=wanted, client=client_user)
+    r = w_api.post("/api/auth/trainer/respond-to-request/",
+                   {"request_id": mine.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id == wanted.id
+
+    # And the squatter's invitation cannot now be accepted over the top.
+    theirs = TrainerClientRelation.objects.get(trainer=squatter, client=client_user)
+    r = c_api.post("/api/auth/client/respond-to-invite/",
+                   {"request_id": theirs.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 400, r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id == wanted.id
+
+
+def test_the_collection_routes_answer_405_not_a_crash(seeded_catalogue, make_user):
+    """`trainer/meals/` routes PUT and DELETE to handlers that require a meal id, so
+    Django called them without one: a TypeError caught by the broad handler and
+    reported as a 400."""
+    trainer, _client_user, t_api, _c = _assigned_pair(make_user, "verbs")
+    for method in ("put", "delete"):
+        r = getattr(t_api, method)("/api/diet/v1/trainer/meals/", {}, content_type="application/json")
+        assert r.status_code == 405, (method, r.status_code, r.content[:100])

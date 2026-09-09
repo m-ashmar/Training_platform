@@ -1663,10 +1663,11 @@ class IsTrainerOrReadOnly(IsAuthenticated):
     def has_object_permission(self, request, view, obj):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return True
-        # `copy` is a POST but is read-only with respect to the source template —
-        # it creates a NEW template owned by the caller. Copying a public template
-        # is the intended workflow, so it must not require ownership.
-        if getattr(view, 'action', None) == 'copy':
+        # `copy` and `generate` are POSTs that are read-only with respect to the
+        # source template: one creates a new template owned by the caller, the other
+        # a routine for the caller's client. Using a public template is the documented
+        # workflow, and requiring ownership refused it.
+        if getattr(view, 'action', None) in ('copy', 'generate'):
             return True
         if getattr(request.user, 'is_admin', False):
             return True

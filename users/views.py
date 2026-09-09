@@ -37,7 +37,7 @@ from training_platform.i18n import LanguageContext, CACHE_VERSION
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.http import Http404
 from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
                                        ValidationError as DRFValidationError)
@@ -456,12 +456,16 @@ class AssignClientView(APIView):
             # client to themselves in two calls and read that person's body metrics,
             # training history and diet plan without ever being asked. `initiated_by`
             # is what makes the approval belong to the other side.
-            relation, created = TrainerClientRelation.objects.get_or_create(
-                trainer=request.user,
-                client=client,
-                defaults={'status': 'pending', 'initiated_by': 'trainer',
-                          'agreed_rate': getattr(request.user, 'trainer_hourly_rate', None)}
-            )
+            # In a savepoint: `unique_pending_trainer_request_per_client` is a partial
+            # unique index, and catching its IntegrityError outside an atomic block
+            # leaves the surrounding transaction unusable for everything after it.
+            with transaction.atomic():
+                relation, created = TrainerClientRelation.objects.get_or_create(
+                    trainer=request.user,
+                    client=client,
+                    defaults={'status': 'pending', 'initiated_by': 'trainer',
+                              'agreed_rate': getattr(request.user, 'trainer_hourly_rate', None)}
+                )
             
             if not created:
                 if relation.status == 'approved':
@@ -482,12 +486,13 @@ class AssignClientView(APIView):
                     relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
                                                  'updated_at'])
             
-            # Emit domain event — notification handled at delivery boundary
-            emit_event(TrainerAssignmentRequestEvent(
-                actor_id=request.user.id,
-                recipient_id=client.id,
-                trainer_name=getattr(request.user, 'full_name', None) or request.user.username,
-            ))
+            # On commit, like the client-side path beside it: a notification queued
+            # inside an open transaction can be delivered before the row exists, or
+            # after a rollback for a request that was never saved.
+            _actor, _recipient = request.user.id, client.id
+            _name = getattr(request.user, 'full_name', None) or request.user.username
+            transaction.on_commit(lambda: emit_event(TrainerAssignmentRequestEvent(
+                actor_id=_actor, recipient_id=_recipient, trainer_name=_name)))
             logger.info(f"Trainer {request.user.id} requested assignment of client {client.id}")
             
             # Invalidate client cache
@@ -499,9 +504,17 @@ class AssignClientView(APIView):
                 'status': 'pending'
             }, status=status.HTTP_200_OK)
             
+        except IntegrityError:
+            # `unique_pending_trainer_request_per_client` is a partial unique index, so
+            # inviting a client who already has an outstanding request raised straight
+            # past the only handler here and became a 500.
+            return Response(
+                {'error': _('That client already has an outstanding request.')},
+                status=status.HTTP_409_CONFLICT
+            )
         except CustomUser.DoesNotExist:
             return Response(
-                {'error': 'Client not found'}, 
+                {'error': _('Client not found')},
                 status=status.HTTP_404_NOT_FOUND
             )
 
@@ -1076,9 +1089,13 @@ class ClientRequestTrainerView(APIView):
                 )
 
             # Also block if there is any other pending request with a different trainer
+            # Only the client's OWN outstanding request blocks them. Counting a
+            # trainer's unanswered invitation here let any trainer freeze a client out
+            # of choosing anybody, by inviting them and never withdrawing it.
             has_pending_elsewhere = TrainerClientRelation.objects.filter(
                 client=request.user,
-                status='pending'
+                status='pending',
+                initiated_by='client',
             ).exclude(trainer_id=trainer.id).exists()
             if has_pending_elsewhere:
                 return Response(

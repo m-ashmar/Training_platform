@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
@@ -833,25 +834,27 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoutineTemplate
         fields = ['id', 'name', 'description', 'goal', 'days', 'is_public', 'created_by', 'created_at', 'exercises']
+    @transaction.atomic
     def create(self, validated_data):
-        # Pop out nested exercises
         exercises_data = validated_data.pop('routinetemplateexercise_set', [])
-        request = self.context.get('request')
-        created_by = request.user if request else None
-        template = RoutineTemplate.objects.create( **validated_data)
-        for ex in exercises_data:
-            RoutineTemplateExercise.objects.create(template=template, **ex)
+        template = RoutineTemplate.objects.create(**validated_data)
+        RoutineTemplateExercise.objects.bulk_create([
+            RoutineTemplateExercise(template=template, **ex) for ex in exercises_data])
         return template
+
+    @transaction.atomic
     def update(self, instance, validated_data):
-        # Update template and nested exercises
+        """Atomic. The old exercises are deleted before the new ones are written, so a
+        failure on the third of twelve left the trainer's template holding two, with
+        no way to recover the rest."""
         exercises_data = validated_data.pop('routinetemplateexercise_set', None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
         if exercises_data is not None:
             instance.routinetemplateexercise_set.all().delete()
-            for ex in exercises_data:
-                RoutineTemplateExercise.objects.create(template=instance, **ex)
+            RoutineTemplateExercise.objects.bulk_create([
+                RoutineTemplateExercise(template=instance, **ex) for ex in exercises_data])
         return instance
 
 

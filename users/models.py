@@ -633,10 +633,14 @@ class TrainerClientRelation(models.Model):
                 condition=Q(status='approved'),
                 name='unique_approved_trainer_per_client'
             ),
-            # A client can have at most one pending request at a time
+            # A client can have at most one pending request OF THEIR OWN. Scoped to
+            # client-initiated rows: a trainer's invitation is a different thing, and
+            # counting it here meant any trainer could freeze any client out of
+            # choosing anybody — the client's own request hit this index and 500'd —
+            # while a client could also receive only one invitation in total.
             models.UniqueConstraint(
                 fields=['client'],
-                condition=Q(status='pending'),
+                condition=Q(status='pending', initiated_by='client'),
                 name='unique_pending_trainer_request_per_client'
             ),
         ]
