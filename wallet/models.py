@@ -136,6 +136,19 @@ class Transaction(models.Model):
     amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     currency = models.CharField(max_length=8, default="USD")
     metadata = models.JSONField(default=dict, blank=True)
+    #: The transaction this one reverses, when it is a reversal. A OneToOne, so the
+    #: DATABASE says a transfer can be reversed at most once.
+    #:
+    #: The rule was enforced by reading `metadata__original_reference` and refusing if a
+    #: row was found — a check in one transaction and a write in another, with no lock on
+    #: the original. Two administrators hitting Reverse on the same reference both passed
+    #: the check and both moved money: measured with two real threads, one 100.00
+    #: transfer came back as 200.00 out of the trainer's wallet. An idempotency key does
+    #: not help, because it is scoped to `(created_by, key)` — a different admin, or the
+    #: same admin retrying with a fresh key, is a different key.
+    reverses = models.OneToOneField(
+        "self", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="reversal", limit_choices_to={"tx_type__in": ("topup", "transfer")})
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
@@ -230,7 +243,15 @@ class WalletAuditLog(models.Model):
         return True, None
 
 
-def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount, actor_id=None, tx_type="transfer", metadata=None) -> Transaction:
+class AlreadyReversed(Exception):
+    """This transaction has been reversed. Money must not move a second time."""
+
+    def __init__(self, reference_id):
+        self.reference_id = reference_id
+        super().__init__(f"{reference_id} has already been reversed")
+
+
+def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount, actor_id=None, tx_type="transfer", metadata=None, reverses=None) -> Transaction:
     """
     Atomically move funds between wallets. If source is None, it's a credit (e.g., top-up).
     If destination is None, it's a debit. Creates a Transaction record on success.
@@ -258,6 +279,21 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
             for w in Wallet.objects.select_for_update().filter(id__in=wallet_ids).order_by("id")
         }
 
+        # BEFORE the balances are touched. Locking the original and re-reading it here
+        # is what stops two callers both finding it un-reversed; the OneToOne on
+        # `reverses` is the backstop. Order matters for the MESSAGE too: after the first
+        # reversal the destination wallet is empty, so a second attempt placed below the
+        # balance check fails with "Insufficient balance" — an accidental refusal that
+        # reads as a wallet problem and disappears the moment the wallet has other money
+        # in it. That is why this defect survived testing.
+        if reverses is not None:
+            original = (Transaction.objects.select_for_update()
+                        .filter(pk=reverses.pk).first())
+            if original is None:
+                raise ValueError("the transaction being reversed no longer exists")
+            if Transaction.objects.filter(reverses=original).exists():
+                raise AlreadyReversed(original.reference_id)
+
         if source:
             src = locked[source.id]
             if src.balance < amount:
@@ -282,6 +318,7 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
             amount=amount,
             currency=(destination.currency if destination else (source.currency if source else "USD")),
             metadata=metadata,
+            reverses=reverses,
         )
 
     return tx

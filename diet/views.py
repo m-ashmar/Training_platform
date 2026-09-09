@@ -43,7 +43,8 @@ from subscription.permissions import HasDietAccess
 from subscription import quota
 from django.utils import timezone
 from django.http import Http404
-from rest_framework.exceptions import NotFound, PermissionDenied, NotAuthenticated
+from rest_framework.exceptions import (NotFound, NotAuthenticated, PermissionDenied,
+                                       ValidationError as DRFValidationError)
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 from training_platform.query_params import int_param
 
@@ -87,8 +88,26 @@ def parse_time(time_str):
 # FOOD SEARCH AND IMPORT ENDPOINTS
 # ============================================================================
 
-class BadInput(ValueError):
-    """A client value of the wrong shape. Answered with a 400 naming the field."""
+class BadInput(ValueError, DRFValidationError):
+    """A client value of the wrong shape. Answered with a 400 naming the field.
+
+    Both bases on purpose. `ValueError` keeps the twenty-six `except BadInput` clauses in
+    this module working unchanged; `rest_framework.exceptions.ValidationError` means a
+    site that does NOT catch it still answers 400 with a `code`, because `APIException` is
+    in `PASSTHROUGH_EXCEPTIONS` and so it reaches DRF's handler instead of the view's
+    broad `except Exception`. Without that second base, every new call to `_id()` or
+    `_body()` in a handler that happens not to catch `BadInput` would be a 500.
+    """
+
+    def __init__(self, message):
+        DRFValidationError.__init__(self, message)
+        ValueError.__init__(self, message)
+
+    def __str__(self):
+        detail = self.detail
+        while isinstance(detail, (list, tuple)) and detail:
+            detail = detail[0]
+        return str(detail)
 
 
 def _id_list(value, field: str):
@@ -112,12 +131,60 @@ def _id_list(value, field: str):
 
 
 def _id(value, field: str) -> int:
+    """A positive whole number, or a 400 naming the field.
+
+    `int(True)` is 1 and `int(14372.9)` is 14372 — a DIFFERENT row, accepted silently and
+    named back to the client in a 200. `trainer_services._validated_items` has always
+    rejected both; this helper truncated them.
+    """
+    if isinstance(value, bool):
+        raise BadInput(f"{field} must be an id")
     try:
         out = int(value)
     except (TypeError, ValueError):
         raise BadInput(f"{field} must be an id")
+    try:
+        if float(value) != out:
+            raise BadInput(f"{field} must be a whole number")
+    except (TypeError, ValueError):
+        raise BadInput(f"{field} must be an id")
     if out <= 0:
         raise BadInput(f"{field} must be an id")
+    return out
+
+
+def _body(request) -> dict:
+    """`request.data` when it is an object, and a 400 when it is not.
+
+    A JSON body of `[]`, `null`, `5`, `true` or `"hello"` reaches `request.data` as a
+    list, None, int, bool or str — none of which have `.get` — so eleven write endpoints
+    answered 500 to a client that serialised an empty list instead of an empty object.
+    The shape of the body is the caller's mistake and it is one 400.
+    """
+    data = request.data
+    if isinstance(data, dict):
+        return data
+    if data is None or data == "":
+        return {}
+    raise BadInput("expected a JSON object")
+
+
+def _text(value, field: str, *, limit: int = 500) -> str:
+    """A string of bounded length, or a 400. Never `str(some_dict)`.
+
+    `allergies` was assigned straight from `request.data`, so a client posting
+    `["peanut"]` stored the literal text `"['peanut']"` and a client posting 100,000
+    characters stored all of them. That string is the sole input to `AllergenChecker`,
+    read by the generator, by the trainer's write and by the swap path, and a shape it
+    cannot parse fails OPEN.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise BadInput(f"{field} must be text")
+    out = str(value).strip()
+    if len(out) > limit:
+        raise BadInput(f"{field} must be at most {limit} characters")
     return out
 
 
@@ -458,9 +525,9 @@ class UserFoodCategoryPreferenceView(APIView):
 
     def post(self, request):
         try:
-            food_id = request.data.get('food_id')
-            meal = request.data.get('meal')
-            macro = request.data.get('macro')
+            food_id = _body(request).get('food_id')
+            meal = _body(request).get('meal')
+            macro = _body(request).get('macro')
 
             if not all([food_id, meal, macro]):
                 return Response({"error": _("food_id, meal, and macro are required")}, status=status.HTTP_400_BAD_REQUEST)
@@ -514,8 +581,8 @@ class UserFoodCategoryPreferenceDetailView(APIView):
 
     def put(self, request, food_id):
         try:
-            meal = request.data.get('meal')
-            macro = request.data.get('macro')
+            meal = _body(request).get('meal')
+            macro = _body(request).get('macro')
             if not any([meal, macro]):
                 return Response({"error": _("Provide meal and/or macro to update")}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -531,7 +598,7 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             # Without that, `get_object_or_404` on (user, food) raised
             # MultipleObjectsReturned the moment the core feature worked.
             rows = UserFoodCategoryPreference.objects.filter(user=request.user, food_id=food_id)
-            from_meal, from_macro = request.data.get('from_meal'), request.data.get('from_macro')
+            from_meal, from_macro = _body(request).get('from_meal'), _body(request).get('from_macro')
             if from_meal:
                 rows = rows.filter(meal=from_meal)
             if from_macro:
@@ -569,10 +636,10 @@ class UserFoodCategoryPreferenceDetailView(APIView):
         try:
             # Delete one slot when named, every slot for the food when not.
             rows = UserFoodCategoryPreference.objects.filter(user=request.user, food_id=food_id)
-            if request.data.get('meal'):
-                rows = rows.filter(meal=request.data['meal'])
-            if request.data.get('macro'):
-                rows = rows.filter(macro=request.data['macro'])
+            if _body(request).get('meal'):
+                rows = rows.filter(meal=_body(request)['meal'])
+            if _body(request).get('macro'):
+                rows = rows.filter(macro=_body(request)['macro'])
             # NOT `deleted, _ = ...`: `_` is gettext in this module, and rebinding it
             # to the per-model dict made every translated string below a TypeError —
             # a 500 on "remove a food I chose", the same shadowing class as the loop
@@ -610,7 +677,7 @@ class FoodImportView(APIView):
     def post(self, request):
         try:
             # Accept either nested 'food_data' or flat body per tests
-            food_data = request.data.get('food_data') or request.data
+            food_data = _body(request).get('food_data') or request.data
             if not food_data or not food_data.get('api_id'):
                 return Response({"error": _("api_id is required")}, status=status.HTTP_400_BAD_REQUEST)
             
@@ -813,9 +880,9 @@ class UserPreferencesView(APIView):
     def post(self, request):
         try:
             preferences, _created = UserFoodPreference.objects.get_or_create(user=request.user)
-            action = request.data.get('action')
+            action = _body(request).get('action')
             if action:
-                food_id = request.data.get('food_id')
+                food_id = _body(request).get('food_id')
                 if not food_id:
                     return Response({"error": _("food_id is required")}, status=status.HTTP_400_BAD_REQUEST)
                 # BUG FIX: Use select_related for better performance
@@ -834,25 +901,25 @@ class UserPreferencesView(APIView):
 
             # Bulk update path (retain old behavior)
             if 'liked_foods' in request.data:
-                foods = FoodItem.objects.filter(id__in=_id_list(request.data['liked_foods'], 'liked_foods'))
+                foods = FoodItem.objects.filter(id__in=_id_list(_body(request)['liked_foods'], 'liked_foods'))
                 preferences.liked_foods.set(foods)
             if 'disliked_foods' in request.data:
-                foods = FoodItem.objects.filter(id__in=_id_list(request.data['disliked_foods'], 'disliked_foods'))
+                foods = FoodItem.objects.filter(id__in=_id_list(_body(request)['disliked_foods'], 'disliked_foods'))
                 preferences.disliked_foods.set(foods)
             # The five macro-choice lists carried a 50-point ranking weight that no
             # endpoint could write; Django admin was the only writer.
             for field in ('protein_choices', 'carb_choices', 'fat_choices',
                           'vegetable_choices', 'fruit_choices'):
                 if field in request.data:
-                    ids = _id_list(request.data[field], field)
+                    ids = _id_list(_body(request)[field], field)
                     getattr(preferences, field).set(FoodItem.objects.filter(id__in=ids))
             changed = []
             if 'allergies' in request.data:
-                preferences.allergies = request.data['allergies']
+                preferences.allergies = _body(request)['allergies']
                 changed.append('allergies')
             if 'local_ratio' in request.data:
                 try:
-                    ratio = float(request.data['local_ratio'])
+                    ratio = float(_body(request)['local_ratio'])
                 except (TypeError, ValueError):
                     return Response({"error": _("local_ratio must be a number from 0 to 1")},
                                     status=status.HTTP_400_BAD_REQUEST)
@@ -882,8 +949,8 @@ class UserPreferencesView(APIView):
     def delete(self, request):
         try:
             preferences = get_object_or_404(UserFoodPreference, user=request.user)
-            action = request.data.get('action')
-            food_id = request.data.get('food_id')
+            action = _body(request).get('action')
+            food_id = _body(request).get('food_id')
             if action and food_id:
                 food = FoodItem.objects.filter(id=food_id).first()
                 if not food:
@@ -973,7 +1040,7 @@ class GenerateDietPlanView(APIView):
             # validated were not the values used.
             meal_count = int_param(request.data, 'meal_count', default=3, minimum=1, maximum=10)
             snack_count = int_param(request.data, 'snack_count', default=1, minimum=0, maximum=10)
-            start_date_str = request.data.get('start_date')
+            start_date_str = _body(request).get('start_date')
             # Validate optional start_date if present
             if start_date_str:
                 parsed = parse_date(start_date_str)
@@ -1090,7 +1157,7 @@ class GenerateDietPlanRuleBasedView(APIView):
             # Seven days inline. This endpoint is synchronous and CPU-bound; anything
             # longer belongs on `generate_rule_based_plan`, the Celery task.
             duration_days = int_param(request.data, 'duration_days', default=1, minimum=1, maximum=MAX_INLINE_DAYS)
-            start_date = request.data.get('start_date')
+            start_date = _body(request).get('start_date')
             if start_date:
                 parsed = parse_date(str(start_date))
                 if not parsed:
@@ -1392,9 +1459,9 @@ class TrainerDietPlanView(APIView):
                 )
             
             # Validate required fields
-            client_id = request.data.get('client_id')
-            template_id = request.data.get('template_id')
-            start_date_str = request.data.get('start_date')
+            client_id = _body(request).get('client_id')
+            template_id = _body(request).get('template_id')
+            start_date_str = _body(request).get('start_date')
             
             if not all([client_id, template_id, start_date_str]):
                 return Response(
@@ -1421,8 +1488,8 @@ class TrainerDietPlanView(APIView):
                 template=template,
                 start_date=start_date,
                 duration_weeks=int_param(request.data, 'duration_weeks', default=4, minimum=1, maximum=52),
-                goal=DietPlan.normalise_goal(request.data.get('goal')),
-                daily_calories=request.data.get('daily_calories')
+                goal=DietPlan.normalise_goal(_body(request).get('goal')),
+                daily_calories=_body(request).get('daily_calories')
             )
             
             return Response({
@@ -1618,10 +1685,10 @@ class TrainerMealView(APIView):
                 }, status=status.HTTP_201_CREATED)
             
             # Validate required fields for single object
-            diet_plan_id = request.data.get('diet_plan_id')
-            meal_type = request.data.get('meal_type')
-            target_date_str = request.data.get('target_date')
-            food_items = request.data.get('food_items', [])
+            diet_plan_id = _body(request).get('diet_plan_id')
+            meal_type = _body(request).get('meal_type')
+            target_date_str = _body(request).get('target_date')
+            food_items = _body(request).get('food_items', [])
             
             if not all([diet_plan_id, meal_type, target_date_str, food_items]):
                 return Response(
@@ -1633,8 +1700,8 @@ class TrainerMealView(APIView):
             diet_plan = get_object_or_404(DietPlan, id=diet_plan_id)
             target_date = parse_date(target_date_str)
             scheduled_time = None
-            if request.data.get('scheduled_time'):
-                scheduled_time = parse_time(request.data.get('scheduled_time'))
+            if _body(request).get('scheduled_time'):
+                scheduled_time = parse_time(_body(request).get('scheduled_time'))
             
             if not target_date:
                 return Response(
@@ -1650,7 +1717,7 @@ class TrainerMealView(APIView):
                 target_date=target_date,
                 food_items=food_items,
                 scheduled_time=scheduled_time,
-                description=request.data.get('description', '')
+                description=_body(request).get('description', '')
             )
             
             return Response({
@@ -1707,16 +1774,16 @@ class TrainerMealView(APIView):
             
             # Parse optional fields
             scheduled_time = None
-            if request.data.get('scheduled_time'):
-                scheduled_time = parse_time(request.data.get('scheduled_time'))
+            if _body(request).get('scheduled_time'):
+                scheduled_time = parse_time(_body(request).get('scheduled_time'))
             
             # Update meal
             trainer_service = TrainerDietPlanService(request.user)
             updated_meal = trainer_service.update_meal(
                 meal=meal,
-                food_items=request.data.get('food_items'),
+                food_items=_body(request).get('food_items'),
                 scheduled_time=scheduled_time,
-                description=request.data.get('description')
+                description=_body(request).get('description')
             )
             
             return Response({
@@ -2204,7 +2271,7 @@ class MealCompletionView(APIView):
             meal = get_object_or_404(
                 Meal.objects.filter(diet_plan__user=request.user), id=meal_id)
             
-            action = request.data.get('action', 'complete_meal')
+            action = _body(request).get('action', 'complete_meal')
             
             if action == 'complete_meal':
                 # Complete entire meal
@@ -2225,8 +2292,8 @@ class MealCompletionView(APIView):
             
             elif action == 'complete_component':
                 # Complete specific component
-                component_id = request.data.get('component_id')
-                actual_quantity = request.data.get('actual_quantity')
+                component_id = _body(request).get('component_id')
+                actual_quantity = _body(request).get('actual_quantity')
                 
                 if not component_id:
                     return Response(
@@ -2384,7 +2451,7 @@ class ClientMealInteractionView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
             
-            action = request.data.get('action')
+            action = _body(request).get('action')
             
             if action == 'swap_food':
                 # The client rejected one food on the plate and took another. Offered
@@ -2395,8 +2462,8 @@ class ClientMealInteractionView(APIView):
                 from diet.planner.portion import nearest_portion
                 component = get_object_or_404(
                     MealComponent.objects.select_related('meal', 'food'),
-                    id=request.data.get('component_id'), meal__diet_plan__user=request.user)
-                chosen_id = request.data.get('chosen_food_id')
+                    id=_body(request).get('component_id'), meal__diet_plan__user=request.user)
+                chosen_id = _body(request).get('chosen_food_id')
                 # Built AFTER the component is resolved and only for foods that could
                 # actually replace it — the same macro slot. This loaded and vectorised
                 # the entire catalogue on every tap, including the "just show me the
@@ -2466,8 +2533,8 @@ class ClientMealInteractionView(APIView):
 
             if action == 'rate_component':
                 component = get_object_or_404(
-                    MealComponent, id=request.data.get('component_id'), meal__diet_plan__user=request.user)
-                is_liked = request.data.get('is_liked')
+                    MealComponent, id=_body(request).get('component_id'), meal__diet_plan__user=request.user)
+                is_liked = _body(request).get('is_liked')
                 if is_liked is None:
                     return Response({"error": _("is_liked is required")}, status=status.HTTP_400_BAD_REQUEST)
                 component.is_liked = _as_bool(is_liked, 'is_liked')
@@ -2479,17 +2546,17 @@ class ClientMealInteractionView(APIView):
                 # The client-side steps of the funnel. Generated is the meal row;
                 # completed, rated and swapped are recorded by the endpoints that do
                 # them; viewed and accepted only the app can know.
-                kind = (request.data.get('kind') or '').lower()
+                kind = (_body(request).get('kind') or '').lower()
                 if kind not in (MealEvent.VIEWED, MealEvent.ACCEPTED):
                     return Response({"error": _("kind must be viewed or accepted")},
                                     status=status.HTTP_400_BAD_REQUEST)
-                meal = get_object_or_404(Meal, id=request.data.get('meal_id'), diet_plan__user=request.user)
+                meal = get_object_or_404(Meal, id=_body(request).get('meal_id'), diet_plan__user=request.user)
                 MealEvent.objects.create(user=request.user, meal=meal, kind=kind)
                 return Response({"message": _("Recorded"), "meal_id": meal.id, "kind": kind})
 
             if action == 'complete_component':
-                component_id = request.data.get('component_id')
-                actual_quantity = request.data.get('actual_quantity')
+                component_id = _body(request).get('component_id')
+                actual_quantity = _body(request).get('actual_quantity')
                 
                 if not component_id:
                     return Response(
@@ -2512,9 +2579,9 @@ class ClientMealInteractionView(APIView):
                 })
             
             elif action == 'rate_meal':
-                meal_id = request.data.get('meal_id')
-                is_liked = request.data.get('is_liked')
-                notes = request.data.get('notes', '')
+                meal_id = _body(request).get('meal_id')
+                is_liked = _body(request).get('is_liked')
+                notes = _body(request).get('notes', '')
                 
                 if not all([meal_id, is_liked is not None]):
                     return Response(

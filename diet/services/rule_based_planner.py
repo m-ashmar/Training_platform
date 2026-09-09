@@ -554,8 +554,37 @@ class RuleBasedPlanner:
         # meals and was deleted. A pool that can supply neither a dish nor a shape is a
         # catalogue or constraint problem, and it must surface as one rather than as a
         # confidently wrong plate.
-        raise NoServableMealError(
-            f"no dish or meal shape can be built for {meal_name} from this client's pool")
+        raise NoServableMealError(self._why_nothing_fits(meal_name))
+
+    def _why_nothing_fits(self, meal_name: str) -> str:
+        """Say what emptied the pool, not just that it is empty.
+
+        "No dish or meal shape can be built" reads as a catalogue that is too small, and
+        someone will go looking for missing food. The commonest cause is the opposite: a
+        catalogue that is complete but UNVETTED. The allergen gate refuses anything it
+        cannot positively clear, and a food's composition is only positively known once
+        `curate_food_allergens` has run — so on a database where that step was skipped,
+        a client with any allergy at all has zero candidates and every generate fails.
+        Nothing else in the system says so.
+        """
+        from diet.models import FoodItem
+
+        base = f"no dish or meal shape can be built for {meal_name} from this client's pool"
+        constraints = self._constraints()
+        if not constraints.checks_allergens:
+            return base
+        unvetted = (FoodItem.objects.filter(needs_review=False)
+                    .exclude(allergen_source="verified").count())
+        total = FoodItem.objects.filter(needs_review=False).count()
+        if total and unvetted == total:
+            return (f"{base}. Every one of the {total} food(s) in the catalogue has an "
+                    f"unverified allergen composition, so none of them can be cleared for "
+                    f"a client who has declared an allergy. Run "
+                    f"`manage.py curate_food_allergens --apply`.")
+        if unvetted:
+            return (f"{base}. {unvetted} of {total} food(s) have an unverified allergen "
+                    f"composition and cannot be served to a client with a declared allergy.")
+        return base
 
     def _plan_meal_from_template(self, meal_name: str, ctx: PlannerContext,
                                  day_ctx: DayContext):

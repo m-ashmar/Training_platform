@@ -45,11 +45,28 @@ no notifications, no feed fan-out, no AI plans, no scheduled jobs.
 
 ## 5. Seed and verify
 ```bash
-fly ssh console -C "python manage.py seed_recipes"
-fly ssh console -C "python manage.py curate_food_allergens --apply"
+fly ssh console -C "python manage.py load_food_catalogue --apply --wipe"
 fly ssh console -C "python manage.py update_translation_fields"   # after any bulk import
+fly ssh console -C "python manage.py check_catalogue"
 curl -fsS https://<app>.fly.dev/api/auth/health/
 ```
+
+**`load_food_catalogue` is the whole seed and it was missing from this list.** It builds the
+catalogue, then calls `seed_food_units`, `seed_recipes` and `curate_food_allergens` itself, in
+that order, because each needs the one before it. Running `seed_recipes` on its own — which is
+what this step used to say — prints 105 lines of `skip ...: catalogue has no [...]`, seeds
+nothing, and **exits 0**. The deploy then reports success and the app comes up with an empty
+food catalogue: every plan generation has nothing to plan from.
+
+`--wipe` is correct here and only here: on a first deploy there is nothing to wipe, and after
+launch it would delete what clients have eaten and every preference and learned weight they
+have accumulated. **Never run `--wipe` against a live database.** To converge an existing
+catalogue on the file, run `load_food_catalogue --apply` without it.
+
+`check_catalogue` asserts the invariants the engine depends on and exits non-zero if any of
+them is broken — most importantly that every food has a *verified* allergen composition,
+because the planner refuses to serve a client with a declared allergy anything it cannot
+positively clear, and an uncurated catalogue means those clients get no plan at all.
 
 `update_translation_fields` matters: content imported outside the ORM fills only the base
 column, and `.name` then resolves to `''`. That once left 542 of 554 exercises blank

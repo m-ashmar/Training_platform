@@ -9,7 +9,9 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, generics
 from django.utils.translation import gettext as _
-from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditLog, IdempotencyKey, move_funds_atomic, ensure_agent_profile
+from .models import (AlreadyReversed, Wallet, Transaction, AgentProfile, AgentAPIKey,
+                     WalletAuditLog, IdempotencyKey, move_funds_atomic,
+                     ensure_agent_profile)
 from .serializers import (
     WalletSerializer,
     TransactionSerializer,
@@ -291,9 +293,18 @@ class AdminReversalView(APIView):
         # --- Pre-side-effect validation before reserving the idempotency key ---
         original = get_object_or_404(Transaction, reference_id=serializer.validated_data["reference_id"])
 
-        # Guard: a transaction may be reversed at most once, regardless of idempotency key.
-        if Transaction.objects.filter(tx_type="reversal", metadata__original_reference=original.reference_id).exists():
-            return Response({"error": _("Transaction has already been reversed")}, status=status.HTTP_409_CONFLICT)
+        # A cheap early answer for the ordinary case. It is NOT the guard — this read and
+        # the write below are different transactions with no lock between them, and two
+        # administrators hitting Reverse on the same reference both passed it and both
+        # moved money (measured: one 100.00 transfer came out of the trainer's wallet
+        # twice). The real guard is inside `move_funds_atomic`, which locks the original
+        # and re-checks, backed by a OneToOne on `Transaction.reverses`.
+        if Transaction.objects.filter(reverses=original).exists():
+            return Response({"error": _("Transaction has already been reversed"),
+                             "code": "already_reversed"}, status=status.HTTP_409_CONFLICT)
+        if original.tx_type == "reversal":
+            return Response({"error": _("A reversal cannot itself be reversed"),
+                             "code": "not_reversible"}, status=status.HTTP_409_CONFLICT)
 
         idem_key = serializer.validated_data["idempotency_key"]
         try:
@@ -308,7 +319,18 @@ class AdminReversalView(APIView):
             return Response(replay, status=status.HTTP_200_OK)
 
         try:
-            tx = move_funds_atomic(original.destination_wallet, original.source_wallet, original.amount, actor_id=request.user.id, tx_type="reversal", metadata={"original_reference": original.reference_id, "reason": serializer.validated_data.get("reason", "")})
+            tx = move_funds_atomic(
+                original.destination_wallet, original.source_wallet, original.amount,
+                actor_id=request.user.id, tx_type="reversal",
+                metadata={"original_reference": original.reference_id,
+                          "reason": serializer.validated_data.get("reason", "")},
+                reverses=original)
+        except AlreadyReversed:
+            # The other caller won the lock. No money moved here.
+            idempotency.release(idem)
+            audit("wallet.reversal.already", request, {"original": original.reference_id})
+            return Response({"error": _("Transaction has already been reversed"),
+                             "code": "already_reversed"}, status=status.HTTP_409_CONFLICT)
         except ValueError as e:
             idempotency.release(idem)
             return Response({"error": _("Request could not be completed.")}, status=status.HTTP_400_BAD_REQUEST)

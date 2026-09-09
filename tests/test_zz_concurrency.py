@@ -14,6 +14,9 @@ So these live in a file that sorts AFTER `test_regression_gate.py`. `pytest test
 them; it just runs them last, and the truncation lands on nothing. Anything added here
 has to be able to survive being the last thing that happens.
 """
+import threading
+from decimal import Decimal
+
 import pytest
 
 from tests.test_regression_gate import _api_client_for, _chooser, _trainer_and_client
@@ -122,3 +125,55 @@ def test_one_hold_pays_a_trainer_once_however_many_callers(seeded_catalogue, mak
     assert Transaction.objects.filter(
         metadata__purpose="trainer_assignment_settlement",
         metadata__trainer_id=trainer.id).count() == 1
+
+
+
+
+@pytest.mark.django_db(transaction=True)
+def test_one_transfer_is_reversed_once_however_many_administrators_try(make_user):
+    """The "already reversed" guard read `metadata__original_reference` in one transaction
+    and moved money in another, with no lock on the row it was reading. Two administrators
+    hitting Reverse on the same reference both passed it: measured with real threads, one
+    100.00 transfer came out of the trainer's wallet twice. An idempotency key does not
+    help — it is scoped to `(created_by, key)`, so a second admin, or the same admin with
+    a fresh key, is a different key.
+
+    The refusal must also be the RIGHT refusal. Placed after the balance check, the second
+    caller failed with "Insufficient balance" — an accident of the destination wallet
+    being empty, which stops happening the moment that wallet holds other money.
+    """
+    from django.db import connections
+    from wallet.models import Transaction, Wallet, move_funds_atomic
+
+    client_user = make_user("rev-client")
+    trainer = make_user("rev-trainer", user_type="trainer")
+    cw, _ = Wallet.objects.get_or_create(owner=client_user, defaults={"owner_type": "client"})
+    tw, _ = Wallet.objects.get_or_create(owner=trainer, defaults={"owner_type": "trainer"})
+    cw.balance = Decimal("500.00"); cw.save()
+    tw.balance = Decimal("0.00"); tw.save()
+    tx = move_funds_atomic(cw, tw, Decimal("100.00"), actor_id=client_user.id, tx_type="transfer")
+
+    barrier, results = threading.Barrier(4), []
+
+    def go():
+        try:
+            barrier.wait(timeout=30)
+            move_funds_atomic(tw, cw, tx.amount, actor_id=client_user.id,
+                              tx_type="reversal", reverses=tx)
+            results.append("moved")
+        except Exception as exc:
+            results.append(type(exc).__name__)
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=go) for _ in range(4)]
+    for t in threads: t.start()
+    for t in threads: t.join(timeout=60)
+
+    cw.refresh_from_db(); tw.refresh_from_db()
+    assert results.count("moved") == 1, results
+    assert results.count("AlreadyReversed") == 3, results
+    assert Transaction.objects.filter(reverses=tx).count() == 1
+    assert cw.balance == Decimal("500.00") and tw.balance == Decimal("0.00")
+
+

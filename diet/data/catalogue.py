@@ -34,6 +34,13 @@ from __future__ import annotations
 
 # --- meal slot vocabulary -------------------------------------------------
 B, L, D, S = "Breakfast", "Lunch", "Dinner", "Snack"
+#: Every slot name, so a row's slots can be checked against something rather than
+#: trusted. Ten rows once passed the bare constant `S` where a tuple was meant, and
+#: `list("Snack")` is five single characters — a non-empty slot list naming no real slot,
+#: which zeroes every slot feature in the similarity index instead of leaving it neutral.
+#: `load_food_catalogue` refuses that shape now; this is what it checks against.
+SLOTS = frozenset((B, L, D, S))
+
 ALL = (B, L, D, S)
 MAIN = (L, D)
 MORNING = (B, S)
@@ -105,8 +112,8 @@ USDA = [
     ("Pistachios", "nuts pistachio nuts raw", "Fats", (B, S), "فستق حلبي"),
     ("Peanut Butter (Natural)", "peanut butter smooth style without salt", "Fats", MORNING, "زبدة فول سوداني"),
     ("Almond Butter", "almond butter plain without salt", "Fats", MORNING, "زبدة لوز"),
-    ("Sunflower Seeds", "seeds sunflower seed kernels dried", "Fats", S, "بزر"),
-    ("Pumpkin Seeds", "seeds pumpkin seed kernels dried", "Fats", S, "بزر قرع"),
+    ("Sunflower Seeds", "seeds sunflower seed kernels dried", "Fats", (S,), "بزر"),
+    ("Pumpkin Seeds", "seeds pumpkin seed kernels dried", "Fats", (S,), "بزر قرع"),
     ("Sesame Seeds", "seeds sesame seeds whole dried", "Fats", ALL, "سمسم"),
     ("Flax Seeds", "seeds flaxseed", "Fats", MORNING, "بذر كتان"),
     ("Chia Seeds", "seeds chia seeds dried", "Fats", MORNING, "شيا"),
@@ -139,15 +146,15 @@ USDA = [
     ("Banana", "bananas raw", "Fruits", MORNING, "موز"),
     ("Orange", "oranges raw navels", "Fruits", MORNING, "برتقال"),
     ("Grapes", "grapes red or green raw", "Fruits", MORNING, "عنب"),
-    ("Watermelon", "watermelon raw", "Fruits", S, "بطيخ"),
-    ("Melon (Cantaloupe)", "melons cantaloupe raw", "Fruits", S, "شمام"),
+    ("Watermelon", "watermelon raw", "Fruits", (S,), "بطيخ"),
+    ("Melon (Cantaloupe)", "melons cantaloupe raw", "Fruits", (S,), "شمام"),
     ("Strawberries", "strawberries raw", "Fruits", MORNING, "فراولة"),
     ("Blueberries", "blueberries raw", "Fruits", MORNING, "توت أزرق"),
     ("Peach", "peaches raw", "Fruits", MORNING, "دراق"),
     ("Apricot", "apricots raw", "Fruits", MORNING, "مشمش"),
     ("Fig (Fresh)", "figs raw", "Fruits", MORNING, "تين"),
     ("Pomegranate", "pomegranates raw", "Fruits", MORNING, "رمان"),
-    ("Dates (Medjool)", "dates medjool", "Fruits", S, "تمر"),
+    ("Dates (Medjool)", "dates medjool", "Fruits", (S,), "تمر"),
     ("Kiwi", "kiwifruit green raw", "Fruits", MORNING, "كيوي"),
     ("Mango", "mangos raw", "Fruits", MORNING, "مانجا"),
     ("Pear", "pears raw", "Fruits", MORNING, "إجاص"),
@@ -167,7 +174,7 @@ LEVANTINE = [
     ("Nabulsi Cheese", "جبنة نابلسية", 290, 20.0, 2.5, 22.0, "Proteins", ALL),
     ("Shanklish", "شنكليش", 315, 21.0, 5.0, 24.0, "Proteins", ALL),
     ("Jameed (Dried Yogurt)", "جميد", 258, 27.0, 30.0, 3.0, "Proteins", MAIN),
-    ("Kishk (Dry)", "كشك", 350, 15.0, 60.0, 5.0, "Carbs", B),
+    ("Kishk (Dry)", "كشك", 350, 15.0, 60.0, 5.0, "Carbs", (B,)),
     ("Freekeh (Cooked)", "فريكة", 141, 5.7, 28.0, 0.9, "Carbs", MAIN),
     ("Freekeh (Dry)", "فريكة ناشفة", 352, 12.5, 72.0, 2.5, "Carbs", MAIN),
     ("Pita Bread (White)", "خبز عربي", 275, 9.1, 55.7, 1.2, "Carbs", ALL),
@@ -179,7 +186,7 @@ LEVANTINE = [
     ("Tahini", "طحينة", 595, 17.0, 21.2, 53.8, "Fats", ALL),
     ("Molokhia (Cooked)", "ملوخية", 58, 4.0, 7.0, 1.5, "Vegetables", MAIN),
     ("Makdous", "مكدوس", 210, 3.5, 9.0, 18.0, "Vegetables", (B, S)),
-    ("Za'atar Mix", "زعتر", 340, 10.0, 45.0, 14.0, "Fats", B),
+    ("Za'atar Mix", "زعتر", 340, 10.0, 45.0, 14.0, "Fats", (B,)),
     ("Sumac", "سماق", 320, 5.0, 60.0, 8.0, "Vegetables", ALL),
     ("Green Olives", "زيتون أخضر", 145, 1.0, 3.8, 15.3, "Fats", ALL),
     ("Black Olives", "زيتون أسود", 115, 0.8, 6.3, 10.7, "Fats", ALL),
@@ -190,11 +197,11 @@ LEVANTINE = [
     ("Fattoush", "فتوش", 110, 2.2, 11.0, 6.5, "Vegetables", MAIN),
     ("Shawarma (Chicken)", "شاورما دجاج", 190, 20.0, 4.0, 10.0, "Proteins", MAIN),
     ("Grape Leaves (Stuffed)", "ورق عنب", 155, 3.0, 20.0, 7.0, "Carbs", MAIN),
-    ("Halawa (Tahini Sweet)", "حلاوة طحينية", 540, 12.0, 50.0, 32.0, "Fats", S),
-    ("Ashta", "قشطة", 200, 6.0, 10.0, 15.0, "Proteins", S),
+    ("Halawa (Tahini Sweet)", "حلاوة طحينية", 540, 12.0, 50.0, 32.0, "Fats", (S,)),
+    ("Ashta", "قشطة", 200, 6.0, 10.0, 15.0, "Proteins", (S,)),
     ("Arabic Coffee", "قهوة عربية", 2, 0.1, 0.3, 0.0, "Other", ALL),
     ("Ayran", "عيران", 40, 1.7, 3.0, 2.0, "Proteins", ALL),
-    ("Jallab", "جلاب", 120, 0.2, 30.0, 0.1, "Other", S),
+    ("Jallab", "جلاب", 120, 0.2, 30.0, 0.1, "Other", (S,)),
     ("Pomegranate Molasses", "دبس رمان", 270, 0.5, 66.0, 0.2, "Other", ALL),
 ]
 

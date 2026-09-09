@@ -134,8 +134,15 @@ class Command(BaseCommand):
                 to_save.append(food)
 
         total = sum(len(v) for v in buckets.values())
+        tagged = sum(1 for _n, tags, _r in buckets["verified"] if tags)
+        # "verified allergen-free: 136" was the last line an operator read off an
+        # ALLERGEN command, and 62 of those 136 carry milk, gluten, fish, peanut, sesame,
+        # shellfish, soy, tree nut, celery or sulphite. Verified means "we know what is in
+        # it", not "there is nothing in it".
         self.stdout.write(f"\n{total} food items classified:")
-        self.stdout.write(f"  verified allergen-free : {len(buckets['verified'])}")
+        self.stdout.write(f"  composition verified   : {len(buckets['verified'])}"
+                          f"  ({tagged} carry at least one allergen, "
+                          f"{len(buckets['verified']) - tagged} carry none)")
         self.stdout.write(f"  allergens inferred     : {len(buckets['inferred'])}")
         self.stdout.write(f"  needs human review     : {len(buckets['unknown'])}")
 

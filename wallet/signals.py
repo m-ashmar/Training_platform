@@ -97,3 +97,50 @@ def handle_payment_completed(sender, instance, created, **kwargs):
         )
 
 
+def unwind_payment(payment) -> int:
+    """Take the ledger back to where it was before this payment completed.
+
+    `refund_payment` withdrew the ACCESS a payment bought and wrote nothing to the wallet
+    ledger. So a gateway refund or a chargeback — both routed there by
+    `PaymentWebhookView` — cancelled the subscription, returned the money to the card, and
+    left the minted top-up in the client's wallet and the full amount in the trainer's.
+    Every refund was a net loss of the amount to the platform and an un-clawed-back
+    payout to the trainer.
+
+    Reverses each leg through `move_funds_atomic`, so the money moves under the same
+    wallet locks as the original and the reversal is recorded as a reversal. Idempotent:
+    a leg already reversed is skipped, and `Transaction.reverses` is a OneToOne, so a
+    second attempt cannot double it even if two callbacks race.
+
+    Returns how many legs were reversed.
+    """
+    from .models import AlreadyReversed
+
+    reversed_legs = 0
+    legs = Transaction.objects.filter(
+        tx_type__in=("transfer", "topup"),
+        metadata__original_payment_id=str(payment.id),
+    ).order_by("-id")   # the transfer first, so the client's wallet can fund it
+    for leg in legs:
+        if Transaction.objects.filter(reverses=leg).exists():
+            continue
+        try:
+            move_funds_atomic(
+                leg.destination_wallet, leg.source_wallet, leg.amount,
+                actor_id=leg.actor_id, tx_type="reversal",
+                metadata={"original_reference": leg.reference_id,
+                          "original_payment_id": str(payment.id),
+                          "reason": "payment refunded"},
+                reverses=leg)
+            reversed_legs += 1
+        except AlreadyReversed:
+            continue
+        except ValueError:
+            # Insufficient balance: the client has already spent the credit. Say so
+            # rather than leaving a silent hole — this is money someone has to chase.
+            logger.error(
+                "could not reverse %s leg %s for refunded payment %s: the wallet no "
+                "longer holds the funds", leg.tx_type, leg.reference_id, payment.id)
+    return reversed_legs
+
+

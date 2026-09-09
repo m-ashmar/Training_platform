@@ -5359,3 +5359,48 @@ def test_the_plan_is_the_same_whichever_language_asked_for_it(seeded_catalogue):
     english = plan_under("en")
     assert english, "nothing was planned"
     assert english == plan_under("ar"), "the plan changed with the display language"
+
+
+def test_a_refund_takes_the_money_back_and_not_only_the_access(make_user):
+    """`refund_payment` withdrew the ACCESS a payment bought and wrote nothing to the
+    wallet ledger — while `wallet.signals` credits the client on completion and pays the
+    trainer out of that credit. So a gateway refund or a chargeback cancelled the
+    subscription, returned the money to the card, and left the minted top-up and the
+    trainer's payout in place: every refund was a net loss of the amount to the platform.
+
+    The test that existed built a client with NO trainer relation, so the payout leg never
+    ran and the assertion never reached the ledger.
+    """
+    from decimal import Decimal as D
+
+    from subscription.models import Payment, Subscription, SubscriptionPlan
+    from subscription.services.payment_service import PaymentService
+    from users.models import TrainerClientRelation
+    from wallet.models import Transaction, Wallet
+
+    client_user = make_user("ref-client")
+    trainer = make_user("ref-trainer", user_type="trainer")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user, status="approved")
+    client_user.assigned_trainer = trainer; client_user.save()
+
+    plan = SubscriptionPlan.objects.create(name="ref plan", price=D("10.00"), currency="USD",
+                                           duration_days=30, description="x")
+    from django.utils import timezone
+    from datetime import timedelta
+    sub = Subscription.objects.create(user=client_user, plan=plan, status="pending",
+                                      start_date=timezone.now(),
+                                      end_date=timezone.now() + timedelta(days=30))
+    pay = Payment.objects.create(subscription=sub, amount=D("10.00"), currency="USD",
+                                 status="pending", payment_method="manual")
+    PaymentService.complete_payment(pay.id, {"amount": "10.00", "currency": "USD",
+                                             "status": "completed",
+                                             "transaction_id": "probe-1"})
+    tw = Wallet.objects.get(owner=trainer); cw = Wallet.objects.get(owner=client_user)
+    tw.refresh_from_db(); cw.refresh_from_db()
+    assert tw.balance == D("10.00")
+
+    PaymentService.refund_payment(pay.id, reason="chargeback")
+    tw.refresh_from_db(); cw.refresh_from_db()
+    assert tw.balance == D("0.00"), "the trainer kept a refunded payout"
+    assert cw.balance == D("0.00"), "the minted credit was never taken back"
+    assert Transaction.objects.filter(tx_type="reversal").count() == 2

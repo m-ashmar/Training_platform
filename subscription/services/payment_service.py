@@ -182,10 +182,27 @@ class PaymentService:
                 subscription.auto_renew = False
             subscription.save()
 
+            # And take the MONEY back, not just the access. `wallet.signals` credits the
+            # client's wallet and pays the trainer out of it when a payment completes;
+            # nothing undid either leg, so the platform refunded the card and the trainer
+            # kept the payout. Inside the same transaction as the status change, so a
+            # refund is one fact.
+            try:
+                from wallet.signals import unwind_payment
+
+                legs = unwind_payment(payment)
+            except Exception:
+                logger.exception(
+                    "Payment %s was refunded but the ledger could not be unwound; the "
+                    "trainer payout and the minted top-up are still outstanding",
+                    payment.id)
+                raise
+
             logger.warning(
-                "Payment %s refunded (%s); subscription %s now %s until %s",
+                "Payment %s refunded (%s); subscription %s now %s until %s; "
+                "%d wallet leg(s) reversed",
                 payment.id, reason or 'no reason given',
-                subscription.id, subscription.status, subscription.end_date,
+                subscription.id, subscription.status, subscription.end_date, legs,
             )
         return payment
 

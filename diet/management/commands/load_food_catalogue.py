@@ -24,7 +24,7 @@ from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from diet.data.catalogue import LEVANTINE, USDA, WESTERN
+from diet.data.catalogue import LEVANTINE, SLOTS, USDA, WESTERN
 from diet.models import FoodCategory, FoodItem, MealComponent, Recipe, RecipeIngredient
 
 CACHE = Path(__file__).resolve().parents[2] / "data" / "usda_cache.json"
@@ -73,6 +73,16 @@ class Command(BaseCommand):
                 calories=kcal, protein=protein, carbs=carbs, fat=fat,
                 source="curated (absent from USDA SR Legacy and Foundation)",
             ))
+
+        # A row's slots must be a COLLECTION of real slot names. Passing the bare
+        # constant instead of a tuple type-checks, reads correctly, and stores
+        # `["S","n","a","c","k"]`.
+        malformed = [r["name"] for r in rows
+                     if isinstance(r["slots"], str) or not set(r["slots"]) <= SLOTS]
+        if malformed:
+            raise CommandError(
+                "these rows declare meal slots that are not slots (a bare string instead "
+                f"of a tuple?): {malformed}")
 
         self.stdout.write(f"catalogue file declares {len(USDA) + len(LEVANTINE)} food(s)")
         self.stdout.write(f"  resolvable now : {len(rows)}")
