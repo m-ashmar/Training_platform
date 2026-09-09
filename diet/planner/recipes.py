@@ -227,6 +227,16 @@ def _augment(match: RecipeMatch, lines, targets, policy, pool, meal_name, edges,
                        substituted=match.substituted, replaced=match.replaced)
 
 
+def _names_the_dish(food_name: str, title: str) -> bool:
+    """Whether the dish is named after this food, by whole words."""
+    import re
+
+    words = [w for w in re.findall(r"[a-z]+", food_name.lower()) if len(w) > 2]
+    if not words:
+        return False
+    return all(re.search(rf"\b{re.escape(w)}\b", title) for w in words)
+
+
 def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids, recipe_name=""):
     """Put a food the client chose for this meal into the dish, in place of the line
     it most resembles, when that line is a substitute for it.
@@ -240,6 +250,15 @@ def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids, recipe
 
     if not chosen_ids or index is None:
         return lines, None, None
+    # A food the client once chose and has since disliked, or that their allergens or
+    # cuisine forbid, must not be swapped in: the dish was then rejected wholesale by
+    # the constraint check below and the library silently shrank.
+    constraints = getattr(pool, 'constraints', None)
+    if constraints is not None and getattr(constraints, 'active', False):
+        chosen_ids = frozenset(
+            cid for cid in chosen_ids
+            if not constraints.forbids(index.foods.get(cid))
+        ) if hasattr(constraints, 'forbids') else chosen_ids
     present = {getattr(f, "id", None) for f, _g, _s in lines}
     title = (recipe_name or "").lower()
     best = None  # (similarity, line_index, chosen_food)
@@ -250,7 +269,10 @@ def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids, recipe
         # (Chickpeas instead of Lentils)" is a lentil soup with no lentils in it, and
         # that is not the client's choice reaching a dish — it is a different dish
         # wearing its name.
-        if title and plain_name(food).lower() in title:
+        # Whole words, not a substring: "Egg" matched "Eggplant Casserole" and "Oat"
+        # matched "Goat Cheese Salad", so those lines became permanently
+        # unsubstitutable and a client's chosen food could not reach dishes it fits.
+        if title and _names_the_dish(plain_name(food), title):
             continue
         slot = classify_food(food)
         # Sorted: a frozenset iterates in id-hash order, and an exact tie in

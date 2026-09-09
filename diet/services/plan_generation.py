@@ -33,7 +33,11 @@ class InfeasibleCaloriesError(ValueError):
 
     @property
     def suggestion(self) -> dict:
-        return {"meal_count": min(6, int(-(-self.requested // 1250))), "snack_count": 2}
+        # Within what this module will actually accept. It suggested up to 6 meals and
+        # 2 snacks, which `generate_and_save` then clamps back to 3 and 1 — so the
+        # client was told to retry with numbers that produce the same refusal.
+        return {"meal_count": MAX_MAIN_MEALS, "snack_count": MAX_SNACKS,
+                "note": "This is the largest structure the planner supports."}
 
 
 def generate_and_save(user, *, meal_count: int = 3, snack_count: int = 1, duration_days: int = 1,

@@ -73,6 +73,10 @@ class CandidatePool:
     #: tied it; measured P(chosen recipe wins) was 0.13. Structure is weighted by share;
     #: preference is counted by presence.
     preference_scores: Dict[str, Dict[str, Dict[int, float]]] = field(default_factory=dict)
+    #: What this client may not eat. Carried on the pool so anything holding a pool can
+    #: ask, rather than each consumer rebuilding it — the substitution step could not,
+    #: and swapped in foods the client had since disliked.
+    constraints: object = None
 
     def get(self, meal: str, macro: str) -> List:
         return self.by_slot.get(meal, {}).get(macro, [])
@@ -222,6 +226,15 @@ def _density(food, macro: str) -> float:
     kcal_pg = float(getattr(food, "calories_per_gram", 0) or 0)
     if kcal_pg <= 0:
         return 0.0
+    # Vegetables and fruit had no entry here, so every one of them scored zero: the
+    # slot's order then fell through to the name tie-break, which sorts DESCENDING, and
+    # the shortlist `_pick` samples from was the reverse-alphabetical head of the
+    # catalogue. Zucchini and Watermelon were always in it and Broccoli never was.
+    if macro == "vegetable":
+        # How much food a calorie buys — the reason a vegetable is on the plate.
+        return 1.0 / kcal_pg
+    if macro == "fruit":
+        return float(getattr(food, "carbs_per_gram", 0) or 0) / kcal_pg
     attr = {"protein": "protein_per_gram", "carb": "carbs_per_gram", "fat": "fat_per_gram"}.get(macro)
     if not attr:
         return 0.0
@@ -358,6 +371,7 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
         "disliked": len(constraints.disliked_ids),
     }
     pool = CandidatePool(by_slot=by_slot, source_counts=counts, scores=scores,
+                         constraints=constraints,
                          preference_scores=preference_scores)
     if pool.empty_slots:
         logger.warning(

@@ -676,13 +676,17 @@ class RuleBasedPlanner:
         """Derived once per generation; they only change when a recipe does."""
         if getattr(self, "_template_cache", None) is None:
             from diet.planner.templates import derive_templates
-            self._template_cache = derive_templates()
+            # From the library the planner will actually serve. Called with no
+            # argument, this re-queried every active recipe — including the ones
+            # excluded for containing an unvetted food — so a shape could be derived
+            # that no servable dish supports, and it cost a third full recipe query.
+            self._template_cache = derive_templates(self._recipes())
         return self._template_cache
 
     def _pairings(self):
         if getattr(self, "_pairing_cache", None) is None:
             from diet.planner.templates import pairing_edges
-            self._pairing_cache = pairing_edges()
+            self._pairing_cache = pairing_edges(self._recipes())
         return self._pairing_cache
 
     def _constraints(self):

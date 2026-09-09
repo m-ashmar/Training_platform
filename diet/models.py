@@ -1089,18 +1089,6 @@ class Recipe(models.Model):
     def __str__(self):
         return self.name
 
-    def nutrition(self):
-        """Totals for one serving of the recipe as written."""
-        totals = {'calories': 0.0, 'protein': 0.0, 'carbs': 0.0, 'fat': 0.0}
-        for line in self.ingredients.select_related('food'):
-            grams = float(line.grams or 0) / 100.0
-            food = line.food
-            totals['calories'] += float(food.calories or 0) * grams
-            totals['protein'] += float(food.protein or 0) * grams
-            totals['carbs'] += float(food.carbs or 0) * grams
-            totals['fat'] += float(food.fat or 0) * grams
-        return totals
-
     def allergen_tags(self):
         """Union of every ingredient's allergens — composition, not the dish name."""
         tags = set()

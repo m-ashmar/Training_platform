@@ -49,12 +49,20 @@ def _macro_of(food, macro: str) -> float:
                                 "fat": "fat"}.get(macro, "calories"), 0) or 0)
 
 
-def _snapped(components: Components, factor: float) -> Components:
-    """Rescale a meal and land every line on an amount a person would serve."""
+def _snapped(components: Components, factor: float,
+             movable: Optional[List[int]] = None) -> Components:
+    """Rescale a meal and land every line on an amount a person would serve.
+
+    `movable` names the lines the caller allows to change. A recipe's author pins the
+    pinch of salt and the teaspoon of oil; scaling those with the rest is how a garnish
+    reached its ladder ceiling during convergence.
+    """
     from .portion import nearest_portion
 
-    return [(food, nearest_portion(food, float(grams) * factor).grams)
-            for food, grams in components]
+    allowed = None if movable is None else set(movable)
+    return [(food, grams if (allowed is not None and i not in allowed)
+             else nearest_portion(food, float(grams) * factor).grams)
+            for i, (food, grams) in enumerate(components)]
 
 
 #: The whole-meal scale is searched rather than hill-climbed. A meal that is 30% short
@@ -167,7 +175,8 @@ def refine(components: Components, targets: Dict[str, float],
 
 
 def optimize_meal(components: Components, targets: Dict[str, float],
-                  policy: PlannerPolicy) -> OptimizeResult:
+                  policy: PlannerPolicy,
+                  movable: Optional[List[int]] = None) -> OptimizeResult:
     """Bring a meal as close to its macro targets as servable portions allow.
 
     Two stages, both searches over the same discrete space: the amounts each food
@@ -195,14 +204,14 @@ def optimize_meal(components: Components, targets: Dict[str, float],
     best_factor = 1.0
     for index in range(steps):
         factor = SCALE_LO + index * SCALE_STEP
-        candidate = _snapped(components, factor)
+        candidate = _snapped(components, factor, movable)
         dev = deviation_of(totals_of(candidate), targets)
         if _better(dev, best_dev, policy.tolerance):
             best, best_dev, best_factor = candidate, dev, factor
 
     trace.append(f"scale x{best_factor:.2f} -> {best_dev.human()}")
     if not best_dev.within(policy.tolerance):
-        refined, refined_dev = refine(best, targets, policy.tolerance)
+        refined, refined_dev = refine(best, targets, policy.tolerance, movable)
         if _better(refined_dev, best_dev, policy.tolerance):
             trace.append(f"refine portions -> {refined_dev.human()}")
             best, best_dev = refined, refined_dev

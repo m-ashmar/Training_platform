@@ -1466,45 +1466,59 @@ class TrainerMealView(APIView):
                 trainer_service = TrainerDietPlanService(request.user)
                 plans = {}
                 created_meals = []
-                with transaction.atomic():
-                    for index, meal_data in enumerate(request.data):
-                        diet_plan_id = meal_data.get('diet_plan_id')
-                        meal_type = meal_data.get('meal_type')
-                        target_date_str = meal_data.get('target_date')
-                        food_items = meal_data.get('food_items', [])
-                        if not all([diet_plan_id, meal_type, target_date_str, food_items]):
-                            return Response(
-                                {"error": _("Missing required fields"), "index": index,
-                                 "code": "missing_fields"},
-                                status=status.HTTP_400_BAD_REQUEST)
-                        target_date = parse_date(target_date_str)
-                        if not target_date:
-                            return Response(
-                                {"error": _("Invalid target_date format"), "index": index,
-                                 "code": "bad_date"},
-                                status=status.HTTP_400_BAD_REQUEST)
-                        scheduled_time = None
-                        if meal_data.get('scheduled_time'):
-                            scheduled_time = parse_time(meal_data.get('scheduled_time'))
-                        # One fetch per distinct plan, not one per meal.
-                        if diet_plan_id not in plans:
-                            plans[diet_plan_id] = get_object_or_404(DietPlan, id=diet_plan_id)
-                        meal = trainer_service.add_meal_to_plan(
-                            diet_plan=plans[diet_plan_id],
-                            meal_type=meal_type,
-                            target_date=target_date,
-                            food_items=food_items,
-                            scheduled_time=scheduled_time,
-                            description=meal_data.get('description', '')
-                        )
-                        created_meals.append({
-                            'id': meal.id,
-                            'meal_type': meal.meal_type,
-                            'date': meal.date,
-                            'scheduled_time': meal.scheduled_time,
-                            'description': meal.description,
-                            'components_count': len(meal_data.get('food_items') or []),
-                        })
+
+                class _Refuse(Exception):
+                    """Roll the batch back and answer with `response`."""
+
+                    def __init__(self, response):
+                        self.response = response
+
+                # Returning a 400 from INSIDE the atomic block committed everything
+                # created before the bad item, so a batch of ten with a bad eighth
+                # persisted seven — and the corrected retry then hit `duplicate_meal`
+                # on those seven. Raising unwinds the transaction first.
+                try:
+                    with transaction.atomic():
+                        for index, meal_data in enumerate(request.data):
+                            diet_plan_id = meal_data.get('diet_plan_id')
+                            meal_type = meal_data.get('meal_type')
+                            target_date_str = meal_data.get('target_date')
+                            food_items = meal_data.get('food_items', [])
+                            if not all([diet_plan_id, meal_type, target_date_str, food_items]):
+                                return Response(
+                                    {"error": _("Missing required fields"), "index": index,
+                                     "code": "missing_fields"},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                            target_date = parse_date(target_date_str)
+                            if not target_date:
+                                return Response(
+                                    {"error": _("Invalid target_date format"), "index": index,
+                                     "code": "bad_date"},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                            scheduled_time = None
+                            if meal_data.get('scheduled_time'):
+                                scheduled_time = parse_time(meal_data.get('scheduled_time'))
+                            # One fetch per distinct plan, not one per meal.
+                            if diet_plan_id not in plans:
+                                plans[diet_plan_id] = get_object_or_404(DietPlan, id=diet_plan_id)
+                            meal = trainer_service.add_meal_to_plan(
+                                diet_plan=plans[diet_plan_id],
+                                meal_type=meal_type,
+                                target_date=target_date,
+                                food_items=food_items,
+                                scheduled_time=scheduled_time,
+                                description=meal_data.get('description', '')
+                            )
+                            created_meals.append({
+                                'id': meal.id,
+                                'meal_type': meal.meal_type,
+                                'date': meal.date,
+                                'scheduled_time': meal.scheduled_time,
+                                'description': meal.description,
+                                'components_count': len(meal_data.get('food_items') or []),
+                            })
+                except _Refuse as refusal:
+                    return refusal.response
                 return Response({
                     "message": _("Meals created successfully"),
                     "created": created_meals,
@@ -1733,7 +1747,15 @@ class DietPlanNutritionView(APIView):
             
             # Get target date from query params (fallback to plan start date if no meals for today)
             target_date_str = request.GET.get('date')
-            target_date = parse_date(target_date_str) if target_date_str else timezone.localdate()
+            target_date = timezone.localdate()
+            if target_date_str:
+                target_date = parse_date(target_date_str)
+                if target_date is None:
+                    # Silently falling back to today answered a question the caller did
+                    # not ask: "how did I do on the 31st of February" came back as
+                    # today's progress, 200 OK.
+                    return Response({"error": _("date must be YYYY-MM-DD"), "code": "bad_date"},
+                                    status=status.HTTP_400_BAD_REQUEST)
             if target_date_str and target_date is None:
                 return Response({"error": _("Invalid date format. Use YYYY-MM-DD.")},
                                 status=status.HTTP_400_BAD_REQUEST)
@@ -2033,7 +2055,15 @@ class EnhancedClientProgressView(APIView):
                 )
             
             target_date_str = request.GET.get('date')
-            target_date = parse_date(target_date_str) if target_date_str else timezone.localdate()
+            target_date = timezone.localdate()
+            if target_date_str:
+                target_date = parse_date(target_date_str)
+                if target_date is None:
+                    # Silently falling back to today answered a question the caller did
+                    # not ask: "how did I do on the 31st of February" came back as
+                    # today's progress, 200 OK.
+                    return Response({"error": _("date must be YYYY-MM-DD"), "code": "bad_date"},
+                                    status=status.HTTP_400_BAD_REQUEST)
             if target_date_str and target_date is None:
                 return Response({"error": _("Invalid date format. Use YYYY-MM-DD.")},
                                 status=status.HTTP_400_BAD_REQUEST)
@@ -2166,6 +2196,13 @@ class ClientProgressView(APIView):
             target_date = None
             if target_date_str:
                 target_date = parse_date(target_date_str)
+                if target_date is None:
+                    # Silently falling back to today answered a question the caller
+                    # did not ask: "how did I do on the 31st of February" came back
+                    # as today's progress, 200 OK. Its two sibling endpoints 400.
+                    return Response({"error": _("date must be YYYY-MM-DD"),
+                                     "code": "bad_date"},
+                                    status=status.HTTP_400_BAD_REQUEST)
             
             # Get progress
             client_service = ClientProgressService(request.user)
@@ -2205,6 +2242,13 @@ class ClientWeeklyProgressView(APIView):
             start_date = None
             if start_date_str:
                 start_date = parse_date(start_date_str)
+                if start_date is None:
+                    # Silently falling back to today answered a question the caller
+                    # did not ask: "how did I do on the 31st of February" came back
+                    # as today's progress, 200 OK. Its two sibling endpoints 400.
+                    return Response({"error": _("start_date must be YYYY-MM-DD"),
+                                     "code": "bad_date"},
+                                    status=status.HTTP_400_BAD_REQUEST)
             
             # Get weekly progress
             client_service = ClientProgressService(request.user)
@@ -2274,7 +2318,17 @@ class ClientMealInteractionView(APIView):
                                         status=status.HTTP_409_CONFLICT)
                     component.food = chosen
                     component.quantity = grams
-                    component.save(update_fields=['food', 'quantity'])
+                    # The client has not eaten the new food. This left the component
+                    # completed over entirely different food, and DailyProgress sums
+                    # the components of completed meals — so a swap after eating
+                    # credited calories nobody consumed.
+                    component.is_completed = False
+                    component.completed_at = None
+                    component.save(update_fields=['food', 'quantity', 'is_completed',
+                                                  'completed_at'])
+                    component.meal.is_completed = False
+                    component.meal.save(update_fields=['is_completed'])
+                    TrainerDietPlanService._recompute_day(component.meal)
                     MealSwap.objects.create(user=request.user, meal=component.meal,
                                             rejected_food=rejected, chosen_food=chosen,
                                             similarity=round(index.similarity(rejected.id, chosen.id), 4))

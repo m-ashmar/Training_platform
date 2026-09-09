@@ -36,7 +36,11 @@ def scheduled_time_for(slot: str, occurrence: int = 0):
     # Never past the end of the day; pile up just before midnight rather than wrap
     # into the previous morning and change the meal's order.
     if moved.date() != date_cls.min:
-        return time(23, 59)
+        # Past midnight. Step back from 23:59 by the occurrence so repeated slots stay
+        # DISTINCT — returning 23:59 for every overflow made two meals collide on the
+        # uniqueness key and the whole plan was refused.
+        minute = max(0, 59 - occurrence)
+        return time(23, minute)
     return moved.time()
 
 

@@ -821,11 +821,19 @@ class ClientProgressService:
         if meal.diet_plan.user != self.client:
             raise ValidationError(_("You can only complete your own meals"), code="not_meal_completion_owner")
         
-        # Complete all components efficiently with bulk update
-        MealComponent.objects.filter(meal=meal).update(
-            is_completed=True,
-            completed_at=timezone.now()
-        )
+        # A bulk `update()` fires no `post_save`, and completion is the ONLY thing the
+        # analytics and achievement listeners watch on MealComponent. So the app's main
+        # "I ate this" button recorded nothing anywhere downstream: adherence metrics
+        # and the meal-tracking achievement could only be earned by ticking components
+        # one at a time. Written per row, in one transaction, so the listeners run.
+        now = timezone.now()
+        with transaction.atomic():
+            for component in MealComponent.objects.filter(meal=meal).select_related('food'):
+                if component.is_completed:
+                    continue
+                component.is_completed = True
+                component.completed_at = now
+                component.save(update_fields=['is_completed', 'completed_at'])
         
         # Update parent meal status explicitly
         Meal.objects.filter(id=meal.id).update(is_completed=True)

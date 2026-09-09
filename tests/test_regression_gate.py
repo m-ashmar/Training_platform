@@ -2882,6 +2882,12 @@ def test_the_goal_metrics_never_move_the_wrong_way(diet_quality):
     assert diet_quality.chosen_ingredient_share >= recorded["chosen_ingredient_share"] - 5e-5, (
         f"chosen-ingredient share fell: {diet_quality.chosen_ingredient_share:.3f} "
         f"< recorded {recorded['chosen_ingredient_share']:.3f}")
+    # The meals the engine BUILDS must all change when the client chooses. A library
+    # dish that is the best fit for a slot both before and after is not a
+    # personalisation failure, so the overall twin count is a bound and the built-meal
+    # count is the invariant.
+    assert diet_quality.twin_identical_built == 0, (
+        f"{diet_quality.twin_identical_built} engine-built meals ignored the client's choices")
     assert diet_quality.twin_identical_meals <= recorded["twin_identical_meals"], (
         f"more meals unchanged after choosing: {diet_quality.twin_identical_meals} "
         f"> recorded {recorded['twin_identical_meals']}")
@@ -4807,3 +4813,80 @@ def test_the_dashboards_do_not_count_in_python(seeded_catalogue):
     dashboard = inspect.getsource(routine_views.AnalyticsViewSet.admin_dashboard)
     assert "'user', 'day'" not in dashboard, "streaks still keyed on the ordinal day"
     assert "'user_id', 'date'" in dashboard
+
+
+def test_completing_a_meal_is_visible_to_everything_that_listens(seeded_catalogue):
+    """`complete_meal` marked components with a bulk `update()`, which fires no
+    `post_save` — and completion is the only thing the analytics and achievement
+    listeners watch on MealComponent. The app's main "I ate this" button therefore
+    recorded nothing downstream."""
+    from diet.models import Meal, MealComponent
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("complete-signal")
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="signal")
+    meal = Meal.objects.filter(diet_plan=plan).first()
+    c = _api_client_for(user)
+
+    seen = []
+    from django.db.models.signals import post_save
+
+    def listener(sender, instance, **kwargs):
+        if instance.is_completed:
+            seen.append(instance.pk)
+
+    post_save.connect(listener, sender=MealComponent, dispatch_uid="gate-complete")
+    try:
+        r = c.post(f"/api/diet/v1/client/meals/{meal.id}/complete/",
+                   {"action": "complete_meal"}, content_type="application/json")
+        assert r.status_code == 200, r.content
+    finally:
+        post_save.disconnect(sender=MealComponent, dispatch_uid="gate-complete")
+
+    assert len(seen) == meal.components.count() > 0, "completion was invisible to listeners"
+    meal.refresh_from_db()
+    assert meal.is_completed
+
+
+def test_swapping_a_food_after_eating_does_not_keep_the_old_calories(seeded_catalogue):
+    """A swap rewrote the component's food and left it marked completed, and
+    DailyProgress sums the components of completed meals — so the client was credited
+    with food they never ate."""
+    from diet.models import DailyProgress, Meal, MealComponent
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("swap-invalidate")
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="swap")
+    meal = Meal.objects.filter(diet_plan=plan).first()
+    c = _api_client_for(user)
+    assert c.post(f"/api/diet/v1/client/meals/{meal.id}/complete/",
+                  {"action": "complete_meal"}, content_type="application/json").status_code == 200
+
+    component = MealComponent.objects.filter(meal=meal).first()
+    url = "/api/diet/v1/client/meals/interact/"
+    offers = c.post(url, {"action": "swap_food", "component_id": component.id},
+                    content_type="application/json")
+    assert offers.status_code == 200, offers.content
+    offered = offers.json()["offers"]
+    if not offered:
+        pytest.skip("no similar food to swap to in this catalogue")
+    r = c.post(url, {"action": "swap_food", "component_id": component.id,
+                     "chosen_food_id": offered[0]["food_id"]}, content_type="application/json")
+    assert r.status_code == 200, r.content
+
+    component.refresh_from_db()
+    meal.refresh_from_db()
+    assert not component.is_completed, "the client is credited with food they never ate"
+    assert not meal.is_completed
+
+
+def test_the_progress_endpoints_refuse_a_date_they_cannot_read(seeded_catalogue):
+    """Two of the four date-taking endpoints silently fell back to today, so asking
+    about an impossible date returned today's numbers with a 200."""
+    user, _chosen = _chooser("bad-date")
+    c = _api_client_for(user)
+    for url in ("/api/diet/v1/client/progress/?date=31-02-2026",
+                "/api/diet/v1/client/progress/weekly/?start_date=notadate"):
+        r = c.get(url)
+        assert r.status_code == 400, (url, r.status_code, r.content[:120])
+        assert r.json().get("code") == "bad_date"

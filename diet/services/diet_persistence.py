@@ -190,19 +190,25 @@ class DietPersistenceService:
             # failure here leaves a valid, unconverged plan rather than no plan.
             from diet.planner.converge import converge_plan
 
+            convergence = None
             try:
                 convergence = converge_plan(diet_plan)
             except Exception:
                 # The plan is committed and active. A failure here must not turn
                 # into a 400 that makes the client retry and supersede a good plan.
+                #
+                # And it must not RETURN either: this skipped the allergen report
+                # below, so the one record of what the checker found was lost exactly
+                # when something had gone wrong. Carry on without a convergence
+                # summary instead.
                 log_json(self.logger, "error", "convergence failed after commit",
                          plan_id=diet_plan.id)
-                return diet_plan
             try:
                 payload = diet_plan.generated_plan
                 if not isinstance(payload, dict):
                     payload = {'raw': payload} if payload else {}
-                payload['convergence'] = convergence
+                if convergence is not None:
+                    payload['convergence'] = convergence
                 diet_plan.generated_plan = payload
                 diet_plan.save(update_fields=['generated_plan'])
             except Exception:
@@ -319,16 +325,20 @@ class DietPersistenceService:
         from ..models import UserFoodPreference
 
         pref = UserFoodPreference.objects.filter(user=self.user).first()
-        disliked = {f.name.strip().lower() for f in pref.disliked_foods.all()} if pref else set()
+        # By ID, like every other constraint check. Comparing names meant a catalogue
+        # with two rows of one name refused the WHOLE plan because the planner had
+        # legitimately used the other row — and under an Arabic request the two halves
+        # of this comparison read different columns entirely.
+        disliked = {f.id for f in pref.disliked_foods.all()} if pref else set()
         if not disliked:
             return
 
         violations = []
         for m in plan_output.plan:
             for ing in getattr(m, 'ingredients', []) or []:
-                n = (getattr(ing, 'name', '') or '').strip().lower()
-                if n and n in disliked:
-                    violations.append(n)
+                food_id = getattr(ing, 'food_id', None)
+                if food_id is not None and food_id in disliked:
+                    violations.append(str(getattr(ing, 'name', food_id)))
         if violations:
             raise ConstraintViolationError(
                 f"disliked_foods:{','.join(sorted(set(violations)))}"
