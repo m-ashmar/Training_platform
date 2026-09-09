@@ -459,7 +459,8 @@ class AssignClientView(APIView):
             relation, created = TrainerClientRelation.objects.get_or_create(
                 trainer=request.user,
                 client=client,
-                defaults={'status': 'pending', 'initiated_by': 'trainer'}
+                defaults={'status': 'pending', 'initiated_by': 'trainer',
+                          'agreed_rate': getattr(request.user, 'trainer_hourly_rate', None)}
             )
             
             if not created:
@@ -477,7 +478,9 @@ class AssignClientView(APIView):
                     # Update status to pending for new request
                     relation.status = 'pending'
                     relation.initiated_by = 'trainer'
-                    relation.save(update_fields=['status', 'initiated_by', 'updated_at'])
+                    relation.agreed_rate = getattr(request.user, 'trainer_hourly_rate', None)
+                    relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
+                                                 'updated_at'])
             
             # Emit domain event — notification handled at delivery boundary
             emit_event(TrainerAssignmentRequestEvent(
@@ -542,7 +545,10 @@ class UnassignClientView(APIView):
                     client.assigned_trainer = None
                     client.save(update_fields=['assigned_trainer'])
 
-                # Delete the relation
+                # The hold taken when this pair was approved goes back to the client.
+                # Before the delete, because the hold is named on the row.
+                from .trainer_relations import release_hold
+                release_hold(relation, request.user)
                 relation.delete()
                 
                 # Emit domain event — notification handled at delivery boundary
@@ -1084,7 +1090,10 @@ class ClientRequestTrainerView(APIView):
             relation, created = TrainerClientRelation.objects.get_or_create(
                 trainer=trainer,
                 client=request.user,
-                defaults={'status': 'pending', 'initiated_by': 'client'}
+                defaults={'status': 'pending', 'initiated_by': 'client',
+                          # The price the client is agreeing to, right now. Read again
+                          # at approval it was whatever the trainer had since set it to.
+                          'agreed_rate': getattr(trainer, 'trainer_hourly_rate', None)}
             )
             
             if not created:
@@ -1102,7 +1111,9 @@ class ClientRequestTrainerView(APIView):
                     # Allow new request after rejection
                     relation.status = 'pending'
                     relation.initiated_by = 'client'
-                    relation.save(update_fields=['status', 'initiated_by', 'updated_at'])
+                    relation.agreed_rate = getattr(trainer, 'trainer_hourly_rate', None)
+                    relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
+                                                 'updated_at'])
             
             # Emit domain event — notification handled at delivery boundary.
             # On commit: this runs inside an open transaction, and a message queued
@@ -1177,22 +1188,26 @@ class ClientUnassignTrainerView(APIView):
             trainer_name = trainer.full_name or trainer.username
             
             # Remove the TrainerClientRelation record
+            relation = None
             try:
                 relation = TrainerClientRelation.objects.get(
                     trainer=trainer,
                     client=request.user,
                     status='approved'
                 )
+                # Release BEFORE deleting the row: the hold is named on it.
+                from .trainer_relations import release_hold
+                release_hold(relation, request.user)
                 relation.delete()
             except TrainerClientRelation.DoesNotExist:
                 # Relation may not exist, but we still proceed to clear assigned_trainer
                 # Optional side effect: swallowing this silently is what made the
                 # surrounding failures invisible in logs. Control flow is unchanged.
                 logger.debug('suppressed non-fatal error', exc_info=True)
-            
+
             # Clear assigned trainer
             request.user.assigned_trainer = None
-            request.user.save()
+            request.user.save(update_fields=['assigned_trainer'])
             
             # Emit domain event — notification handled at delivery boundary
             emit_event(ClientUnassignedTrainerEvent(
@@ -1367,66 +1382,12 @@ class TrainerPendingRequestsView(APIView):
             )
 
 
-def approve_trainer_relation(relation, actor):
-    """Approve a pending trainer/client relation, whichever side is accepting.
-
-    One implementation, because there are two sides and the approval has to do the
-    same five things on both: check nobody else already owns this client, flip the
-    row, set `assigned_trainer`, hold the trainer's charge in escrow, and announce it.
-    A second copy would drift, and the half that drifted would be the one granting
-    access to another person's body metrics.
-
-    Returns (response_or_None, relation). A response means refuse with it.
-    """
-    from rest_framework import status as http
-    from rest_framework.response import Response
-
-    from .models import TrainerClientRelation
-
-    client, trainer = relation.client, relation.trainer
-
-    if client.assigned_trainer_id and client.assigned_trainer_id != trainer.id:
-        return Response({'error': _('Client is already assigned to another trainer')},
-                        status=http.HTTP_400_BAD_REQUEST), relation
-    if TrainerClientRelation.objects.filter(
-            client=client, status='approved').exclude(trainer=trainer).exists():
-        return Response({'error': _('Client already has an approved relation with another trainer')},
-                        status=http.HTTP_400_BAD_REQUEST), relation
-
-    # The charge is held BEFORE the relation is granted. Approving first and then
-    # failing the hold left an assigned trainer nobody had paid for.
-    try:
-        from wallet.models import Wallet, move_funds_atomic
-        from wallet.utils import get_escrow_wallet
-        charge = getattr(trainer, 'trainer_hourly_rate', None) or 0
-        if charge and charge > 0:
-            client_wallet, _created = Wallet.objects.get_or_create(
-                owner=client, defaults={"owner_type": "client"})
-            if client_wallet.balance < charge:
-                return Response(
-                    {'error': _('Insufficient client wallet balance for trainer charge hold')},
-                    status=http.HTTP_402_PAYMENT_REQUIRED), relation
-            move_funds_atomic(client_wallet, get_escrow_wallet(), charge,
-                              actor_id=actor.id, tx_type='transfer',
-                              metadata={'purpose': 'trainer_request_hold',
-                                        'trainer_id': trainer.id, 'client_id': client.id})
-    except Exception as e:
-        logger.error(f"Wallet hold failed: {str(e)}")
-
-    relation.status = 'approved'
-    relation.save(update_fields=['status', 'updated_at'])
-    client.assigned_trainer = trainer
-    client.save(update_fields=['assigned_trainer'])
-    return None, relation
-
-
 class ClientRespondToTrainerInviteView(APIView):
     """A client accepts or declines a trainer's invitation.
 
-    The other half of `trainer/assign-client/`. Without it a trainer-initiated
-    request had no legitimate way to be approved at all — which is why the trainer
-    endpoint used to approve its own, and that was a takeover of any unassigned
-    client's account.
+    The other half of `trainer/assign-client/`. Without it a trainer-initiated request
+    had no legitimate way to be approved at all — which is why the trainer endpoint
+    used to approve its own, and that was a takeover of any unassigned client.
 
     POST {"request_id": <id>, "action": "approve" | "reject"}
     """
@@ -1449,28 +1410,35 @@ class ClientRespondToTrainerInviteView(APIView):
             return Response({'error': _('Invitation not found or already processed')},
                             status=status.HTTP_404_NOT_FOUND)
 
+        if relation.initiated_by == 'unknown':
+            return Response(
+                {'error': _('This invitation predates the current consent flow. '
+                            'Ask your trainer to send it again.')},
+                status=status.HTTP_409_CONFLICT)
         # Symmetric to the trainer side: you approve what the OTHER party asked for.
         if relation.initiated_by != 'trainer':
             return Response({'error': _('You made this request. The trainer has to accept it.')},
                             status=status.HTTP_403_FORBIDDEN)
 
+        trainer_id, trainer = relation.trainer_id, relation.trainer
         if action == 'reject':
             relation.status = 'rejected'
             relation.save(update_fields=['status', 'updated_at'])
+            transaction.on_commit(lambda: emit_event(ClientRequestRejectedEvent(
+                actor_id=request.user.id, recipient_id=trainer_id,
+                trainer_name=trainer.full_name or trainer.username)))
             return Response({'message': _('Invitation declined.'),
-                             'trainer_id': relation.trainer_id, 'status': 'rejected'})
+                             'trainer_id': trainer_id, 'status': 'rejected'})
 
         refusal, relation = approve_trainer_relation(relation, request.user)
         if refusal is not None:
             return refusal
         transaction.on_commit(lambda: emit_event(ClientRequestApprovedEvent(
-            actor_id=request.user.id,
-            recipient_id=relation.trainer_id,
-            trainer_name=relation.trainer.full_name or relation.trainer.username,
-        )))
-        logger.info(f"Client {request.user.id} accepted trainer {relation.trainer_id}")
+            actor_id=request.user.id, recipient_id=trainer_id,
+            trainer_name=trainer.full_name or trainer.username)))
+        logger.info(f"Client {request.user.id} accepted trainer {trainer_id}")
         return Response({'message': _('Invitation accepted.'),
-                         'trainer_id': relation.trainer_id, 'status': 'approved'})
+                         'trainer_id': trainer_id, 'status': 'approved'})
 
 
 class ClientPendingTrainerInvitesView(APIView):
@@ -1490,8 +1458,69 @@ class ClientPendingTrainerInvitesView(APIView):
             'request_id': r.id,
             'trainer_id': r.trainer_id,
             'trainer_name': r.trainer.full_name or r.trainer.username,
+            'agreed_rate': r.agreed_rate,
             'created_at': r.created_at,
         } for r in rows]})
+
+
+def approve_trainer_relation(relation, actor):
+    """Approve a pending trainer/client relation, whichever side is accepting.
+
+    One implementation, because there are two sides and the approval has to do the
+    same things on both: check nobody else already owns this client, take the agreed
+    charge into escrow, flip the row and set `assigned_trainer`. A second copy would
+    drift, and the half that drifted would be the one granting access to another
+    person's body metrics.
+
+    Everything happens inside one transaction, under a row lock on the relation, and
+    the charge is taken BEFORE the relation is granted — a failure to take it refuses
+    the approval instead of granting a relationship nobody paid for.
+
+    Returns (response_or_None, relation). A response means refuse with it.
+    """
+    from rest_framework import status as http
+    from rest_framework.response import Response
+
+    from .models import TrainerClientRelation
+    from .trainer_relations import HoldFailed, take_hold
+
+    with transaction.atomic():
+        relation = (TrainerClientRelation.objects
+                    .select_for_update()
+                    .select_related('trainer', 'client')
+                    .get(pk=relation.pk))
+        client, trainer = relation.client, relation.trainer
+
+        if relation.status != 'pending':
+            return Response({'error': _('This request has already been answered')},
+                            status=http.HTTP_409_CONFLICT), relation
+        # A trainer who has since been deactivated cannot be accepted weeks later.
+        if not (trainer.is_active and trainer.is_trainer):
+            return Response({'error': _('That trainer is no longer available')},
+                            status=http.HTTP_409_CONFLICT), relation
+
+        locked_client = CustomUser.objects.select_for_update().get(pk=client.pk)
+        if locked_client.assigned_trainer_id and locked_client.assigned_trainer_id != trainer.id:
+            return Response({'error': _('Client is already assigned to another trainer')},
+                            status=http.HTTP_400_BAD_REQUEST), relation
+        if TrainerClientRelation.objects.filter(
+                client=client, status='approved').exclude(trainer=trainer).exists():
+            return Response({'error': _('Client already has an approved relation with another trainer')},
+                            status=http.HTTP_400_BAD_REQUEST), relation
+
+        try:
+            take_hold(relation, actor)
+        except HoldFailed as exc:
+            logger.warning("Trainer hold failed for relation %s: %s", relation.id, exc)
+            return Response({'error': _('The trainer charge could not be held: %(why)s')
+                             % {'why': str(exc)}},
+                            status=http.HTTP_402_PAYMENT_REQUIRED), relation
+
+        relation.status = 'approved'
+        relation.save(update_fields=['status', 'updated_at'])
+        locked_client.assigned_trainer = trainer
+        locked_client.save(update_fields=['assigned_trainer'])
+    return None, relation
 
 
 class TrainerRespondToRequestView(APIView):
@@ -1550,6 +1579,12 @@ class TrainerRespondToRequestView(APIView):
             # A request is approved by the side that did NOT make it. Without this,
             # a trainer could approve their own invitation, and that was a complete
             # takeover of any unassigned client's account data.
+            if relation.initiated_by == 'unknown':
+                return Response(
+                    {'error': _('This request predates the current consent flow. '
+                                'Ask the client to send it again.')},
+                    status=status.HTTP_409_CONFLICT
+                )
             if relation.initiated_by != 'client':
                 return Response(
                     {'error': _('You invited this client. They have to accept the invitation.')},

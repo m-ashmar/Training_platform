@@ -1145,7 +1145,23 @@ TRAINER_REFUSALS = {
     'not_assigned_view': status.HTTP_403_FORBIDDEN,
     'not_trainer': status.HTTP_403_FORBIDDEN,
     'not_meal_viewer': status.HTTP_403_FORBIDDEN,
+    'duplicate_meal': status.HTTP_409_CONFLICT,
 }
+
+
+def _trainer_may_read_plan(trainer, diet_plan) -> bool:
+    """One rule for every trainer read of a plan, matching the write rule.
+
+    Ownership was tested inline in two views and in the service separately, and the
+    inline copies were the ones that stayed weak.
+    """
+    from .trainer_services import TrainerDietPlanService
+
+    try:
+        TrainerDietPlanService(trainer)._authorize_plan(diet_plan)
+    except Exception:
+        return False
+    return True
 
 
 def trainer_refusal(exc):
@@ -1634,9 +1650,12 @@ class DietPlanNutritionView(APIView):
             
             # Check permissions
             if request.user.is_trainer:
-                if diet_plan.created_by != request.user:
+                # Authorship AND still this client's trainer. Authorship alone let a
+                # dismissed trainer keep reading the plan they had written: the write
+                # path was fixed and this read path was not.
+                if not _trainer_may_read_plan(request.user, diet_plan):
                     return Response(
-                        {"error": _("You can only view nutrition for plans you created")},
+                        {"error": _("You can only view plans for your current clients")},
                         status=status.HTTP_403_FORBIDDEN
                     )
             elif request.user.is_client:
@@ -1788,9 +1807,9 @@ class MealComponentsView(APIView):
                 
             # Check permissions
             if request.user.is_trainer:
-                if meal.diet_plan.created_by != request.user:
+                if not _trainer_may_read_plan(request.user, meal.diet_plan):
                     return Response(
-                        {"error": _("You can only view meals in plans you created")},
+                        {"error": _("You can only view meals for your current clients")},
                         status=status.HTTP_403_FORBIDDEN
                     )
             elif request.user.is_client:

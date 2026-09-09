@@ -4260,3 +4260,254 @@ def test_every_import_path_produces_an_unvetted_food(seeded_catalogue):
         create_at = source.index("FoodItem.objects.create(")
         window = source[create_at:create_at + 900]
         assert "needs_review=True" in window, f"{label} creates a plannable food"
+
+
+def test_a_relation_from_before_the_consent_flow_cannot_be_approved(seeded_catalogue, make_user):
+    """The code fix did not reach the data the old code had written. Migration 0033
+    labelled every existing row 'client', which is exactly what the old
+    trainer/assign-client produced — so the takeover survived in any pending row that
+    predated the deploy. Those rows are 'unknown' and neither side may approve them.
+    """
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, "legacy")
+    relation = TrainerClientRelation.objects.create(
+        trainer=trainer, client=client_user, status="pending", initiated_by="unknown")
+
+    r = t_api.post("/api/auth/trainer/respond-to-request/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 409, r.content
+    r = c_api.post("/api/auth/client/respond-to-invite/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 409, r.content
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id is None
+
+    # And a row written without saying who asked defaults to un-approvable, rather
+    # than to the value the trainer is allowed to approve.
+    blank = TrainerClientRelation.objects.create(
+        trainer=trainer, client=make_user("cl-blank", user_type="client"), status="pending")
+    assert blank.initiated_by == "unknown"
+
+
+def test_the_escrow_hold_comes_back_when_the_relationship_ends(seeded_catalogue, make_user):
+    """Approving a trainer moves the client's money into the platform escrow wallet,
+    and nothing gave it back: a client who accepted a trainer and later dismissed them
+    lost it permanently. The hold now has a lifecycle tied to the relation, and
+    releasing it is idempotent."""
+    from decimal import Decimal
+
+    from wallet.models import Transaction, Wallet
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, "escrow")
+    trainer.trainer_hourly_rate = Decimal("100.00")
+    trainer.save()
+    wallet, _created = Wallet.objects.get_or_create(
+        owner=client_user, defaults={"owner_type": "client"})
+    wallet.balance = Decimal("500.00")
+    wallet.save()
+
+    c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
+               content_type="application/json")
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client_user)
+    r = t_api.post("/api/auth/trainer/respond-to-request/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    wallet.refresh_from_db()
+    assert wallet.balance == Decimal("400.00"), "the hold was not taken"
+    assert Transaction.objects.filter(metadata__purpose="trainer_request_hold").exists()
+
+    r = c_api.post("/api/auth/client/unassign-trainer/", {}, content_type="application/json")
+    assert r.status_code in (200, 204), r.content
+    wallet.refresh_from_db()
+    assert wallet.balance == Decimal("500.00"), "the client's money stayed in escrow"
+
+    # Releasing twice does not mint money: the hold has an identity and it is spent.
+    from users.trainer_relations import release_hold
+    stale = TrainerClientRelation(trainer=trainer, client=client_user)
+    release_hold(stale, client_user)
+    wallet.refresh_from_db()
+    assert wallet.balance == Decimal("500.00")
+
+
+def test_the_price_the_client_agreed_to_is_the_price_they_pay(seeded_catalogue, make_user):
+    """The charge was re-read from the trainer's own `trainer_hourly_rate` at approval
+    time, and that field is trainer-writable: advertise 10, wait for the request, raise
+    the rate, approve, and the client's wallet is swept for a price they never saw."""
+    from decimal import Decimal
+
+    from wallet.models import Wallet
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, "price")
+    trainer.trainer_hourly_rate = Decimal("10.00")
+    trainer.save()
+    wallet, _created = Wallet.objects.get_or_create(
+        owner=client_user, defaults={"owner_type": "client"})
+    wallet.balance = Decimal("500.00")
+    wallet.save()
+
+    c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
+               content_type="application/json")
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client_user)
+    assert relation.agreed_rate == Decimal("10.00")
+
+    trainer.trainer_hourly_rate = Decimal("450.00")
+    trainer.save()
+    r = t_api.post("/api/auth/trainer/respond-to-request/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    wallet.refresh_from_db()
+    assert wallet.balance == Decimal("490.00"), "the client paid a price they never agreed to"
+
+
+def test_a_relationship_is_not_granted_when_the_charge_cannot_be_taken(seeded_catalogue, make_user):
+    """The hold failure was logged and the relation granted anyway: the trainer got
+    full access to the client's data, the client was charged nothing, and the routine
+    app would then pay that trainer out of other clients' money."""
+    from decimal import Decimal
+
+    from wallet.models import Wallet
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, "nofunds")
+    trainer.trainer_hourly_rate = Decimal("100.00")
+    trainer.save()
+    wallet, _created = Wallet.objects.get_or_create(
+        owner=client_user, defaults={"owner_type": "client"})
+    wallet.balance = Decimal("500.00")
+    wallet.save()
+
+    c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
+               content_type="application/json")
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client_user)
+    # The balance is checked when the request is made and again when it is answered.
+    # Between those two moments the client can spend it.
+    wallet.balance = Decimal("5.00")
+    wallet.save()
+    r = t_api.post("/api/auth/trainer/respond-to-request/",
+                   {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+    assert r.status_code == 402, r.content
+    relation.refresh_from_db()
+    client_user.refresh_from_db()
+    assert relation.status == "pending" and not relation.hold_reference
+    assert client_user.assigned_trainer_id is None
+    wallet.refresh_from_db()
+    assert wallet.balance == Decimal("5.00")
+
+
+def test_a_trainer_is_paid_the_held_amount_once(seeded_catalogue, make_user):
+    """Assigning a routine moved the trainer's CURRENT rate out of the single shared
+    escrow wallet every time, with no link to any hold: fifty assignments were fifty
+    payouts, drawn from money other clients had deposited."""
+    from decimal import Decimal
+
+    from wallet.models import Transaction, Wallet
+    from routine.models import Routine
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _trainer_and_client(make_user, "settle")
+    trainer.trainer_hourly_rate = Decimal("100.00")
+    trainer.save()
+    wallet, _created = Wallet.objects.get_or_create(
+        owner=client_user, defaults={"owner_type": "client"})
+    wallet.balance = Decimal("500.00")
+    wallet.save()
+    c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
+               content_type="application/json")
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client_user)
+    t_api.post("/api/auth/trainer/respond-to-request/",
+               {"request_id": relation.id, "action": "approve"}, content_type="application/json")
+
+    from users.trainer_relations import settle_hold
+    relation.refresh_from_db()
+    assert relation.hold_reference
+    settle_hold(relation, trainer)
+    trainer_wallet = Wallet.objects.get(owner=trainer)
+    assert trainer_wallet.balance == Decimal("100.00")
+
+    # Every repeat moves nothing: the hold is spent and the relation says so.
+    for _ in range(5):
+        relation.refresh_from_db()
+        settle_hold(relation, trainer)
+    trainer_wallet.refresh_from_db()
+    assert trainer_wallet.balance == Decimal("100.00"), "the trainer was paid more than was held"
+    assert Transaction.objects.filter(
+        metadata__purpose="trainer_assignment_settlement").count() == 1
+
+
+def test_editing_a_completed_meal_does_not_invent_calories(seeded_catalogue, make_user):
+    """`Meal.is_completed` is a cache of its components, and nothing invalidated it
+    when a trainer replaced them. The client completed 100 g of eggs, the trainer
+    swapped it for 2000 g of rice, and DailyProgress — which sums the components of
+    completed meals — credited the client with food they never ate."""
+    from diet.models import DailyProgress, DietPlan, FoodItem, Meal
+
+    trainer, client_user, t_api, c_api = _assigned_pair(make_user, "recompute")
+    r = t_api.post("/api/diet/v1/trainer/diet-plans/",
+                   {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 1,
+                    "template_id": _a_template().id, "start_date": str(date.today())},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    plan = DietPlan.objects.get(user=client_user, created_by=trainer)
+    small = FoodItem.objects.get(name="Cucumber")
+    big = FoodItem.objects.get(name="White Rice (Cooked)")
+    r = t_api.post("/api/diet/v1/trainer/meals/", {
+        "diet_plan_id": plan.id, "meal_type": "Lunch", "target_date": str(date.today()),
+        "food_items": [{"food_id": small.id, "quantity": 100}]}, content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    meal = Meal.objects.get(diet_plan=plan, meal_type="Lunch")
+
+    r = c_api.post(f"/api/diet/v1/client/meals/{meal.id}/complete/",
+                   {"action": "complete_meal"}, content_type="application/json")
+    assert r.status_code == 200, r.content
+    meal.refresh_from_db()
+    assert meal.is_completed
+
+    r = t_api.put(f"/api/diet/v1/trainer/meals/{meal.id}/",
+                  {"food_items": [{"food_id": big.id, "quantity": 1000}]},
+                  content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    meal.refresh_from_db()
+    assert not meal.is_completed, "the client is credited with food they never ate"
+    progress = DailyProgress.objects.filter(user=client_user, diet_plan=plan, date=date.today()).first()
+    if progress is not None:
+        assert progress.calories_consumed == 0, progress.calories_consumed
+
+    # The same slot cannot be written twice by a retried request.
+    r = t_api.post("/api/diet/v1/trainer/meals/", {
+        "diet_plan_id": plan.id, "meal_type": "Lunch", "target_date": str(date.today()),
+        "food_items": [{"food_id": small.id, "quantity": 50}]}, content_type="application/json")
+    assert r.status_code == 409, r.content
+    assert Meal.objects.filter(diet_plan=plan, meal_type="Lunch", date=date.today()).count() == 1
+
+
+def test_a_dismissed_trainer_cannot_read_the_plan_either(seeded_catalogue, make_user):
+    """The write path was fixed and the read path was not: two views tested authorship
+    inline, so a dismissed trainer kept reading the client's plan, every meal and every
+    gram."""
+    from diet.models import DietPlan, Meal
+
+    trainer, client_user, t_api, c_api = _assigned_pair(make_user, "readrevoke")
+    r = t_api.post("/api/diet/v1/trainer/diet-plans/",
+                   {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 1,
+                    "template_id": _a_template().id, "start_date": str(date.today())},
+                   content_type="application/json")
+    assert r.status_code in (200, 201), r.content
+    plan = DietPlan.objects.get(user=client_user, created_by=trainer)
+    from diet.models import FoodItem
+    food = FoodItem.objects.filter(needs_review=False).first()
+    t_api.post("/api/diet/v1/trainer/meals/", {
+        "diet_plan_id": plan.id, "meal_type": "Lunch", "target_date": str(date.today()),
+        "food_items": [{"food_id": food.id, "quantity": 100}]}, content_type="application/json")
+    meal = Meal.objects.get(diet_plan=plan)
+
+    assert t_api.get(f"/api/diet/v1/nutrition/plan/{plan.id}/").status_code == 200
+    assert t_api.get(f"/api/diet/v1/meals/{meal.id}/components/").status_code == 200
+
+    r = c_api.post("/api/auth/client/unassign-trainer/", {}, content_type="application/json")
+    assert r.status_code in (200, 204), r.content
+
+    assert t_api.get(f"/api/diet/v1/nutrition/plan/{plan.id}/").status_code == 403
+    assert t_api.get(f"/api/diet/v1/meals/{meal.id}/components/").status_code == 403

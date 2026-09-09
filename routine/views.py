@@ -173,19 +173,22 @@ class ExerciseViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
 
     def destroy(self, request, *args, **kwargs):
+        """Refuse to delete an exercise clients have logged work against.
+
+        This guard was written for Routine and attached here, where it could never
+        fire: nothing PROTECTs an Exercise. `UserExerciseProgress.exercise` and
+        `ExerciseSetLog` both CASCADE, so deleting one exercise silently erased every
+        client's history for it and changed their past volume and streaks. Refuse, and
+        offer the retire path instead.
         """
-        Refuse to delete a routine that has recorded progress — deleting it would
-        erase the client's training history. Deactivate it instead.
-        """
-        from django.db.models import ProtectedError
-        try:
-            return super().destroy(request, *args, **kwargs)
-        except ProtectedError:
+        exercise = self.get_object()
+        if exercise.progress.exists():
             return Response(
-                {'error': _('This routine has recorded client progress and cannot be '
-                            'deleted. Set is_active=false to retire it instead.')},
+                {'error': _('Clients have recorded work against this exercise, so it '
+                            'cannot be deleted. Set is_active=false to retire it.')},
                 status=status.HTTP_409_CONFLICT,
             )
+        return super().destroy(request, *args, **kwargs)
 
 
 class ExerciseCreateWithImageView(APIView):
@@ -470,6 +473,25 @@ class RoutineViewSet(viewsets.ModelViewSet):
         """Override to assign the routine to the creator."""
         serializer.save(created_by=self.request.user)
 
+    def destroy(self, request, *args, **kwargs):
+        """A routine with recorded progress cannot be deleted.
+
+        `RoutineProgress.routine` is PROTECT, and a row is created for every day of
+        every assignment, so every assigned routine is protected — and `ProtectedError`
+        is not a DRF exception, so deleting one was an unhandled 500 rather than a
+        message. Retiring is the operation the trainer actually wants.
+        """
+        from django.db.models import ProtectedError
+
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            return Response(
+                {'error': _('This routine has recorded client progress and cannot be '
+                            'deleted. Set is_active=false to retire it instead.')},
+                status=status.HTTP_409_CONFLICT,
+            )
+
     @action(detail=True, methods=['post'], permission_classes=[IsTrainerOrAdminForAssignment])
     def assign_to_client(self, request, pk=None):
         """
@@ -535,17 +557,17 @@ class RoutineViewSet(viewsets.ModelViewSet):
             # Assign routine to client
             routine.assigned_to.add(client)
 
-            # On assignment, settle escrow to trainer wallet
-            try:
-                from wallet.models import Wallet, move_funds_atomic
-                from wallet.utils import get_escrow_wallet
-                trainer_charge = getattr(request.user, 'trainer_hourly_rate', None) or 0
-                if trainer_charge and trainer_charge > 0:
-                    escrow = get_escrow_wallet()
-                    trainer_wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "trainer"})
-                    move_funds_atomic(escrow, trainer_wallet, trainer_charge, actor_id=request.user.id, tx_type='transfer', metadata={'purpose': 'trainer_assignment_settlement', 'client_id': client.id, 'routine_id': routine.id})
-            except Exception as e:
-                logger.error(f"Escrow settlement failed: {str(e)}")
+            # Settle the hold taken for THIS client, once. This used to move the
+            # trainer's CURRENT hourly rate out of the single shared escrow wallet on
+            # every assignment, with no link to any hold: assigning fifty routines
+            # paid out fifty times, from money other clients had deposited, and a
+            # trainer who set a rate after approval collected against a hold that had
+            # never existed. `settle_hold` pays exactly what was held for this pair
+            # and then forgets it, so a repeat moves nothing.
+            from users.trainer_relations import active_relation, settle_hold
+            relation = active_relation(request.user, client)
+            if relation is not None:
+                settle_hold(relation, request.user)
             
             # Log the assignment
             logger.info(

@@ -27,18 +27,50 @@ class IsAdminOrOwnerOrReadOnly(BasePermission):
         if request.user and request.user.is_staff:
             return True
         # Allow modifying methods for trainers if they own the object
-        if request.user.is_authenticated and request.user.is_trainer and hasattr(obj, 'created_by'):
-            return obj.created_by == request.user
+        if request.user.is_authenticated and request.user.is_trainer:
+            return owner_of(obj) == request.user
         return False
+
+
+def owner_of(obj):
+    """The trainer who owns this row, following the parent when the row has no owner.
+
+    `hasattr(obj, 'created_by')` was the test, and a `RoutineExercise` has no such
+    field — its owner is `routine.created_by`. So the check fell through to False and
+    a trainer could add an exercise to their own routine and then never edit it again.
+    """
+    owner = getattr(obj, 'created_by', None)
+    if owner is not None:
+        return owner
+    for parent in ('routine', 'template', 'routine_template'):
+        related = getattr(obj, parent, None)
+        if related is not None:
+            return getattr(related, 'created_by', None)
+    return None
 
 
 class IsTrainerOrAdmin(BasePermission):
     """
     Permission to allow only trainers and admins to access.
+
+    Object-level too. This class defined only `has_permission`, so DRF's default
+    `has_object_permission` returned True for every object it was asked about: any
+    trainer could PATCH or DELETE any other trainer's routine that happened to reach
+    their queryset — which one does as soon as a client moves between trainers.
     """
-    
+
     def has_permission(self, request, view):
         return request.user.is_authenticated and (request.user.is_trainer or request.user.is_admin)
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_admin or request.user.is_staff:
+            return True
+        owner = owner_of(obj)
+        if owner is not None:
+            return owner == request.user
+        # No owner to compare against: fall back to the queryset's scoping for reads,
+        # and refuse writes rather than guess.
+        return request.method in SAFE_METHODS
 
 
 class IsClientOrTrainerOrAdmin(BasePermission):

@@ -593,10 +593,29 @@ class TrainerClientRelation(models.Model):
     #: unassigned client, then approved their own row, and owned that person's body
     #: metrics, training history and diet plan without the client ever being asked.
     #: A request is approved by the OTHER party, and this is what says who that is.
-    INITIATOR_CHOICES = [('client', 'Client'), ('trainer', 'Trainer')]
+    #: 'unknown' is for rows written before this column existed, and it is the
+    #: DEFAULT on purpose: a code path that forgets to say who asked produces a row
+    #: neither side can approve, rather than one the trainer can approve for
+    #: themselves. Failing safe is the whole point of the column.
+    INITIATOR_CHOICES = [('client', 'Client'), ('trainer', 'Trainer'),
+                         ('unknown', 'Unknown (predates this field)')]
     initiated_by = models.CharField(
-        max_length=8, choices=INITIATOR_CHOICES, default='client', db_index=True,
+        max_length=8, choices=INITIATOR_CHOICES, default='unknown', db_index=True,
         help_text="Which side asked. The other side approves.")
+    #: The price both sides agreed to, snapshotted when the request was made. The
+    #: charge used to be re-read from `trainer_hourly_rate` at approval time, and that
+    #: field is trainer-writable: a trainer could advertise 10, wait for the request,
+    #: raise the rate, then approve and sweep the client's wallet. The client agreed
+    #: to a number, so that number is what they pay.
+    agreed_rate = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    #: The reference of the escrow Transaction while money is held for this pair, and
+    #: empty when nothing is held. The hold had no identity at all: it was found by
+    #: searching transaction metadata, released nowhere, and settled by the routine
+    #: app from the shared escrow pool at whatever the trainer's rate happened to be —
+    #: so assigning fifty routines paid out fifty times, out of other clients' money.
+    #: One hold, named here, is what makes taking it, giving it back and paying it out
+    #: the same single event.
+    hold_reference = models.CharField(max_length=36, blank=True, default='', db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -750,6 +750,13 @@ class Meal(models.Model):
         # paging repeated and hid rows whenever two records shared the value.
         ordering = ['date', 'scheduled_time', 'id']
         unique_together = ['diet_plan', 'date', 'meal_type', 'scheduled_time']
+        # NOTE: `unique_together` above is void whenever `scheduled_time` is null,
+        # because Postgres treats NULLs as distinct — and the engine never sets one.
+        # A database constraint on (plan, date, meal_type) cannot go here: a plan may
+        # legitimately hold two snacks in a day. The retry that actually duplicates is
+        # the trainer's, and `add_meal_to_plan` refuses it explicitly. Giving every
+        # meal a real scheduled time would make this constraint expressible, and is
+        # the better fix once the engine can be changed.
         indexes = [
             models.Index(fields=['is_completed']),
             models.Index(fields=['diet_plan', 'date']),

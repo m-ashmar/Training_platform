@@ -752,6 +752,24 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
         model = WorkoutSession
         fields = ['id', 'user', 'routine', 'start_time', 'end_time', 'status', 'duration']
         read_only_fields = ['id', 'user', 'start_time', 'duration']
+
+    def validate_routine(self, routine):
+        """A session belongs to a routine you were given or wrote.
+
+        `routine` was a writable field over every Routine, and object permissions are
+        never consulted on create, so any authenticated user could open a session
+        against any trainer's routine — and completing it notified that trainer's
+        client.
+        """
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None or not user.is_authenticated:
+            raise serializers.ValidationError("Authentication required.")
+        if user.is_staff or getattr(user, 'is_admin', False):
+            return routine
+        if routine.created_by_id == user.id or routine.assigned_to.filter(pk=user.pk).exists():
+            return routine
+        raise serializers.ValidationError("That routine is not assigned to you.")
     
     def get_duration(self, obj):
         if obj.start_time and obj.end_time:
@@ -772,7 +790,23 @@ class RoutineTemplateExerciseSerializer(serializers.ModelSerializer):
     """
     exercise = ExerciseSerializer(read_only=True)
     exercise_id = serializers.PrimaryKeyRelatedField(queryset=Exercise.objects.all(), source='exercise', write_only=True)
-    
+
+    def validate_exercise_id(self, exercise):
+        """Your own exercises, or the global ones. Not another trainer's private one.
+
+        The routine path enforces this and the template path did not, so a trainer
+        could put a competitor's private exercise into a template and push it to a
+        client, exposing its name, description and media.
+        """
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if exercise.created_by_id is None or (user and exercise.created_by_id == user.id):
+            return exercise
+        if user is not None and (user.is_staff or getattr(user, 'is_admin', False)):
+            return exercise
+        raise serializers.ValidationError(
+            "That exercise belongs to another trainer. Use your own or a global exercise.")
+
     class Meta:
         model = RoutineTemplateExercise
         fields = ['id', 'exercise', 'exercise_id', 'sets', 'reps', 'rest_time', 'day', 'order']

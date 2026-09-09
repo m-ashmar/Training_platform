@@ -191,6 +191,18 @@ class TrainerDietPlanService:
                 % {"a": diet_plan.start_date, "b": diet_plan.end_date},
                 code="date_outside_plan")
 
+        # A retried POST wrote a second Breakfast for the same day, and the database
+        # cannot refuse it: `unique_together` includes `scheduled_time`, which is
+        # optional, and Postgres treats NULLs as distinct. The client then saw the
+        # meal twice and could never reach 100%.
+        clash = Meal.objects.filter(diet_plan=diet_plan, date=target_date,
+                                    meal_type=meal_type, scheduled_time=scheduled_time)
+        if clash.exists():
+            raise ValidationError(
+                _("A %(slot)s already exists for %(date)s in this plan")
+                % {"slot": meal_type, "date": target_date},
+                code="duplicate_meal")
+
         components = self._validated_items(food_items, meal_type)
         name, name_ar, reason, reason_ar = self._meal_names(meal_type, components)
 
@@ -256,8 +268,35 @@ class TrainerDietPlanService:
                                   meal_time=meal.meal_type)
                     for food, grams in components
                 ])
+                # The client did not eat what the trainer has just put here. The meal
+                # kept `is_completed=True` over entirely different food, and
+                # DailyProgress sums the components of completed meals — so swapping
+                # 100 g of eggs for 2000 g of rice added 2,600 kcal the client never
+                # ate, while the same meal reported 0% complete.
+                meal.is_completed = False
+                # The components carry the completion marks; they were just deleted
+                # and replaced, so the new ones start uncompleted by default.
             meal.save()
+            if components is not None:
+                self._recompute_day(meal)
         return meal
+
+    @staticmethod
+    def _recompute_day(meal) -> None:
+        """Bring the client's stored progress back in line with the meals as they are.
+
+        `DailyProgress` is a cache of the day's meals, and nothing invalidated it when
+        a trainer rewrote one.
+        """
+        from .models import DailyProgress
+
+        try:
+            progress = DailyProgress.objects.filter(
+                user=meal.diet_plan.user, diet_plan=meal.diet_plan, date=meal.date).first()
+            if progress is not None:
+                progress.update_progress()
+        except Exception:
+            logger.exception("Could not recompute progress for meal %s", meal.pk)
     
     def delete_meal(self, meal: Meal) -> bool:
         """
@@ -515,7 +554,7 @@ class ClientProgressService:
             target_date = timezone.localdate()
         
         # Get active diet plan
-        active_plan = self._get_active_diet_plan()
+        active_plan = self._get_active_diet_plan(target_date)
         if not active_plan:
             return {
                 'date': target_date,
@@ -621,14 +660,16 @@ class ClientProgressService:
         
         # Get active diet plan with optimized prefetching
         # We need to fetch everything in 3-4 queries max
-        today = timezone.localdate()
+        # The plan governing TARGET_DATE, not today: the meals below are prefetched on
+        # target_date, so resolving the plan by today reported a day's meals against a
+        # plan that did not cover it.
         from django.db.models import Prefetch
-        
+
         active_plan = DietPlan.objects.filter(
             user=self.client,
             is_active=True,
-            start_date__lte=today,
-            end_date__gte=today
+            start_date__lte=target_date,
+            end_date__gte=target_date
         ).order_by('-start_date', '-id').prefetch_related(
             Prefetch(
                 'meals',
@@ -835,15 +876,15 @@ class ClientProgressService:
             'meal_completion_percentage': 100.0
         }
     
-    def _get_active_diet_plan(self) -> Optional[DietPlan]:
+    def _get_active_diet_plan(self, on_date: date = None) -> Optional[DietPlan]:
+        """The plan governing `on_date`, defaulting to today.
+
+        This ignored the date it was asked about and always resolved by today, while
+        its callers went on to report and PERSIST progress against the date they were
+        given: asking about last month returned "you have a plan and ate none of it",
+        and wrote a DailyProgress row for a date the plan never covered.
         """
-        Get the client's active diet plan.
-        Optimized to fetch latest plan deterministically.
-        
-        Returns:
-            Active DietPlan instance or None
-        """
-        today = timezone.localdate()
+        today = on_date or timezone.localdate()
         # strictly order by start_date descending to get the latest one
         return DietPlan.objects.filter(
             user=self.client,
