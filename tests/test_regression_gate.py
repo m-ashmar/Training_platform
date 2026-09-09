@@ -3311,8 +3311,16 @@ def test_the_async_endpoint_can_run_the_deterministic_engine_for_a_month(seeded_
                content_type="application/json")
     assert r.status_code == 200, r.content
     assert r.json()["engine"] == "rule" and r.json()["task_id"]
-    plan = DietPlan.objects.filter(user=user).order_by("-id").first()   # CELERY_TASK_ALWAYS_EAGER
-    assert plan is not None and Meal.objects.filter(diet_plan=plan).count() == 40
+    # The task's own answer, not "the newest plan for this user": under
+    # CELERY_TASK_ALWAYS_EAGER the result carries the id it created, and reading it
+    # back by ordering assumed nothing else had written a plan in between.
+    from celery.result import AsyncResult
+
+    outcome = AsyncResult(r.json()["task_id"]).result
+    assert isinstance(outcome, dict) and "plan_id" in outcome, outcome
+    plan = DietPlan.objects.get(pk=outcome["plan_id"])
+    assert plan.user_id == user.id
+    assert Meal.objects.filter(diet_plan=plan).count() == 40
     assert plan.generation_strategy == "FALLBACK"
 
 
@@ -4511,3 +4519,68 @@ def test_a_dismissed_trainer_cannot_read_the_plan_either(seeded_catalogue, make_
 
     assert t_api.get(f"/api/diet/v1/nutrition/plan/{plan.id}/").status_code == 403
     assert t_api.get(f"/api/diet/v1/meals/{meal.id}/components/").status_code == 403
+
+
+def test_a_trainer_cannot_touch_another_trainers_routine(seeded_catalogue, make_user):
+    """`IsTrainerOrAdmin` defined only `has_permission`, so DRF's object permission
+    defaulted to True: any trainer could modify any routine that reached their
+    queryset, and one does as soon as a client moves between trainers. And the owning
+    trainer could never edit their own routine's exercises, because the ownership test
+    required a `created_by` field that RoutineExercise does not have."""
+    from django.test import Client
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    from routine.models import Exercise, Routine, RoutineExercise
+
+    owner, client_user, o_api, c_api = _assigned_pair(make_user, "routine")
+    intruder = make_user("tr-routine-intruder", user_type="trainer")
+    i_api = Client()
+    i_api.defaults["HTTP_AUTHORIZATION"] = f"Bearer {RefreshToken.for_user(intruder).access_token}"
+
+    exercise = Exercise.objects.create(name="Gate Squat", created_by=owner)
+    routine = Routine.objects.create(name="Owner Routine", days=3, created_by=owner)
+    routine.assigned_to.set([client_user])
+    line = RoutineExercise.objects.create(routine=routine, exercise=exercise,
+                                          sets=3, reps=10, day=1, order=1)
+
+    # The owner can edit the composition of their own routine.
+    r = o_api.patch(f"/api/routine/routine-exercises/{line.id}/", {"sets": 4},
+                    content_type="application/json")
+    assert r.status_code == 200, r.content
+    line.refresh_from_db()
+    assert line.sets == 4
+
+    # A stranger cannot, and cannot touch the routine either.
+    r = i_api.patch(f"/api/routine/routines/{routine.id}/", {"name": "Stolen"},
+                    content_type="application/json")
+    assert r.status_code in (403, 404), r.content
+    r = i_api.delete(f"/api/routine/routines/{routine.id}/")
+    assert r.status_code in (403, 404), r.content
+    routine.refresh_from_db()
+    assert routine.name == "Owner Routine"
+
+    # An assigned routine cannot be deleted at all: it holds recorded progress.
+    r = o_api.delete(f"/api/routine/routines/{routine.id}/")
+    assert r.status_code in (204, 409), r.content
+    if r.status_code == 409:
+        assert Routine.objects.filter(pk=routine.pk).exists()
+
+
+def test_deleting_an_exercise_cannot_erase_a_clients_history(seeded_catalogue, make_user):
+    """The ProtectedError guard was written for Routine and attached to Exercise,
+    where nothing is protected: `UserExerciseProgress` and every `ExerciseSetLog`
+    cascade, so one delete silently rewrote a client's past volume and streaks."""
+    from routine.models import Exercise, UserExerciseProgress
+
+    owner, client_user, o_api, _c = _assigned_pair(make_user, "exdelete")
+    exercise = Exercise.objects.create(name="Gate Press", created_by=owner)
+    UserExerciseProgress.objects.create(user=client_user, exercise=exercise)
+
+    r = o_api.delete(f"/api/routine/exercises/{exercise.id}/")
+    assert r.status_code == 409, r.content
+    assert Exercise.objects.filter(pk=exercise.pk).exists()
+    assert UserExerciseProgress.objects.filter(exercise=exercise).exists()
+
+    # One nobody has trained with can still be removed.
+    spare = Exercise.objects.create(name="Gate Spare", created_by=owner)
+    assert o_api.delete(f"/api/routine/exercises/{spare.id}/").status_code == 204

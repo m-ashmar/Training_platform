@@ -15,6 +15,7 @@ from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
 from diet.services.meal_payload import component_payload, meal_payload
+from .validators import DietInputValidator
 from .models import (
     DietPlan, DietPlanTemplate, Meal, MealComponent, 
     FoodItem, DailyProgress
@@ -35,9 +36,13 @@ class TrainerDietPlanService:
         Args:
             trainer: The trainer user instance
         """
-        if not trainer.is_trainer:
+        if not (trainer.is_trainer or trainer.is_admin):
             raise ValidationError(_("User must be a trainer to use this service"), code="not_trainer")
         self.trainer = trainer
+        #: An admin acts on behalf of support and is not anybody's assigned trainer,
+        #: so the assignment tests below would refuse them. Widening the view gate
+        #: without widening this one only changed the wording of the 403.
+        self.is_support = bool(trainer.is_admin)
     
     def get_available_templates(self) -> List[DietPlanTemplate]:
         """
@@ -102,7 +107,6 @@ class TrainerDietPlanService:
 
         # Validate the calorie target server-side (bounds + type). Prevents a
         # trainer from persisting a medically dangerous target (e.g. 200 or 50000).
-        from .validators import DietInputValidator
         daily_calories = DietInputValidator.validate_daily_calories(daily_calories)
 
         try:
@@ -385,6 +389,8 @@ class TrainerDietPlanService:
         Returns:
             True if trainer can manage this client
         """
+        if self.is_support:
+            return True
         # Both halves. `assigned_trainer` is the pointer the app reads, and the
         # approved relation is the record of consent; a trainer who was unassigned
         # keeps neither. This used to be the pointer alone.
@@ -402,16 +408,17 @@ class TrainerDietPlanService:
         that client's live plan, because they had created it. Being the author AND
         still being this client's trainer are both required.
         """
-        if diet_plan.created_by_id != self.trainer.id:
+        if not self.is_support and diet_plan.created_by_id != self.trainer.id:
             raise ValidationError(_("You can only modify diet plans you created"),
                                   code="not_plan_owner")
         if not self._can_manage_client(diet_plan.user):
             raise ValidationError(_("This client is no longer assigned to you"),
                                   code="not_assigned_client")
 
-    #: What a person can be served in one sitting. A trainer typing 5000 into a
-    #: quantity box wrote it straight to the column, and every reader multiplies it.
-    MAX_COMPONENT_GRAMS = 2000.0
+    #: One legal range for a component, the same one `DietInputValidator` applies
+    #: everywhere else. This class declared its own 0-2000 while every other writer
+    #: used 1-1000, so the same gram figure was accepted here and refused there, and
+    #: 0.0001 g passed as a component that renders as "0 g".
 
     def _validated_items(self, food_items, meal_type: str):
         """Turn the request's food list into rows we are willing to persist.
@@ -431,15 +438,22 @@ class TrainerDietPlanService:
             if not isinstance(entry, dict):
                 raise ValidationError(_("Each food item must be an object"), code="bad_food_item")
             try:
-                food_id = int(entry.get('food_id'))
-                grams = float(entry.get('quantity'))
+                raw_id, raw_grams = entry.get('food_id'), entry.get('quantity')
+                # `int(True)` is 1 and `int(12.9)` is 12 — a silently different food.
+                if isinstance(raw_id, bool) or isinstance(raw_grams, bool):
+                    raise TypeError("booleans are not ids or quantities")
+                food_id = int(raw_id)
+                if float(raw_id) != food_id:
+                    raise ValueError("food_id must be a whole number")
+                grams = float(raw_grams)
             except (TypeError, ValueError):
                 raise ValidationError(_("Each food item needs a numeric food_id and quantity"),
                                       code="bad_food_item")
-            if not 0 < grams <= self.MAX_COMPONENT_GRAMS:
+            if not (DietInputValidator.MIN_QUANTITY <= grams <= DietInputValidator.MAX_QUANTITY):
                 raise ValidationError(
-                    _("Quantity for food %(id)s must be between 0 and %(max)d grams")
-                    % {"id": food_id, "max": int(self.MAX_COMPONENT_GRAMS)},
+                    _("Quantity for food %(id)s must be between %(lo)d and %(hi)d grams")
+                    % {"id": food_id, "lo": int(DietInputValidator.MIN_QUANTITY),
+                       "hi": int(DietInputValidator.MAX_QUANTITY)},
                     code="bad_quantity")
             if food_id in seen:
                 raise ValidationError(

@@ -533,7 +533,12 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         """
         if not obj.weight or not obj.reps or obj.reps == 0:
             return 0.0
-        # If reps are very high, formula breaks down, but useful as metric
+        # Brzycki divides by (37 - reps), so 37 reps is a division by zero and more
+        # than 37 is a NEGATIVE one-rep max. `MAX_REPS_PER_SET` is 1000, so both are
+        # reachable from a real set log. The formula is only meaningful to about ten
+        # reps anyway; past that, report the weight lifted rather than a fiction.
+        if obj.reps >= 36:
+            return round(float(obj.weight), 1)
         return round(obj.weight * (36 / (37 - obj.reps)), 1)
 
 
@@ -621,13 +626,17 @@ class TrainerRoutineSerializer(serializers.ModelSerializer):
         Calculate completion rate for this routine.
         Returns the percentage of days marked as 'Completed' across all assigned users.
         """
+        # Counted in the query when the viewset annotated it. Counting in Python
+        # "to avoid a DB hit" meant fetching every progress row of every client to
+        # produce one percentage.
+        total = getattr(obj, 'progress_total', None)
+        if total is not None:
+            done = getattr(obj, 'progress_done', 0) or 0
+            return round((done / total) * 100, 1) if total else 0.0
+
         from .models import RoutineProgress
-        
-        # Get all progress entries for this routine
-        # Use all() to leverage prefetch_related
+
         progress_entries = obj.progress.all()
-        
-        # Calculate manually in python to avoid DB hit
         total_entries = len(progress_entries)
         completed_entries = sum(1 for p in progress_entries if p.status == 'completed')
         

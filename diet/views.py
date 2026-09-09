@@ -1402,34 +1402,46 @@ class TrainerMealView(APIView):
 
             # Handle bulk creation for list input
             if isinstance(request.data, list):
-                created_meals = []
-                errors = []
-                trainer_service = TrainerDietPlanService(request.user)
+                # All or nothing, and bounded. Each item used to be wrapped in a bare
+                # `except Exception` that turned an authorization refusal into a line
+                # in `errors` while the response stayed 201 Created — so posting a
+                # plan belonging to another trainer's client looked like success. The
+                # list was also unbounded, at roughly seven queries an item.
+                MAX_BULK_MEALS = 100
+                if len(request.data) > MAX_BULK_MEALS:
+                    return Response(
+                        {"error": _("At most %(n)d meals in one request") % {"n": MAX_BULK_MEALS},
+                         "code": "batch_too_large"},
+                        status=status.HTTP_400_BAD_REQUEST)
 
-                for index, meal_data in enumerate(request.data):
-                    try:
-                        # Extract and validate
+                trainer_service = TrainerDietPlanService(request.user)
+                plans = {}
+                created_meals = []
+                with transaction.atomic():
+                    for index, meal_data in enumerate(request.data):
                         diet_plan_id = meal_data.get('diet_plan_id')
                         meal_type = meal_data.get('meal_type')
                         target_date_str = meal_data.get('target_date')
                         food_items = meal_data.get('food_items', [])
-
                         if not all([diet_plan_id, meal_type, target_date_str, food_items]):
-                            errors.append({"index": index, "error": "Missing required fields"})
-                            continue
-
-                        diet_plan = get_object_or_404(DietPlan, id=diet_plan_id)
+                            return Response(
+                                {"error": _("Missing required fields"), "index": index,
+                                 "code": "missing_fields"},
+                                status=status.HTTP_400_BAD_REQUEST)
                         target_date = parse_date(target_date_str)
+                        if not target_date:
+                            return Response(
+                                {"error": _("Invalid target_date format"), "index": index,
+                                 "code": "bad_date"},
+                                status=status.HTTP_400_BAD_REQUEST)
                         scheduled_time = None
                         if meal_data.get('scheduled_time'):
                             scheduled_time = parse_time(meal_data.get('scheduled_time'))
-                        
-                        if not target_date:
-                            errors.append({"index": index, "error": "Invalid target_date format"})
-                            continue
-                        
+                        # One fetch per distinct plan, not one per meal.
+                        if diet_plan_id not in plans:
+                            plans[diet_plan_id] = get_object_or_404(DietPlan, id=diet_plan_id)
                         meal = trainer_service.add_meal_to_plan(
-                            diet_plan=diet_plan,
+                            diet_plan=plans[diet_plan_id],
                             meal_type=meal_type,
                             target_date=target_date,
                             food_items=food_items,
@@ -1442,27 +1454,12 @@ class TrainerMealView(APIView):
                             'date': meal.date,
                             'scheduled_time': meal.scheduled_time,
                             'description': meal.description,
-                            'components_count': meal.components.count()
+                            'components_count': len(meal_data.get('food_items') or []),
                         })
-                    except BadInput as e:
-                        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-                    except PASSTHROUGH_EXCEPTIONS:
-                        # get_object() signals 404/403 by raising. The broad handler below
-                        # swallowed those and re-emitted them as 500 (str(Http404()) is '',
-                        # so the log line was empty too). Control-flow exceptions must pass.
-                        raise
-                    except Exception as e:
-                        logger.error(f"Error creating meal at index {index}: {e}")
-                        errors.append({"index": index,
-                                       "error": _("Could not create this meal.")})
-
-                if errors and not created_meals:
-                     return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
-                
                 return Response({
-                    "message": f"Successfully created {len(created_meals)} meals",
-                    "meals": created_meals,
-                    "errors": errors if errors else None
+                    "message": _("Meals created successfully"),
+                    "created": created_meals,
+                    "created_count": len(created_meals),
                 }, status=status.HTTP_201_CREATED)
             
             # Validate required fields for single object

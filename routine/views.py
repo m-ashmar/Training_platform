@@ -437,12 +437,17 @@ class RoutineViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         # Base optimization for all queries
+        # `progress` is NOT prefetched: the serializer counted those rows in Python
+        # "to avoid a DB hit", which forced every one of them into memory — twenty
+        # routines x twenty clients x thirty days is 12,000 rows fetched to produce
+        # twenty percentages. They are counted in the query now.
         queryset = self.queryset.select_related('created_by').prefetch_related(
             'routine_exercises__exercise__media',
             'assigned_to',
-            'progress'
         ).annotate(
-            client_count=models.Count('assigned_to', filter=models.Q(assigned_to__user_type='client'), distinct=True)
+            client_count=models.Count('assigned_to', filter=models.Q(assigned_to__user_type='client'), distinct=True),
+            progress_total=models.Count('progress', distinct=True),
+            progress_done=models.Count('progress', filter=models.Q(progress__status='completed'), distinct=True)
         # annotate() with an aggregate adds a GROUP BY, and Django then drops
         # Meta.ordering from the SQL entirely — the query came back with GROUP BY and
         # no ORDER BY at all. Paging a routine list in whatever order Postgres felt
@@ -1256,21 +1261,21 @@ class AnalyticsViewSet(viewsets.ViewSet):
             except CustomUser.DoesNotExist:
                 return Response({'error': _('User not found')}, status=404)
 
-        now = timezone.now()
-        
+        # Calendar days, not a datetime subtracted from now. `date__gte` compares a
+        # DateField against a datetime, which truncates: a 7-day window starting at
+        # this instant covers EIGHT calendar dates, so a client training daily scored
+        # 8/7 and the consistency figure read 114%.
+        today = timezone.localdate()
+
         # Determine time ranges
         if period == 'month':
-            start_date = now - timedelta(days=30)
-            prev_start = start_date - timedelta(days=30)
             days_in_period = 30
         elif period == 'year':
-            start_date = now - timedelta(days=365)
-            prev_start = start_date - timedelta(days=365)
             days_in_period = 365
-        else: # week
-            start_date = now - timedelta(days=7)
-            prev_start = start_date - timedelta(days=7)
+        else:  # week
             days_in_period = 7
+        start_date = today - timedelta(days=days_in_period - 1)
+        prev_start = start_date - timedelta(days=days_in_period)
 
         # Current Period Data
         setlogs = ExerciseSetLog.objects.filter(
@@ -1282,7 +1287,8 @@ class AnalyticsViewSet(viewsets.ViewSet):
             total=Sum(F('weight') * F('reps'))
         )['total'] or 0
         
-        days_trained = setlogs.values('date').distinct().count()
+        # Bounded by the window, so it can never exceed it.
+        days_trained = min(setlogs.values('date').distinct().count(), days_in_period)
         
         # PRs (Personal Records) in this period - simplified check
         # Ideally would check if weight > max(previous weights) for each exercise
@@ -1510,9 +1516,12 @@ class AnalyticsViewSet(viewsets.ViewSet):
             clients = CustomUser.objects.filter(user_type='client')
         
         # Prefetch related data to avoid N+1 queries
+        # `exercise_progress__set_logs` was prefetched here and never read: the
+        # aggregates below run their own queries. For twenty clients with a year of
+        # training that was ~36k progress rows and ~110k set logs pulled into the
+        # worker to produce a page of summaries.
         clients = clients.select_related('assigned_trainer').prefetch_related(
-            'routine_progress',
-            'exercise_progress__set_logs'
+            'routine_progress'
         )
         
         # Calculate date range for volume (last 30 days)
@@ -1792,11 +1801,15 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         if end_date:
             routine_data['end_date'] = end_date
 
-        routine = Routine.objects.create(**routine_data)
-        routine.assigned_to.set([client])
-        
-        # Copy exercises with expansion loop
+        # Assignment comes AFTER the exercises exist. The m2m receiver creates one
+        # RoutineProgress row per day and reads `routine_exercises.count()` to set
+        # `total_exercises`; assigning first meant every row was written with zero,
+        # `bulk_create` fires no signal to correct it, and the trainer's completion
+        # view then read 0% for that client forever.
         customizations = request.data.get('customizations', {})
+        if not isinstance(customizations, dict):
+            return Response({'error': 'customizations must be an object'},
+                            status=status.HTTP_400_BAD_REQUEST)
         template_exercises = list(template.routinetemplateexercise_set.select_related('exercise').all())
         new_routine_exercises = []
         cycle_length = template.days or 1
@@ -1810,7 +1823,6 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
                 ex_custom = customizations.get(ex_id, {})
                 new_routine_exercises.append(
                     RoutineExercise(
-                        routine=routine,
                         exercise=t_ex.exercise,
                         sets=ex_custom.get('sets', t_ex.sets),
                         reps=ex_custom.get('reps', t_ex.reps),
@@ -1820,9 +1832,16 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
                     )
                 )
                 
-        if new_routine_exercises:
-            RoutineExercise.objects.bulk_create(new_routine_exercises)
-        
+        # One transaction: a failure partway through used to leave a routine with
+        # some of its days and a client already assigned to it.
+        with transaction.atomic():
+            routine = Routine.objects.create(**routine_data)
+            for pending in new_routine_exercises:
+                pending.routine = routine
+            if new_routine_exercises:
+                RoutineExercise.objects.bulk_create(new_routine_exercises)
+            routine.assigned_to.set([client])
+
         # Send notification to client
         from .services import send_notification
         send_notification(
@@ -2580,10 +2599,13 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
              ).prefetch_related(
                  # Prefetch recent completed sessions with their set logs and exercises
                  Prefetch(
+                     # Sliced. This was ordered but unbounded, so a client with three
+                     # hundred sessions materialised all of them and every set log,
+                     # for a view whose statistics only look back seven days.
                      'workout_sessions',
                      queryset=WorkoutSession.objects.filter(
                         status='completed'
-                     ).order_by('-end_time').prefetch_related(
+                     ).order_by('-end_time')[:30].prefetch_related(
                          Prefetch(
                              'set_logs',
                              queryset=ExerciseSetLog.objects.select_related(
@@ -2664,13 +2686,12 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
             )
         
         # Get all clients assigned to this trainer
+        # Same unread prefetch as the dashboard above, and the client list was
+        # unbounded. The serializer issues its own queries per client, so the only
+        # thing this bought was memory.
         clients = CustomUser.objects.filter(
             assigned_trainer=user, user_type='client'
-        ).prefetch_related(
-            'workout_sessions',
-            'exercise_progress__set_logs',
-            'routine_progress'
-        )
+        ).select_related('assigned_trainer')[:100]
         
         recent_activity = []
         for client in clients:
