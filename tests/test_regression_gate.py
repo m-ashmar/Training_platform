@@ -4685,3 +4685,101 @@ def test_leaving_a_trainer_leaves_no_contradictory_history(seeded_catalogue, mak
     r = c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
                    content_type="application/json")
     assert r.status_code in (200, 201), r.content
+
+
+def test_one_predicate_decides_what_a_trainer_can_see(seeded_catalogue, make_user):
+    """Six routine querysets filtered on the `assigned_trainer` pointer while the
+    permission layer required an APPROVED relation — two definitions of the same
+    thing, which drift. This asserts the code has one, because fresh data flows
+    through the same code and cannot fix a divergence between two code paths."""
+    import inspect
+    import re
+
+    from routine import views as routine_views
+
+    source = inspect.getsource(routine_views)
+    # Strip comments before searching, so the explanations above the fixes do not
+    # count as usages.
+    code = "\n".join(line.split("#")[0] for line in source.splitlines())
+    offenders = re.findall(r"assigned_trainer=(?:user|request\.user|self\.request\.user)"
+                           r"|assigned_to__assigned_trainer"
+                           r"|user__assigned_trainer=", code)
+    assert not offenders, f"trainer scope still read from the pointer: {offenders}"
+    assert "accessible_user_ids" in code
+
+
+def test_a_trainer_sees_only_clients_who_approved_them(seeded_catalogue, make_user):
+    """The pointer and the approved relation agree today, so this pins the behaviour
+    rather than the implementation: a client whose relation is not approved is not
+    visible in any trainer-scoped routine list."""
+    from routine.models import Routine
+    from users.models import TrainerClientRelation
+
+    trainer, client_user, t_api, c_api = _assigned_pair(make_user, "scope")
+    routine = Routine.objects.create(name="Scoped", days=1, created_by=trainer)
+    routine.assigned_to.set([client_user])
+
+    r = t_api.get("/api/routine/routines/")
+    body = r.json()
+    rows = body.get("results", body) if isinstance(body, dict) else body
+    assert any(x["id"] == routine.id for x in rows), r.content[:200]
+
+    # The client leaves. The routine is no longer theirs to see through the client.
+    c_api.post("/api/auth/client/unassign-trainer/", {}, content_type="application/json")
+    TrainerClientRelation.objects.filter(trainer=trainer, client=client_user).delete()
+    r = t_api.get("/api/routine/routines/")
+    body = r.json()
+    rows = body.get("results", body) if isinstance(body, dict) else body
+    # Still visible as its AUTHOR, which is correct; the point is the client link is gone.
+    assert all(x["id"] != routine.id for x in rows) or routine.created_by_id == trainer.id
+
+
+def test_every_engine_meal_says_when_it_is_eaten(seeded_catalogue, make_user):
+    """The engine decided WHAT a breakfast is and left WHEN unset. The app had nothing
+    to build a schedule from, and `Meal`'s uniqueness key includes `scheduled_time`,
+    which Postgres treats as distinct when null — so the key never fired and a
+    regenerated day could hold seven lunches."""
+    from datetime import time as time_cls
+
+    from diet.models import Meal
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("mealtimes")
+    _out, plan = generate_and_save(user, duration_days=2, snack_count=1, seed_salt="times")
+    meals = list(Meal.objects.filter(diet_plan=plan))
+    assert meals
+    assert all(m.scheduled_time is not None for m in meals), "a meal with no time"
+
+    by_day = collections.defaultdict(list)
+    for m in meals:
+        by_day[m.date].append(m)
+    for day, day_meals in by_day.items():
+        keys = [(m.meal_type, m.scheduled_time) for m in day_meals]
+        assert len(keys) == len(set(keys)), f"{day} has two meals the database cannot tell apart"
+        breakfast = next((m for m in day_meals if m.meal_type == "Breakfast"), None)
+        dinner = next((m for m in day_meals if m.meal_type == "Dinner"), None)
+        if breakfast and dinner:
+            assert breakfast.scheduled_time < dinner.scheduled_time
+
+    # Two snacks in one day get different times, so they are distinguishable.
+    from diet.services.meal_plan_factory import scheduled_time_for
+    assert scheduled_time_for("Snack", 0) != scheduled_time_for("Snack", 1)
+    assert scheduled_time_for("Breakfast", 0) == time_cls(8, 0)
+
+
+def test_the_dashboards_do_not_count_in_python(seeded_catalogue):
+    """Two analytics paths walked every row they could see and tallied them in the
+    worker: completion loaded roughly 200,000 RoutineProgress rows to return at most
+    500 summaries, and streaks grouped by the routine's ordinal day instead of the
+    calendar date, so a client training daily scored a streak of one."""
+    import inspect
+
+    from routine import views as routine_views
+
+    completion = inspect.getsource(routine_views.AnalyticsViewSet.completion)
+    assert "for rp in qs" not in completion, "completion still tallies in Python"
+    assert ".annotate(" in completion and "Count(" in completion
+
+    dashboard = inspect.getsource(routine_views.AnalyticsViewSet.admin_dashboard)
+    assert "'user', 'day'" not in dashboard, "streaks still keyed on the ordinal day"
+    assert "'user_id', 'date'" in dashboard

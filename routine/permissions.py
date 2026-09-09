@@ -410,6 +410,9 @@ def accessible_user_ids(requester):
         return None  # unrestricted
     ids = {requester.id}
     if getattr(requester, 'is_trainer', False):
+        # The approved relation, which is the platform's single source of truth for
+        # "this trainer may see this client" — the same record `can_access_user_data`
+        # reads. Nothing here consults the `assigned_trainer` pointer.
         from users.models import TrainerClientRelation
         ids.update(
             TrainerClientRelation.objects.filter(

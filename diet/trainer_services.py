@@ -339,16 +339,12 @@ class TrainerDietPlanService:
         Returns:
             True if trainer can manage this client
         """
-        if self.is_support:
-            return True
-        # Both halves. `assigned_trainer` is the pointer the app reads, and the
-        # approved relation is the record of consent; a trainer who was unassigned
-        # keeps neither. This used to be the pointer alone.
-        if client.assigned_trainer_id != self.trainer.id:
-            return False
-        from users.models import TrainerClientRelation
-        return TrainerClientRelation.objects.filter(
-            trainer=self.trainer, client=client, status='approved').exists()
+        # One gate for the whole platform: `can_access_user_data`, which reads the
+        # approved TrainerClientRelation. This used to test the `assigned_trainer`
+        # pointer, then both, and the routine app tested something else again — three
+        # spellings of one rule. The relation is the record that carries consent, the
+        # agreed price and the escrow hold, so it is the one that decides.
+        return self.trainer.can_access_user_data(client)
 
     def _authorize_plan(self, diet_plan: DietPlan) -> None:
         """Every write to a plan, checked the same way.

@@ -26,7 +26,9 @@ from .permissions import (
     IsTrainerOrAdminForAssignment,
     IsSetLogCreatorOrTrainerOrAdmin,
     IsRoutineOwnerOrAssigned,
-    IsClientOrAssignedTrainer # Added for RoutineProgressViewSet
+    IsClientOrAssignedTrainer,  # Added for RoutineProgressViewSet
+    # The one predicate for "this trainer may see this client": an APPROVED relation.
+    accessible_user_ids,
 )
 import logging
 from .services import send_notification
@@ -475,9 +477,17 @@ class RoutineViewSet(viewsets.ModelViewSet):
             return queryset.all()
         elif user.is_trainer:
             # Trainers can see routines they created and routines assigned to their clients
+            # `accessible_user_ids` is the one predicate that means "this trainer may see
+        # this client": it requires an APPROVED relation. These querysets filtered on
+        # the `assigned_trainer` pointer instead, which is a second definition of the
+        # same thing — and two definitions drift. Dropping the database does not fix
+        # it, because fresh rows flow through the same code.
+            ids = accessible_user_ids(user)
+            if ids is None:
+                return queryset.all()
             return queryset.filter(
-                models.Q(created_by=user) | 
-                models.Q(assigned_to__assigned_trainer=user)
+                models.Q(created_by=user) |
+                models.Q(assigned_to__id__in=ids)
             ).distinct()
         else:
             # Clients can see routines assigned to them
@@ -875,7 +885,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
         if user.is_admin:
             return base_qs
         elif user.is_trainer:
-            return base_qs.filter(user__assigned_trainer=user)
+            ids = accessible_user_ids(user)
+            return base_qs if ids is None else base_qs.filter(user_id__in=ids)
         else:
             return base_qs.filter(user=user)
 
@@ -914,7 +925,9 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         if user.is_admin:
             return base_qs
         elif user.is_trainer:
-            return base_qs.filter(user_exercise_progress__user__assigned_trainer=user)
+            ids = accessible_user_ids(user)
+            return (base_qs if ids is None
+                    else base_qs.filter(user_exercise_progress__user_id__in=ids))
         else:
             return base_qs.filter(user_exercise_progress__user=user)
 
@@ -1391,27 +1404,29 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 return Response({'error': _('You do not have access to this user\'s data.')},
                                 status=status.HTTP_403_FORBIDDEN)
             qs = qs.filter(user_id=user_id)
-        # Aggregate by routine and user
-        data = {}
-        for rp in qs:
-            key = f"routine_{rp.routine_id}_user_{rp.user_id}"
-            if key not in data:
-                data[key] = {'routine_id': rp.routine_id, 'user_id': rp.user_id, 'days': 0, 'completed': 0}
-            data[key]['days'] += 1
-            if rp.status == 'completed':
-                data[key]['completed'] += 1
-        # Calculate completion %
-        for v in data.values():
-            v['completion_rate'] = round(100 * v['completed'] / v['days'], 2) if v['days'] else 0
-        # Match the platform-wide list shape {count, next, previous, results} and
-        # cap the payload — this was a hand-rolled dict with no bound, so a trainer
-        # with many clients could pull an unbounded response.
-        rows = list(data.values())
+        # Grouped and counted by the database. This walked every RoutineProgress row
+        # the caller could see and tallied it in Python — a trainer with twenty
+        # clients on thirty-day routines across a year loaded roughly 200,000 rows
+        # into the worker to return at most 500 summaries. The `[:500]` cap bounded
+        # the response, not the query.
+        LIMIT = 500
+        grouped = (qs.values('routine_id', 'user_id')
+                     .annotate(days=Count('id'),
+                               completed=Count('id', filter=Q(status='completed')))
+                     .order_by('routine_id', 'user_id'))
+        total = grouped.count()
+        rows = [{
+            'routine_id': row['routine_id'],
+            'user_id': row['user_id'],
+            'days': row['days'],
+            'completed': row['completed'],
+            'completion_rate': round(100 * row['completed'] / row['days'], 2) if row['days'] else 0,
+        } for row in grouped[:LIMIT]]
         return Response({
-            'count': len(rows),
+            'count': total,
             'next': None,
             'previous': None,
-            'results': rows[:500],
+            'results': rows,
         })
 
     @action(detail=False, methods=['get'])
@@ -1532,7 +1547,8 @@ class AnalyticsViewSet(viewsets.ViewSet):
         
         # Get all clients for this trainer/admin with optimized queries
         if request.user.is_trainer:
-            clients = CustomUser.objects.filter(assigned_trainer=request.user)
+            ids = accessible_user_ids(request.user)
+            clients = CustomUser.objects.filter(id__in=ids or [])
         else:
             clients = CustomUser.objects.filter(user_type='client')
         
@@ -1579,45 +1595,31 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 'completion_rate': round(100 * completed_days / total_days, 2) if total_days else 0
             }
         
-        # Bulk aggregate streak data for all clients
-        streak_data = RoutineProgress.objects.filter(
-            user__in=clients,
-            status='completed'
-        ).values('user', 'day').order_by('user', 'day')
-        
-        # Calculate streaks for each client
+        # Streaks are CONSECUTIVE CALENDAR DAYS. This grouped by `day`, which is the
+        # ordinal position inside a routine (1..N), not a date: `day` repeats every
+        # time a routine cycles, so a client training daily for a month scored a
+        # streak of one to three. The analytics endpoint beside this one already
+        # counted dates correctly and disagreed with it.
         streak_lookup = {}
-        current_user = None
-        current_streak = 0
-        max_streak = 0
-        last_completed_day = None
-        
-        for item in streak_data:
-            user_id = item['user']
-            day = item['day']
-            
-            if current_user != user_id:
-                # Save previous user's streak data
-                if current_user is not None:
-                    streak_lookup[current_user] = max_streak
-                
-                # Reset for new user
-                current_user = user_id
-                current_streak = 1
-                max_streak = 1
-                last_completed_day = day
-            else:
-                # Same user, check if consecutive
-                if last_completed_day is not None and day == last_completed_day + 1:
-                    current_streak += 1
-                    max_streak = max(max_streak, current_streak)
-                else:
-                    current_streak = 1
-                last_completed_day = day
-        
-        # Save last user's streak data
-        if current_user is not None:
-            streak_lookup[current_user] = max_streak
+        streak_rows = (RoutineProgress.objects
+                       .filter(user__in=clients, status='completed')
+                       .values_list('user_id', 'date')
+                       .order_by('user_id', 'date')
+                       .distinct())
+        previous_user = previous_date = None
+        run = best = 0
+        for user_id, day_date in streak_rows:
+            if user_id != previous_user:
+                if previous_user is not None:
+                    streak_lookup[previous_user] = best
+                previous_user, previous_date = user_id, day_date
+                run = best = 1
+                continue
+            run = run + 1 if (day_date - previous_date).days == 1 else 1
+            best = max(best, run)
+            previous_date = day_date
+        if previous_user is not None:
+            streak_lookup[previous_user] = best
         
         # Build dashboard response
         dashboard = []
@@ -2024,7 +2026,8 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         if user.is_admin:
             return self.queryset.all()
         elif user.is_trainer:
-            return self.queryset.filter(user__assigned_trainer=user)
+            ids = accessible_user_ids(user)
+            return self.queryset if ids is None else self.queryset.filter(user_id__in=ids)
         else:
             return self.queryset.filter(user=user)
 
@@ -2711,9 +2714,10 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         # Same unread prefetch as the dashboard above, and the client list was
         # unbounded. The serializer issues its own queries per client, so the only
         # thing this bought was memory.
-        clients = CustomUser.objects.filter(
-            assigned_trainer=user, user_type='client'
-        ).select_related('assigned_trainer')[:100]
+        ids = accessible_user_ids(user)
+        clients = (CustomUser.objects
+                   .filter(id__in=ids or [], user_type='client')
+                   .select_related('assigned_trainer')[:100])
         
         recent_activity = []
         for client in clients:

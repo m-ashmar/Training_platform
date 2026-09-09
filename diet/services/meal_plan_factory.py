@@ -1,9 +1,43 @@
 from __future__ import annotations
 
+from datetime import date as date_cls, datetime, time, timedelta
 from typing import Iterable, Tuple, List
 from ..ai_models import AIMeal
 from ..models import Meal, MealComponent, FoodItem, DietPlan
 from ..utils.nutrition import convert_to_grams, piece_based_grams_if_appropriate, dominant_macro_of_food
+
+
+#: When each slot is eaten. The engine decided WHAT a breakfast is and left WHEN
+#: unset, so every meal reached the client with no time on it. Three consequences,
+#: all of them real: the app had nothing to sort or show a schedule by; `Meal`'s
+#: uniqueness key includes `scheduled_time`, and Postgres treats NULLs as distinct,
+#: so the key never fired and a regenerated day could hold seven lunches; and a
+#: client with two snacks had two rows the database could not tell apart.
+#:
+#: Times a Syrian household would recognise, and snacks are spaced so a second one
+#: is the afternoon and a third the evening.
+SLOT_TIMES = {
+    'Breakfast': time(8, 0),
+    'Lunch': time(13, 30),
+    'Dinner': time(20, 0),
+    'Snack': time(11, 0),
+}
+#: Each further meal in the same slot on the same day moves by this much.
+SLOT_REPEAT_OFFSET = timedelta(hours=5)
+
+
+def scheduled_time_for(slot: str, occurrence: int = 0):
+    """The time this meal is eaten, given how many of its slot came before it today."""
+    base = SLOT_TIMES.get(slot, SLOT_TIMES['Lunch'])
+    if not occurrence:
+        return base
+    moved = (datetime.combine(date_cls.min, base)
+             + SLOT_REPEAT_OFFSET * occurrence)
+    # Never past the end of the day; pile up just before midnight rather than wrap
+    # into the previous morning and change the meal's order.
+    if moved.date() != date_cls.min:
+        return time(23, 59)
+    return moved.time()
 
 
 class MealPlanFactory:
@@ -14,7 +48,8 @@ class MealPlanFactory:
     def __init__(self, piece_weights: dict[str, float]):
         self.piece_weights = piece_weights
 
-    def create_meal(self, diet_plan: DietPlan, ai_meal: AIMeal, date) -> Meal:
+    def create_meal(self, diet_plan: DietPlan, ai_meal: AIMeal, date,
+                    occurrence: int = 0) -> Meal:
         slot = ai_meal.meal_type or 'Lunch'
         # A recipe meal is named after its dish; an engine-built meal arrives named after
         # the slot, which is not a name. Compose one from what is on the plate.
@@ -28,6 +63,7 @@ class MealPlanFactory:
             description=ai_meal.description,
             meal_type=slot,
             is_ai_generated=True,
+            scheduled_time=scheduled_time_for(slot, occurrence),
             name=name[:160],
             name_ar=name_ar[:160],
             recipe_id=ai_meal.recipe_id,

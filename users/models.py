@@ -509,15 +509,38 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         if self.is_admin:
             return True
             
-        # Trainers can access their clients' data
+        # Trainers can access their clients' data.
+        #
+        # SOURCE OF TRUTH: the approved TrainerClientRelation, not the
+        # `assigned_trainer` pointer. The relation is the record that carries consent
+        # (who asked, who agreed), the price both sides agreed, and the escrow hold;
+        # the pointer is a denormalised convenience for reading "who is my trainer"
+        # in one query. Two records meaning the same thing drift, and the half that
+        # drifts is the one granting access to another person's body metrics — so
+        # only one of them decides, and it is the one with the meaning.
         if self.is_trainer and target_user.is_client:
-            return target_user.assigned_trainer == self
+            return TrainerClientRelation.objects.filter(
+                trainer=self, client=target_user, status='approved').exists()
             
         # Users can access their own data
         if target_user == self:
             return True
             
         return False
+
+    @property
+    def current_trainer(self):
+        """This client's trainer, from the relation that grants it.
+
+        `assigned_trainer` is kept in step by the three places that write it, and is
+        what the app reads for display. This is what authorization reads.
+        """
+        if not self.is_client:
+            return None
+        relation = (TrainerClientRelation.objects
+                    .select_related('trainer')
+                    .filter(client=self, status='approved').first())
+        return relation.trainer if relation else None
 
     def get_accessible_clients(self):
         """

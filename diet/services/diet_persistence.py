@@ -110,6 +110,7 @@ class DietPersistenceService:
                 # Cache preferences per user for strict category mapping
                 strict_index = {k: set(v) for k, v in categories.items()}
                 factory = MealPlanFactory(piece_weights)
+                slot_occurrences: dict = {}
                 # BUG FIX: Safer nested attribute access to prevent AttributeError
                 user_pref = getattr(self.user, 'userfoodpreference', None)
                 user_allergies = getattr(user_pref, 'allergies', None) if user_pref else None
@@ -121,7 +122,13 @@ class DietPersistenceService:
 
                 for i, ai_meal in enumerate(plan_output.plan):
                     meal_date = sd + _timedelta(days=i // (meal_count + snack_count if (meal_count + snack_count) else 1))
-                    meal = factory.create_meal(diet_plan, ai_meal, meal_date)
+                    # How many of this slot are already on this date, so a second
+                    # snack gets a later time than the first and the two rows differ.
+                    slot_key = (meal_date, ai_meal.meal_type or 'Lunch')
+                    occurrence = slot_occurrences.get(slot_key, 0)
+                    slot_occurrences[slot_key] = occurrence + 1
+                    meal = factory.create_meal(diet_plan, ai_meal, meal_date,
+                                               occurrence=occurrence)
 
                     from ..meal_processor import MealProcessor
                     meal_processor = MealProcessor(self.user)  # BUG FIX: Pass user instead of None
