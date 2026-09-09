@@ -66,7 +66,12 @@ class TopUpRequestSerializer(serializers.Serializer):
     client_identifier = serializers.CharField()  # id or email
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=_MIN_AMOUNT)
     idempotency_key = serializers.CharField()
+    #: Signed AND checked for freshness. The view used to check the header's copy and
+    #: sign the body's, which made them independent and the replay window unbounded.
     timestamp = serializers.IntegerField()
+    #: Declared and read by nothing — the signature the view verifies comes from the
+    #: `X-Agent-Auth` header. Kept required so a caller that sends it here and nowhere
+    #: else fails loudly at the signature check rather than being quietly unauthenticated.
     signature = serializers.CharField()
 
 

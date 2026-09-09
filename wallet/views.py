@@ -157,7 +157,23 @@ class AgentTopUpView(APIView):
 
         auth_header = request.META.get("HTTP_X_AGENT_AUTH")
         parsed = parse_agent_auth_header(auth_header)
-        if not parsed or not is_fresh_timestamp(parsed.timestamp):
+        if not parsed:
+            audit("wallet.topup.auth_failed", request, {"reason": "invalid_or_stale_auth"})
+            return Response({"error": _("Invalid agent auth")}, status=status.HTTP_401_UNAUTHORIZED)
+
+        # Freshness is checked on the SIGNED timestamp, and the two must be the same one.
+        # The header's timestamp was the one checked and the body's was the one signed, so
+        # they were independent: an attacker who captured a valid top-up replayed the
+        # identical body and signature with the header's timestamp rewritten to now. The
+        # signature still verified — the signed message had not changed — and freshness
+        # passed. The only thing standing in the way was the IdempotencyKey row, which the
+        # retention job deletes after 30 days, after which the same capture mints funds
+        # again, indefinitely.
+        signed_timestamp = str(serializer.validated_data["timestamp"])
+        if str(parsed.timestamp) != signed_timestamp:
+            audit("wallet.topup.auth_failed", request, {"reason": "timestamp_mismatch"})
+            return Response({"error": _("Invalid agent auth")}, status=status.HTTP_401_UNAUTHORIZED)
+        if not is_fresh_timestamp(signed_timestamp):
             audit("wallet.topup.auth_failed", request, {"reason": "invalid_or_stale_auth"})
             return Response({"error": _("Invalid agent auth")}, status=status.HTTP_401_UNAUTHORIZED)
 

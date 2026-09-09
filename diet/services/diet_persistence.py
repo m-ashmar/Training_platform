@@ -58,13 +58,26 @@ class DietPersistenceService:
                 # overlap — was never executed because save() does not call full_clean().
                 # So plans accumulated: the list showed N duplicates for one day while
                 # progress tracked only the newest, and which plan applied was undefined.
-                superseded = DietPlan.objects.filter(
+                overlapping = list(DietPlan.objects.filter(
                     user=self.user, is_active=True,
                     start_date__lte=ed, end_date__gte=sd,
-                ).update(is_active=False)
-                if superseded:
+                ).values_list("id", "created_by_id"))
+                superseded_ids = [pk for pk, _author in overlapping]
+                DietPlan.objects.filter(id__in=superseded_ids).update(is_active=False)
+                # WHOSE plan was retired, not just how many. A client tapping Generate
+                # deactivates their TRAINER's plan too, and said nothing to anyone: the
+                # trainer's list still showed it, marked inactive, and every meal they
+                # added to it afterwards landed on a plan nobody follows.
+                # `TrainerDietPlanService.create_diet_plan` reports its own supersedes;
+                # this path did not report anything at all.
+                authored = [pk for pk, author in overlapping if author is not None]
+                if authored:
+                    log_json(self.logger, "warning",
+                             "A client's own generation replaced a plan written for them",
+                             user_id=self.user.id, superseded_plan_ids=authored)
+                elif superseded_ids:
                     log_json(self.logger, "info", "Superseded overlapping active plans",
-                             user_id=self.user.id, count=superseded)
+                             user_id=self.user.id, count=len(superseded_ids))
 
                 self._require_decided_foods(plan_output)
 
@@ -241,6 +254,10 @@ class DietPersistenceService:
                 logger.warning("could not store the allergen report for plan %s",
                                diet_plan.id, exc_info=True)
 
+            # The caller reports these to the client, so a plan vanishing from their
+            # trainer's screen has an explanation attached to the thing that caused it.
+            diet_plan.superseded_plan_ids = superseded_ids
+            diet_plan.superseded_authored_plan_ids = authored
             return diet_plan
         except (IntegrityError, ValidationError) as e:
             log_json(self.logger, "error", "Constraint violation while saving diet plan", error=str(e))

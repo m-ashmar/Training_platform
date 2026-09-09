@@ -92,7 +92,10 @@ def generate_rule_based_plan(user_id, meal_count=3, snack_count=1, start_date=No
         # new, so without this a failed attempt would keep the client's allowance.
         _refund(user)
         raise
-    return {"plan_id": plan.id, "user_id": user_id}
+    return {"plan_id": plan.id, "user_id": user_id,
+            "superseded_plan_ids": getattr(plan, "superseded_plan_ids", []),
+            "replaced_a_plan_written_for_you": bool(
+                getattr(plan, "superseded_authored_plan_ids", []))}
 
 
 @shared_task(

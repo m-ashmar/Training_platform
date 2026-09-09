@@ -35,6 +35,16 @@ class PersonalDataSource:
     anonymise: dict[str, object] = field(default_factory=dict)
     retention_days: int | None = None
     retention_field: str = "created_at"
+    #: What `retention_field` MEANS. False (the default) is "when this row was written",
+    #: and rows older than `retention_days` go. True is "when this row must be gone by" —
+    #: a date in the future — and the row goes once that date passes.
+    #:
+    #: Without the distinction the two were treated the same, and `ai_training_data`
+    #: writes `retain_until = now + 365 days`: `purge_expired` then deleted rows whose
+    #: deadline was more than 365 days in the PAST, i.e. 730 days after writing. Special
+    #: category health data — injury text, weight, BMI, goals — kept for twice the
+    #: declared window, in the one source where the declared window is the promise.
+    retention_is_deadline: bool = False
 
     def get_model(self):
         from django.apps import apps
@@ -159,11 +169,25 @@ def purge_expired() -> dict:
     for source in registry.values():
         if not source.retention_days:
             continue
-        cutoff = timezone.now() - timedelta(days=source.retention_days)
+        now = timezone.now()
+        cutoff = now if source.retention_is_deadline else (
+            now - timedelta(days=source.retention_days))
         try:
             qs = source.get_model()._default_manager.filter(
                 **{f"{source.retention_field}__lt": cutoff}
             )
+            if source.retention_is_deadline:
+                # A row with no deadline is not exempt, it is unaccounted for. Anything
+                # older than the window goes too, so rows written before the deadline
+                # column existed cannot sit there forever — which is exactly what the 89
+                # rows collected before the consent gate were doing: `retain_until` NULL,
+                # and both purge queries filter on it.
+                stale = source.get_model()._default_manager.filter(
+                    **{f"{source.retention_field}__isnull": True,
+                       "created_at__lt": now - timedelta(days=source.retention_days)})
+                qs = source.get_model()._default_manager.filter(
+                    pk__in=list(qs.values_list("pk", flat=True))
+                    + list(stale.values_list("pk", flat=True)))
             n, _detail = qs.delete()
             if n:
                 removed[source.label] = n

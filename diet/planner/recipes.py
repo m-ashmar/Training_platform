@@ -37,7 +37,12 @@ class RecipeMatch:
 
     @property
     def name(self) -> str:
-        base = getattr(self.recipe, "name", "meal")
+        # `recipe.name_en`, not `recipe.name`. The latter is a modeltranslation virtual
+        # field: under an Arabic request this composed the Arabic dish name into the
+        # ENGLISH column of the persisted Meal, and `Meal.name` is what an English client
+        # reads for the life of that plan.
+        base = (getattr(self.recipe, "name_en", None)
+                or getattr(self.recipe, "name", "meal") or "meal")
         if self.substituted is not None:
             new = plain_name(self.substituted)
             old = plain_name(self.replaced) if self.replaced is not None else None

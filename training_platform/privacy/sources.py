@@ -64,7 +64,7 @@ register(PersonalDataSource(
     retention_days=365))
 register(PersonalDataSource(
     label="ai_training_data", model="ai_assistant.AITrainingData", user_field="user",
-    retention_days=365, retention_field="retain_until"))
+    retention_days=365, retention_field="retain_until", retention_is_deadline=True))
 
 # --- notifications ------------------------------------------------------------
 register(PersonalDataSource(

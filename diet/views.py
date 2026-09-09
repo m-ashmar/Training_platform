@@ -381,8 +381,12 @@ class FoodSearchView(APIView):
     API endpoint to search for food items from both local database and Edamam API.
     Returns combined results with indication of source.
     """
-    # Relaxed to authenticated-only to match tests
-    permission_classes = [IsAuthenticated]
+    # `HasDietAccess`, like every other diet route. "Relaxed to authenticated-only to
+    # match tests" was a comment about the tests, not about who may search the paid
+    # catalogue: a financial `agent` account, which has no diet entitlement at all,
+    # could read it, and a client whose subscription had lapsed kept browsing here
+    # while the sibling `food/list` refused them.
+    permission_classes = [IsAuthenticated, HasDietAccess]
     
     def get(self, request):
         try:
@@ -663,7 +667,6 @@ class FoodImportView(APIView):
     """
     API endpoint to import food items from Edamam API into local database.
     """
-    # Relaxed to authenticated-only to match tests
     # Staff only. Any authenticated account could insert rows into the SHARED
     # catalogue, unbounded and unrated — which is how the previous database
     # reached 327 rows of noise. `needs_review` keeps them off plates; it does
@@ -810,8 +813,10 @@ class UserPreferencesView(APIView):
     """
     API endpoint to manage user food preferences (liked/disliked foods).
     """
-    # Relaxed to authenticated-only to match tests
-    permission_classes = [IsAuthenticated]
+    # `HasDietAccess`. This endpoint reads AND WRITES `allergies` — the string the plan
+    # generator, the trainer's write and the swap path all consult — and an `agent`
+    # account could set it for itself, as could a client whose subscription had lapsed.
+    permission_classes = [IsAuthenticated, HasDietAccess]
     
     def get(self, request):
         try:
@@ -1243,6 +1248,13 @@ class GenerateDietPlanRuleBasedView(APIView):
             return Response({
                 "status": "ok",
                 "diet_plan_id": diet_plan.id,
+                # What this plan replaced. Generating again retires any active plan over
+                # the same dates — including one a TRAINER wrote for this client — and
+                # the client's app had no way to know, so a plan could vanish from the
+                # trainer's screen with nothing anywhere saying why.
+                "superseded_plan_ids": getattr(diet_plan, "superseded_plan_ids", []),
+                "replaced_a_plan_written_for_you": bool(
+                    getattr(diet_plan, "superseded_authored_plan_ids", [])),
                 "meals_count": len(plan_output.plan),
                 "date": present_date,
                 "plan_nutrition": {
@@ -1893,16 +1905,16 @@ class DietPlanNutritionView(APIView):
                     )
             elif request.user.is_client:
                 if diet_plan.user != request.user:
-                    return Response(
-                        {"error": _("You can only view your own diet plan nutrition")},
-                        status=status.HTTP_403_FORBIDDEN
-                    )
+                    # 404, not 403. `client/meals/<id>/`, `.../complete/` and
+                    # `interact/` all answer 404 for another client's object; these three
+                    # answered 403, which says "it exists and is not yours" and turns the
+                    # id space into a census of the platform. A client has no legitimate
+                    # knowledge that another client's plan exists.
+                    raise NotFound()
             elif not request.user.is_admin:
-                # Default-deny: any other role (e.g. agent) has no ownership claim.
-                return Response(
-                    {"error": _("You do not have access to this diet plan")},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+                # Default-deny. An `agent` or any future role has no claim here either,
+                # and no reason to learn that this id is live.
+                raise NotFound()
             
             # Get target date from query params (fallback to plan start date if no meals for today)
             target_date_str = request.GET.get('date')
@@ -2055,16 +2067,16 @@ class MealComponentsView(APIView):
                     )
             elif request.user.is_client:
                 if meal.diet_plan.user != request.user:
-                    return Response(
-                        {"error": _("You can only view your own meals")},
-                        status=status.HTTP_403_FORBIDDEN
-                    )
+                    # 404, not 403. `client/meals/<id>/`, `.../complete/` and
+                    # `interact/` all answer 404 for another client's object; these three
+                    # answered 403, which says "it exists and is not yours" and turns the
+                    # id space into a census of the platform. A client has no legitimate
+                    # knowledge that another client's meal exists.
+                    raise NotFound()
             elif not request.user.is_admin:
-                # Default-deny: any other role (e.g. agent) has no ownership claim.
-                return Response(
-                    {"error": _("You do not have access to this meal")},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+                # Default-deny. An `agent` or any future role has no claim here either,
+                # and no reason to learn that this id is live.
+                raise NotFound()
             
             # Get meal components - No new DB query due to prefetch
             components = meal.components.all()
@@ -2747,7 +2759,9 @@ class DietPlanMealsWithIngredientsView(APIView):
             # matched neither branch and read all of them.
             if request.user.is_client:
                 if plan.user_id != request.user.id:
-                    return Response({'error': _('You can only view your own diet plans')}, status=status.HTTP_403_FORBIDDEN)
+                    # 404 — see DietPlanNutritionView. Another client's plan does not
+                    # exist as far as this caller is concerned.
+                    raise NotFound()
             elif request.user.is_trainer:
                 # Authorship AND still this client's trainer, the same rule the other
                 # two plan reads use. This tested authorship alone, so a dismissed
@@ -2756,7 +2770,9 @@ class DietPlanMealsWithIngredientsView(APIView):
                     return Response({'error': _('You can only view plans for your current clients')},
                                     status=status.HTTP_403_FORBIDDEN)
             elif not getattr(request.user, 'is_admin', False):
-                return Response({'error': _('You do not have access to this plan')}, status=status.HTTP_403_FORBIDDEN)
+                # 404 for anyone with no claim — a client who does not own it, an agent,
+                # any future role. See DietPlanNutritionView for why this is not a 403.
+                raise NotFound()
             
             # Bounded, and filterable by date. A 30-day plan is 120 meals and 600
             # components, each carrying two servings, two names and its nutrition —

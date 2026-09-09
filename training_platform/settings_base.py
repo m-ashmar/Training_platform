@@ -403,6 +403,16 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'ai_assistant.tasks.check_daily_cost',
         'schedule': 3600,
     },
+    # Registered with Celery and in no schedule, so the ONLY code that reads
+    # `AITrainingData.retain_until` the way it is written — a deadline, not an age — never
+    # ran. `purge-expired-personal-data` above covers the same rows through the privacy
+    # registry; both are kept because they answer to different owners (this one to the
+    # assistant's own consent record, that one to the retention policy) and either
+    # disappearing should not silently end the other.
+    'purge-expired-ai-training-data': {
+        'task': 'ai_assistant.tasks.purge_expired_training_data',
+        'schedule': 86400,
+    },
 }
 
 # ========================

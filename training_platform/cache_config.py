@@ -34,13 +34,23 @@ cache key, so a bump instantly orphans every stale entry with no key scanning.
 """
 
 # path prefix -> {scope, model, ttl}
-# NOTE: the diet food routes are served behind [IsAuthenticated, HasDietAccess] — a
-# PER-USER entitlement. They must never use the "public" scope, whose cache key is
-# shared by every caller: a subscriber's response would be served to non-subscribers.
+#
+# A cached response is returned from `process_request`, BEFORE the view and therefore
+# before its permission classes. So a route may only appear here if the cache key already
+# carries everything that decides who may see the response.
+#
+# `scope: private` puts the user id in the key, which covers "whose rows are these". It
+# does NOT cover "may this user still have them": an entitlement can lapse — a
+# subscription expires, is cancelled, is refunded — and the key does not change, so the
+# client keeps being served the paid response for the rest of the TTL. That is why the two
+# diet food routes are NOT here any more. They were, at 600 s and 3600 s, behind
+# `HasDietAccess`; a lapsed subscriber kept the catalogue for up to an hour. Serving them
+# from the view costs four or five queries, which is the right price.
+#
+# The remaining four are gated on identity and role alone, both of which are in the key or
+# fixed for the life of the token.
 CACHEABLE_ROUTES = {
-    # ---- Global catalogs: identical for every viewer -> shared entry ----
-    "/api/diet/v1/food/list/":       {"scope": "private",  "model": "FOODITEM",         "ttl": 600},
-    "/api/diet/v1/food/categories/": {"scope": "private",  "model": "FOODCATEGORY",     "ttl": 3600},
+    # ---- Global catalog, no entitlement: identical for every viewer -> shared entry ----
     "/api/subscription/v1/plans/":    {"scope": "public",  "model": "SUBSCRIPTIONPLAN", "ttl": 600},
 
     # ---- User-scoped: queryset depends on the caller -> per-user entry in DB3 ----
@@ -63,12 +73,17 @@ VERSIONED_MODELS = {entry["model"].title().replace("_", ""): entry["model"]
 # `social`, and `/api/achievements/` is served by the first. Keyed by class name, a write
 # to a social achievement flushed the cache for a route it has nothing to do with.
 MODEL_VERSION_KEYS = {
-    "diet.FoodItem": "FOODITEM",
-    "diet.FoodCategory": "FOODCATEGORY",
     "subscription.SubscriptionPlan": "SUBSCRIPTIONPLAN",
     "routine.Exercise": "EXERCISE",
     "routine.RoutineTemplate": "ROUTINETEMPLATE",
+    # All three, not just the catalogue. `/api/achievements/` and its `my`, `progress` and
+    # `leaderboard` sub-paths return the caller's OWN state, built from `UserAchievement`
+    # and `AchievementProgress`; versioning on the static `Achievement` catalogue meant a
+    # user earned a badge, got the push, opened the screen and it was not there for up to
+    # five minutes — including their own progress bars.
     "achievements.Achievement": "ACHIEVEMENT",
+    "achievements.UserAchievement": "ACHIEVEMENT",
+    "achievements.AchievementProgress": "ACHIEVEMENT",
 }
 
 

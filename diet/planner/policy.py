@@ -59,6 +59,17 @@ class PlannerPolicy:
     similarity_propagation: float = 0.5
 
     # --- per-meal floors --------------------------------------------------
+    # NOT WIRED, and kept only so nobody re-invents them without reading this. A grep
+    # across diet/ and tests/ finds no reader for any of the three, nor for `floor_for()`
+    # below. They were a design — "a main meal must contain this much protein" — that the
+    # per-meal TARGETS made redundant: the split already asks each meal for its share of
+    # the day's grams, and the optimiser is scored against that. Measured over 84 main
+    # meals across the six harness profiles, none came in below 60% of its own protein
+    # target, so a fixed floor would only fight the target on a small-calorie client
+    # whose dinner is legitimately a 23 g protein meal.
+    #
+    # `test_a_main_meal_is_built_around_a_protein` asserts the outcome these were reaching
+    # for, over what the engine actually serves.
     protein_floor_main_g: float = 40.0      # lunch / dinner
     protein_floor_other_g: float = 35.0     # breakfast / snack
     carb_floor_g: float = 50.0

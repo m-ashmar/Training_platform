@@ -114,7 +114,12 @@ def _reasons(meal_name: str, chosen_foods, cuisine: str = "", built: bool = Fals
     """
     slot_ar = SLOT_AR.get(meal_name, meal_name)
     if chosen_foods:
-        en = [f.name for f in chosen_foods[:2]]
+        # The ENGLISH column. `f.name` is a modeltranslation virtual field, so a plan
+        # generated from the Arabic app stored "because you chose برغل, كوسا for lunch" in
+        # `Meal.reason` — the ENGLISH column — and a client who later views in English
+        # reads Arabic, permanently: this sentence is composed at generation time and
+        # cannot be translated back into its parts. `name_ar` sits beside it and is right.
+        en = [getattr(f, "name_en", None) or f.name for f in chosen_foods[:2]]
         ar = [getattr(f, "name_ar", None) or f.name for f in chosen_foods[:2]]
         return (f"because you chose {', '.join(en)} for {meal_name.lower()}",
                 f"لأنك اخترت {' و'.join(ar)} لوجبة {slot_ar}")
@@ -397,30 +402,80 @@ class RuleBasedPlanner:
         5,000 and silent about the 22% it was short. A ceiling is a fact about food and
         is fine; not saying so is not.
         """
-        requested = float(daily_kcal or 0.0)
-        delivered = sum(float((m.total_nutrition or {}).get("calories", 0) or 0)
-                        for m in output.plan) / max(1, days)
-        shortfall = (delivered / requested - 1.0) if requested > 0 else 0.0
-        # The POLICY's calorie tolerance, not a second copy of the number. A deployment
-        # that widens or narrows the band through `DIET_PLANNER_POLICY` moved what the
-        # engine builds to and not what it reports about itself.
+        # The POLICY's tolerances, not a second copy of the numbers. A deployment that
+        # widens or narrows a band moved what the engine builds to and not what it
+        # reports about itself.
         from diet.planner.policy import load_policy
+        from diet.planner.targets import day_macro_grams
 
-        band = float(load_policy(self._resolve_goal()).tolerance.get("calories", 0.10))
+        policy = load_policy(self._resolve_goal())
+        requested = float(daily_kcal or 0.0)
+
+        # PER DAY, and per MACRO. This averaged the plan's calories across every day and
+        # looked at nothing else, so a 7-day plan whose worst day came in 28% under on
+        # energy and 62% under on protein — five of its seven days outside tolerance —
+        # reported `met: True`, because the good days pulled the mean back inside the
+        # band. This is the mechanism the module exists to add; it could not see the
+        # thing it was added to see.
+        by_day: dict = {}
+        for index, meal in enumerate(output.plan):
+            slot = index // max(1, len(output.plan) // max(1, days) or 1)
+            bucket = by_day.setdefault(min(slot, days - 1), {
+                "calories": 0.0, "protein": 0.0, "carb": 0.0, "fat": 0.0})
+            got = meal.total_nutrition or {}
+            bucket["calories"] += float(got.get("calories", 0) or 0)
+            bucket["protein"] += float(got.get("protein", 0) or 0)
+            bucket["carb"] += float(got.get("carbs", got.get("carb", 0)) or 0)
+            bucket["fat"] += float(got.get("fat", 0) or 0)
+
+        want = day_macro_grams(requested, policy, getattr(self.user, "weight", None))
+        want["calories"] = requested
+
+        delivered = (sum(d["calories"] for d in by_day.values()) / max(1, len(by_day))
+                     if by_day else 0.0)
+        shortfall = (delivered / requested - 1.0) if requested > 0 else 0.0
+
+        missed = []
+        worst = {}
+        for day_index, totals in sorted(by_day.items()):
+            for macro in ("calories", "protein", "carb", "fat"):
+                target = float(want.get(macro, 0.0) or 0.0)
+                if target <= 0:
+                    continue
+                off = totals[macro] / target - 1.0
+                if abs(off) > abs(worst.get(macro, 0.0)):
+                    worst[macro] = off
+                if abs(off) > float(policy.tolerance.get(macro, 0.10)):
+                    missed.append({"day": day_index, "macro": macro,
+                                   "deviation": round(off, 4)})
+
         report = {
             "requested_kcal_per_day": round(requested, 1),
             "delivered_kcal_per_day": round(delivered, 1),
             "deviation": round(shortfall, 4),
-            "met": abs(shortfall) <= band,
+            "days": len(by_day),
+            "days_outside_tolerance": len({m["day"] for m in missed}),
+            "worst_deviation_by_macro": {k: round(v, 4) for k, v in worst.items()},
+            "missed": missed[:12],
+            # `met` means every day landed inside tolerance on every macro. It used to
+            # mean the calorie MEAN did.
+            "met": not missed,
         }
         if not report["met"]:
+            energy = [m for m in missed if m["macro"] == "calories"]
             report["reason"] = (
                 "the day's meals cannot carry this many calories in servable portions"
-                if shortfall < 0 else
-                "the day's meals overshoot the target in servable portions")
+                if energy and energy[0]["deviation"] < 0 else
+                "the day's meals overshoot the target in servable portions"
+                if energy else
+                "the day's energy is right but its macro split is not")
             logger.warning(
-                "Plan for user %s delivers %.0f kcal/day against %.0f requested (%+.1f%%)",
-                getattr(self.user, "id", "?"), delivered, requested, shortfall * 100)
+                "Plan for user %s: %d of %d day(s) outside tolerance; worst %s; "
+                "delivers %.0f kcal/day against %.0f requested",
+                getattr(self.user, "id", "?"), report["days_outside_tolerance"],
+                report["days"],
+                ", ".join(f"{k} {v:+.1%}" for k, v in report["worst_deviation_by_macro"].items()),
+                delivered, requested)
         try:
             output.plan_metadata["delivery"] = report
         except Exception:
@@ -669,8 +724,14 @@ class RuleBasedPlanner:
                 reason_ar=reason_ar,
                 ingredients=[
                     AIIngredient(
-                        name=p.food.name,
-                        name_ar=getattr(p.food, "name_ar", None) or p.food.name,
+                        # `name` is the ENGLISH name and `name_ar` the Arabic one. Both
+                        # were read through the modeltranslation virtual field, so under
+                        # an Arabic request they held the same Arabic string — and
+                        # `MealPlanFactory._compose_name` builds the persisted English
+                        # `Meal.name` out of `ing.name`.
+                        name=getattr(p.food, "name_en", None) or p.food.name,
+                        name_ar=(getattr(p.food, "name_ar", None)
+                                 or getattr(p.food, "name_en", None) or p.food.name),
                         quantity=f"{p.grams:g}g",
                         food_id=p.food.id,
                         grams=float(p.grams),
@@ -854,8 +915,10 @@ class RuleBasedPlanner:
 
             ingredients = [
                 AIIngredient(
-                    name=food.name,
-                    name_ar=getattr(food, "name_ar", None) or food.name,
+                    # The English column; see the note on the other construction above.
+                    name=getattr(food, "name_en", None) or food.name,
+                    name_ar=(getattr(food, "name_ar", None)
+                             or getattr(food, "name_en", None) or food.name),
                     quantity=f"{grams:g}g",
                     food_id=food.id,
                     grams=float(grams),

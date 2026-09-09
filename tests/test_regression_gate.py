@@ -582,9 +582,39 @@ def test_every_scheduled_task_exists_and_is_registered():
         "notifications.drain_dead_letter_queue",
         "training_platform.privacy.purge_expired_personal_data",
         "diet.tasks.generate_daily_advice",
+        "ai_assistant.tasks.purge_expired_training_data",
     ):
         assert any(e["task"] == required for e in schedule.values()), \
             f"{required} is no longer scheduled"
+
+    # And the OTHER direction, which is how the retention purge above went missing. It
+    # was registered with Celery, written to run on a timer, documented as the only code
+    # that reads `retain_until` correctly — and in no beat entry, so it never ran once.
+    # Checking only beat -> registry cannot see that.
+    #
+    # A task whose name is a periodic verb has to be scheduled or listed here with a
+    # reason. Anything else is triggered by an event and does not belong on a timer.
+    triggered_on_purpose = {
+        # Enqueued by a request, not by the clock.
+        "diet.tasks.generate_rule_based_plan",
+        "notifications.tasks.process_event_task",
+        "notifications.tasks.send_push_notification",
+        "notifications.tasks.retry_failed_notification",
+        "social.tasks.fan_out_post",
+    }
+    periodic_verbs = ("purge_", "expire_", "drain_", "refresh_", "sweep_", "cleanup_",
+                      "close_idle")
+    scheduled = {e["task"] for e in schedule.values()}
+    unscheduled = sorted(
+        name for name in registered
+        if not name.startswith("celery.")
+        and any(verb in name.rsplit(".", 1)[-1] for verb in periodic_verbs)
+        and name not in scheduled
+        and name not in triggered_on_purpose
+    )
+    assert not unscheduled, (
+        "these tasks are written to run on a timer and are on no timer: "
+        f"{unscheduled}")
 
 
 @pytest.mark.parametrize("path,method,headers,expected_code,expected_status", [
@@ -3547,12 +3577,19 @@ def test_a_plan_is_readable_only_by_its_client_or_its_author(seeded_catalogue):
     assert r.status_code == 201, r.content
     plan_id = r.json()["diet_plan_id"]
 
+    # A trainer who is not this client's trainer is told they may not — they can already
+    # see the client on their own screens, so nothing is disclosed. Everyone else gets a
+    # 404: 403 means "this exists and is not yours", and walking the id space with it
+    # counts the platform's plans. The three client meal endpoints already answered 404.
     trainer = _make_client("plan-trainer", *PROFILES[0]); trainer.user_type = "trainer"; trainer.save()
     assert _api_client_for(trainer).get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 403
     agent = _make_client("plan-agent", *PROFILES[0]); agent.user_type = "agent"; agent.save()
-    assert _api_client_for(agent).get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 403
+    assert _api_client_for(agent).get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 404
     other, _ = _chooser("plan-other")
-    assert _api_client_for(other).get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 403
+    other_api = _api_client_for(other)   # once: it gives the user a subscription
+    assert other_api.get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 404
+    # And the same answer from the sibling read over the same object.
+    assert other_api.get(f"/api/diet/v1/nutrition/plan/{plan_id}/").status_code == 404
     assert c.get(f"/api/diet/v1/plan/{plan_id}/meals-with-ingredients/").status_code == 200
 
 
@@ -5404,3 +5441,78 @@ def test_a_refund_takes_the_money_back_and_not_only_the_access(make_user):
     assert tw.balance == D("0.00"), "the trainer kept a refunded payout"
     assert cw.balance == D("0.00"), "the minted credit was never taken back"
     assert Transaction.objects.filter(tx_type="reversal").count() == 2
+
+
+@pytest.mark.django_db
+def test_a_plan_generated_in_arabic_keeps_its_english_columns(seeded_catalogue):
+    """`Meal.name` and `Meal.reason` are the ENGLISH columns, with `name_ar`/`reason_ar`
+    beside them, and both were composed from modeltranslation virtual fields — so a plan
+    generated from the Arabic app stored Arabic in them. A client who later views in
+    English reads Arabic for the life of that plan, because these sentences are built at
+    generation time out of the foods on the plate and cannot be translated back.
+
+    Four places had to be right for this to hold: the reason composer, the dish title,
+    and both constructions of `AIIngredient`, whose `name` is what
+    `MealPlanFactory._compose_name` writes into `Meal.name` for a meal with no dish.
+    """
+    import re
+
+    from django.utils import translation
+
+    from diet.models import Meal
+    from diet.services.plan_generation import generate_and_save
+
+    ARABIC = re.compile(r"[؀-ۿ]")
+
+    user, _ = _chooser("lang-persist")
+    with translation.override("ar"):
+        _out, plan = generate_and_save(user, duration_days=2, seed_salt="langp")
+    translation.deactivate()
+    bad = []
+    for meal in Meal.objects.filter(diet_plan=plan):
+        for field in ("name", "reason"):
+            value = getattr(meal, field) or ""
+            if ARABIC.search(value):
+                bad.append((meal.id, field, value[:60]))
+    assert not bad, bad
+
+
+def test_a_main_meal_is_built_around_a_protein(seeded_catalogue):
+    """Lunch and dinner have to be meals, not just numbers that add up.
+
+    `PlannerPolicy` declares `protein_floor_main_g = 40.0` and nothing has ever read it,
+    so the only thing asking a main meal for protein is its own target — and on a small
+    calorie budget that target is small. The failure this guards against is a dinner of
+    barley, onion and tahini: 3.6 g of protein against a 30.7 g target, arithmetically
+    defensible and not dinner.
+
+    Asserted over what the engine SERVES, across the whole profile range, because a
+    fixed gram floor would fight the target for a client whose dinner is legitimately a
+    23 g meal.
+    """
+    import uuid
+
+    from diet.services.rule_based_planner import RuleBasedPlanner
+    from tests.diet_quality import HARNESS_START_DATE, PROFILES, _make_client
+
+    short = []
+    mains = 0
+    for index, profile in enumerate(PROFILES):
+        user = _make_client(f"pfloor{uuid.uuid4().hex[:6]}", *profile)
+        out = RuleBasedPlanner(user, seed_salt=f"floor{index}").generate(
+            daily_kcal=user.calculate_daily_calories(), duration_days=7, snack_count=1,
+            start_date=HARNESS_START_DATE)
+        for meal in out.plan:
+            if (meal.meal_type or "") not in ("Lunch", "Dinner"):
+                continue
+            mains += 1
+            served = float((meal.total_nutrition or {}).get("protein", 0) or 0)
+            target = float((meal.target or {}).get("protein", 0) or 0)
+            if target > 0 and served < 0.6 * target:
+                short.append((meal.meal_type, round(served, 1), round(target, 1),
+                              (meal.meal_name or "")[:40]))
+
+    assert mains >= 6 * 7 * 2 * 0.8, f"only {mains} main meals were planned"
+    assert not short, (
+        f"{len(short)} of {mains} main meals came in under 60% of their own protein "
+        f"target: {short[:5]}")

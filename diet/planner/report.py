@@ -88,9 +88,37 @@ class MacroDeviation:
     #: then landed 2 to 4% under target, in the same direction every time.
     CALORIE_WEIGHT = 0.5
 
+    #: WHY `magnitude` has no absolute floor while `within` does.
+    #:
+    #: `within()` forgives a miss smaller than NEGLIGIBLE; `magnitude` prices every miss
+    #: at its relative size. On a small target the two therefore disagree, by about six
+    #: and a half times. Measured on a 1,200 kcal client's lunch (412 kcal, 6.2 g fat):
+    #:
+    #:     fat      miss 4.1 g   -> 66.1%  -> cost 0.661   (floor 3.0 g)
+    #:     calories miss 84 kcal -> 20.4%  -> cost 0.102   (floor 40 kcal)
+    #:
+    #: `better()` is the only comparison the engine makes between two portionings, so a
+    #: teaspoon of olive oil can outweigh a 130 kcal energy error: a lunch of sea bass,
+    #: pita, lettuce and seeds was discarded for sea bass and green beans.
+    #:
+    #: Both cures were measured over 168 meals, and both cost more than the disease
+    #: (dish rate / distinct dishes / chosen-ingredient share / preference satisfaction /
+    #: worst calorie drift):
+    #:
+    #:     as it stands          0.804  60  0.307  0.688  3.33
+    #:     floor applied hard    0.810  59  0.248  0.688  3.50
+    #:     floor tapered         0.810  61  0.284  0.625  2.12
+    #:
+    #: Both take a fifth off the share of a client's own chosen foods that reach their
+    #: plate, which is the thing the choosing feature exists to produce, and they buy
+    #: better-shaped plates and (tapered) much better calorie drift. That is a product
+    #: trade, not a bug fix, so it is recorded here rather than made quietly. `within` is
+    #: the FILTER — it decides servable or not — and `magnitude` only ranks candidates
+    #: that already agree on that, which bounds what the disagreement can do.
+
     @property
     def magnitude(self) -> float:
-        """Single scalar for comparing two candidate plans."""
+        """Single scalar for comparing two candidate plans. See the note above."""
         macros = sum(abs(getattr(self, m)) for m in ("protein", "carb", "fat"))
         return macros + self.CALORIE_WEIGHT * abs(self.calories)
 
