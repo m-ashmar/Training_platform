@@ -525,6 +525,9 @@ class CacheMiddleware(MiddlewareMixin):
         rule = match_route(request.path) if request.method == 'GET' else None
         if rule:
             identity, is_private = self._scope_for(request, rule)
+            if identity is None:
+                # A token whose account is gone: never a hit, never a write.
+                return None
             cache_key = self._build_key(request, identity, rule)
             cache_backend = private_cache() if is_private else public_cache()
             cached_response = cache_backend.get(cache_key)
@@ -546,6 +549,8 @@ class CacheMiddleware(MiddlewareMixin):
             from training_platform.cache_config import match_route
             rule = match_route(request.path)
             identity, is_private = self._scope_for(request, rule)
+            if identity is None:
+                return response
             cache_key = self._build_key(request, identity, rule)
 
             try:
@@ -596,8 +601,13 @@ class CacheMiddleware(MiddlewareMixin):
             try:
                 token = AccessToken(auth_header.split(' ', 1)[1])
                 user_id = token.get('user_id')
-                if user_id:
+                if user_id and self._account_is_usable(user_id):
                     return f"user:{user_id}", True
+                if user_id:
+                    # The token verifies but the account behind it does not. Falling
+                    # through to the anonymous bucket would SERVE a public entry; make
+                    # it a cache miss instead and let the view answer 401.
+                    return None, True
             except Exception:
                 # Optional side effect: swallowing this silently is what made the
                 # surrounding failures invisible in logs. Control flow is unchanged.
@@ -610,6 +620,30 @@ class CacheMiddleware(MiddlewareMixin):
 
         # 3. Anonymous — trusted proxy-chain IP (spoof-resistant), not raw XFF.
         return f"anon:{get_trusted_client_ip(request)}", False
+
+    @staticmethod
+    def _account_is_usable(user_id) -> bool:
+        """Is the account behind this token still allowed to be used?
+
+        `AccessToken(...)` verifies a signature and an expiry and nothing else — it
+        cannot know the account was deactivated, and simplejwt has no revocation for
+        access tokens. This middleware returns a cached response from the middleware
+        chain, which runs BEFORE DRF authentication, so a banned account kept reading
+        its exercises, templates and achievements for the full TTL while every uncached
+        route correctly answered 401.
+
+        One cheap keyed read per cached request, memoised for a minute, so a deactivation
+        takes effect within a minute rather than never.
+        """
+        from django.contrib.auth import get_user_model
+
+        cache_key = f"acct_usable:{user_id}"
+        cached = private_cache().get(cache_key)
+        if cached is not None:
+            return bool(cached)
+        usable = get_user_model().objects.filter(pk=user_id, is_active=True).exists()
+        private_cache().set(cache_key, 1 if usable else 0, 60)
+        return usable
 
     def _build_key(self, request, identity, rule=None):
         """

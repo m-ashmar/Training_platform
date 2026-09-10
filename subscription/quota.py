@@ -46,12 +46,30 @@ def _period(subscription, granularity, now):
     `get_or_create` race-safe.
     """
     if granularity == "day":
-        from training_platform.user_time import day_start_for
+        import datetime as _dt
 
-        # The CLIENT's midnight, not the server's. `timezone.localtime` resolves against
-        # TIME_ZONE (Asia/Damascus) for everyone, so a client in Berlin or the Gulf had
-        # their daily allowance reset at a random hour of their own afternoon or night.
-        start = day_start_for(getattr(subscription, "user", None), now)
+        from training_platform.user_time import today_for
+
+        # The CLIENT's calendar DATE, pinned to UTC — not the UTC instant of their local
+        # midnight. `timezone.localtime` resolves against TIME_ZONE (Asia/Damascus) for
+        # everyone, so a client in Berlin or the Gulf had their daily allowance reset at
+        # a random hour of their own afternoon; that part was right and stays.
+        #
+        # What was wrong is that the row's unique key then contained a value the user can
+        # WRITE. `SubscriptionUsage` is unique on (subscription, feature, period_start),
+        # and `period_start` was the instant of local midnight — a different instant for
+        # every UTC offset — so `POST /api/auth/user/update/ {"preferred_timezone": ...}`
+        # between generations minted a fresh row with `usage_count = 0`. Measured: a
+        # 1/day plan yielded 11 extra allowances from 12 timezones, and there are about
+        # 38 distinct offsets.
+        #
+        # Keying on the local DATE instead means every timezone that shares today shares
+        # the row. Moving timezone can still shift a user by at most one calendar day,
+        # which is what genuinely travelling does, rather than handing out an allowance
+        # per offset.
+        local_date = today_for(getattr(subscription, "user", None), now)
+        start = _dt.datetime.combine(
+            local_date, _dt.time.min, tzinfo=_dt.timezone.utc)
         return start, start + timezone.timedelta(days=1)
     # "subscription": the current paid period, so a limit like max_routines resets
     # when the customer renews rather than on an arbitrary rolling date.

@@ -5135,17 +5135,58 @@ def test_the_progress_endpoints_refuse_a_date_they_cannot_read(seeded_catalogue)
 
 
 def test_the_daily_quota_follows_the_users_day(seeded_catalogue, make_user):
-    """`timezone.now()` is UTC and TIME_ZONE is Asia/Damascus, so a daily allowance
-    rolled over at 03:00 local: a client generating at 01:00 was still spending
-    yesterday's."""
-    from django.utils import timezone
+    """Two properties, and they pull against each other.
+
+    The window has to turn over at the CLIENT's midnight: `timezone.now()` is UTC and
+    TIME_ZONE is Asia/Damascus, so a daily allowance used to roll at 03:00 local and a
+    client generating at 01:00 was still spending yesterday's.
+
+    And the row's identity must not be something the client can WRITE.
+    `SubscriptionUsage` is unique on (subscription, feature, period_start), and
+    `period_start` was the instant of local midnight — a different instant for every UTC
+    offset — so one `POST /api/auth/user/update/ {"preferred_timezone": ...}` between
+    generations minted a fresh row with `usage_count = 0`. A 1/day plan yielded 11 extra
+    allowances from 12 timezones.
+
+    Keying on the local DATE satisfies both: the date turns over at local midnight, and
+    every offset that shares today shares the row. This asserts the BEHAVIOUR either
+    side of midnight rather than how the stamp happens to render.
+    """
+    import datetime as _dt
 
     from subscription import quota
 
-    start, end = quota._period(None, "day", timezone.now())
-    local_start = timezone.localtime(start)
-    assert (local_start.hour, local_start.minute) == (0, 0), local_start
-    assert (end - start).days == 1
+    class _Sub:
+        def __init__(self, user):
+            self.user = user
+
+    traveller = make_user("gate_quota_tz", user_type="client")
+    traveller.preferred_timezone = "Asia/Damascus"
+    traveller.save(update_fields=["preferred_timezone"])
+    subscription = _Sub(traveller)
+
+    damascus = _dt.timezone(_dt.timedelta(hours=3))
+    before_midnight = _dt.datetime(2026, 5, 10, 23, 30, tzinfo=damascus)
+    after_midnight = _dt.datetime(2026, 5, 11, 0, 30, tzinfo=damascus)
+    later_that_day = _dt.datetime(2026, 5, 11, 22, 0, tzinfo=damascus)
+
+    start_before, _e1 = quota._period(subscription, "day", before_midnight)
+    start_after, end_after = quota._period(subscription, "day", after_midnight)
+    start_later, _e3 = quota._period(subscription, "day", later_that_day)
+
+    assert start_before != start_after, \
+        "the allowance did not turn over at the client's midnight"
+    assert start_after == start_later, \
+        "the allowance turned over again during the client's own day"
+    assert (end_after - start_after).days == 1
+
+    # And moving timezone inside one local day must not mint a second row.
+    traveller.preferred_timezone = "Europe/Berlin"
+    traveller.save(update_fields=["preferred_timezone"])
+    berlin_same_day = _dt.datetime(2026, 5, 11, 12, 0, tzinfo=damascus)
+    start_berlin, _e4 = quota._period(subscription, "day", berlin_same_day)
+    assert start_berlin == start_after, \
+        "changing timezone minted a fresh allowance for the same day"
 
 
 def test_an_achievement_counts_meals_not_mouthfuls(seeded_catalogue, django_capture_on_commit_callbacks):
@@ -7115,3 +7156,93 @@ def test_a_progress_status_must_be_one_we_declared(make_user, api):
 
     assert set_status("banana") == 400
     assert set_status("completed") == 200
+
+
+def test_an_unverified_trainer_does_not_get_the_paid_product(make_user, api):
+    """`user_type='trainer'` is self-service at registration — only `admin` and `agent`
+    are blocked — and both subscription permissions short-circuited on `is_trainer`
+    alone, a role check standing in for an entitlement check. So anyone who picked
+    "trainer" at signup got the whole paid product free, permanently, with no admin ever
+    approving them, while the people who told the truth about who they are paid for it.
+    `trainer_is_verified` already existed and gated nothing anywhere."""
+    trainer = make_user("gate_unverified_trainer", user_type="trainer")
+    assert trainer.trainer_is_verified is False
+
+    assert api(trainer).get("/api/diet/v1/food/list/").status_code == 403
+
+    trainer.trainer_is_verified = True
+    trainer.save(update_fields=["trainer_is_verified"])
+    assert api(trainer).get("/api/diet/v1/food/list/").status_code == 200
+
+
+def test_an_unanswered_invitation_does_not_disclose_the_client(make_user, api):
+    """Trainer-side invitations are unlimited and can name any client id, and this view
+    rendered the full record for every pending row. Register as a trainer, loop
+    `client_id` 1..N, read the list once: the name, email address, age, gender and
+    fitness goals of the entire client base. The consent boundary was enforced at
+    APPROVAL and not at disclosure."""
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("gate_inv_t", user_type="trainer")
+    invited = make_user("gate_inv_invited", user_type="client", age=32, gender="Female")
+    asker = make_user("gate_inv_asker", user_type="client", age=28, gender="Male")
+
+    TrainerClientRelation.objects.create(trainer=trainer, client=invited,
+                                         status="pending", initiated_by="trainer")
+    TrainerClientRelation.objects.create(trainer=trainer, client=asker,
+                                         status="pending", initiated_by="client")
+
+    rows = {row["client_id"]: row for row in
+            api(trainer).get("/api/auth/trainer/pending-requests/")
+            .json()["pending_requests"]}
+
+    uninvited = rows[invited.pk]
+    for leaked in ("client_email", "client_age", "client_gender", "client_goals"):
+        assert leaked not in uninvited, (leaked, sorted(uninvited))
+
+    # Someone who ASKED has chosen to be seen.
+    assert "client_email" in rows[asker.pk]
+
+
+def test_a_trainer_cannot_hold_unlimited_invitations(make_user, api):
+    """`unique_pending_trainer_request_per_client` is scoped to client-initiated rows,
+    so trainer-initiated invitations were unbounded — which is what made the
+    pending-requests list reachable as a directory."""
+    import json as _json
+
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("gate_invcap_t", user_type="trainer")
+    for index in range(25):
+        client_user = make_user(f"gate_invcap_c{index}", user_type="client")
+        TrainerClientRelation.objects.create(
+            trainer=trainer, client=client_user, status="pending",
+            initiated_by="trainer")
+
+    one_more = make_user("gate_invcap_extra", user_type="client")
+    resp = api(trainer).post("/api/auth/trainer/assign-client/",
+                             data=_json.dumps({"client_id": one_more.pk}),
+                             content_type="application/json")
+    assert resp.status_code == 429, resp.content[:200]
+
+
+def test_a_deactivated_account_is_not_served_from_cache(make_user, api):
+    """`CacheMiddleware.process_request` returns a JsonResponse from the middleware
+    chain, which runs BEFORE DRF authentication, and `AccessToken(...)` verifies a
+    signature and an expiry and nothing else. A banned account kept reading its
+    exercises, templates and achievements for the full TTL while every uncached route
+    correctly answered 401."""
+    from training_platform.cache import private_cache
+
+    user = make_user("gate_cache_ban", user_type="client")
+    client = api(user)
+
+    cacheable = "/api/routine/exercises/"
+    assert client.get(cacheable).status_code == 200      # warm it
+
+    user.is_active = False
+    user.save(update_fields=["is_active"])
+    private_cache().delete(f"acct_usable:{user.pk}")     # the 60s memo, not the entry
+
+    assert client.get(cacheable).status_code == 401, \
+        "a deactivated account was served the cached body"

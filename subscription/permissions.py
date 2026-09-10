@@ -1,6 +1,26 @@
 from rest_framework import permissions
 from django.utils import timezone
 
+#: A trainer is exempt from the paywall only once a human has VERIFIED them.
+#:
+#: `user_type='trainer'` is self-service at registration (users/serializers.py accepts
+#: it; only `admin` and `agent` are blocked), and both permissions below short-circuited
+#: on `is_trainer` alone — a role check standing in for an entitlement check. So anyone
+#: who picked "trainer" at signup got the whole paid product for free, permanently, with
+#: no admin ever approving them, while the people who told the truth about who they are
+#: paid for it.
+#:
+#: `trainer_is_verified` already exists, is writable only from the admin, and gated
+#: nothing anywhere: a grep found it in list displays and response payloads and in no
+#: permission class. This is the check it was made for.
+def _is_exempt_from_paywall(user) -> bool:
+    """Staff and admins always; trainers once verified."""
+    if getattr(user, 'is_admin', False) or user.is_staff:
+        return True
+    return bool(getattr(user, 'is_trainer', False)
+                and getattr(user, 'trainer_is_verified', False))
+
+
 class HasActiveSubscription(permissions.BasePermission):
     """
     Permission to check if user has an active subscription.
@@ -16,7 +36,7 @@ class HasActiveSubscription(permissions.BasePermission):
         # every trainer endpoint — including the ones deliberately widened to admit
         # them, which made the widening unreachable.
         user = request.user
-        if getattr(user, 'is_admin', False) or user.is_staff or getattr(user, 'is_trainer', False):
+        if _is_exempt_from_paywall(user):
             return True
         
         try:
@@ -42,7 +62,7 @@ class HasSubscriptionFeature(permissions.BasePermission):
         user = request.user
         if not user.is_authenticated:
             return False
-        if getattr(user, 'is_admin', False) or user.is_staff or getattr(user, 'is_trainer', False):
+        if _is_exempt_from_paywall(user):
             return True
         
         try:

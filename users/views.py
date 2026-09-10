@@ -467,6 +467,24 @@ class AssignClientView(APIView):
         
         try:
             from .models import TrainerClientRelation
+
+            # How many people a trainer may have outstanding invitations to at once.
+            # `unique_pending_trainer_request_per_client` is scoped to client-initiated
+            # rows, so trainer-initiated invitations were unlimited and could name any
+            # client id — which is what turned the pending-requests list into a
+            # directory of the whole client base. An invitation is a message to a
+            # person, not a query, so a working trainer needs a handful and a scraper
+            # needs thousands.
+            OUTSTANDING_INVITE_LIMIT = 25
+            outstanding = TrainerClientRelation.objects.filter(
+                trainer=request.user, status='pending', initiated_by='trainer').count()
+            if outstanding >= OUTSTANDING_INVITE_LIMIT:
+                return Response(
+                    {'error': _('You have too many invitations awaiting a reply. '
+                                'Wait for some to be answered before sending more.'),
+                     'code': 'too_many_invitations'},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS)
+
             client = CustomUser.objects.get(id=client_id, user_type='client')
             
             # Check if relation already exists
@@ -1433,12 +1451,28 @@ class TrainerPendingRequestsView(APIView):
             requests_data = []
             for relation in pending_relations:
                 client = relation.client
-                requests_data.append({
+                # A client who ASKED has chosen to be seen; a client who was merely
+                # invited has not answered yet and must not be disclosed. Trainer-side
+                # invitations are unlimited and can name any client id, so this view was
+                # a directory: register as a trainer, loop client_id 1..N, read the list
+                # once, and take the full name, email address, age, gender and fitness
+                # goals of the entire client base. The consent boundary was enforced at
+                # APPROVAL and not at disclosure.
+                asked_for_this = relation.initiated_by == 'client'
+                row = {
                     'request_id': relation.id,
                     'client_id': client.id,
                     'client_name': client.full_name or client.username,
-                    'client_email': client.email,
                     'client_username': client.username,
+                    'initiated_by': relation.initiated_by,
+                    'created_at': relation.created_at,
+                }
+                if not asked_for_this:
+                    requests_data.append(row)
+                    continue
+                requests_data.append({
+                    **row,
+                    'client_email': client.email,
                     'client_profile_picture': client.profile_picture.url if client.profile_picture else None,
                     'client_age': client.age,
                     'client_gender': client.gender,
