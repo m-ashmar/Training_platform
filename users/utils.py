@@ -398,7 +398,7 @@ def verify_otp(email, otp_code, purpose='registration'):
             email=email,
             purpose=purpose,
             is_verified=False
-        ).order_by('-created_at')
+        ).order_by('-created_at', '-id')
         
         matched_otp = None
         for otp in candidates:

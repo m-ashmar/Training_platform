@@ -377,16 +377,26 @@ class AgentApiKeyCreateView(APIView):
         # Non-signing lookup/compat digest; the raw secret is stored encrypted (Fernet).
         hashed_key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
-        # Deactivate any existing active keys (single active key policy)
-        prev_ids = list(AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).values_list("key_id", flat=True))
-        if prev_ids:
-            AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).update(is_active=False)
-            audit("wallet.agent.apikey.rotated", request, {"deactivated": prev_ids})
+        # Deactivate, then create, ATOMICALLY and under the agent's own row lock. The
+        # "single active key policy" this comment describes was enforced by nothing: an
+        # unlocked `update()` followed by a `create()` with no transaction and no unique
+        # index, so two concurrent POSTs both deactivated and both created — the agent
+        # then held two valid signing credentials, and revoking the one they knew about
+        # left the other live. A partial unique index now makes the database say it too.
+        with transaction.atomic():
+            AgentProfile.objects.select_for_update().filter(pk=agent_profile.pk).first()
+            prev_ids = list(AgentAPIKey.objects.filter(
+                agent=agent_profile, is_active=True).values_list("key_id", flat=True))
+            if prev_ids:
+                AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).update(
+                    is_active=False)
 
-        AgentAPIKey.objects.create(
-            agent=agent_profile, key_id=key_id, hashed_key=hashed_key,
-            secret_ciphertext=encrypt_secret(secret), is_active=True,
-        )
+            AgentAPIKey.objects.create(
+                agent=agent_profile, key_id=key_id, hashed_key=hashed_key,
+                secret_ciphertext=encrypt_secret(secret), is_active=True,
+            )
+        if prev_ids:
+            audit("wallet.agent.apikey.rotated", request, {"deactivated": prev_ids})
         audit("wallet.agent.apikey.create", request, {"key_id": key_id})
         # Return secret ONCE — client must store it securely
         return Response({"key_id": key_id, "secret": secret}, status=status.HTTP_201_CREATED)
@@ -415,7 +425,10 @@ class AgentApiKeyEnsureView(APIView):
     def post(self, request):
         import hashlib
         agent_profile = ensure_agent_profile(request.user)
-        api_key = AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).order_by("-created_at").first()
+        # `-created_at, -id`: which key counts as current must not depend on
+        # which row Postgres happens to return when two share a timestamp.
+        api_key = AgentAPIKey.objects.filter(
+            agent=agent_profile, is_active=True).order_by("-created_at", "-id").first()
         if api_key:
             return Response({"created": False})
         # Create without returning secret (kept server-side only, encrypted at rest)

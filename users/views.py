@@ -1446,7 +1446,7 @@ class TrainerPendingRequestsView(APIView):
             pending_relations = TrainerClientRelation.objects.filter(
                 trainer=request.user,
                 status='pending'
-            ).select_related('client').order_by('-created_at')
+            ).select_related('client').order_by('-created_at', '-id')
             
             requests_data = []
             for relation in pending_relations:
@@ -1575,7 +1575,7 @@ class ClientPendingTrainerInvitesView(APIView):
                             status=status.HTTP_403_FORBIDDEN)
         rows = (TrainerClientRelation.objects
                 .filter(client=request.user, status='pending', initiated_by='trainer')
-                .select_related('trainer').order_by('-created_at')[:50])
+                .select_related('trainer').order_by('-created_at', '-id')[:50])
         return Response({'invitations': [{
             'request_id': r.id,
             'trainer_id': r.trainer_id,
@@ -1801,7 +1801,7 @@ class ClientRequestStatusView(APIView):
             # Get all requests made by this client
             client_relations = TrainerClientRelation.objects.filter(
                 client=request.user
-            ).select_related('trainer').order_by('-created_at')
+            ).select_related('trainer').order_by('-created_at', '-id')
             
             requests_data = []
             for relation in client_relations:

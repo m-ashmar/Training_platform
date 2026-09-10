@@ -555,7 +555,15 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 'creator__id', 'creator__username', 'creator__email',
                 'creator__user_type', 'creator__profile_picture',
             )
-            .order_by('-created_at')
+            # `-created_at, -id`, never `-created_at` alone. A single non-unique
+            # sort column is not a total order, so LIMIT/OFFSET paging repeats
+            # and hides rows whenever two records share the value — which a
+            # fan-out batch guarantees. Every model here declares the tiebreaker
+            # in `Meta.ordering`; a view-level `.order_by()` OVERRIDES it, and
+            # the sweep that fixed the models never reached these call sites.
+            # Reproduced: 50 notifications sharing a timestamp served `b-1` on
+            # page 1 and again on page 2, and `b-6` on neither.
+            .order_by('-created_at', '-id')
         )
         user = getattr(self, 'request', None).user if getattr(self, 'request', None) else None
         if user and user.is_authenticated:
@@ -970,9 +978,12 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         # `recipient` is serialised on every row and was not joined, so a page of 20
         # cost 21 queries: one for the notifications and one identical user select per
         # row, for the same user the queryset already filters on.
+        # `-created_at, -id`: the model declares that tiebreaker in `Meta.ordering` and
+        # a view-level `.order_by()` overrides it. Without the id, a fan-out batch that
+        # shares a timestamp made cursor pages repeat one row and skip another.
         qs = Notification.objects.select_related('actor', 'recipient').filter(
             recipient=self.request.user
-        ).order_by('-created_at')
+        ).order_by('-created_at', '-id')
         
         # Optional filter by notification type
         notification_type = self.request.query_params.get('type')

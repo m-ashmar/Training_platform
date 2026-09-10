@@ -109,7 +109,7 @@ def drain_dead_letter_queue():
     # thing that reads it.
     failed_pushes = list(
         Notification.objects.filter(status__fcm__status="failed")
-        .order_by("-created_at")[:100])
+        .order_by("-created_at", "-id")[:100])
     resent = 0
     for notification in failed_pushes:
         try:

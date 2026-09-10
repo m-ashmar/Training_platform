@@ -177,3 +177,42 @@ def test_one_transfer_is_reversed_once_however_many_administrators_try(make_user
     assert cw.balance == Decimal("500.00") and tw.balance == Decimal("0.00")
 
 
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_agent_ends_up_with_one_active_api_key(make_user, api):
+    """The "single active key policy" the rotation code describes was enforced by
+    nothing: an unlocked `update()` followed by a `create()`, with no transaction and no
+    unique index. Two concurrent POSTs both deactivated and both created, so the agent
+    held two valid signing credentials — and revoking the one they knew about left the
+    other live."""
+    import threading
+
+    from django.db import connections
+
+    from wallet.models import AgentAPIKey, AgentProfile, ensure_agent_profile
+
+    agent = make_user("zz_apikey_agent", user_type="agent")
+    ensure_agent_profile(agent)
+
+    outcomes = []
+
+    def rotate():
+        try:
+            outcomes.append(api(agent).post(
+                "/api/wallet/agent/apikey/create/", {},
+                content_type="application/json").status_code)
+        except Exception as exc:          # a lost race must not be a crash
+            outcomes.append(type(exc).__name__)
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=rotate) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    profile = AgentProfile.objects.get(user=agent)
+    active = AgentAPIKey.objects.filter(agent=profile, is_active=True).count()
+    assert active == 1, (active, outcomes)

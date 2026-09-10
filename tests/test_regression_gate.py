@@ -7712,3 +7712,34 @@ def test_a_push_that_failed_to_send_is_recorded_and_retried():
 
     drain = inspect.getsource(notification_tasks.drain_dead_letter_queue)
     assert "status__fcm__status" in drain, "nothing re-sends a push that failed"
+
+
+def test_no_view_orders_on_a_column_that_is_not_a_total_order():
+    """Every model declares a `-created_at, -id` tiebreaker in `Meta.ordering` and the
+    sweep that added them never reached the view layer — a view-level `.order_by()`
+    OVERRIDES Meta. A single non-unique sort column is not a total order, so LIMIT/OFFSET
+    paging repeats and hides rows whenever two records share the value, which a fan-out
+    batch guarantees. Reproduced with 50 notifications sharing a timestamp: `b-1` was on
+    page 1 and page 2, and `b-6` was on neither."""
+    import inspect
+    import re
+
+    from achievements import views as achievements_views
+    from analytics import views as analytics_views
+    from notifications import tasks as notification_tasks
+    from social import views as social_views
+    from subscription import views as subscription_views
+    from users import utils as users_utils
+    from users import views as users_views
+    from wallet import views as wallet_views
+
+    offenders = []
+    for module in (social_views, users_views, users_utils, wallet_views,
+                   analytics_views, achievements_views, subscription_views,
+                   notification_tasks):
+        code = "\n".join(line.split("#")[0]
+                         for line in inspect.getsource(module).splitlines())
+        for match in re.findall(r"order_by\(\s*['\"]-?created_at['\"]\s*\)", code):
+            offenders.append(f"{module.__name__}: {match}")
+
+    assert not offenders, offenders

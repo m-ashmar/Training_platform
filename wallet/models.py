@@ -60,8 +60,19 @@ class AgentAPIKey(models.Model):
         # likes and LIMIT/OFFSET paging silently repeats and hides rows between pages.
         ordering = ['-created_at', '-id']
         indexes = [
-            models.Index(fields=["key_id"]),
+            # No `Index(fields=["key_id"])`: the column is already `unique=True`, which
+            # builds its own btree. This was a second index on the same column.
             models.Index(fields=["is_active"]),
+        ]
+        constraints = [
+            # The "single active key policy" the rotation code describes, said by the
+            # database. It was enforced by an unlocked `update()` followed by a
+            # `create()` with no transaction, so two concurrent POSTs both deactivated
+            # and both created — the agent held two valid signing credentials and
+            # revoking the known one left the other live.
+            models.UniqueConstraint(
+                fields=["agent"], condition=models.Q(is_active=True),
+                name="one_active_api_key_per_agent"),
         ]
 
 
