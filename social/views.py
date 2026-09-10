@@ -259,6 +259,26 @@ class PostViewSet(viewsets.ModelViewSet):
 
         return queryset.select_related('author')
     
+    def perform_destroy(self, instance):
+        """Take the post out of the feeds that carry it, not only out of the table.
+
+        Nothing ever removed an id from a follower's ZSET, so a deleted post stayed there
+        for the key's 24-hour life and the reader dropped it after the SQL visibility
+        filter — which used to end the feed at that point.
+        """
+        from .feed_cache import remove_post_from_feeds
+
+        post_id = instance.pk
+        follower_ids = list(
+            UserFollow.objects.filter(following=instance.author)
+            .values_list('follower_id', flat=True))
+        super().perform_destroy(instance)
+        try:
+            remove_post_from_feeds(post_id, follower_ids)
+        except Exception:
+            # The feed reader tolerates a stale id; this is housekeeping, not correctness.
+            logger.debug("could not evict post %s from feeds", post_id, exc_info=True)
+
     def perform_create(self, serializer):
         post = serializer.save(author=self.request.user)
         # ⚡️ Cache Implementation Phase 3: Push to Fan-Out Queue
@@ -353,12 +373,19 @@ class PostViewSet(viewsets.ModelViewSet):
             # 3. Order the SQL response precisely mirroring the ZSET temporal sorting
             ordered_posts = [posts_dict[int(i)] for i in post_ids if int(i) in posts_dict]
             
+            # `has_more` is about the ZSET, not about what survived the visibility
+            # filter. It read `len(ordered_posts) == limit`, and nothing ever ZREMs a
+            # post id — deleted, erased and now-invisible posts stay in every follower's
+            # sorted set for the key's 24h life — so ONE hole ended the feed: the author
+            # deleted a single post, the page came back four rows instead of five,
+            # `has_more` went False, and the seven posts behind it were unreachable.
+            # Unfollowing someone blanked the feed entirely for the same reason.
             serializer = self.get_serializer(ordered_posts, many=True)
             return Response({
                 'posts': serializer.data,
                 'page': page,
                 'limit': limit,
-                'has_more': len(ordered_posts) == limit
+                'has_more': len(post_ids) == limit
             })
             
         except Exception as e:

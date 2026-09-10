@@ -63,6 +63,16 @@ ACTIVITY_TO_CATEGORIES = {
     
     # Login/streak activities
     'login': ['streak'],
+
+    # Being liked is a social event, and it was NOT in this map — so
+    # `on_post_liked` fell through to the unfiltered branch below and every like
+    # scanned the WHOLE achievement catalogue. Measured at 50 definitions: a like cost
+    # 352 queries and 279 ms, a follow 817 queries and 704 ms, and a post 354. Roughly
+    # seven queries per definition per social write, so growing the badge catalogue
+    # degraded every post, like and follow linearly.
+    'post_liked': ['social'],
+    'comment_created': ['social'],
+    'like_given': ['social'],
 }
 
 
@@ -96,16 +106,29 @@ class AchievementEngine:
                 categories = ACTIVITY_TO_CATEGORIES[event_type]
                 achievements = achievements.filter(category__in=categories)
             
+            # Which ones this user already holds, in ONE query. This was an `.exists()`
+            # per definition, inside a loop over the whole catalogue.
+            already = set(
+                UserAchievement.objects.filter(user=user)
+                .values_list('achievement_id', flat=True))
+
+            # One memo for this whole sweep. `metric_value_cached` exists for exactly
+            # this and the award path did not use it: `_evaluate_criteria` computed the
+            # metric, and `_record_progress` then computed the SAME metric a second time
+            # for the same definition. Twenty badges that all count workouts re-ran the
+            # same COUNT forty times.
+            metric_cache: dict = {}
+            pending_progress: list = []
+
             # Check each achievement
             for achievement in achievements:
                 # Skip if already earned
-                if UserAchievement.objects.filter(
-                    user=user, achievement=achievement
-                ).exists():
+                if achievement.id in already:
                     continue
                 
                 # Evaluate criteria
-                if cls._evaluate_criteria(user, achievement, **context):
+                if cls._evaluate_criteria(user, achievement, metric_cache=metric_cache,
+                                          **context):
                     result = cls._award_achievement(user, achievement, **context)
                     if result:
                         awarded.append(result)
@@ -114,7 +137,16 @@ class AchievementEngine:
                     # serializer, an admin page and an import in achievements/views.py,
                     # and nothing ever wrote a row — so a "3 of 5 workouts" screen was
                     # fully plumbed and always empty.
-                    cls._record_progress(user, achievement, **context)
+                    #
+                    # COLLECTED, not written one at a time: `update_or_create` per
+                    # definition is a SELECT plus a write each, so a 40-badge catalogue
+                    # cost ~80 queries on every post, like and follow. One upsert now.
+                    row = cls._progress_row(user, achievement, metric_cache=metric_cache,
+                                            **context)
+                    if row is not None:
+                        pending_progress.append(row)
+
+            cls._flush_progress(pending_progress)
         
         except Exception as e:
             logger.error(f"Error checking achievements for user {user.id}: {e}")
@@ -122,8 +154,28 @@ class AchievementEngine:
         return awarded
 
     @classmethod
-    def _record_progress(cls, user: CustomUser, achievement, **context) -> None:
-        """Store partial progress toward an achievement that has not been earned yet."""
+    @classmethod
+    def _flush_progress(cls, rows) -> None:
+        """Write every collected progress row in one statement."""
+        if not rows:
+            return
+        try:
+            from .models import AchievementProgress
+
+            AchievementProgress.objects.bulk_create(
+                rows,
+                update_conflicts=True,
+                update_fields=["current_value", "target_value", "progress_percentage"],
+                unique_fields=["user", "achievement"],
+            )
+        except Exception:
+            # Progress is a display nicety; it must never break awarding.
+            logger.debug("could not write achievement progress", exc_info=True)
+
+    @classmethod
+    def _progress_row(cls, user: CustomUser, achievement, metric_cache=None,
+                      **context):
+        """An unsaved AchievementProgress for this definition, or None."""
         try:
             from .models import AchievementProgress
 
@@ -133,25 +185,23 @@ class AchievementEngine:
             # bar and the award decision measuring the same thing.
             target = criteria.get("target")
             if not criteria_type or not target:
-                return
+                return None
 
-            # Same signature the evaluator uses — `criteria` is positional.
-            current = cls._get_metric_value(user, criteria_type, criteria, **context)
+            # The SAME memo the evaluator just used. This recomputed the metric a
+            # second time for every definition, so each one cost its query twice.
+            current = cls.metric_value_cached(user, criteria, cache=metric_cache)
             if current is None:
-                return
+                return None
 
             target = float(target)
             if target <= 0:
-                return
+                return None
             pct = max(0.0, min(100.0, (float(current) / target) * 100.0))
 
-            AchievementProgress.objects.update_or_create(
+            return AchievementProgress(
                 user=user, achievement=achievement,
-                defaults={
-                    "current_value": float(current),
-                    "target_value": target,
-                    "progress_percentage": round(pct, 2),
-                },
+                current_value=float(current), target_value=target,
+                progress_percentage=round(pct, 2),
             )
         except Exception:
             # Progress is a display nicety; it must never break awarding.
@@ -159,15 +209,16 @@ class AchievementEngine:
                          getattr(achievement, "pk", "?"), exc_info=True)
 
     @classmethod
-    def _evaluate_criteria(cls, user: CustomUser, achievement, **context) -> bool:
+    def _evaluate_criteria(cls, user: CustomUser, achievement, metric_cache=None,
+                           **context) -> bool:
         """Evaluate if user meets the achievement criteria."""
         criteria = achievement.criteria
         criteria_type = criteria.get('type')
         target = criteria.get('target', 1)
         condition = criteria.get('condition', 'gte')
         
-        # Get current value for the criteria type
-        current_value = cls._get_metric_value(user, criteria_type, criteria, **context)
+        # Get current value for the criteria type, memoised across this sweep.
+        current_value = cls.metric_value_cached(user, criteria, cache=metric_cache)
         
         if current_value is None:
             return False

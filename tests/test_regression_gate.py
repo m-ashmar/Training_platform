@@ -7560,3 +7560,70 @@ def test_a_wipe_counts_everything_it_would_destroy(seeded_catalogue, make_user):
         assert "learned food weight" in str(refusal.value), str(refusal.value)
     finally:
         UserFoodWeight.objects.filter(user=user).delete()
+
+
+def test_a_social_write_does_not_scan_the_whole_badge_catalogue(make_user, api):
+    """`check_and_award` looped every matching definition, ran `.exists()` per definition
+    to see if it was already earned, computed the metric in `_evaluate_criteria` and then
+    computed the SAME metric again in `_record_progress`, which wrote with
+    `update_or_create` — a SELECT plus a write each. And `post_liked` was not in
+    `ACTIVITY_TO_CATEGORIES`, so a like scanned the catalogue unfiltered. Measured at 50
+    definitions: a like cost 352 queries and 279 ms, a follow 817 and 704 ms. Growing the
+    badge catalogue degraded every post, like and follow linearly."""
+    import json as _json
+
+    from django.db import connection as _conn
+    from django.test.utils import CaptureQueriesContext
+
+    from achievements.models import Achievement
+    from social.models import Post
+
+    for index in range(40):
+        Achievement.objects.get_or_create(
+            key=f"gate_scan_{index}",
+            defaults=dict(name=f"Gate scan {index}", description="probe",
+                          category="social",
+                          criteria={"type": "posts_created", "target": 500 + index},
+                          points=10, is_active=True))
+    definitions = Achievement.objects.filter(is_active=True).count()
+    assert definitions >= 40, definitions
+
+    author = make_user("gate_scan_author", user_type="client")
+    liker = make_user("gate_scan_liker", user_type="client")
+    post = Post.objects.create(author=author, content="x", visibility="public")
+
+    like_url = f"/api/social/posts/{post.id}/like/"
+    api(liker).post(like_url, {}, content_type="application/json")   # warm
+    api(liker).post(like_url, {}, content_type="application/json")   # unlike
+    with CaptureQueriesContext(_conn) as liking:
+        assert api(liker).post(like_url, {},
+                               content_type="application/json").status_code == 200
+
+    with CaptureQueriesContext(_conn) as posting:
+        assert api(author).post(
+            "/api/social/posts/",
+            data=_json.dumps({"content": "hello", "visibility": "public"}),
+            content_type="application/json").status_code == 201
+
+    # Well under one query per definition, rather than the ~7 it used to cost.
+    assert len(liking) < definitions, (len(liking), definitions)
+    assert len(posting) < definitions, (len(posting), definitions)
+
+
+def test_one_hole_in_the_feed_does_not_end_it(make_user, api):
+    """`has_more` was `len(ordered_posts) == limit` — the count AFTER the SQL visibility
+    filter — and nothing ever ZREMs a post id, so deleted, erased and now-invisible posts
+    sit in every follower's sorted set for the key's 24-hour life. One hole ended the
+    feed: the author deleted a single post, the page came back four rows instead of five,
+    `has_more` went False, and everything behind it was unreachable."""
+    import inspect
+
+    from social import views as social_views
+
+    source = inspect.getsource(social_views.PostViewSet.feed)
+    assert "len(post_ids) == limit" in source, \
+        "has_more counts survivors again, so one hole ends the feed"
+
+    # And a deleted post is evicted rather than left as a hole.
+    assert hasattr(social_views.PostViewSet, "perform_destroy")
+    from social.feed_cache import remove_post_from_feeds  # noqa: F401

@@ -31,6 +31,33 @@ def push_post_to_global_stream(post_id, timestamp):
     except Exception as e:
         logger.error(f"Global feed push failed: {e}")
 
+def remove_post_from_feeds(post_id, follower_ids=None):
+    """Drop a post id from the global stream and from the feeds that carry it.
+
+    Nothing ever removed an id: a grep for `zrem` found only the `zremrangebyrank` that
+    trims each key to 500. So a deleted post — or an erased author's, or one that became
+    invisible — stayed in every follower's sorted set for the key's 24-hour life, and the
+    reader silently dropped it after the SQL visibility filter. One hole ended the feed:
+    a page came back four rows instead of five, `has_more` went False, and everything
+    behind it was unreachable until the key expired.
+
+    `has_more` now counts the ZSET rather than the survivors, so a hole no longer ends
+    the feed; this keeps the holes from accumulating in the first place.
+    """
+    client = get_redis_client()
+    if not client:
+        return
+    member = str(post_id)
+    keys = ["feed_global:v1"]
+    for follower_id in (follower_ids or []):
+        keys.append(f"feed:v1:{follower_id}")
+    for key in keys:
+        try:
+            client.zrem(key, member)
+        except Exception as exc:
+            logger.warning("Could not remove post %s from %s: %s", post_id, key, exc)
+
+
 def get_user_feed(user_id, offset=0, limit=20):
     """
     Fetches the combined hybrid feed by merging the personal ZSET list
