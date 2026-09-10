@@ -7246,3 +7246,91 @@ def test_a_deactivated_account_is_not_served_from_cache(make_user, api):
 
     assert client.get(cacheable).status_code == 401, \
         "a deactivated account was served the cached body"
+
+
+def test_the_weekly_screen_sees_a_plan_that_covers_only_midweek(
+        make_user, api, seeded_catalogue):
+    """`_get_active_diet_plan(start) or _get_active_diet_plan(end)` requires a plan to
+    cover the Monday or the Sunday of the week, so a plan covering only mid-week
+    satisfied neither probe and the whole week came back blank — which is every 1-day and
+    7-day plan that does not start on a Monday, and `duration_days` defaults to 1. The
+    client's own progress screen showed today's meals while this one showed seven empty
+    days."""
+    import datetime as _dt
+
+    from django.utils import timezone as _tz
+
+    from diet.services.plan_generation import generate_and_save
+
+    user = make_user("gate_week_client", user_type="client", age=30, gender="male",
+                     height=175, weight=75, activity_level="Moderate")
+    _grant_diet_access(user)
+
+    today = _tz.localdate()
+    midweek = today - _dt.timedelta(days=today.weekday()) + _dt.timedelta(days=3)
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="gate-week",
+                                   start_date=midweek)
+    meal = plan.meals.first()
+    for component in meal.components.all():
+        component.complete()
+
+    body = api(user).get("/api/diet/v1/client/progress/weekly/").json()
+    rows = body["results"] if isinstance(body, dict) else body
+    with_a_plan = [row for row in rows if row["has_active_plan"]]
+    assert with_a_plan, "a mid-week plan renders as seven empty days"
+    assert any(row["meals_completed"] > 0 for row in with_a_plan), with_a_plan
+
+
+def test_the_plan_screen_does_not_report_planned_food_as_eaten(
+        make_user, api, seeded_catalogue):
+    """`calculate_daily_nutrition` sums every meal of the day with no reference to
+    `is_completed`, and the view emitted that as `calories_consumed` — so one response
+    told a client who had eaten a quarter of their food that they were at 97.3% of
+    target, while `/client/progress/` said 30%. On a cut that is the difference between
+    eating again and not."""
+    from diet.services.plan_generation import generate_and_save
+
+    user = make_user("gate_nut_client", user_type="client", age=30, gender="male",
+                     height=175, weight=75, activity_level="Moderate")
+    _grant_diet_access(user)
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="gate-nut")
+
+    meal = plan.meals.first()
+    for component in meal.components.all():
+        component.complete()
+
+    when = plan.start_date.isoformat()
+    summary = api(user).get(
+        f"/api/diet/v1/nutrition/plan/{plan.id}/?date={when}").json()["summary"]
+    progress = api(user).get(f"/api/diet/v1/client/progress/?date={when}").json()
+
+    assert summary["completed_meals"] < summary["total_meals"], summary
+    assert summary["calories_consumed"] < summary["calories_planned"], summary
+    # The two screens agree, which is the whole point.
+    assert abs(summary["calories_consumed"] - progress["calories_consumed"]) < 0.5, \
+        (summary["calories_consumed"], progress["calories_consumed"])
+
+
+def test_a_meal_on_a_superseded_plan_cannot_be_completed(make_user, api, seeded_catalogue):
+    """`MealCompletionView` was scoped by owner only, never by `is_active`, while
+    `ClientProgressService` resolves progress by `is_active=True`. So completing a meal
+    on a retired plan answered 200 with a completion percentage, wrote a `DailyProgress`
+    row keyed to the retired plan, and no read endpoint ever consulted it: the client
+    tapped "I ate this", was told it worked, and the number never moved."""
+    from diet.services.plan_generation import generate_and_save
+
+    user = make_user("gate_sup_client", user_type="client", age=30, gender="male",
+                     height=175, weight=75, activity_level="Moderate")
+    _grant_diet_access(user)
+    _out, first = generate_and_save(user, duration_days=1, seed_salt="gate-sup-1")
+    stale_meal = first.meals.first()
+
+    generate_and_save(user, duration_days=1, seed_salt="gate-sup-2",
+                      start_date=first.start_date)
+    first.refresh_from_db()
+    assert first.is_active is False
+
+    resp = api(user).post(f"/api/diet/v1/client/meals/{stale_meal.id}/complete/", {},
+                          content_type="application/json")
+    assert resp.status_code == 409, resp.content[:200]
+    assert resp.json().get("code") == "plan_superseded"

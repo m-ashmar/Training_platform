@@ -25,7 +25,8 @@ from .models import (
     MealSwap,
     MealEvent,
     DailyAdvice, FoodItem, UserFoodPreference, FoodCategory, 
-    DietPlan, DietPlanTemplate, Meal, MealComponent, UserFoodCategoryPreference
+    DietPlan, DietPlanTemplate, DailyProgress, Meal, MealComponent,
+    UserFoodCategoryPreference
 )
 from .api import search_food
 from .trainer_services import TrainerDietPlanService, ClientProgressService
@@ -2091,6 +2092,18 @@ class DietPlanNutritionView(APIView):
             
             # Calculate plan nutrition
             plan_nutrition = diet_plan.calculate_daily_nutrition(target_date)
+
+            # And what was actually EATEN, which is a different number. `DailyProgress`
+            # already computes it per component, honouring `actual_quantity_consumed`;
+            # this view had no notion of it and reported the plan as the intake.
+            progress_row = DailyProgress.objects.filter(
+                user=diet_plan.user, diet_plan=diet_plan, date=target_date).first()
+            consumed = {
+                'calories': progress_row.calories_consumed if progress_row else 0.0,
+                'protein': progress_row.protein_consumed if progress_row else 0.0,
+                'carbs': progress_row.carbs_consumed if progress_row else 0.0,
+                'fat': progress_row.fat_consumed if progress_row else 0.0,
+            }
             
             # Get meals for the date with detailed nutrition
             meals = diet_plan.meals.filter(date=target_date).order_by('scheduled_time')
@@ -2171,8 +2184,20 @@ class DietPlanNutritionView(APIView):
                     'completed_meals': completed_meals,
                     'completion_percentage': round((completed_meals / total_meals * 100), 1) if total_meals > 0 else 0,
                     'calories_target': diet_plan.daily_calories,
-                    'calories_consumed': plan_nutrition['calories'],
-                    'calories_percentage': round((plan_nutrition['calories'] / diet_plan.daily_calories * 100), 1) if diet_plan.daily_calories > 0 else 0
+                    # PLANNED, and named so. `calculate_daily_nutrition` sums every meal
+                    # of the day with no reference to `is_completed`, and this emitted
+                    # that as `calories_consumed` — so one response told a client who had
+                    # eaten a quarter of their food that they were at 97.3% of target
+                    # while `/client/progress/`, computed a different way, said 30%. On a
+                    # cut that is the difference between eating again and not.
+                    'calories_planned': plan_nutrition['calories'],
+                    'calories_consumed': consumed['calories'],
+                    'calories_percentage': round(
+                        (consumed['calories'] / diet_plan.daily_calories * 100), 1)
+                    if diet_plan.daily_calories > 0 else 0,
+                    'planned_percentage': round(
+                        (plan_nutrition['calories'] / diet_plan.daily_calories * 100), 1)
+                    if diet_plan.daily_calories > 0 else 0,
                 }
             })
             
@@ -2449,6 +2474,20 @@ class MealCompletionView(APIView):
             # two different answers.
             meal = get_object_or_404(
                 Meal.objects.filter(diet_plan__user=request.user), id=meal_id)
+
+            # And on a plan the client still follows. This was scoped by owner only,
+            # never by `is_active` — while `ClientProgressService` resolves progress by
+            # `is_active=True`. So completing a meal on a superseded plan answered 200
+            # with a completion percentage, wrote a `DailyProgress` row keyed to the
+            # retired plan, and no read endpoint ever consulted it: the client tapped
+            # "I ate this", was told it worked, and the number never moved. A stale
+            # screen — regenerated on another device, or just scrolled back — is enough.
+            if not meal.diet_plan.is_active:
+                return Response(
+                    {"error": _("This plan has been replaced. Refresh to see your "
+                                "current plan."),
+                     "code": "plan_superseded"},
+                    status=status.HTTP_409_CONFLICT)
             
             action = _body(request).get('action', 'complete_meal')
             

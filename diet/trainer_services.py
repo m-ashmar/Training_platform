@@ -708,11 +708,25 @@ class ClientProgressService:
         # GET, and an unbounded `start_date` minted DailyProgress rows for any date
         # asked about.
         end_date = start_date + timedelta(days=6)
-        plan = self._get_active_diet_plan(start_date) or self._get_active_diet_plan(end_date)
+
+        # EVERY active plan that overlaps the week, not one resolved from the two
+        # boundary dates. `_get_active_diet_plan(start) or _get_active_diet_plan(end)`
+        # requires a plan to cover the Monday or the Sunday, so a plan covering only
+        # mid-week satisfied neither probe and the whole week came back blank — which is
+        # every 1-day and 7-day plan that does not start on a Monday, and `duration_days`
+        # defaults to 1. The client's own progress screen showed today's meals while this
+        # one showed seven empty days. It also reported a week containing two plans
+        # entirely against one of them.
+        plans = list(DietPlan.objects.filter(
+            user=self.client, is_active=True,
+            start_date__lte=end_date, end_date__gte=start_date,
+        ).values_list('id', flat=True))
+
         meals_by_day: Dict[object, List[int]] = {}
-        if plan is not None:
+        if plans:
             for row in (Meal.objects
-                        .filter(diet_plan=plan, date__gte=start_date, date__lte=end_date)
+                        .filter(diet_plan_id__in=plans,
+                                date__gte=start_date, date__lte=end_date)
                         .values('date', 'is_completed')):
                 total, done = meals_by_day.setdefault(row['date'], [0, 0])
                 meals_by_day[row['date']] = [total + 1, done + (1 if row['is_completed'] else 0)]
@@ -723,7 +737,7 @@ class ClientProgressService:
             total, done = meals_by_day.get(day_date, (0, 0))
             week_progress.append({
                 'date': day_date,
-                'has_active_plan': plan is not None and bool(total),
+                'has_active_plan': bool(total),
                 'meals_completed': done,
                 'total_meals': total,
                 'completion_percentage': round((done / total) * 100, 1) if total else 0,
