@@ -2,8 +2,10 @@
 settings_secrets.py - Zero-trust secrets management utilities.
 
 Provides strict environment parsing and secrets fetching.
-In production, secrets MUST come from a managed service (AWS Secrets Manager, Vault).
-Missing secrets crash the application at startup - no defaults, no fallbacks.
+Secrets come from AWS Secrets Manager when `AWS_SECRET_NAME` is set, and otherwise from
+the process environment — which is where the platform we deploy to (`fly secrets set`)
+injects them. Missing secrets crash the application at startup - no defaults, no
+fallbacks, whichever store is in use.
 """
 
 import os
@@ -76,19 +78,24 @@ def get_int_env(name: str, default: int) -> int:
 
 
 def get_secret(name: str) -> str:
+    """Fetch a highly sensitive secret. Fail-closed: no defaults, ever.
+
+    The secret STORE is whatever the platform actually injects. Set `AWS_SECRET_NAME`
+    and the value is read from AWS Secrets Manager; otherwise it comes from the process
+    environment, which is where `fly secrets set` puts it.
+
+    This used to demand Secrets Manager in production and ignore the environment
+    entirely. `DEPLOY_CHECKLIST.md` documents the deploy as `fly secrets set ...`,
+    `fly.toml` provisions no AWS credentials, and the Dockerfile sets none — so the
+    documented deploy could not boot: settings raised ImproperlyConfigured("Unable to
+    locate credentials") on the first `get_secret` call, before `migrate` ran, and
+    `training_platform/celery.py` calls `django.setup()` at import so the worker died the
+    same way. The message pointed at infrastructure nobody had provisioned.
+
+    Neither source has a fallback value: a missing secret still crashes startup.
     """
-    Fetch a highly sensitive secret.
-    In production, dynamically fetches from AWS Secrets Manager (fail-closed, no fallbacks).
-    In local dev, fetches from os.environ.
-    """
-    is_prod = (
-        os.environ.get("DJANGO_SETTINGS_MODULE") == "training_platform.settings_production"
-        and os.environ.get("LOCAL_PROD_TEST") != "True"
-    )
-    
-    if is_prod:
-        # Strict AWS Secrets Manager enforcement
-        secret_store_name = os.environ.get("AWS_SECRET_NAME", "training_platform/production")
+    if os.environ.get("AWS_SECRET_NAME"):
+        secret_store_name = os.environ["AWS_SECRET_NAME"]
         
         # Memoize the AWS secrets dict to avoid fetching on every get_secret call
         if not hasattr(get_secret, "_aws_secrets"):
@@ -116,9 +123,8 @@ def get_secret(name: str) -> str:
                 f"No fallback or default values allowed."
             )
         return val
-    else:
-        # Local development fallback
-        return require_env(name)
+
+    return require_env(name)
 
 
 def get_aws_secret(secret_name: str) -> dict:

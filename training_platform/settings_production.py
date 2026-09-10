@@ -250,6 +250,22 @@ def enforce_production_safety():
             "use DB6 or higher"
         )
 
+    # --- WebSocket group layer ---
+    # Same failure shape as the broker: the channel layer used to be assembled from
+    # REDIS_HOST/REDIS_PORT, which nothing in the deploy sets, so it defaulted to a
+    # localhost Redis that does not exist in the container. It now comes from REDIS_URL
+    # like every cache; this refuses to boot if something puts it back on localhost.
+    try:
+        _channel_hosts = CHANNEL_LAYERS["default"]["CONFIG"]["hosts"]  # noqa: F405
+    except (KeyError, TypeError):
+        _channel_hosts = []
+    for _host in _channel_hosts:
+        if isinstance(_host, str) and ("localhost" in _host or "127.0.0.1" in _host):
+            errors.append(
+                f"CHANNEL_LAYERS points at localhost ({_host!r}); "
+                "there is no Redis inside the app container — WebSockets would be dead"
+            )
+
     # --- Payment gateway (ShamCash) production readiness ---
     # PAYMENT_DEBUG must never be on in production.
     if os.environ.get("PAYMENT_DEBUG", "False").lower() == "true":

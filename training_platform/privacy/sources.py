@@ -22,6 +22,11 @@ register(PersonalDataSource(
         "phone_number": "0000000000",
         "first_name": "", "last_name": "",
         "specific_injury": "", "client_goals": [],
+        # The denormalised pointer to the trainer. The relation rows are deleted by the
+        # trainer_relations source below; leaving this set would keep the display name
+        # of a trainer on an erased account, and leave the two sources of truth
+        # disagreeing in the one direction that grants access.
+        "assigned_trainer": None,
         # Clearing the field triggers the post-commit receiver that removes
         # the stored file; leaving it would orphan the image.
         "profile_picture": None,
@@ -119,9 +124,20 @@ register(PersonalDataSource(label="challenges_created", model="social.Challenge"
 register(PersonalDataSource(label="challenge_participation", model="social.ChallengeParticipation", user_field="user"))
 register(PersonalDataSource(label="post_likes", model="social.PostLike", user_field="user"))
 register(PersonalDataSource(label="comment_likes", model="social.CommentLike", user_field="user"))
-register(PersonalDataSource(label="follows", model="social.UserFollow", user_field="follower"))
+# BOTH directions. Registered on "follower" alone, an erasure dropped who you follow and
+# left every row saying who follows you — the erased account stayed in other people's
+# follower lists and counts.
+register(PersonalDataSource(label="follows", model="social.UserFollow",
+                            user_field=("follower", "following")))
 
-register(PersonalDataSource(label="trainer_relations", model="users.TrainerClientRelation", user_field="trainer"))
+# BOTH sides of the bond, for the same reason and with a sharper consequence. Registered
+# on "trainer" alone, a CLIENT's erasure left the relation row standing: the trainer kept
+# them on the client list, kept reading their profile endpoint, and kept creating routines
+# attached to them — writing NEW personal data about someone who had asked to be
+# forgotten — and the erased account could no longer call unassign-trainer to stop it,
+# because erasure had deactivated it.
+register(PersonalDataSource(label="trainer_relations", model="users.TrainerClientRelation",
+                            user_field=("trainer", "client")))
 # Short-lived credentials: deleted on erasure, and expired rows purged on a schedule.
 register(PersonalDataSource(label="otp_verifications", model="users.OTPVerification", user_field="user",
                             retention_days=1))

@@ -4,6 +4,8 @@ from rest_framework import viewsets, status, permissions, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from training_platform.query_params import body_dict
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction
@@ -378,9 +380,10 @@ class SubscriptionManagementView(APIView):
     def post(self, request):
         """Create a trial subscription for a user with proper validation"""
         try:
-            user_id = request.data.get('user_id')
-            plan_id = request.data.get('plan_id')
-            trial_days = request.data.get('trial_days', 7)
+            body = body_dict(request)
+            user_id = body.get('user_id')
+            plan_id = body.get('plan_id')
+            trial_days = body.get('trial_days', 7)
             
             if not user_id or not plan_id:
                 return Response(
@@ -443,7 +446,7 @@ class SubscriptionAccessView(APIView):
     def post(self, request):
         """Check if user has access to specific features with proper error handling"""
         try:
-            features = request.data.get('features', [])
+            features = body_dict(request).get('features', [])
             user = request.user
             
             if not isinstance(features, list):
@@ -691,8 +694,9 @@ class PaymentGatewayView(APIView):
         than the figure they agreed to.
         """
         try:
-            gateway_name = request.data.get('gateway')
-            subscription_id = request.data.get('subscription_id')
+            body = body_dict(request)
+            gateway_name = body.get('gateway')
+            subscription_id = body.get('subscription_id')
 
             if not gateway_name or not subscription_id:
                 return Response(

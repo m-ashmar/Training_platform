@@ -4881,17 +4881,34 @@ def test_one_predicate_decides_what_a_trainer_can_see(seeded_catalogue, make_use
     import inspect
     import re
 
+    from routine import models as routine_models
     from routine import views as routine_views
 
-    source = inspect.getsource(routine_views)
-    # Strip comments before searching, so the explanations above the fixes do not
-    # count as usages.
-    code = "\n".join(line.split("#")[0] for line in source.splitlines())
-    offenders = re.findall(r"assigned_trainer=(?:user|request\.user|self\.request\.user)"
-                           r"|assigned_to__assigned_trainer"
-                           r"|user__assigned_trainer=", code)
+    # Both modules. The regex below used to name three exact spellings in views.py
+    # only, and four more sites — `client.assigned_trainer_id == request.user.id` in
+    # RoutineTemplateViewSet.generate, `created_by=user.assigned_trainer` in the client
+    # exercise queryset, and `self.user.assigned_trainer == user` in two
+    # `can_be_accessed_by` methods on routine/models.py — were a second definition of
+    # "may this trainer act on this client" that the guard could not see. Any read of
+    # the pointer that is not plainly display now fails this.
+    offenders = []
+    for module in (routine_views, routine_models):
+        # Strip comments before searching, so the explanations above the fixes do not
+        # count as usages.
+        code = "\n".join(line.split("#")[0]
+                         for line in inspect.getsource(module).splitlines())
+        offenders += [
+            f"{module.__name__}: {m}"
+            for m in re.findall(
+                r"assigned_trainer(?:_id)?\s*(?:=|==)\s*"
+                r"(?:user|request\.user|self\.request\.user)"
+                r"|assigned_to__assigned_trainer"
+                r"|user__assigned_trainer="
+                r"|created_by=\w+\.assigned_trainer"
+                r"|\.assigned_trainer\s*==\s*user", code)
+        ]
     assert not offenders, f"trainer scope still read from the pointer: {offenders}"
-    assert "accessible_user_ids" in code
+    assert "accessible_user_ids" in inspect.getsource(routine_views)
 
 
 def test_a_trainer_sees_only_clients_who_approved_them(seeded_catalogue, make_user):
@@ -5750,3 +5767,404 @@ def test_a_plan_is_refused_rather_than_served_hollowed_out(seeded_catalogue):
         str(refused.value)
     assert DietPlan.objects.filter(user=user).count() == before, \
         "a plan that could not be served was left behind"
+
+
+# --------------------------------------------------------------------------------
+# API_CONTRACT.md is the document the Flutter client is built from, and nothing
+# checked it against the URLconf. It drifted three ways at once: it documented
+# `GET`/`PATCH /api/auth/profile/` as the home of `preferred_timezone` and
+# `workout_reminder_hour` (that route does not exist and both fields are written with
+# POST elsewhere), and it omitted `client/respond-to-invite/` — the only way a client
+# can accept a trainer's invitation, leaving the documented `trainer/assign-client/`
+# as an invitation nothing could answer — along with `client/trainer-invites/` and
+# `notifications/message-client/`.
+# --------------------------------------------------------------------------------
+
+def _contract_documented_paths():
+    from pathlib import Path as _Path
+    text = (_Path(__file__).resolve().parent.parent / "API_CONTRACT.md").read_text()
+    out = {}
+    for m in re.finditer(r"^\|\s*`([A-Z, ]+)`\s*\|\s*`(/[^`]+)`\s*\|", text, re.M):
+        out[m.group(2)] = set(x.strip() for x in m.group(1).split(","))
+    return out
+
+
+def _resolved_api_paths():
+    from django.urls import get_resolver
+    from django.urls.resolvers import URLPattern, URLResolver
+
+    out = {}
+
+    def walk(patterns, prefix=""):
+        for p in patterns:
+            if isinstance(p, URLResolver):
+                walk(p.url_patterns, prefix + str(p.pattern))
+            elif isinstance(p, URLPattern):
+                out["/" + prefix + str(p.pattern)] = True
+
+    walk(get_resolver().url_patterns)
+    return out
+
+
+def _contract_normalise(path):
+    path = re.sub(r"\(\?P<[^>]+>[^)]*\)", "{id}", path)
+    path = re.sub(r"<[^>]+>", "{id}", path)
+    path = re.sub(r"\{[a-zA-Z_]+\}", "{id}", path)
+    path = path.replace("^", "").replace("$", "").replace("\\.", ".")
+    # DRF's optional `.json` format suffix on every router route: one URL, not two.
+    path = re.sub(r"\.\{id\}/?\??$", "", path)
+    return path if path.endswith("/") else path + "/"
+
+
+def test_every_api_route_is_in_the_contract_and_every_documented_route_exists():
+    documented = {_contract_normalise(p) for p in _contract_documented_paths()}
+    # `?format=json` variants are the same endpoint written twice, so they are dropped
+    # on the RAW pattern — after normalisation `<drf_format_suffix:format>` looks exactly
+    # like a real `<int:pk>` and a filter there would swallow every detail route.
+    resolved = {_contract_normalise(p) for p in _resolved_api_paths()
+                if "format" not in p}
+
+    live = {p for p in resolved if p.startswith("/api/")}
+    docs = {p for p in documented if p.startswith("/api/")}
+
+    undocumented = sorted(live - docs)
+    phantom = sorted(docs - live)
+    assert not undocumented, (
+        "routes exist that API_CONTRACT.md does not list: " + ", ".join(undocumented))
+    assert not phantom, (
+        "API_CONTRACT.md lists routes that do not exist: " + ", ".join(phantom))
+
+
+def test_the_contract_does_not_point_the_client_at_a_route_that_is_not_there():
+    """The prose, not the table. `/api/auth/profile/` was named in the reminder section
+    as the home of both scheduling fields and has never existed."""
+    from pathlib import Path as _Path
+    text = (_Path(__file__).resolve().parent.parent / "API_CONTRACT.md").read_text()
+    assert "/api/auth/profile/" not in text
+
+
+# --------------------------------------------------------------------------------
+# Client-fault input answered 500. A sweep of every argument-free POST route found 18
+# endpoints that crashed on the body `[]` — a JSON array reaches `request.data` as a
+# `list`, and `list` has no `.get` — plus a NUL byte in a query string or a field, a
+# non-numeric id reaching `.get(id=...)`, and a JSON number where `.lower()` was
+# called. Each was a free error-budget burn on a trivially reachable path, and
+# `respond-to-invite` is the route a client uses to accept a trainer.
+# --------------------------------------------------------------------------------
+
+_MALFORMED_BODY_ROUTES = [
+    "/api/analytics/sessions/end_session/",
+    "/api/auth/client/request-trainer/",
+    "/api/auth/client/respond-to-invite/",
+    "/api/auth/device-token/",
+    "/api/auth/resend-otp/",
+    "/api/auth/token/logout/",
+    "/api/auth/trainer/assign-client/",
+    "/api/auth/trainer/respond-to-request/",
+    "/api/auth/trainer/unassign-client/",
+    "/api/auth/verify-otp/",
+    "/api/routine/exercisesetlogs/bulk-create/",
+    "/api/routine/set-logs/bulk-create/",
+    "/api/routine/user-exercise-progress/bulk-complete/",
+    "/api/social/follows/follow_user/",
+    "/api/social/follows/unfollow_user/",
+    "/api/subscription/v1/access/check/",
+    "/api/subscription/v1/admin/management/",
+    "/api/subscription/v1/gateways/",
+]
+
+
+def test_a_json_array_body_is_a_400_not_a_500(make_user, api):
+    admin = make_user("gate_shape_admin", user_type="admin")
+    trainer = make_user("gate_shape_trainer", user_type="trainer")
+    crashed = []
+    for url in _MALFORMED_BODY_ROUTES:
+        for actor in (admin, trainer):
+            resp = api(actor).post(url, data="[]", content_type="application/json")
+            if resp.status_code >= 500:
+                crashed.append((url, resp.status_code))
+                break
+    assert not crashed, f"a JSON array body still crashes: {crashed}"
+
+
+def test_a_nul_byte_is_a_400_not_a_500(make_user, api):
+    """Postgres refuses a NUL inside a text value and psycopg raises a plain ValueError
+    at execute time, deep inside a view — usually inside a broad `except Exception`
+    that answers 500. The parser rejects it at the boundary instead."""
+    import json as _json
+
+    client = make_user("gate_nul_client", user_type="client")
+    admin = make_user("gate_nul_admin", user_type="admin")
+
+    for url, body in (
+        ("/api/auth/device-token/", {"token": "a\u0000b"}),
+        ("/api/analytics/sessions/end_session/", {"session_id": "a\u0000b"}),
+    ):
+        resp = api(client).post(url, data=_json.dumps(body),
+                                content_type="application/json")
+        assert resp.status_code == 400, (url, resp.status_code, resp.content[:200])
+
+    for url in ("/api/social/users/public-profile/by_username/?username=%00",
+                "/api/auth/trainers/public/?search=%00"):
+        resp = api(admin).get(url)
+        assert resp.status_code == 400, (url, resp.status_code, resp.content[:200])
+
+
+def test_a_non_numeric_id_is_a_400_not_a_500(make_user, api):
+    import json as _json
+
+    admin = make_user("gate_badid_admin", user_type="admin")
+    client = make_user("gate_badid_client", user_type="client")
+
+    for url in ("/api/social/follows/follow_user/", "/api/social/follows/unfollow_user/"):
+        resp = api(admin).post(url, data=_json.dumps({"user_id": "abc"}),
+                               content_type="application/json")
+        assert resp.status_code == 400, (url, resp.status_code, resp.content[:200])
+
+    # A JSON boolean where a string is expected: `(x or '').lower()` was an
+    # AttributeError and a 500 on the client's own accept-a-trainer path.
+    resp = api(client).post("/api/auth/client/respond-to-invite/",
+                            data=_json.dumps({"request_id": 1, "action": True}),
+                            content_type="application/json")
+    assert resp.status_code == 400, (resp.status_code, resp.content[:200])
+
+    # `?agent_id=abc` reached an integer column and came back 500.
+    resp = api(admin).get("/api/wallet/admin/audit/export/?agent_id=abc")
+    assert resp.status_code == 400, (resp.status_code, resp.content[:200])
+
+
+def test_an_unsupported_period_is_rejected_not_echoed(make_user, api):
+    """`?period=zzz` answered 200 with a response key literally named `zzz_volume`:
+    the caller chose the shape of our response, and a client asking for a period we do
+    not implement was told nothing."""
+    admin = make_user("gate_period_admin", user_type="admin")
+    resp = api(admin).get("/api/routine/analytics/summary/?period=zzz")
+    assert resp.status_code == 400, (resp.status_code, resp.content[:200])
+    assert api(admin).get("/api/routine/analytics/summary/?period=week").status_code == 200
+
+
+def test_an_unresolvable_timezone_is_rejected(make_user, api):
+    """Any string was accepted, and the reminder sweep catches ZoneInfoNotFoundError and
+    falls back to UTC — so a typo left the user getting reminders in the wrong part of
+    their day with nothing anywhere to say why."""
+    import json as _json
+
+    user = make_user("gate_tz_user", user_type="client")
+    bad = api(user).post("/api/auth/user/update/",
+                         data=_json.dumps({"preferred_timezone": "Not/AZone"}),
+                         content_type="application/json")
+    assert bad.status_code == 400, (bad.status_code, bad.content[:200])
+    good = api(user).post("/api/auth/user/update/",
+                          data=_json.dumps({"preferred_timezone": "Asia/Damascus"}),
+                          content_type="application/json")
+    assert good.status_code == 200, good.content[:200]
+
+
+# --------------------------------------------------------------------------------
+# Erasure, both sides of a two-sided row.
+# --------------------------------------------------------------------------------
+
+def test_a_clients_erasure_ends_the_trainer_bond(make_user, api):
+    """`trainer_relations` was registered on `trainer` alone, so a CLIENT's erasure left
+    the relation standing: the trainer kept them on the client list, kept reading their
+    profile, and kept creating routines attached to them — writing NEW personal data
+    about someone who had asked to be forgotten — and the erased account could not stop
+    it, because erasure had deactivated it."""
+    from routine.permissions import can_access_user_data
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("gate_erase_t", user_type="trainer")
+    client = make_user("gate_erase_c", user_type="client")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client, status="approved")
+    client.assigned_trainer = trainer
+    client.save(update_fields=["assigned_trainer"])
+
+    resp = api(client).delete("/api/privacy/erase/?confirm=ERASE")
+    assert resp.status_code == 200, resp.content[:300]
+
+    client.refresh_from_db()
+    assert client.assigned_trainer_id is None
+    assert not TrainerClientRelation.objects.filter(client=client).exists()
+    assert not can_access_user_data(trainer, client.pk)
+    assert api(trainer).get(
+        f"/api/auth/trainer/client-profile/{client.pk}/").status_code == 403
+
+
+def test_erasure_covers_both_directions_of_a_follow():
+    """Registered on `follower` alone, an erasure dropped who you follow and left every
+    row saying who follows you."""
+    import training_platform.privacy.sources  # noqa: F401  (populates the registry)
+    from training_platform.privacy.registry import registry
+
+    by_label = {s.label: s for s in registry.values()}
+    assert set(by_label["follows"].user_field) == {"follower", "following"}
+    assert set(by_label["trainer_relations"].user_field) == {"trainer", "client"}
+
+
+# --------------------------------------------------------------------------------
+# Query counts that grew with the row count.
+# --------------------------------------------------------------------------------
+
+def test_the_trainers_roster_costs_the_same_at_any_size(make_user, api):
+    """`client-progress/recent/` serialised each client on its own and each serializer
+    asked its own questions: ~9 queries for one client, ~109 for 21, ~259 for 51, up to
+    ~509 at the [:100] cap — on a deployment whose connection budget is 15 per machine
+    against a 100-connection Postgres."""
+    from django.db import connection as _conn
+    from django.test.utils import CaptureQueriesContext
+    from users.models import TrainerClientRelation
+
+    def roster(n, tag):
+        trainer = make_user(f"gate_qg_t_{tag}", user_type="trainer")
+        for i in range(n):
+            c = make_user(f"gate_qg_c_{tag}_{i}", user_type="client")
+            TrainerClientRelation.objects.create(
+                trainer=trainer, client=c, status="approved")
+        return trainer
+
+    counts = {}
+    for n, tag in ((1, "a"), (25, "b")):
+        client = api(roster(n, tag))
+        client.get("/api/routine/trainer/client-progress/recent/")  # warm
+        with CaptureQueriesContext(_conn) as ctx:
+            resp = client.get("/api/routine/trainer/client-progress/recent/")
+        assert resp.status_code == 200, resp.content[:200]
+        assert len(resp.json()["recent_activity"]) == n
+        counts[n] = len(ctx)
+
+    assert counts[25] <= counts[1] + 2, counts
+
+
+def test_the_ledger_does_not_cost_two_queries_per_row(make_user, api):
+    """The serializer reads `source_wallet.owner.username`, one hop past the end of
+    `select_related("source_wallet", "destination_wallet")` — 50 queries for a 20-row
+    page of the financial history screen."""
+    from decimal import Decimal
+
+    from django.db import connection as _conn
+    from django.test.utils import CaptureQueriesContext
+
+    from wallet.models import Transaction, Wallet
+
+    user = make_user("gate_ledger_u", user_type="client")
+    other = make_user("gate_ledger_t", user_type="trainer")
+    source, _ = Wallet.objects.get_or_create(owner=user, defaults={"owner_type": "client"})
+    dest, _ = Wallet.objects.get_or_create(owner=other, defaults={"owner_type": "trainer"})
+    client = api(user)
+    client.get("/api/wallet/transactions/")  # warm
+
+    with CaptureQueriesContext(_conn) as empty:
+        client.get("/api/wallet/transactions/")
+
+    for i in range(20):
+        Transaction.objects.create(
+            source_wallet=source, destination_wallet=dest, amount=Decimal("1.00"),
+            tx_type="transfer", actor=user, reference_id=f"gate-ledger-{i}")
+
+    with CaptureQueriesContext(_conn) as full:
+        resp = client.get("/api/wallet/transactions/")
+    assert resp.status_code == 200
+    assert len(full) <= len(empty) + 2, (len(empty), len(full))
+
+
+def test_the_trainer_can_open_a_clients_progress(make_user, api):
+    """A `Prefetch` queryset that was sliced and then nested-prefetched. Django applies
+    the nested prefetch by filtering the outer queryset, and "Cannot filter a query once
+    a slice has been taken" fired on every request, for every trainer, whether or not
+    the client had ever trained: the endpoint had never worked for anyone."""
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("gate_cp_t", user_type="trainer")
+    client = make_user("gate_cp_c", user_type="client")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client, status="approved")
+
+    resp = api(trainer).get(f"/api/routine/trainer/client-progress/{client.pk}/")
+    assert resp.status_code == 200, resp.content[:300]
+    assert resp.json()["client_info"]["id"] == client.pk
+
+
+# --------------------------------------------------------------------------------
+# Boot configuration: the deploy the checklist documents.
+# --------------------------------------------------------------------------------
+
+def test_production_secrets_come_from_the_environment_the_deploy_actually_sets():
+    """`get_secret` demanded AWS Secrets Manager in production and ignored the
+    environment. `DEPLOY_CHECKLIST.md` documents `fly secrets set ...`, `fly.toml`
+    provisions no AWS credentials and the Dockerfile sets none, so the documented deploy
+    could not boot: settings raised before `migrate` ran, and `celery.py` calls
+    `django.setup()` at import so the worker died the same way."""
+    import os
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    from training_platform.settings_secrets import get_secret
+
+    name = "GATE_SECRET_PROBE"
+    os.environ.pop("AWS_SECRET_NAME", None)
+    os.environ[name] = "a-value"
+    try:
+        assert get_secret(name) == "a-value"
+        del os.environ[name]
+        # Still fail-closed: a missing name crashes rather than defaulting.
+        with pytest.raises(ImproperlyConfigured):
+            get_secret(name)
+    finally:
+        os.environ.pop(name, None)
+
+
+def test_the_channel_layer_is_built_from_the_same_redis_as_every_cache():
+    """It was assembled from REDIS_HOST/REDIS_PORT, which nothing in fly.toml, the
+    Dockerfile or the checklist sets, so production resolved to redis://127.0.0.1:6379/5
+    — a Redis that does not exist inside the app container. Boot succeeded and the AI
+    assistant and social consumers simply could not reach their group layer."""
+    from pathlib import Path as _Path
+
+    base = (_Path(__file__).resolve().parent.parent
+            / "training_platform" / "settings_base.py").read_text()
+    assert 'get_env("REDIS_URL")' in base, "the channel layer ignores REDIS_URL again"
+
+    prod = (_Path(__file__).resolve().parent.parent
+            / "training_platform" / "settings_production.py").read_text()
+    assert "CHANNEL_LAYERS" in prod and "WebSockets would be dead" in prod, \
+        "nothing refuses to boot when the channel layer points at localhost"
+
+
+def test_the_admin_login_is_rate_limited_and_locks_out():
+    """`/admin/` was on the rate-limit skip list, matched with `startswith`, so the
+    exemption covered django.contrib.admin's own login form — which counts nothing and
+    locks nothing. That left the one login page in the product with no ceiling at all,
+    guarding accounts that can reverse transactions and read the audit log."""
+    from training_platform.middleware import RateLimitMiddleware
+
+    middleware = RateLimitMiddleware(lambda r: None)
+
+    class _Req:
+        def __init__(self, path):
+            self.path = path
+
+    assert not middleware._should_skip(_Req("/admin/login/"))
+    assert middleware._should_skip(_Req("/static/admin/css/base.css"))
+
+
+def test_the_admin_login_locks_out_after_five_failures(client):
+    from training_platform.cache import ratelimit_cache
+
+    ratelimit_cache().clear()
+    body = {"username": "gate_admin_probe", "password": "wrong-password"}
+    seen = [client.post("/admin/login/", body).status_code for _ in range(7)]
+    assert 429 in seen, seen
+
+
+# --------------------------------------------------------------------------------
+# A refund that cannot fully unwind must SAY so, not crash.
+# --------------------------------------------------------------------------------
+
+def test_an_unreversible_refund_leg_is_recorded_rather_than_raising(make_user):
+    """`unwind_payment` logged the one case a human has to chase — a client who already
+    spent the credit — through a `logger` that was never imported in that module. The
+    NameError rolled the whole refund back: the payment stayed completed, the
+    subscription stayed active, and the gateway retried into the same crash forever."""
+    import wallet.signals as wallet_signals
+
+    assert getattr(wallet_signals, "logger", None) is not None, \
+        "wallet/signals.py has no logger; the refund failure branch raises NameError"

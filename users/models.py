@@ -12,6 +12,8 @@ import os
 import uuid
 from training_platform.encrypted_fields import EncryptedTextField
 from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils.translation import gettext_lazy as _
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,17 @@ def user_profile_picture_upload_path(instance, filename):
     # Use uuid4 for unique filenames
     filename = f"user_{instance.pk or 'new'}_{uuid.uuid4().hex[:8]}.{ext}"
     return os.path.join('profile_pictures', filename)
+
+
+def _validate_timezone(value):
+    """Reject a timezone name the standard library cannot resolve."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(str(value))
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        raise DjangoValidationError(
+            _("%(value)s is not a known timezone."), params={"value": value})
 
 
 def _default_timezone():
@@ -176,6 +189,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     preferred_timezone = models.CharField(
         max_length=50,
         default=_default_timezone,
+        # Validated, because the failure is silent. Any string was accepted here, and
+        # `notifications/tasks.py` catches ZoneInfoNotFoundError and falls back to UTC —
+        # so a typo left the user receiving reminders in the wrong part of their day with
+        # nothing anywhere to say why.
+        validators=[_validate_timezone],
         help_text="User's preferred timezone. Used to decide when scheduled "
                   "notifications fire in the user's own day."
     )

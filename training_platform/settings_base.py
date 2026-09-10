@@ -86,12 +86,24 @@ INSTALLED_APPS = [
 
 ASGI_APPLICATION = "training_platform.asgi.application"
 
+# DB5: dedicated channel layer — isolated from sessions (DB0) and all other caches.
+#
+# Built from REDIS_URL, the same variable every cache uses, because this was the one
+# Redis client in the project assembled from REDIS_HOST/REDIS_PORT instead. Neither
+# appears in fly.toml, the Dockerfile or DEPLOY_CHECKLIST.md, so production silently
+# resolved to redis://127.0.0.1:6379/5 — a Redis that does not exist inside the app
+# container. Boot succeeded and the AI assistant and social consumers simply could not
+# reach their group layer. REDIS_HOST/REDIS_PORT still work for a local dev box that
+# sets them.
+_CHANNEL_REDIS = get_env("REDIS_URL") or (
+    f"redis://{get_env('REDIS_HOST', '127.0.0.1')}:{get_int_env('REDIS_PORT', 6379)}"
+)
+
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            # DB5: dedicated channel layer — isolated from sessions (DB0) and all other caches
-            "hosts": [f"redis://{get_env('REDIS_HOST', '127.0.0.1')}:{get_int_env('REDIS_PORT', 6379)}/5"],
+            "hosts": [f"{_CHANNEL_REDIS.rstrip('/')}/5"],
         },
     },
 }
@@ -121,6 +133,9 @@ MIDDLEWARE = [
 
     "training_platform.middleware.LanguageResolutionMiddleware",
     "training_platform.middleware.RateLimitMiddleware",
+    # After the general limiter, which is a coarse per-IP DoS ceiling. This one is
+    # the brute-force control for the admin login, keyed on the username too.
+    "training_platform.middleware.AdminLoginThrottleMiddleware",
     "training_platform.middleware.RequestLoggingMiddleware",
     "training_platform.middleware.DatabaseQueryCountMiddleware",
     "training_platform.middleware.CacheMiddleware",
@@ -195,6 +210,14 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'charging': '10/minute',
     },
+    # DRF's own parsers, with one addition: a NUL byte anywhere in a request payload is
+    # a 400 here rather than a ValueError from psycopg at execute time, which several
+    # views caught as an unknown fault and answered 500. See training_platform/parsers.py.
+    'DEFAULT_PARSER_CLASSES': [
+        'training_platform.parsers.SafeJSONParser',
+        'training_platform.parsers.SafeFormParser',
+        'training_platform.parsers.SafeMultiPartParser',
+    ],
     # ONE pagination shape for every list endpoint: {count, next, previous, results}.
     # Previously three shapes were in play (paginated dict, bare array, cursor) and
     # seven viewsets had no pagination at all, so they returned EVERY row — an

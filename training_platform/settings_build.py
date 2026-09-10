@@ -12,7 +12,9 @@ NEVER use this module to serve traffic — it contains no real secrets and no DB
 """
 import os
 
-# Make get_secret read os.environ (require_env) instead of hitting AWS.
+# Make get_secret read os.environ (require_env) instead of hitting AWS. get_secret goes
+# to Secrets Manager only when AWS_SECRET_NAME is set, so clearing it is the whole switch.
+os.environ.pop("AWS_SECRET_NAME", None)
 os.environ.setdefault("LOCAL_PROD_TEST", "True")
 
 # collectstatic must not touch external integrations. Firebase fails closed when

@@ -2,6 +2,7 @@ from rest_framework import viewsets, status, permissions, generics, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
+from training_platform.pagination import StandardPagination
 from django.db import models, IntegrityError, transaction
 from django.db.models import Sum, Avg, Count, F, Q, Prefetch
 from django.utils import timezone
@@ -34,6 +35,10 @@ import logging
 from .services import send_notification
 from django.utils import timezone
 from datetime import timedelta
+
+# How far back the trainer's client-progress screen looks. The weekly statistics
+# use the last seven days; the activity list shows the month around them.
+RECENT_ACTIVITY_DAYS = 30
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -58,7 +63,9 @@ MAX_REPS_PER_SET = 1000
 MAX_BACKLOG_DAYS = 365
 
 
-class StandardResultsSetPagination(PageNumberPagination):
+class StandardResultsSetPagination(StandardPagination):
+    # Subclasses the project paginator so a bad `page_size` gets the same 400 here
+    # as everywhere else; this class exists only for the `page` handling below.
     # 25, matching `REST_FRAMEWORK['PAGE_SIZE']` and what API_CONTRACT.md publishes.
     # This said 20, so the contract's documented page size was wrong for every list it
     # paginates and a client sizing its own buffers from the docs got it wrong too.
@@ -198,9 +205,15 @@ class ExerciseViewSet(viewsets.ModelViewSet):
             # plus anything appearing in a routine assigned to them.
             # This branch previously returned base_qs unfiltered, so every client
             # could see every trainer's private custom exercises.
+            # `created_by__in=trainers`, from the approved relations — not
+            # `created_by=user.assigned_trainer`, the display pointer.
+            from users.models import TrainerClientRelation
+            trainers = (TrainerClientRelation.objects
+                        .filter(client=user, status='approved')
+                        .values_list('trainer_id', flat=True))
             return base_qs.filter(
                 models.Q(created_by__isnull=True)
-                | models.Q(created_by=user.assigned_trainer)
+                | models.Q(created_by_id__in=trainers)
                 | models.Q(routine_exercises__routine__assigned_to=user)
             ).distinct()
 
@@ -763,13 +776,20 @@ class RoutineViewSet(viewsets.ModelViewSet):
         if not day or not status:
             return Response({"error": _("Day and status are required.")}, status=400)
 
+        # Parsed once, and before it is used. `int(day)` sat unguarded in the comparison
+        # below, so `{"day": "abc"}` was a ValueError and a 500 rather than a 400.
+        try:
+            day_number = int(str(day).strip())
+        except (TypeError, ValueError):
+            return Response({"error": _("Day must be a whole number.")}, status=400)
+
         # Validate if the day exists in the routine's exercises
         valid_days = [exercise.day for exercise in routine.routine_exercises.all()]
-        if int(day) not in valid_days:
+        if day_number not in valid_days:
             return Response({"error": _("Day %(day)s is not part of the routine.") % {"day": day}}, status=400)
 
         try:
-            updated_progress = routine.update_progress(user=user, day=int(day), status=status)
+            updated_progress = routine.update_progress(user=user, day=day_number, status=status)
         except ValueError as e:
             return Response({"error": _("Invalid progress update.")}, status=400)
 
@@ -1246,9 +1266,13 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                 message=f"Congratulations! You completed your workout session for routine: {instance.routine.name}",
                 related_object=instance
             )
-            # Notify trainer if exists
-            trainer = getattr(instance.user, 'assigned_trainer', None)
-            if trainer:
+            # Notify the trainer this client actually has an APPROVED relation with.
+            # Reading `assigned_trainer` would tell a dismissed trainer what their former
+            # client trained today, which is the client's data, not theirs.
+            from users.models import TrainerClientRelation
+            for trainer in (t.trainer for t in TrainerClientRelation.objects
+                            .filter(client=instance.user, status='approved')
+                            .select_related('trainer')):
                 send_notification(
                     user=trainer,
                     notif_type="session_completed",
@@ -1301,7 +1325,16 @@ class AnalyticsViewSet(viewsets.ViewSet):
         Output: JSON with total volume, days trained, PRs, comparisons, top muscles.
         """
         from datetime import timedelta
+        # Validated against the three the view actually implements. Anything else fell
+        # through to the week branch AND was interpolated into a response key, so
+        # `?period=zzz` answered 200 with a field literally named `zzz_volume`: the
+        # caller chose the shape of our response, and a client asking for a period we do
+        # not support was told nothing.
         period = request.query_params.get('period', 'week')
+        if period not in ('week', 'month', 'year'):
+            return Response(
+                {'error': _('period must be one of: week, month, year.')},
+                status=status.HTTP_400_BAD_REQUEST)
         user_id = request.query_params.get('user_id')
         user = request.user
         
@@ -1529,6 +1562,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
             return Response({'error': _('You do not have access to this user\'s data.')},
                             status=status.HTTP_403_FORBIDDEN)
         period = request.query_params.get('period', 'day')
+        if period not in ('day', 'week', 'month'):
+            return Response(
+                {'error': _('period must be one of: day, week, month.')},
+                status=status.HTTP_400_BAD_REQUEST)
         # Training volume trend
         setlogs = ExerciseSetLog.objects.filter(user_exercise_progress__user_id=user_id)
         if period == 'week':
@@ -1801,8 +1838,12 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
         except CustomUser.DoesNotExist:
             return Response({'detail': _('Client not found')}, status=404)
         
-        # Security check: Only trainers can assign to their own clients
-        if not (request.user.is_trainer and client.assigned_trainer_id == request.user.id):
+        # Security check: only a trainer, and only for an approved client of theirs.
+        # This read `client.assigned_trainer_id`, the denormalised display pointer that
+        # routine/permissions.py opens by forbidding as an access test — it was the
+        # pointer that once granted access without consent.
+        from .permissions import can_access_user_data
+        if not (request.user.is_trainer and can_access_user_data(request.user, client.pk)):
             return Response({'detail': _('Permission denied. You can only assign routines to your own clients.')}, status=403)
         
         # Determine total duration for the routine
@@ -2648,13 +2689,21 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
              ).prefetch_related(
                  # Prefetch recent completed sessions with their set logs and exercises
                  Prefetch(
-                     # Sliced. This was ordered but unbounded, so a client with three
-                     # hundred sessions materialised all of them and every set log,
-                     # for a view whose statistics only look back seven days.
+                     # Bounded by TIME, not by a slice. This was ordered but unbounded,
+                     # so a client with three hundred sessions materialised all of them
+                     # and every set log for a view whose statistics only look back seven
+                     # days. The slice that replaced it made the endpoint a permanent 500:
+                     # Django applies the NESTED prefetch by filtering the outer queryset,
+                     # and "Cannot filter a query once a slice has been taken" fired on
+                     # every request, for every trainer, whether or not the client had
+                     # trained. A window is the bound this view actually wants — the
+                     # weekly statistics use seven days and the activity list shows a
+                     # month — and unlike a slice it composes with the nested prefetch.
                      'workout_sessions',
                      queryset=WorkoutSession.objects.filter(
-                        status='completed'
-                     ).order_by('-end_time')[:30].prefetch_related(
+                        status='completed',
+                        end_time__gte=timezone.now() - timedelta(days=RECENT_ACTIVITY_DAYS),
+                     ).order_by('-end_time').prefetch_related(
                          Prefetch(
                              'set_logs',
                              queryset=ExerciseSetLog.objects.select_related(
@@ -2743,11 +2792,15 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                    .filter(id__in=ids or [], user_type='client')
                    .select_related('assigned_trainer')[:100])
         
-        recent_activity = []
-        for client in clients:
-            # Use the enhanced serializer for each client
-            serializer = RecentActivitySerializer(client)
-            recent_activity.append(serializer.data)
+        # One collection pass for the whole roster. Serialising each client on its own
+        # asked the same handful of questions per client, so a full roster cost ~509
+        # queries on one page load.
+        clients = list(clients)
+        activity = RecentActivitySerializer.collect(clients)
+        recent_activity = [
+            RecentActivitySerializer(client, context={"activity": activity}).data
+            for client in clients
+        ]
         
         return Response({
             'trainer_id': user.id,

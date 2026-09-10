@@ -30,6 +30,9 @@ consumers keep working; new ones read `code` and `field_errors`.
 
 from __future__ import annotations
 
+import re
+
+from django.utils.translation import gettext as _
 from rest_framework import exceptions
 from rest_framework.response import Response
 from rest_framework.views import exception_handler as drf_exception_handler
@@ -103,7 +106,50 @@ def _first_message(node):
     return str(node) or None
 
 
+# A request whose SHAPE the view could never have read. Each of these is the caller's
+# mistake and each one used to answer 500.
+#
+# A sweep of every argument-free POST route found 18 endpoints — verify-otp, resend-otp,
+# device-token, follow_user, respond-to-invite, both routine bulk-create routes,
+# subscription access/check and more — that answered 500 to the body `[]`, because a JSON
+# array reaches `request.data` as a `list` and `list` has no `.get`. Five more returned
+# 500 for a NUL byte in a query string (psycopg refuses it at execute time) and six for a
+# non-numeric id reaching `.get(id=...)`.
+#
+# Fixing this at eighteen call sites leaves the nineteenth, so the rule lives here. It is
+# deliberately narrow: each branch matches a message that only client input can produce,
+# and the list branch additionally requires that the parsed body really is not a mapping,
+# so an AttributeError from our own code still reaches the 500 handler and the logs.
+_NOT_A_NUMBER = re.compile(r"^Field '.+' expected a number but got ")
+
+
+def _client_input_error(exc, context):
+    """Return a ValidationError when `exc` is really a malformed request, else None."""
+    message = str(exc)
+
+    if isinstance(exc, AttributeError) and "object has no attribute" in message:
+        request = context.get("request") if isinstance(context, dict) else None
+        try:
+            body = request.data if request is not None else None
+        except Exception:
+            return None
+        if body is not None and not hasattr(body, "get"):
+            return exceptions.ValidationError(
+                {NON_FIELD: [_("Expected a JSON object, not a list.")]})
+        return None
+
+    if isinstance(exc, ValueError):
+        if "NUL (0x00)" in message or "\x00" in message:
+            return exceptions.ValidationError(
+                {NON_FIELD: [_("Text may not contain null bytes.")]})
+        if _NOT_A_NUMBER.match(message):
+            return exceptions.ValidationError(
+                {NON_FIELD: [_("Must be a whole number.")]})
+    return None
+
+
 def api_exception_handler(exc, context):
+    exc = _client_input_error(exc, context) or exc
     response = drf_exception_handler(exc, context)
 
     # None means DRF does not handle it — an unhandled 500. Let it propagate so the

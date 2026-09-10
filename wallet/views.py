@@ -133,7 +133,11 @@ class WalletTransactionsView(generics.ListAPIView):
         return (
             Transaction.objects
             .filter(Q(source_wallet=wallet) | Q(destination_wallet=wallet))
-            .select_related("source_wallet", "destination_wallet")
+            # ...__owner too: the serializer reads `source_wallet.owner.username`,
+            # which is one hop past the end of this chain, so the ledger cost two
+            # extra queries PER ROW — 50 queries for a 20-row page of the financial
+            # history screen.
+            .select_related("source_wallet__owner", "destination_wallet__owner")
             .order_by("-created_at", "-id")  # total order: -created_at alone repeats rows across pages
         )
 
@@ -496,8 +500,10 @@ class AdminAuditExportView(APIView):
     def get(self, request):
         start = request.query_params.get("start")
         end = request.query_params.get("end")
-        agent_id = request.query_params.get("agent_id")
-        user_id = request.query_params.get("user_id")
+        # Both land in `actor_id`, an integer column: a non-numeric value reached
+        # Postgres and came back as a 500 for what is the caller's typo.
+        agent_id = int_param(request.query_params, "agent_id")
+        user_id = int_param(request.query_params, "user_id")
         qs = WalletAuditLog.objects.all()
         if start:
             qs = qs.filter(created_at__gte=start)

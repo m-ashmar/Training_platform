@@ -25,6 +25,10 @@ fly secrets set \
   FIELD_ENCRYPTION_KEY="..."
 ```
 
+These are read straight from the process environment. `get_secret()` goes to AWS
+Secrets Manager only when `AWS_SECRET_NAME` is set; leave it unset on Fly. Either way a
+missing name crashes startup rather than falling back to a default.
+
 **The broker must not be on DB0–DB5.** Those are the six segmented caches (sessions,
 rate limiting, public, private, Edamam, channels); boot refuses a broker that lands on
 one of them, or one pointing at localhost.

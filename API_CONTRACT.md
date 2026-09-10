@@ -172,7 +172,11 @@ Every registered event type is emitted; there are no placeholders to skip.
 **Reminder scheduling.** `session_reminder` fires once a day, in the user's own
 evening: the sweep runs hourly and sends only to users whose local hour — resolved
 through `preferred_timezone` — equals `workout_reminder_hour`. Both fields are on the
-profile (`GET`/`PATCH /api/auth/profile/`), `workout_reminder_hour` is 0-23 and
+profile and are written with `POST /api/auth/user/update/` (a client may also use
+`POST /api/auth/client/profile/`). Note POST, not PATCH, and note the paths: this
+section used to name a profile route that has never existed, so a client built from
+this document could not set the reminder hour at all.
+`workout_reminder_hour` is 0-23 and
 defaults to 18. To turn reminders off entirely, disable the `session_reminder` event
 via the notification preferences endpoint rather than picking an unreachable hour.
 
@@ -274,8 +278,10 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 | `POST` | `/api/auth/client/cancel-trainer-request/` | auth | `ClientCancelTrainerRequestView` |
 | `GET, POST` | `/api/auth/client/profile/` | auth | `ClientProfileView` |
 | `GET` | `/api/auth/client/request-status/` | auth | `ClientRequestStatusView` |
+| `POST` | `/api/auth/client/respond-to-invite/` | auth | `ClientRespondToTrainerInviteView` |
 | `POST` | `/api/auth/client/request-trainer/` | auth | `ClientRequestTrainerView` |
 | `POST` | `/api/auth/client/unassign-trainer/` | auth | `ClientUnassignTrainerView` |
+| `GET` | `/api/auth/client/trainer-invites/` | auth | `ClientPendingTrainerInvitesView` |
 | `DELETE, POST` | `/api/auth/device-token/` | auth | `FCMTokenView` |
 | `POST` | `/api/auth/forgot-password/` | public | `PasswordResetRequestView` |
 | `POST` | `/api/auth/forgot-password/confirm/` | public | `PasswordResetConfirmView` |
@@ -337,6 +343,7 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/notifications/` | auth | `APIRootView` |
+| `POST` | `/api/notifications/message-client/` | trainer or admin | `TrainerMessageView` |
 | `GET, POST` | `/api/notifications/preferences/` | auth | `NotificationPreferenceViewSet` |
 | `GET` | `/api/notifications/preferences/event_types/` | auth | `NotificationPreferenceViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/notifications/preferences/{id}/` | auth | `NotificationPreferenceViewSet` |

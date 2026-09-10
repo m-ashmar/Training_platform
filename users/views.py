@@ -42,6 +42,7 @@ from django.http import Http404
 from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
                                        ValidationError as DRFValidationError)
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
+from training_platform.query_params import body_dict
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ class JWTAuthLogoutView(APIView):
     def post(self, request):
         try:
             # Get the refresh token from the request
-            refresh_token = request.data.get('refresh_token')
+            refresh_token = body_dict(request).get('refresh_token')
             
             if not refresh_token:
                 return Response(
@@ -1439,7 +1440,9 @@ class ClientRespondToTrainerInviteView(APIView):
         if not request.user.is_client:
             return Response({'error': _('This endpoint is only for clients')},
                             status=status.HTTP_403_FORBIDDEN)
-        action = (request.data.get('action') or '').lower()
+        # str() before .lower(): a JSON number, boolean or object here used to be an
+        # AttributeError and a 500, on the path a client uses to accept a trainer.
+        action = str(body_dict(request).get('action') or '').lower()
         if action not in ('approve', 'reject'):
             return Response({'error': _('action must be approve or reject')},
                             status=status.HTTP_400_BAD_REQUEST)

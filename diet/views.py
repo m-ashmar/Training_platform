@@ -2690,7 +2690,7 @@ class ClientMealInteractionView(APIView):
                 # The client-side steps of the funnel. Generated is the meal row;
                 # completed, rated and swapped are recorded by the endpoints that do
                 # them; viewed and accepted only the app can know.
-                kind = (_body(request).get('kind') or '').lower()
+                kind = str(_body(request).get('kind') or '').lower()
                 if kind not in (MealEvent.VIEWED, MealEvent.ACCEPTED):
                     return Response({"error": _("kind must be viewed or accepted")},
                                     status=status.HTTP_400_BAD_REQUEST)

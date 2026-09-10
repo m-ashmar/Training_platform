@@ -43,3 +43,23 @@ def int_param(params, name, default=None, minimum=None, maximum=None):
     if maximum is not None and value > maximum:
         value = maximum
     return value
+
+
+def body_dict(request):
+    """Return `request.data` as a mapping, or raise a 400 saying what shape was expected.
+
+    A JSON array body reaches `request.data` as a `list`, and `list` has no `.get`, so a
+    view that reads `request.data.get('x')` raises AttributeError on `POST []`. Most
+    views let that reach the API exception handler, which now answers 400. The ones that
+    wrap their body in `except Exception: return 500` never give it that chance, so they
+    ask here instead, before reading a field.
+
+    Raising ValidationError rather than returning a response matters: it is an
+    APIException, so it is in PASSTHROUGH_EXCEPTIONS and survives the same broad
+    `except Exception` that caused the problem.
+    """
+    data = request.data
+    if not hasattr(data, "get"):
+        raise ValidationError(
+            {"non_field_errors": [_("Expected a JSON object, not a list.")]})
+    return data

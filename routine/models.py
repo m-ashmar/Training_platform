@@ -579,9 +579,13 @@ class UserExerciseProgress(models.Model):
         if self.user == user:
             return True
         
-        # Trainer can access their client's progress
-        if user.is_trainer and self.user.assigned_trainer == user:
-            return True
+        # Trainer can access their client's progress — through an APPROVED relation.
+        # `self.user.assigned_trainer == user` read the denormalised display pointer,
+        # which routine/permissions.py forbids as an access test.
+        if user.is_trainer:
+            from .permissions import can_access_user_data
+            if can_access_user_data(user, self.user_id):
+                return True
         
         # Admin can access all progress
         if user.is_admin:
@@ -665,9 +669,13 @@ class RoutineProgress(models.Model):
         if self.user == user:
             return True
         
-        # Trainer can access their client's progress
-        if user.is_trainer and self.user.assigned_trainer == user:
-            return True
+        # Trainer can access their client's progress — through an APPROVED relation.
+        # `self.user.assigned_trainer == user` read the denormalised display pointer,
+        # which routine/permissions.py forbids as an access test.
+        if user.is_trainer:
+            from .permissions import can_access_user_data
+            if can_access_user_data(user, self.user_id):
+                return True
         
         # Admin can access all progress
         if user.is_admin:

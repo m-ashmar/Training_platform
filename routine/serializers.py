@@ -1097,18 +1097,128 @@ class DetailedClientProgressSerializer(serializers.ModelSerializer):
 
 
 class RecentActivitySerializer(serializers.ModelSerializer):
-    """Serializer for recent activity summary."""
+    """One client's recent training, for the trainer's roster screen.
+
+    Every field used to be computed with its own queries against `obj`: the last
+    session, its set logs, a distinct count, this week's sessions iterated with their
+    set logs, two RoutineProgress counts, and the week's exercise logs. Serialising a
+    roster of fifty cost ~259 queries and a hundred ~509, growing strictly with the
+    number of clients — on a deployment whose connection budget is 15 per machine
+    against a 100-connection Postgres, which is why `fly.toml` caps concurrency there.
+
+    The queries are the same queries; what changed is that they are asked ONCE for the
+    whole roster and handed in through `context["activity"]`, keyed by user id. Build it
+    with `RecentActivitySerializer.collect(users)`. Without that context the serializer
+    still works for a single user — it collects for that one user — so nothing that
+    serialises one client had to change.
+    """
     client_info = serializers.SerializerMethodField()
     last_session = serializers.SerializerMethodField()
     this_week = serializers.SerializerMethodField()
     recent_exercises = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = CustomUser
         fields = [
             'client_info', 'last_session', 'this_week', 'recent_exercises'
         ]
-    
+
+    # ---- batch collection ---------------------------------------------------
+
+    @staticmethod
+    def collect(users):
+        """Everything the fields below need, for every user, in a fixed query count."""
+        from django.db.models import Count, Max, Q
+        from django.utils import timezone
+        from datetime import timedelta
+
+        ids = [u.pk for u in users]
+        collected = {
+            uid: {"last_session": None, "last_volume": 0, "last_exercises": 0,
+                  "week_volume": 0, "week_sessions": 0,
+                  "week_total_days": 0, "week_completed_days": 0, "exercises": {}}
+            for uid in ids
+        }
+        if not ids:
+            return collected
+
+        week_ago = timezone.localdate() - timedelta(days=7)
+
+        # The most recent completed session per user: one query for the ids, one for the
+        # rows, rather than a `.first()` per user.
+        latest_ids = [
+            row["latest"] for row in (
+                WorkoutSession.objects
+                .filter(user_id__in=ids, status='completed')
+                .values('user_id')
+                .annotate(latest=Max('id'))
+            )
+        ]
+        for session in (WorkoutSession.objects
+                        .filter(id__in=latest_ids)
+                        .select_related('routine')):
+            collected[session.user_id]["last_session"] = session
+
+        # Volume and distinct exercise count of those sessions, aggregated in the query.
+        for row in (ExerciseSetLog.objects
+                    .filter(workout_session_id__in=latest_ids)
+                    .values('workout_session__user_id')
+                    .annotate(volume=Sum(F('weight') * F('reps')),
+                              exercises=Count('user_exercise_progress__exercise',
+                                              distinct=True))):
+            entry = collected[row['workout_session__user_id']]
+            entry["last_volume"] = row['volume'] or 0
+            entry["last_exercises"] = row['exercises']
+
+        # This week: sessions per user, and the volume of their set logs. Counted
+        # distinctly because the join to set_logs multiplies the session rows.
+        for row in (WorkoutSession.objects
+                    .filter(user_id__in=ids, status='completed', end_time__date__gte=week_ago)
+                    .values('user_id')
+                    .annotate(sessions=Count('id', distinct=True),
+                              volume=Sum(F('set_logs__weight') * F('set_logs__reps')))):
+            collected[row['user_id']]["week_sessions"] = row['sessions']
+            collected[row['user_id']]["week_volume"] = row['volume'] or 0
+
+        # This week's routine progress, both counts in one pass.
+        for row in (RoutineProgress.objects
+                    .filter(user_id__in=ids, updated_at__date__gte=week_ago)
+                    .values('user_id')
+                    .annotate(total=Count('id'),
+                              completed=Count('id', filter=Q(status='completed')))):
+            collected[row['user_id']]["week_total_days"] = row['total']
+            collected[row['user_id']]["week_completed_days"] = row['completed']
+
+        # This week's exercise logs, for the per-exercise summary. Ordered the way the
+        # per-user version ordered them, so the "top 5" are the same five.
+        for log in (ExerciseSetLog.objects
+                    .filter(user_exercise_progress__user_id__in=ids, date__gte=week_ago)
+                    .select_related('user_exercise_progress__exercise')
+                    .order_by('user_exercise_progress__exercise__name', '-date')):
+            progress = log.user_exercise_progress
+            entry = collected[progress.user_id]["exercises"]
+            exercise = progress.exercise
+            summary = entry.setdefault(exercise.name, {
+                'exercise_name': exercise.name,
+                'exercise_id': exercise.id,
+                'last_performed': log.date,
+                'sets': 0, 'reps': 0, 'weight': 0, 'volume': 0,
+            })
+            summary['sets'] += 1
+            summary['reps'] += log.reps or 0
+            summary['weight'] = max(summary['weight'], log.weight or 0)
+            summary['volume'] += (log.weight * log.reps) if log.weight and log.reps else 0
+
+        return collected
+
+    def _activity(self, obj):
+        collected = self.context.get("activity")
+        if collected is None or obj.pk not in collected:
+            collected = self.collect([obj])
+        return collected[obj.pk]
+
+    # ---- fields -------------------------------------------------------------
+
     def get_client_info(self, obj):
         return {
             'id': obj.id,
@@ -1116,104 +1226,35 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             'full_name': obj.full_name,
             'profile_picture': obj.profile_picture.url if obj.profile_picture else None
         }
-    
+
     def get_last_session(self, obj):
-        last_session = WorkoutSession.objects.filter(
-            user=obj,
-            status='completed'
-        ).order_by('-end_time').first()
-        
+        entry = self._activity(obj)
+        last_session = entry["last_session"]
         if not last_session:
             return None
-        
+
         duration = None
         if last_session.start_time and last_session.end_time:
             duration = round((last_session.end_time - last_session.start_time).total_seconds() / 60, 1)
-        
-        total_volume = sum(
-            (log.weight * log.reps) for log in last_session.set_logs.all()
-            if log.weight and log.reps
-        )
-        
-        exercises_count = last_session.set_logs.values(
-            'user_exercise_progress__exercise'
-        ).distinct().count()
-        
+
         return {
             'date': last_session.end_time.date() if last_session.end_time else None,
-            'routine_name': last_session.routine.name,
-            'exercises_completed': exercises_count,
-            'total_volume': total_volume,
+            'routine_name': last_session.routine.name if last_session.routine else None,
+            'exercises_completed': entry["last_exercises"],
+            'total_volume': entry["last_volume"],
             'duration': f"{duration} minutes" if duration else None
         }
-    
+
     def get_this_week(self, obj):
-        from django.utils import timezone
-        from datetime import timedelta
-        
-        week_ago = timezone.localdate() - timedelta(days=7)
-        week_sessions = WorkoutSession.objects.filter(
-            user=obj,
-            status='completed',
-            end_time__date__gte=week_ago
-        )
-        
-        week_volume = sum(
-            sum((log.weight * log.reps) for log in session.set_logs.all() if log.weight and log.reps)
-            for session in week_sessions
-        )
-        
-        # Calculate completion rate for this week
-        week_progress = RoutineProgress.objects.filter(
-            user=obj,
-            updated_at__date__gte=week_ago
-        )
-        total_days = week_progress.count()
-        completed_days = week_progress.filter(status='completed').count()
+        entry = self._activity(obj)
+        total_days = entry["week_total_days"]
+        completed_days = entry["week_completed_days"]
         completion_rate = round((completed_days / total_days * 100) if total_days > 0 else 0, 1)
-        
         return {
-            'sessions': week_sessions.count(),
-            'total_volume': week_volume,
+            'sessions': entry["week_sessions"],
+            'total_volume': entry["week_volume"],
             'completion_rate': completion_rate
         }
-    
+
     def get_recent_exercises(self, obj):
-        # Get recent exercises with their latest performance
-        from django.utils import timezone
-        from datetime import timedelta
-        
-        week_ago = timezone.localdate() - timedelta(days=7)
-        recent_logs = ExerciseSetLog.objects.filter(
-            user_exercise_progress__user=obj,
-            date__gte=week_ago
-        ).select_related(
-            'user_exercise_progress__exercise'
-        ).order_by(
-            'user_exercise_progress__exercise__name',
-            '-date'
-        )
-        
-        exercise_summaries = {}
-        for log in recent_logs:
-            exercise_name = log.user_exercise_progress.exercise.name
-            exercise_id = log.user_exercise_progress.exercise.id
-            
-            if exercise_name not in exercise_summaries:
-                exercise_summaries[exercise_name] = {
-                    'exercise_name': exercise_name,
-                    'exercise_id': exercise_id,
-                    'last_performed': log.date,
-                    'sets': 0,
-                    'reps': 0,
-                    'weight': 0,
-                    'volume': 0
-                }
-            
-            summary = exercise_summaries[exercise_name]
-            summary['sets'] += 1
-            summary['reps'] += log.reps or 0
-            summary['weight'] = max(summary['weight'], log.weight or 0)
-            summary['volume'] += (log.weight * log.reps) if log.weight and log.reps else 0
-        
-        return list(exercise_summaries.values())[:5]  # Return top 5 recent exercises
+        return list(self._activity(obj)["exercises"].values())[:5]

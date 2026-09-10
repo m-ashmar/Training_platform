@@ -1,3 +1,5 @@
+import logging
+
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
@@ -5,7 +7,14 @@ from django.db import transaction
 
 from subscription.services.payment_service import payment_completed
 
-from .models import Wallet, AgentProfile, Transaction, move_funds_atomic, ensure_agent_profile
+from .models import (Wallet, AgentProfile, Transaction, WalletAuditLog,
+                     move_funds_atomic, ensure_agent_profile)
+
+# The one branch written to make an un-clawed-back refund visible used to raise
+# NameError instead, which rolled the whole refund back: the payment stayed
+# completed, the subscription stayed active, and the gateway retried into the same
+# crash forever.
+logger = logging.getLogger(__name__)
 
 
 User = get_user_model()
@@ -137,11 +146,28 @@ def unwind_payment(payment) -> int:
         except AlreadyReversed:
             continue
         except ValueError:
-            # Insufficient balance: the client has already spent the credit. Say so
+            # Insufficient balance: the client has already spent the credit. Record it
             # rather than leaving a silent hole — this is money someone has to chase.
+            # A log line is not enough: it is not queryable, it is not retained with the
+            # ledger, and it is the only trace that a refunded payment left value behind.
             logger.error(
                 "could not reverse %s leg %s for refunded payment %s: the wallet no "
                 "longer holds the funds", leg.tx_type, leg.reference_id, payment.id)
+            WalletAuditLog.objects.create(
+                event_type="refund_leg_unreversible",
+                actor=None,
+                path="wallet.signals.unwind_payment",
+                payload={
+                    "payment_id": str(payment.id),
+                    "leg_id": leg.id,
+                    "leg_type": leg.tx_type,
+                    "reference_id": leg.reference_id,
+                    "amount": str(leg.amount),
+                    "source_wallet_id": leg.source_wallet_id,
+                    "destination_wallet_id": leg.destination_wallet_id,
+                    "reason": "destination wallet no longer holds the funds",
+                },
+            )
     return reversed_legs
 
 

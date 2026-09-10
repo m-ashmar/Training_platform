@@ -118,7 +118,12 @@ class RateLimitMiddleware(MiddlewareMixin):
             # Fly polls this every 30s = 120 req/hour, which would blow the
             # anonymous 100/hour limit and start returning 429 -> machine unhealthy.
             '/api/auth/health/',
-            '/admin/',
+            # '/admin/' is deliberately NOT here. It was, and `startswith` made the
+            # exemption cover /admin/login/ — django.contrib.admin's own login form,
+            # which has no attempt limit of its own. That left the one login page in the
+            # product with no ceiling at all, against accounts that can reverse
+            # transactions and read the audit log, while /dj-admin/ and /api/auth/login/
+            # were both limited. Its static assets are already covered by '/static/'.
             '/static/',
             '/media/',
         ]
@@ -776,3 +781,66 @@ class RequestSizeLimitMiddleware:
                     status=413,
                 )
         return self.get_response(request)
+
+
+class AdminLoginThrottleMiddleware(MiddlewareMixin):
+    """Cap password attempts against Django's own admin login form.
+
+    `django.contrib.admin` is mounted at /admin/ alongside the custom dashboard at
+    /dj-admin/, and its login view has no attempt limit: Django counts nothing, locks
+    nothing, and answers a wrong password as fast as it can. The OTP flow locks a record
+    after 5 attempts and password reset is capped at 3/hour per email; this was the one
+    login page in the product with neither, guarding accounts that can reverse
+    transactions and read the audit log.
+
+    Keyed on username + trusted client IP, hashed, in the rate-limit Redis DB — the same
+    shape as the OTP resend limit, so a shared carrier NAT address cannot lock out an
+    unrelated administrator and a rotating IP cannot escape the username's own counter.
+    Only failures count: `process_response` clears the counter on the redirect that a
+    successful login returns.
+    """
+
+    LIMIT = 5
+    WINDOW = 900  # 15 minutes, matching the OTP lockout the product already uses.
+
+    def _keys(self, request):
+        username = (request.POST.get("username") or "").strip().lower()[:150]
+        ip = get_trusted_client_ip(request)
+        import hashlib
+        by_user = hashlib.sha256(f"admin:{username}".encode()).hexdigest()[:32]
+        by_ip = hashlib.sha256(f"admin:{ip}".encode()).hexdigest()[:32]
+        return [f"rl:admin_login:u:{by_user}", f"rl:admin_login:i:{by_ip}"]
+
+    def _is_admin_login(self, request):
+        return request.method == "POST" and request.path in ("/admin/login/", "/admin/")
+
+    def process_request(self, request):
+        if not self._is_admin_login(request):
+            return None
+        rl = ratelimit_cache()
+        for key in self._keys(request):
+            if (rl.get(key) or 0) >= self.LIMIT:
+                logger.warning("admin login lockout on %s", key)
+                message = _('Too many failed sign-in attempts. Try again in 15 minutes.')
+                return JsonResponse(
+                    {'error': message, 'detail': message, 'code': 'rate_limited'},
+                    status=429, headers={'Retry-After': str(self.WINDOW)})
+        return None
+
+    def process_response(self, request, response):
+        if not self._is_admin_login(request):
+            return response
+        rl = ratelimit_cache()
+        # Django's admin answers a successful login with a redirect and re-renders the
+        # form (200) on failure. Anything else is not an outcome we can read, so it is
+        # left alone rather than counted as either.
+        if response.status_code in (301, 302):
+            for key in self._keys(request):
+                rl.delete(key)
+        elif response.status_code == 200:
+            for key in self._keys(request):
+                try:
+                    rl.incr(key)
+                except ValueError:
+                    rl.set(key, 1, self.WINDOW)
+        return response
