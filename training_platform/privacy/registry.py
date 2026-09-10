@@ -159,10 +159,48 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
 
 
 # ------------------------------------------------------- storage limitation
+#: How many rows one DELETE covers. Small enough that the id list and the objects
+#: Django collects for it stay bounded on a 512 MB worker, large enough that a big
+#: purge is still a handful of statements per thousand rows.
+PURGE_BATCH = 2000
+
+
+def _delete_in_batches(queryset) -> int:
+    """Delete a queryset a page at a time, and return how many rows went.
+
+    `queryset.delete()` looks cheap and is not. Django can only issue a bare
+    `DELETE ... WHERE` when nothing points at the model with a cascade or SET_NULL it
+    has to handle in Python; `analytics.PerformanceMetric.related_activity` is SET_NULL
+    on `UserActivity`, so `can_fast_delete()` is False and the whole result set is
+    materialised first. Measured: 200,000 expiring rows cost 6.7 s and 181 MB of
+    resident memory, against a worker `fly.toml` gives 512 MB and runs at
+    `--concurrency=2`. `CELERY_TASK_ACKS_LATE` plus `CELERY_TASK_REJECT_ON_WORKER_LOST`
+    then redeliver the task to the sibling child, which dies the same way — a crash loop
+    that takes every other job down with it, on the first purge after 180 days of
+    traffic.
+
+    Batching keeps the peak flat regardless of how far behind the purge has fallen.
+    """
+    model = queryset.model
+    removed = 0
+    while True:
+        ids = list(queryset.values_list("pk", flat=True)[:PURGE_BATCH])
+        if not ids:
+            return removed
+        n, _detail = model._default_manager.filter(pk__in=ids).delete()
+        if not n:
+            # Nothing deleted despite matching rows: a PROTECT somewhere. Stop rather
+            # than spin.
+            logger.warning("purge made no progress on %s; stopping", model.__name__)
+            return removed
+        removed += n
+
+
 def purge_expired() -> dict:
     """Delete rows past their retention window, across every registered source."""
     from datetime import timedelta
 
+    from django.db.models import Q
     from django.utils import timezone
 
     removed: dict[str, int] = {}
@@ -182,13 +220,15 @@ def purge_expired() -> dict:
                 # column existed cannot sit there forever — which is exactly what the 89
                 # rows collected before the consent gate were doing: `retain_until` NULL,
                 # and both purge queries filter on it.
-                stale = source.get_model()._default_manager.filter(
-                    **{f"{source.retention_field}__isnull": True,
-                       "created_at__lt": now - timedelta(days=source.retention_days)})
+                # A Q, not two materialised id lists. Building `pk__in=[...]` here read
+                # every expiring primary key into worker memory before a single row was
+                # deleted — the same shape as the batching fix below, in the one branch
+                # that batching could not save.
                 qs = source.get_model()._default_manager.filter(
-                    pk__in=list(qs.values_list("pk", flat=True))
-                    + list(stale.values_list("pk", flat=True)))
-            n, _detail = qs.delete()
+                    Q(**{f"{source.retention_field}__lt": cutoff})
+                    | Q(**{f"{source.retention_field}__isnull": True,
+                           "created_at__lt": now - timedelta(days=source.retention_days)}))
+            n = _delete_in_batches(qs)
             if n:
                 removed[source.label] = n
         except FieldError:

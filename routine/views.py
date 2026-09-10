@@ -783,6 +783,18 @@ class RoutineViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             return Response({"error": _("Day must be a whole number.")}, status=400)
 
+        # A declared status, not any string. `choices` is a form-layer rule and
+        # `update_or_create` never calls `full_clean`, so 'banana' was stored and
+        # returned with a 200 — a row that is neither complete nor incomplete, invisible
+        # to every `filter(status=...)` in analytics and a value the client's switch has
+        # no case for.
+        valid_statuses = [choice[0] for choice in RoutineProgress.STATUS_CHOICES]
+        if status not in valid_statuses:
+            return Response(
+                {"error": _("status must be one of: %(options)s")
+                 % {"options": ", ".join(valid_statuses)}, "code": "bad_status"},
+                status=400)
+
         # Validate if the day exists in the routine's exercises
         valid_days = [exercise.day for exercise in routine.routine_exercises.all()]
         if day_number not in valid_days:
@@ -807,8 +819,17 @@ class RoutineViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # Get all clients assigned to this trainer
-        clients = request.user.clients.all()
+        # The APPROVED relation, not `request.user.clients` — the reverse accessor of
+        # `CustomUser.assigned_trainer`, which routine/permissions.py forbids as an
+        # access test. It was inverted here: a DISMISSED trainer at whom the pointer
+        # still aimed was told they had a client, and the approved trainer was told they
+        # had none. Only a count leaks today because the body is a stub, which is
+        # exactly why it matters — whatever fills it in inherits the predicate.
+        from .permissions import accessible_user_ids
+        from users.models import CustomUser
+
+        clients = CustomUser.objects.filter(
+            id__in=accessible_user_ids(request.user) or [], user_type='client')
         
         # Get routines created by this trainer
         trainer_routines = self.queryset.filter(created_by=request.user)

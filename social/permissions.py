@@ -12,10 +12,21 @@ from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 
 class IsOwnerOrReadOnly(BasePermission):
-    """Reads follow the queryset; writes require owning the object.
+    """Reads follow the queryset; MODIFYING the object requires owning it.
 
     `owner_fields` covers the differing names across the social models
     (`author` on Post/Comment, `creator` on Challenge).
+
+    "Modifying" is not the same as "a non-safe method". Liking a post, liking a
+    comment, joining a challenge and logging progress are all POSTs to a detail route,
+    and every one of them creates a row BESIDE the object rather than changing it —
+    that is the entire point of a social product. Treating them as writes meant
+    `get_object()` refused everyone but the author: the like button, the comment-like
+    button, Join and Log progress returned 403 for every user on every piece of content
+    they did not write, and the only case that worked was liking your own post.
+
+    A viewset opts an action out by name in `interaction_actions`. Opt-in rather than
+    opt-out, so a new action that really does modify the object is refused by default.
     """
 
     owner_fields = ('author', 'creator', 'user', 'owner')
@@ -26,6 +37,10 @@ class IsOwnerOrReadOnly(BasePermission):
 
     def has_object_permission(self, request, view, obj):
         if request.method in SAFE_METHODS:
+            return True
+        if getattr(view, 'action', None) in getattr(view, 'interaction_actions', ()):
+            # Acting ON someone's content, not editing it. Whether the actor may SEE
+            # the object is the queryset's job and is enforced before this runs.
             return True
         user = request.user
         if not (user and user.is_authenticated):

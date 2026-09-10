@@ -203,3 +203,20 @@ class PaymentGatewayManager:
         if not is_gateway_enabled(gateway_name):
             raise PaymentGatewayError(f"Gateway {gateway_name} is not enabled")
         return PaymentGatewayService(gateway_name)
+
+    @staticmethod
+    def get_service_for_initiation(gateway_name: str) -> 'PaymentGatewayService':
+        """A gateway that can actually give the customer something to act on.
+
+        `get_gateway_service` asks only whether the API token is set, which is the wrong
+        question for a transfer/reconcile deployment where the customer pays into
+        `merchant_id` by hand. `can_initiate_payments` accepts either credential — and
+        refuses when there is neither, which is the deploy that told every customer to
+        transfer 5,000 SYP to account "".
+        """
+        from subscription.settings.gateway_config import can_initiate_payments
+
+        if not can_initiate_payments(gateway_name):
+            raise PaymentGatewayError(
+                f"Gateway {gateway_name} is not configured to take payments")
+        return PaymentGatewayService(gateway_name)

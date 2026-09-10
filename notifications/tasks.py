@@ -15,6 +15,8 @@ TRANSIENT_ERRORS = (
 )
 
 
+from training_platform.task_retries import no_retry_on_timeout
+
 logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3)
@@ -74,12 +76,16 @@ def process_event_task(self, event_path: str, event_data: dict):
 
 @shared_task(
     name="notifications.drain_dead_letter_queue",
+    # Not a bare `(Exception,)`: that also retries `SoftTimeLimitExceeded`, so a
+    # job too big for its 300 s slot burned four consecutive slots and still
+    # never finished. See training_platform/task_retries.py.
     autoretry_for=(Exception,),
     retry_backoff=True,
     retry_backoff_max=600,
     retry_jitter=True,
     max_retries=3,
 )
+@no_retry_on_timeout
 def drain_dead_letter_queue():
     """Hourly: replay what failed, and shout if the queue is growing.
 
@@ -200,7 +206,19 @@ def send_workout_reminders():
             tz = ZoneInfo("UTC")
 
         local = now.astimezone(tz)
-        if local.hour != user.workout_reminder_hour:
+        # AT OR PAST their hour, not exactly on it. The equality test was true during
+        # one hourly run and never again that day, so anything that ended the sweep
+        # part-way — the 300 s soft time limit, an OOM, a deploy — cost every remaining
+        # user their reminder for the whole day, and the next run an hour later excluded
+        # them by definition. Measured: 4 due clients, killed after 2, and the 02:00 run
+        # sent 0 because every user's hour was 01:00. `SoftTimeLimitExceeded` is not in
+        # TRANSIENT_ERRORS either, so Celery did not retry the task.
+        #
+        # `>=` makes every later run of the same local day a catch-up, and the send is
+        # already idempotent per local day: the dedup key below is `today.isoformat()`.
+        # It also closes the DST hole — on a spring-forward date one local hour does not
+        # occur, so a user whose reminder sat in the gap was skipped every year.
+        if local.hour < user.workout_reminder_hour:
             continue
 
         today = local.date()

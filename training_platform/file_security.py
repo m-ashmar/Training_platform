@@ -299,24 +299,79 @@ class FileSecurityValidator:
             # Don't fail validation if scanning fails
             pass
     
+    #: Total bytes the quarantine directory may hold, and the age past which an entry
+    #: is dropped. Every rejected upload used to be copied here at full size and kept
+    #: for ever — no TTL, no cap, no purge anywhere — so 30 deliberately malformed 2 MB
+    #: "images" put 58 MB on the volume in two seconds, and roughly 500 rejected
+    #: requests fill the 1 GB Fly volume that also serves all user media. A cheap,
+    #: low-bandwidth way for any authenticated account to exhaust the disk.
+    QUARANTINE_MAX_BYTES = 64 * 1024 * 1024
+    QUARANTINE_MAX_AGE_SECONDS = 7 * 24 * 3600
+    #: Only the first slice of a rejected file is kept. The point of quarantine is to
+    #: let a person see WHAT was sent, and the first few kilobytes carry the magic
+    #: bytes, the header and the payload marker that caused the rejection.
+    QUARANTINE_SAMPLE_BYTES = 64 * 1024
+
     def _quarantine_file(self, file):
-        """Move suspicious files to quarantine"""
+        """Keep a bounded sample of a rejected file, for a bounded time."""
         try:
-            if hasattr(file, 'name') and file.name:
-                quarantine_path = os.path.join(
-                    self.quarantine_dir,
-                    f"quarantine_{file.name}_{int(time.time())}"
-                )
-                
-                file.seek(0)
-                with open(quarantine_path, 'wb') as qfile:
-                    for chunk in file.chunks():
-                        qfile.write(chunk)
-                
-                logger.warning(f"File quarantined: {quarantine_path}")
-                
+            if not (hasattr(file, 'name') and file.name):
+                return
+
+            self._evict_quarantine()
+
+            # `sanitize_filename`, which this class ships and did not use here. Django's
+            # multipart parser strips path separators before the file object arrives, so
+            # this was not reachable over HTTP — but any non-HTTP caller of
+            # `validate_file()` could set `.name` and write outside the directory.
+            safe_name = self.sanitize_filename(file.name)
+            quarantine_path = os.path.join(
+                self.quarantine_dir,
+                f"quarantine_{safe_name}_{int(time.time())}"
+            )
+
+            file.seek(0)
+            written = 0
+            with open(quarantine_path, 'wb') as qfile:
+                for chunk in file.chunks():
+                    remaining = self.QUARANTINE_SAMPLE_BYTES - written
+                    if remaining <= 0:
+                        break
+                    qfile.write(chunk[:remaining])
+                    written += min(len(chunk), remaining)
+
+            logger.warning("File quarantined: %s (%d bytes sampled)",
+                           quarantine_path, written)
+
         except Exception as e:
             logger.error(f"Failed to quarantine file: {e}")
+
+    def _evict_quarantine(self):
+        """Drop quarantined samples that are too old, then the oldest until under cap."""
+        try:
+            entries = []
+            total = 0
+            now = time.time()
+            for name in os.listdir(self.quarantine_dir):
+                path = os.path.join(self.quarantine_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                stat = os.stat(path)
+                if now - stat.st_mtime > self.QUARANTINE_MAX_AGE_SECONDS:
+                    os.remove(path)
+                    continue
+                entries.append((stat.st_mtime, stat.st_size, path))
+                total += stat.st_size
+
+            entries.sort()
+            while total > self.QUARANTINE_MAX_BYTES and entries:
+                _mtime, size, path = entries.pop(0)
+                os.remove(path)
+                total -= size
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.debug("quarantine eviction failed", exc_info=True)
     
     def sanitize_filename(self, filename: str) -> str:
         """

@@ -8,7 +8,7 @@ from django.db import transaction
 from subscription.services.payment_service import payment_completed
 
 from .models import (Wallet, AgentProfile, Transaction, WalletAuditLog,
-                     move_funds_atomic, ensure_agent_profile)
+                     move_funds_atomic, ensure_agent_profile, wallet_for)
 
 # The one branch written to make an un-clawed-back refund visible used to raise
 # NameError instead, which rolled the whole refund back: the payment stayed
@@ -44,7 +44,7 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
     off Django's fast-delete path everywhere. Both problems go away by listening to the
     signal that means the thing.
     """
-    if payment is None or payment.status != "completed":
+    if payment is None:
         return
 
     subscription = subscription or payment.subscription
@@ -64,16 +64,40 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
     # platform minted the money for it. The second callback now waits on the lock and
     # then finds the transfer already recorded.
     with transaction.atomic():
-        type(payment).objects.select_for_update().filter(pk=payment.pk).first()
+        # Re-read the payment UNDER the lock, and decide on that row — not on the
+        # in-memory object the caller captured. `complete_payment` defers this to
+        # `transaction.on_commit`, so between the COMMIT and this receiver running there
+        # is a real window in which a refund webhook can land and commit. The status
+        # test used to run on the stale object, so the payout went ahead on an
+        # already-refunded payment: `unwind_payment` had found no legs to reverse
+        # (they did not exist yet), so nothing was reversed and nothing was recorded —
+        # the customer's money went back to their card, access was cancelled, and the
+        # trainer kept a full payout minted from nothing. Reproduced on the first
+        # attempt with two threads on a barrier.
+        locked = type(payment).objects.select_for_update().filter(pk=payment.pk).first()
+        if locked is None or locked.status != "completed":
+            logger.info(
+                "payout skipped for payment %s: status is %s at payout time",
+                payment.pk, getattr(locked, "status", "gone"))
+            return
+        payment = locked
         if Transaction.objects.filter(
                 tx_type="transfer",
                 metadata__original_payment_id=str(payment.id)).exists():
             return
 
-        client_wallet, _c = Wallet.objects.get_or_create(
-            owner=client, defaults={"owner_type": "client"})
-        trainer_wallet, _t = Wallet.objects.get_or_create(
-            owner=trainer, defaults={"owner_type": "trainer"})
+        # In the payment's OWN currency. `get_or_create` with only `owner_type` left the
+        # wallet on its hardcoded "USD" default whatever the plan was priced in.
+        client_wallet = wallet_for(client, "client", payment.currency)
+        trainer_wallet = wallet_for(trainer, "trainer", payment.currency)
+        for w, who in ((client_wallet, "client"), (trainer_wallet, "trainer")):
+            if w.currency != payment.currency:
+                # A wallet that already holds money in another currency. There is no FX
+                # here, so this is refused loudly rather than converted at 1:1.
+                logger.error(
+                    "payout skipped for payment %s: the %s's wallet holds %s and the "
+                    "payment is %s", payment.pk, who, w.currency, payment.currency)
+                return
 
         # A Payment means money entered the system, so the client's wallet is credited
         # first and the trainer is paid out of it.
@@ -86,6 +110,10 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
                 payment.amount,
                 actor_id=client.id,
                 tx_type="topup",
+                # The payment's OWN currency, checked against the wallet. Without it the
+                # mint leg was the one path with no currency check anywhere, and a SYP
+                # payment credited a USD-labelled wallet at 1:1.
+                currency=payment.currency,
                 metadata={
                     "original_payment_id": str(payment.id),
                     "subscription_id": str(subscription.id),
@@ -98,6 +126,7 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
             trainer_wallet,
             payment.amount,
             actor_id=client.id,
+            currency=payment.currency,
             tx_type="transfer",
             metadata={
                 "original_payment_id": str(payment.id),

@@ -1203,7 +1203,30 @@ def test_a_plan_carries_its_own_currency(paid_plan):
     ).exists(), "a plan is priced in a currency payments cannot express"
 
 
-def test_the_client_cannot_choose_what_it_pays(make_user, api, paid_plan):
+@pytest.fixture
+def configured_gateway():
+    """A ShamCash that can actually give a customer somewhere to send money.
+
+    The registry is built from the environment at import, and the test environment sets
+    none of it — so a gateway with no API token AND no account id is, correctly, refused
+    for payment initiation. That is the deploy failure `can_initiate_payments` exists to
+    stop: all three ShamCash variables blank used to answer 200 and tell every customer
+    to transfer 5,000 SYP to account "". A test about PRICING needs a usable gateway to
+    reach the pricing code, so it configures one rather than asserting against a broken
+    deployment.
+    """
+    from subscription.settings import gateway_config
+
+    config = gateway_config.GATEWAY_REGISTRY["shamcash"]["config"][gateway_config.GATEWAY_MODE]
+    before = config.get("merchant_id")
+    config["merchant_id"] = "GATE-ACCOUNT-1"
+    try:
+        yield
+    finally:
+        config["merchant_id"] = before
+
+
+def test_the_client_cannot_choose_what_it_pays(make_user, api, paid_plan, configured_gateway):
     """`amount` used to be read straight from the request body.
 
     Every later check compares the gateway's report against `payment.amount`, so the
@@ -6452,3 +6475,643 @@ def test_a_list_of_allergies_is_recorded_not_stringified(make_user, api, seeded_
     checker = AllergenChecker(stored)
     assert "peanuts" in checker.canonical or "peanut" in checker.canonical, checker.user_tags
     assert not any(t.startswith("free:'") for t in checker.user_tags), checker.user_tags
+
+
+# --------------------------------------------------------------------------------
+# Cycle 8: money, social and request-handling.
+# --------------------------------------------------------------------------------
+
+def _c8_payment(make_user, tag, currency, amount="5000.00"):
+    from decimal import Decimal as _D
+    from datetime import timedelta as _td
+
+    from django.utils import timezone as _tz, translation as _tr
+
+    from subscription.models import Payment, Subscription, SubscriptionPlan
+    from users.models import TrainerClientRelation
+
+    client = make_user(f"c8pay_{tag}_c", user_type="client")
+    trainer = make_user(f"c8pay_{tag}_t", user_type="trainer")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client, status="approved")
+    with _tr.override("en"):
+        plan = SubscriptionPlan.objects.create(
+            name=f"c8pay {tag}", price=_D(amount), currency=currency,
+            duration_days=30, description="x")
+    sub = Subscription.objects.create(user=client, plan=plan, status="pending",
+                                      start_date=_tz.now(),
+                                      end_date=_tz.now() + _td(days=30))
+    pay = Payment.objects.create(subscription=sub, amount=_D(amount), currency=currency,
+                                 status="pending", payment_method="manual")
+    return client, trainer, pay
+
+
+def test_a_payment_pays_out_in_the_currency_it_was_charged_in(
+        make_user, django_capture_on_commit_callbacks):
+    """`Wallet.currency` was a hardcoded `default="USD"` and nothing ever set it from the
+    plan, while `move_funds_atomic` only compared currencies when there were TWO wallets
+    — so the mint leg of a payment, which passes `source=None`, was never checked at all.
+    A 5,000 SYP subscription credited a wallet labelled USD at 1:1 and paid the trainer
+    5,000 "USD" for something worth about forty cents. The ledger reconciled perfectly
+    the whole way, which is why it survived every internal check: the arithmetic was
+    right and the unit was wrong."""
+    from decimal import Decimal as _D
+
+    from subscription.services.payment_service import PaymentService
+    from wallet.models import Wallet
+
+    for tag, currency in (("syp", "SYP"), ("usd", "USD")):
+        _client, trainer, pay = _c8_payment(make_user, tag, currency)
+        with django_capture_on_commit_callbacks(execute=True):
+            PaymentService.complete_payment(pay.id, {
+                "amount": "5000.00", "currency": currency, "status": "completed",
+                "transaction_id": f"gate-{tag}"})
+        wallet = Wallet.objects.get(owner=trainer)
+        assert wallet.currency == currency, (currency, wallet.currency)
+        assert wallet.balance == _D("5000.00")
+
+
+def test_a_funded_wallet_refuses_a_payment_in_another_currency(
+        make_user, django_capture_on_commit_callbacks):
+    """There is no FX rate in this system and there is not meant to be. A wallet that
+    already holds money has a currency that is a fact, so a payment in a different one is
+    refused rather than moved at 1:1."""
+    from decimal import Decimal as _D
+
+    from subscription.models import Payment
+    from subscription.services.payment_service import PaymentService
+    from wallet.models import Wallet
+
+    _client, trainer, pay = _c8_payment(make_user, "mix", "SYP")
+    with django_capture_on_commit_callbacks(execute=True):
+        PaymentService.complete_payment(pay.id, {
+            "amount": "5000.00", "currency": "SYP", "status": "completed",
+            "transaction_id": "gate-mix-1"})
+    wallet = Wallet.objects.get(owner=trainer)
+    assert wallet.currency == "SYP" and wallet.balance == _D("5000.00")
+
+    foreign = Payment.objects.create(subscription=pay.subscription, amount=_D("5000.00"),
+                                     currency="USD", status="pending",
+                                     payment_method="manual")
+    foreign.subscription.plan.currency = "USD"
+    foreign.subscription.plan.save(update_fields=["currency"])
+    with django_capture_on_commit_callbacks(execute=True):
+        PaymentService.complete_payment(foreign.id, {
+            "amount": "5000.00", "currency": "USD", "status": "completed",
+            "transaction_id": "gate-mix-2"})
+
+    wallet.refresh_from_db()
+    assert wallet.balance == _D("5000.00") and wallet.currency == "SYP", \
+        "a foreign-currency payment moved money into this wallet"
+
+
+def test_one_renewal_at_a_time_holds_under_concurrency(make_user):
+    """`start_renewal` was a `.filter(...).first()` followed by a `.create(...)` with no
+    lock, so two real threads both found nothing and both opened a renewal: a
+    double-tapped Renew charged twice and granted sixty days, and both charges cleared
+    verification because both were legitimate."""
+    import inspect
+
+    from subscription.services import payment_service
+
+    source = inspect.getsource(payment_service.PaymentService.start_renewal)
+    assert "select_for_update" in source, "start_renewal takes no lock again"
+    assert source.index("select_for_update") < source.index("status__in"), \
+        "the lock is taken after the check it is meant to protect"
+
+
+def test_a_refunded_payment_does_not_pay_out(make_user, django_capture_on_commit_callbacks):
+    """The payout is deferred to `transaction.on_commit`, so between the COMMIT and the
+    receiver running there is a real window in which a refund can land and commit. The
+    receiver judged the STALE in-memory payment the lambda captured, so it paid out on an
+    already-refunded payment — and `unwind_payment` had found no legs to reverse, because
+    they did not exist yet."""
+    from decimal import Decimal as _D
+
+    from subscription.services.payment_service import PaymentService
+    from wallet.models import Wallet
+    from wallet.signals import handle_payment_completed
+
+    _client, trainer, pay = _c8_payment(make_user, "raced", "SYP")
+    PaymentService.complete_payment(pay.id, {
+        "amount": "5000.00", "currency": "SYP", "status": "completed",
+        "transaction_id": "gate-raced"})
+    PaymentService.refund_payment(pay.id, reason="chargeback")
+
+    # The deferred payout now runs, holding the object as it was BEFORE the refund.
+    pay.status = "completed"
+    handle_payment_completed(sender=None, payment=pay, subscription=pay.subscription)
+
+    wallet, _ = Wallet.objects.get_or_create(
+        owner=trainer, defaults={"owner_type": "trainer"})
+    assert wallet.balance == _D("0.00"), \
+        f"a refunded payment still paid out: trainer holds {wallet.balance}"
+
+
+def test_an_unconfigured_gateway_does_not_take_payments():
+    """`PaymentGatewayService(gateway_name)` was constructed directly, skipping the only
+    place the enabled check lives — so a deploy missing SHAMCASH_ACCOUNT_ID answered 200
+    and told every customer to transfer 5,000 SYP to account "" ."""
+    import inspect
+
+    from subscription import views as subscription_views
+
+    for view in (subscription_views.PaymentGatewayView,
+                 subscription_views.SubscriptionViewSet):
+        source = inspect.getsource(view)
+        assert "PaymentGatewayManager.get_service_for_initiation" in source, view.__name__
+        code = "\n".join(line.split("#")[0] for line in source.splitlines())
+        assert "PaymentGatewayService(gateway_name)" not in code, \
+            f"{view.__name__} bypasses the enabled check again"
+
+    # The WEBHOOK deliberately does not check: it is about money that already moved,
+    # and refusing a delivery because new payments are switched off would strand it.
+    webhook = inspect.getsource(subscription_views.PaymentWebhookView)
+    assert "PaymentGatewayService(gateway_name)" in webhook
+
+
+def test_liking_and_joining_someone_elses_content_is_allowed(make_user, api):
+    """`IsOwnerOrReadOnly` treated every non-safe method as an edit, but liking a post,
+    liking a comment, joining a challenge and logging progress are POSTs to a detail
+    route that create a row BESIDE the object. `get_object()` refused everyone but the
+    author, so the like button, Join and Log progress returned 403 for every user on
+    every piece of content they did not write."""
+    from datetime import timedelta as _td
+
+    from django.utils import timezone as _tz
+
+    from social.models import Challenge, Post, PostLike
+
+    alice = make_user("c8soc_alice", user_type="client")
+    bob = make_user("c8soc_bob", user_type="client")
+
+    post = Post.objects.create(author=alice, content="hello", visibility="public")
+    resp = api(bob).post(f"/api/social/posts/{post.id}/like/", {},
+                         content_type="application/json")
+    assert resp.status_code == 200, resp.content[:200]
+    assert PostLike.objects.filter(post=post, user=bob).exists()
+
+    challenge = Challenge.objects.create(
+        creator=alice, title="C", description="d", status="active",
+        start_date=_tz.now() - _td(days=1), end_date=_tz.now() + _td(days=10),
+        target_value=100)
+    joined = api(bob).post(f"/api/social/challenges/{challenge.id}/join/", {},
+                           content_type="application/json")
+    assert joined.status_code == 201, joined.content[:200]
+
+
+def test_hidden_content_is_hidden_and_strangers_cannot_comment_into_it(make_user, api):
+    """`Post.can_be_viewed_by` encodes the `is_hidden` rule and has never had a caller;
+    the querysets that actually run encode visibility WITHOUT it, so moderation did
+    nothing. And the comment read path was scoped by visibility while the WRITE path was
+    not, so a stranger could comment into a private post — 201, counter bumped, push
+    notification to the author quoting their text — which was also a post-existence
+    oracle over the whole id space."""
+    import json as _json
+
+    from social.models import Post
+
+    alice = make_user("c8soc_a2", user_type="client")
+    mallory = make_user("c8soc_m2", user_type="client")
+
+    hidden = Post.objects.create(author=alice, content="hidden", visibility="public",
+                                 is_hidden=True)
+    private = Post.objects.create(author=alice, content="diary", visibility="private")
+
+    assert api(mallory).get(f"/api/social/posts/{hidden.id}/").status_code == 404
+    body = api(mallory).get("/api/social/posts/").json()
+    rows = body.get("results", body)
+    assert not any(row["id"] == hidden.id for row in rows), "a hidden post is in the feed"
+
+    for target in (private, hidden):
+        resp = api(mallory).post("/api/social/comments/",
+                                 data=_json.dumps({"post": target.id, "content": "x"}),
+                                 content_type="application/json")
+        assert resp.status_code == 404, (target.id, resp.status_code, resp.content[:200])
+
+    # The author still sees their own hidden post: hiding is not a silent deletion.
+    assert api(alice).get(f"/api/social/posts/{hidden.id}/").status_code == 200
+
+
+def test_a_follower_list_does_not_carry_email_addresses(make_user, api):
+    """`UserMinimalSerializer` deliberately dropped `email`; these two hand-rolled dicts
+    were never updated, so following someone and reading your own list harvested their
+    address."""
+    from social.models import UserFollow
+
+    alice = make_user("c8soc_a3", user_type="client")
+    bob = make_user("c8soc_b3", user_type="client")
+    UserFollow.objects.create(follower=bob, following=alice)
+
+    for url, key in (("/api/social/follows/following/", "following"),
+                     ("/api/social/follows/followers/", "followers")):
+        actor = bob if key == "following" else alice
+        rows = api(actor).get(url).json()[key]
+        assert rows, url
+        assert "email" not in rows[0], (url, sorted(rows[0]))
+
+
+def test_challenge_progress_is_a_real_amount(make_user, api):
+    """`float(current_value)` with no range check accepted -500 (progress percentage
+    -500, because `min(100.0, ...)` had no lower bound) and 1e12 (instant completion) —
+    and the completion branch only ever SET `completed`, so correcting 100 back to 0 left
+    a participant "completed" with zero progress and still eligible for the badge."""
+    import json as _json
+    from datetime import timedelta as _td
+
+    from django.utils import timezone as _tz
+
+    from social.models import Challenge, ChallengeParticipation
+
+    owner = make_user("c8soc_a4", user_type="client")
+    player = make_user("c8soc_b4", user_type="client")
+    challenge = Challenge.objects.create(
+        creator=owner, title="C4", description="d", status="active",
+        start_date=_tz.now() - _td(days=1), end_date=_tz.now() + _td(days=10),
+        target_value=100)
+    api(player).post(f"/api/social/challenges/{challenge.id}/join/", {},
+                     content_type="application/json")
+
+    def log(value):
+        return api(player).post(
+            f"/api/social/challenges/{challenge.id}/update_progress/",
+            data=_json.dumps({"current_value": value}),
+            content_type="application/json")
+
+    assert log(-500).status_code == 400
+    assert log(10 ** 12).status_code == 400
+    assert log(100).status_code == 200
+    row = ChallengeParticipation.objects.get(challenge=challenge, user=player)
+    assert row.status == "completed"
+
+    assert log(0).status_code == 200
+    row.refresh_from_db()
+    assert row.status != "completed", "completion never reverted when the number did"
+    assert row.progress_percentage >= 0
+
+
+def test_a_challenge_that_has_ended_cannot_be_joined(make_user, api):
+    """`join` checked capacity only while `update_progress` checked `is_active`, so a
+    client could join a challenge that ended ten days ago and then be unable to log
+    anything against it."""
+    from datetime import timedelta as _td
+
+    from django.utils import timezone as _tz
+
+    from social.models import Challenge
+
+    owner = make_user("c8soc_a5", user_type="client")
+    player = make_user("c8soc_b5", user_type="client")
+    over = Challenge.objects.create(
+        creator=owner, title="C5", description="d", status="active",
+        start_date=_tz.now() - _td(days=30), end_date=_tz.now() - _td(days=10),
+        target_value=100)
+    resp = api(player).post(f"/api/social/challenges/{over.id}/join/", {},
+                            content_type="application/json")
+    assert resp.status_code == 400, resp.content[:200]
+
+
+def test_a_chunked_body_cannot_skip_the_size_cap():
+    """The cap read CONTENT_LENGTH and treated a missing one as 0, which is never over
+    the limit — so `Transfer-Encoding: chunked` skipped the only body-size control in the
+    stack. Django spools the whole body to FILE_UPLOAD_TEMP_DIR before any middleware
+    runs, and in production that is the same 1 GB volume as all user media: a 400 MB
+    chunked POST was measured buffering past 368 MB against a 15 MB cap."""
+    from django.test import RequestFactory
+
+    from training_platform.middleware import RequestSizeLimitMiddleware
+
+    middleware = RequestSizeLimitMiddleware(lambda request: "reached the view")
+
+    chunked = RequestFactory().post("/api/auth/user/profile-picture/")
+    chunked.META.pop("CONTENT_LENGTH", None)
+    chunked.META["HTTP_TRANSFER_ENCODING"] = "chunked"
+    assert getattr(middleware(chunked), "status_code", None) == 411
+
+    # An ordinary empty POST still passes: no length and no chunked encoding means no
+    # body at all, which is not something to refuse.
+    empty = RequestFactory().post("/api/social/posts/1/like/")
+    empty.META.pop("CONTENT_LENGTH", None)
+    assert middleware(empty) == "reached the view"
+
+
+def test_quarantined_uploads_are_bounded():
+    """Every rejected upload was copied at full size into the media volume and kept for
+    ever — no TTL, no cap, no purge anywhere — so thirty malformed 2 MB "images" put
+    58 MB on the volume in two seconds and roughly 500 rejected requests fill the 1 GB
+    disk that also serves all user media."""
+    from training_platform.file_security import FileSecurityValidator
+
+    assert FileSecurityValidator.QUARANTINE_MAX_BYTES > 0
+    assert FileSecurityValidator.QUARANTINE_MAX_AGE_SECONDS > 0
+    assert 0 < FileSecurityValidator.QUARANTINE_SAMPLE_BYTES <= 1024 * 1024
+    assert hasattr(FileSecurityValidator, "_evict_quarantine")
+
+    import inspect
+
+    source = inspect.getsource(FileSecurityValidator._quarantine_file)
+    assert "sanitize_filename" in source, "the quarantine path is built from a raw name"
+
+
+def test_both_admin_logins_are_throttled():
+    """`/dj-admin/` is a full AdminSite authenticating the SAME staff and superuser
+    accounts, and its session is valid on both sites — but the lockout matched `/admin/`
+    only, so the throttle added for exactly these accounts was defeated by attacking its
+    sibling path."""
+    from training_platform.middleware import AdminLoginThrottleMiddleware
+
+    middleware = AdminLoginThrottleMiddleware(lambda request: None)
+
+    class _Req:
+        def __init__(self, path):
+            self.method = "POST"
+            self.path = path
+
+    for path in ("/admin/login/", "/dj-admin/login/"):
+        assert middleware._is_admin_login(_Req(path)), path
+    assert not middleware._is_admin_login(_Req("/api/auth/login/"))
+
+
+def test_the_retention_purge_does_not_load_every_expiring_row():
+    """`qs.delete()` looks cheap and is not: `analytics.PerformanceMetric.related_activity`
+    is SET_NULL on `UserActivity`, so Django cannot fast-delete and materialises the whole
+    result set. 200,000 expiring rows cost 181 MB of resident memory against a worker that
+    gets 512 MB and runs two children — and ACKS_LATE plus REJECT_ON_WORKER_LOST then
+    redeliver the task to the sibling, which dies the same way."""
+    import inspect
+
+    # `importlib`, not `import ... as`: `training_platform/privacy/__init__.py` binds the
+    # NAME `registry` to the dict inside the module, so attribute lookup on the package
+    # returns the dict and shadows the module of the same name.
+    import importlib
+
+    registry_module = importlib.import_module("training_platform.privacy.registry")
+
+    assert registry_module.PURGE_BATCH > 0
+    source = inspect.getsource(registry_module.purge_expired)
+    assert "_delete_in_batches" in source
+    code = "\n".join(line.split("#")[0] for line in source.splitlines())
+    assert "pk__in=list(" not in code, "the deadline branch materialises ids again"
+
+
+def test_a_job_too_big_for_its_slot_is_not_retried_three_more_times():
+    """`autoretry_for=(Exception,)` also catches `SoftTimeLimitExceeded`, which Celery
+    raises INSIDE the task when it overruns. That is not transient: every retry restarts
+    the same work and overruns at the same point, so a job too big for its 300 s slot
+    burned four consecutive slots on a worker running two children."""
+    from celery.exceptions import Ignore
+
+    from training_platform.task_retries import no_retry_on_timeout
+
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    @no_retry_on_timeout
+    def overruns():
+        raise SoftTimeLimitExceeded()
+
+    with pytest.raises(Ignore):
+        overruns()
+
+    @no_retry_on_timeout
+    def blips():
+        raise OSError("connection reset")
+
+    with pytest.raises(OSError):
+        blips()   # a real transient fault still retries
+
+
+def test_a_gateway_with_no_credentials_at_all_cannot_take_payments():
+    """All three ShamCash variables blank used to answer 200 and hand the customer
+    transfer instructions naming account `""` — while `GET /v1/gateways/` correctly hid
+    the gateway, so the failure was invisible until customers reported the money gone.
+    Either credential makes it usable; neither makes it unusable."""
+    from subscription.settings import gateway_config
+
+    config = gateway_config.GATEWAY_REGISTRY["shamcash"]["config"][
+        gateway_config.GATEWAY_MODE]
+    before = dict(config)
+    try:
+        config["api_key"] = ""
+        config["merchant_id"] = ""
+        assert gateway_config.can_initiate_payments("shamcash") is False
+
+        # A transfer/reconcile deployment has no API token and is perfectly usable.
+        config["merchant_id"] = "ACCOUNT-1"
+        assert gateway_config.can_initiate_payments("shamcash") is True
+
+        # And a hosted deployment has the token.
+        config["merchant_id"] = ""
+        config["api_key"] = "token"
+        assert gateway_config.can_initiate_payments("shamcash") is True
+    finally:
+        config.update(before)
+
+    assert gateway_config.can_initiate_payments("no_such_gateway") is False
+
+
+def test_a_set_log_belongs_to_one_person(make_user, api):
+    """`user_exercise_progress` was validated and `workout_session` beside it was a bare
+    primary key over every session in the table. Session ids are sequential, and every
+    reader aggregates a session's set logs without re-checking whose progress each log
+    belongs to — so a stranger pushed a client's recorded volume from 500 kg to
+    100,500 kg and put an exercise they never performed into their activity list."""
+    import json as _json
+
+    from django.utils import timezone as _tz
+
+    from routine.models import (Exercise, Routine, RoutineExercise,
+                                UserExerciseProgress, WorkoutSession)
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("c8set_t", user_type="trainer")
+    owner = make_user("c8set_owner", user_type="client")
+    stranger = make_user("c8set_stranger", user_type="client")
+    TrainerClientRelation.objects.create(trainer=trainer, client=owner, status="approved")
+
+    routine = Routine.objects.create(name="c8set", days=1, created_by=trainer,
+                                     start_date=_tz.localdate(), is_active=True)
+    exercise = Exercise.objects.create(name="c8set ex", created_by=trainer)
+    RoutineExercise.objects.create(routine=routine, exercise=exercise, day=1,
+                                   sets=3, reps=10)
+    routine.assigned_to.add(owner)
+
+    session = WorkoutSession.objects.create(user=owner, routine=routine, day=1,
+                                            status="active")
+    theirs = UserExerciseProgress.objects.create(
+        user=stranger, exercise=exercise, date=_tz.localdate(), target_sets=3)
+
+    resp = api(stranger).post("/api/routine/set-logs/", data=_json.dumps({
+        "user_exercise_progress": theirs.id, "workout_session": session.id,
+        "set_number": 1, "weight": 1000, "reps": 100,
+        "date": _tz.localdate().isoformat()}), content_type="application/json")
+    assert resp.status_code == 400, resp.content[:300]
+
+
+def test_logging_sets_moves_the_day_it_was_logged_for(
+        make_user, api, django_capture_on_commit_callbacks):
+    """Two defects in one path. A race fix replaced a model save with a queryset
+    `.update()`, which emits no `post_save`, so the receiver that writes
+    `RoutineProgress` never ran: a client logged every set and the day stayed
+    "not started", the streak stayed 0 and the trainer's screen read 0%. And
+    `UserExerciseProgress` records neither routine nor day, so the propagation walked
+    every routine containing the exercise and marked every day of each — one full-body
+    workout marked the whole week done."""
+    import json as _json
+
+    from django.utils import timezone as _tz
+
+    from routine.models import (Exercise, Routine, RoutineExercise, RoutineProgress,
+                                UserExerciseProgress, WorkoutSession)
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("c8prog_t", user_type="trainer")
+    client_user = make_user("c8prog_c", user_type="client")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user,
+                                         status="approved")
+
+    exercise = Exercise.objects.create(name="c8prog ex", created_by=trainer)
+    trained = Routine.objects.create(name="c8prog trained", days=3, created_by=trainer,
+                                     start_date=_tz.localdate(), is_active=True)
+    for day in (1, 2, 3):
+        RoutineExercise.objects.create(routine=trained, exercise=exercise, day=day,
+                                       sets=3, reps=10)
+    trained.assigned_to.add(client_user)
+
+    # A second routine holding the same exercise, which the client never opens.
+    untouched = Routine.objects.create(name="c8prog other", days=1, created_by=trainer,
+                                       start_date=_tz.localdate(), is_active=True)
+    RoutineExercise.objects.create(routine=untouched, exercise=exercise, day=1,
+                                   sets=3, reps=10)
+    untouched.assigned_to.add(client_user)
+
+    session = WorkoutSession.objects.create(user=client_user, routine=trained, day=1,
+                                            status="active")
+    progress = UserExerciseProgress.objects.create(
+        user=client_user, exercise=exercise, date=_tz.localdate(), target_sets=3)
+
+    for number in (1, 2, 3):
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = api(client_user).post("/api/routine/set-logs/", data=_json.dumps({
+                "user_exercise_progress": progress.id, "workout_session": session.id,
+                "set_number": number, "weight": 50, "reps": 10,
+                "date": _tz.localdate().isoformat()}),
+                content_type="application/json")
+        assert resp.status_code in (200, 201), resp.content[:200]
+
+    progress.refresh_from_db()
+    assert progress.completed_sets == 3, "the set logs never reached the derived totals"
+
+    verdicts = {
+        (row["routine__name"], row["day"]): row["status"]
+        for row in RoutineProgress.objects.filter(user=client_user)
+        .values("routine__name", "day", "status")
+    }
+    assert verdicts[("c8prog trained", 1)] == "completed", verdicts
+    assert verdicts[("c8prog trained", 2)] != "completed", verdicts
+    assert verdicts[("c8prog trained", 3)] != "completed", verdicts
+    assert verdicts[("c8prog other", 1)] != "completed", verdicts
+
+
+def test_a_client_cannot_author_their_own_compliance(make_user, api):
+    """`status`, `exercises_completed` and `total_exercises` were writable and
+    `perform_create` checked only that the routine was assigned to the caller — never
+    that the numbers corresponded to work done. A PATCH put 4950% on the trainer's
+    screen, and two HTTP calls with no set logs behind them manufactured a streak."""
+    import json as _json
+
+    from django.utils import timezone as _tz
+
+    from routine.models import (Exercise, Routine, RoutineExercise, RoutineProgress)
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("c8comp_t", user_type="trainer")
+    client_user = make_user("c8comp_c", user_type="client")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user,
+                                         status="approved")
+    routine = Routine.objects.create(name="c8comp", days=1, created_by=trainer,
+                                     start_date=_tz.localdate(), is_active=True)
+    RoutineExercise.objects.create(
+        routine=routine, exercise=Exercise.objects.create(name="c8comp ex",
+                                                          created_by=trainer),
+        day=1, sets=3, reps=10)
+    routine.assigned_to.add(client_user)
+
+    row = RoutineProgress.objects.filter(user=client_user, routine=routine).first()
+    assert row is not None
+    api(client_user).patch(
+        f"/api/routine/routine-progress/{row.id}/",
+        data=_json.dumps({"status": "completed", "exercises_completed": 99,
+                          "total_exercises": 2}),
+        content_type="application/json")
+
+    row.refresh_from_db()
+    assert row.exercises_completed == 0, row.exercises_completed
+    assert row.status != "completed", row.status
+
+    body = api(client_user).get(f"/api/routine/routine-progress/{row.id}/").json()
+    assert 0 <= body["completion_percentage"] <= 100, body["completion_percentage"]
+
+
+def test_a_workout_cannot_end_before_it_started_or_last_a_year(make_user, api):
+    """`start_time` is `auto_now_add` so only one side of the interval was trusted, and
+    nothing compared them: an end three days BEFORE the start reported -259,199 seconds
+    and one 400 days after gave 34,560,000. The activity chart sums these."""
+    import json as _json
+    from datetime import timedelta as _td
+
+    from django.utils import timezone as _tz
+
+    from routine.models import Routine, WorkoutSession
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("c8dur_t", user_type="trainer")
+    client_user = make_user("c8dur_c", user_type="client")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user,
+                                         status="approved")
+    routine = Routine.objects.create(name="c8dur", days=1, created_by=trainer,
+                                     start_date=_tz.localdate(), is_active=True)
+    routine.assigned_to.add(client_user)
+    session = WorkoutSession.objects.create(user=client_user, routine=routine,
+                                            status="active")
+
+    def finish(when):
+        return api(client_user).patch(
+            f"/api/routine/workout-sessions/{session.id}/",
+            data=_json.dumps({"end_time": when.isoformat()}),
+            content_type="application/json").status_code
+
+    assert finish(_tz.now() - _td(days=3)) == 400
+    assert finish(_tz.now() + _td(days=400)) == 400
+    assert finish(_tz.now() + _td(minutes=40)) == 200
+
+
+def test_a_progress_status_must_be_one_we_declared(make_user, api):
+    """`choices` is a form-layer rule and `update_or_create` never calls `full_clean`,
+    so 'banana' was stored and returned with a 200 — a row that is neither complete nor
+    incomplete, invisible to every `filter(status=...)` in analytics."""
+    import json as _json
+
+    from django.utils import timezone as _tz
+
+    from routine.models import Exercise, Routine, RoutineExercise
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("c8st_t", user_type="trainer")
+    client_user = make_user("c8st_c", user_type="client")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user,
+                                         status="approved")
+    routine = Routine.objects.create(name="c8st", days=1, created_by=trainer,
+                                     start_date=_tz.localdate(), is_active=True)
+    RoutineExercise.objects.create(
+        routine=routine, exercise=Exercise.objects.create(name="c8st ex",
+                                                          created_by=trainer),
+        day=1, sets=3, reps=10)
+    routine.assigned_to.add(client_user)
+
+    def set_status(value):
+        return api(client_user).post(
+            f"/api/routine/routines/{routine.id}/update_progress/",
+            data=_json.dumps({"day": 1, "status": value}),
+            content_type="application/json").status_code
+
+    assert set_status("banana") == 400
+    assert set_status("completed") == 200

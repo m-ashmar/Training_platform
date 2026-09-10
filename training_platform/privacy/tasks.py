@@ -8,17 +8,23 @@ import logging
 
 from celery import shared_task
 
+from training_platform.task_retries import no_retry_on_timeout
+
 logger = logging.getLogger(__name__)
 
 
 @shared_task(
     name="training_platform.privacy.purge_expired_personal_data",
+    # Not a bare `(Exception,)`: that also retries `SoftTimeLimitExceeded`, so a
+    # job too big for its 300 s slot burned four consecutive slots and still
+    # never finished. See training_platform/task_retries.py.
     autoretry_for=(Exception,),
     retry_backoff=True,
     retry_backoff_max=600,
     retry_jitter=True,
     max_retries=3,
 )
+@no_retry_on_timeout
 def purge_expired_personal_data():
     """Delete rows past the retention window declared for their source."""
     from .registry import purge_expired

@@ -200,6 +200,19 @@ REST_AUTH_SERIALIZERS = {
 # ========================
 from django.utils.translation import gettext_lazy as _
 
+#: The one currency this platform charges and holds money in. Every SubscriptionPlan
+#: is priced in it (`SubscriptionPlan.currency` defaults to SYP and calls itself the
+#: single source of truth), every Payment inherits it — and `Wallet.currency` was
+#: hardcoded to a default of "USD" that nothing ever set from the plan. Since
+#: `move_funds_atomic` skipped its currency guard whenever there was no source wallet,
+#: the mint leg of a payment credited 5,000 SYP into a wallet labelled USD at 1:1, and
+#: the trainer's withdrawable balance read 5,000 USD for a subscription worth about
+#: forty cents. The ledger reconciled perfectly the whole way, which is why it survived
+#: every internal check: the arithmetic was right and the unit was wrong.
+#:
+#: There is no FX in this system and there is not meant to be. One currency, named once.
+PLATFORM_CURRENCY = get_env("PLATFORM_CURRENCY", "SYP")
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',

@@ -611,18 +611,22 @@ class RoutineProgress(models.Model):
     
     # Progress data
     day = models.PositiveIntegerField(help_text="Day of the routine")
+    #: Named, so a caller can validate against it. `update_progress` passed whatever
+    #: string arrived straight into `update_or_create`, which never calls `full_clean`,
+    #: so 'banana' was stored and returned with a 200.
+    STATUS_CHOICES = [
+        # Stored values are lowercase snake_case, matching the convention already
+        # used by WorkoutSession, social, subscription and analytics. RoutineProgress
+        # was the lone outlier storing Title Case, which forced any API consumer to
+        # implement two vocabularies for the same concept.
+        ('not_started', 'Not Started'),
+        ('in_progress', 'In Progress'),
+        ('completed', 'Completed'),
+        ('skipped', 'Skipped'),
+    ]
     status = models.CharField(
         max_length=20,
-        choices=[
-            # Stored values are lowercase snake_case, matching the convention already
-            # used by WorkoutSession, social, subscription and analytics. RoutineProgress
-            # was the lone outlier storing Title Case, which forced any API consumer to
-            # implement two vocabularies for the same concept.
-            ('not_started', 'Not Started'),
-            ('in_progress', 'In Progress'),
-            ('completed', 'Completed'),
-            ('skipped', 'Skipped')
-        ],
+        choices=STATUS_CHOICES,
         default='not_started',
         help_text="Progress status for this day"
     )
@@ -697,6 +701,18 @@ class WorkoutSession(models.Model):
     """
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='workout_sessions')
     routine = models.ForeignKey(Routine, on_delete=models.CASCADE, related_name='workout_sessions')
+    #: WHICH day of the routine this session is. Nullable, because a session can be
+    #: opened without naming one and older rows have none.
+    #:
+    #: Nothing recorded it, and `UserExerciseProgress` is keyed `(user, exercise, date)`
+    #: with no day either — so when a routine schedules the same exercise on more than
+    #: one day, completing it once marked EVERY one of those days done. A full-body
+    #: routine reported the whole week complete from a single workout, and the streak
+    #: and completion figures were credited for days the client never trained. With the
+    #: day known, exactly one day moves.
+    day = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Which day of the routine this session covers, when the client said.")
     start_time = models.DateTimeField(auto_now_add=True)
     end_time = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=[('active', 'Active'), ('completed', 'Completed'), ('abandoned', 'Abandoned')], default='active')
@@ -889,26 +905,64 @@ class RoutineTemplateExercise(models.Model):
 
 # --- SIGNALS FOR ROUTINE PROGRESS AUTO-UPDATE ---
 
+def _session_of_record(progress):
+    """The workout session this progress was logged in, if there was one.
+
+    `UserExerciseProgress` carries neither a routine nor a day, but its set logs point
+    at a `WorkoutSession`, which knows both. That is the only honest link between "work
+    was logged" and "which day of which plan it was for".
+    """
+    log = (ExerciseSetLog.objects
+           .filter(user_exercise_progress=progress, workout_session__isnull=False)
+           .select_related('workout_session__routine')
+           .order_by('-id')
+           .first())
+    return getattr(log, 'workout_session', None)
+
+
 @receiver(post_save, sender=UserExerciseProgress)
 def update_routine_progress_on_exercise_progress(sender, instance, created, **kwargs):
-    """
-    When a UserExerciseProgress is created or updated, update the corresponding RoutineProgress.
-    Correctly handles completion logic even when target_sets is 0.
-    Optimized to avoid N+1 queries.
-    """
-    # Honour the bulk-write suspension (see suspend_progress_recalc).
+    """Signal wrapper. The work is in `refresh_routine_progress` so that callers which
+    write with a queryset `.update()` — which emits no `post_save` — can run it too."""
     if getattr(_recalc_state, 'suspended', False) and not kwargs.get('_forced'):
         return
+    refresh_routine_progress(instance)
+
+
+def refresh_routine_progress(instance, routine_scope=None):
+    """Write `RoutineProgress` for the work this `UserExerciseProgress` represents.
+
+    `routine_scope`, when given, is the routine the client was actually training. It
+    matters because `UserExerciseProgress` is keyed `(user, exercise, date)` and records
+    NO routine and no day, so without a scope this walks every active routine assigned
+    to the user that contains the exercise and writes a verdict for every day of each.
+    One full-body workout therefore marked the whole week done — and days in OTHER
+    routines the client has never opened came back `completed`, because those days
+    happened to hold only that exercise. Measured at 20 assigned routines: one
+    `bulk-complete` wrote 90 RoutineProgress rows and cost 524 queries.
+
+    The set logs know the routine: `ExerciseSetLog.workout_session.routine`. When they
+    do, only that routine is touched. Without a scope — ad-hoc logging with no session —
+    a day is only ever marked `completed`, never `in_progress`, because "some exercise
+    of this day has progress today" is not evidence the client opened that day at all.
+    """
     user = instance.user
     exercise = instance.exercise
     progress_date = instance.date
-    
+
+    session = _session_of_record(instance)
+    if routine_scope is None:
+        routine_scope = getattr(session, 'routine', None)
+    day_scope = getattr(session, 'day', None)
+
     # Pre-fetch the related routine_exercises to avoid N+1 down the line
     routines = Routine.objects.filter(
         assigned_to=user, 
         routine_exercises__exercise=exercise,
         is_active=True
     ).prefetch_related('routine_exercises', 'routine_exercises__exercise').distinct()
+    if routine_scope is not None:
+        routines = routines.filter(pk=routine_scope.pk)
     
     for routine in routines:
         # All routine exercises are loaded in memory now
@@ -916,6 +970,11 @@ def update_routine_progress_on_exercise_progress(sender, instance, created, **kw
         
         # Find which days this exercise appears in this routine
         days_with_exercise = {rex.day for rex in exercises_in_routine if rex.exercise_id == exercise.id}
+        # The day the client said they were training, when they said. Without it, a
+        # routine that schedules one exercise on several days had every one of those
+        # days marked from a single workout.
+        if day_scope is not None:
+            days_with_exercise &= {day_scope}
         
         for day in days_with_exercise:
             # Get all exercises scheduled for this specific day in the routine (from memory)
@@ -962,7 +1021,14 @@ def update_routine_progress_on_exercise_progress(sender, instance, created, **kw
                 status = 'completed'
             else:
                 status = 'in_progress'
-            
+
+            # Without a routine of record we cannot know the client opened THIS day, so
+            # a partial count is not evidence of anything: a shared exercise made an
+            # untrained day report `in_progress`. A fully-completed day is different —
+            # every exercise it schedules was trained today, which is the verdict.
+            if routine_scope is None and status != 'completed':
+                continue
+
             # Update or create the RoutineProgress record
             RoutineProgress.objects.update_or_create(
                 user=user,
@@ -1056,6 +1122,17 @@ def _recalc_locked(progress_pk):
         total_weight=agg(Sum('weight'), models.FloatField()),
         total_repetitions=agg(Sum('reps'), models.IntegerField()),
     )
+
+    # And PROPAGATE. A queryset `.update()` emits no `post_save`, so
+    # `update_routine_progress_on_exercise_progress` — the receiver that actually writes
+    # `RoutineProgress` — never fired: a client could log every set of a workout and the
+    # day stayed "not started", the streak stayed 0, and the trainer's completion screen
+    # read 0%. The race fix that introduced this UPDATE silently cut the propagation
+    # chain the calling function is named after. Only `bulk-complete`, which writes
+    # through `save()`, moved the number.
+    refreshed = UserExerciseProgress.objects.filter(pk=progress_pk).first()
+    if refreshed is not None:
+        refresh_routine_progress(refreshed)
 
 
 # --- M2M SIGNAL FOR AUTOMATIC ROUTINEPROGRESS CREATION ---

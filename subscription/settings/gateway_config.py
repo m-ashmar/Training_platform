@@ -114,6 +114,26 @@ def is_gateway_enabled(gateway_name: str) -> bool:
         return False
 
 
+def can_initiate_payments(gateway_name: str) -> bool:
+    """Can this gateway produce instructions a customer can actually act on?
+
+    Not the same question as `is_gateway_enabled`, which asks only about the API token.
+    ShamCash has two shapes: HOSTED, which needs the token and an initiate path, and
+    TRANSFER/reconcile, where the customer moves money to `merchant_id` by hand and we
+    reconcile it later — no token involved. Keying initiation on the token alone would
+    switch off a deployment that is working correctly.
+
+    What must never happen is what a deploy missing every ShamCash variable did: answer
+    200 and tell every customer to transfer 5,000 SYP to account `""`. Either credential
+    makes the gateway usable; neither makes it unusable.
+    """
+    try:
+        config = GATEWAY_REGISTRY[gateway_name]['config'].get(GATEWAY_MODE) or {}
+    except (ValueError, KeyError):
+        return False
+    return bool(config.get('api_key') or config.get('merchant_id'))
+
+
 def get_available_gateways() -> list:
     """List of enabled gateway names."""
     return [name for name in GATEWAY_REGISTRY.keys() if is_gateway_enabled(name)]

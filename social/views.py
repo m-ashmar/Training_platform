@@ -10,7 +10,8 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q, Exists, OuterRef
+from django.db import transaction
+from django.db.models import Q, Exists, F, OuterRef
 from django.utils import timezone
 from django.utils.translation import gettext as _
 from django.contrib.contenttypes.models import ContentType
@@ -149,10 +150,12 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             following=request.user
         ).select_related('follower')
         
+        # No `email`. `UserMinimalSerializer` deliberately dropped it (see
+        # social/serializers.py) and these two hand-rolled dicts were never updated, so
+        # following someone and reading your own list harvested their address.
         data = [{
             'id': follow.follower.id,
             'username': follow.follower.username,
-            'email': follow.follower.email,
             'user_type': follow.follower.user_type,
             'profile_picture': follow.follower.profile_picture.url if follow.follower.profile_picture else None,
             'followed_at': follow.created_at
@@ -174,10 +177,12 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             follower=request.user
         ).select_related('following')
         
+        # No `email`. `UserMinimalSerializer` deliberately dropped it (see
+        # social/serializers.py) and these two hand-rolled dicts were never updated, so
+        # following someone and reading your own list harvested their address.
         data = [{
             'id': follow.following.id,
             'username': follow.following.username,
-            'email': follow.following.email,
             'user_type': follow.following.user_type,
             'profile_picture': follow.following.profile_picture.url if follow.following.profile_picture else None,
             'followed_at': follow.created_at
@@ -189,12 +194,38 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         })
 
 
+def visible_posts_for(user):
+    """Every post `user` is allowed to see.
+
+    ONE definition, because there were two and they disagreed. `Post.can_be_viewed_by`
+    (social/models.py) encodes the rule including `is_hidden` and has never had a single
+    caller; the querysets in this module encode it without `is_hidden`, and they are what
+    actually runs. So moderation did nothing: an admin hid an abusive post and it stayed
+    in the feed, in search, and in the detail endpoint for everyone — and every comment
+    already on a hidden post stayed world-readable, because the comment queryset filtered
+    the post's VISIBILITY and not its hidden flag.
+
+    An author still sees their own hidden post, so hiding is not a silent deletion.
+    """
+    return Post.objects.filter(
+        (
+            Q(visibility='public')
+            | Q(visibility='followers', author__followers__follower=user)
+        ) & Q(is_hidden=False)
+        | Q(author=user)
+    ).distinct()
+
+
 class PostViewSet(viewsets.ModelViewSet):
     """
     API endpoints for social posts
     """
     serializer_class = PostSerializer
     permission_classes = [IsOwnerOrReadOnly]
+    #: POSTs to a detail route that act ON a post rather than editing it. Without this
+    #: `IsOwnerOrReadOnly` refused everyone but the author and the like button returned
+    #: 403 for every user on every post they did not write.
+    interaction_actions = ('like',)
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['author', 'post_type', 'visibility']
     search_fields = ['title', 'content']
@@ -204,12 +235,8 @@ class PostViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         
-        # Get posts that user can view based on visibility
-        queryset = Post.objects.filter(
-            Q(visibility='public') |
-            Q(author=user) |  # Own posts
-            Q(visibility='followers', author__followers__follower=user)  # Followed users
-        ).distinct()
+        # Get posts that user can view based on visibility AND moderation.
+        queryset = visible_posts_for(user)
         
         # Handle author filtering
         author_id = self.request.query_params.get('author')
@@ -283,8 +310,12 @@ class PostViewSet(viewsets.ModelViewSet):
             # Unlike the post
             like.delete()
             
-            # Atomic decrement
-            Post.objects.filter(pk=post.pk).update(likes_count=F('likes_count') - 1)
+            # Atomic decrement, FLOORED at zero. `F('likes_count') - 1` against the
+            # row's own `CHECK (likes_count >= 0)` was a 500 whenever the counter and
+            # the like rows had drifted apart — which the whole-row `save()` in
+            # `perform_create` guaranteed — and the 500 left them drifted.
+            Post.objects.filter(pk=post.pk, likes_count__gt=0).update(
+                likes_count=F('likes_count') - 1)
             
             return Response({'message': _('Post unliked')})
     
@@ -344,7 +375,7 @@ class PostViewSet(viewsets.ModelViewSet):
             })
 
 
-from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.exceptions import ValidationError as DRFValidationError, NotFound
 from rest_framework.pagination import CursorPagination
 
 class CommentCursorPagination(CursorPagination):
@@ -363,6 +394,7 @@ class CommentViewSet(viewsets.ModelViewSet):
     """
     serializer_class = CommentSerializer
     permission_classes = [IsOwnerOrReadOnly]
+    interaction_actions = ('like',)
     pagination_class = CommentCursorPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['post', 'author', 'parent_comment']
@@ -383,11 +415,10 @@ class CommentViewSet(viewsets.ModelViewSet):
                 CommentLike.objects.filter(comment=OuterRef('pk'), user=user)
             )
         ).filter(
-            post__in=Post.objects.filter(
-                Q(visibility='public') |
-                Q(author=user) |
-                Q(visibility='followers', author__followers__follower=user)
-            )
+            # Same rule as the post list, from the same function, so a hidden post's
+            # thread cannot be read through the comment endpoint.
+            post__in=visible_posts_for(user),
+            is_hidden=False,
         ).distinct()
         
         # Handle post filtering
@@ -403,12 +434,25 @@ class CommentViewSet(viewsets.ModelViewSet):
         return queryset
     
     def perform_create(self, serializer):
+        # The post has to be one this user may READ. The read queryset was scoped by
+        # visibility and the write path was not, so a stranger could comment into a
+        # private diary post, a followers-only post and a hidden post — 201 every time,
+        # bumping the counter and firing a push notification to the author quoting their
+        # text. 201-vs-400 was also a post-existence oracle over the whole id space.
+        target = serializer.validated_data.get('post')
+        if target is not None and not visible_posts_for(self.request.user).filter(
+                pk=target.pk).exists():
+            raise NotFound(_('No such post.'))
+
         comment = serializer.save(author=self.request.user)
-        
-        # Update post comments count
+
+        # Update post comments count. `F()` on the row, not a full `save()` of an
+        # in-memory copy: the whole-row write clobbered likes_count, views_count and
+        # shares_count with whatever this request had read, and 30 concurrent likes
+        # collapsed to 1.
+        Post.objects.filter(pk=comment.post_id).update(
+            comments_count=F('comments_count') + 1)
         post = comment.post
-        post.comments_count = post.comments.count()
-        post.save()
         
         # Create notification
         if post.author != self.request.user:
@@ -441,14 +485,18 @@ class CommentViewSet(viewsets.ModelViewSet):
             comment=comment
         )
         
+        # `update_fields`, not a whole-row `save()` of an in-memory copy: the full save
+        # writes every column back from what this request happened to read, so two
+        # concurrent likes on one comment lose each other's work. Counted from the rows
+        # rather than incremented, so a drifted counter self-heals on the next tap.
         if created:
-            comment.likes_count = comment.likes.count()
-            comment.save()
+            Comment.objects.filter(pk=comment.pk).update(
+                likes_count=CommentLike.objects.filter(comment=comment).count())
             return Response({'message': _('Comment liked')})
         else:
             like.delete()
-            comment.likes_count = comment.likes.count()
-            comment.save()
+            Comment.objects.filter(pk=comment.pk).update(
+                likes_count=CommentLike.objects.filter(comment=comment).count())
             return Response({'message': _('Comment unliked')})
 
 
@@ -460,6 +508,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     """
     serializer_class = ChallengeSerializer
     permission_classes = [IsOwnerOrReadOnly]
+    interaction_actions = ('join', 'leave', 'update_progress')
     pagination_class = StandardResultsSetPagination
     
     def get_queryset(self):
@@ -578,20 +627,41 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         """
         challenge = self.get_object()
 
-        if challenge.max_participants and challenge.participants_count >= challenge.max_participants:
+        # A challenge you can still take part in. `join` checked capacity only, while
+        # `update_progress` checked `is_active` — so a client could join one that ended
+        # ten days ago, or a cancelled one, and then be unable to log anything against it.
+        # `Challenge.is_active` is status AND the date window, which is the whole rule.
+        if not challenge.is_active:
             return Response(
-                {'error': _('Challenge is full')},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+                {'error': _('This challenge is not running.'), 'code': 'challenge_closed'},
+                status=status.HTTP_400_BAD_REQUEST)
 
+        # Capacity, under the challenge's own row lock. `participants_count` was read
+        # and compared outside any lock, so eight real threads all passed a
+        # `max_participants` of one and all eight joined.
+        with transaction.atomic():
+            locked = Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
+            if locked and locked.max_participants and (
+                    ChallengeParticipation.objects.filter(challenge=locked).count()
+                    >= locked.max_participants):
+                return Response(
+                    {'error': _('Challenge is full')},
+                    status=status.HTTP_400_BAD_REQUEST)
+            return self._join_locked(request, locked or challenge)
+
+    def _join_locked(self, request, challenge):
+        """The join itself, with the challenge row already locked by the caller."""
         participation, created = ChallengeParticipation.objects.get_or_create(
             user=request.user,
             challenge=challenge
         )
 
         if created:
-            challenge.participants_count = challenge.participations.count()
-            challenge.save()
+            # Same reason as the comment counter: a whole-row save clobbers every other
+            # column with this request's stale copy.
+            Challenge.objects.filter(pk=challenge.pk).update(
+                participants_count=ChallengeParticipation.objects.filter(
+                    challenge=challenge).count())
             self._invalidate_challenges_cache(request)
             return Response(
                 {'message': _('Successfully joined challenge')},
@@ -612,10 +682,15 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         """
         challenge = self.get_object()
         
+        # A total order, and the user joined. `-current_value` alone is not an order:
+        # a hundred participants tied on 4.0 meant whichever row Postgres happened to
+        # return got rank 1 — and rank 1 is what the Challenge Winner and Champion
+        # badges key on. `-current_value, joined_at, id` breaks the tie by who got there
+        # first. `select_related` because `p.user.username` was a query per row.
         participants = ChallengeParticipation.objects.filter(
             challenge=challenge
-        ).order_by('-current_value')[:10]
-        
+        ).select_related('user').order_by('-current_value', 'joined_at', 'id')[:10]
+
         leaderboard = [{
             'rank': idx + 1,
             'user': {
@@ -680,6 +755,28 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 {'error': _('current_value must be a valid number')}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        # A real amount of progress. `float()` alone accepted -500 and 1e12: the first
+        # gave a progress percentage of -500 (the `min(100.0, ...)` had no lower bound)
+        # and the second completed the challenge instantly. `challenge_wins` in the
+        # achievements engine keys on `status='completed'` and `rank=1`, so this fed a
+        # badge.
+        if current_value != current_value or current_value in (
+                float('inf'), float('-inf')):
+            return Response(
+                {'error': _('current_value must be a valid number')},
+                status=status.HTTP_400_BAD_REQUEST)
+        if current_value < 0:
+            return Response(
+                {'error': _('current_value cannot be negative'),
+                 'code': 'negative_progress'},
+                status=status.HTTP_400_BAD_REQUEST)
+        ceiling = float(challenge.target_value or 0) * 100 or 1e9
+        if current_value > ceiling:
+            return Response(
+                {'error': _('current_value is implausibly large for this challenge'),
+                 'code': 'progress_out_of_range'},
+                status=status.HTTP_400_BAD_REQUEST)
         
         # Update participation progress
         old_value = participation.current_value
@@ -687,16 +784,22 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         
         # Calculate progress percentage
         if challenge.target_value and challenge.target_value > 0:
-            participation.progress_percentage = min(100.0, (current_value / challenge.target_value) * 100)
+            participation.progress_percentage = max(0.0, min(
+                100.0, (current_value / challenge.target_value) * 100))
         else:
             participation.progress_percentage = 0.0
-        
-        # Check if challenge is completed
-        if (challenge.target_value and
-                current_value >= challenge.target_value and
-                participation.status != 'completed'):
-            participation.status = 'completed'
-            participation.completed_at = timezone.now()
+
+        # Completion FOLLOWS the number, in both directions. The branch only ever set
+        # `completed`, so a participant who logged 100 and then corrected it to 0 stayed
+        # "completed" with zero progress — and stayed eligible for the badge.
+        if challenge.target_value:
+            reached = current_value >= challenge.target_value
+            if reached and participation.status != 'completed':
+                participation.status = 'completed'
+                participation.completed_at = timezone.now()
+            elif not reached and participation.status == 'completed':
+                participation.status = 'active'
+                participation.completed_at = None
         
         participation.save()
         

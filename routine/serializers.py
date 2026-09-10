@@ -389,11 +389,21 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
             'completion_percentage', 'exercises_summary', 
             'next_suggested_action', 'updated_at'
         ]
-    
+        #: DERIVED, not declared. These three were writable, and `perform_create` only
+        #: checked that the routine was assigned to the caller — never that the numbers
+        #: corresponded to work done. A client could PATCH `exercises_completed: 99`
+        #: against a two-exercise day and their trainer's screen read 4950%, or POST a
+        #: `completed` day with no set logs behind it and manufacture a streak from two
+        #: HTTP calls. The signal in routine/models.py computes all three from the set
+        #: logs; nothing else may.
+        read_only_fields = ['status', 'exercises_completed', 'total_exercises']
+
     def get_completion_percentage(self, obj):
         if obj.total_exercises == 0:
             return 0.0
-        return round((obj.exercises_completed / obj.total_exercises) * 100, 1)
+        # Clamped. The inputs are derived now, but a percentage is a percentage: a
+        # stale or hand-repaired row must not render as 4950% on a trainer's screen.
+        return round(max(0.0, min(100.0, (obj.exercises_completed / obj.total_exercises) * 100)), 1)
     
     def get_exercises_summary(self, obj):
         """Get summary of exercises for this day with optimized queries."""
@@ -511,6 +521,67 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
                 _("You cannot log sets against another user's progress.")
             )
         return value
+
+    #: The same bounds `bulk-create` enforces (routine/views.py). They were applied on
+    #: that route only, so the plain `POST /set-logs/` route — same table, same
+    #: aggregates — accepted `weight=-500`, which reported a volume of -5,000 and a
+    #: one-rep max of -666.7, and turned a client's weekly volume negative.
+    MAX_WEIGHT_KG = 1000
+    MAX_REPS = 1000
+
+    def validate_weight(self, value):
+        if value is None:
+            return value
+        if value < 0 or value > self.MAX_WEIGHT_KG:
+            raise serializers.ValidationError(
+                _("Weight must be between 0 and %(max)d kg.") % {"max": self.MAX_WEIGHT_KG})
+        return value
+
+    def validate_reps(self, value):
+        if value is None:
+            return value
+        if value < 0 or value > self.MAX_REPS:
+            raise serializers.ValidationError(
+                _("Reps must be between 0 and %(max)d.") % {"max": self.MAX_REPS})
+        return value
+
+    def validate_workout_session(self, value):
+        """The session has to be one the caller may write to.
+
+        `user_exercise_progress` was guarded and this field was not — a bare
+        `PrimaryKeyRelatedField` over every session in the table. Session ids are
+        sequential, and every reader (`WorkoutSessionDetailSerializer`, the trainer's
+        client-progress screen, the roster's recent activity) aggregates a session's
+        `set_logs` without re-checking whose progress each log belongs to. So a stranger
+        could post onto another client's session and the trainer watched that client's
+        volume go from 500 kg to 100,500 kg, with an exercise they never performed
+        appearing in their activity list.
+        """
+        if value is None:
+            return value
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            raise serializers.ValidationError(_("Authentication required."))
+        from routine.permissions import can_access_user_data
+        if not can_access_user_data(request.user, value.user_id):
+            raise serializers.ValidationError(
+                _("You cannot log sets against another user's session.")
+            )
+        return value
+
+    def validate(self, attrs):
+        """A set log belongs to ONE person: the session and the progress must agree."""
+        attrs = super().validate(attrs)
+        progress = attrs.get('user_exercise_progress') or getattr(
+            self.instance, 'user_exercise_progress', None)
+        session = attrs.get('workout_session') or getattr(
+            self.instance, 'workout_session', None)
+        if progress is not None and session is not None and (
+                progress.user_id != session.user_id):
+            raise serializers.ValidationError(
+                _("That session and that progress record belong to different users.")
+            )
+        return attrs
 
     class Meta:
         model = ExerciseSetLog
@@ -758,10 +829,38 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
 class WorkoutSessionSerializer(serializers.ModelSerializer):
     duration = serializers.SerializerMethodField()
 
+    #: The longest a single session may be recorded as. Generous — an all-day event is
+    #: twelve hours — but finite, which is the point.
+    MAX_SESSION_SECONDS = 12 * 3600
+
     class Meta:
         model = WorkoutSession
-        fields = ['id', 'user', 'routine', 'start_time', 'end_time', 'status', 'duration']
+        fields = ['id', 'user', 'routine', 'day', 'start_time', 'end_time', 'status',
+                  'duration']
         read_only_fields = ['id', 'user', 'start_time', 'duration']
+
+    def validate_end_time(self, value):
+        """A workout ends after it starts, and lasts a plausible length of time.
+
+        `start_time` is `auto_now_add` so only one side of the interval was trusted, and
+        nothing compared them: an end three days BEFORE the start was accepted and
+        reported a duration of -259,199 seconds, and one 400 days after gave 34,560,000.
+        The seven-day activity chart sums these, so a single call turned a bar negative
+        or into 9,600 hours, and `intensity_score` divides volume by it.
+        """
+        if value is None:
+            return value
+        start = getattr(self.instance, 'start_time', None)
+        if start is None:
+            return value
+        if value < start:
+            raise serializers.ValidationError(
+                _("A workout cannot end before it started."))
+        if (value - start).total_seconds() > self.MAX_SESSION_SECONDS:
+            raise serializers.ValidationError(
+                _("A workout cannot last longer than %(hours)d hours.")
+                % {"hours": self.MAX_SESSION_SECONDS // 3600})
+        return value
 
     def validate_routine(self, routine):
         """A session belongs to a routine you were given or wrote.
@@ -1049,7 +1148,12 @@ class DetailedClientProgressSerializer(serializers.ModelSerializer):
         from datetime import timedelta
         
         # This week (last 7 days)
-        week_ago = timezone.localdate() - timedelta(days=7)
+        # SIX, not seven. Combined with the `__gte` below this window is inclusive on both
+        # ends, so `days=7` counted EIGHT calendar dates: the trainer's roster and the
+        # detailed progress screen both reported 8 sessions for a week in which the
+        # client trained 7 times, while `AnalyticsViewSet.summary` — which uses
+        # `days_in_period - 1` — reported 7 for the same data.
+        week_ago = timezone.localdate() - timedelta(days=6)
         week_sessions = WorkoutSession.objects.filter(
             user=client,
             status='completed',
@@ -1142,7 +1246,12 @@ class RecentActivitySerializer(serializers.ModelSerializer):
         if not ids:
             return collected
 
-        week_ago = timezone.localdate() - timedelta(days=7)
+        # SIX, not seven. Combined with the `__gte` below this window is inclusive on both
+        # ends, so `days=7` counted EIGHT calendar dates: the trainer's roster and the
+        # detailed progress screen both reported 8 sessions for a week in which the
+        # client trained 7 times, while `AnalyticsViewSet.summary` — which uses
+        # `days_in_period - 1` — reported 7 for the same data.
+        week_ago = timezone.localdate() - timedelta(days=6)
 
         # The most recent completed session per user: one query for the ids, one for the
         # rows, rather than a `.first()` per user.

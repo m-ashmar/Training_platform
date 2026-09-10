@@ -1,4 +1,5 @@
 from django.db import models, transaction, connection
+from django.db.models import Q
 from django.conf import settings
 from django.utils import timezone
 from django.core.validators import MinValueValidator
@@ -64,6 +65,18 @@ class AgentAPIKey(models.Model):
         ]
 
 
+def _platform_currency():
+    """The platform's currency, read per row rather than frozen at import.
+
+    A callable, not `settings.PLATFORM_CURRENCY` evaluated at class-definition time:
+    a module-level read is captured once when the class is first loaded, so it would
+    stop tracking the setting — the same defect `preferred_timezone` had.
+    """
+    from django.conf import settings
+
+    return getattr(settings, "PLATFORM_CURRENCY", "SYP")
+
+
 class Wallet(models.Model):
     OWNER_TYPES = [
         ("client", "Client"),
@@ -74,7 +87,11 @@ class Wallet(models.Model):
     owner = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="wallet")
     owner_type = models.CharField(max_length=16, choices=OWNER_TYPES)
     balance = models.DecimalField(max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
-    currency = models.CharField(max_length=8, default="USD")
+    #: The platform's one currency, from settings — never a hardcoded literal. This
+    #: read `default="USD"` while every plan and payment is SYP, and nothing anywhere
+    #: set it from the plan, so a 5,000 SYP payment minted 5,000 "USD" into the wallet
+    #: and paid the trainer that. See settings_base.PLATFORM_CURRENCY.
+    currency = models.CharField(max_length=8, default=_platform_currency)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -251,7 +268,43 @@ class AlreadyReversed(Exception):
         super().__init__(f"{reference_id} has already been reversed")
 
 
-def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount, actor_id=None, tx_type="transfer", metadata=None, reverses=None) -> Transaction:
+def wallet_for(owner, owner_type: str, currency: str | None = None) -> "Wallet":
+    """The owner's wallet, in the currency the money is actually arriving in.
+
+    `SubscriptionPlan` supports SYP and USD, and `Wallet.currency` was a hardcoded
+    `default="USD"` that nothing ever set from the plan. Since the currency guard in
+    `move_funds_atomic` only ran when there were two wallets, the mint leg of a payment
+    never checked at all: a 5,000 SYP subscription credited a wallet labelled USD at 1:1
+    and paid the trainer 5,000 "USD". The ledger reconciled the whole way, because the
+    arithmetic was right and only the unit was wrong.
+
+    A wallet that has never held money has no currency of its own yet, so the first
+    payment to fund it decides. Once it holds a balance or has a single transaction leg,
+    its currency is a fact: a payment in a different one is refused by the caller rather
+    than silently converted, because this system has no FX rate and is not meant to.
+    """
+    from django.db import transaction as _transaction
+
+    with _transaction.atomic():
+        wallet, created = Wallet.objects.get_or_create(
+            owner=owner,
+            defaults={"owner_type": owner_type,
+                      **({"currency": currency} if currency else {})},
+        )
+        if created or not currency or wallet.currency == currency:
+            return wallet
+
+        untouched = (wallet.balance == 0 and not Transaction.objects.filter(
+            Q(source_wallet=wallet) | Q(destination_wallet=wallet)).exists())
+        if untouched:
+            wallet.currency = currency
+            wallet.save(update_fields=["currency"])
+        return wallet
+
+
+def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
+                      actor_id=None, tx_type="transfer", metadata=None, reverses=None,
+                      currency: str | None = None) -> Transaction:
     """
     Atomically move funds between wallets. If source is None, it's a credit (e.g., top-up).
     If destination is None, it's a debit. Creates a Transaction record on success.
@@ -261,12 +314,19 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
 
     metadata = metadata or {}
 
-    if source and destination and source.currency != destination.currency:
-        # No FX rate exists in this system; moving the raw amount between wallets of
-        # different currencies would silently transfer at 1:1.
-        raise ValueError(
-            f"Currency mismatch: {source.currency} -> {destination.currency}"
-        )
+    # EVERY wallet involved, and the currency the caller says the money is in. The
+    # check used to be `if source and destination`, so the mint leg of a payment — which
+    # passes `source=None` — was never checked at all: a SYP payment was credited into a
+    # wallet labelled USD at 1:1 and the trainer was paid that. `currency` is optional so
+    # existing internal callers keep working, but when it is given it is authoritative.
+    wallets = [w for w in (source, destination) if w]
+    currencies = {w.currency for w in wallets}
+    if currency:
+        currencies.add(currency)
+    if len(currencies) > 1:
+        # No FX rate exists in this system; moving the raw amount between different
+        # currencies would silently transfer at 1:1.
+        raise ValueError(f"Currency mismatch: {sorted(currencies)}")
 
     with transaction.atomic():
         # Lock every wallet involved in ONE deterministic order (ascending id) before

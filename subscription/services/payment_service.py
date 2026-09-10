@@ -134,7 +134,31 @@ class PaymentService:
         return payment
 
     @classmethod
-    def refund_payment(cls, payment_id, reason: str = "") -> Payment:
+    def cancel_payment(cls, payment_id, reason: str = "") -> Payment:
+        """A payment that was never taken. Legal from pending/processing.
+
+        `cancelled` has been a declared transition from `pending` since the state machine
+        was written and no service method implemented it, while the webhook classified
+        `cancelled`/`canceled`/`voided` as REFUNDS — and a refund is only legal from
+        `completed`. So the most common gateway event of all, a customer opening the
+        payment page and walking away, was answered 400 and redelivered for ever against
+        a row that could never leave `pending`.
+        """
+        with transaction.atomic():
+            payment = Payment.objects.select_for_update().get(id=payment_id)
+            if payment.status == 'cancelled':
+                return payment
+            if not payment.can_transition_to('cancelled'):
+                raise InvalidPaymentTransition(
+                    f"Payment {payment.id} cannot go {payment.status} -> cancelled")
+            payment.status = 'cancelled'
+            payment.gateway_error = (reason or 'Cancelled at the gateway')[:2000]
+            payment.save()
+            logger.info("Payment %s cancelled (%s)", payment.id, reason or 'no reason')
+        return payment
+
+    @classmethod
+    def refund_payment(cls, payment_id, reason: str = "", gateway_data: dict | None = None) -> Payment:
         """Move a completed payment to refunded and take back what it paid for.
 
         Nothing could reach this state. `PAYMENT_STATUS_TRANSITIONS` has declared
@@ -160,6 +184,15 @@ class PaymentService:
                 raise InvalidPaymentTransition(
                     f"Payment {payment.id} cannot go {payment.status} -> refunded"
                 )
+
+            # The same verification the completion path does. This branch did NONE, so a
+            # signed webhook claiming 1.00 USD against a 5,000.00 SYP payment revoked the
+            # whole subscription and unwound the whole ledger — and nothing checked a
+            # refund was not for MORE than the payment was worth, because nothing checked
+            # the number at all. A partial refund is refused rather than silently treated
+            # as a full one: this system can only give back what it took.
+            if gateway_data:
+                cls._verify_amount_and_currency(payment, gateway_data)
 
             payment.status = 'refunded'
             if reason:
@@ -247,21 +280,33 @@ class PaymentService:
         if subscription.status not in ('active', 'expired'):
             raise PaymentError("Subscription is not in a renewable state")
 
-        # One renewal in flight at a time. Nothing stopped a retried task or a
-        # double-tapped button from opening several, and every one of them could be
-        # completed and charged: a probe opened six and the subscription took 180 days.
-        existing = Payment.objects.filter(
-            subscription=subscription,
-            status__in=('pending', 'processing', 'authorized'),
-            metadata__kind='renewal',
-        ).first()
-        if existing:
-            logger.info(
-                "Renewal already pending for subscription %s (payment %s)",
-                subscription.id, existing.id,
-            )
-            return existing
+        # One renewal in flight at a time, and the check has to hold under concurrency.
+        # It was a `.filter(...).first()` followed by a `.create(...)` with no lock, so
+        # two real threads both found nothing and both opened one: a double-tapped Renew
+        # button charged 10,000 SYP for a 5,000 SYP plan and granted 60 days. Both
+        # charges then cleared verification, because both were legitimate.
+        #
+        # The subscription row is the lock, because it is what "a renewal for this
+        # subscription" is scoped to, and the whole check-and-create happens under it.
+        with transaction.atomic():
+            Subscription.objects.select_for_update().filter(pk=subscription.pk).first()
 
+            existing = Payment.objects.filter(
+                subscription=subscription,
+                status__in=('pending', 'processing', 'authorized'),
+                metadata__kind='renewal',
+            ).first()
+            if existing:
+                logger.info(
+                    "Renewal already pending for subscription %s (payment %s)",
+                    subscription.id, existing.id,
+                )
+                return existing
+
+            return cls._create_renewal_payment(subscription)
+
+    @classmethod
+    def _create_renewal_payment(cls, subscription: Subscription) -> Payment:
         return Payment.objects.create(
             subscription=subscription,
             amount=subscription.plan.price,

@@ -220,8 +220,32 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
 
             gateway_name = request.data.get('gateway', 'shamcash')
+
+            # A renewal already in flight keeps the reference the customer was given.
+            # `start_renewal` deliberately returns the EXISTING pending payment, and
+            # this then generated a fresh reference, opened a SECOND live session at the
+            # gateway, and wrote the new reference over the old one — which is unique, so
+            # the first was destroyed rather than kept as an alias. The customer pays
+            # against the instructions from their first tap, the webhook carrying that
+            # reference matches nothing, and the platform banks the money and grants
+            # nothing.
+            if payment.gateway_transaction_reference:
+                logger.info("Renewal %s already initiated; returning its reference",
+                            payment.id)
+                resp = payment.gateway_response or {}
+                return Response({
+                    'message': _('A renewal payment is already awaiting completion.'),
+                    'payment_id': str(payment.id),
+                    'reference': payment.gateway_transaction_reference,
+                    'status': payment.status,
+                    'payment_url': resp.get('payment_url'),
+                    'instructions': resp.get('instructions'),
+                })
+
             try:
-                gateway_service = PaymentGatewayService(gateway_name)
+                # Through the manager, so an unconfigured gateway refuses instead of
+                # handing out transfer instructions to an empty account.
+                gateway_service = PaymentGatewayManager.get_service_for_initiation(gateway_name)
                 reference = gateway_service._generate_reference()
                 init = gateway_service.initiate_payment(
                     amount=payment.amount,
@@ -504,13 +528,18 @@ class SubscriptionAccessView(APIView):
             )
 
 #: What a gateway can tell us about a payment, and which of them we act on. The
-#: handler is exhaustive: anything outside these three sets is a delivery failure, not
+#: handler is exhaustive: anything outside these four sets is a delivery failure, not
 #: a silent 200.
 SUCCESS_STATUSES = frozenset({'completed', 'success', 'succeeded', 'paid'})
 FAILURE_STATUSES = frozenset({'failed', 'declined', 'error', 'rejected', 'expired'})
+#: Money that was taken and given back. Only legal from `completed`.
 REFUND_STATUSES = frozenset({'refunded', 'refund', 'reversed', 'reversal',
-                             'chargeback', 'charged_back', 'disputed', 'cancelled',
-                             'canceled', 'voided'})
+                             'chargeback', 'charged_back', 'disputed'})
+#: Money that was never taken. `cancelled`/`canceled`/`voided` were in REFUND_STATUSES,
+#: and a refund is only legal from `completed` — so the most common event of all, a
+#: customer opening the payment page and walking away, was answered 400 and redelivered
+#: for ever against a row that could never leave `pending`.
+CANCELLATION_STATUSES = frozenset({'cancelled', 'canceled', 'voided', 'abandoned'})
 
 
 class PaymentWebhookView(APIView):
@@ -550,7 +579,10 @@ class PaymentWebhookView(APIView):
             payload = request.body
             headers = request.headers
             
-            # Initialize gateway service
+            # NOT through the enabled check. A webhook is about money that has ALREADY
+            # moved, so a gateway being switched off for NEW payments must not make us
+            # drop a delivery about an old one — that is the silent-loss failure the
+            # unmatched-reference branch below exists to prevent.
             gateway_service = PaymentGatewayService(gateway_name)
             
             # Verify webhook and extract payment data
@@ -589,8 +621,15 @@ class PaymentWebhookView(APIView):
             gateway_transaction_reference=payment_data['reference']
         ).first()
         if not payment:
-            logger.warning(f"Payment not found for reference: {payment_data['reference']}")
-            return
+            # A FAILED delivery, not a silent 200. This logged and returned, and the
+            # caller answered 200 — which tells the gateway "accepted, stop retrying" —
+            # so every reference mismatch was an unrecoverable, unalerted loss of a
+            # customer's money. The identical reasoning is already applied to an unknown
+            # STATUS below; it was never applied to an unknown reference.
+            logger.error("Payment not found for reference: %s (%s)",
+                         payment_data['reference'], gateway_name)
+            raise PaymentGatewayError(
+                f"No payment matches reference {payment_data['reference']!r}")
 
         gateway_status = str(payment_data.get('status', '')).lower()
         try:
@@ -600,9 +639,23 @@ class PaymentWebhookView(APIView):
             elif gateway_status in FAILURE_STATUSES:
                 PaymentService.fail_payment(payment.id, payment_data.get('error_message', 'Payment failed'))
                 logger.info(f"Webhook marked payment {payment.id} failed")
+            elif gateway_status in CANCELLATION_STATUSES:
+                # An abandoned checkout is not a refund. These words were in
+                # REFUND_STATUSES, and `refund_payment` is only legal from `completed`,
+                # so the single most common gateway event — the customer opens the
+                # payment page and walks away — produced a 400 and an endless
+                # redelivery loop against a row that stayed `pending` for ever.
+                PaymentService.cancel_payment(
+                    payment.id, payment_data.get('error_message', gateway_status))
+                logger.info(f"Webhook cancelled payment {payment.id} via {gateway_name}")
             elif gateway_status in REFUND_STATUSES:
                 PaymentService.refund_payment(
-                    payment.id, payment_data.get('error_message', gateway_status)
+                    payment.id, payment_data.get('error_message', gateway_status),
+                    # The refund path did NO amount or currency verification at all,
+                    # while completion verifies both — so a signed webhook claiming
+                    # 1.00 USD against a 5,000.00 SYP payment revoked the whole
+                    # subscription and unwound the whole ledger.
+                    gateway_data=payment_data,
                 )
                 logger.info(f"Webhook refunded payment {payment.id} via {gateway_name}")
             else:
@@ -763,8 +816,20 @@ class PaymentGatewayView(APIView):
                     status=status.HTTP_409_CONFLICT
                 )
 
-            # Initialize gateway service
-            gateway_service = PaymentGatewayService(gateway_name)
+            # Through the MANAGER, which is the only place the enabled check lives.
+            # Constructing the service directly skipped it, so a deploy missing
+            # SHAMCASH_ACCOUNT_ID answered 200 and told every customer to transfer
+            # 5,000 SYP to account "" — while GET /v1/gateways/ correctly hid the
+            # gateway, so the failure was invisible until customers reported the loss.
+            try:
+                gateway_service = PaymentGatewayManager.get_service_for_initiation(gateway_name)
+            except PaymentGatewayError as e:
+                logger.error("Payment initiation refused: %s", e)
+                return Response(
+                    {'error': _('That payment method is not available right now.'),
+                     'code': 'gateway_unavailable'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
             reference = gateway_service._generate_reference()
 
             # Prepare user data

@@ -754,12 +754,42 @@ class RequestSizeLimitMiddleware:
 
     def __call__(self, request):
         if request.method in ('POST', 'PUT', 'PATCH'):
-            length = request.META.get('CONTENT_LENGTH') or 0
+            raw_length = request.META.get('CONTENT_LENGTH')
             try:
-                length = int(length)
+                length = int(raw_length) if raw_length not in (None, '') else None
             except (TypeError, ValueError):
-                length = 0
-            if length > self.max_bytes:
+                length = None
+
+            # A body with NO declared length is the case this cap missed entirely.
+            # `Transfer-Encoding: chunked` sends no Content-Length, the old code read
+            # that as `0`, and `0 > max_bytes` is never true — so the only body-size
+            # control in the stack (there is no nginx in front of Daphne) was skipped by
+            # setting one header. Django spools the whole body to FILE_UPLOAD_TEMP_DIR
+            # before any middleware or per-file check runs, and in production that is
+            # `/data/tmp` on the same 1 GB volume as all user media: a 400 MB chunked
+            # POST was measured buffering past 368 MB against a 15 MB cap.
+            #
+            # We cannot know a chunked body's size in advance, so we refuse it. Every
+            # client this API has sends a length and nothing here needs streaming.
+            # A missing Content-Length WITHOUT chunked encoding means no body at all
+            # (HTTP says so), which is an ordinary empty POST and must still pass.
+            encoding = (request.META.get('HTTP_TRANSFER_ENCODING') or '').lower()
+            if 'chunked' in encoding:
+                logger.warning(
+                    "Rejected %s %s: chunked body, no declared Content-Length",
+                    request.method, request.path)
+                message = 'A request body must declare its Content-Length.'
+                return JsonResponse(
+                    {
+                        'error': message,
+                        'detail': message,
+                        'code': 'length_required',
+                        'status': 411,
+                    },
+                    status=411,
+                )
+
+            if length is not None and length > self.max_bytes:
                 logger.warning(
                     "Rejected %s %s: body %d bytes exceeds cap %d",
                     request.method, request.path, length, self.max_bytes,
@@ -811,8 +841,14 @@ class AdminLoginThrottleMiddleware(MiddlewareMixin):
         by_ip = hashlib.sha256(f"admin:{ip}".encode()).hexdigest()[:32]
         return [f"rl:admin_login:u:{by_user}", f"rl:admin_login:i:{by_ip}"]
 
+    #: Every admin login page in the product. `/dj-admin/` is a full AdminSite subclass
+    #: authenticating the SAME staff and superuser accounts, and its session is valid on
+    #: both sites — but this matched `/admin/` only, so the throttle added for exactly
+    #: these accounts was defeated by attacking its sibling path.
+    LOGIN_PATHS = ("/admin/login/", "/admin/", "/dj-admin/login/", "/dj-admin/")
+
     def _is_admin_login(self, request):
-        return request.method == "POST" and request.path in ("/admin/login/", "/admin/")
+        return request.method == "POST" and request.path in self.LOGIN_PATHS
 
     def process_request(self, request):
         if not self._is_admin_login(request):
