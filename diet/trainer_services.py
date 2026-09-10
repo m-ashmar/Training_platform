@@ -162,7 +162,8 @@ class TrainerDietPlanService:
         target_date: date,
         food_items: List[Dict[str, Any]],
         scheduled_time: Optional[time] = None,
-        description: str = ""
+        description: str = "",
+        recompute_allergens: bool = True,
     ) -> Meal:
         """
         Add a meal to a diet plan.
@@ -226,7 +227,12 @@ class TrainerDietPlanService:
                 MealComponent(meal=meal, food=food, quantity=grams, meal_time=meal_type)
                 for food, grams in components
             ])
-        self._recompute_allergens(diet_plan)
+        # The batch endpoint passes False and recomputes ONCE at the end. The report is
+        # derived from every component of the whole plan, so doing it per meal made a
+        # hundred-meal batch re-derive it a hundred times — about twelve queries per meal
+        # inside one transaction, two seconds of it, on a small connection budget.
+        if recompute_allergens:
+            self._recompute_allergens(diet_plan)
         return meal
     
     def update_meal(
@@ -441,8 +447,28 @@ class TrainerDietPlanService:
         self._refuse_declared_allergens(items, client)
         return items
 
-    @staticmethod
-    def _refuse_declared_allergens(items, client) -> None:
+    def _allergen_checker_for(self, client):
+        """This client's checker, read from the database once per service instance.
+
+        From the DATABASE, not `client.userfoodpreference`: that reverse accessor caches
+        on the instance at first access, so a caller that had touched it before the
+        allergies were written saw them as they were, and the check silently did nothing.
+        Cached HERE instead, per service, because the bulk endpoint validates up to a
+        hundred meals for the same client in one request.
+        """
+        from diet.services.meal_validator import AllergenChecker
+
+        cache = getattr(self, "_allergen_checkers", None)
+        if cache is None:
+            cache = self._allergen_checkers = {}
+        key = getattr(client, "pk", None)
+        if key not in cache:
+            allergies = (UserFoodPreference.objects.filter(user=client)
+                         .values_list("allergies", flat=True).first())
+            cache[key] = AllergenChecker(allergies)
+        return cache[key]
+
+    def _refuse_declared_allergens(self, items, client) -> None:
         """A trainer may not put a client's declared allergen on their plate.
 
         The generator has checked this since the allergen work landed; the trainer's own
@@ -453,16 +479,14 @@ class TrainerDietPlanService:
         if client is None:
             return
         from diet.allergens import label
-        from diet.services.meal_validator import AllergenChecker, VIOLATION
+        from diet.services.meal_validator import VIOLATION
 
         # Read from the DATABASE, not from the reverse accessor. `client.userfoodpreference`
         # is cached on the instance from the first access, so a caller that touched it
         # before the client edited their allergies — or in the same request that wrote
         # them — got the value as it was, and this check silently did nothing. An
         # allergy check must not depend on when someone last looked.
-        allergies = (UserFoodPreference.objects.filter(user=client)
-                     .values_list("allergies", flat=True).first())
-        checker = AllergenChecker(allergies)
+        checker = self._allergen_checker_for(client)
         if not checker.active:
             return
         refused = [(food, v) for food, _g in items

@@ -5216,7 +5216,9 @@ def test_every_diet_list_endpoint_answers_in_one_shape(seeded_catalogue):
     for url in ("/api/diet/v1/food/list/?page=1",
                 "/api/diet/v1/food/categories/",
                 "/api/diet/v1/food/search/?q=chicken",
-                "/api/diet/v1/my/diet-plans/"):
+                "/api/diet/v1/my/diet-plans/",
+                "/api/diet/v1/client/progress/weekly/",
+                "/api/diet/v1/preferences/food-category/"):
         r = c.get(url)
         assert r.status_code == 200, (url, r.content[:120])
         body = r.json()

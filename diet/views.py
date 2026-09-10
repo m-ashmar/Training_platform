@@ -551,19 +551,22 @@ class UserFoodCategoryPreferenceView(APIView):
             uncategorized_data = [
                 {
                     'food_id': f.id,
-                    'food_name': f.name,
+                    'food_name': name_en_of(f),
+                    'food_name_ar': getattr(f, 'name_ar', None) or name_en_of(f),
                 }
                 for f in uncategorized
             ]
 
-            return Response({
+            # `results` is the mappings — what this endpoint is a list OF — with the old
+            # keys alongside so a client already reading them keeps working.
+            return Response(listing(mapping_data, extra={
                 'mappings': mapping_data,
                 'uncategorized_liked_foods': uncategorized_data,
                 'choices': {
                     'meals': [c[0] for c in UserFoodCategoryPreference.MEAL_CHOICES],
                     'macros': [c[0] for c in UserFoodCategoryPreference.MACRO_CHOICES],
                 }
-            })
+            }))
         except BadInput as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
@@ -1770,7 +1773,9 @@ class TrainerMealView(APIView):
                                 target_date=target_date,
                                 food_items=food_items,
                                 scheduled_time=scheduled_time,
-                                description=meal_data.get('description', '')
+                                description=meal_data.get('description', ''),
+                                # Once, below, for each plan the batch touched.
+                                recompute_allergens=False,
                             )
                             created_meals.append({
                                 'id': meal.id,
@@ -1780,6 +1785,8 @@ class TrainerMealView(APIView):
                                 'description': meal.description,
                                 'components_count': len(meal_data.get('food_items') or []),
                             })
+                    for plan in plans.values():
+                        TrainerDietPlanService._recompute_allergens(plan)
                 except _Refuse as refusal:
                     return refusal.response
                 return Response({
@@ -2542,10 +2549,14 @@ class ClientWeeklyProgressView(APIView):
             client_service = ClientProgressService(request.user)
             week_progress = client_service.get_weekly_progress(start_date)
             
-            return Response({
+            # The one list shape the contract promises, with the old keys alongside so a
+            # client already reading `week_progress` keeps working. This answered
+            # `{week_progress, total_days}` and nothing else, so a caller reading `count`
+            # and `results` — as it does for every other list — got null.
+            return Response(listing(week_progress, extra={
                 'week_progress': week_progress,
-                'total_days': len(week_progress)
-            })
+                'total_days': len(week_progress),
+            }))
             
         except PASSTHROUGH_EXCEPTIONS:
             # 404/403/401 carry their own status. Flattening them into a 400
