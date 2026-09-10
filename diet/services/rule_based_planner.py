@@ -6,6 +6,8 @@ import logging
 from typing import Dict, List, Tuple, Set
 from dataclasses import dataclass, field
 
+from datetime import date as _dt_date, datetime as _dt_datetime
+
 from django.utils import timezone
 from django.conf import settings
 import random
@@ -24,6 +26,27 @@ from ..utils.nutrition import (
 from ..utils.logging_utils import safe_json_log
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_date(value):
+    """A `date` from a date, a datetime, an ISO string, or None.
+
+    The planner's `start_date` was typed `str | None` and parsed with
+    `date.fromisoformat`, which raises `TypeError` on a real `date` object. Every HTTP
+    caller happened to re-serialise, so the narrowness was invisible until something
+    else called it. Anything unparseable is a ValueError naming the parameter, not a
+    TypeError from inside the planner.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, _dt_datetime):
+        return value.date()
+    if isinstance(value, _dt_date):
+        return value
+    try:
+        return _dt_date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        raise ValueError(f"start_date must be a date or an ISO date string, got {value!r}")
 
 
 @dataclass
@@ -193,7 +216,7 @@ class RuleBasedPlanner:
         daily_kcal: float,
         meal_count: int = 3,
         snack_count: int = 1,
-        start_date: str | None = None,
+        start_date: "str | _dt_date | None" = None,
         duration_days: int = 1,
         no_repeat_days: int = 3,
     ) -> DietPlanOutput:
@@ -203,7 +226,12 @@ class RuleBasedPlanner:
         # BUG FIX: Validate inputs before processing
         validate_diet_generation(daily_kcal, meal_count, duration_days)
 
-        base_date = _date.fromisoformat(start_date) if start_date else timezone.localdate()
+        # A date, an ISO string, or nothing. This accepted ONLY a string, because the
+        # one caller that existed parsed the request and re-serialised it — so any other
+        # caller holding a real `date` (the Celery task, a management command, a future
+        # service) got `TypeError: fromisoformat: argument must be str`, which is a 500
+        # for what is a correct call. Normalise at the boundary and say so in the type.
+        base_date = _coerce_date(start_date) or timezone.localdate()
         meals = ["Breakfast", "Lunch", "Dinner"][:meal_count]
 
         # Allowed foods per meal/macro (static per user)

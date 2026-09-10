@@ -40,6 +40,7 @@ from rest_framework.views import exception_handler as drf_exception_handler
 # Re-exported so `from training_platform.exception_handler import PASSTHROUGH_EXCEPTIONS`
 # also works; the definition lives in api_exceptions to keep it importable early.
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS  # noqa: F401
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import Http404
 
 
@@ -148,8 +149,36 @@ def _client_input_error(exc, context):
     return None
 
 
+def _as_drf_validation_error(exc):
+    """Django's own ValidationError, rendered as the 400 it always meant.
+
+    Services in this project raise `django.core.exceptions.ValidationError` with a
+    `code` to say "this is the caller's mistake, here is which one". DRF does not know
+    that class, so it fell through to the unhandled path and every view had to catch it
+    by hand — and seven client-facing diet views never did, so a bad `actual_quantity`,
+    a meal type that is not a meal type and a date outside the plan all reached the user
+    as 500s. Translating it once here means a view that simply lets it propagate is
+    correct by default.
+    """
+    if not isinstance(exc, DjangoValidationError):
+        return None
+    detail = getattr(exc, "messages", None) or [str(exc)]
+    code = getattr(exc, "code", None)
+    if hasattr(exc, "error_dict"):
+        drf = exceptions.ValidationError(
+            {field: [str(e) for e in errors]
+             for field, errors in exc.message_dict.items()})
+    else:
+        drf = exceptions.ValidationError({NON_FIELD: [str(m) for m in detail]})
+    if isinstance(code, str) and code:
+        # The service's own code survives; it is what the mobile app branches on, and
+        # `validation_error` would tell it nothing it did not already know.
+        drf.service_code = code
+    return drf
+
+
 def api_exception_handler(exc, context):
-    exc = _client_input_error(exc, context) or exc
+    exc = _as_drf_validation_error(exc) or _client_input_error(exc, context) or exc
     response = drf_exception_handler(exc, context)
 
     # None means DRF does not handle it — an unhandled 500. Let it propagate so the
@@ -173,7 +202,7 @@ def api_exception_handler(exc, context):
     }
     code = getattr(exc, "default_code", None) or _BY_STATUS.get(response.status_code, "error")
     if isinstance(exc, exceptions.ValidationError):
-        code = "validation_error"
+        code = getattr(exc, "service_code", None) or "validation_error"
     elif "code" in data and isinstance(data["code"], str):
         # simplejwt already sets a precise one (e.g. "token_not_valid") — keep it.
         code = data["code"]

@@ -1442,6 +1442,15 @@ class DailyAdviceView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
+        except DjangoValidationError as e:
+            # A service saying "this is the caller's mistake", with its own code. Seven
+            # client-facing views let it fall into the broad handler below, so a bad
+            # `actual_quantity`, a meal type that is not one and a date outside the plan
+            # all reached the client as 500s while the trainer views answered 400.
+            refusal = service_refusal(e)
+            if refusal is not None:
+                return refusal
+            raise
         except Exception as e:
             logger.error(f"Daily advice error: {str(e)}")
             return Response(
@@ -1484,8 +1493,13 @@ def _trainer_may_read_plan(trainer, diet_plan) -> bool:
     return True
 
 
-def trainer_refusal(exc):
-    """A Response for a service ValidationError, or None if it is not one of ours."""
+def service_refusal(exc):
+    """A Response for a service ValidationError, or None if it is not one of ours.
+
+    Named `trainer_refusal` while only the trainer views used it. Nothing about it is
+    trainer-specific, and the seven client views that did not call it answered 500 to
+    every service refusal.
+    """
     code = getattr(exc, 'code', None)
     messages = getattr(exc, 'messages', None) or [str(exc)]
     if code in TRAINER_REFUSALS:
@@ -1540,7 +1554,7 @@ class TrainerTemplatesView(APIView):
             # wrong contract for the client and hides real faults in the error budget.
             raise
         except DjangoValidationError as e:
-            refusal = trainer_refusal(e)
+            refusal = service_refusal(e)
             if refusal is not None:
                 return refusal
             raise
@@ -1629,7 +1643,7 @@ class TrainerDietPlanView(APIView):
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
         except DjangoValidationError as e:
-            refusal = trainer_refusal(e)
+            refusal = service_refusal(e)
             if refusal is not None:
                 return refusal
             raise
@@ -1690,7 +1704,7 @@ class TrainerDietPlanView(APIView):
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
         except DjangoValidationError as e:
-            refusal = trainer_refusal(e)
+            refusal = service_refusal(e)
             if refusal is not None:
                 return refusal
             raise
@@ -1870,7 +1884,7 @@ class TrainerMealView(APIView):
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
         except DjangoValidationError as e:
-            refusal = trainer_refusal(e)
+            refusal = service_refusal(e)
             if refusal is not None:
                 return refusal
             raise
@@ -1946,7 +1960,7 @@ class TrainerMealView(APIView):
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
         except DjangoValidationError as e:
-            refusal = trainer_refusal(e)
+            refusal = service_refusal(e)
             if refusal is not None:
                 return refusal
             raise
@@ -1994,7 +2008,7 @@ class TrainerMealView(APIView):
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
         except DjangoValidationError as e:
-            refusal = trainer_refusal(e)
+            refusal = service_refusal(e)
             if refusal is not None:
                 return refusal
             raise
@@ -2378,6 +2392,15 @@ class EnhancedClientProgressView(APIView):
             # meant the app could not tell a refusal from a server fault, and
             # real faults never entered the error budget.
             raise
+        except DjangoValidationError as e:
+            # A service saying "this is the caller's mistake", with its own code. Seven
+            # client-facing views let it fall into the broad handler below, so a bad
+            # `actual_quantity`, a meal type that is not one and a date outside the plan
+            # all reached the client as 500s while the trainer views answered 400.
+            refusal = service_refusal(e)
+            if refusal is not None:
+                return refusal
+            raise
         except Exception as e:
             logger.error(f"Enhanced client progress error: {str(e)}")
             return Response(
@@ -2441,7 +2464,12 @@ class MealCompletionView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
-                component = get_object_or_404(MealComponent, id=component_id, meal=meal)
+                # `_id(...)`, like the sibling endpoint below. This one took the raw
+                # value, so `component_id: "abc"` was a ValueError and a 500 here while
+                # the identical action on /meals/interact/ answered 400.
+                component = get_object_or_404(MealComponent,
+                                              id=_id(component_id, 'component_id'),
+                                              meal=meal)
                 client_service = ClientProgressService(request.user)
                 updated_component = client_service.complete_meal_component(component, actual_quantity)
                 
@@ -2468,6 +2496,15 @@ class MealCompletionView(APIView):
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
+            raise
+        except DjangoValidationError as e:
+            # A service saying "this is the caller's mistake", with its own code. Seven
+            # client-facing views let it fall into the broad handler below, so a bad
+            # `actual_quantity`, a meal type that is not one and a date outside the plan
+            # all reached the client as 500s while the trainer views answered 400.
+            refusal = service_refusal(e)
+            if refusal is not None:
+                return refusal
             raise
         except Exception as e:
             logger.error(f"Meal completion error: {str(e)}")
@@ -2518,6 +2555,15 @@ class ClientProgressView(APIView):
             # 404/403/401 carry their own status. Flattening them into a 400
             # meant the app could not tell a refusal from a server fault, and
             # real faults never entered the error budget.
+            raise
+        except DjangoValidationError as e:
+            # A service saying "this is the caller's mistake", with its own code. Seven
+            # client-facing views let it fall into the broad handler below, so a bad
+            # `actual_quantity`, a meal type that is not one and a date outside the plan
+            # all reached the client as 500s while the trainer views answered 400.
+            refusal = service_refusal(e)
+            if refusal is not None:
+                return refusal
             raise
         except Exception as e:
             logger.error(f"Client progress error: {str(e)}")
@@ -2571,6 +2617,15 @@ class ClientWeeklyProgressView(APIView):
             # 404/403/401 carry their own status. Flattening them into a 400
             # meant the app could not tell a refusal from a server fault, and
             # real faults never entered the error budget.
+            raise
+        except DjangoValidationError as e:
+            # A service saying "this is the caller's mistake", with its own code. Seven
+            # client-facing views let it fall into the broad handler below, so a bad
+            # `actual_quantity`, a meal type that is not one and a date outside the plan
+            # all reached the client as 500s while the trainer views answered 400.
+            refusal = service_refusal(e)
+            if refusal is not None:
+                return refusal
             raise
         except Exception as e:
             logger.error(f"Client weekly progress error: {str(e)}")
@@ -2760,6 +2815,15 @@ class ClientMealInteractionView(APIView):
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
+        except DjangoValidationError as e:
+            # A service saying "this is the caller's mistake", with its own code. Seven
+            # client-facing views let it fall into the broad handler below, so a bad
+            # `actual_quantity`, a meal type that is not one and a date outside the plan
+            # all reached the client as 500s while the trainer views answered 400.
+            refusal = service_refusal(e)
+            if refusal is not None:
+                return refusal
+            raise
         except Exception as e:
             logger.error(f"Client meal interaction error: {str(e)}")
             return Response(
@@ -2798,6 +2862,15 @@ class ClientMealDetailsView(APIView):
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
+            raise
+        except DjangoValidationError as e:
+            # A service saying "this is the caller's mistake", with its own code. Seven
+            # client-facing views let it fall into the broad handler below, so a bad
+            # `actual_quantity`, a meal type that is not one and a date outside the plan
+            # all reached the client as 500s while the trainer views answered 400.
+            refusal = service_refusal(e)
+            if refusal is not None:
+                return refusal
             raise
         except Exception as e:
             logger.error(f"Client meal details error: {str(e)}")

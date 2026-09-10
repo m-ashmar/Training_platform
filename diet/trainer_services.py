@@ -98,7 +98,11 @@ class TrainerDietPlanService:
             raise ValidationError(_("duration_weeks must be between 1 and 52"),
                                   code="bad_duration")
 
-        end_date = start_date + timedelta(weeks=duration_weeks)
+        # INCLUSIVE, matching `DietPlan.end_date` and the engine. `start + weeks` made a
+        # "4 week" plan span 29 days: the trainer got a day they did not ask for,
+        # `add_meal_to_plan` accepted a meal on it, and two back-to-back four-week plans
+        # overlapped on one day, so creating the second silently superseded the first.
+        end_date = start_date + timedelta(weeks=duration_weeks) - timedelta(days=1)
         resolved_goal = DietPlan.normalise_goal(goal)
 
         # The same macro split the deterministic planner builds to. A trainer plan
@@ -581,7 +585,32 @@ class ClientProgressService:
         # Validate client owns this component
         if component.meal.diet_plan.user != self.client:
             raise ValidationError(_("You can only complete your own meal components"), code="not_component_owner")
-        
+
+        # And validate the AMOUNT. This came straight from a request body into the
+        # client's own progress figures and into the planner's learned weights, with
+        # nothing between: `actual_quantity: -500` was accepted with a 200 and stored,
+        # and so was 1,000,000,000, and `"abc"` was a 500. Every other numeric input in
+        # this app goes through DietInputValidator; this one was missed because it is
+        # optional. Zero is a real answer — "I had none of it".
+        if actual_quantity is not None:
+            if isinstance(actual_quantity, bool):
+                raise ValidationError(_("actual_quantity must be a number"),
+                                      code="bad_actual_quantity")
+            try:
+                actual_quantity = float(actual_quantity)
+            except (TypeError, ValueError):
+                raise ValidationError(_("actual_quantity must be a number"),
+                                      code="bad_actual_quantity")
+            if actual_quantity != actual_quantity or actual_quantity in (
+                    float("inf"), float("-inf")):
+                raise ValidationError(_("actual_quantity must be a number"),
+                                      code="bad_actual_quantity")
+            if not (0 <= actual_quantity <= DietInputValidator.MAX_QUANTITY):
+                raise ValidationError(
+                    _("actual_quantity must be between 0 and %(hi)d grams")
+                    % {"hi": int(DietInputValidator.MAX_QUANTITY)},
+                    code="bad_actual_quantity")
+
         component.complete(actual_quantity)
         return component
     

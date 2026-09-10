@@ -14,6 +14,11 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 import logging
 from training_platform.model_validation import RowValidationMixin
 
+#: The largest amount of one food we will record on a plate or as eaten, in grams.
+#: The same number `DietInputValidator.MAX_QUANTITY` enforces at the API boundary,
+#: named here so the database and the validator cannot drift apart.
+MAX_PORTION_GRAMS = 1000.0
+
 logger = logging.getLogger(__name__)
 
 class FoodCategory(models.Model):
@@ -623,6 +628,14 @@ class DietPlan(RowValidationMixin, models.Model):
                             getattr(self.user, "weight", None))
         return {"protein": d["protein"], "carbs": d["carb"], "fat": d["fat"]}
     start_date = models.DateField()
+    #: INCLUSIVE: the last day the plan covers. A 7-day plan starting on the 1st ends
+    #: on the 7th, not the 8th. The column carried no stated meaning and its four
+    #: readers and writers each picked one: the engine wrote `start + days - 1`
+    #: (inclusive), the trainer path wrote `start + weeks` (exclusive, so a "4 week"
+    #: plan spanned 29 days and accepted a meal on the 29th), `admin` counted
+    #: `(end - start).days + 1` (inclusive) and `period` below counted without the +1
+    #: (exclusive, so a 7-day engine plan reported itself as "daily"). One convention,
+    #: written down, and a gate test that pins both writers to it.
     end_date = models.DateField(db_index=True)
     duration_weeks = models.PositiveIntegerField(default=4)
     generated_plan = models.JSONField(null=True, blank=True)
@@ -703,7 +716,9 @@ class DietPlan(RowValidationMixin, models.Model):
         """
         Smart period detection for the plan.
         """
-        days = (self.end_date - self.start_date).days
+        # `+ 1` because end_date is INCLUSIVE (see the field). Without it a 7-day plan
+        # measured 6 and fell through to 'daily'.
+        days = (self.end_date - self.start_date).days + 1
         return 'weekly' if days == 7 else 'monthly' if days > 14 else 'daily'
     
     @property
@@ -780,7 +795,7 @@ class DietPlan(RowValidationMixin, models.Model):
         self.validate_row()
         super().save(*args, **kwargs)
 
-class Meal(models.Model):
+class Meal(RowValidationMixin, models.Model):
     """
     Represents a meal within a diet plan, including template, date, and description.
     Enhanced with scheduling and completion tracking.
@@ -870,7 +885,35 @@ class Meal(models.Model):
             models.Index(fields=['is_completed']),
             models.Index(fields=['diet_plan', 'date']),
         ]
-    
+
+    def clean(self):
+        """A meal belongs to a day its plan actually covers.
+
+        The rule existed in exactly one place — `TrainerDietPlanService.add_meal_to_plan`
+        — so every other writer could put a meal outside its own plan's window, and one
+        did: `Meal.objects.create(diet_plan=<a one-day plan>, date=<400 days later>)` is
+        accepted, and the plan then reports five meals for a day that has four. Nothing
+        downstream reads it, because every read filters by date, so it is a row that
+        exists, counts, and can never be shown. A CHECK cannot span two tables, so the
+        model is the enforcement point, and `validate_row()` runs it on every save.
+        """
+        from django.core.exceptions import ValidationError
+
+        super().clean()
+        plan = self.diet_plan if self.diet_plan_id else None
+        if plan and self.date and plan.start_date and plan.end_date:
+            if not (plan.start_date <= self.date <= plan.end_date):
+                raise ValidationError({'date': (
+                    f'{self.date} is outside the plan it belongs to '
+                    f'({plan.start_date} to {plan.end_date}).')})
+
+    def save(self, *args, **kwargs):
+        # `RowValidationMixin` only ADDS `validate_row()`; a model that does not call it
+        # validates nothing. `DietPlan` calls it, `Meal` did not, so `clean()` above was
+        # decoration until this line existed.
+        self.validate_row()
+        super().save(*args, **kwargs)
+
     def calculate_nutrition(self):
         """
         Calculate total nutrition for this meal.
@@ -939,6 +982,12 @@ class MealComponent(models.Model):
     # Completion tracking
     is_completed = models.BooleanField(default=False, help_text="Whether this component was consumed")
     completed_at = models.DateTimeField(null=True, blank=True, help_text="When this component was completed")
+    #: What the client says they actually ate. Unvalidated, this went straight from a
+    #: request body into the number on their own progress screen and into the planner's
+    #: learned weights: `actual_quantity: -500` was accepted with a 200 and stored, and
+    #: so was 1,000,000,000. `quantity` beside it got `> 0` after exactly this bug and
+    #: the reasoning was never carried across the one-line gap to this column.
+    #: Zero is allowed — "I had none of it" is a real answer — negative is not.
     actual_quantity_consumed = models.FloatField(
         null=True, 
         blank=True, 
@@ -1015,6 +1064,13 @@ class MealComponent(models.Model):
             # is already constrained; the numerator was not.
             models.CheckConstraint(condition=models.Q(quantity__gt=0),
                                    name='a_portion_is_a_positive_amount'),
+            # See the field comment: the client's own "how much did you eat" was the
+            # one numeric input in the diet app with no bound anywhere.
+            models.CheckConstraint(
+                condition=(models.Q(actual_quantity_consumed__isnull=True)
+                           | models.Q(actual_quantity_consumed__gte=0,
+                                      actual_quantity_consumed__lte=MAX_PORTION_GRAMS)),
+                name='consumed_amount_is_a_real_amount'),
         ]
 
 class DailyProgress(models.Model):

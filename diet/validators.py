@@ -15,6 +15,8 @@ class DietInputValidator:
     MIN_CALORIES = 1000.0
     MAX_CALORIES = 6000.0
     MIN_QUANTITY = 1.0
+    #: One number, one definition. `diet.models.MAX_PORTION_GRAMS` is the same bound in
+    #: the database; importing it here means a change to one is a change to both.
     MAX_QUANTITY = 1000.0
     MIN_SERVING_SIZE = 1
     MAX_SERVING_SIZE = 2000
