@@ -1,3 +1,5 @@
+import datetime
+
 from django.db import transaction
 from django.db.models import Sum, Q
 from django.conf import settings
@@ -74,8 +76,24 @@ def _topup_limit_error(agent_profile, actor, amount, request):
     """
     today = timezone.localdate()
     month_start = today.replace(day=1)
-    day_total = Transaction.objects.filter(actor=actor, tx_type="topup", created_at__date=today).aggregate(Sum("amount"))["amount__sum"] or 0
-    month_total = Transaction.objects.filter(actor=actor, tx_type="topup", created_at__date__gte=month_start).aggregate(Sum("amount"))["amount__sum"] or 0
+    # RANGES on the column, not a function of it. `created_at__date=` compiles to
+    # `(created_at AT TIME ZONE 'Asia/Damascus')::date = ...`, which no btree on
+    # `created_at` can serve — so both of these, which run on every top-up, scanned every
+    # row the agent had ever written: one agent with 10,000 ledger rows read all 10,000
+    # to find 500, and the scan never resets, so it gets slower for the agent's whole
+    # lifetime. A half-open range over the same instants uses `tx_actor_type_time_idx`.
+    day_start = timezone.make_aware(
+        datetime.datetime.combine(today, datetime.time.min))
+    tomorrow = day_start + datetime.timedelta(days=1)
+    month_from = timezone.make_aware(
+        datetime.datetime.combine(month_start, datetime.time.min))
+    day_total = Transaction.objects.filter(
+        actor=actor, tx_type="topup",
+        created_at__gte=day_start, created_at__lt=tomorrow,
+    ).aggregate(Sum("amount"))["amount__sum"] or 0
+    month_total = Transaction.objects.filter(
+        actor=actor, tx_type="topup", created_at__gte=month_from,
+    ).aggregate(Sum("amount"))["amount__sum"] or 0
     if day_total + amount > agent_profile.daily_limit:
         audit("wallet.topup.limit_block", request, {"scope": "daily", "attempt": float(amount), "used": float(day_total)})
         return Response({"error": _("Daily limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)

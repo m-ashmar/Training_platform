@@ -184,8 +184,26 @@ class Transaction(models.Model):
         # paging repeated and hid rows whenever two records shared the value.
         ordering = ["-created_at", '-id']
         indexes = [
-            models.Index(fields=["reference_id"]),
+            # No `Index(fields=["reference_id"])`: the column is already `unique=True`,
+            # so this was a second btree on the same column of the hottest write table
+            # in the app.
             models.Index(fields=["tx_type", "created_at"]),
+            # The ledger screen filters `source_wallet = w OR destination_wallet = w`
+            # and sorts by `(-created_at, -id)`. Single-column FK indexes cannot serve
+            # that OR combined with that sort, so the planner walked `created_at`
+            # backwards over the WHOLE table: measured on 500,000 rows, a wallet with no
+            # transactions at all took 207 ms and read every row to return zero. One
+            # composite per side lets each half of the union use its own index — the
+            # same query then costs 0.4 ms and reads nine pages.
+            models.Index(fields=["source_wallet", "-created_at", "-id"],
+                         name="tx_source_recent_idx"),
+            models.Index(fields=["destination_wallet", "-created_at", "-id"],
+                         name="tx_destination_recent_idx"),
+            # The agent top-up cap counts one actor's top-ups in a window, twice per
+            # top-up, and had only the plain `actor_id` index to work with: one agent
+            # with 10,000 ledger rows scanned 10,000 to find 500.
+            models.Index(fields=["actor", "tx_type", "created_at"],
+                         name="tx_actor_type_time_idx"),
         ]
 
 

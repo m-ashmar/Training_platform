@@ -7881,3 +7881,35 @@ def test_moving_a_meal_onto_an_occupied_slot_says_so(seeded_catalogue, make_user
     with pytest.raises(_DjangoValidationError) as refusal:
         service.update_meal(first, scheduled_time=_dt.time(16, 0))
     assert getattr(refusal.value, "code", None) == "duplicate_meal"
+
+
+def test_the_ledger_has_indexes_for_the_way_it_is_read():
+    """`wallet_transaction` had `(source_wallet_id)`, `(destination_wallet_id)` and
+    `(created_at)` separately, and the ledger screen filters `source = w OR
+    destination = w` sorted by `(-created_at, -id)` — a shape none of them can serve. The
+    planner walked `created_at` backwards over the WHOLE table: measured on 500,000 rows,
+    a wallet with NO transactions took 207 ms and read every row to return zero, and a
+    new user's first visit to their wallet history did exactly that.
+
+    The agent top-up cap had the same problem from the other direction: it filtered
+    `created_at__date=`, a function of the column that no btree on it can serve, twice
+    per top-up — one agent with 10,000 rows scanned 10,000 to find 500, and the scan
+    never resets."""
+    import inspect
+
+    from wallet.models import Transaction
+    from wallet import views as wallet_views
+
+    names = {index.name for index in Transaction._meta.indexes}
+    assert "tx_source_recent_idx" in names, names
+    assert "tx_destination_recent_idx" in names, names
+    assert "tx_actor_type_time_idx" in names, names
+
+    # And no second btree on a column that is already unique.
+    fields = [tuple(index.fields) for index in Transaction._meta.indexes]
+    assert ("reference_id",) not in fields, fields
+
+    # The cap filters a RANGE, not a function of the column.
+    source = inspect.getsource(wallet_views)
+    code = "\n".join(line.split("#")[0] for line in source.splitlines())
+    assert "created_at__date" not in code, "the top-up cap is non-sargable again"
