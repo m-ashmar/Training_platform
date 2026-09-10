@@ -285,6 +285,11 @@ class ChatService:
             await database_sync_to_async(self.data_collector.log_interaction)(
                 user=user,
                 session=session,
+                # The FK the feedback path filters on. `log_interaction` grew this
+                # parameter specifically to replace a fragile text-prefix join, and no
+                # caller ever passed it — so every row had `message = NULL` and every
+                # thumbs-up matched nothing. `_save_messages` returns the id.
+                message_id=msg_id,
                 user_message=content,
                 ai_response=full_response,
                 tools_called=[tc["name"] for tc in tool_calls_made],

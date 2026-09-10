@@ -24,6 +24,7 @@ class DataCollector:
         tools_called: list,
         tool_results: list,
         message=None,
+        message_id=None,
         response_tokens: int = 0,
         response_latency_ms: int = 0,
     ):
@@ -55,7 +56,11 @@ class DataCollector:
             AITrainingData.objects.create(
                 user=user,
                 session=session,
-                message=message,
+                # Either the instance or its id. The caller has the id, because
+                # `_save_messages` returns one; without this the FK stayed NULL and the
+                # feedback path — which filters on it — matched nothing, for ever.
+                **({"message": message} if message is not None
+                   else {"message_id": message_id}),
                 consented=True,
                 retain_until=timezone.now() + timedelta(days=retention_days),
                 user_context_snapshot=context,

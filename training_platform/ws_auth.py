@@ -47,6 +47,26 @@ def token_from_scope(scope) -> str | None:
     return (token or "").strip() or None
 
 
+def still_authenticated(scope) -> bool:
+    """Is the credential this socket connected with STILL good?
+
+    A WebSocket presents its token exactly once. `ACCESS_TOKEN_LIFETIME` is 60 minutes,
+    but nothing re-reads it, so on this surface it is effectively unbounded: measured
+    with a 5-second token, the socket kept answering seven seconds later, after logging
+    out (which blacklists the refresh token), and after the account was disabled — a
+    banned user kept spending model tokens until they chose to close the app.
+
+    `_check_premium` is already re-run per message, which shows the shape was understood;
+    only entitlement was wired up, not identity. This is the identity half: it re-parses
+    the token (so expiry bites) and re-reads `is_active` (so a suspension bites), which
+    is everything simplejwt can tell us about an access token.
+
+    Runs database queries, so consumers must call it through
+    `channels.db.database_sync_to_async`.
+    """
+    return authenticate_scope(scope) is not None
+
+
 def authenticate_scope(scope):
     """Return the authenticated user for this connection, or None.
 

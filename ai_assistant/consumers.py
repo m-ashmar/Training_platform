@@ -105,6 +105,35 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 }))
             return
 
+        # A well-formed JSON frame is not a well-formed MESSAGE. `json.loads` returns
+        # lists and ints quite legitimately, and `data.get` on either is an
+        # AttributeError — which killed the socket with close code 1011 and no reason,
+        # while the protocol at the top of this class documents an `invalid_input`
+        # error. Seven shapes did it: a list body, an int body, `content` as a number, a
+        # list or null, and `message_id` as a string or a list. Each also wrote a fresh
+        # traceback into the server log, so it was a cheap log flood too.
+        if not isinstance(data, dict):
+            with LanguageContext.for_user(self.user):
+                await self.send(text_data=json.dumps({
+                    "type": "error",
+                    "content": str(_("Expected a JSON object.")),
+                    "code": "invalid_input",
+                }))
+            return
+
+        # The credential is re-checked per message, not only at connect. A socket
+        # presents its token once and then outlives it: logging out did not end the AI
+        # session, and neither did disabling the account.
+        if not await self._still_authenticated():
+            with LanguageContext.for_user(self.user):
+                await self.send(text_data=json.dumps({
+                    "type": "error",
+                    "content": str(_("Your session has expired. Please sign in again.")),
+                    "code": "auth",
+                }))
+            await self.close(code=4001)
+            return
+
         msg_type = data.get("type")
 
         if msg_type == "message":
@@ -121,7 +150,18 @@ class AIChatConsumer(AsyncWebsocketConsumer):
 
     async def _handle_message(self, data):
         """Process a user chat message."""
-        content = data.get("content", "").strip()
+        # `data.get("content", "").strip()` assumed a string. A JSON number, list or null
+        # is a legitimate value and an AttributeError here, which closed the socket.
+        raw_content = data.get("content")
+        if raw_content is not None and not isinstance(raw_content, str):
+            with LanguageContext.for_user(self.user):
+                await self.send(text_data=json.dumps({
+                    "type": "error",
+                    "content": str(_("`content` must be text.")),
+                    "code": "invalid_input",
+                }))
+            return
+        content = (raw_content or "").strip()
         session_id = data.get("session_id")
 
         # All user-facing responses inside LanguageContext
@@ -212,7 +252,15 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 }))
                 return
 
-            if not message_id:
+            # A whole number, and only that. `_save_feedback` handed this straight to
+            # `ChatMessage.objects.get(id=...)`, which raises ValueError for a string
+            # and TypeError for a list — neither caught, so the socket died with 1011.
+            if isinstance(message_id, bool) or not isinstance(message_id, int):
+                try:
+                    message_id = int(str(message_id).strip())
+                except (TypeError, ValueError):
+                    message_id = None
+            if not message_id or message_id <= 0:
                 await self.send(text_data=json.dumps({
                     "type": "error",
                     "content": str(_("message_id is required.")),
@@ -227,6 +275,19 @@ class AIChatConsumer(AsyncWebsocketConsumer):
             }))
 
     # --- Authentication ---
+
+    @database_sync_to_async
+    def _still_authenticated(self):
+        """Re-check the credential this socket connected with, per message.
+
+        A WebSocket presents its token exactly once, so the 60-minute access-token
+        lifetime never bit here: measured with a 5-second token, the socket kept
+        answering after it expired, after logout blacklisted the refresh token, and after
+        the account was disabled.
+        """
+        from training_platform.ws_auth import still_authenticated
+
+        return still_authenticated(self.scope)
 
     @database_sync_to_async
     def _authenticate(self):
@@ -313,13 +374,25 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 session__user=self.user,
                 role='assistant',
             )
-            # Update training data
-            AITrainingData.objects.filter(
-                user=self.user,
-                session=msg.session,
-                ai_response=msg.content[:100],  # partial match
-            ).update(user_feedback=feedback)
-            return True
+            # On the FK, not on a text prefix. `AITrainingData.message` was added to
+            # replace exactly this join — the model comment says the old key was "first
+            # 100 characters of ai_response, and replies routinely share an opening
+            # line, so a single thumbs-up mislabelled several unrelated rows" — but
+            # neither end was migrated: `chat_service` never passed `message=`, so the
+            # FK was always NULL, and this filter matched nothing at all because
+            # `ai_response` stores the FULL text. `.update()`'s return value was ignored
+            # and `True` was returned unconditionally, so the user tapped 👍, saw
+            # "Thanks for the feedback!", and nothing was recorded. The quality signal
+            # for the entire assistant was silently zero.
+            updated = AITrainingData.objects.filter(
+                user=self.user, message=msg).update(user_feedback=feedback)
+            if not updated:
+                # A turn logged before the FK existed: fall back to the session and the
+                # full response text, which is at least an exact comparison.
+                updated = AITrainingData.objects.filter(
+                    user=self.user, session=msg.session, message__isnull=True,
+                    ai_response=msg.content).update(user_feedback=feedback)
+            return bool(updated)
         except ChatMessage.DoesNotExist:
             return False
 
