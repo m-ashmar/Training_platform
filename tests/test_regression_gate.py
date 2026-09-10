@@ -7499,3 +7499,64 @@ def test_an_over_cap_dish_is_not_offered_at_all(seeded_catalogue):
     code = "\n".join(line.split("#")[0] for line in source.splitlines())
     assert "if fresh:" not in code, "find_recipe discards the weekly cap again"
     assert "within = fresh" in code
+
+
+def test_the_deploy_gate_notices_a_catalogue_the_planner_cannot_use(seeded_catalogue):
+    """Every check in `check_catalogue` was a COUNT over `needs_review=False`, and none
+    asked the only question that matters: can the planner still build from this. The
+    admin's own bulk action "Send back: stop the planner serving these" on the Proteins
+    category left 90 servable foods, a full recipe library, ten green ticks and exit 0 —
+    while the planner logged "Candidate pool has empty slots" for every meal and
+    delivered a protein-free day 43% under target, with a 200 OK. This command is what
+    the deploy gates on."""
+    import contextlib
+    import io
+
+    from django.core.management import call_command
+    from django.core.management.base import CommandError
+
+    from diet.models import FoodItem
+    from diet.planner.candidates import classify_food
+
+    call_command("check_catalogue", verbosity=0)      # the healthy catalogue passes
+
+    proteins = [food.id for food in FoodItem.objects.filter(needs_review=False)
+                if classify_food(food) == "protein"]
+    assert proteins, "the seeded catalogue has no protein to remove"
+    FoodItem.objects.filter(id__in=proteins).update(needs_review=True)
+
+    printed = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(printed):
+            call_command("check_catalogue", verbosity=1)
+    except (CommandError, SystemExit):
+        pass
+    else:
+        raise AssertionError("a catalogue with no servable protein passed the gate")
+    finally:
+        FoodItem.objects.filter(id__in=proteins).update(needs_review=False)
+
+    assert "no servable food classifies as" in printed.getvalue(), printed.getvalue()
+
+
+def test_a_wipe_counts_everything_it_would_destroy(seeded_catalogue, make_user):
+    """The guard counted `MealComponent` alone — the one FK that had been changed to
+    PROTECT — so on any database whose meal history had been trimmed, `--wipe` needed no
+    `--force`, printed nothing about it, and cascade-deleted the planner's LEARNED
+    per-client weights, the category preferences and both sides of the liked/disliked
+    M2M: the entire signal the personalisation is built on."""
+    from django.core.management import call_command
+    from django.core.management.base import CommandError
+
+    from diet.models import FoodItem, UserFoodWeight
+
+    user = make_user("gate_wipe_owner", user_type="client")
+    food = FoodItem.objects.filter(needs_review=False).first()
+    UserFoodWeight.objects.create(user=user, food=food, weight=1.5)
+
+    try:
+        with pytest.raises(CommandError) as refusal:
+            call_command("load_food_catalogue", "--apply", "--wipe", verbosity=0)
+        assert "learned food weight" in str(refusal.value), str(refusal.value)
+    finally:
+        UserFoodWeight.objects.filter(user=user).delete()

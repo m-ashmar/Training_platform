@@ -67,6 +67,43 @@ class Command(BaseCommand):
              "a category with no English name is invisible to `by_canonical_name`"),
         ]
 
+        # CAN THE PLANNER ACTUALLY BUILD FROM THIS? Every check above is a count over
+        # `needs_review=False`, and none of them asks the only question that matters. The
+        # admin's own bulk action "Send back: stop the planner serving these" on the
+        # Proteins category left a catalogue with 90 servable foods, a full recipe
+        # library, ten green ticks and exit 0 — while the planner logged "Candidate pool
+        # has empty slots" for every meal and delivered a protein-free day 43% under
+        # target, with a 200 OK. This command is what the deploy gates on, so it has to
+        # ask.
+        from diet.planner.candidates import classify_food
+
+        by_slot = {}
+        for food in servable:
+            by_slot.setdefault(classify_food(food), []).append(food)
+        empty_slots = [slot for slot in ("protein", "carb", "fat", "vegetable", "fruit")
+                       if not by_slot.get(slot)]
+        checks.append((
+            "every macro slot has food the planner can serve",
+            len(by_slot.get("protein", [])),
+            not empty_slots,
+            f"no servable food classifies as: {', '.join(empty_slots)} — the planner "
+            f"will build meals without them and report success",
+        ))
+
+        # A recipe whose ingredients are not servable can never be served either, and
+        # the recipe library is half the variety.
+        unusable = (Recipe.objects.filter(is_active=True)
+                    .exclude(ingredients__food__needs_review=False)
+                    .distinct().count())
+        total_recipes = Recipe.objects.filter(is_active=True).count()
+        checks.append((
+            "recipes can be served from the servable catalogue",
+            total_recipes - unusable,
+            unusable == 0,
+            f"{unusable} of {total_recipes} active recipe(s) contain a food the planner "
+            f"may not serve; they will never be chosen",
+        ))
+
         # A meal slot stored one character at a time — `list("Snack")` — is a non-empty
         # list that names no real slot, which zeroes every slot feature in the similarity
         # index instead of leaving it neutral.

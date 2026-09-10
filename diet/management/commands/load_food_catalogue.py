@@ -109,15 +109,37 @@ class Command(BaseCommand):
         # development database — 2,720 meals with nothing on them — and the release
         # plan runs it against production.
         if opts["wipe"]:
-            from diet.models import MealComponent
-            eaten = MealComponent.objects.count()
-            if eaten and not opts.get("force"):
+            # EVERYTHING a wipe destroys, not only the one FK that was changed to
+            # PROTECT. The guard counted `MealComponent` alone, so on any database whose
+            # meal history had been trimmed the command needed no `--force`, printed
+            # nothing about it, and cascade-deleted four other kinds of client data:
+            # `UserFoodWeight` (the planner's LEARNED per-client weights),
+            # `UserFoodCategoryPreference`, and both sides of the liked/disliked M2M —
+            # the entire signal the personalisation is built on.
+            from diet.models import (MealComponent, MealSwap, UserFoodCategoryPreference,
+                                     UserFoodPreference, UserFoodWeight)
+
+            at_risk = {
+                "meal component(s) — what clients have eaten": MealComponent.objects.count(),
+                "meal swap(s)": MealSwap.objects.count(),
+                "learned food weight(s) — the planner's personalisation":
+                    UserFoodWeight.objects.count(),
+                "food category preference(s)": UserFoodCategoryPreference.objects.count(),
+                "liked food(s)": UserFoodPreference.liked_foods.through.objects.count(),
+                "disliked food(s)": UserFoodPreference.disliked_foods.through.objects.count(),
+            }
+            losses = {label: n for label, n in at_risk.items() if n}
+            if losses and not opts.get("force"):
+                detail = "\n  ".join(f"{n} {label}" for label, n in losses.items())
                 raise CommandError(
-                    f"refusing to wipe: {eaten} meal component(s) reference these foods, "
-                    f"and deleting them would erase what clients have already eaten. "
+                    f"refusing to wipe: deleting these foods would also erase\n  {detail}\n"
                     f"Run without --wipe to converge the catalogue on the file instead, "
                     f"or pass --force if this database has no real client history."
                 )
+            if losses:
+                self.stdout.write(self.style.WARNING(
+                    "  --force: erasing " + ", ".join(
+                        f"{n} {label}" for label, n in losses.items())))
 
         with transaction.atomic():
             if opts["wipe"]:
@@ -125,15 +147,8 @@ class Command(BaseCommand):
                 # plain delete raises. `--force` means "this database holds no real
                 # client history", and the only honest way to honour it is to say
                 # exactly what is being destroyed and then destroy it.
-                from diet.models import MealSwap
-                n_comps = MealComponent.objects.count()
-                n_swaps = MealSwap.objects.count()
-                if n_comps or n_swaps:
-                    self.stdout.write(self.style.WARNING(
-                        f"  --force: erasing {n_comps} meal component(s) and {n_swaps} "
-                        f"swap(s) — this is what clients had eaten"))
-                    MealSwap.objects.all().delete()
-                    MealComponent.objects.all().delete()
+                MealSwap.objects.all().delete()
+                MealComponent.objects.all().delete()
 
                 # RecipeIngredient.food is PROTECT, so recipes go first.
                 n_lines = RecipeIngredient.objects.count()
