@@ -5713,3 +5713,40 @@ def test_a_search_reports_how_many_matches_there_are(seeded_catalogue):
     # Either language finds the food.
     assert c.get("/api/diet/v1/food/search/?q=chicken").json()["count"] > 0
     assert c.get("/api/diet/v1/food/search/?q=دجاج").json()["count"] > 0
+
+
+def test_a_plan_is_refused_rather_than_served_hollowed_out(seeded_catalogue):
+    """The allergen check at save time re-reads the client's allergies from the database
+    ON PURPOSE, so it can disagree with the constraints the pool was built from — and a
+    thirty-day generation takes about forty seconds, which is time enough for someone to
+    add "egg, dairy" in the app.
+
+    It used to drop the offending ingredients and persist the remains, and nothing
+    recomputed the meal's name, its stored target, the plan's daily calories or the
+    delivery report. Measured before this: a client on 2,633 kcal got a day of 1,409, a
+    breakfast named "Kishk Breakfast + Salmon Fillet" holding olive oil and an onion, and
+    a snack named "Egg, Pita Bread and Peach" that was a peach — while `Meal.target` still
+    said 852 kcal and the plan reported `met: true`.
+    """
+    from diet.exceptions import PersistenceError
+    from diet.models import DietPlan, UserFoodPreference
+    from diet.services.diet_persistence import DietPersistenceService
+    from diet.services.rule_based_planner import RuleBasedPlanner
+
+    user, _chosen = _chooser("hollowed-out")
+    plan_output = RuleBasedPlanner(user, seed_salt="hollow").generate(
+        daily_kcal=user.calculate_daily_calories(), duration_days=2, snack_count=1,
+        start_date="2026-03-02")
+    assert plan_output.plan, "nothing was planned"
+
+    # The client edits their allergies between the plan being built and being saved.
+    UserFoodPreference.objects.update_or_create(
+        user=user, defaults={"allergies": "egg, dairy, gluten, fish, nuts"})
+
+    before = DietPlan.objects.filter(user=user).count()
+    with pytest.raises(PersistenceError) as refused:
+        DietPersistenceService(user).save_plan(plan_output, meal_count=3, snack_count=1)
+    assert str(refused.value).startswith("preferences_changed_during_generation"), \
+        str(refused.value)
+    assert DietPlan.objects.filter(user=user).count() == before, \
+        "a plan that could not be served was left behind"

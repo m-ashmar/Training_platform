@@ -1380,6 +1380,15 @@ class GenerateDietPlanRuleBasedView(APIView):
                 "code": "plan_already_exists",
             }, status=status.HTTP_409_CONFLICT)
         except PersistenceError as e:
+            # One PersistenceError is the client's to act on: their preferences changed
+            # while the plan was being built, so the plan does not match what they now
+            # say they can eat. Generating again fixes it, which a 500 does not invite.
+            if str(e).startswith("preferences_changed_during_generation"):
+                return Response(
+                    {"error": _("Your food preferences changed while this plan was being "
+                                "built. Please generate it again."),
+                     "code": "preferences_changed"},
+                    status=status.HTTP_409_CONFLICT)
             # 500. `PersistenceError` wraps any unexpected exception during the WRITE —
             # a database fault, not a malformed request — and answering 400 told the
             # client its request was wrong and it must not retry, while keeping the

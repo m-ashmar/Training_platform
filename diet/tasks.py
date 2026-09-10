@@ -85,6 +85,14 @@ def generate_rule_based_plan(self, user_id, meal_count=3, snack_count=1, start_d
         # covering those dates. Not a fault: the plan they wanted exists.
         _refund(user)
         return {"error": str(e), "code": "plan_already_exists", "user_id": user_id}
+    except PersistenceError as e:
+        if str(e).startswith("preferences_changed_during_generation"):
+            # Their preferences changed mid-build; generating again is the answer, and
+            # they should not be charged for a plan that was never served.
+            _refund(user)
+            return {"error": str(e), "code": "preferences_changed", "user_id": user_id}
+        _refund(user)
+        raise
     except (ValueError, PermissionError) as e:
         _refund(user)
         return {"error": str(e), "code": "invalid_request", "user_id": user_id}

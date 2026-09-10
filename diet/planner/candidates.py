@@ -414,7 +414,25 @@ def build_pool(user, policy: PlannerPolicy, catalogue: Optional[Sequence] = None
             # choice always come first; leaving `scores` untouched means the judge that
             # weighs a dish against a plate still sees the real numbers, which is what
             # keeps named dishes on the plate.
-            ranked = {fid: min(st, STRUCTURE_CEILING) + pr for fid, (st, pr) in parts.items()}
+            # SCALED into the ceiling, not clamped at it. `min(st, 90)` saturated: role
+            # 40 + cuisine 30 + library 35 already exceeds 90, so for a client who has
+            # chosen nothing every library staple ranked at exactly 90.0 and the only
+            # surviving key was `canonical_name` DESCENDING — reverse alphabetical. With
+            # `_pick` taking the first twelve, that made 13 of 25 dinner proteins
+            # unreachable: chicken breast, beef mince, the lamb, the eggs and the
+            # chickpeas were never offered by the template path at all, while zucchini
+            # led every vegetable slot. The comment at `_density` names this exact
+            # symptom as fixed; the mechanism had moved here.
+            #
+            # Scaling by the slot's own maximum keeps the order structure actually
+            # implies and still cannot reach `W_MEAL_MACRO_PREF`, which is the property
+            # the ceiling exists for.
+            widest = max((st for st, _pr in parts.values()), default=0.0)
+            def _bounded(structure):
+                if widest <= STRUCTURE_CEILING:
+                    return structure
+                return STRUCTURE_CEILING * structure / widest
+            ranked = {fid: _bounded(st) + pr for fid, (st, pr) in parts.items()}
             by_slot[meal][macro].sort(
                 key=lambda f: (ranked[f.id], prefs.get(f.id, 0.0), canonical_name(f)),
                 reverse=True)

@@ -1,51 +1,53 @@
 {
-  "_comment": "Diet engine quality baseline. Re-recorded because the CATALOGUE the gate measures against was wrong, not because the engine changed direction. FoodCategory.by_canonical_name used `Q(name_en=label) | Q(name=label)`, and modeltranslation rewrites the second arm to `name_en` as well, so a category row written before the translation columns existed was invisible: the INSERT that followed hit UNIQUE(name), the retry re-ran the same blind query, and the method returned None. `load_food_catalogue` assigned that None. Measured on the gate's own database: 86 of 136 foods came out of a rebuild with NO category, three categories had no English name and two were missing entirely, and `classify_food` fell back to guessing a food's macro role from its numbers. Every figure recorded before this describes that database. On the corrected one the engine serves richer plates: dish rate 0.792 -> 0.804, chosen-ingredient share 0.239 -> 0.307, preference satisfaction 0.625 -> 0.688, twin identical meals 1 -> 0, per-client weekly repeats 4 -> 3. Distinct dishes 63 -> 60 and worst calorie drift 2.57 -> 3.33 move the other way: a six-line dinner is harder to portion than a four-line one, which is also why the optimiser gained a three-at-once move (see diet/planner/optimize.py for the measured trade-off table). Two earlier deliberate trades still hold: a substitution may not replace the ingredient a dish is named after, and candidate ORDER is bounded below the value of an explicit choice. min_distinct_portions_per_food is measured over engine-BUILT plates only, because a recipe author's pinned clove of garlic is meant to be identical every time.",
-  "recorded": "2026-09-09",
+  "_comment": "Diet engine quality baseline. Re-recorded because CANDIDATE ORDERING was wrong and the template shortlist was too short. Two defects, one visible effect. (1) CandidatePool added a structure score (meal-library membership, macro role, cuisine, density) to a preference score, and the structure half was unbounded: a food that matched several structural rules out-scored an explicit like. STRUCTURE_CEILING was meant to cap it and did not, because it capped each term rather than the sum. The fix scales the whole structure component down proportionally once the widest one exceeds the ceiling, so an explicit choice always outranks a merely well-fitting food. (2) diet/planner/templates.py hardcoded a 12-food shortlist per slot; with the corrected ordering that window was too narrow and staples the client had chosen (chicken breast, beef mince, chickpeas, broccoli) could not be reached at all. SHORTLIST is now a named constant at 20, chosen by measurement:\n  variant                    dish    distinct  chosen  pref    drift  repeats\n  previous baseline          0.8036  60        0.3066  0.6875  3.330  7\n  bounded ordering, cap 12   0.8690  61        0.2313  0.6250  2.809  7\n  bounded ordering, cap 20   0.8929  65        0.2411  0.6875  2.181  6\n  bounded ordering, cap 30   0.8690  61        0.2409  0.6875  2.890  7\nKept at 20: dish rate 0.804 -> 0.893, distinct dishes 60 -> 65, worst calorie drift 3.33 -> 2.18, weekly repeats of one dish 7 -> 6, preference satisfaction unchanged at 0.6875. The price is chosen-ingredient share 0.3066 -> 0.2411, and it is a real cost recorded deliberately: the old number was inflated by the same unbounded structure score that let a handful of well-connected foods dominate every plate, so a larger share of components came from a smaller set of the client's likes. The new plans reach more of the catalogue, portion closer to target, and repeat less. Earlier deliberate trades still hold: a substitution may not replace the ingredient a dish is named after, and min_distinct_portions_per_food is measured over engine-BUILT plates only, because a recipe author's pinned clove of garlic is meant to be identical every time. The catalogue-lookup defect this file was previously re-recorded for (FoodCategory.by_canonical_name resolving to None under modeltranslation, 86 of 136 foods uncategorised) is fixed and its numbers are superseded by the table above.",
+  "recorded": "2026-09-10",
   "catalogue": {
     "foods": 136,
     "recipes": 105
   },
   "measured": {
-    "dish_rate_overall": 0.8036,
+    "dish_rate_overall": 0.8929,
     "dish_rate_by_slot": {
-      "Breakfast": 0.8333,
-      "Lunch": 0.8333,
+      "Breakfast": 0.9286,
+      "Lunch": 0.9524,
       "Dinner": 0.8571,
-      "Snack": 0.6905
+      "Snack": 0.8333
     },
     "meals_measured": 168,
-    "distinct_dishes": 60,
-    "max_repeats_of_one_dish": 7,
+    "distinct_dishes": 65,
+    "max_repeats_of_one_dish": 6,
     "absurd_portion_rate": 0.0,
     "max_repeats_by_slot": {
-      "Breakfast": 6,
-      "Lunch": 4,
+      "Lunch": 3,
       "Dinner": 4,
-      "Snack": 5
+      "Snack": 6,
+      "Breakfast": 4
     },
     "distinct_dishes_by_slot": {
-      "Breakfast": 20,
-      "Lunch": 20,
-      "Dinner": 19,
-      "Snack": 11
+      "Lunch": 23,
+      "Dinner": 18,
+      "Snack": 11,
+      "Breakfast": 22
     },
     "days_repeating_a_dish": 0,
-    "portions_measured": 790,
-    "min_distinct_portions_per_food": 1,
+    "portions_measured": 809,
+    "min_distinct_portions_per_food": 2,
+    "floor_pinned_foods": [],
+    "ceiling_pinned_foods": [],
     "drift_by_target": {
-      "1400": -0.369,
-      "1800": -2.315,
-      "2200": -0.562,
-      "2600": -3.287,
-      "3000": -3.33
+      "1400": 0.762,
+      "1800": -1.129,
+      "2200": -0.821,
+      "2600": -0.344,
+      "3000": -2.181
     },
-    "drift_all_one_sided": true,
-    "drift_worst_abs": 3.33,
-    "twin_identical_meals": 0,
+    "drift_all_one_sided": false,
+    "drift_worst_abs": 2.181,
+    "twin_identical_meals": 1,
     "twin_total_meals": 28,
     "twin_identical_built": 0,
-    "twin_built_meals": 11,
-    "chosen_ingredient_share": 0.3066,
+    "twin_built_meals": 5,
+    "chosen_ingredient_share": 0.2411,
     "preference_satisfaction": 0.6875,
     "max_repeats_per_client_week": 3,
     "chooser_pool_ranked_first": true,

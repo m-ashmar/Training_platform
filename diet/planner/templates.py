@@ -242,6 +242,12 @@ def meal_pool_score(foods_with_grams, pool, meal_name: str,
     return structure + preference + pairing
 
 
+#: How far down a ranked slot list `_pick` will look. Twelve was too few once the pool
+#: ordering was corrected: for a client who has chosen nothing, a slot holds 25 to 46
+#: comparable foods and the cut fell in the middle of them.
+SHORTLIST = 20
+
+
 def _pick(candidates: Sequence, chosen_ids: List[int],
           edges: Dict[int, collections.Counter], recent: Set[int], rng,
           scores: Optional[Dict[int, float]] = None) -> Optional[object]:
@@ -253,7 +259,7 @@ def _pick(candidates: Sequence, chosen_ids: List[int],
     added in the same units, and the result is sampled through a softmax, so a strong
     preference decides the slot and a weak one only tilts it.
     """
-    shortlist = list(candidates)[:12]
+    shortlist = list(candidates)[:SHORTLIST]
     if not shortlist:
         return None
     scores = scores or {}

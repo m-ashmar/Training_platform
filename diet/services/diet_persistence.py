@@ -152,6 +152,29 @@ class DietPersistenceService:
 
                     mapped = self._resolve_by_id(ai_meal, decided)
                     validated = list(validator.validate(mapped))
+                    # REFUSE, do not quietly serve the remains. The validator re-reads
+                    # the client's allergies from the database on purpose, so it can
+                    # disagree with the constraints the pool was built from — and a
+                    # 30-day generation takes about forty seconds, which is plenty of
+                    # time for a client to add "egg, dairy" in the app.
+                    #
+                    # This used to drop the offending ingredients and keep going, and
+                    # nothing recomputed the meal's name, its stored target, the plan's
+                    # daily calories or the planner's delivery report. Measured: a client
+                    # on 2,633 kcal got a day of 1,409 (-47%), a breakfast named "Kishk
+                    # Breakfast + Salmon Fillet" holding olive oil and an onion, and a
+                    # snack named "Egg, Pita Bread and Peach" that was a peach — while
+                    # `Meal.target` still said 852 kcal and the plan reported `met: true`.
+                    #
+                    # A plan that is no longer the plan is not a plan. The client is told,
+                    # and generating again builds against the preferences they now have.
+                    if len(validated) != len(mapped):
+                        dropped = [food.name_en or food.name
+                                   for (food, _q) in mapped
+                                   if not any(food.id == kept.id for kept, _k in validated)]
+                        raise PersistenceError(
+                            "preferences_changed_during_generation:"
+                            + ",".join(sorted(set(dropped))[:10]))
                     factory.add_components(meal, validated)
 
                 # Log before normalizers
