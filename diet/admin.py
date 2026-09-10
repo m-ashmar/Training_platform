@@ -595,6 +595,21 @@ class ImprovedFoodItemAdmin(TranslAdmin):
 # Improved DietPlan Admin
 @admin.register(DietPlan)
 class ImprovedDietPlanAdmin(admin.ModelAdmin):
+    def has_delete_permission(self, request, obj=None):
+        """No. Deleting a plan cascades through everything the client did.
+
+        `Meal.diet_plan`, `MealComponent.meal`, `MealSwap.meal` and `MealEvent.meal` are
+        all CASCADE, so one click in `/dj-admin/` erases what a client ate, every swap
+        they made — "the strongest preference signal a client will ever give" — and their
+        whole interaction funnel. `MealComponent.food` was made PROTECT so a catalogue
+        rebuild could not do this; the plan-deletion direction was still open.
+
+        A plan that should not apply any more is DEACTIVATED (`is_active = False`), which
+        is what generating again and what a trainer's new plan both do, and which keeps
+        the history.
+        """
+        return False
+
     list_display = [
         'id', 'user_link', 'goal', 'daily_calories', 'date_range',
         'meal_count', 'compliance_rate', 'strategy', 'status_badge'
@@ -726,6 +741,14 @@ class ImprovedUserFoodCategoryPreferenceAdmin(admin.ModelAdmin):
 # Meal Admin - Simplified
 @admin.register(Meal)
 class ImprovedMealAdmin(admin.ModelAdmin):
+    def has_delete_permission(self, request, obj=None):
+        """No. `MealComponent.meal`, `MealSwap.meal` and `MealEvent.meal` are CASCADE, so
+        deleting one meal erases what the client ate at it, the swaps they made on it and
+        their funnel for it. A trainer removes a meal through
+        `TrainerDietPlanService.delete_meal`, which recomputes the day and the plan's
+        allergen report; the admin's bulk delete does neither."""
+        return False
+
     list_display = ['id', 'meal_type', 'date', 'user_email', 'nutrition_info']
     list_filter = ['meal_type', 'date']
     search_fields = ['diet_plan__user__email', 'description']

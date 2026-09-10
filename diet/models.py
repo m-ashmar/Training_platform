@@ -666,7 +666,12 @@ class DietPlan(RowValidationMixin, models.Model):
         help_text="Trainer who created this plan"
     )
     is_active = models.BooleanField(default=True, help_text="Whether this plan is currently active")
-    created_at = models.DateTimeField(default=timezone.now, null=True, blank=True, db_index=True)
+    #: NOT NULL. `ordering = ['-created_at', '-id']` puts NULLs FIRST in Postgres on a
+    #: descending sort, so one plan with a null timestamp — a `loaddata` fixture, an
+    #: import, a `queryset.update()` — became permanently "the latest" for its owner, and
+    #: `dietplan_owner_recent_idx` served that wrong order too. 0029/0031/0033 made it
+    #: nullable to get past a migration; nothing needed it to stay that way.
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:

@@ -5679,3 +5679,35 @@ def test_every_shipped_achievement_can_be_earned():
     unhandled = sorted(c for c in IMPLEMENTED_CRITERIA if f"'{c}'" not in source)
     assert not unhandled, (
         f"IMPLEMENTED_CRITERIA names metrics the dispatcher does not handle: {unhandled}")
+
+
+def test_an_admin_cannot_poll_a_task_that_was_never_issued(seeded_catalogue, make_user):
+    """`task_belongs_to` returned True for an admin before looking the id up at all, so
+    polling any string produced a fabricated `200 PENDING` and support tooling waited
+    forever on a task that had never existed."""
+    admin = make_user("task-admin", user_type="admin")
+    c = _api_client_for(admin)
+    r = c.get("/api/diet/v1/plans/tasks/never-issued-at-all/")
+    assert r.status_code == 404, (r.status_code, r.content[:200])
+    assert r.json().get("code") == "not_found", r.content[:200]
+
+
+def test_a_search_reports_how_many_matches_there_are(seeded_catalogue):
+    """`count` was the length of a silently truncated ten-row slice, with `next: null`, so
+    a catalogue holding two hundred matches told the client there were ten and gave it no
+    way to ask for the rest. And the lookup went through `name`, a translated virtual
+    field, so an English query from an Arabic session matched nothing."""
+    user, _chosen = _chooser("search-total")
+    c = _api_client_for(user)
+
+    r = c.get("/api/diet/v1/food/search/?q=e&page_size=5")
+    assert r.status_code == 200, r.content[:200]
+    body = r.json()
+    assert len(body["results"]) <= 5
+    assert body["count"] > len(body["results"]), (
+        "count is the size of the page, not the number of matches")
+    assert body["next"], "there is more and no way to ask for it"
+
+    # Either language finds the food.
+    assert c.get("/api/diet/v1/food/search/?q=chicken").json()["count"] > 0
+    assert c.get("/api/diet/v1/food/search/?q=دجاج").json()["count"] > 0

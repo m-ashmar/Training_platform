@@ -66,6 +66,22 @@ class StandardResultsSetPagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 100
 
+    def paginate_queryset(self, queryset, request, view=None):
+        """A bad `page` is a 400 naming the parameter, not a 404.
+
+        DRF answers `NotFound("Invalid page.")` for both a non-numeric page and one past
+        the end, while the hand-rolled paginator on `food/list` answers 400 for the first
+        and clamps the second. So a client could not write one handler for a paging
+        error — and on a LIST endpoint a 404 is indistinguishable from "the thing you
+        asked about is gone".
+        """
+        from rest_framework.exceptions import NotFound, ValidationError
+
+        try:
+            return super().paginate_queryset(queryset, request, view)
+        except NotFound as exc:
+            raise ValidationError({self.page_query_param: [str(exc.detail)]}) from exc
+
 
 class RecentActivityProgressView(APIView):
     """

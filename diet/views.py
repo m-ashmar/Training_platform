@@ -424,10 +424,23 @@ class FoodSearchView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Search local database first
-            local_qs = FoodItem.objects.filter(
-                name__icontains=query
-            )[:10]
+            # The ENGLISH column and the Arabic one, so an Arabic client can search in
+            # either. `name__icontains` alone resolves to whichever the active language
+            # selects, so an English search from an Arabic session matched nothing.
+            from django.db.models import Q
+
+            matches = (FoodItem.objects.select_related('category')
+                       .filter(Q(name_en__icontains=query) | Q(name_ar__icontains=query))
+                       .order_by('name_en', 'id'))
+            # `count` is the TOTAL, and the page is a slice of it. It used to report the
+            # length of the truncated slice, so a catalogue with 200 matches answered
+            # `count: 10, next: null` — a client following the contract had no way to
+            # know there was more and no way to ask for it.
+            total = matches.count()
+            page = int_param(request.GET, 'page', default=1, minimum=1, maximum=100000)
+            page_size = int_param(request.GET, 'page_size', default=25, minimum=1, maximum=100)
+            start = (page - 1) * page_size
+            local_qs = matches[start:start + page_size]
             
             local_results = []
             for food in local_qs:
@@ -479,9 +492,18 @@ class FoodSearchView(APIView):
                 logger.warning(f"Edamam API search failed: {str(e)}")
             
             results = local_results + edamam_results
-            return Response(listing(results, extra={
+
+            def page_url(number):
+                params = request.GET.copy()
+                params['page'] = number
+                return request.build_absolute_uri(f"{request.path}?{params.urlencode()}")
+
+            has_next = start + len(local_results) < total
+            return Response(listing(results, count=total + len(edamam_results), extra={
+                'next': page_url(page + 1) if has_next else None,
+                'previous': page_url(page - 1) if page > 1 else None,
                 'query': query,
-                'local_count': len(local_results),
+                'local_count': total,
                 'edamam_count': len(edamam_results),
             }))
             
@@ -1020,10 +1042,19 @@ def _task_owner_key(task_id) -> str:
 
 
 def remember_task_owner(task_id, user) -> None:
-    """Record who started a generation, so its status can be scoped to them."""
-    from django.core.cache import cache
+    """Record who started a generation, so its status can be scoped to them.
+
+    In the PRIVATE cache (Redis DB3), not the default one. `django.core.cache` is DB0 in
+    production — `KEY_PREFIX: "tp_session"`, the session store — and this record is the
+    only thing standing between a client and their own generation. The allowance is spent
+    at admission, so an eviction there (session pressure, an LRU sweep, a flush, a
+    failover) left the client charged for a plan they could no longer find, permanently:
+    `task_belongs_to` reads unknown as no.
+    """
+    from training_platform.cache import private_cache
+
     try:
-        cache.set(_task_owner_key(task_id), user.id, TASK_OWNER_TTL)
+        private_cache().set(_task_owner_key(task_id), user.id, TASK_OWNER_TTL)
     except Exception:
         logger.warning("could not record the owner of task %s", task_id, exc_info=True)
 
@@ -1034,14 +1065,19 @@ def task_belongs_to(task_id, user) -> bool:
     Unknown means no. A task id nobody claims is not one to report on, and the
     alternative is disclosing strangers' failures to anyone who guesses an id.
     """
-    from django.core.cache import cache
-    if getattr(user, "is_admin", False):
-        return True
+    from training_platform.cache import private_cache
+
     try:
-        return cache.get(_task_owner_key(task_id)) == user.id
+        owner = private_cache().get(_task_owner_key(task_id))
     except Exception:
         logger.warning("could not read the owner of task %s", task_id, exc_info=True)
         return False
+    if owner == user.id:
+        return True
+    # An admin may read a task that EXISTS. Returning True before looking meant an admin
+    # polling any string at all got a fabricated `200 PENDING`, so support tooling waited
+    # forever on an id that was never issued.
+    return bool(owner is not None and getattr(user, "is_admin", False))
 
 
 class GenerateDietPlanView(APIView):
