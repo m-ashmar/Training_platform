@@ -1488,9 +1488,23 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # into the worker to return at most 500 summaries. The `[:500]` cap bounded
         # the response, not the query.
         LIMIT = 500
+        # Counted over DAYS of the routine, not over rows of this table. There are two
+        # keying conventions in `RoutineProgress` and they collide: the assignment
+        # receiver scaffolds one row per day all stamped with `routine.start_date`, while
+        # the completion path writes at the ACTUAL training date, and
+        # `(user, routine, day, date)` is unique — so every scaffold except the one whose
+        # date happened to coincide is stranded as `not_started` for ever. Counting rows
+        # therefore gave a client who trained perfectly on all 7 days of a 7-day routine
+        # 7 completed out of 13 rows: 53.85%, permanently, with no amount of training
+        # able to reach 100.
+        #
+        # `days` is now the number of distinct DAYS attempted and `completed` the number
+        # of distinct days with a completed row, which is the question the field name
+        # asks and is immune to how many rows a day accumulated.
         grouped = (qs.values('routine_id', 'user_id')
-                     .annotate(days=Count('id'),
-                               completed=Count('id', filter=Q(status='completed')))
+                     .annotate(days=Count('day', distinct=True),
+                               completed=Count('day', distinct=True,
+                                               filter=Q(status='completed')))
                      .order_by('routine_id', 'user_id'))
         total = grouped.count()
         rows = [{

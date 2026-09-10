@@ -7334,3 +7334,105 @@ def test_a_meal_on_a_superseded_plan_cannot_be_completed(make_user, api, seeded_
                           content_type="application/json")
     assert resp.status_code == 409, resp.content[:200]
     assert resp.json().get("code") == "plan_superseded"
+
+
+def test_a_client_who_trains_every_day_reads_as_complete(make_user, api):
+    """Two keying conventions collide in `RoutineProgress`. The assignment receiver
+    scaffolds one row per day all stamped with `routine.start_date`; the completion path
+    writes at the ACTUAL training date; and `(user, routine, day, date)` is unique — so
+    every scaffold except the one whose date happened to coincide is stranded as
+    `not_started` for ever. Counting ROWS gave a client who trained perfectly on all 7
+    days of a 7-day routine 7 of 13: 53.85%, permanently, with no amount of training able
+    to reach 100. The trainer's roster showed the same figure."""
+    import datetime as _dt
+
+    from django.utils import timezone as _tz
+
+    from routine.models import Exercise, Routine, RoutineExercise, RoutineProgress
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("gate_perfect_t", user_type="trainer")
+    client_user = make_user("gate_perfect_c", user_type="client")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user,
+                                         status="approved")
+
+    today = _tz.localdate()
+    routine = Routine.objects.create(name="gate perfect", days=7, created_by=trainer,
+                                     start_date=today - _dt.timedelta(days=7),
+                                     is_active=True)
+    for day in range(1, 8):
+        RoutineExercise.objects.create(
+            routine=routine,
+            exercise=Exercise.objects.create(name=f"gate perfect ex{day}",
+                                             created_by=trainer),
+            day=day, sets=3, reps=10)
+    routine.assigned_to.add(client_user)
+
+    for offset, day in enumerate(range(1, 8)):
+        RoutineProgress.objects.update_or_create(
+            user=client_user, routine=routine, day=day,
+            date=today - _dt.timedelta(days=6 - offset),
+            defaults={"status": "completed", "exercises_completed": 1,
+                      "total_exercises": 1})
+
+    # The stranded scaffolds are still there; the figure must not care.
+    assert RoutineProgress.objects.filter(user=client_user, routine=routine).count() > 7
+
+    results = api(trainer).get(
+        f"/api/routine/analytics/completion/?user_id={client_user.pk}").json()["results"]
+    assert results, results
+    row = next(r for r in results if r["routine_id"] == routine.pk)
+    assert row["completed"] == 7, row
+    assert row["completion_rate"] == 100.0, row
+
+
+def test_every_daily_job_survives_a_worker_restart():
+    """A plain-interval beat entry's clock starts at worker startup — a fresh
+    `ScheduleEntry` sets `last_run_at = now`, so the first fire is a full interval later
+    — and `celery -A ... worker --beat` keeps its schedule file on the container
+    filesystem, which `[mounts]` scopes to the web process only. On a free-tier machine a
+    deploy, an OOM or a replacement resets that clock, so a DAILY job never ran if the
+    worker restarted more often than daily. Two of these are the GDPR retention purges,
+    whose whole point is a legal deadline, and the beat log looked healthy throughout."""
+    from celery.schedules import crontab
+
+    from django.conf import settings
+
+    interval_entries = {
+        name: entry["schedule"]
+        for name, entry in settings.CELERY_BEAT_SCHEDULE.items()
+        if not isinstance(entry["schedule"], crontab)
+    }
+    # A short interval is fine: restarting costs at most that interval, not a whole day.
+    for name, schedule in interval_entries.items():
+        seconds = getattr(schedule, "total_seconds", lambda: float(schedule))()
+        assert seconds <= 900, (name, seconds)
+
+
+def test_expired_jwt_rows_are_flushed_on_a_schedule():
+    """`ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION` write two permanent rows per
+    refresh, and simplejwt's `flushexpiredtokens` appeared in no schedule, no Dockerfile
+    and no checklist. The row holds the whole RS256 token in a text column at ~869 bytes:
+    one client rotating hourly is 25 rows a day, so 10,000 daily users is 250,000 rows
+    and 217 MB of heap per day, 91 million rows a year, on a 1 GB volume."""
+    from django.conf import settings
+
+    from training_platform.celery import app
+
+    app.loader.import_default_modules()
+
+    entry = settings.CELERY_BEAT_SCHEDULE.get("flush-expired-jwt-tokens")
+    assert entry is not None, "nothing flushes the JWT blacklist"
+    assert entry["task"] in app.tasks, entry["task"]
+
+
+def test_every_beat_entry_resolves_to_a_registered_task():
+    """A schedule naming a task nobody registered is a job that silently never runs."""
+    from django.conf import settings
+
+    from training_platform.celery import app
+
+    app.loader.import_default_modules()
+    unresolvable = [entry["task"] for entry in settings.CELERY_BEAT_SCHEDULE.values()
+                    if entry["task"] not in app.tasks]
+    assert not unresolvable, unresolvable

@@ -404,20 +404,28 @@ CELERY_BEAT_SCHEDULE = {
     # be replayed and escalates what cannot.
     'drain-notification-dlq': {
         'task': 'notifications.drain_dead_letter_queue',
-        'schedule': 3600,
+        'schedule': crontab(minute=20),
     },
     # Turns is_liked / is_completed / actual_quantity_consumed — all collected and
     # previously read by nothing — into planner ranking weights.
     'refresh-food-weights': {
         'task': 'diet.planner.refresh_food_weights',
-        'schedule': 86400,
+        # `crontab`, not a plain interval. An interval entry's clock starts at worker
+        # startup — a fresh `ScheduleEntry` sets `last_run_at = now`, so the first fire
+        # is a full interval later — and `celery -A ... worker --beat` keeps its schedule
+        # file on the container filesystem, which `[mounts]` scopes to the web process
+        # only. On a free-tier Fly machine a deploy, an OOM or a machine replacement
+        # resets that clock, so a daily job never ran if the worker restarted more often
+        # than daily. Two of these are the GDPR retention purges, whose entire point is a
+        # legal deadline, and the beat log looked perfectly healthy throughout.
+        'schedule': crontab(hour=2, minute=30),
     },
     # Retention. Every source in training_platform/privacy/sources.py that declares
     # retention_days is enforced here — analytics IPs at 180 days, notifications at
     # 90, OTP/reset tokens at 1.
     'purge-expired-personal-data': {
         'task': 'training_platform.privacy.purge_expired_personal_data',
-        'schedule': 86400,
+        'schedule': crontab(hour=3, minute=15),
     },
     # Paid access has to be able to lapse. subscription.utils.expire_subscriptions
     # said "This should be run as a scheduled task" and never was, so 64 of 72 rows
@@ -433,11 +441,11 @@ CELERY_BEAT_SCHEDULE = {
     },
     'compute-daily-ai-insights': {
         'task': 'ai_assistant.tasks.compute_all_user_insights',
-        'schedule': 86400,
+        'schedule': crontab(hour=4, minute=0),
     },
     'check-ai-cost-alert': {
         'task': 'ai_assistant.tasks.check_daily_cost',
-        'schedule': 3600,
+        'schedule': crontab(minute=40),
     },
     # Registered with Celery and in no schedule, so the ONLY code that reads
     # `AITrainingData.retain_until` the way it is written — a deadline, not an age — never
@@ -447,7 +455,19 @@ CELERY_BEAT_SCHEDULE = {
     # disappearing should not silently end the other.
     'purge-expired-ai-training-data': {
         'task': 'ai_assistant.tasks.purge_expired_training_data',
-        'schedule': 86400,
+        'schedule': crontab(hour=3, minute=45),
+    },
+    # `ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION` mean every refresh writes two
+    # permanent rows, and simplejwt ships `flushexpiredtokens` for exactly this — it
+    # appeared in no schedule, no Dockerfile and no checklist. The full RS256 token is
+    # stored in a text column at ~869 bytes: one active mobile client rotating hourly is
+    # 25 rows a day, so 10,000 daily users is 250,000 rows and 217 MB of heap a day,
+    # 91 million rows a year, on a 1 GB volume. The unique index on `jti` and its
+    # `varchar_pattern_ops` twin make every refresh progressively slower long before the
+    # disk fills.
+    'flush-expired-jwt-tokens': {
+        'task': 'training_platform.privacy.flush_expired_tokens',
+        'schedule': crontab(hour=3, minute=50),
     },
 }
 
