@@ -7743,3 +7743,141 @@ def test_no_view_orders_on_a_column_that_is_not_a_total_order():
             offenders.append(f"{module.__name__}: {match}")
 
     assert not offenders, offenders
+
+
+def test_a_trainer_cannot_write_to_a_plan_the_client_no_longer_follows(
+        seeded_catalogue, make_user):
+    """`diet_persistence` identified this exact failure — "every meal they added to it
+    afterwards landed on a plan nobody follows" — and fixed only the LOGGING on the
+    superseding side. The client taps Generate, silently retiring the trainer's plan; the
+    trainer then builds next week's meals, gets 200 on every one, and the client sees an
+    empty day."""
+    import datetime as _dt
+
+    from django.core.exceptions import ValidationError as _DjangoValidationError
+    from django.utils import timezone as _tz
+
+    from diet.models import DietPlanTemplate, FoodItem
+    from diet.services.plan_generation import generate_and_save
+    from diet.trainer_services import TrainerDietPlanService
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("gate_retired_t", user_type="trainer")
+    client_user = make_user("gate_retired_c", user_type="client", age=30, gender="male",
+                            height=175, weight=75, activity_level="Moderate")
+    _grant_diet_access(client_user)
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user,
+                                         status="approved")
+
+    template = DietPlanTemplate.objects.create(
+        name="gate retired", description="d", meals_per_day=3, snacks_per_day=1,
+        days_variation=7)
+    service = TrainerDietPlanService(trainer)
+    plan = service.create_diet_plan(client_user, template, _tz.localdate(),
+                                    duration_weeks=4)
+    food = FoodItem.objects.filter(needs_review=False).first()
+
+    # The client generates their own, which supersedes the trainer's.
+    generate_and_save(client_user, duration_days=1, seed_salt="gate-retired")
+    plan.refresh_from_db()
+    assert plan.is_active is False
+
+    with pytest.raises(_DjangoValidationError) as refusal:
+        service.add_meal_to_plan(plan, "Dinner", _tz.localdate() + _dt.timedelta(days=2),
+                                 [{"food_id": food.id, "quantity": 100}])
+    assert getattr(refusal.value, "code", None) == "plan_superseded"
+
+
+def test_editing_a_past_meal_does_not_erase_what_the_client_ate(
+        seeded_catalogue, make_user):
+    """The component rows ARE the completion record — `is_completed`, `completed_at`,
+    `actual_quantity_consumed` — and `update_meal` deletes and re-creates them. A trainer
+    tidying up last month's plan silently zeroed days the client actually lived, and the
+    coach and analytics layers read the zeros as non-compliance. `add_meal_to_plan`
+    checks the plan window; `update_meal` checked nothing."""
+    import datetime as _dt
+
+    from django.core.exceptions import ValidationError as _DjangoValidationError
+    from django.utils import timezone as _tz
+
+    from diet.models import DietPlanTemplate, FoodItem
+    from diet.trainer_services import TrainerDietPlanService
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("gate_past_t", user_type="trainer")
+    client_user = make_user("gate_past_c", user_type="client", age=30, gender="male",
+                            height=175, weight=75, activity_level="Moderate")
+    _grant_diet_access(client_user)
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user,
+                                         status="approved")
+
+    template = DietPlanTemplate.objects.create(
+        name="gate past", description="d", meals_per_day=3, snacks_per_day=1,
+        days_variation=7)
+    service = TrainerDietPlanService(trainer)
+    plan = service.create_diet_plan(
+        client_user, template, _tz.localdate() - _dt.timedelta(days=7),
+        duration_weeks=4)
+    food = FoodItem.objects.filter(needs_review=False).first()
+
+    eaten = service.add_meal_to_plan(
+        plan, "Lunch", _tz.localdate() - _dt.timedelta(days=3),
+        [{"food_id": food.id, "quantity": 100}])
+    for component in eaten.components.all():
+        component.complete()
+
+    with pytest.raises(_DjangoValidationError) as refusal:
+        service.update_meal(eaten, food_items=[{"food_id": food.id, "quantity": 200}])
+    assert getattr(refusal.value, "code", None) == "meal_already_happened"
+
+    eaten.refresh_from_db()
+    assert eaten.components.filter(is_completed=True).exists(), \
+        "the client's record of what they ate was destroyed"
+
+    # A FUTURE meal is still freely editable.
+    upcoming = service.add_meal_to_plan(
+        plan, "Dinner", _tz.localdate() + _dt.timedelta(days=2),
+        [{"food_id": food.id, "quantity": 100}])
+    service.update_meal(upcoming, food_items=[{"food_id": food.id, "quantity": 150}])
+
+
+def test_moving_a_meal_onto_an_occupied_slot_says_so(seeded_catalogue, make_user):
+    """`add_meal_to_plan` has an explicit `duplicate_meal` pre-check and `update_meal`
+    had none, so `one_meal_per_slot_per_day` fired at the database and the view's broad
+    handler answered `{"code": "server_error"}` with a 500. The data was safe; the answer
+    was wrong, and it spent the error budget."""
+    import datetime as _dt
+
+    from django.core.exceptions import ValidationError as _DjangoValidationError
+    from django.utils import timezone as _tz
+
+    from diet.models import DietPlanTemplate, FoodItem
+    from diet.trainer_services import TrainerDietPlanService
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("gate_slot_t", user_type="trainer")
+    client_user = make_user("gate_slot_c", user_type="client", age=30, gender="male",
+                            height=175, weight=75, activity_level="Moderate")
+    _grant_diet_access(client_user)
+    TrainerClientRelation.objects.create(trainer=trainer, client=client_user,
+                                         status="approved")
+
+    template = DietPlanTemplate.objects.create(
+        name="gate slot", description="d", meals_per_day=3, snacks_per_day=1,
+        days_variation=7)
+    service = TrainerDietPlanService(trainer)
+    plan = service.create_diet_plan(client_user, template, _tz.localdate(),
+                                    duration_weeks=4)
+    food = FoodItem.objects.filter(needs_review=False).first()
+    when = _tz.localdate() + _dt.timedelta(days=2)
+
+    first = service.add_meal_to_plan(plan, "Snack", when,
+                                     [{"food_id": food.id, "quantity": 50}],
+                                     scheduled_time=_dt.time(10, 0))
+    service.add_meal_to_plan(plan, "Snack", when,
+                             [{"food_id": food.id, "quantity": 50}],
+                             scheduled_time=_dt.time(16, 0))
+
+    with pytest.raises(_DjangoValidationError) as refusal:
+        service.update_meal(first, scheduled_time=_dt.time(16, 0))
+    assert getattr(refusal.value, "code", None) == "duplicate_meal"

@@ -260,9 +260,37 @@ class TrainerDietPlanService:
         """
         self._authorize_plan(meal.diet_plan)
 
+        # A meal the client has already lived through is a RECORD, not a plan. The
+        # component rows carry `is_completed`, `completed_at` and
+        # `actual_quantity_consumed`, and replacing them deletes all three: a trainer
+        # tidying up last month's plan silently zeroed days the client actually ate,
+        # and the coach and analytics layers then read the zeros as non-compliance.
+        # Resetting completion is right for a FUTURE meal; nothing distinguished the two.
+        if food_items is not None and meal.date < timezone.localdate():
+            raise ValidationError(
+                _("That meal is in the past and records what the client ate. "
+                  "Change a future meal instead."),
+                code="meal_already_happened")
+
         components = (self._validated_items(food_items, meal.meal_type,
                                             client=meal.diet_plan.user)
                       if food_items is not None else None)
+
+        # Moving a meal onto a slot another meal already holds is "that slot is taken",
+        # not a server fault. `add_meal_to_plan` has an explicit `duplicate_meal`
+        # pre-check and this had none, so `one_meal_per_slot_per_day` fired at the
+        # database and the view's broad handler answered
+        # `{"code": "server_error"}` with a 500. The data was safe — the atomic block
+        # rolls back cleanly — but the answer was wrong and it spent the error budget.
+        if scheduled_time is not None and scheduled_time != meal.scheduled_time:
+            clash = Meal.objects.filter(
+                diet_plan=meal.diet_plan, date=meal.date, meal_type=meal.meal_type,
+                scheduled_time=scheduled_time).exclude(pk=meal.pk)
+            if clash.exists():
+                raise ValidationError(
+                    _("A %(slot)s already exists at that time on %(date)s")
+                    % {"slot": meal.meal_type, "date": meal.date},
+                    code="duplicate_meal")
 
         # Atomic, because the old components are deleted before the new ones exist:
         # a failure halfway through emptied the client's meal.
@@ -394,6 +422,16 @@ class TrainerDietPlanService:
         if not self._can_manage_client(diet_plan.user):
             raise ValidationError(_("This client is no longer assigned to you"),
                                   code="not_assigned_client")
+        if not diet_plan.is_active:
+            # A plan the client no longer follows. `diet_persistence` identified this
+            # exact failure — "every meal they added to it afterwards landed on a plan
+            # nobody follows" — and fixed only the LOGGING on the superseding side. The
+            # client taps Generate, silently retiring the trainer's plan; the trainer
+            # then spends an afternoon building next week's meals, gets 200 on every one,
+            # and the client sees an empty day.
+            raise ValidationError(
+                _("This plan has been replaced by a newer one and is no longer followed"),
+                code="plan_superseded")
 
     #: One legal range for a component, the same one `DietInputValidator` applies
     #: everywhere else. This class declared its own 0-2000 while every other writer
