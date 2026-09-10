@@ -191,9 +191,18 @@ def _text(value, field: str, *, limit: int = 500) -> str:
     characters stored all of them. That string is the sole input to `AllergenChecker`,
     read by the generator, by the trainer's write and by the swap path, and a shape it
     cannot parse fails OPEN.
+
+    A LIST of strings is accepted and joined, not refused: it is the shape a client
+    naturally sends for a list of allergies, `parse_user_allergies` splits on commas
+    anyway, and on a field where a rejected write means an unprotected client, taking
+    the obvious meaning beats a 400.
     """
     if value is None:
         return ""
+    if isinstance(value, (list, tuple)):
+        if any(isinstance(v, bool) or not isinstance(v, (str, int, float)) for v in value):
+            raise BadInput(f"{field} must be text, or a list of text")
+        value = ", ".join(str(v).strip() for v in value if str(v).strip())
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise BadInput(f"{field} must be text")
     out = str(value).strip()
@@ -971,7 +980,14 @@ class UserPreferencesView(APIView):
                     getattr(preferences, field).set(FoodItem.objects.filter(id__in=ids))
             changed = []
             if 'allergies' in request.data:
-                preferences.allergies = _body(request)['allergies']
+                # `_text` was written for THIS call site — its docstring names the bug —
+                # and was then never called from anywhere. A client posting
+                # `["peanut","sesame"]` stored the literal text `"['peanut', 'sesame']"`,
+                # which `parse_user_allergies` turned into `free:'peanut'` WITH the quote
+                # characters, matching no ingredient name. Every canonical tag was lost,
+                # the checker graded on `allergen_source` alone, and the plan came back
+                # `is_safe: true` while offering the client tahini by name.
+                preferences.allergies = _text(_body(request)['allergies'], 'allergies')
                 changed.append('allergies')
             if 'local_ratio' in request.data:
                 try:

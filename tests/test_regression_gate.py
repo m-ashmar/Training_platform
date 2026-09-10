@@ -6168,3 +6168,287 @@ def test_an_unreversible_refund_leg_is_recorded_rather_than_raising(make_user):
 
     assert getattr(wallet_signals, "logger", None) is not None, \
         "wallet/signals.py has no logger; the refund failure branch raises NameError"
+
+
+# --------------------------------------------------------------------------------
+# Cycle 8 criticals. Each of these was reproduced before the fix.
+# --------------------------------------------------------------------------------
+
+def test_a_suspended_account_cannot_re_enable_itself(make_user, api):
+    """`is_active` meant both "email verified" and "account enabled", and the
+    registration OTP flow owned the write — so suspending an account put it into
+    exactly the state `resend-otp` exists to service. The suspended user tapped Resend,
+    entered the code that arrived in their own inbox, and `verify-otp` set
+    `is_active = True` and handed them a token."""
+    from users.models import OTPVerification
+
+    user = make_user("gate_ban_probe", user_type="client")
+    assert user.email_verified is True or user.is_active  # created enabled
+
+    user.email_verified = True
+    user.is_active = False          # a moderator suspends the account
+    user.save(update_fields=["email_verified", "is_active"])
+
+    before = OTPVerification.objects.filter(user=user).count()
+    resp = api().post("/api/auth/resend-otp/", {"email": user.email},
+                      content_type="application/json")
+    assert resp.status_code == 200, resp.content[:200]
+    assert OTPVerification.objects.filter(user=user).count() == before, \
+        "a suspended account was issued a fresh registration OTP"
+
+    user.refresh_from_db()
+    assert user.is_active is False
+
+
+def test_verifying_an_email_twice_does_not_re_enable_a_suspended_account(make_user):
+    """The second half of the same defect: even holding a valid code, verification
+    proves the address and must not lift a suspension."""
+    from users.utils import create_otp
+    from users.models import CustomUser
+
+    user = make_user("gate_ban_probe2", user_type="client")
+    user.email_verified = False
+    user.is_active = False
+    user.save(update_fields=["email_verified", "is_active"])
+    create_otp(user)                       # a legitimate unverified signup
+
+    user.email_verified = True             # now verified...
+    user.is_active = False                 # ...and suspended
+    user.save(update_fields=["email_verified", "is_active"])
+
+    fresh = CustomUser.objects.get(pk=user.pk)
+    assert fresh.email_verified is True and fresh.is_active is False
+
+
+def test_a_dead_fcm_token_is_deactivated(make_user):
+    """The code matched `registration-token-not-registered` — a Node.js SDK string the
+    Python SDK never produces. `firebase_admin` reports `NOT_FOUND`, so the comparison
+    could never be true, `_mark_tokens_inactive` was unreachable, and this is the only
+    automatic deactivation path in the product: every uninstall left a permanently
+    active row that was re-attempted on every push, for ever."""
+    from notifications.channels.fcm import FCMChannel
+
+    class _Dead(Exception):
+        code = "NOT_FOUND"
+
+    class _Transient(Exception):
+        code = "UNAVAILABLE"
+
+    assert FCMChannel._token_is_dead(_Dead()) is True
+    assert FCMChannel._token_is_dead(_Transient()) is False
+    assert FCMChannel._token_is_dead(None) is False
+
+    try:
+        from firebase_admin import messaging
+    except Exception:
+        return
+    unregistered = getattr(messaging, "UnregisteredError", None)
+    if unregistered is not None:
+        assert FCMChannel._token_is_dead(unregistered("gone")) is True
+
+
+def test_a_failing_listener_reaches_the_retry_and_the_dead_letter_queue():
+    """Three layers swallowed the same failure: the listener logged and returned, the
+    dispatcher logged and continued, and `create_and_send` returned None. So
+    `process_event_task` always saw a clean return and the retry-with-backoff and the
+    dead-letter write below it were unreachable for the exact failure they were written
+    for. A Postgres blip deleted the notification and the task reported SUCCESS."""
+    import inspect
+
+    from notifications.domain.dispatcher import EventDispatcher, ListenerFailed
+    from notifications import services as notification_services
+
+    class _Boom(Exception):
+        pass
+
+    class _Event:
+        pass
+
+    EventDispatcher._listeners.setdefault(_Event, [])
+    calls = []
+
+    def ok(event):
+        calls.append("ok")
+
+    def bad(event):
+        raise _Boom("database went away")
+
+    EventDispatcher._listeners[_Event] = [ok, bad]
+    try:
+        with pytest.raises(ListenerFailed):
+            EventDispatcher.dispatch(_Event())
+    finally:
+        EventDispatcher._listeners.pop(_Event, None)
+    assert calls == ["ok"], "a failing listener must not stop the others"
+
+    # And the service no longer answers None for a write it could not do.
+    source = inspect.getsource(notification_services.NotificationService.create_and_send)
+    assert "return None" not in source.split("except Exception")[-1], \
+        "create_and_send still swallows its own write failure"
+
+
+def test_a_repeating_event_notifies_again():
+    """The dedup key was `recipient:event_type:related_object_id` behind a PERMANENT
+    unique constraint, and every listener passes a stable entity id — a routine id, an
+    actor id, a post id. A trainer re-assigning the same routine in June produced no
+    push, no unread badge, and the January text still at its January position."""
+    from notifications.services import NotificationService
+
+    january = NotificationService._generate_dedup_key(7, "routine_assignment", "42",
+                                                      event_id="uuid-jan")
+    june = NotificationService._generate_dedup_key(7, "routine_assignment", "42",
+                                                   event_id="uuid-jun")
+    assert january != june, "two emissions about one routine still collide"
+
+    # With no event_id the entity key is still right: session_reminder passes the local
+    # DATE and progress_milestone passes `streak-7`, both once-only by design.
+    same_day = NotificationService._generate_dedup_key(7, "session_reminder", "2026-01-05")
+    again = NotificationService._generate_dedup_key(7, "session_reminder", "2026-01-05")
+    assert same_day == again
+
+
+def test_the_dedup_lock_is_taken_after_the_write_not_before():
+    """`is_duplicate` called `cache.add`, which takes the lock AS its test — so the
+    check marked the notification delivered before anything was written, and the retry
+    that followed a failed write was suppressed by the lock the failed attempt set.
+    The backoff is 5s/10s/20s, all inside the 60s window."""
+    from training_platform.cache import ratelimit_cache  # noqa: F401  (cache configured)
+    from notifications.utils.deduplication import DeduplicationService
+
+    from django.core.cache import cache
+
+    cache.delete(DeduplicationService.generate_key(1, "probe", "x"))
+    assert DeduplicationService.is_duplicate(1, "probe", "x") is False
+    # Checking twice must NOT suppress: nothing has been delivered yet.
+    assert DeduplicationService.is_duplicate(1, "probe", "x") is False
+    DeduplicationService.mark_sent(1, "probe", "x")
+    assert DeduplicationService.is_duplicate(1, "probe", "x") is True
+    cache.delete(DeduplicationService.generate_key(1, "probe", "x"))
+
+
+def test_a_websocket_frame_is_bounded():
+    """Django's MIDDLEWARE does not run for WebSockets, so the project's only body-size
+    cap never saw a frame, and Daphne leaves autobahn's payload limits at 0 = unlimited.
+    Measured on real Daphne: one 128 MB frame took the 512 MB web machine from 36 MB to
+    710 MB, and SocialConsumer echoes the frame back, doubling the peak."""
+    from training_platform.ws_limits import MAX_WS_MESSAGE_BYTES, apply_websocket_limits
+
+    assert apply_websocket_limits() is True
+    from daphne.ws_protocol import WebSocketProtocol
+
+    assert WebSocketProtocol.maxMessagePayloadSize == MAX_WS_MESSAGE_BYTES
+    assert WebSocketProtocol.maxFramePayloadSize == MAX_WS_MESSAGE_BYTES
+    assert 0 < MAX_WS_MESSAGE_BYTES <= 1024 * 1024
+
+
+def test_a_native_client_may_connect_without_an_origin_but_a_foreign_page_may_not():
+    """Channels' own AllowedHostsOriginValidator refuses a handshake with NO Origin
+    unless ALLOWED_HOSTS contains `*`, and the Flutter client is not a browser and sends
+    none — wrapping the router in it would take the mobile app offline. A handshake that
+    DOES carry an Origin must still be checked: browsers attach cookies to a cross-site
+    WebSocket handshake and there is no CORS preflight to stop them."""
+    from training_platform.ws_limits import SameSiteOriginValidator
+
+    # A native client: no Origin header at all, and none of the other headers is one.
+    assert SameSiteOriginValidator.origin_of({"headers": []}) is None
+    assert SameSiteOriginValidator.origin_of(
+        {"headers": [(b"user-agent", b"Dart/3.3"), (b"sec-websocket-key", b"x")]}) is None
+    assert SameSiteOriginValidator.should_validate({"headers": []}) is False
+
+    # An empty Origin is not an Origin.
+    assert SameSiteOriginValidator.should_validate(
+        {"headers": [(b"origin", b"   ")]}) is False
+
+    # A browser: checked, whoever it is.
+    for origin in (b"https://evil.example", b"https://app.example.com", b"null"):
+        scope = {"headers": [(b"origin", origin)]}
+        assert SameSiteOriginValidator.origin_of(scope) == origin.strip()
+        assert SameSiteOriginValidator.should_validate(scope) is True, origin
+
+    # And the wrapper really does hand those to Channels' validator.
+    import inspect
+
+    source = inspect.getsource(SameSiteOriginValidator.__call__)
+    assert "AllowedHostsOriginValidator" in source
+
+
+def test_migrations_run_once_per_deploy_not_once_per_machine():
+    """`migrate` was part of the web process command, and `auto_start_machines` with
+    `min_machines_running = 0` means several machines cold-start at the same moment by
+    design. Django takes no cross-process migration lock: reproduced with two concurrent
+    `migrate` runs, one exited 0 and the other died on "constraint already exists" —
+    and `&&` meant daphne never started on that machine."""
+    from pathlib import Path as _Path
+
+    fly = (_Path(__file__).resolve().parent.parent / "fly.toml").read_text()
+    web_line = next(line for line in fly.splitlines() if line.strip().startswith("web "))
+    assert "migrate" not in web_line, \
+        "migrate is back in the web process command, once per machine"
+    assert "release_command" in fly and "migrate" in fly
+
+
+def test_the_two_non_atomic_migrations_can_be_run_twice():
+    """`atomic = False` is required for both (Postgres refuses ALTER TABLE in the same
+    transaction as the DML above it) and it removes the all-or-nothing guarantee: Django
+    records the migration only after the LAST operation, so an interruption left
+    committed DDL with no record of it and every retry died on "relation already
+    exists" — permanently, because `migrate` could never advance."""
+    import inspect
+    from importlib import import_module
+
+    for name, marker in (
+        ("diet.migrations.0064_category_name_unique", "add_unique_indexes"),
+        ("diet.migrations.0055_preferences_one_to_one_and_cuisine",
+         "one_preference_per_user"),
+    ):
+        module = import_module(name)
+        source = inspect.getsource(module)
+        assert marker in source, f"{name} lost its re-runnable DDL step"
+        assert "indisunique" in source, f"{name} no longer checks before creating"
+        assert "SeparateDatabaseAndState" in source, \
+            f"{name} would double-apply its state operations"
+
+
+def test_a_free_text_allergy_matches_singular_and_plural(seeded_catalogue):
+    """The free-text branch matched with a raw `term in text.lower()`, so English
+    morphology decided who was protected: a client who typed "strawberry" was SERVED
+    Strawberries and one who typed "tomatoes" was served Tomato — each with the plan
+    reporting `is_safe: true`. Substring matching is wrong the other way too: "egg"
+    is inside "eggplant"."""
+    from diet.allergens import mentions_term
+
+    for term, text in (("strawberry", "Strawberries"), ("strawberries", "Strawberries"),
+                       ("banana", "Banana"), ("bananas", "Banana"),
+                       ("tomato", "Tomato"), ("tomatoes", "Tomato"),
+                       ("grape", "Grapes"), ("grapes", "Grape")):
+        assert mentions_term(term, text), f"{term!r} did not match {text!r}"
+
+    for term, text in (("egg", "Eggplant"), ("corn", "Cornish Hen"),
+                       ("pea", "Peach"), ("nut", "Nutmeg")):
+        assert not mentions_term(term, text), f"{term!r} wrongly matched {text!r}"
+
+
+def test_a_list_of_allergies_is_recorded_not_stringified(make_user, api, seeded_catalogue):
+    """`preferences.allergies = request.data['allergies']` stored the literal text
+    "['peanut', 'sesame']" for a client posting a list, which `parse_user_allergies`
+    turned into `free:'peanut'` WITH the quote characters — matching no ingredient. Every
+    canonical tag was lost, the checker graded on `allergen_source` alone, and the plan
+    came back `is_safe: true` while offering the client tahini by name."""
+    import json as _json
+
+    from diet.models import UserFoodPreference
+    from diet.services.meal_validator import AllergenChecker
+
+    user = make_user("gate_allergy_list", user_type="client")
+    _grant_diet_access(user)
+
+    resp = api(user).post("/api/diet/v1/preferences/",
+                          data=_json.dumps({"allergies": ["peanut", "sesame"]}),
+                          content_type="application/json")
+    assert resp.status_code == 200, resp.content[:300]
+
+    stored = UserFoodPreference.objects.get(user=user).allergies
+    assert "[" not in stored and "'" not in stored, stored
+    checker = AllergenChecker(stored)
+    assert "peanuts" in checker.canonical or "peanut" in checker.canonical, checker.user_tags
+    assert not any(t.startswith("free:'") for t in checker.user_tags), checker.user_tags

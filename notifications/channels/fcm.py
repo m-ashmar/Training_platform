@@ -184,10 +184,8 @@ class FCMChannel:
             for idx, resp in enumerate(response.responses):
                 if resp.success:
                     success_tokens.append(tokens[idx])
-                else:
-                    err_code = resp.exception.code
-                    if err_code in ['registration-token-not-registered', 'invalid-registration-token']:
-                        invalid_tokens.append(tokens[idx])
+                elif cls._token_is_dead(resp.exception):
+                    invalid_tokens.append(tokens[idx])
 
             if invalid_tokens:
                 cls._mark_tokens_inactive(invalid_tokens)
@@ -204,6 +202,46 @@ class FCMChannel:
         except Exception as e:
             logger.error(f"FCM Multicast/Chunk error: {e}", exc_info=True)
             return 0, len(tokens), []
+
+    #: The canonical Google error codes the PYTHON admin SDK reports for a token that
+    #: will never deliver again. The list here used to be
+    #: `registration-token-not-registered` / `invalid-registration-token`, which are the
+    #: legacy NODE.js SDK's codes: `firebase_admin` returns `NOT_FOUND`,
+    #: `INVALID_ARGUMENT` and `PERMISSION_DENIED`, so the comparison could never be
+    #: true, `_mark_tokens_inactive` below was unreachable, and this was the only
+    #: automatic deactivation path in the product. Every uninstall, reinstall and OS
+    #: token rotation left a permanently active row that was re-attempted on every
+    #: single push, for ever.
+    DEAD_TOKEN_CODES = frozenset({
+        "NOT_FOUND", "INVALID_ARGUMENT", "PERMISSION_DENIED",
+        # Kept so a future SDK or a stubbed transport that still speaks the old
+        # vocabulary is also understood.
+        "registration-token-not-registered", "invalid-registration-token",
+        "messaging/registration-token-not-registered",
+        "messaging/invalid-registration-token",
+    })
+
+    @classmethod
+    def _token_is_dead(cls, exception) -> bool:
+        """Is this per-token failure permanent, or worth retrying later?
+
+        Matched on the exception CLASS first, because that is what the SDK actually
+        guarantees; the code string is the belt to that brace. A transport error or a
+        quota rejection is not a dead token and must not deactivate anything.
+        """
+        if exception is None:
+            return False
+        try:
+            from firebase_admin import messaging as _messaging
+            dead_types = tuple(
+                t for t in (getattr(_messaging, "UnregisteredError", None),
+                            getattr(_messaging, "SenderIdMismatchError", None))
+                if t is not None)
+            if dead_types and isinstance(exception, dead_types):
+                return True
+        except Exception:
+            logger.debug("could not consult firebase exception types", exc_info=True)
+        return getattr(exception, "code", None) in cls.DEAD_TOKEN_CODES
 
     @classmethod
     def _mark_tokens_inactive(cls, tokens):

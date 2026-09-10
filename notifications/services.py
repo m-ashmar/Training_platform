@@ -30,10 +30,12 @@ class NotificationService:
             logger.debug('suppressed non-fatal error', exc_info=True)
         
         # calculate dedup key
-        dedup_key = cls._generate_dedup_key(recipient.id, event_type, related_object_id)
+        dedup_key = cls._generate_dedup_key(recipient.id, event_type, related_object_id, event_id)
         
         # Layer 1: Redis Check
-        if DeduplicationService.is_duplicate(recipient.id, event_type, related_object_id):
+        # Same anchor as the DB key below: the EMISSION when we have one.
+        dedup_scope = event_id or related_object_id
+        if DeduplicationService.is_duplicate(recipient.id, event_type, dedup_scope):
             try:
                 from notifications.metrics import notifications_deduplicated_total
                 notifications_deduplicated_total.labels(source='redis', event_type=event_type).inc()
@@ -74,7 +76,11 @@ class NotificationService:
             # Dispatch to channels
             # In a real system, you might check user preferences here
             cls._dispatch_channels(notification)
-            
+
+            # The Redis suppression window opens HERE, once the row exists — not at the
+            # check, which is what made a retry a no-op.
+            DeduplicationService.mark_sent(recipient.id, event_type, dedup_scope)
+
             return notification
             
         except IntegrityError:
@@ -101,12 +107,38 @@ class NotificationService:
                 # Should not happen given IntegrityError
                 return None
         except Exception as e:
+            # RAISED, not swallowed. Returning None here told the caller "nothing to
+            # do" for a database error, an outage or a bug — so the dispatcher saw a
+            # clean return, the task reported SUCCESS, and the notification was gone
+            # with nothing retrying it and nothing recording it. The dead-letter queue
+            # read empty while notifications were being destroyed.
             logger.error(f"Error creating notification: {e}", exc_info=True)
-            return None
+            raise
 
     @staticmethod
-    def _generate_dedup_key(recipient_id, event_type, related_object_id):
-        raw = f"{recipient_id}:{event_type}:{related_object_id}"
+    def _generate_dedup_key(recipient_id, event_type, related_object_id, event_id=None):
+        """What counts as "the same notification", for the permanent DB constraint.
+
+        The EMISSION, when we know it. `event_id` is a fresh UUID per `emit_event`, so
+        keying on it suppresses a duplicate delivery of one emission — a Celery
+        redelivery, a double signal — which is what deduplication is for, and lets a
+        genuinely new event through.
+
+        Keying on the entity instead made the suppression permanent, because
+        `UniqueConstraint(recipient, deduplication_key)` has no time component and
+        every listener passes a stable id: a routine id for `routine_assignment`, an
+        actor id for the four trainer-request events, a post id for `post_liked`. A
+        trainer re-assigning the same routine in June with new sets produced no push, no
+        unread badge, and the January text still sitting at its January position in the
+        feed — while the dedup counter rose and looked like the feature working. A
+        trainer whose invitation was declined could never invite that client again.
+
+        Without an `event_id` the entity key is still the right answer: `session_reminder`
+        passes the local DATE, and `progress_milestone` passes `streak-7`, both of which
+        are meant to be once-only.
+        """
+        raw = (f"{recipient_id}:{event_type}:{event_id}" if event_id
+               else f"{recipient_id}:{event_type}:{related_object_id}")
         return hashlib.sha256(raw.encode()).hexdigest()
 
     @classmethod

@@ -16,12 +16,25 @@ import ai_assistant.routing
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "training_platform.settings_production")
 
+# Cap inbound frame size before Daphne builds its factory. See ws_limits for the
+# measurements: one 128 MB frame from any authenticated account was enough to OOM the
+# 512 MB web machine, because Django's middleware — including the project's only
+# body-size cap — does not run for WebSockets and autobahn's default is unlimited.
+from training_platform.ws_limits import (  # noqa: E402
+    SameSiteOriginValidator, apply_websocket_limits)
+
+apply_websocket_limits()
+
 application = ProtocolTypeRouter({
     "http": get_asgi_application(),
-    "websocket": AuthMiddlewareStack(
-        URLRouter(
-            social.routing.websocket_urlpatterns
-            + ai_assistant.routing.websocket_urlpatterns
+    # Origin-checked for browsers, open for native clients that send no Origin at all.
+    # See SameSiteOriginValidator for why Channels' own validator cannot be used here.
+    "websocket": SameSiteOriginValidator(
+        AuthMiddlewareStack(
+            URLRouter(
+                social.routing.websocket_urlpatterns
+                + ai_assistant.routing.websocket_urlpatterns
+            )
         )
     ),
 })

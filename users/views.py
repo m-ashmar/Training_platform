@@ -246,10 +246,24 @@ class OTPVerificationView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Activate user
+        # Verifying an email proves the address, and nothing else. It used to set
+        # `is_active = True`, which is also the column a moderator clears to suspend an
+        # account — so a suspended user tapped Resend, entered the code that arrived in
+        # their own inbox, and was handed a working token with the suspension undone.
         user = otp_instance.user
-        user.is_active = True
-        user.save()
+        was_verified = user.email_verified
+        user.email_verified = True
+        if not was_verified:
+            # First verification enables the account. A later one cannot re-enable a
+            # suspended one, because the account was already verified when it was
+            # suspended.
+            user.is_active = True
+        user.save(update_fields=['email_verified', 'is_active'])
+        if not user.is_active:
+            return Response(
+                {'error': _('This account is not available. Contact support.'),
+                 'code': 'account_disabled'},
+                status=status.HTTP_403_FORBIDDEN)
         
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
@@ -330,9 +344,14 @@ class ResendOTPView(APIView):
             logger.info(f"OTP resend requested for unknown email (hash: {rate_key})")
             return Response({'message': _GENERIC_MSG}, status=status.HTTP_200_OK)
 
-        # Already verified accounts: still return 200 (don't confirm email status)
-        if user.is_active:
-            logger.info(f"OTP resend requested for already-active user {user.id}")
+        # Already verified, or suspended: still 200, and still no OTP. This gated on
+        # `is_active` alone, which is false for BOTH an unverified signup and a
+        # suspended account — so suspension made an account eligible for a fresh
+        # registration code. Verification is now its own column and is the only thing
+        # this endpoint services.
+        if user.email_verified or not user.is_active:
+            logger.info(f"OTP resend declined for user {user.id} "
+                        f"(verified={user.email_verified}, active={user.is_active})")
             return Response({'message': _GENERIC_MSG}, status=status.HTTP_200_OK)
 
         # Create and send new OTP
@@ -1304,25 +1323,51 @@ class ClientCancelTrainerRequestView(APIView):
         
         try:
             from .models import TrainerClientRelation
-            
-            # Find pending request for this client
-            pending_request = TrainerClientRelation.objects.filter(
-                client=request.user,
-                status='pending'
-            ).select_related('trainer').first()
-            
-            if not pending_request:
-                return Response(
-                    {'error': _('You do not have a pending trainer request')}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            trainer = pending_request.trainer
-            trainer_id = trainer.id
-            trainer_name = trainer.full_name or trainer.username
-            
-            # Delete the pending request
-            pending_request.delete()
+
+            # THE CLIENT'S OWN request, and only that. The filter was `client=..., 
+            # status='pending'` with `.first()` under `-created_at` ordering, so a
+            # stranger's INVITATION — a different thing, which is why `initiated_by`
+            # exists — was the newest row and got destroyed instead, while the client
+            # stayed locked to the trainer they were trying to leave.
+            #
+            # Locked and re-read INSIDE the transaction, and the status re-checked. It
+            # used to select with no lock and then DELETE unconditionally: a client
+            # tapping Cancel while the trainer tapped Approve produced two 200s, an
+            # approved-then-deleted relation, and 100.00 of the client's money sitting
+            # in escrow with its only anchor — `hold_reference`, which lives on that row
+            # — destroyed. `unassign-trainer` then reported success and refunded nothing.
+            # 4 of 30 contended attempts in an uninstrumented run.
+            with transaction.atomic():
+                pending_request = (TrainerClientRelation.objects
+                                   .select_for_update()
+                                   .select_related('trainer')
+                                   .filter(client=request.user, status='pending',
+                                           initiated_by='client')
+                                   .first())
+
+                if not pending_request:
+                    return Response(
+                        {'error': _('You do not have a pending trainer request')},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                trainer = pending_request.trainer
+                trainer_id = trainer.id
+                trainer_name = trainer.full_name or trainer.username
+
+                # A row that holds money is never deleted. `hold_reference` is the only
+                # record of whose funds are in escrow; releasing them needs it.
+                if pending_request.hold_reference:
+                    logger.error(
+                        "relation %s is pending but holds escrow %s; refusing to delete",
+                        pending_request.id, pending_request.hold_reference)
+                    return Response(
+                        {'error': _('That request is being processed. Try again shortly.'),
+                         'code': 'request_in_flight'},
+                        status=status.HTTP_409_CONFLICT
+                    )
+
+                pending_request.delete()
             
             # Emit domain event — notification handled at delivery boundary
             emit_event(ClientRequestCancelledEvent(

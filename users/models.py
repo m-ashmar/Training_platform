@@ -174,6 +174,23 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     
     # Django auth fields
     is_active = models.BooleanField(default=True, db_index=True)
+    #: Has this person proved they own the address they signed up with?
+    #:
+    #: `is_active` was carrying two unrelated meanings — "email verified" and "account
+    #: enabled" — and the registration OTP flow owned the write. A moderator suspending
+    #: an account therefore put it into exactly the state the resend-OTP endpoint exists
+    #: to service: `ResendOTPView` gated on `if user.is_active`, sent a fresh
+    #: registration code to the suspended person's own inbox, and `verify-otp` set
+    #: `is_active = True` and handed them a token. Suspension undid itself.
+    #:
+    #: Splitting the two means a suspended account is `is_active=False,
+    #: email_verified=True`, which the resend endpoint declines and verify-otp cannot
+    #: re-enable. `default=False` and a migration that back-fills every already-enabled
+    #: account, so nobody has to re-verify.
+    email_verified = models.BooleanField(
+        default=False, db_index=True,
+        help_text="The address was confirmed by OTP. Separate from is_active, which is "
+                  "whether the account is allowed to be used at all.")
     is_staff = models.BooleanField(default=False)
     
     # User Preferences

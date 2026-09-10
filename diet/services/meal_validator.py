@@ -6,6 +6,7 @@ from typing import Iterable, List, Set, Tuple
 from ..allergens import (
     infer_allergens,
     label,
+    mentions_term,
     parse_user_allergies,
 )
 from ..models import FoodItem
@@ -102,8 +103,11 @@ class AllergenChecker:
 
         # 1. Curated tags are authoritative in both directions.
         matched = sorted(stored & self.canonical)
-        # 2. Free-text terms the vocabulary did not recognise are still matched on text.
-        matched += sorted(t for t in self.free_terms if t and t in text.lower())
+        # 2. Free-text terms the vocabulary did not recognise are still matched on text,
+        #    by WORD and singular — not by substring. `t in text.lower()` let English
+        #    morphology decide who was protected: "strawberry" was served Strawberries
+        #    and "bananas" was served Banana, each with the plan reporting `is_safe`.
+        matched += sorted(t for t in self.free_terms if mentions_term(t, text))
         # 3. Name/ingredient inference catches rows whose tags are missing or stale.
         matched += sorted(infer_allergens(text) & self.canonical - set(matched))
 

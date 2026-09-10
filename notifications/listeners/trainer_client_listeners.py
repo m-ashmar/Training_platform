@@ -53,6 +53,12 @@ def handle_trainer_assignment_request(event: TrainerAssignmentRequestEvent):
         logger.warning(f"User not found for TrainerAssignmentRequestEvent: actor={event.actor_id}, recipient={event.recipient_id}")
     except Exception as e:
         logger.error(f"Error handling TrainerAssignmentRequestEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 
 @subscribe(TrainerUnassignmentEvent)
@@ -78,6 +84,12 @@ def handle_trainer_unassignment(event: TrainerUnassignmentEvent):
         logger.warning(f"User not found for TrainerUnassignmentEvent: {event.actor_id}")
     except Exception as e:
         logger.error(f"Error handling TrainerUnassignmentEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 
 @subscribe(ClientRequestReceivedEvent)
@@ -103,6 +115,12 @@ def handle_client_request_received(event: ClientRequestReceivedEvent):
         logger.warning(f"User not found for ClientRequestReceivedEvent: {event.actor_id}")
     except Exception as e:
         logger.error(f"Error handling ClientRequestReceivedEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 
 @subscribe(ClientRequestApprovedEvent)
@@ -128,6 +146,12 @@ def handle_client_request_approved(event: ClientRequestApprovedEvent):
         logger.warning(f"User not found for ClientRequestApprovedEvent: {event.actor_id}")
     except Exception as e:
         logger.error(f"Error handling ClientRequestApprovedEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 
 @subscribe(ClientRequestRejectedEvent)
@@ -153,6 +177,12 @@ def handle_client_request_rejected(event: ClientRequestRejectedEvent):
         logger.warning(f"User not found for ClientRequestRejectedEvent: {event.actor_id}")
     except Exception as e:
         logger.error(f"Error handling ClientRequestRejectedEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 
 @subscribe(ClientRequestCancelledEvent)
@@ -178,6 +208,12 @@ def handle_client_request_cancelled(event: ClientRequestCancelledEvent):
         logger.warning(f"User not found for ClientRequestCancelledEvent: {event.actor_id}")
     except Exception as e:
         logger.error(f"Error handling ClientRequestCancelledEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 
 @subscribe(ClientUnassignedTrainerEvent)
@@ -203,3 +239,9 @@ def handle_client_unassigned_trainer(event: ClientUnassignedTrainerEvent):
         logger.warning(f"User not found for ClientUnassignedTrainerEvent: {event.actor_id}")
     except Exception as e:
         logger.error(f"Error handling ClientUnassignedTrainerEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise

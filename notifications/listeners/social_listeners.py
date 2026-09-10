@@ -52,6 +52,12 @@ def handle_post_liked(event: PostLikedEvent):
         logger.warning(f"User not found for PostLikedEvent: {event}")
     except Exception as e:
         logger.error(f"Error handling PostLikedEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 @subscribe(CommentCreatedEvent)
 def handle_comment_created(event: CommentCreatedEvent):
@@ -84,6 +90,12 @@ def handle_comment_created(event: CommentCreatedEvent):
         logger.debug('suppressed non-fatal error', exc_info=True)
     except Exception as e:
         logger.error(f"Error handling CommentCreatedEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 @subscribe(UserFollowedEvent)
 def handle_user_followed(event: UserFollowedEvent):
@@ -106,6 +118,12 @@ def handle_user_followed(event: UserFollowedEvent):
         )
     except Exception as e:
         logger.error(f"Error handling UserFollowedEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 @subscribe(AchievementAwardedEvent)
 def handle_achievement_awarded(event: AchievementAwardedEvent):
@@ -130,6 +148,12 @@ def handle_achievement_awarded(event: AchievementAwardedEvent):
         )
     except Exception as e:
         logger.error(f"Error handling AchievementAwardedEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise
 
 @subscribe(ChallengeProgressEvent)
 def handle_challenge_progress(event: ChallengeProgressEvent):
@@ -154,3 +178,9 @@ def handle_challenge_progress(event: ChallengeProgressEvent):
         )
     except Exception as e:
         logger.error(f"Error handling ChallengeProgressEvent: {e}", exc_info=True)
+        # RAISED. A listener that logs and returns tells the dispatcher it
+        # succeeded, so the retry and the dead-letter write in
+        # `process_event_task` were unreachable and a transient database error
+        # silently deleted the notification. The `DoesNotExist` branch above
+        # stays a swallow: a deleted user is nothing to retry.
+        raise

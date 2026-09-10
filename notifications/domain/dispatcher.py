@@ -5,6 +5,14 @@ from typing import Dict, List, Type, Callable
 
 logger = logging.getLogger(__name__)
 
+
+class ListenerFailed(Exception):
+    """At least one listener for an event did not complete.
+
+    Raised so `process_event_task` can retry and, past its retries, write the event to
+    the dead-letter queue. Both of those paths existed and neither could ever run.
+    """
+
 class EventDispatcher:
     _listeners: Dict[Type[BaseDomainEvent], List[Callable]] = {}
 
@@ -26,11 +34,26 @@ class EventDispatcher:
         
         logger.info(f"Dispatching {event_type.__name__} to {len(listeners)} listeners")
         
+        # Every listener runs even if one fails — a failure in the badge listener must
+        # not cost the push — but the failures are RAISED at the end. They used to be
+        # logged and dropped, and `create_and_send` swallowed its own exceptions too, so
+        # `process_event_task` always saw `dispatch()` return normally: the retry with
+        # backoff and the dead-letter write below it were unreachable for the exact
+        # failure they were written for. A Postgres blip deleted the notification and
+        # the task reported SUCCESS.
+        failures = []
         for listener in listeners:
             try:
                 listener(event)
             except Exception as e:
                 logger.error(f"Error in listener {listener.__name__} for {event_type.__name__}: {e}", exc_info=True)
+                failures.append((getattr(listener, "__name__", str(listener)), e))
+
+        if failures:
+            names = ", ".join(name for name, _e in failures)
+            raise ListenerFailed(
+                f"{len(failures)} listener(s) failed for {event_type.__name__}: {names}"
+            ) from failures[0][1]
 
     @classmethod
     def emit(cls, event: BaseDomainEvent, async_processing: bool = True):

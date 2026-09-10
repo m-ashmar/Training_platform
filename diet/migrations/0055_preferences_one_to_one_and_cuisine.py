@@ -61,6 +61,30 @@ def noop(apps, schema_editor):
     """No reverse. Splitting a merged preference row back in two is not recoverable."""
 
 
+def one_preference_per_user(apps, schema_editor):
+    """Add the unique index behind the OneToOne, unless it is already there."""
+    connection = schema_editor.connection
+    if connection.vendor != "postgresql":
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT 1
+              FROM pg_index i
+              JOIN pg_class t ON t.oid = i.indrelid
+              JOIN pg_attribute a
+                ON a.attrelid = t.oid AND a.attnum = ANY (i.indkey)
+             WHERE t.relname = 'diet_userfoodpreference'
+               AND i.indisunique
+               AND i.indnatts = 1
+               AND a.attname = 'user_id'
+        """)
+        if cursor.fetchone():
+            return
+        cursor.execute(
+            'ALTER TABLE diet_userfoodpreference '
+            'ADD CONSTRAINT diet_userfoodpreference_user_id_uniq UNIQUE ("user_id")')
+
+
 class Migration(migrations.Migration):
     # Not atomic: Postgres refuses to ALTER a table in the same transaction as the DML
     # above it ("cannot ALTER TABLE ... because it has pending trigger events"), and the
@@ -94,11 +118,22 @@ class Migration(migrations.Migration):
             field=models.FloatField(default=0.5),
         ),
         migrations.RunPython(one_row_per_client, noop),
-        migrations.AlterField(
-            model_name="userfoodpreference",
-            name="user",
-            field=models.OneToOneField(
-                on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL
-            ),
+        migrations.SeparateDatabaseAndState(
+            # Re-runnable, for the same reason as 0064: `atomic = False` means an
+            # interruption after this DDL but before Django records the migration
+            # leaves the unique index committed and unrecorded, and every retry then
+            # dies on "relation already exists" — permanently, because `migrate` never
+            # advances. The check is on the shape of the index, not on a generated name.
+            database_operations=[migrations.RunPython(one_preference_per_user, noop)],
+            state_operations=[
+                migrations.AlterField(
+                    model_name="userfoodpreference",
+                    name="user",
+                    field=models.OneToOneField(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+            ],
         ),
     ]

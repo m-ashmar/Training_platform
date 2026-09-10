@@ -146,6 +146,63 @@ def _norm(text: str) -> tuple[set[str], str]:
     return set(_WORD_RE.findall(low)), low
 
 
+def _singular(word: str) -> str:
+    """`bananas` -> `banana`, `glass` -> `glass`. The one-rule form, kept for callers
+    that want a single answer; `forms_of` below is what matching should use."""
+    return (word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss")
+            else word)
+
+
+def forms_of(word: str) -> Set[str]:
+    """A word and the singular candidates English could have made it from.
+
+    One rule is not enough: `-ies` comes from `-y` (strawberries/strawberry) and `-es`
+    from either a bare stem or an `-e` (tomatoes/tomato, grapes/grape). Stripping a
+    single `s` handles none of those, which is why a client who typed "strawberry" was
+    served Strawberries and one who typed "tomatoes" was served Tomato.
+    """
+    w = (word or "").lower()
+    out = {w}
+    if len(w) > 4 and w.endswith("ies"):
+        out.add(w[:-3] + "y")
+    if len(w) > 3 and w.endswith("es"):
+        out.add(w[:-2])
+        out.add(w[:-1])
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        out.add(w[:-1])
+    return out
+
+
+def word_forms(text: str) -> Set[str]:
+    """Every word in `text`, plus the singular candidates for each."""
+    forms: Set[str] = set()
+    for w in _WORD_RE.findall((text or "").lower()):
+        forms |= forms_of(w)
+    return forms
+
+
+def mentions_term(term: str, text: str) -> bool:
+    """Does `text` name `term`, whichever of them is written in the plural?
+
+    The free-text allergy path matched with a raw `term in text.lower()` substring, and
+    English morphology then decided whether a client was protected: a client who typed
+    "strawberry" was SERVED "Strawberries" (the singular is not a substring of the
+    plural) while one who typed "strawberries" was protected; "bananas" was served
+    "Banana" while "banana" was not. Substring matching is wrong in the other direction
+    too — "corn" is inside "cornish", "egg" inside "eggplant".
+
+    `infer_allergens` below already singularises both sides; this is the same rule,
+    named once, so the two paths cannot disagree again.
+    """
+    term = (term or "").strip().lower()
+    if not term:
+        return False
+    if " " in term:
+        # A phrase is matched as written; there is no useful word form for it.
+        return term in (text or "").lower()
+    return bool(forms_of(term) & word_forms(text))
+
+
 def infer_allergens(*texts: str) -> Set[str]:
     """Best-effort allergen tags for a food/ingredient name.
 

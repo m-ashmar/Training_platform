@@ -48,21 +48,64 @@ class Migration(migrations.Migration):
     def noop(apps, schema_editor):
         pass
 
+    def add_unique_indexes(apps, schema_editor):
+        """Make each of the three name columns unique, skipping any already done.
+
+        `atomic = False` is required here (see above) and it removes the all-or-nothing
+        guarantee: Django writes the `django_migrations` row only after the LAST
+        operation, so an interruption between the second and the fourth left committed
+        DDL with no record of it. The retry then died on "relation ... already exists",
+        every time, and `migrate` could never advance again — with `migrate` in the boot
+        command, that is an app that never starts, and the repair is not the obvious
+        `DROP INDEX` (Postgres refuses: the constraint requires it) but
+        `ALTER TABLE ... DROP CONSTRAINT`.
+
+        Re-runnable instead. The check is on the shape — a single-column unique index on
+        that column — not on a generated constraint name, so it holds whether the
+        column was made unique by this migration, by an earlier partial run, or by hand.
+        """
+        connection = schema_editor.connection
+        if connection.vendor != "postgresql":
+            return
+        for column in ("name", "name_ar", "name_en"):
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT 1
+                      FROM pg_index i
+                      JOIN pg_class t ON t.oid = i.indrelid
+                      JOIN pg_attribute a
+                        ON a.attrelid = t.oid AND a.attnum = ANY (i.indkey)
+                     WHERE t.relname = 'diet_foodcategory'
+                       AND i.indisunique
+                       AND i.indnatts = 1
+                       AND a.attname = %s
+                """, [column])
+                if cursor.fetchone():
+                    continue
+                cursor.execute(
+                    'ALTER TABLE diet_foodcategory ADD CONSTRAINT '
+                    f'diet_foodcategory_{column}_uniq UNIQUE ("{column}")')
+
     operations = [
         migrations.RunPython(collapse_duplicate_categories, noop),
-        migrations.AlterField(
-            model_name="foodcategory",
-            name="name",
-            field=models.CharField(max_length=50, unique=True),
-        ),
-        migrations.AlterField(
-            model_name="foodcategory",
-            name="name_ar",
-            field=models.CharField(max_length=50, null=True, unique=True),
-        ),
-        migrations.AlterField(
-            model_name="foodcategory",
-            name="name_en",
-            field=models.CharField(max_length=50, null=True, unique=True),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[migrations.RunPython(add_unique_indexes, noop)],
+            state_operations=[
+                migrations.AlterField(
+                    model_name="foodcategory",
+                    name="name",
+                    field=models.CharField(max_length=50, unique=True),
+                ),
+                migrations.AlterField(
+                    model_name="foodcategory",
+                    name="name_ar",
+                    field=models.CharField(max_length=50, null=True, unique=True),
+                ),
+                migrations.AlterField(
+                    model_name="foodcategory",
+                    name="name_en",
+                    field=models.CharField(max_length=50, null=True, unique=True),
+                ),
+            ],
         ),
     ]

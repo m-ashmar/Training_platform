@@ -12,8 +12,17 @@ primary_region = "ams"          # Amsterdam — closest free-tier region to Midd
 # Celery worker or beat existed anywhere — every .delay() enqueued a job nothing ever
 # consumed: feed fan-out, notifications, FCM, AI plan generation, all silently dead.
 [processes]
-  web    = "sh -c 'python manage.py migrate --noinput && daphne -b 0.0.0.0 -p 8000 training_platform.asgi:application'"
+  web    = "daphne -b 0.0.0.0 -p 8000 training_platform.asgi:application"
   worker = "celery -A training_platform worker --beat --loglevel=info --concurrency=2"
+
+# Migrations run ONCE per deploy, here, before any machine starts serving. They used to
+# be part of the web command, and `auto_start_machines` with `min_machines_running = 0`
+# means several machines cold-start at the same moment by design: each ran `migrate`
+# against the same database, Django takes no cross-process migration lock, and the loser
+# died on "constraint already exists". `&&` meant daphne never started on that machine,
+# so it served nothing and Fly restarted it into the same race. Reproduced with two
+# concurrent `migrate` processes: one exited 0, the other exited 1 partway through.
+release_command = "python manage.py migrate --noinput"
 
 [env]
   DJANGO_SETTINGS_MODULE = "training_platform.settings_production"
