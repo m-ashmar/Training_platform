@@ -564,14 +564,24 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             within.append((match, score, recipe))
 
     if within:
-        # A dish already served `max_servings` times this week is not sampled while
-        # any other fitting dish exists. The multiplicative penalty (about 60 points
-        # a serving) could not outweigh a 100-point chosen-food bonus, so a chooser's
-        # favourite dish came back a fourth time in a week.
+        # A dish already served `max_servings` times this week is not sampled at all.
+        # The multiplicative penalty (about 60 points a serving) could not outweigh a
+        # 100-point chosen-food bonus, so a chooser's favourite dish came back a fourth
+        # time in a week.
         if max_servings is not None and served_counts:
             fresh = [t for t in within if int(served_counts.get(t[2].id, 0)) < max_servings]
-            if fresh:
-                within = fresh
+            # `if fresh: within = fresh` discarded the cap entirely when EVERY fitting
+            # dish was already at it — which is exactly the situation the cap exists for.
+            # A 1,200 kcal client has one dish in a 105-recipe library that fits a
+            # 300 kcal dinner, so `fresh` emptied on the third night and the same tuna
+            # salad came back a fourth and a fifth time. Returning nothing hands the slot
+            # to the template path, which is the variety this is protecting.
+            within = fresh
+
+    # Re-tested, because the cap above can empty it. Every fitting dish being at its
+    # weekly limit is not a reason to serve one a fifth time; it is a reason to let the
+    # template path build a plate instead.
+    if within:
         if rng is None or len(within) == 1:
             return max(within, key=lambda triple: triple[1])[0]
         matches = [m for m, _s, _r in within]

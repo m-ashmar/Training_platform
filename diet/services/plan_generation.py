@@ -17,7 +17,15 @@ logger = logging.getLogger(__name__)
 #: What the deterministic planner can structure. More meals than this is a request for
 #: the meal count the planner does not split for; it is clamped, not refused.
 MAX_MAIN_MEALS = 3
-MAX_SNACKS = 1
+#: Four, not one. This is a STRUCTURE cap — how many eating occasions a day may have —
+#: not a nutrition rule, and at one snack the largest structure the planner would accept
+#: topped out at 3,325 kcal on `maintain`. `CustomUser.MAX_DAILY_CALORIES` is 6,000 and
+#: `calculate_daily_calories` legitimately returns more than 3,325 for a large or very
+#: active adult, so four of ten plausible adult profiles were refused a plan outright —
+#: and the suggestion handed back was 3 meals and 1 snack, which is the default and the
+#: structure that had just been refused. There was no input that produced a plan for
+#: them. Each snack adds `policy.snack_kcal` to the ceiling.
+MAX_SNACKS = 4
 #: Seven days inline is the ceiling for a synchronous endpoint; the task takes more.
 MAX_INLINE_DAYS = 7
 MAX_TASK_DAYS = 30
@@ -33,11 +41,32 @@ class InfeasibleCaloriesError(ValueError):
 
     @property
     def suggestion(self) -> dict:
-        # Within what this module will actually accept. It suggested up to 6 meals and
-        # 2 snacks, which `generate_and_save` then clamps back to 3 and 1 — so the
-        # client was told to retry with numbers that produce the same refusal.
-        return {"meal_count": MAX_MAIN_MEALS, "snack_count": MAX_SNACKS,
-                "note": "This is the largest structure the planner supports."}
+        """A structure that would actually work, or an honest admission that none does.
+
+        This used to return the maximum structure unconditionally — which, when the
+        request already WAS the maximum, told the client to retry with the numbers that
+        had just been refused. A suggestion that cannot succeed is worse than none: it
+        sends someone round a loop instead of telling them what is wrong.
+
+        So: find the smallest structure that clears the requested figure, and if none
+        does, say so and report the ceiling and the shortfall.
+        """
+        from diet.services.rule_based_planner import feasible_kcal_ceiling
+
+        for snacks in range(self.snack_count, MAX_SNACKS + 1):
+            for meals in range(max(self.meal_count, 1), MAX_MAIN_MEALS + 1):
+                if feasible_kcal_ceiling(meals, snacks) >= self.requested:
+                    return {"meal_count": meals, "snack_count": snacks,
+                            "note": "This structure can carry that many calories."}
+
+        best = feasible_kcal_ceiling(MAX_MAIN_MEALS, MAX_SNACKS)
+        return {
+            "meal_count": MAX_MAIN_MEALS,
+            "snack_count": MAX_SNACKS,
+            "max_daily_calories": round(best),
+            "short_by": round(max(0.0, self.requested - best)),
+            "note": "Even the largest structure cannot carry that many calories.",
+        }
 
 
 def generate_and_save(user, *, meal_count: int = 3, snack_count: int = 1, duration_days: int = 1,

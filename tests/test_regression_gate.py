@@ -7436,3 +7436,66 @@ def test_every_beat_entry_resolves_to_a_registered_task():
     unresolvable = [entry["task"] for entry in settings.CELERY_BEAT_SCHEDULE.values()
                     if entry["task"] not in app.tasks]
     assert not unresolvable, unresolvable
+
+
+def test_a_large_adult_is_offered_a_structure_that_works(seeded_catalogue, make_user):
+    """`MAX_SNACKS` was 1, so the largest structure the planner would accept topped out
+    at 3,325 kcal on `maintain` — while `CustomUser.MAX_DAILY_CALORIES` is 6,000 and
+    `calculate_daily_calories` legitimately returns more for a large or very active
+    adult. Four of ten plausible adult profiles were refused outright, and the suggestion
+    handed back was 3 meals and 1 snack: the default, and the structure that had just
+    been refused. There was no input that produced a plan for them."""
+    from diet.services.plan_generation import (
+        InfeasibleCaloriesError, MAX_MAIN_MEALS, MAX_SNACKS, generate_and_save)
+    from diet.services.rule_based_planner import feasible_kcal_ceiling
+
+    assert MAX_SNACKS > 1, "the structure cap is back to one snack"
+    assert feasible_kcal_ceiling(MAX_MAIN_MEALS, MAX_SNACKS) > \
+        feasible_kcal_ceiling(MAX_MAIN_MEALS, 1)
+
+    # A suggestion must be a structure that would actually succeed...
+    refused = InfeasibleCaloriesError(3400.0, feasible_kcal_ceiling(3, 1), 3, 1)
+    suggestion = refused.suggestion
+    assert feasible_kcal_ceiling(suggestion["meal_count"],
+                                 suggestion["snack_count"]) >= 3400.0, suggestion
+
+    # ...or an honest admission that none does, with the ceiling and the shortfall.
+    impossible = InfeasibleCaloriesError(9000.0, feasible_kcal_ceiling(3, 1), 3, 1)
+    hopeless = impossible.suggestion
+    assert hopeless["short_by"] > 0 and hopeless["max_daily_calories"] > 0, hopeless
+
+    # And a real large adult gets a plan.
+    user = make_user("gate_big_adult", user_type="client", gender="male", height=185,
+                     weight=90, age=25, activity_level="VeryActive")
+    planned = False
+    for snacks in range(1, MAX_SNACKS + 1):
+        try:
+            generate_and_save(user, duration_days=1, snack_count=snacks,
+                              seed_salt=f"gate-big-{snacks}")
+            planned = True
+            break
+        except InfeasibleCaloriesError:
+            continue
+    assert planned, "no structure produced a plan for a 90 kg very active adult"
+
+
+def test_an_over_cap_dish_is_not_offered_at_all(seeded_catalogue):
+    """`find_recipe` filtered the fitting dishes to those under `WEEK_MAX_SERVINGS` and
+    then wrote `if fresh: within = fresh` — so when EVERY fitting dish was already at the
+    cap, which is exactly the situation the cap exists for, the filter was discarded and
+    an over-cap dish was returned anyway.
+
+    The cap is still ADVISORY overall, deliberately: `_plan_meal` ranks "is inside
+    tolerance" above the serving count, so an over-cap dish can still win when the
+    template plate does not fit — see
+    `test_a_fitting_dish_at_the_weekly_cap_beats_a_plate_that_misses`, and the open
+    decision recorded in tests/diet_quality_baseline.json. What this pins is that
+    `find_recipe` itself no longer hands one back."""
+    import inspect
+
+    from diet.planner import recipes
+
+    source = inspect.getsource(recipes.find_recipe)
+    code = "\n".join(line.split("#")[0] for line in source.splitlines())
+    assert "if fresh:" not in code, "find_recipe discards the weekly cap again"
+    assert "within = fresh" in code
