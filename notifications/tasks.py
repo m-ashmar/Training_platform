@@ -95,19 +95,38 @@ def drain_dead_letter_queue():
     """
     from django.core.management import call_command
 
-    from notifications.models import NotificationFailure
+    from notifications.models import Notification, NotificationFailure
+    from notifications.services import NotificationService
 
     pending = NotificationFailure.objects.filter(is_resolved=False).count()
     if pending:
         logger.warning("Notification dead-letter queue holds %s unresolved entries", pending)
         call_command("retry_failed_notifications", limit=100, verbosity=0)
 
+    # And the pushes that were never delivered because the transport was down. The
+    # in-app row survives an FCM outage, so the loss is invisible unless someone greps
+    # worker logs; `status.fcm.status == 'failed'` is now recorded and this is the only
+    # thing that reads it.
+    failed_pushes = list(
+        Notification.objects.filter(status__fcm__status="failed")
+        .order_by("-created_at")[:100])
+    resent = 0
+    for notification in failed_pushes:
+        try:
+            NotificationService._dispatch_channels(notification)
+            resent += 1
+        except Exception:
+            logger.debug("re-dispatch failed for %s", notification.pk, exc_info=True)
+    if failed_pushes:
+        logger.warning("Re-dispatched %s of %s notification(s) whose push had failed",
+                       resent, len(failed_pushes))
+
     stuck = NotificationFailure.objects.filter(is_resolved=False, retry_count__gte=5).count()
     if stuck:
         logger.critical(
             "%s notification(s) have exhausted retries and need a human", stuck
         )
-    return f"pending={pending} stuck={stuck}"
+    return f"pending={pending} stuck={stuck} resent={resent}"
 
 
 @shared_task(

@@ -7627,3 +7627,88 @@ def test_one_hole_in_the_feed_does_not_end_it(make_user, api):
     # And a deleted post is evicted rather than left as a hole.
     assert hasattr(social_views.PostViewSet, "perform_destroy")
     from social.feed_cache import remove_post_from_feeds  # noqa: F401
+
+
+def test_refunding_one_payment_does_not_destroy_the_periods_still_paid_for(
+        make_user, django_capture_on_commit_callbacks):
+    """The `else` branch set `end_date = now` unconditionally, with no reference to what
+    else had been paid — so refunding a customer's FIRST month destroyed the two months
+    they had paid for and kept: 15,000 SYP over three payments, one 5,000 refunded, the
+    subscription cancelled outright, the trainer holding 10,000 and the client nothing."""
+    from decimal import Decimal as _D
+
+    from django.utils import timezone as _tz, translation as _tr
+
+    from subscription.models import Payment, Subscription, SubscriptionPlan
+    from subscription.services.payment_service import PaymentService
+
+    user = make_user("gate_refund_scope", user_type="client")
+    with _tr.override("en"):
+        plan = SubscriptionPlan.objects.create(
+            name="gate refund scope", price=_D("5000.00"), currency="SYP",
+            duration_days=30, description="x")
+    subscription = Subscription.objects.create(
+        user=user, plan=plan, status="pending",
+        start_date=_tz.now(), end_date=_tz.now())
+
+    payments = []
+    for index in range(3):
+        payment = Payment.objects.create(
+            subscription=subscription, amount=_D("5000.00"), currency="SYP",
+            status="pending", payment_method="manual",
+            metadata={"kind": "renewal"} if index else {})
+        with django_capture_on_commit_callbacks(execute=True):
+            PaymentService.complete_payment(payment.id, {
+                "amount": "5000.00", "currency": "SYP", "status": "completed",
+                "transaction_id": f"gate-refund-{index}"})
+        payments.append(payment)
+
+    subscription.refresh_from_db()
+    paid_until = subscription.end_date
+
+    with django_capture_on_commit_callbacks(execute=True):
+        PaymentService.refund_payment(payments[0].id, reason="chargeback")
+
+    subscription.refresh_from_db()
+    assert subscription.status != "cancelled", subscription.status
+    assert subscription.end_date > _tz.now(), subscription.end_date
+    # Exactly one period came off, not all of them.
+    assert (paid_until - subscription.end_date).days == plan.duration_days, (
+        paid_until, subscription.end_date)
+
+
+def test_an_abandoned_checkout_is_cancelled_not_refunded():
+    """`cancelled`/`canceled`/`voided` were in REFUND_STATUSES, and `refund_payment` is
+    only legal from `completed` — so the most common gateway event of all, a customer
+    opening the payment page and walking away, produced a 400 and an endless redelivery
+    loop against a row that could never leave `pending`. `PAYMENT_STATUS_TRANSITIONS`
+    has declared `pending -> cancelled` all along and no service method implemented it."""
+    from subscription import views as subscription_views
+    from subscription.services.payment_service import PaymentService
+
+    assert hasattr(PaymentService, "cancel_payment")
+    for word in ("cancelled", "canceled", "voided"):
+        assert word in subscription_views.CANCELLATION_STATUSES, word
+        assert word not in subscription_views.REFUND_STATUSES, word
+    # A real refund is still a refund.
+    assert "refunded" in subscription_views.REFUND_STATUSES
+    assert "chargeback" in subscription_views.REFUND_STATUSES
+
+
+def test_a_push_that_failed_to_send_is_recorded_and_retried():
+    """`_dispatch_channels` caught the transport error and logged it, and
+    `notification.status` is written INSIDE `FCMChannel.send` after the sends — so a
+    failure before that point left `status = {}`. No query anywhere read
+    `status['fcm']['status'] == 'failed'` and the admin offered no resend, so an FCM
+    outage of any length cost every push issued during it, permanently and invisibly,
+    because the in-app row survives."""
+    import inspect
+
+    from notifications import services as notification_services
+    from notifications import tasks as notification_tasks
+
+    dispatch = inspect.getsource(notification_services.NotificationService._dispatch_channels)
+    assert "'status': 'failed'" in dispatch, "an FCM failure is not recorded"
+
+    drain = inspect.getsource(notification_tasks.drain_dead_letter_queue)
+    assert "status__fcm__status" in drain, "nothing re-sends a push that failed"

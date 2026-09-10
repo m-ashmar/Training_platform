@@ -1,5 +1,7 @@
 import logging
 import hashlib
+
+from django.utils import timezone
 from django.db import IntegrityError, transaction
 from notifications.models import Notification, UserNotificationPreference
 from notifications.utils.deduplication import DeduplicationService
@@ -154,7 +156,24 @@ class NotificationService:
             try:
                 FCMChannel.send(notification)
             except Exception as e:
+                # RECORDED, so something can find it. `notification.status` is written
+                # inside `FCMChannel.send` AFTER the sends, so a failure before that
+                # point left `status = {}` — and no query anywhere reads
+                # `status['fcm']['status'] == 'failed'`, nor does the admin offer a
+                # resend. An FCM outage of any length cost every push issued during it,
+                # permanently and invisibly, because the in-app row survives.
                 logger.error(f"FCM dispatch failed for {notification.id}: {e}", exc_info=True)
+                try:
+                    status = dict(notification.status or {})
+                    status['fcm'] = {
+                        'status': 'failed',
+                        'error': str(e)[:500],
+                        'failed_at': timezone.now().isoformat(),
+                    }
+                    type(notification).objects.filter(pk=notification.pk).update(
+                        status=status)
+                except Exception:
+                    logger.debug("could not record the FCM failure", exc_info=True)
             
         # Email (Future)
         # if UserNotificationPreference.is_channel_enabled(recipient, event_type, 'email'):

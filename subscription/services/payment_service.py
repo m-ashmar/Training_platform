@@ -205,8 +205,20 @@ class PaymentService:
                 .get(pk=payment.subscription_id)
             )
             now = timezone.now()
-            is_renewal = str(payment.metadata.get('kind', '')) == 'renewal'
-            if is_renewal and subscription.end_date:
+            # ONE period comes off, whichever payment it was. The `else` branch set
+            # `end_date = now` unconditionally, with no reference to what else had been
+            # paid — so refunding a customer's FIRST month destroyed the two months they
+            # had paid for and kept: 15,000 SYP paid over three payments, one 5,000
+            # refunded, and the subscription cancelled outright with the trainer holding
+            # 10,000 and the client holding nothing.
+            #
+            # A refund gives back one period of access because it gave back one period of
+            # money. If nothing else has been paid, that ends the subscription, which is
+            # what the old branch was right about in the single-payment case.
+            other_completed = Payment.objects.filter(
+                subscription_id=payment.subscription_id, status='completed'
+            ).exclude(pk=payment.pk).count()
+            if subscription.end_date and other_completed:
                 subscription.end_date = subscription.end_date - timedelta(
                     days=subscription.plan.duration_days
                 )
