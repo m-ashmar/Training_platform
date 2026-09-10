@@ -2,6 +2,9 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.db import transaction
+
+from subscription.services.payment_service import payment_completed
+
 from .models import Wallet, AgentProfile, Transaction, move_funds_atomic, ensure_agent_profile
 
 
@@ -19,25 +22,23 @@ def create_wallet_and_agent(sender, instance, created, **kwargs):
             ensure_agent_profile(instance)
 
 
-@receiver(post_save)
-def handle_payment_completed(sender, instance, created, **kwargs):
+@receiver(payment_completed)
+def handle_payment_completed(sender, payment, subscription=None, **kwargs):
     """
     On Payment completion, transfer funds from client wallet to trainer wallet
     if the client has an assigned trainer. Idempotent via Transaction metadata.
+
+    Listens to `payment_completed`, the signal `PaymentService` was written to emit and
+    which had no receivers at all. It used to be a `post_save` with NO sender, so it ran
+    an import and an identity check on every row saved anywhere on the platform — and,
+    because `post_delete.has_listeners()` is then true for every model, it also switched
+    off Django's fast-delete path everywhere. Both problems go away by listening to the
+    signal that means the thing.
     """
-    try:
-        from subscription.models import Payment
-    except Exception:
+    if payment is None or payment.status != "completed":
         return
 
-    if sender is not Payment:
-        return
-
-    payment = instance
-    if payment.status != "completed":
-        return
-
-    subscription = payment.subscription
+    subscription = subscription or payment.subscription
     client = subscription.user
     # The trainer this client actually has a relationship with, not the pointer.
     # Reading the pointer meant a subscription payment forwarded the FULL price to

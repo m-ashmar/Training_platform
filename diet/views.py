@@ -13,6 +13,7 @@ from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.db.models import Count
 from django.utils.translation import gettext as _
 from .tasks import generate_rule_based_plan
 from .exceptions import ConstraintViolationError, PersistenceError
@@ -153,6 +154,19 @@ def _id(value, field: str) -> int:
     return out
 
 
+def _refuse_nul(params, *names) -> None:
+    """A NUL byte in a query parameter is a 400, not a 500.
+
+    psycopg2 refuses a parameter containing `\x00` outright, so `?search=%00` reached the
+    broad handler and came back as a server fault — from any authenticated account, one
+    character, unlimited times.
+    """
+    for name in names:
+        value = params.get(name)
+        if value and "\x00" in str(value):
+            raise BadInput(f"{name} must not contain a null character")
+
+
 def _body(request) -> dict:
     """`request.data` when it is an object, and a 400 when it is not.
 
@@ -232,6 +246,7 @@ class FoodListView(APIView):
             # bigint, Postgres raised NumericValueOutOfRange, and the broad handler
             # below answered 500 to what is plainly a bad request.
             page = int_param(request.GET, 'page', default=1, minimum=1, maximum=100000)
+            _refuse_nul(request.GET, 'category', 'search')
             # 25, the same default DRF is configured with and the same number the
             # contract publishes. Two hand-rolled paginators said 20, so a client
             # that trusted the documented page size mis-sized every request.
@@ -342,18 +357,28 @@ class FoodCategoryListView(APIView):
     
     def get(self, request):
         try:
-            categories = FoodCategory.objects.all().order_by('name')
-            
+            # Counted in the query. `category.fooditem_set.count()` inside the loop was
+            # one query per category, unbounded and unpaginated, hidden behind a 3600 s
+            # cache until a cold worker or an invalidation storm.
+            #
+            # `order_by('name_en')`, not `name`: `name` is a modeltranslation virtual
+            # field, so the list came back in a different order for an Arabic request and
+            # any client paging or diffing it saw the rows move.
+            categories = (FoodCategory.objects
+                          .annotate(food_count=Count('fooditem'))
+                          .order_by('name_en', 'id'))
+
             results = []
             for category in categories:
                 results.append({
                     'id': category.id,
-                    'name': category.name,
+                    'name': getattr(category, 'name_en', None) or category.name,
+                    'name_ar': getattr(category, 'name_ar', None) or category.name,
                     'meal_times': category.meal_times,
                     'is_protein': category.is_protein,
                     'is_carb': category.is_carb,
                     'is_fat': category.is_fat,
-                    'food_count': category.fooditem_set.count()
+                    'food_count': category.food_count,
                 })
             
             return Response(listing(results))
@@ -391,6 +416,7 @@ class FoodSearchView(APIView):
     def get(self, request):
         try:
             # `query` as well as `q`: the client sent the longer name and got a 400.
+            _refuse_nul(request.GET, 'q', 'query')
             query = (request.GET.get('q') or request.GET.get('query') or '').strip()
             if not query:
                 return Response(
@@ -1065,7 +1091,16 @@ class GenerateDietPlanView(APIView):
             # every concurrent tap passed the same check and the limit meant nothing
             # under exactly the load it exists for. Refunded below if the work does not
             # produce a plan.
-            if not quota.reserve(request.user, "daily_meals"):
+            try:
+                claimed = quota.reserve(request.user, "daily_meals")
+            except quota.NoEntitlement:
+                # No subscription, or an inactive one. Not a spent allowance — 429 told
+                # the caller to wait until tomorrow for a limit that does not apply.
+                return Response(
+                    {"error": _("An active subscription is needed to generate a plan."),
+                     "code": "no_entitlement"},
+                    status=status.HTTP_403_FORBIDDEN)
+            if not claimed:
                 return Response(
                     {"error": _("You have used your meal plan allowance for today."),
                      "code": "quota_exhausted"},
@@ -1173,7 +1208,16 @@ class GenerateDietPlanRuleBasedView(APIView):
             # Claimed before the build, refunded on every path that does not produce a
             # plan. See the async endpoint above for why reading the counter was not
             # enough.
-            if not quota.reserve(request.user, "daily_meals"):
+            try:
+                claimed = quota.reserve(request.user, "daily_meals")
+            except quota.NoEntitlement:
+                # No subscription, or an inactive one. Not a spent allowance — 429 told
+                # the caller to wait until tomorrow for a limit that does not apply.
+                return Response(
+                    {"error": _("An active subscription is needed to generate a plan."),
+                     "code": "no_entitlement"},
+                    status=status.HTTP_403_FORBIDDEN)
+            if not claimed:
                 return Response(
                     {"error": _("You have used your meal plan allowance for today."),
                      "code": "quota_exhausted"},
@@ -1297,8 +1341,15 @@ class GenerateDietPlanRuleBasedView(APIView):
                 "code": "plan_already_exists",
             }, status=status.HTTP_409_CONFLICT)
         except PersistenceError as e:
+            # 500. `PersistenceError` wraps any unexpected exception during the WRITE —
+            # a database fault, not a malformed request — and answering 400 told the
+            # client its request was wrong and it must not retry, while keeping the
+            # failure out of the 5xx error budget. Fifteen other handlers were corrected;
+            # this was the sixteenth.
             logger.error(f"Rule-based persistence error: {str(e)}")
-            return Response({"error": _("Persistence error")}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": _("Your plan could not be saved. Please try again."),
+                             "code": "persistence_failed"},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except BadInput as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
@@ -1669,6 +1720,11 @@ class TrainerMealView(APIView):
                             scheduled_time = None
                             if meal_data.get('scheduled_time'):
                                 scheduled_time = parse_time(meal_data.get('scheduled_time'))
+                                if scheduled_time is None:
+                                    raise _Refuse(Response(
+                                        {"error": _("Invalid scheduled_time format. Use HH:MM."),
+                                         "index": index, "code": "bad_time"},
+                                        status=status.HTTP_400_BAD_REQUEST))
                             # One fetch per distinct plan, not one per meal.
                             if diet_plan_id not in plans:
                                 plans[diet_plan_id] = get_object_or_404(DietPlan, id=diet_plan_id)
@@ -1714,6 +1770,16 @@ class TrainerMealView(APIView):
             scheduled_time = None
             if _body(request).get('scheduled_time'):
                 scheduled_time = parse_time(_body(request).get('scheduled_time'))
+                if scheduled_time is None:
+                    # Answered 200 with the time silently dropped, so a trainer who
+                    # mistyped dinner's time was told it saved. And `Meal`'s slot key
+                    # includes `scheduled_time`, so a null defeats the duplicate-meal
+                    # guard that `add_meal_to_plan` exists to back up. The date field
+                    # beside this one has always answered 400.
+                    return Response(
+                        {"error": _("Invalid scheduled_time format. Use HH:MM."),
+                         "code": "bad_time"},
+                        status=status.HTTP_400_BAD_REQUEST)
             
             if not target_date:
                 return Response(
@@ -1788,6 +1854,16 @@ class TrainerMealView(APIView):
             scheduled_time = None
             if _body(request).get('scheduled_time'):
                 scheduled_time = parse_time(_body(request).get('scheduled_time'))
+                if scheduled_time is None:
+                    # Answered 200 with the time silently dropped, so a trainer who
+                    # mistyped dinner's time was told it saved. And `Meal`'s slot key
+                    # includes `scheduled_time`, so a null defeats the duplicate-meal
+                    # guard that `add_meal_to_plan` exists to back up. The date field
+                    # beside this one has always answered 400.
+                    return Response(
+                        {"error": _("Invalid scheduled_time format. Use HH:MM."),
+                         "code": "bad_time"},
+                        status=status.HTTP_400_BAD_REQUEST)
             
             # Update meal
             trainer_service = TrainerDietPlanService(request.user)

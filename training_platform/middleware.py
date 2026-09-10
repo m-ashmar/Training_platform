@@ -262,12 +262,26 @@ class ErrorHandlingMiddleware(MiddlewareMixin):
         
         # Determine error type and response
         error_response = self._get_error_response(exception)
-        
+
         # Add request context to error
         error_response['request_id'] = getattr(request, 'id', 'unknown')
         error_response['timestamp'] = timezone.now().isoformat()
-        
-        return JsonResponse(error_response, status=error_response['status'])
+
+        # The SAME envelope every other error uses. This one is built by hand and
+        # returned as a JsonResponse, so `normalize_error_envelope` never touches it —
+        # and `error` held a machine string while `message` held the sentence, the exact
+        # inversion of the documented shape, with no `code` and no `detail` at all. A
+        # client told to branch on `code` could not handle any genuinely unhandled
+        # exception on the platform.
+        status_code = error_response['status']
+        machine = error_response.pop('error', None)
+        human = error_response.pop('message', '')
+        error_response['code'] = machine or STATUS_CODES.get(
+            status_code, "server_error" if status_code >= 500 else "bad_request")
+        error_response['error'] = human
+        error_response['detail'] = human
+
+        return JsonResponse(error_response, status=status_code)
     
     def _get_error_response(self, exception):
         """
@@ -745,10 +759,18 @@ class RequestSizeLimitMiddleware:
                     "Rejected %s %s: body %d bytes exceeds cap %d",
                     request.method, request.path, length, self.max_bytes,
                 )
+                # The documented envelope. This middleware is FIRST, so it short-circuits
+                # before `ErrorHandlingMiddleware` is ever entered and
+                # `normalize_error_envelope` cannot reach it — and it returns a
+                # JsonResponse, which that function skips anyway. A 413 carried no `code`
+                # and no `detail` while the contract says every error has both.
+                message = (f'Request body exceeds '
+                           f'{self.max_bytes // (1024 * 1024)} MB.')
                 return JsonResponse(
                     {
-                        'error': 'request_too_large',
-                        'message': f'Request body exceeds {self.max_bytes // (1024 * 1024)} MB.',
+                        'error': message,
+                        'detail': message,
+                        'code': 'payload_too_large',
                         'status': 413,
                     },
                     status=413,

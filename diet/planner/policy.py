@@ -175,16 +175,31 @@ def load_policy(goal: str = "maintain") -> PlannerPolicy:
     )
 
     overrides = getattr(settings, "DIET_PLANNER_POLICY", {}) or {}
-    merged = {**overrides.get("*", {}), **overrides.get(goal, {})}
+    merged = {k: v for k, v in {**overrides.get("*", {}), **overrides.get(goal, {})}.items()
+              if k in PlannerPolicy.__dataclass_fields__}
     if merged:
-        policy = replace(policy, **{k: v for k, v in merged.items()
-                                    if k in PlannerPolicy.__dataclass_fields__})
+        # A dict field is MERGED into, not replaced. `{"tolerance": {"fat": 0.25}}` reads
+        # as "widen fat", and `replace()` would take it literally — leaving the dict with
+        # one key, so `tolerance.get("carb", 0.10)` silently TIGHTENED carbohydrate from
+        # 0.20 to the fallback and protein from 0.15. Setting one band must not move the
+        # other three.
+        for name, value in list(merged.items()):
+            current = getattr(policy, name, None)
+            if isinstance(current, dict) and isinstance(value, dict):
+                merged[name] = {**current, **value}
+        policy = replace(policy, **merged)
 
-    # `DIET_CONFIG` does not exist and never has — `grep -rn DIET_CONFIG` matched this
-    # line and nothing else, so the comment fifty lines above claiming MACRO_TOLERANCE
+    # `DIET_CONFIG` does not exist and never has — `grep -rn DIET_CONFIG` matched one
+    # line, the read itself, so the comment fifty lines above claiming MACRO_TOLERANCE
     # was now honoured described a second dead read. The dict that IS declared is
     # `AI_CHEF_CONFIG["MACRO_TOLERANCE"]`, and it keys carbohydrate as "carbs" where
-    # `report.MACROS` reads "carb", so wiring that one up unchanged would have left carb
-    # at its default while silently moving fat. `DIET_PLANNER_POLICY` above is the one
-    # override path, it takes `tolerance` like any other field, and it is tested.
+    # `report.MACROS` reads "carb", so wiring that one up unchanged would leave carb at
+    # its default while silently moving fat.
+    #
+    # `DIET_PLANNER_POLICY` above is the one override path and it takes `tolerance` like
+    # any other field. It is NOT declared in any settings module either — an earlier
+    # version of this comment claimed it was tested, which was the third false claim in
+    # the same function. `settings_base.py` now declares it as an empty dict so the name
+    # exists, is greppable, and a deployment can set it; `test_the_policy_override_is_wired`
+    # proves the path works rather than asserting that it does.
     return policy

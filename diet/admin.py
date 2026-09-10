@@ -231,14 +231,38 @@ class ImprovedFoodItemAdmin(TranslAdmin):
 
     @admin.action(description='Guess household unit, role and slots from the name')
     def assign_units_and_roles(self, request, queryset):
-        """The same patterns `seed_food_units` applies, for a food added by hand."""
-        from django.core.management import call_command
-        try:
-            call_command('seed_food_units', '--apply', verbosity=0)
-            self.message_user(request, "Units and roles reassigned across the catalogue.",
-                              messages.SUCCESS)
-        except Exception as exc:
-            self.message_user(request, f"Could not assign units: {exc}", messages.ERROR)
+        """The same patterns `seed_food_units` applies — to the SELECTED foods only.
+
+        This ran the whole command and never looked at `queryset`, so an operator who
+        selected one food and used the action reverted every hand-corrected household
+        unit, gram weight, portion range and role in the catalogue to the pattern guess.
+        This screen exists because those fields could not be corrected by hand; the
+        action beside it undid the corrections.
+        """
+        from diet.management.commands.seed_food_units import role_for, unit_for
+
+        changed = 0
+        for food in queryset:
+            name = getattr(food, "name_en", None) or food.name or ""
+            unit = unit_for(name)
+            fields = []
+            role = role_for(name)
+            if role and food.role != role:
+                food.role = role
+                fields.append("role")
+            if unit:
+                for attr, value in zip(
+                        ("household_unit", "unit_grams", "min_units", "max_units"), unit):
+                    if getattr(food, attr, None) != value:
+                        setattr(food, attr, value)
+                        fields.append(attr)
+            if fields:
+                food.save(update_fields=fields)
+                changed += 1
+        self.message_user(
+            request,
+            f"Units and roles reassigned for {changed} of {len(queryset)} selected food(s).",
+            messages.SUCCESS)
     
     def category_badge(self, obj):
         if not obj.category:
@@ -262,20 +286,8 @@ class ImprovedFoodItemAdmin(TranslAdmin):
         )
     macro_display.short_description = 'Macros'
     
-    def serving_info(self, obj):
-        return f"{obj.serving_size} ({obj.serving_size_grams}g)"
-    serving_info.short_description = 'Serving'
     
-    def per_gram_info(self, obj):
-        if obj.calories_per_gram:
-            return format_html('<small>{} kcal/g</small>', f"{obj.calories_per_gram:.2f}")
-        return '-'
-    per_gram_info.short_description = 'Per Gram'
     
-    def has_image(self, obj):
-        return bool(obj.image_url)
-    has_image.short_description = 'Image'
-    has_image.boolean = True
     
     def image_preview(self, obj):
         if obj.image_url:
@@ -310,18 +322,10 @@ class ImprovedFoodItemAdmin(TranslAdmin):
             return "Error calculating analysis"
     nutrition_analysis.short_description = 'Nutritional Analysis'
     
-    def save_model(self, request, obj, form, change):
-        # Auto-calculate per-gram values if not set
-        if obj.serving_size_grams and obj.serving_size_grams > 0:
-            if not obj.calories_per_gram:
-                obj.calories_per_gram = obj.calories / obj.serving_size_grams
-            if not obj.protein_per_gram:
-                obj.protein_per_gram = obj.protein / obj.serving_size_grams
-            if not obj.carbs_per_gram:
-                obj.carbs_per_gram = obj.carbs / obj.serving_size_grams
-            if not obj.fat_per_gram:
-                obj.fat_per_gram = obj.fat / obj.serving_size_grams
-        super().save_model(request, obj, form, change)
+    # No `save_model` override computing per-gram values. `FoodItem.save()` recomputes
+    # all four unconditionally from the per-100 g columns, so anything written here was
+    # discarded on the next line. Verified: setting `calories_per_gram = 999.0` and
+    # saving read back 0.96.
     
     # One list. A second `actions = [...]` further down this class body silently
     # replaced the first, so the vetting actions were defined and unreachable.
@@ -349,18 +353,20 @@ class ImprovedFoodItemAdmin(TranslAdmin):
     export_as_csv.short_description = "Export selected items as CSV"
     
     def calculate_per_gram_values(self, request, queryset):
+        """Recompute the per-gram columns from the per-100 g ones.
+
+        It did that already and then called `save()`, which does the same thing — so the
+        action's own arithmetic was overwritten by the model's every time. Kept because
+        the button is useful after a bulk import that bypassed `save()`; it just delegates
+        to the one place that owns the calculation.
+        """
         updated = 0
         for item in queryset:
-            if item.serving_size_grams and item.serving_size_grams > 0:
-                item.calories_per_gram = item.calories / item.serving_size_grams
-                item.protein_per_gram = item.protein / item.serving_size_grams
-                item.carbs_per_gram = item.carbs / item.serving_size_grams
-                item.fat_per_gram = item.fat / item.serving_size_grams
-                item.save()
-                updated += 1
-        
-        self.message_user(request, f"Calculated per-gram values for {updated} items.")
-    calculate_per_gram_values.short_description = "Calculate per-gram values"
+            item.save()   # FoodItem.save() derives all four
+            updated += 1
+        self.message_user(request, f"Recalculated per-gram values for {updated} item(s).")
+    calculate_per_gram_values.short_description = "Recalculate per-gram values"
+
     
     def get_urls(self):
         """
@@ -546,12 +552,20 @@ class ImprovedFoodItemAdmin(TranslAdmin):
             thresholds = {'protein': 10, 'carb': 15, 'fat': 5}
             category = None
             
+            # By NAME, not by flag-and-luck. `filter(is_protein=True).first()` under
+            # `ordering = ['name_en', 'id']` returns whichever protein-flagged category
+            # sorts first — "Dairy" ahead of "Proteins", "Morning Carbs" ahead of both —
+            # so an imported protein was filed under whatever happened to be alphabetically
+            # earliest. The catalogue's own labels are the answer.
             if protein_per_100g >= thresholds['protein'] and protein_per_100g >= carb_per_100g and protein_per_100g >= fat_per_100g:
-                category = FoodCategory.objects.filter(is_protein=True).first()
+                category = FoodCategory.objects.filter(name_en="Proteins").first() \
+                    or FoodCategory.objects.filter(is_protein=True).order_by("id").first()
             elif carb_per_100g >= thresholds['carb'] and carb_per_100g >= protein_per_100g and carb_per_100g >= fat_per_100g:
-                category = FoodCategory.objects.filter(is_carb=True).first()
+                category = FoodCategory.objects.filter(name_en="Carbs").first() \
+                    or FoodCategory.objects.filter(is_carb=True).order_by("id").first()
             elif fat_per_100g >= thresholds['fat'] and fat_per_100g >= protein_per_100g and fat_per_100g >= carb_per_100g:
-                category = FoodCategory.objects.filter(is_fat=True).first()
+                category = FoodCategory.objects.filter(name_en="Fats").first() \
+                    or FoodCategory.objects.filter(is_fat=True).order_by("id").first()
             
             if not category:
                 # `get_or_create(name=...)` reads whichever column the ACTIVE language

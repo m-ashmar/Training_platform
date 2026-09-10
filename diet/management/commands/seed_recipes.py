@@ -483,8 +483,11 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         from diet.models import FoodItem, Recipe, RecipeIngredient
 
+        # Every lookup in this command is on `name_en`, the unique column and the one
+        # that means "this recipe". `name` is a modeltranslation virtual field and
+        # resolves against the ACTIVE language.
         if opts["replace"]:
-            deleted = Recipe.objects.filter(name__in=[r[0] for r in RECIPES]).delete()[0]
+            deleted = Recipe.objects.filter(name_en__in=[r[0] for r in RECIPES]).delete()[0]
             self.stdout.write(f"removed {deleted} existing rows")
 
         created = updated = skipped = 0
@@ -492,9 +495,9 @@ class Command(BaseCommand):
             # Rename only when the target name is free. This was a subquery on
             # `.values("name")`, which modeltranslation now expands to three columns
             # and Django refuses as a filter value.
-            if not Recipe.objects.filter(name=now).exists():
-                Recipe.objects.filter(name=was).update(name=now)
-        Recipe.objects.filter(name__in=RENAMED).delete()
+            if not Recipe.objects.filter(name_en=now).exists():
+                Recipe.objects.filter(name_en=was).update(name=now, name_en=now)
+        Recipe.objects.filter(name_en__in=RENAMED).delete()
         for name, meals, cuisine, minutes, lines in RECIPES:
             foods = {}
             missing = []
@@ -504,16 +507,23 @@ class Command(BaseCommand):
                 # "Olive Oil" against a catalogue holding both "Extra Virgin Olive Oil"
                 # and "Olive Oil Spray" would take whichever the database returned
                 # first, and the macros of the two are not the same food.
-                food = FoodItem.objects.filter(name__iexact=food_name).first()
+                # `name_en`, not `name`. `name` is a modeltranslation virtual field, so
+                # every lookup here resolved against the ACTIVE language: run under any
+                # non-English locale this matched nothing, printed 105 lines of
+                # "skip ...: catalogue has no [...]" and exited 0, seeding no recipes at
+                # all — and `load_food_catalogue` calls this command internally, so the
+                # engine's whole culinary knowledge would silently be absent. Every
+                # sibling was hardened for this; this file was missed.
+                food = FoodItem.objects.filter(name_en__iexact=food_name).first()
                 if food is None:
                     candidates = sorted(
-                        FoodItem.objects.filter(name__icontains=food_name),
-                        key=lambda f: (len(f.name), f.name),
+                        FoodItem.objects.filter(name_en__icontains=food_name),
+                        key=lambda f: (len(f.name_en or ""), f.name_en or ""),
                     )
                     food = candidates[0] if candidates else None
                     if food is not None:
                         self.stdout.write(
-                            f"  {name!r}: {food_name!r} -> {food.name!r}")
+                            f"  {name!r}: {food_name!r} -> {food.name_en!r}")
                 if food is None:
                     missing.append(food_name)
                 else:
@@ -529,11 +539,16 @@ class Command(BaseCommand):
             # here changed nothing anywhere the seed had already been applied. That is
             # how twelve recipes kept a pinned fat line long after it was known to be
             # the reason no dish could reach its fat target.
-            recipe, was_new = Recipe.objects.get_or_create(
-                name=name,
-                defaults=dict(meal_types=meals, cuisine=cuisine, prep_minutes=minutes,
-                              description=f"{cuisine} · about {minutes} minutes"),
-            )
+            # Keyed on `name_en`, which is the unique column and the one that means
+            # "this recipe". `get_or_create(name=...)` reads the active language and
+            # would create 105 rows with `name_en` NULL under any other locale.
+            recipe = Recipe.objects.filter(name_en=name).first()
+            was_new = recipe is None
+            if was_new:
+                recipe = Recipe.objects.create(
+                    name=name, name_en=name, meal_types=meals, cuisine=cuisine,
+                    prep_minutes=minutes,
+                    description=f"{cuisine} · about {minutes} minutes")
             if not was_new:
                 recipe.meal_types = meals
                 recipe.cuisine = cuisine

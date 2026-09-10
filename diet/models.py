@@ -961,10 +961,25 @@ class MealComponent(models.Model):
             # Optional side effect: swallowing this silently is what made the
             # surrounding failures invisible in logs. Control flow is unchanged.
             logger.debug('suppressed non-fatal error', exc_info=True)
-    
+
+        # And the day's totals, which count components now rather than whole meals — so
+        # ticking one ingredient has to move the number the client is looking at. The
+        # progress row is CREATED here if it does not exist yet: it used to appear only
+        # when the client opened their progress screen, so the first thing they ate
+        # before opening it changed nothing they could see.
+        try:
+            DailyProgress.objects.get_or_create(
+                user=self.meal.diet_plan.user, diet_plan=self.meal.diet_plan,
+                date=self.meal.date)[0].update_progress()
+        except Exception:
+            logger.exception("could not recompute progress for component %s", self.pk)
+
     def calculate_nutrition(self):
         """
         Calculate nutrition for this component.
+
+        The PLANNED amount, which is what this component is worth on the plate. What the
+        client actually ate is `actual_quantity_consumed` and belongs to `DailyProgress`.
         """
         scale_factor = self.quantity / self.food.serving_size_grams
         return {
@@ -988,6 +1003,13 @@ class MealComponent(models.Model):
         # database say so, rather than two code paths each half-guarding it.
         constraints = [
             models.UniqueConstraint(fields=['meal', 'food'], name='one_row_per_food_per_meal'),
+            # Grams are a positive amount of food. Nothing checked, and `DailyProgress`
+            # sums `quantity / serving_size_grams * calories` straight into what the
+            # client reads: a -50 g row persisted -82.5 kcal consumed and a negative
+            # completion percentage. The serving size on the other side of that division
+            # is already constrained; the numerator was not.
+            models.CheckConstraint(condition=models.Q(quantity__gt=0),
+                                   name='a_portion_is_a_positive_amount'),
         ]
 
 class DailyProgress(models.Model):
@@ -1065,7 +1087,8 @@ class DailyProgress(models.Model):
         Args:
             meals_qs: Optional queryset of meals to reuse existing data if available.
         """
-        from django.db.models import Sum, F, Count, Q
+        from django.db.models import Count, F, FloatField, Q, Sum
+        from django.db.models.functions import Coalesce
         
         # Use provided queryset or fetch efficient queryset
         if meals_qs is None:
@@ -1090,18 +1113,32 @@ class DailyProgress(models.Model):
         self.target_carbs = macros.get('carbs', 0)
         self.target_fat = macros.get('fat', 0)
         
-        # 2. Calculate nutrition via database aggregation (Single Complex Query)
-        # We need to aggregate across all components of completed meals
-        # This avoids iterating thousands of components in Python
+        # 2. What the client actually ate, aggregated in the database.
+        #
+        # Per COMPONENT, not per meal. The filter was `meal__is_completed=True`, so a
+        # client ticking ingredients off as they ate saw 0 kcal all the way through the
+        # meal and then the whole meal at once — including the parts they never marked.
+        # `EnhancedClientProgressView` showed `completed_components: 2` beside
+        # `calories_consumed: 0` in the same response. `complete_entire_meal` writes every
+        # component individually, so counting components covers that path too.
+        #
+        # And the AMOUNT is what they say they ate. `actual_quantity_consumed` is the one
+        # field the client fills in to say "I only had a third of it"; it was collected,
+        # echoed back over the API, and read by nothing, so a gram of a hundred-gram
+        # portion still counted as a hundred grams.
+        eaten = Coalesce(
+            F('actual_quantity_consumed'), F('quantity'), output_field=FloatField())
+        per_gram = eaten / F('food__serving_size_grams')
         stats = MealComponent.objects.filter(
-            meal__diet_plan=self.diet_plan, 
-            meal__date=self.date, 
-            meal__is_completed=True
+            meal__diet_plan=self.diet_plan,
+            meal__date=self.date,
+        ).filter(
+            Q(is_completed=True) | Q(meal__is_completed=True)
         ).aggregate(
-            total_calories=Sum(F('quantity') / F('food__serving_size_grams') * F('food__calories')),
-            total_protein=Sum(F('quantity') / F('food__serving_size_grams') * F('food__protein')),
-            total_carbs=Sum(F('quantity') / F('food__serving_size_grams') * F('food__carbs')),
-            total_fat=Sum(F('quantity') / F('food__serving_size_grams') * F('food__fat'))
+            total_calories=Sum(per_gram * F('food__calories')),
+            total_protein=Sum(per_gram * F('food__protein')),
+            total_carbs=Sum(per_gram * F('food__carbs')),
+            total_fat=Sum(per_gram * F('food__fat'))
         )
         
         self.calories_consumed = round(stats['total_calories'] or 0, 1)

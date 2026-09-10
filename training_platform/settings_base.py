@@ -418,6 +418,21 @@ CELERY_BEAT_SCHEDULE = {
 # ========================
 # Nutrition & AI Chef
 # ========================
+
+#: Per-goal overrides for `diet/planner/policy.py`. Empty by default, and declared here so
+#: the name exists in one place a deployment can find. `load_policy` merges
+#: `DIET_PLANNER_POLICY["*"]` then `DIET_PLANNER_POLICY[<goal>]` over the dataclass
+#: defaults, taking any field it declares — `tolerance`, `meal_kcal_split`,
+#: `max_kcal_per_meal`, `snack_kcal` and the rest.
+#:
+#:     DIET_PLANNER_POLICY = {"*": {"tolerance": {"fat": 0.25}},
+#:                            "lose": {"snack_kcal": 150.0}}
+#:
+#: It was read by `load_policy` and declared nowhere, so every constant in `PlannerPolicy`
+#: was unreachable to a deployment and the module's stated purpose — "a dietitian could
+#: not change one without a deploy" — was not met by the one mechanism meant to meet it.
+DIET_PLANNER_POLICY: dict = {}
+
 AI_CHEF_CONFIG = {
     "MAX_RETRIES": 2,
     "TEMPERATURE": 0.3,

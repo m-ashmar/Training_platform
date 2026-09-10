@@ -13,14 +13,11 @@ class NotificationsConfig(AppConfig):
     name = 'notifications'
 
     def ready(self):
-        # Register listeners
-        try:
-            import notifications.listeners.social_listeners
-            import notifications.listeners.trainer_client_listeners
-        except ImportError:
-            # Optional side effect: swallowing this silently is what made the
-            # surrounding failures invisible in logs. Control flow is unchanged.
-            logger.debug('suppressed non-fatal error', exc_info=True)
+        # NOT guarded, for the same reason as `wallet/apps.py`: these modules ARE the
+        # notification system. An ImportError swallowed at DEBUG level starts a platform
+        # that quietly sends nothing, and says so in a line production does not log.
+        import notifications.listeners.social_listeners  # noqa: F401
+        import notifications.listeners.trainer_client_listeners  # noqa: F401
 
         # Security Check: Initialize Firebase
         self._initialize_firebase()

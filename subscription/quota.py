@@ -150,8 +150,18 @@ def record_on_commit(user, feature_name, amount: int = 1) -> None:
     transaction.on_commit(lambda: consume(user, feature_name, amount))
 
 
+class NoEntitlement(Exception):
+    """There is no allowance to claim, because there is no subscription to claim it from."""
+
+
 def reserve(user, feature_name, amount: int = 1) -> bool:
     """Claim `amount` of the allowance now, atomically. Returns whether it was claimed.
+
+    Raises `NoEntitlement` when the caller has no subscription or an inactive one — which
+    is a different answer from "you have used today's allowance" and deserves a different
+    status. An admin, and a client whose subscription lapsed between the permission check
+    and here, were both told to come back tomorrow for a limit that does not apply to
+    them.
 
     `has_headroom` then work then `consume` is check-then-act across two transactions,
     and the gap is the whole request. Twenty parallel taps on Generate by a client whose
@@ -182,7 +192,7 @@ def reserve(user, feature_name, amount: int = 1) -> bool:
     except QuotaUnavailable as exc:
         logger.info("quota reservation denied for user %s on %s: %s",
                     getattr(user, "id", None), feature_name, exc)
-        return False
+        raise NoEntitlement(str(exc)) from exc
     except Exception:
         logger.exception("quota reservation failed for user %s on %s",
                          getattr(user, "id", None), feature_name)

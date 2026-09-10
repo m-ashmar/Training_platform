@@ -2249,12 +2249,18 @@ def test_the_recorded_baseline_still_describes_this_engine(diet_quality):
 def test_the_two_seed_commands_agree_on_food_names(seeded_catalogue, db):
     """A fresh production database cannot build most of its own recipes.
 
-    `add_healthy_foods` writes 100 foods and `seed_recipes` writes recipes that name
-    their ingredients, and the two disagree: the catalogue has "Chicken Breast
+    `diet/data/catalogue.py` names the foods and `seed_recipes` writes recipes that name
+    their ingredients, and the two used to disagree: the catalogue has "Chicken Breast
     (Grilled)", "Salmon Fillet", "Greek Yogurt (Non-Fat)", "Sweet Potato (Baked)",
     "Extra Virgin Olive Oil" and "Lentils (Cooked)", while the recipes ask for "Chicken
-    Breast", "Salmon", "Greek Yogurt", "Sweet Potato", "Olive Oil" and "Lentils". Oats
-    are absent from a hundred-item healthy-food catalogue entirely.
+    Breast", "Salmon", "Greek Yogurt", "Sweet Potato", "Olive Oil" and "Lentils".
+
+    (The `add_healthy_foods` command this was originally written against is gone. It wrote
+    a hundred unvetted foods with no units, no meal slots and no allergen composition,
+    duplicating 69 names the curated catalogue already held, and created its own `Dairy`
+    and `Legumes` categories flagged `is_protein=True` — which `auto_assign_category`
+    resolves with `filter(is_protein=True).first()`, so every imported protein was filed
+    as dairy.)
 
     The effect is not subtle. On the development database, whose 340 Edamam rows happen
     to carry the plain names, the engine serves a named dish 71% of the time. On the
@@ -2274,8 +2280,8 @@ def test_the_two_seed_commands_agree_on_food_names(seeded_catalogue, db):
     for name, _meals, _cuisine, _minutes, lines in RECIPES:
         missing = [
             food_name for food_name, _grams, _scalable in lines
-            if not FoodItem.objects.filter(name__iexact=food_name).exists()
-            and not FoodItem.objects.filter(name__icontains=food_name).exists()
+            if not FoodItem.objects.filter(name_en__iexact=food_name).exists()
+            and not FoodItem.objects.filter(name_en__icontains=food_name).exists()
         ]
         if missing:
             unresolvable[name] = missing
@@ -5398,7 +5404,8 @@ def test_the_plan_is_the_same_whichever_language_asked_for_it(seeded_catalogue):
     assert english == plan_under("ar"), "the plan changed with the display language"
 
 
-def test_a_refund_takes_the_money_back_and_not_only_the_access(make_user):
+def test_a_refund_takes_the_money_back_and_not_only_the_access(
+        make_user, django_capture_on_commit_callbacks):
     """`refund_payment` withdrew the ACCESS a payment bought and wrote nothing to the
     wallet ledger — while `wallet.signals` credits the client on completion and pays the
     trainer out of that credit. So a gateway refund or a chargeback cancelled the
@@ -5429,14 +5436,19 @@ def test_a_refund_takes_the_money_back_and_not_only_the_access(make_user):
                                       end_date=timezone.now() + timedelta(days=30))
     pay = Payment.objects.create(subscription=sub, amount=D("10.00"), currency="USD",
                                  status="pending", payment_method="manual")
-    PaymentService.complete_payment(pay.id, {"amount": "10.00", "currency": "USD",
-                                             "status": "completed",
-                                             "transaction_id": "probe-1"})
+    # The payout fires on commit — `PaymentWebhookView` wraps the whole update in a
+    # transaction that can still roll back, and the receiver moves money — so the test
+    # has to let the callbacks run.
+    with django_capture_on_commit_callbacks(execute=True):
+        PaymentService.complete_payment(pay.id, {"amount": "10.00", "currency": "USD",
+                                                 "status": "completed",
+                                                 "transaction_id": "probe-1"})
     tw = Wallet.objects.get(owner=trainer); cw = Wallet.objects.get(owner=client_user)
     tw.refresh_from_db(); cw.refresh_from_db()
     assert tw.balance == D("10.00")
 
-    PaymentService.refund_payment(pay.id, reason="chargeback")
+    with django_capture_on_commit_callbacks(execute=True):
+        PaymentService.refund_payment(pay.id, reason="chargeback")
     tw.refresh_from_db(); cw.refresh_from_db()
     assert tw.balance == D("0.00"), "the trainer kept a refunded payout"
     assert cw.balance == D("0.00"), "the minted credit was never taken back"
@@ -5516,3 +5528,154 @@ def test_a_main_meal_is_built_around_a_protein(seeded_catalogue):
     assert not short, (
         f"{len(short)} of {mains} main meals came in under 60% of their own protein "
         f"target: {short[:5]}")
+
+
+def test_the_day_counts_what_the_client_says_they_ate(seeded_catalogue):
+    """Two defects in one aggregate, both of them about the client's own record.
+
+    It filtered on `meal__is_completed`, so a client ticking ingredients off as they ate
+    saw 0 kcal all the way through the meal and then the whole meal at once — including
+    the parts they never marked. And it summed the PLANNED grams, so
+    `actual_quantity_consumed` — the one field a client fills in to say "I only had a
+    third of it" — was collected, echoed back over the API, and changed no number they
+    could ever see.
+    """
+    from diet.models import DailyProgress, Meal, MealComponent
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("day-counts")
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="counts")
+    meal = Meal.objects.filter(diet_plan=plan).first()
+    components = list(MealComponent.objects.filter(meal=meal).select_related("food"))
+    assert len(components) >= 3, "need a few components to tick off separately"
+    c = _api_client_for(user)
+
+    def eaten():
+        row = DailyProgress.objects.filter(
+            user=user, diet_plan=plan, date=meal.date).first()
+        return round(row.calories_consumed, 1) if row else 0.0
+
+    assert eaten() == 0.0
+
+    r = c.post(f"/api/diet/v1/client/meals/{meal.id}/complete/",
+               {"action": "complete_component", "component_id": components[0].id},
+               content_type="application/json")
+    assert r.status_code == 200, r.content[:200]
+    after_one = eaten()
+    assert after_one > 0.0, "one ingredient eaten counted as nothing"
+
+    # A third of the next one is a third of its calories, not all of them.
+    whole = components[1].calculate_nutrition()["calories"]
+    r = c.post(f"/api/diet/v1/client/meals/{meal.id}/complete/",
+               {"action": "complete_component", "component_id": components[1].id,
+                "actual_quantity": float(components[1].quantity) / 3.0},
+               content_type="application/json")
+    assert r.status_code == 200, r.content[:200]
+    added = eaten() - after_one
+    assert added < whole * 0.5, (
+        f"a third of a {whole:.0f} kcal portion added {added:.0f} kcal")
+    assert added > 0.0
+
+
+def test_swapping_one_food_does_not_erase_the_rest_of_the_day(seeded_catalogue):
+    """A swap clears the component's completion and the meal's, and the day's totals used
+    to be counted per MEAL — so a client who ate breakfast and then swapped the almonds
+    for pistachios watched their whole day reset to zero, and the two things they had
+    actually eaten stopped counting."""
+    from diet.models import DailyProgress, Meal, MealComponent
+    from diet.services.plan_generation import generate_and_save
+
+    user, _chosen = _chooser("swap-keeps-day")
+    _out, plan = generate_and_save(user, duration_days=1, seed_salt="swapkeep")
+    meal = Meal.objects.filter(diet_plan=plan).first()
+    c = _api_client_for(user)
+
+    def eaten():
+        row = DailyProgress.objects.filter(
+            user=user, diet_plan=plan, date=meal.date).first()
+        return round(row.calories_consumed, 1) if row else 0.0
+
+    r = c.post(f"/api/diet/v1/client/meals/{meal.id}/complete/",
+               {"action": "complete_meal"}, content_type="application/json")
+    assert r.status_code == 200, r.content[:200]
+    before = eaten()
+    assert before > 0.0
+
+    component = MealComponent.objects.filter(meal=meal).first()
+    offers = c.post("/api/diet/v1/client/meals/interact/",
+                    {"action": "swap_food", "component_id": component.id},
+                    content_type="application/json").json().get("offers", [])
+    assert offers, "no alternative was offered"
+    r = c.post("/api/diet/v1/client/meals/interact/",
+               {"action": "swap_food", "component_id": component.id,
+                "chosen_food_id": offers[0]["food_id"]},
+               content_type="application/json")
+    assert r.status_code == 200, r.content[:200]
+
+    after = eaten()
+    assert after > 0.0, "the whole day was erased by one swap"
+    assert after < before, "the rejected food is still being counted"
+
+
+def test_the_policy_override_is_wired(settings):
+    """`PlannerPolicy` exists so "a dietitian could not change one without a deploy" is
+    not true — and its one override path read `settings.DIET_PLANNER_POLICY`, which was
+    declared in no settings module, so every constant in it was in fact unreachable to a
+    deployment. Two other dead reads in the same function (`DIET_CONFIG`,
+    `AI_CHEF_CONFIG["MACRO_TOLERANCE"]`) had already been found; a comment in the middle
+    of the paragraph describing them asserted this third one was tested. It was not.
+
+    A dict field MERGES. `{"tolerance": {"fat": 0.25}}` means widen fat, and replacing the
+    dict wholesale left it with one key — so `tolerance.get("carb", 0.10)` fell back and
+    silently tightened carbohydrate from 0.20 and protein from 0.15.
+    """
+    from diet.planner.policy import load_policy
+
+    assert hasattr(settings, "DIET_PLANNER_POLICY"), "the override path is not declared"
+    default = load_policy("maintain")
+
+    settings.DIET_PLANNER_POLICY = {"*": {"tolerance": {"fat": 0.25}}}
+    widened = load_policy("maintain")
+    assert widened.tolerance["fat"] == 0.25
+    for macro in ("calories", "protein", "carb"):
+        assert widened.tolerance[macro] == default.tolerance[macro], (
+            f"widening fat moved {macro}")
+
+    settings.DIET_PLANNER_POLICY = {"lose": {"snack_kcal": 150.0}}
+    assert load_policy("lose").snack_kcal == 150.0
+    assert load_policy("maintain").snack_kcal == default.snack_kcal, \
+        "a per-goal override leaked into another goal"
+
+    settings.DIET_PLANNER_POLICY = {}
+    assert load_policy("maintain").tolerance == default.tolerance
+
+
+def test_every_shipped_achievement_can_be_earned():
+    """A badge nobody can reach is a promise the platform breaks.
+
+    Two shipped: `marathon_master` needed `PerformanceMetric(metric_type='distance_run')`,
+    which `analytics.recorder.record_metric` has never once been called with, and
+    `perfectionist` needed a metric whose body was `return 0` under a comment saying it
+    was a placeholder. Both returned a value that could not grow, so a user could chase
+    them forever.
+
+    `IMPLEMENTED_CRITERIA` is the list of metrics the engine can actually compute; this
+    holds it and the registry in step in both directions, so neither can drift.
+    """
+    from achievements.engine import IMPLEMENTED_CRITERIA, AchievementEngine
+    from achievements.registry import ACHIEVEMENTS
+
+    shipped = {a.criteria_type for a in ACHIEVEMENTS}
+    assert shipped, "no achievements are defined"
+    unreachable = sorted(shipped - IMPLEMENTED_CRITERIA)
+    assert not unreachable, (
+        f"these achievements use a metric the engine cannot compute: {unreachable}")
+
+    # And the other way: a metric declared implemented must be handled by the dispatcher,
+    # or the declaration is the thing that is stale.
+    import inspect
+
+    source = inspect.getsource(AchievementEngine._get_metric_value)
+    unhandled = sorted(c for c in IMPLEMENTED_CRITERIA if f"'{c}'" not in source)
+    assert not unhandled, (
+        f"IMPLEMENTED_CRITERIA names metrics the dispatcher does not handle: {unhandled}")

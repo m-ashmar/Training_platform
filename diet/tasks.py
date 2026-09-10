@@ -40,13 +40,14 @@ TRANSIENT_ERRORS = (
 logger = logging.getLogger(__name__)
 
 @shared_task(
+    bind=True,          # so the task can tell a retry from its last attempt
     autoretry_for=TRANSIENT_ERRORS,
     retry_backoff=True,
     retry_backoff_max=600,
     retry_jitter=True,
     max_retries=3,
 )
-def generate_rule_based_plan(user_id, meal_count=3, snack_count=1, start_date=None, duration_days=7):
+def generate_rule_based_plan(self, user_id, meal_count=3, snack_count=1, start_date=None, duration_days=7):
     """The deterministic planner, off the request thread, for plans longer than the
     synchronous endpoint allows. Same planner, same persistence, same refusals.
 
@@ -87,9 +88,19 @@ def generate_rule_based_plan(user_id, meal_count=3, snack_count=1, start_date=No
     except (ValueError, PermissionError) as e:
         _refund(user)
         return {"error": str(e), "code": "invalid_request", "user_id": user_id}
+    except TRANSIENT_ERRORS:
+        # A retry re-enters this function from the top, where there is no
+        # `quota.reserve` — the allowance was claimed once, by the view. Refunding on
+        # every transient failure and letting a later attempt succeed means a plan built
+        # with `usage_count` unchanged: a client on one plan a day gets unlimited plans
+        # for as long as the database is flapping, which is exactly when the extra
+        # optimiser runs hurt most. So the reservation stands through the retries and is
+        # given back only when the task has given up for good.
+        if self.request.retries >= (self.max_retries or 0):
+            _refund(user)
+        raise
     except Exception:
-        # Including the transient errors Celery will retry: the retry claims nothing
-        # new, so without this a failed attempt would keep the client's allowance.
+        # No retry is coming for this one. Nothing was built, so nothing is owed.
         _refund(user)
         raise
     return {"plan_id": plan.id, "user_id": user_id,

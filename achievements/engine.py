@@ -18,6 +18,20 @@ from django.db import transaction
 from analytics import activity_types
 from users.models import CustomUser
 
+#: Every criteria type `_get_metric_value` can actually compute from data this platform
+#: writes. The registry may only ship achievements whose criteria are in here — two of
+#: them were not, and could never be earned: `total_distance` read a `PerformanceMetric`
+#: type nothing has ever recorded, and `perfect_days_streak` was `return 0` under a
+#: comment saying so. `test_every_shipped_achievement_can_be_earned` holds the two lists
+#: in step, so adding a definition for an unimplemented metric fails the gate rather than
+#: shipping a badge nobody can reach.
+IMPLEMENTED_CRITERIA = frozenset({
+    "workout_count", "meal_count", "post_count", "follower_count",
+    "total_likes_received", "challenge_joined_count", "challenge_wins",
+    "goals_completed", "workout_streak", "calorie_tracking_streak", "weight_loss",
+    "late_night_workout", "early_morning_workout",
+})
+
 logger = logging.getLogger(__name__)
 
 
@@ -264,15 +278,13 @@ class AchievementEngine:
             
             elif criteria_type == 'early_morning_workout':
                 return cls._check_early_morning_workout(user)
-            
-            # Distance tracking
-            elif criteria_type == 'total_distance':
-                return cls._calculate_total_distance(user, criteria.get('unit', 'km'))
-            
-            # Perfect days
-            elif criteria_type == 'perfect_days_streak':
-                return cls._calculate_perfect_days_streak(user)
-        
+
+            # `total_distance` and `perfect_days_streak` used to be handled here. Their
+            # metrics read a `PerformanceMetric` type nothing writes and a function whose
+            # body was `return 0`, so the two achievements that used them could never be
+            # earned. Both definitions are gone from the registry; see the note at the
+            # end of `achievements/registry.py`.
+
         except Exception as e:
             logger.error(f"Error calculating metric {criteria_type}: {e}")
             return None
@@ -297,53 +309,57 @@ class AchievementEngine:
         
         return False
 
+    #: The longest streak this platform will count. A streak is read to award a badge,
+    #: and the longest one any badge asks for is well inside this.
+    MAX_STREAK_DAYS = 400
+
     @classmethod
-    def _calculate_workout_streak(cls, user: CustomUser) -> int:
-        """Calculate consecutive days with workouts."""
+    def _streak_of(cls, user: CustomUser, kinds) -> int:
+        """Consecutive days, ending today, on which this user did one of `kinds`.
+
+        ONE query, and the client's own days. It was a `while True` issuing a query per
+        consecutive day with no upper bound — a user with a long history paid one
+        round-trip per day of it, every time any achievement was evaluated — and it
+        counted days in the SERVER's timezone while `subscription.quota` and
+        `diet.tasks` resolve "today" from `CustomUser.preferred_timezone`. A client
+        outside Asia/Damascus had their allowance reset at their own midnight and their
+        streak judged at Damascus midnight, so a workout logged in the gap broke a streak
+        the reminder job still believed was alive.
+        """
+        from zoneinfo import ZoneInfo
+
         from analytics.models import UserActivity
-        
-        today = timezone.localdate()
-        streak = 0
-        current_date = today
-        
-        while True:
-            has_workout = UserActivity.objects.filter(
-                user=user,
-                activity_type__in=activity_types.WORKOUT,
-                timestamp__date=current_date
-            ).exists()
-            
-            if has_workout:
-                streak += 1
-                current_date -= timedelta(days=1)
-            else:
-                break
-        
+        from training_platform.user_time import today_for
+
+        today = today_for(user)
+        window_start = today - timedelta(days=cls.MAX_STREAK_DAYS)
+        try:
+            zone = ZoneInfo(getattr(user, "preferred_timezone", None) or "UTC")
+        except Exception:
+            zone = None
+
+        stamps = UserActivity.objects.filter(
+            user=user, activity_type__in=kinds,
+            timestamp__date__gte=window_start - timedelta(days=2),
+        ).values_list("timestamp", flat=True)
+        days = {(t.astimezone(zone) if zone else timezone.localtime(t)).date()
+                for t in stamps}
+
+        streak, day = 0, today
+        while day in days and streak < cls.MAX_STREAK_DAYS:
+            streak += 1
+            day -= timedelta(days=1)
         return streak
 
     @classmethod
+    def _calculate_workout_streak(cls, user: CustomUser) -> int:
+        """Consecutive days with a workout."""
+        return cls._streak_of(user, activity_types.WORKOUT)
+
+    @classmethod
     def _calculate_calorie_streak(cls, user: CustomUser) -> int:
-        """Calculate consecutive days with meal logging."""
-        from analytics.models import UserActivity
-        
-        today = timezone.localdate()
-        streak = 0
-        current_date = today
-        
-        while True:
-            has_meal = UserActivity.objects.filter(
-                user=user,
-                activity_type__in=activity_types.MEAL,
-                timestamp__date=current_date
-            ).exists()
-            
-            if has_meal:
-                streak += 1
-                current_date -= timedelta(days=1)
-            else:
-                break
-        
-        return streak
+        """Consecutive days with a meal recorded."""
+        return cls._streak_of(user, activity_types.MEAL)
 
     @classmethod
     def _calculate_weight_loss(cls, user: CustomUser) -> float:
@@ -398,24 +414,7 @@ class AchievementEngine:
         ).exists()
 
     @classmethod
-    def _calculate_total_distance(cls, user: CustomUser, unit: str = 'km') -> float:
-        """Calculate total distance from workout activities."""
-        from analytics.models import PerformanceMetric
-        
-        result = PerformanceMetric.objects.filter(
-            user=user,
-            metric_type='distance_run'
-        ).aggregate(total=Sum('value'))
-        
-        return result['total'] or 0
 
-    @classmethod
-    def _calculate_perfect_days_streak(cls, user: CustomUser) -> int:
-        """Calculate streak of days where all goals were completed."""
-        from analytics.models import UserGoal
-        
-        # This is a placeholder - would need daily goal tracking
-        return 0
 
     @classmethod
     @transaction.atomic

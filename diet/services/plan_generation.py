@@ -63,7 +63,13 @@ def generate_and_save(user, *, meal_count: int = 3, snack_count: int = 1, durati
         raise ValueError("Complete profile required: height, weight, age, gender")
     daily_kcal = float(kcal)
     ceiling = feasible_kcal_ceiling(meal_count, snack_count, user.resolve_fitness_goal())
-    if daily_kcal > ceiling * 1.05:
+    # No slack. `feasible_kcal_ceiling` solves the constraint exactly — the largest meal
+    # of the split must fit under `max_kcal_per_meal` — and multiplying by 1.05 reopened
+    # a 166 kcal band the function exists to refuse. Measured at 3 meals + 1 snack on
+    # `maintain`: the ceiling is 3,325 and 3,400 was accepted, giving a lunch of 1,280
+    # against the same policy's 1,250 limit. The plan was then built short and stored
+    # with the requested figure on it, which is the exact failure this gate is for.
+    if daily_kcal > ceiling:
         raise InfeasibleCaloriesError(daily_kcal, ceiling, meal_count, snack_count)
 
     planner = RuleBasedPlanner(user, seed_salt=seed_salt)

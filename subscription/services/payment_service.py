@@ -125,8 +125,12 @@ class PaymentService:
                 f"subscription {payment.subscription_id} activated"
             )
 
-        # Signal outside the write path of the row lock but after commit-safe state.
-        payment_completed.send(sender=cls, payment=payment, subscription=payment.subscription)
+        # ON COMMIT. The comment here said "after commit-safe state", which was true of
+        # this function and not of its callers: `PaymentWebhookView` wraps the whole
+        # update in `transaction.atomic()`, so the send happened inside a transaction
+        # that could still roll back — and the receiver moves money.
+        transaction.on_commit(lambda: payment_completed.send(
+            sender=cls, payment=payment, subscription=payment.subscription))
         return payment
 
     @classmethod

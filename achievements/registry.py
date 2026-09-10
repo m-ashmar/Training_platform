@@ -74,18 +74,6 @@ ACHIEVEMENTS = [
         badge_color='#CD7F32',
         is_rare=True,
     ),
-    AchievementDef(
-        key='marathon_master',
-        name='Marathon Master',
-        description='Run a total distance of 42.2km or more',
-        category='workout',
-        criteria_type='total_distance',
-        target=42.2,
-        unit='km',
-        points=200,
-        badge_color='#FF6B6B',
-        is_rare=True,
-    ),
 
     # =========================================================================
     # STREAK ACHIEVEMENTS
@@ -268,19 +256,23 @@ ACHIEVEMENTS = [
         badge_color='#F1C40F',
         is_secret=True,
     ),
-    AchievementDef(
-        key='perfectionist',
-        name='Perfectionist',
-        description='Complete all daily goals for 30 consecutive days',
-        category='milestone',
-        criteria_type='perfect_days_streak',
-        target=30,
-        points=500,
-        badge_color='#1ABC9C',
-        is_rare=True,
-        is_secret=True,
-    ),
 ]
+
+# Two definitions were removed from this list because nothing could ever satisfy them.
+#
+#   `marathon_master`  (total_distance, 42.2 km) reads
+#                      `PerformanceMetric(metric_type='distance_run')`, and
+#                      `analytics.recorder.record_metric` is only ever called with
+#                      "workout_duration" and "weight". No row of that type has ever been
+#                      written by anything.
+#   `perfectionist`    (perfect_days_streak, 30 days) reads
+#                      `_calculate_perfect_days_streak`, whose body is `return 0` under a
+#                      comment saying it is a placeholder.
+#
+# A badge a user can chase and never reach is worse than no badge. Put them back when the
+# platform records distance and daily goal completion — `IMPLEMENTED_CRITERIA` in
+# `achievements/engine.py` is the list that decides, and a gate test holds the two in
+# step.
 
 
 def get_achievement_by_key(key: str) -> Optional[AchievementDef]:

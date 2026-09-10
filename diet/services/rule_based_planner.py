@@ -478,6 +478,14 @@ class RuleBasedPlanner:
                 delivered, requested)
         try:
             output.plan_metadata["delivery"] = report
+            failures = getattr(self, "_path_failures", None)
+            if failures:
+                # A path raised while building this client's week. In production the
+                # planner fails open — the other path or the next slot carries on — so
+                # without this the only trace is a log line nobody counts.
+                output.plan_metadata["path_failures"] = failures
+                logger.error("Plan for user %s was built with %d planner path failure(s)",
+                             getattr(self.user, "id", "?"), len(failures))
         except Exception:
             logger.debug("could not record the delivery report", exc_info=True)
 
@@ -756,15 +764,31 @@ class RuleBasedPlanner:
             )
             return (meal, deviation.within(policy.tolerance), preference, is_recent,
                     float(deviation.magnitude), lambda: None)
-        except Exception:
+        except Exception as failure:
             # Loud. This used to log at DEBUG and return None, so any bug inside
             # diet/planner/ presented as "the engine built a pile" and nothing else.
-            # Re-raised where a developer will see it; in production the recipe path
-            # and NoServableMealError still stand between the client and silence.
+            #
+            # In PRODUCTION `DIET_PLANNER_STRICT` is False, so it is not re-raised —
+            # failing open is right, a client gets dinner and an engineer gets an error
+            # log. But an error log nobody counts is close to silence, and a comment
+            # here used to claim it was "re-raised where a developer will see it",
+            # which is only true of the gate. The failure is recorded on the plan
+            # itself, so `plan_metadata["path_failures"]` says a path broke while
+            # building this client's week.
             logger.error("template path failed for %s", meal_name, exc_info=True)
+            self._note_path_failure("template", meal_name, failure)
             if getattr(settings, "DIET_PLANNER_STRICT", settings.DEBUG):
                 raise
             return None
+
+    def _note_path_failure(self, path: str, meal_name: str, failure: Exception) -> None:
+        """Record that a planner path raised, so the plan can say so about itself."""
+        record = getattr(self, "_path_failures", None)
+        if record is None:
+            record = self._path_failures = []
+        if len(record) < 20:
+            record.append({"path": path, "meal": meal_name,
+                           "error": f"{type(failure).__name__}: {failure}"[:200]})
 
     def _recipes(self):
         """The active library, loaded once per generation with its foods and categories.
@@ -962,8 +986,9 @@ class RuleBasedPlanner:
                 difficulty_level="easy",
             )
             return (meal, True, preference, is_recent, float(match.deviation.magnitude), commit)
-        except Exception:
+        except Exception as failure:
             logger.error("recipe path failed for %s", meal_name, exc_info=True)
+            self._note_path_failure("recipe", meal_name, failure)
             if getattr(settings, "DIET_PLANNER_STRICT", settings.DEBUG):
                 raise
             return None

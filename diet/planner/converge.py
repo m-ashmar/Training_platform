@@ -7,6 +7,7 @@ net effect was measured going from +4.1% (inside tolerance) to -6.6% (shipped).
 from __future__ import annotations
 
 import logging
+from datetime import time
 from typing import Dict, List
 
 from .optimize import optimize_meal, totals_of
@@ -72,8 +73,16 @@ def converge_plan(diet_plan, policy: PlannerPolicy | None = None) -> Dict:
     for meal in all_meals:
         by_date.setdefault(meal.date, []).append(meal)
 
+    #: The order generation carries the residual in: the main meals as the split names
+    #: them, then snacks. Convergence read `diet_plan.meals` under
+    #: `Meta.ordering = ['date', 'scheduled_time', 'id']`, and a snack is eaten at 11:00
+    #: — between breakfast and lunch — so it chained Breakfast, Snack, Lunch, Dinner
+    #: while generation chained Breakfast, Lunch, Dinner, Snack. The two stages carried
+    #: the same residual through different meals, and `_write_back` then overwrote
+    #: `meal.target`, which is what the API shows the client as "what this meal was built
+    #: to". Measured on one day: dinner moved 38 kcal down and the snack 13 up.
     for day in sorted(by_date):
-        meals = by_date[day]
+        meals = sorted(by_date[day], key=_generation_order)
         names = [m.meal_type for m in meals if (m.meal_type or "").lower() != "snack"]
         snacks = sum(1 for m in meals if (m.meal_type or "").lower() == "snack")
         # The same targets the plan was built to, bodyweight included. Without the
@@ -165,6 +174,20 @@ def _shift(target: Dict[str, float], carried: Dict[str, float]) -> Dict[str, flo
         limit = RESIDUAL_CARRY_CAP * base
         out[macro] = base + max(-limit, min(limit, float(carried.get(macro, 0.0))))
     return out
+
+
+#: Generation plans the main meals in split order and appends snacks last
+#: (`rule_based_planner.generate`: `slots = list(meals) + ["Snack"]`).
+_SLOT_ORDER = {"Breakfast": 0, "Lunch": 1, "Dinner": 2}
+
+
+def _generation_order(meal):
+    slot = (meal.meal_type or "").strip()
+    # Snacks last, in the order they were scheduled, so a second snack still follows the
+    # first. Anything the split does not name sits with the main meals, by its time.
+    return (_SLOT_ORDER.get(slot, 3 if slot.lower() == "snack" else 2),
+            meal.scheduled_time or time(23, 59),
+            meal.id)
 
 
 def _grams(quantity) -> float:

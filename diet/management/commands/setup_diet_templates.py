@@ -58,10 +58,19 @@ class Command(BaseCommand):
         
         created_count = 0
         for template_data in templates_data:
-            template, created = DietPlanTemplate.objects.get_or_create(
-                name=template_data['name'],
-                defaults=template_data
-            )
+            # Keyed on `name_en`. `name` is a modeltranslation virtual field and
+            # `DietPlanTemplate` has no unique key at all, so running this under an
+            # Arabic locale on a database already seeded in English created a SECOND set
+            # of six — twelve indistinguishable rows in the trainer's picker, six of them
+            # answering '' for `.name` under English because the English text had gone
+            # into the Arabic column. `FoodCategory.by_canonical_name` solves exactly
+            # this and this model never got it.
+            template = DietPlanTemplate.objects.filter(
+                name_en=template_data['name']).first()
+            created = template is None
+            if created:
+                template = DietPlanTemplate.objects.create(
+                    name_en=template_data['name'], **template_data)
             if created:
                 created_count += 1
                 self.stdout.write(f'  Created template: {template.name}')
