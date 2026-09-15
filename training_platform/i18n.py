@@ -167,39 +167,8 @@ class LanguageContext:
         return ":".join(segments)
 
 
-class LanguageAwareAPIView:
-    """
-    DRF mixin that activates the authenticated user's preferred language
-    after DRF authentication but before serialization.
-
-    Guarantees that django-modeltranslation fields resolve in the
-    correct language for API responses.
-
-    Deactivates language in finalize_response() to prevent leaking
-    to the next request on the same thread.
-
-    Usage:
-        class MyView(LanguageAwareAPIView, APIView):
-            ...
-
-        class MyViewSet(LanguageAwareAPIView, ModelViewSet):
-            ...
-    """
-
-    def initial(self, request, *args, **kwargs):
-        super().initial(request, *args, **kwargs)
-        user = getattr(request, 'user', None)
-        if user and getattr(user, 'is_authenticated', False):
-            raw_lang = getattr(user, 'preferred_language', None)
-            lang = _validate_language(
-                raw_lang,
-                user_id=getattr(user, 'id', None),
-            )
-            if lang:
-                translation.activate(lang)
-
-    def finalize_response(self, request, response, *args, **kwargs):
-        """Deactivate language to prevent threadlocal leaking between requests."""
-        response = super().finalize_response(request, response, *args, **kwargs)
-        translation.deactivate()
-        return response
+# There was a `LanguageAwareAPIView` mixin here, documented as the protection against the
+# active language leaking between requests on one thread. No view in the project ever
+# used it. Language is resolved per request by `LanguageResolutionMiddleware`, which
+# activates on every request before any view runs; a mixin nobody inherits from only made
+# the code look protected by something that never executed.

@@ -157,7 +157,9 @@ class CustomUserAdmin(UserAdmin):
     
     def password_status(self, obj):
         """Display password status in admin list"""
-        if obj.password and obj.password.startswith('pbkdf2'):
+        # Ask the model, not the hash prefix: `startswith('pbkdf2')` labels every account
+        # "Not Set" the day the hasher changes to argon2 or bcrypt.
+        if obj.password and obj.has_usable_password():
             return format_html(
                 '<span style="color: green;">✓ Set</span>'
             )
