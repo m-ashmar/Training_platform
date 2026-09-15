@@ -108,7 +108,10 @@ class ImprovedFoodItemAdmin(TranslAdmin):
                    MacroDominantFilter, CalorieRangeFilter]
     list_editable = ['cuisine', 'role']
     search_fields = ['name', 'api_id']
-    readonly_fields = ['image_preview', 'nutrition_analysis', 'planner_view']
+    #: `serving_size_grams` is READ-ONLY: every stored food is per 100 g, and changing it
+    #: on an existing food silently rescaled all four macros. Portions are `unit_grams`.
+    readonly_fields = ['image_preview', 'nutrition_analysis', 'planner_view',
+                       'serving_size_grams']
 
     fieldsets = (
         ('Vetting', {
@@ -120,9 +123,10 @@ class ImprovedFoodItemAdmin(TranslAdmin):
         ('Basic Information', {
             'fields': ('name', 'category', 'api_id', 'image_url', 'image_preview')
         }),
-        ('Nutrition Per Serving', {
-            'fields': ('calories', 'protein', 'carbs', 'fat', 'serving_size', 'serving_size_grams'),
-            'description': 'Per 100 g, which is what the whole catalogue uses.'
+        ('Nutrition per 100 g', {
+            'fields': ('calories', 'protein', 'carbs', 'fat', 'serving_size_grams'),
+            'description': ('Every food is stored per 100 g. To say how big a portion is, '
+                            'set unit grams below — not these numbers.')
         }),
         ('How the planner uses it', {
             'fields': ('meal_slots', 'cuisine', 'role', 'household_unit', 'unit_grams'),

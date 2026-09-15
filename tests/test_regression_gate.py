@@ -8341,3 +8341,65 @@ def test_admin_changelists_do_not_query_per_row(make_user, client):
     few = measure(2)
     many = measure(20)
     assert many <= few + 2, (few, many)
+
+
+def test_changing_a_foods_serving_size_does_not_rescale_its_macros(make_user, client,
+                                                                   seeded_catalogue):
+    """`FoodItem.save()` normalised macros whenever `serving_size_grams` was not 100 — on
+    every save, including updates — and the admin showed that field under "Nutrition Per
+    Serving". An owner typing 40 for "a serving is 40 g" saved, saw the box read 100 again,
+    and Akkawi Cheese had gone from 264 to 660 kcal per 100 g in every plan built after.
+    Normalising is an import convenience; importers create."""
+    import json as _json
+
+    from django.core.exceptions import ValidationError as _Invalid
+
+    from diet.models import FoodItem
+
+    food = FoodItem.objects.filter(needs_review=False, serving_size_grams=100).first()
+    before = (food.calories, food.protein, food.carbs, food.fat)
+
+    # The model refuses the ambiguous update outright.
+    food.serving_size_grams = 40
+    with pytest.raises(_Invalid):
+        food.save()
+    food.refresh_from_db()
+    assert (food.calories, food.protein, food.carbs, food.fat) == before
+
+    # The admin no longer offers it as an input at all.
+    from diet.admin import ImprovedFoodItemAdmin
+    assert "serving_size_grams" in ImprovedFoodItemAdmin.readonly_fields
+
+    superuser = make_user("gate_serving_su", user_type="admin")
+    superuser.is_superuser = True
+    superuser.save()
+    client.force_login(superuser)
+    page = client.get(f"/admin/diet/fooditem/{food.pk}/change/")
+    assert 'name="serving_size_grams"' not in page.content.decode()
+
+    # And an IMPORT that arrives per serving is still normalised to per 100 g.
+    imported = FoodItem.objects.create(name="gate per-serving import", calories=100,
+                                       protein=10, carbs=10, fat=2, serving_size_grams=50,
+                                       needs_review=True)
+    assert imported.serving_size_grams == 100 and imported.calories == 200
+
+
+def test_an_unsupported_accept_language_defers_to_the_users_choice(make_user, api):
+    """`get_language_from_request` never returns None — it falls through to
+    LANGUAGE_CODE — so ANY Accept-Language header short-circuited the stored preference,
+    and a user who chose Arabic got English for `*` or `fr-FR`. An explicit supported
+    language still wins, as the contract documents."""
+    user = make_user("gate_lang_user", user_type="client")
+    user.preferred_language = "ar"
+    user.save(update_fields=["preferred_language"])
+    client_api = api(user)
+
+    def language_for(header):
+        extra = {"HTTP_ACCEPT_LANGUAGE": header} if header is not None else {}
+        return client_api.get("/api/achievements/", **extra).headers.get("Content-Language")
+
+    assert language_for(None) == "ar"
+    assert language_for("*") == "ar"
+    assert language_for("fr-FR") == "ar"
+    assert language_for("ar") == "ar"
+    assert language_for("en") == "en"

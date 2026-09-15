@@ -701,10 +701,16 @@ class LanguageResolutionMiddleware(MiddlewareMixin):
         """Resolve language from header or user preference."""
         language = None
 
-        # 1. Accept-Language header
+        # 1. Accept-Language header — but only a language we actually serve.
+        # `get_language_from_request` never returns None: when nothing in the header is
+        # supported it falls through to LANGUAGE_CODE. So ANY header — `*`, `fr-FR`, a
+        # transport default — short-circuited the stored preference below, and a user
+        # who chose Arabic in their profile got the whole API in English. An explicit
+        # `ar` or `en` still wins, as API_CONTRACT.md documents; a header that names no
+        # supported language now defers to what the user chose.
         accept_lang = request.headers.get("Accept-Language")
         if accept_lang:
-            language = translation.get_language_from_request(request)
+            language = self._supported_language_in(accept_lang)
 
         # 2. Authenticated user's preferred_language via JWT
         if not language:
@@ -724,6 +730,20 @@ class LanguageResolutionMiddleware(MiddlewareMixin):
 
         translation.activate(language)
         request.LANGUAGE_CODE = translation.get_language()
+
+    @staticmethod
+    def _supported_language_in(header):
+        """The first language in an Accept-Language header that we serve, or None."""
+        from django.utils.translation.trans_real import parse_accept_lang_header
+
+        for code, _quality in parse_accept_lang_header(header):
+            if not code or code == "*":
+                continue
+            try:
+                return translation.get_supported_language_variant(code)
+            except LookupError:
+                continue
+        return None
 
     def _get_language_from_jwt(self, request):
         """Extract preferred_language from JWT bearer token if present."""

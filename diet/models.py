@@ -277,8 +277,21 @@ class FoodItem(RowValidationMixin, models.Model):
         if self.serving_size_grams is None or self.serving_size_grams <= 0:
             self.serving_size_grams = 100
         
-        # NORMALIZE: Convert all macros to per-100g standard
-        # If serving_size_grams != 100, normalize the macro values to 100g
+        # NORMALIZE ON CREATE ONLY. A stored food is per 100 g — that is the catalogue's
+        # invariant, and every row holds serving_size_grams = 100. Normalising is how an
+        # IMPORT that arrives per serving becomes per 100 g, and every importer creates.
+        #
+        # On an update it was a silent rescale. The admin shows this field under
+        # "Nutrition Per Serving", so an owner who typed 40 for "a serving is 40 g" saved
+        # and watched nothing happen: the box read 100 again, and Akkawi Cheese had gone
+        # from 264 kcal to 660 kcal per 100 g, protein 18 -> 45 g, in every plan built from
+        # it afterwards. A portion size belongs in `unit_grams`; changing this number on an
+        # existing food has no meaning that is safe to guess, so it is refused.
+        if not self._state.adding and self.serving_size_grams != 100:
+            raise ValidationError(
+                _("Nutrition is stored per 100 g. To set how big a portion is, use "
+                  "unit grams instead of the serving size."),
+                code="serving_size_is_per_100g")
         if self.serving_size_grams != 100:
             # Calculate normalization factor (how many 100g servings in current serving)
             normalization_factor = 100.0 / self.serving_size_grams
