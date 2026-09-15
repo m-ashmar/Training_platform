@@ -19,6 +19,9 @@ from django.shortcuts import render, redirect
 from django.http import JsonResponse
 from django.contrib import messages
 from django.db.models import Count, Sum, Avg, Q
+from subscription.admin import (
+    activate_subscriptions, cancel_subscriptions, extend_subscriptions,
+)
 from django.utils import timezone
 from django.utils.safestring import mark_safe
 from django.template.response import TemplateResponse
@@ -74,6 +77,24 @@ logger = logging.getLogger(__name__)
 # Shared with users/admin.py, which is the class actually registered for users.
 from training_platform.admin_utils import bulk_apply as _bulk_apply  # noqa: E402
 from training_platform.admin_utils import log_admin_action as _log_admin_action  # noqa: E402
+
+
+def _set_field_action(name, description, message, **fields):
+    """An admin action that sets fields one row at a time through `save()`, logged.
+
+    Fourteen actions were declared on this site by NAME — `hide_posts`, `cancel_subscriptions`,
+    `activate_routines` and the rest — with no method behind them. `ModelAdmin.get_action`
+    returns None for a name it cannot resolve and `_get_base_actions` drops it silently, and
+    the admin system checks do not run on a custom AdminSite, so the dropdown simply lacked
+    them: there was no bulk post moderation at all, with no error anywhere.
+    """
+    def action(modeladmin, request, queryset):
+        count = _bulk_apply(request, queryset, message, **fields)
+        modeladmin.message_user(request, f"{description}: {count} updated.")
+
+    action.__name__ = name
+    action.short_description = description
+    return action
 
 
 class TrainingPlatformAdminSite(AdminSite):
@@ -162,10 +183,15 @@ class ExerciseAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at', 'updated_at', 'created_by')
     inlines = []
     
-    actions = ['make_global', 'make_private', 'activate_exercises', 'deactivate_exercises']
+    actions = ['make_global', 'make_private',
+               _set_field_action('activate_exercises', 'Activate selected exercises',
+                                 'Activated via bulk admin action', is_active=True),
+               _set_field_action('deactivate_exercises', 'Deactivate selected exercises',
+                                 'Deactivated via bulk admin action', is_active=False)]
     
     def media_count(self, obj):
-        return obj.media.count()
+        # Annotated in get_queryset: `.count()` here was one query per row.
+        return getattr(obj, '_media_count', 0)
     media_count.short_description = "Media"
     
     def make_global(self, request, queryset):
@@ -177,6 +203,11 @@ class ExerciseAdmin(admin.ModelAdmin):
         updated = _bulk_apply(request, queryset, "Made private via bulk admin action", is_global=False)
         self.message_user(request, f"{updated} record(s) updated.")
     make_private.short_description = "Make exercises private"
+
+    def get_queryset(self, request):
+        # Per-row `.count()` columns cost one query per row — ~125 queries for a
+        # 30-row routine page. `list_select_related` fixes FKs, not reverse counts.
+        return super().get_queryset(request).annotate(_media_count=Count('media', distinct=True))
 
 class RoutineAdmin(admin.ModelAdmin):
     """Routine management with client assignment"""
@@ -212,14 +243,20 @@ class RoutineAdmin(admin.ModelAdmin):
     
     readonly_fields = ('created_at', 'updated_at', 'created_by')
     
-    actions = ['activate_routines', 'deactivate_routines', 'duplicate_routines']
+    actions = [_set_field_action('activate_routines', 'Activate selected routines',
+                                 'Activated via bulk admin action', is_active=True),
+               _set_field_action('deactivate_routines', 'Deactivate selected routines',
+                                 'Deactivated via bulk admin action', is_active=False),
+               'duplicate_routines']
     
     def client_count(self, obj):
-        return obj.assigned_to.count()
+        # Annotated in get_queryset: `.count()` here was one query per row.
+        return getattr(obj, '_client_count', 0)
     client_count.short_description = "Clients"
     
     def exercise_count(self, obj):
-        return obj.exercises.count()
+        # Annotated in get_queryset: `.count()` here was one query per row.
+        return getattr(obj, '_exercise_count', 0)
     exercise_count.short_description = "Exercises"
     
     def duplicate_routines(self, request, queryset):
@@ -236,6 +273,11 @@ class RoutineAdmin(admin.ModelAdmin):
         self.message_user(request, f"{queryset.count()} routines duplicated successfully.")
     duplicate_routines.short_description = "Duplicate selected routines"
 
+    def get_queryset(self, request):
+        # Per-row `.count()` columns cost one query per row — ~125 queries for a
+        # 30-row routine page. `list_select_related` fixes FKs, not reverse counts.
+        return super().get_queryset(request).annotate(_client_count=Count('assigned_to', distinct=True), _exercise_count=Count('exercises', distinct=True))
+
 class RoutineProgressAdmin(admin.ModelAdmin):
     """Track routine completion progress"""
     
@@ -243,7 +285,10 @@ class RoutineProgressAdmin(admin.ModelAdmin):
     # queries per changelist page.
     list_select_related = ('routine', 'user')
     list_display = ('user', 'routine', 'day', 'status', 'completion_percentage', 'updated_at')
-    list_filter = ('status', 'routine', 'user', 'updated_at')
+    # No raw `user` filter: a FK filter renders one sidebar link per row of the user
+    # table — 510 links and 70 KB of HTML for a changelist holding zero rows. Search
+    # by username instead.
+    list_filter = ('status', 'updated_at')
     search_fields = ('user__username', 'routine__name')
     readonly_fields = ('completion_percentage', 'updated_at')
     
@@ -260,7 +305,7 @@ class WorkoutSessionAdmin(admin.ModelAdmin):
     # queries per changelist page.
     list_select_related = ('routine', 'user')
     list_display = ('user', 'routine', 'start_time', 'end_time', 'status', 'duration')
-    list_filter = ('status', 'routine', 'user', 'start_time')
+    list_filter = ('status', 'start_time')
     search_fields = ('user__username', 'routine__name')
     readonly_fields = ('start_time', 'duration')
     
@@ -328,7 +373,10 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
     
     readonly_fields = ('created_at', 'updated_at')
     
-    actions = ['activate_plans', 'deactivate_plans']
+    actions = [_set_field_action('activate_plans', 'Activate selected plans',
+                                 'Activated via bulk admin action', is_active=True),
+               _set_field_action('deactivate_plans', 'Deactivate selected plans',
+                                 'Deactivated via bulk admin action', is_active=False)]
     
     def feature_count(self, obj):
         features = []
@@ -350,7 +398,8 @@ class SubscriptionAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'user__username')
     readonly_fields = ('start_date', 'end_date', 'created_at', 'updated_at')
     
-    actions = ['activate_subscriptions', 'cancel_subscriptions', 'extend_subscriptions']
+    # The same logged, through-the-model actions as the default admin site.
+    actions = [activate_subscriptions, cancel_subscriptions, extend_subscriptions]
 
 class PaymentAdmin(admin.ModelAdmin):
     """Payment tracking"""
@@ -378,7 +427,14 @@ class PostAdmin(admin.ModelAdmin):
     search_fields = ('author__username', 'title', 'content')
     list_editable = ('visibility', 'is_hidden')
     
-    actions = ['hide_posts', 'unhide_posts', 'flag_posts', 'unflag_posts']
+    actions = [_set_field_action('hide_posts', 'Hide selected posts',
+                                 'Hidden by moderation', is_hidden=True),
+               _set_field_action('unhide_posts', 'Unhide selected posts',
+                                 'Unhidden by moderation', is_hidden=False),
+               _set_field_action('flag_posts', 'Flag selected posts',
+                                 'Flagged by moderation', is_flagged=True),
+               _set_field_action('unflag_posts', 'Unflag selected posts',
+                                 'Unflagged by moderation', is_flagged=False)]
 
 class ChallengeAdmin(admin.ModelAdmin):
     """Challenge management"""
@@ -391,8 +447,14 @@ class ChallengeAdmin(admin.ModelAdmin):
     search_fields = ('title', 'creator__username')
     
     def participant_count(self, obj):
-        return obj.participations.count()
+        # Annotated in get_queryset: `.count()` here was one query per row.
+        return getattr(obj, '_participant_count', 0)
     participant_count.short_description = "Participants"
+
+    def get_queryset(self, request):
+        # Per-row `.count()` columns cost one query per row — ~125 queries for a
+        # 30-row routine page. `list_select_related` fixes FKs, not reverse counts.
+        return super().get_queryset(request).annotate(_participant_count=Count('participations', distinct=True))
 
 class AchievementAdmin(admin.ModelAdmin):
     """Achievement management"""
@@ -402,8 +464,14 @@ class AchievementAdmin(admin.ModelAdmin):
     search_fields = ('name', 'description')
     
     def user_count(self, obj):
-        return obj.user_achievements.count()
+        # Annotated in get_queryset: `.count()` here was one query per row.
+        return getattr(obj, '_user_count', 0)
     user_count.short_description = "Users Earned"
+
+    def get_queryset(self, request):
+        # Per-row `.count()` columns cost one query per row — ~125 queries for a
+        # 30-row routine page. `list_select_related` fixes FKs, not reverse counts.
+        return super().get_queryset(request).annotate(_user_count=Count('user_achievements', distinct=True))
 
 # ============================================================================
 # ANALYTICS & REPORTING

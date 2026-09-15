@@ -5,6 +5,34 @@ from .models import (
     SubscriptionPlan, Subscription, Payment, 
     SubscriptionFeature, SubscriptionUsage
 )
+from training_platform.admin_utils import bulk_apply, log_admin_action
+
+
+# Shared by both admin sites. Each goes through `save()` and writes an admin log entry per
+# row: `queryset.update()` skipped both, so granting or cancelling paid access in bulk left
+# no record of who did it — on the table that decides what a customer has paid for.
+@admin.action(description="Activate selected subscriptions")
+def activate_subscriptions(modeladmin, request, queryset):
+    count = bulk_apply(request, queryset, "Activated via bulk admin action", status='active')
+    modeladmin.message_user(request, f"Activated {count} subscriptions.")
+
+
+@admin.action(description="Cancel selected subscriptions")
+def cancel_subscriptions(modeladmin, request, queryset):
+    count = bulk_apply(request, queryset, "Cancelled via bulk admin action",
+                       status='cancelled', cancelled_at=timezone.now())
+    modeladmin.message_user(request, f"Cancelled {count} subscriptions.")
+
+
+@admin.action(description="Extend subscriptions by 30 days")
+def extend_subscriptions(modeladmin, request, queryset):
+    count = 0
+    for subscription in queryset:
+        subscription.end_date = subscription.end_date + timezone.timedelta(days=30)
+        subscription.save()
+        log_admin_action(request, subscription, "Extended by 30 days via bulk admin action")
+        count += 1
+    modeladmin.message_user(request, f"Extended {count} subscriptions.")
 
 @admin.register(SubscriptionPlan)
 class SubscriptionPlanAdmin(admin.ModelAdmin):
@@ -32,11 +60,13 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
     actions = ['activate_plans', 'deactivate_plans']
     
     def activate_plans(self, request, queryset):
-        queryset.update(is_active=True)
+        count = bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
+        self.message_user(request, f"Activated {count} plans.")
     activate_plans.short_description = "Activate selected plans"
     
     def deactivate_plans(self, request, queryset):
-        queryset.update(is_active=False)
+        count = bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
+        self.message_user(request, f"Deactivated {count} plans.")
     deactivate_plans.short_description = "Deactivate selected plans"
 
 @admin.register(Subscription)
@@ -69,21 +99,7 @@ class SubscriptionAdmin(admin.ModelAdmin):
         })
     )
     
-    actions = ['activate_subscriptions', 'cancel_subscriptions', 'extend_subscriptions']
-    
-    def activate_subscriptions(self, request, queryset):
-        queryset.update(status='active')
-    activate_subscriptions.short_description = "Activate selected subscriptions"
-    
-    def cancel_subscriptions(self, request, queryset):
-        queryset.update(status='cancelled', cancelled_at=timezone.now())
-    cancel_subscriptions.short_description = "Cancel selected subscriptions"
-    
-    def extend_subscriptions(self, request, queryset):
-        for subscription in queryset:
-            subscription.end_date = subscription.end_date + timezone.timedelta(days=30)
-            subscription.save()
-    extend_subscriptions.short_description = "Extend subscriptions by 30 days"
+    actions = [activate_subscriptions, cancel_subscriptions, extend_subscriptions]
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
@@ -174,11 +190,13 @@ class SubscriptionFeatureAdmin(admin.ModelAdmin):
     actions = ['activate_features', 'deactivate_features']
     
     def activate_features(self, request, queryset):
-        queryset.update(is_active=True)
+        count = bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
+        self.message_user(request, f"Activated {count} features.")
     activate_features.short_description = "Activate selected features"
     
     def deactivate_features(self, request, queryset):
-        queryset.update(is_active=False)
+        count = bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
+        self.message_user(request, f"Deactivated {count} features.")
     deactivate_features.short_description = "Deactivate selected features"
 
 @admin.register(SubscriptionUsage)

@@ -346,9 +346,12 @@ class Routine(RowValidationMixin, models.Model):
         ordering = ['-created_at', '-id']
 
     def __str__(self):
-        user_names = ', '.join(self.assigned_to.values_list('username', flat=True)[:5])
-        extra = '' if self.assigned_to.count() <= 5 else '...'
-        return f"{self.name} for {user_names}{extra}"
+        # The name, and nothing that needs the database. This ran two queries — the first
+        # five assignees' usernames and a COUNT — every time a routine was rendered as
+        # text: every admin changelist row (90 rows of routine progress cost 180 queries),
+        # every FK dropdown option, every admin log entry. It also put up to five client
+        # usernames into `LogEntry.object_repr` and anywhere else a routine was printed.
+        return self.name
 
     row_validation_exclude = ("created_by",)
 

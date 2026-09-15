@@ -8238,3 +8238,106 @@ def test_a_missed_reminder_is_recovered_briefly_and_never_sent_twice(make_user, 
     early = client_due_at("gate_catchup_0200", 2)
     run_at(_dt.datetime(2026, 3, 11, 21, 10, tzinfo=_dt.timezone.utc))
     assert reminders(early) == 0, "a 02:00 reminder fired nineteen hours late"
+
+
+def test_every_declared_admin_action_exists(db):
+    """Fourteen actions were declared by NAME with no method behind them. `get_action`
+    returns None for a name it cannot resolve, `_get_base_actions` drops it silently, and
+    the admin checks do not run on a custom AdminSite — so there was no bulk post
+    moderation and no bulk subscription cancel, with no error anywhere."""
+    from django.contrib import admin as dj_admin
+
+    from admin_dashboard.admin import admin_site
+
+    missing = []
+    for site in (dj_admin.site, admin_site):
+        for model, model_admin in site._registry.items():
+            for declared in (getattr(model_admin, "actions", None) or []):
+                if model_admin.get_action(declared) is None:
+                    missing.append((site.name, model.__name__, declared))
+    assert not missing, missing
+
+
+def test_admin_bulk_actions_do_not_bypass_the_model(db):
+    """`queryset.update()` in an admin action skips `save()`, every signal and every
+    validator, and writes nothing to the admin log."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in root.glob("*/admin.py"):
+        if "_excluded" in path.parts:
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#")[0]
+            if "queryset.update(" in code and path.parts[-2] in ("users", "subscription",
+                                                                 "admin_dashboard", "wallet"):
+                offenders.append(f"{path.parts[-2]}/admin.py:{number}")
+    assert not offenders, offenders
+
+
+def test_moderation_actions_hide_a_post_and_record_who_did_it(make_user, client):
+    from django.contrib.admin.models import LogEntry
+
+    from social.models import Post
+
+    superuser = make_user("gate_mod_su", user_type="admin")
+    superuser.is_superuser = True
+    superuser.save()
+    client.force_login(superuser)
+    author = make_user("gate_mod_author", user_type="client")
+    post = Post.objects.create(author=author, content="spam", visibility="public")
+
+    client.post("/dj-admin/social/post/", {"action": "hide_posts",
+                                          "_selected_action": [post.pk]})
+    post.refresh_from_db()
+    assert post.is_hidden is True
+    assert LogEntry.objects.filter(object_id=str(post.pk)).exists()
+
+
+def test_rendering_a_routine_as_text_costs_no_queries(make_user):
+    """`Routine.__str__` ran two queries — five assignee usernames and a COUNT — every
+    time a routine was printed: 90 rows of routine progress in the admin cost 180 queries,
+    and client usernames went into every admin log entry about a routine."""
+    from django.db import connection as _conn
+    from django.test.utils import CaptureQueriesContext
+
+    from routine.models import Routine
+
+    trainer = make_user("gate_str_trainer", user_type="trainer")
+    routine = Routine.objects.create(name="Gate text", created_by=trainer, days=1)
+    routine.assigned_to.add(make_user("gate_str_client", user_type="client"))
+    routine = Routine.objects.get(pk=routine.pk)
+
+    with CaptureQueriesContext(_conn) as queries:
+        text = str(routine)
+    assert len(queries) == 0, [q["sql"] for q in queries]
+    assert text == "Gate text"
+    assert "gate_str_client" not in text
+
+
+def test_admin_changelists_do_not_query_per_row(make_user, client):
+    from django.db import connection as _conn
+    from django.test.utils import CaptureQueriesContext
+
+    from routine.models import Routine
+
+    superuser = make_user("gate_cl_su", user_type="admin")
+    superuser.is_superuser = True
+    superuser.save()
+    client.force_login(superuser)
+    trainer = make_user("gate_cl_trainer", user_type="trainer")
+
+    def measure(rows):
+        for index in range(rows):
+            routine = Routine.objects.create(name=f"gate cl {rows}-{index}",
+                                             created_by=trainer, days=1)
+            routine.assigned_to.add(make_user(f"gate_cl_c{rows}_{index}", user_type="client"))
+        client.get("/dj-admin/routine/routine/")
+        with CaptureQueriesContext(_conn) as queries:
+            assert client.get("/dj-admin/routine/routine/").status_code == 200
+        return len(queries)
+
+    few = measure(2)
+    many = measure(20)
+    assert many <= few + 2, (few, many)
