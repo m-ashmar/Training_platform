@@ -25,15 +25,43 @@ class ApiKeyIdFilter(admin.SimpleListFilter):
         return queryset
 
 
+class LedgerReadOnlyAdmin(admin.ModelAdmin):
+    """Money is read here and changed only through the code that records it.
+
+    A ModelAdmin makes every concrete field editable by default, and these four classes
+    declared only `list_display` and friends — so `Wallet.balance` was a plain form
+    input. Setting it to 999999 was a 302 and a committed row, with zero `Transaction`
+    rows and zero `WalletAuditLog` entries: money created outside `move_funds_atomic`,
+    invisible to any reconciliation against the ledger, and absent from the
+    tamper-evident chain because there was nothing to tamper with.
+
+    The ledger is the same in the other direction: `Transaction.amount` and
+    `reference_id` — the idempotency and reconciliation handle — were editable, and rows
+    were deletable.
+
+    Read-only, then. Money moves through `move_funds_atomic`, `PaymentService` and the
+    escrow helpers, all of which write an audit row; nothing here should be a second way.
+    """
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(Wallet)
-class WalletAdmin(admin.ModelAdmin):
+class WalletAdmin(LedgerReadOnlyAdmin):
     list_display = ("owner", "owner_type", "balance", "currency", "created_at")
     search_fields = ("owner__email", "owner__username")
     list_filter = ("owner_type", "currency")
 
 
 @admin.register(Transaction)
-class TransactionAdmin(admin.ModelAdmin):
+class TransactionAdmin(LedgerReadOnlyAdmin):
     list_display = (
         "reference_id",
         "tx_type",
@@ -89,6 +117,9 @@ class TransactionAdmin(admin.ModelAdmin):
 
 @admin.register(AgentProfile)
 class AgentProfileAdmin(admin.ModelAdmin):
+    #: The spend ceiling, the kill-switch and the IP allowlist are deliberate operator
+    #: controls and stay editable; which account the profile belongs to does not.
+    readonly_fields = ("user", "wallet_type")
     list_display = ("user", "wallet_type", "daily_limit", "monthly_limit", "status")
     list_filter = ("wallet_type", "status")
     search_fields = ("user__email", "user__username")
@@ -99,6 +130,18 @@ class AgentAPIKeyAdmin(admin.ModelAdmin):
     list_display = ("agent", "key_id", "is_active", "created_at", "last_rotated_at")
     list_filter = ("is_active",)
     search_fields = ("key_id", "agent__user__email")
+    #: `hashed_key` and `secret_ciphertext` were editable inputs, and the ciphertext was
+    #: rendered into the page. Overwriting either bricks a live agent's credential with
+    #: no log entry. Only the kill-switch stays writable, which is the one thing an
+    #: operator legitimately needs here.
+    readonly_fields = ("agent", "key_id", "hashed_key", "created_at", "last_rotated_at")
+    #: Never rendered at all, read-only or not.
+    exclude = ("secret_ciphertext",)
+
+    def has_add_permission(self, request):
+        # A key is minted by the rotation endpoint, which also encrypts the secret and
+        # writes the audit row. A key created by hand cannot sign anything.
+        return False
 
     def changelist_view(self, request, extra_context=None):
         # Alert if any agent has multiple active keys (should not happen)
@@ -117,14 +160,26 @@ class AgentAPIKeyAdmin(admin.ModelAdmin):
 
 
 @admin.register(WalletAuditLog)
-class WalletAuditLogAdmin(admin.ModelAdmin):
+class WalletAuditLogAdmin(LedgerReadOnlyAdmin):
+    """Append-only means append-only, including from here.
+
+    `WalletAuditLog.delete()` raises `PermissionError`, and Django's `delete_selected`
+    action calls `QuerySet.delete()`, which never invokes the model's `delete()` — so the
+    chain was deletable from the admin. `verify_chain()` walks only the rows that still
+    exist, starting from a zero hash, so deleting the NEWEST entries (exactly the ones
+    recording what was just done) left it reporting VALID. Migration 0012 now refuses the
+    DELETE at the database, which is the only layer every path goes through.
+    """
+
     list_display = ("event_type", "actor", "ip_address", "request_id", "created_at")
     list_filter = ("event_type", "created_at")
     search_fields = ("request_id", "actor__email", "path")
 
 
 @admin.register(IdempotencyKey)
-class IdempotencyKeyAdmin(admin.ModelAdmin):
+class IdempotencyKeyAdmin(LedgerReadOnlyAdmin):
+    """The replay guard. Flipping `processed` back to false re-opens a spent request."""
+
     list_display = ("key", "created_by", "processed", "created_at")
     list_filter = ("processed",)
     search_fields = ("key", "created_by__email")

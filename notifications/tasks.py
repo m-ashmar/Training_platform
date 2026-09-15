@@ -160,6 +160,12 @@ def award_progress_milestones(user_id: int):
     return sent
 
 
+#: How many hours after a user's reminder hour a missed reminder may still be sent.
+#: Long enough for the next hourly sweeps to recover a run that was cut off; short enough
+#: that nobody gets "time to train" long after the moment has passed.
+REMINDER_CATCH_UP_HOURS = 2
+
+
 @shared_task(
     name="notifications.send_workout_reminders",
     autoretry_for=TRANSIENT_ERRORS,
@@ -225,22 +231,32 @@ def send_workout_reminders():
             tz = ZoneInfo("UTC")
 
         local = now.astimezone(tz)
-        # AT OR PAST their hour, not exactly on it. The equality test was true during
-        # one hourly run and never again that day, so anything that ended the sweep
-        # part-way — the 300 s soft time limit, an OOM, a deploy — cost every remaining
-        # user their reminder for the whole day, and the next run an hour later excluded
-        # them by definition. Measured: 4 due clients, killed after 2, and the 02:00 run
-        # sent 0 because every user's hour was 01:00. `SoftTimeLimitExceeded` is not in
-        # TRANSIENT_ERRORS either, so Celery did not retry the task.
+        # A BOUNDED catch-up after the hour the reminder was due, measured round the
+        # clock. Two failures pull against each other here:
         #
-        # `>=` makes every later run of the same local day a catch-up, and the send is
-        # already idempotent per local day: the dedup key below is `today.isoformat()`.
-        # It also closes the DST hole — on a spring-forward date one local hour does not
-        # occur, so a user whose reminder sat in the gap was skipped every year.
-        if local.hour < user.workout_reminder_hour:
+        #  * Exactly-on-the-hour missed everyone a cut-off sweep did not reach: the 300 s
+        #    soft limit, an OOM or a deploy cost the rest of that hour's users their
+        #    reminder for the whole day, because the next run an hour later excluded them
+        #    by definition. Measured: 4 due clients, killed after 2, the next run sent 0.
+        #
+        #  * "At or past their hour on the same local day" fixed that and broke the other
+        #    direction. It compared hours on a 0-23 line, so a user whose reminder is
+        #    02:00 was messaged at 21:00 — nineteen hours after it was due, as a
+        #    "reminder" for a day that is nearly over. The gate caught it only because it
+        #    ran in the evening.
+        #
+        # So: due when the local hour is the reminder hour or up to
+        # REMINDER_CATCH_UP_HOURS after it, with the difference taken mod 24 so a 23:00
+        # reminder is still recoverable at 01:00. That window also covers the one hour a
+        # spring-forward transition removes.
+        hours_late = (local.hour - user.workout_reminder_hour) % 24
+        if hours_late > REMINDER_CATCH_UP_HOURS:
             continue
 
-        today = local.date()
+        # The local DATE THE REMINDER WAS DUE, not the date now. At 01:00 a 23:00
+        # reminder belongs to yesterday; keying it to today would send it a second time
+        # under a fresh dedup key.
+        today = (local - timedelta(hours=hours_late)).date()
 
         # Is a routine actually scheduled for today?
         pending = (

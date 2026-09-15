@@ -296,7 +296,9 @@ class UserGoal(models.Model):
         """Update goal progress"""
         self.current_value = new_value
         if self.target_value > 0:
-            self.progress_percentage = min(100, (new_value / self.target_value) * 100)
+            # Bounded BOTH ways. `min(100, ...)` alone let a negative value produce a
+            # completed goal showing -50%.
+            self.progress_percentage = max(0.0, min(100.0, (new_value / self.target_value) * 100))
         
         # Check if goal is completed
         if self.progress_percentage >= 100 and self.status == 'active':

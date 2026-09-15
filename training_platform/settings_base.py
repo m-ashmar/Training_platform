@@ -222,6 +222,9 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'charging': '10/minute',
+        # Analytics rows are written by the app, and nothing bounded how fast. Generous
+        # for real telemetry, fatal to a loop filling the tables.
+        'analytics_write': '300/hour',
     },
     # DRF's own parsers, with one addition: a NUL byte anywhere in a request payload is
     # a 400 here rather than a ValueError from psycopg at execute time, which several

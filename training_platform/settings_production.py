@@ -171,7 +171,11 @@ CSRF_TRUSTED_ORIGINS = require_env("CSRF_TRUSTED_ORIGINS").split(",")
 # ========================
 # Throttle — strict in production
 # ========================
+# UPDATE the base rates, never replace them. Assigning a new dict here silently dropped
+# every scope settings_base declares, so a view throttled on a base scope raised in this
+# environment for a reason that pointed nowhere near this file.
 REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {  # noqa: F405
+    **REST_FRAMEWORK.get('DEFAULT_THROTTLE_RATES', {}),  # noqa: F405
     'charging': '10/minute',
 }
 

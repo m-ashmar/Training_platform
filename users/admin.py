@@ -7,41 +7,67 @@ from django.utils.html import format_html
 from django.urls import reverse
 from django.http import HttpResponseRedirect
 from .models import CustomUser
+from training_platform.admin_utils import bulk_apply
 import logging
 
 logger = logging.getLogger(__name__)
 
 class ClientInline(admin.TabularInline):
+    """A trainer's clients, for READING.
+
+    The inline's object is the client's USER ACCOUNT, not the relation between them. With
+    Django's default `can_delete = True`, the DELETE box on a row reads as "remove this
+    client from this trainer" and deleted the person: the account, its training history,
+    its goals and its analytics cascaded away, behind a confirmation that just said
+    "delete". Only users who happened to own a wallet were saved, by `Wallet.owner` being
+    PROTECT — 7 of 510 in the measured database. Adding a row created a brand-new user
+    pointed at the trainer, with no relation, no consent and no escrow.
+
+    Relations are changed through the relation itself; this only shows who they are.
+    """
+
     model = CustomUser
     fk_name = 'assigned_trainer'
     fields = ('username', 'email', 'height', 'weight', 'age', 'activity_level')
+    readonly_fields = fields
     extra = 0
+    can_delete = False
     verbose_name = 'Client'
     verbose_name_plural = 'Clients'
     show_change_link = True
 
+    def has_add_permission(self, request, obj=None):
+        return False
+
+# Each goes through `CustomUser.save()` and writes an admin log entry per row.
+# `queryset.update()` skipped both: activating a `user_type='admin'` account in bulk never
+# gave it `is_staff`, so it could not reach the admin, and verifying every trainer at once
+# left no record of who did it. See training_platform/admin_utils.py.
 @admin.action(description="Mark selected trainers as verified")
 def make_verified(modeladmin, request, queryset):
-    queryset.filter(user_type='trainer').update(trainer_is_verified=True)
-    messages.success(request, f"Marked {queryset.filter(user_type='trainer').count()} trainers as verified.")
+    count = bulk_apply(request, queryset.filter(user_type='trainer'),
+                       "Trainer verified via bulk admin action", trainer_is_verified=True)
+    messages.success(request, f"Marked {count} trainers as verified.")
 
 @admin.action(description="Mark selected trainers as available")
 def make_available(modeladmin, request, queryset):
-    queryset.filter(user_type='trainer').update(trainer_is_available=True)
-    messages.success(request, f"Marked {queryset.filter(user_type='trainer').count()} trainers as available.")
+    count = bulk_apply(request, queryset.filter(user_type='trainer'),
+                       "Trainer marked available via bulk admin action",
+                       trainer_is_available=True)
+    messages.success(request, f"Marked {count} trainers as available.")
 
 # The bulk "reset to a known password" action is gone. It set every selected account
 # to one shared, source-visible string, which is an account takeover of every user an
 # operator can select. Password recovery goes through the OTP flow like everyone else.
 @admin.action(description="Activate selected users")
 def activate_users(modeladmin, request, queryset):
-    queryset.update(is_active=True)
-    messages.success(request, f"Activated {queryset.count()} users.")
+    count = bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
+    messages.success(request, f"Activated {count} users.")
 
 @admin.action(description="Deactivate selected users")
 def deactivate_users(modeladmin, request, queryset):
-    queryset.update(is_active=False)
-    messages.success(request, f"Deactivated {queryset.count()} users.")
+    count = bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
+    messages.success(request, f"Deactivated {count} users.")
 
 class CustomUserChangeForm(UserChangeForm):
     """Custom form for changing user data in admin"""
@@ -65,7 +91,11 @@ class CustomUserAdmin(UserAdmin):
         'assigned_trainer', 'trainer_is_verified', 'trainer_is_available',
         'date_joined', 'password_status'
     )
-    list_editable = ('user_type', 'is_active', 'is_staff', 'trainer_is_available')
+    # Not `is_staff` and not `user_type`. Either is a privilege grant, and from the
+    # changelist it was one checkbox with no confirmation and no change message: one
+    # click turned a trainer into a reader of every client's analytics, because the
+    # analytics permissions are `is_staff`. Grant roles from the change form.
+    list_editable = ('is_active', 'trainer_is_available')
     list_filter = (
         'user_type', 'is_active', 'is_staff', 'trainer_is_verified', 
         'trainer_is_available', 'date_joined'

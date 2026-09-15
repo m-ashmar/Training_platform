@@ -252,7 +252,7 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 | `GET, POST` | `/api/analytics/activities/` | auth | `UserActivityViewSet` |
 | `GET` | `/api/analytics/activities/activity_summary/` | auth | `UserActivityViewSet` |
 | `GET` | `/api/analytics/activities/recent_activities/` | auth | `UserActivityViewSet` |
-| `DELETE, GET, PATCH, PUT` | `/api/analytics/activities/{id}/` | auth | `UserActivityViewSet` |
+| `GET` | `/api/analytics/activities/{id}/` | auth | `UserActivityViewSet` |
 | `GET, POST` | `/api/analytics/dashboard/` | auth | `AnalyticsDashboardViewSet` |
 | `GET` | `/api/analytics/dashboard/platform_stats/` | auth | `AnalyticsDashboardViewSet` |
 | `GET` | `/api/analytics/dashboard/user_overview/` | auth | `AnalyticsDashboardViewSet` |

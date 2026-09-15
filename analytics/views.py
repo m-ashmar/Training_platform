@@ -4,6 +4,9 @@ Analytics Views
 ViewSets for analytics API endpoints.
 """
 
+from django.utils.translation import gettext as _
+from training_platform.numbers import is_finite
+from rest_framework.throttling import UserRateThrottle
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -22,12 +25,34 @@ from .serializers import (
 from training_platform.query_params import int_param
 
 
+class AnalyticsWriteThrottle(UserRateThrottle):
+    """Bounds how fast one account can write analytics rows.
+
+    `DEFAULT_THROTTLE_RATES` defined only `charging`, and no analytics view declared a
+    scope, so an authenticated client could fill these tables at line speed. Reads are
+    not throttled here; only writes are.
+    """
+
+    scope = "analytics_write"
+
+    def allow_request(self, request, view):
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return True
+        return super().allow_request(request, view)
+
+
 class UserActivityViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for user activity tracking
+    ViewSet for user activity tracking.
+
+    An activity log is a LOG: rows are appended, never edited or removed through the API.
+    PATCH turned a row into another type and DELETE erased it, on the table the
+    achievement engine counts.
     """
     serializer_class = UserActivitySerializer
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [AnalyticsWriteThrottle]
+    http_method_names = ['get', 'post', 'head', 'options']
     
     def get_queryset(self):
         """Filter activities by user"""
@@ -53,9 +78,12 @@ class UserActivityViewSet(viewsets.ModelViewSet):
         # The hard [:50] slice hid every older row with nothing in the response to say
         # so — the same defect the wallet ledger had. Pagination replaces it, so the
         # client can page back and knows how many rows exist.
-        activities = self.get_queryset().filter(
-            timestamp__gte=since_date
-        ).order_by('-timestamp')
+        # The CALLER's activities. `get_queryset()` is the whole table for a staff
+        # account, and this action is documented "for the user" — so an admin opening
+        # their own recent activity was shown the platform's.
+        activities = UserActivity.objects.filter(
+            user=request.user, timestamp__gte=since_date
+        ).order_by('-timestamp', '-id')
         page = self.paginate_queryset(activities)
         if page is not None:
             return self.get_paginated_response(self.get_serializer(page, many=True).data)
@@ -69,8 +97,8 @@ class UserActivityViewSet(viewsets.ModelViewSet):
         days = int_param(request.query_params, 'days', default=30, minimum=1, maximum=365)
         since_date = timezone.now() - timedelta(days=days)
         
-        summary = self.get_queryset().filter(
-            timestamp__gte=since_date
+        summary = UserActivity.objects.filter(
+            user=request.user, timestamp__gte=since_date
         ).values('activity_type').annotate(
             count=Count('id')
         ).order_by('-count')
@@ -84,6 +112,7 @@ class PerformanceMetricViewSet(viewsets.ModelViewSet):
     """
     serializer_class = PerformanceMetricSerializer
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [AnalyticsWriteThrottle]
     
     def get_queryset(self):
         """Filter metrics by user"""
@@ -103,19 +132,37 @@ class PerformanceMetricViewSet(viewsets.ModelViewSet):
         days = int_param(request.query_params, 'days', default=30, minimum=1, maximum=365)
         since_date = timezone.now() - timedelta(days=days)
         
-        queryset = self.get_queryset().filter(
-            recorded_at__gte=since_date
+        # The caller's own metrics, bucketed by the caller's own calendar day.
+        # `recorded_at__date` resolves against TIME_ZONE (Asia/Damascus) for everyone,
+        # while streaks, daily advice and the quota use the user's timezone — so a
+        # weigh-in at 22:30 Damascus landed on a different day for a user in Auckland
+        # than their streak said. `training_platform/user_time.py` exists for this.
+        from django.db.models.functions import TruncDate
+        from zoneinfo import ZoneInfo
+
+        try:
+            user_tz = ZoneInfo(request.user.preferred_timezone or "UTC")
+        except Exception:
+            user_tz = timezone.get_current_timezone()
+
+        queryset = PerformanceMetric.objects.filter(
+            user=request.user, recorded_at__gte=since_date
         )
         
         if metric_type:
             queryset = queryset.filter(metric_type=metric_type)
         
-        trends = queryset.values('recorded_at__date').annotate(
-            avg_value=Avg('value'),
-            count=Count('id')
-        ).order_by('recorded_at__date')
+        trends = (queryset
+                  .annotate(day=TruncDate('recorded_at', tzinfo=user_tz))
+                  .values('day')
+                  .annotate(avg_value=Avg('value'), count=Count('id'))
+                  .order_by('day'))
         
-        return Response(trends)
+        return Response([
+            {'recorded_at__date': row['day'], 'avg_value': row['avg_value'],
+             'count': row['count']}
+            for row in trends
+        ])
     
     @action(detail=False, methods=['get'])
     def current_metrics(self, request):
@@ -129,8 +176,11 @@ class PerformanceMetricViewSet(viewsets.ModelViewSet):
 
         DISTINCT ON gives one row per metric_type, the newest, in a single query.
         """
+        # The CALLER's metrics. For a staff account `get_queryset()` is the whole table,
+        # so DISTINCT ON returned the newest weight of ANY user as the admin's own, while
+        # `user_overview` on the same dashboard correctly showed theirs.
         rows = (
-            self.get_queryset()
+            PerformanceMetric.objects.filter(user=request.user)
             .order_by('metric_type', '-recorded_at', '-id')
             .distinct('metric_type')
             .values('metric_type', 'value', 'recorded_at')
@@ -151,6 +201,7 @@ class UserSessionViewSet(viewsets.ModelViewSet):
     """
     serializer_class = UserSessionSerializer
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [AnalyticsWriteThrottle]
     
     def get_queryset(self):
         """Filter sessions by user"""
@@ -194,6 +245,7 @@ class UserGoalViewSet(viewsets.ModelViewSet):
     """
     serializer_class = UserGoalSerializer
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [AnalyticsWriteThrottle]
     
     def get_queryset(self):
         """Filter goals by user"""
@@ -212,15 +264,26 @@ class UserGoalViewSet(viewsets.ModelViewSet):
         goal = self.get_object()
         new_value = request.data.get('new_value')
         
-        if new_value is not None:
-            goal.update_progress(float(new_value))
-            serializer = self.get_serializer(goal)
-            return Response(serializer.data)
-        
-        return Response(
-            {'error': 'new_value required'}, 
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        if new_value is None:
+            return Response(
+                {'error': _('new_value is required'), 'code': 'missing_new_value'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # `float(new_value)` was unguarded, so 'abc' was a 500 — and 'nan' and '1e400'
+        # were WRITTEN and then poisoned every later read of the goal list, because the
+        # row commits before the response is rendered and `json.dumps` refuses the value
+        # from then on.
+        if not is_finite(new_value) or isinstance(new_value, bool):
+            return Response(
+                {'error': _('new_value must be a finite number'),
+                 'code': 'bad_new_value'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        goal.update_progress(float(new_value))
+        serializer = self.get_serializer(goal)
+        return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
     def active_goals(self, request):
@@ -243,6 +306,20 @@ class AnalyticsDashboardViewSet(viewsets.ModelViewSet):
     """
     serializer_class = AnalyticsDashboardSerializer
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [AnalyticsWriteThrottle]
+
+    def perform_create(self, serializer):
+        """The row belongs to whoever asked for it.
+
+        This was the only viewset in the module without this method — the other four all
+        pin the user — and the serializer left `user` writable, so a client could create
+        a dashboard owned by another account and have it render at the top of their
+        screen.
+        """
+        serializer.save(user=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(user=self.request.user)
     
     def get_queryset(self):
         """Filter dashboards by user and type"""

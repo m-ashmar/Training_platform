@@ -71,40 +71,9 @@ logger = logging.getLogger(__name__)
 # CUSTOM ADMIN SITE CONFIGURATION
 # ============================================================================
 
-def _log_admin_action(request, obj, message):
-    """Record a bulk change in Django's admin log.
-
-    Actions that used `queryset.update()` wrote nothing to LogEntry, so a bulk
-    privilege change (e.g. verifying every trainer) left no record of who did it.
-    """
-    from django.contrib.admin.models import CHANGE, LogEntry
-    from django.contrib.contenttypes.models import ContentType
-    try:
-        LogEntry.objects.log_action(
-            user_id=request.user.pk,
-            content_type_id=ContentType.objects.get_for_model(obj.__class__).pk,
-            object_id=obj.pk, object_repr=str(obj),
-            action_flag=CHANGE, change_message=message,
-        )
-    except Exception:  # auditing must never break the action itself
-        logger.warning("Could not write an admin LogEntry for %s", obj, exc_info=True)
-
-
-def _bulk_apply(request, queryset, message, **fields):
-    """Apply field changes per row via save(), logging each one.
-
-    `queryset.update()` skips save(), every signal and every validator — so
-    activating users bypassed the state rules on CustomUser.save(), and flipping
-    Exercise visibility never bumped the cache version, leaving clients on stale data.
-    """
-    count = 0
-    for obj in queryset:
-        for k, v in fields.items():
-            setattr(obj, k, v)
-        obj.save(update_fields=list(fields) if obj.pk else None)
-        _log_admin_action(request, obj, message)
-        count += 1
-    return count
+# Shared with users/admin.py, which is the class actually registered for users.
+from training_platform.admin_utils import bulk_apply as _bulk_apply  # noqa: E402
+from training_platform.admin_utils import log_admin_action as _log_admin_action  # noqa: E402
 
 
 class TrainingPlatformAdminSite(AdminSite):
@@ -153,161 +122,11 @@ admin_site = TrainingPlatformAdminSite(name='training_admin')
 # USER MANAGEMENT
 # ============================================================================
 
-class CustomUserAdmin(admin.ModelAdmin):
-    """Enhanced user management with comprehensive features"""
-    
-    # Without this each row re-queried assigned_trainer — ~100 extra
-    # queries per changelist page.
-    list_select_related = ('assigned_trainer',)
-    list_display = (
-        'username', 'email', 'user_type', 'is_active', 'is_staff',
-        'assigned_trainer', 'trainer_status', 'client_count', 'date_joined'
-    )
-    list_editable = ('user_type', 'is_active', 'is_staff')
-    list_filter = (
-        'user_type', 'is_active', 'is_staff', 'trainer_is_verified', 
-        'trainer_is_available', 'date_joined', 'gender', 'activity_level'
-    )
-    search_fields = ('username', 'email', 'phone_number', 'first_name', 'last_name')
-    ordering = ('-date_joined',)
-    
-    # Inline for related data
-    inlines = []
-    
-    # Actions
-    actions = [
-        'activate_users', 'deactivate_users', 'make_trainers_verified',
-        'reset_passwords', 'export_user_data', 'bulk_assign_trainers'
-    ]
-    
-    # Fieldsets for organized editing
-    fieldsets = (
-        ('Basic Information', {
-            # `password` is deliberately ABSENT. As a plain ModelAdmin field it rendered
-            # as a text input and wrote whatever was typed straight to the column,
-            # unhashed — locking the account out and storing the value in clear. Use
-            # the 'Send password reset' action instead.
-            'fields': ('username', 'email', 'phone_number')
-        }),
-        ('Personal Information', {
-            'fields': (
-                'first_name', 'last_name', 'profile_picture', 'height', 
-                'weight', 'age', 'gender', 'activity_level', 'specific_injury'
-            )
-        }),
-        ('User Type & Permissions', {
-            'fields': ('user_type', 'is_active', 'is_staff', 'is_superuser')
-        }),
-        ('Trainer Information', {
-            'fields': (
-                'trainer_bio', 'trainer_specializations', 'trainer_certifications', 
-                'trainer_experience_years', 'trainer_hourly_rate', 
-                'trainer_is_verified', 'trainer_is_available'
-            ),
-            'classes': ('collapse',)
-        }),
-        ('Client Information', {
-            'fields': ('assigned_trainer', 'client_goals', 'client_preferences'),
-            'classes': ('collapse',)
-        }),
-        ('System Information', {
-            'fields': ('date_joined', 'last_login', 'created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
-    )
-    
-    readonly_fields = ('date_joined', 'last_login', 'created_at', 'updated_at', 'client_count')
-    
-    def trainer_status(self, obj):
-        """Display trainer verification status"""
-        if obj.user_type == 'trainer':
-            if obj.trainer_is_verified:
-                return format_html('<span style="color: green;">✓ Verified</span>')
-            else:
-                return format_html('<span style="color: orange;">⚠ Pending</span>')
-        return "-"
-    trainer_status.short_description = "Trainer Status"
-    
-    def client_count(self, obj):
-        """Show number of clients for trainers"""
-        if obj.user_type == 'trainer':
-            return obj.clients.count()
-        return "-"
-    client_count.short_description = "Clients"
-    
-    # Custom actions
-    def activate_users(self, request, queryset):
-        updated = _bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
-        self.message_user(request, f"{updated} record(s) updated.")
-    activate_users.short_description = "Activate selected users"
-    
-    def deactivate_users(self, request, queryset):
-        updated = _bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
-        self.message_user(request, f"{updated} record(s) updated.")
-    deactivate_users.short_description = "Deactivate selected users"
-    
-    def make_trainers_verified(self, request, queryset):
-        updated = _bulk_apply(request, queryset, "Trainer verified via bulk admin action", trainer_is_verified=True)
-        self.message_user(request, f"{updated} record(s) updated.")
-    make_trainers_verified.short_description = "Verify selected trainers"
-    
-    def reset_passwords(self, request, queryset):
-        """Invalidate the current password and force a reset.
-
-        This used to set every selected account to the literal string "testpass123"
-        and print it back in the confirmation banner — a known shared credential on
-        real accounts. Now it makes the existing password unusable and records an
-        admin log entry per user; each user must go through the normal reset flow.
-        """
-        from django.contrib.admin.models import CHANGE, LogEntry
-        from django.contrib.contenttypes.models import ContentType
-
-        ct = ContentType.objects.get_for_model(queryset.model)
-        count = 0
-        for user in queryset:
-            user.set_unusable_password()
-            user.save(update_fields=['password'])
-            LogEntry.objects.log_action(
-                user_id=request.user.pk, content_type_id=ct.pk, object_id=user.pk,
-                object_repr=str(user), action_flag=CHANGE,
-                change_message='Password invalidated by admin; reset required.',
-            )
-            count += 1
-        self.message_user(
-            request,
-            f"Invalidated the password for {count} user(s). They must use "
-            f"'forgot password' to set a new one — no shared password is issued.",
-        )
-    reset_passwords.short_description = "Invalidate passwords (force reset)"
-    
-    def export_user_data(self, request, queryset):
-        """Export user data to CSV"""
-        import csv
-        from django.http import HttpResponse
-        
-        response = HttpResponse(content_type='text/csv')
-        response['Content-Disposition'] = 'attachment; filename="users_export.csv"'
-        
-        # This streams PII. Record who exported how many rows — previously an export
-        # left no trace at all, so a compromised staff session could dump the user
-        # table a page at a time invisibly.
-        logger.warning(
-            "PII export: admin=%s exported %s user record(s)",
-            getattr(request.user, 'username', '?'), queryset.count(),
-        )
-
-        writer = csv.writer(response)
-        writer.writerow(['Username', 'Email', 'User Type', 'Is Active', 'Date Joined'])
-        
-        for user in queryset:
-            writer.writerow([user.username, user.email, user.user_type, user.is_active, user.date_joined])
-        
-        return response
-    export_user_data.short_description = "Export selected users to CSV"
-    
-    def get_queryset(self, request):
-        """Optimize queryset with select_related"""
-        return super().get_queryset(request).select_related('assigned_trainer')
+# No user admin here. This module held a `CustomUserAdmin` — with per-row saves, an
+# admin log, a PII-logging export and a password reset — that no site registered:
+# both sites register `users.admin.CustomUserAdmin` below. Two definitions of the same
+# admin, with the correct behaviour in the one that never ran, is how the live one
+# kept its `queryset.update()` actions.
 
 # ============================================================================
 # TRAINING MANAGEMENT
@@ -621,8 +440,19 @@ class AdminDashboardView:
         self.admin_site = admin_site
     
     def index(self, request):
-        """Main dashboard view with platform overview"""
-        
+        """Main dashboard view with platform overview.
+
+        SUPERUSERS ONLY. Replacing `AdminSite.index` also replaced the one place the
+        admin filters what it shows through `has_module_permission` and
+        `has_view_permission`; `admin_view` only checks `is_active and is_staff`. So an
+        account with `is_staff` and no permissions at all — refused on every changelist —
+        was shown the ten newest users with their email addresses and everyone's recent
+        activity on the landing page. `is_staff` is one checkbox on the user admin.
+        Anyone else gets Django's own index, which lists only what they may see.
+        """
+        if not request.user.is_superuser:
+            return type(self.admin_site).index(self.admin_site, request)
+
         # Get key metrics
         total_users = CustomUser.objects.count()
         active_users = CustomUser.objects.filter(is_active=True).count()

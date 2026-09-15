@@ -7913,3 +7913,328 @@ def test_the_ledger_has_indexes_for_the_way_it_is_read():
     source = inspect.getsource(wallet_views)
     code = "\n".join(line.split("#")[0] for line in source.splitlines())
     assert "created_at__date" not in code, "the top-up cap is non-sargable again"
+
+
+# --------------------------------------------------------------------------------
+# Cycle 9: analytics and the admin.
+# --------------------------------------------------------------------------------
+
+def test_a_client_cannot_plant_a_dashboard_on_someone_else(make_user, api):
+    """`AnalyticsDashboardViewSet` was the one viewset in the module with no
+    `perform_create`, and the serializer left `user` writable — so any client could POST
+    a dashboard row owned by another account, with `data` of their choosing, and it sorted
+    FIRST on the victim's progress screen."""
+    import json as _json
+
+    from analytics.models import AnalyticsDashboard
+
+    victim = make_user("gate_dash_victim", user_type="client")
+    attacker = make_user("gate_dash_attacker", user_type="client")
+    resp = api(attacker).post("/api/analytics/dashboard/", data=_json.dumps({
+        "dashboard_type": "user", "user": victim.pk, "data": {"note": "PLANTED"},
+        "period_start": "2030-01-01T00:00:00Z", "period_end": "2030-02-01T00:00:00Z"}),
+        content_type="application/json")
+    assert resp.status_code == 201, resp.content[:200]
+    assert not AnalyticsDashboard.objects.filter(user=victim).exists()
+    assert AnalyticsDashboard.objects.filter(user=attacker).exists()
+
+
+def test_a_non_finite_number_cannot_take_the_metrics_api_down(make_user, api):
+    """DRF's FloatField accepts "NaN", "Infinity" and "1e400", Postgres stores them, and
+    the row commits before the response is rendered — so every later read of that row was
+    a 500. Three POSTs from one client took the metrics endpoints down for that client and
+    for every staff account, whose queryset is unscoped."""
+    import json as _json
+
+    from analytics.models import PerformanceMetric, UserGoal
+
+    user = make_user("gate_nan_client", user_type="client")
+    admin = make_user("gate_nan_admin", user_type="admin")
+    for value in ("NaN", "Infinity", "1e400"):
+        resp = api(user).post("/api/analytics/metrics/", data=_json.dumps(
+            {"metric_type": "body_fat", "value": value}), content_type="application/json")
+        assert resp.status_code == 400, (value, resp.status_code)
+    assert not PerformanceMetric.objects.filter(user=user).exists()
+    assert api(user).get("/api/analytics/metrics/").status_code == 200
+    assert api(admin).get("/api/analytics/metrics/").status_code == 200
+
+    goal = UserGoal.objects.create(user=user, goal_type="custom", title="g", target_value=10)
+    for value in ("abc", "nan", "1e400"):
+        resp = api(user).post(f"/api/analytics/goals/{goal.id}/update_progress/",
+                              data=_json.dumps({"new_value": value}),
+                              content_type="application/json")
+        assert resp.status_code == 400, (value, resp.status_code)
+    assert api(user).get("/api/analytics/goals/").status_code == 200
+
+
+def test_achievements_cannot_be_farmed_through_the_activity_log(make_user, api):
+    """`UserActivity` was a plain ModelViewSet, and the achievement engine counts
+    `routine_completed` rows while `post_save` on the model fires the award check. Three
+    POSTs earned "Three Workouts" with no routine, no session and no set log anywhere. The
+    server records those facts; the app may log telemetry, and a log is append-only."""
+    import json as _json
+
+    from achievements.models import Achievement, UserAchievement
+    from analytics.models import UserActivity
+
+    Achievement.objects.get_or_create(key="gate_farm_three", defaults=dict(
+        name="Gate Three Workouts", description="x", category="workout",
+        criteria={"type": "workout_count", "target": 3, "condition": "gte"},
+        points=10, is_active=True))
+    farmer = make_user("gate_farmer", user_type="client")
+    for _ in range(3):
+        resp = api(farmer).post("/api/analytics/activities/", data=_json.dumps(
+            {"activity_type": "routine_completed"}), content_type="application/json")
+        assert resp.status_code == 400, resp.content[:200]
+    assert not UserActivity.objects.filter(user=farmer).exists()
+    assert not UserAchievement.objects.filter(user=farmer).exists()
+
+    logged = api(farmer).post("/api/analytics/activities/", data=_json.dumps(
+        {"activity_type": "page_view"}), content_type="application/json")
+    assert logged.status_code == 201
+    row = logged.json()["id"]
+    assert api(farmer).patch(f"/api/analytics/activities/{row}/", data=_json.dumps(
+        {"activity_type": "logout"}), content_type="application/json").status_code == 405
+    assert api(farmer).delete(f"/api/analytics/activities/{row}/").status_code == 405
+
+    oversized = api(farmer).post("/api/analytics/activities/", data=_json.dumps(
+        {"activity_type": "page_view", "metadata": {"x": "a" * 200000}}),
+        content_type="application/json")
+    assert oversized.status_code == 400
+
+
+def test_analytics_numbers_are_bounded_and_server_derived(make_user, api):
+    """A 3,000 kg weigh-in, a billion page views and a thirty-day session were all 201s,
+    and a goal could be declared completed, reopened, given a negative target, or shown as
+    100% at "3 kg of 10" by PATCHing `current_value` past `update_progress`."""
+    import json as _json
+
+    from analytics.models import UserGoal
+
+    user = make_user("gate_bounds_client", user_type="client")
+
+    def post(url, body):
+        return api(user).post(url, data=_json.dumps(body), content_type="application/json")
+
+    assert post("/api/analytics/metrics/", {"metric_type": "weight", "value": 3000}).status_code == 400
+    assert post("/api/analytics/metrics/", {"metric_type": "weight", "value": 80}).status_code == 201
+
+    assert post("/api/analytics/sessions/", {"session_id": "gate-s1",
+                                            "page_views": 10 ** 9}).status_code == 400
+    session = post("/api/analytics/sessions/", {"session_id": "gate-s2",
+                                               "duration_seconds": 2592000})
+    assert session.status_code == 201 and session.json()["duration_seconds"] is None
+
+    assert post("/api/analytics/goals/", {"goal_type": "custom", "title": "g",
+                                         "target_value": -10}).status_code == 400
+    goal = UserGoal.objects.create(user=user, goal_type="custom", title="g", target_value=10)
+    assert api(user).patch(f"/api/analytics/goals/{goal.id}/", data=_json.dumps(
+        {"status": "completed"}), content_type="application/json").status_code == 400
+    api(user).patch(f"/api/analytics/goals/{goal.id}/", data=_json.dumps(
+        {"current_value": 3}), content_type="application/json")
+    goal.refresh_from_db()
+    assert goal.current_value == 0 and goal.progress_percentage == 0
+
+    post(f"/api/analytics/goals/{goal.id}/update_progress/", {"new_value": -5})
+    goal.refresh_from_db()
+    assert goal.progress_percentage == 0 and goal.status == "active"
+
+
+def test_a_staff_accounts_own_metrics_are_its_own(make_user, api):
+    """`get_queryset()` is the whole table for a staff caller and `current_metrics` never
+    re-scoped, so DISTINCT ON returned the newest weight of ANY user as the admin's own."""
+    from analytics.models import PerformanceMetric
+
+    admin = make_user("gate_scope_admin", user_type="admin")
+    other = make_user("gate_scope_other", user_type="client")
+    PerformanceMetric.objects.create(user=admin, metric_type="weight", value=70.0)
+    PerformanceMetric.objects.create(user=other, metric_type="weight", value=123.4)
+    rows = api(admin).get("/api/analytics/metrics/current_metrics/").json()
+    assert [r["latest_value"] for r in rows if r["metric_type"] == "weight"] == [70.0]
+
+
+def test_money_is_not_editable_in_the_admin(make_user, client):
+    """Every concrete field of a ModelAdmin is editable by default, and `WalletAdmin`
+    declared only list columns — so POSTing `balance=999999` was a 302 and a committed row
+    with zero Transaction rows and zero audit entries: money minted outside
+    `move_funds_atomic` and invisible to any reconciliation."""
+    from decimal import Decimal as _D
+
+    from wallet.models import Wallet
+
+    superuser = make_user("gate_money_su", user_type="admin")
+    superuser.is_superuser = True
+    superuser.save()
+    client.force_login(superuser)
+
+    owner = make_user("gate_money_owner", user_type="client")
+    wallet, _ = Wallet.objects.get_or_create(owner=owner, defaults={"owner_type": "client"})
+    client.post(f"/admin/wallet/wallet/{wallet.pk}/change/",
+                {"balance": "999999", "owner_type": "client", "currency": "SYP"})
+    wallet.refresh_from_db()
+    assert wallet.balance == _D("0"), wallet.balance
+
+    from wallet.admin import AgentAPIKeyAdmin
+
+    assert "secret_ciphertext" in (AgentAPIKeyAdmin.exclude or ())
+    assert "hashed_key" in AgentAPIKeyAdmin.readonly_fields
+
+
+def test_the_wallet_audit_log_refuses_delete_at_the_database(make_user):
+    """`WalletAuditLog.delete()` raised, which protected one path. `QuerySet.delete()`
+    never calls it, so the admin's own `delete_selected` removed rows — and
+    `verify_chain()` walks only surviving rows, so deleting the NEWEST entries left the
+    chain reporting VALID. The database is the one layer every path goes through."""
+    from django.db import DatabaseError, connection, transaction as _txn
+
+    from wallet.models import WalletAuditLog
+
+    if connection.vendor != "postgresql":
+        pytest.skip("the append-only trigger is PostgreSQL-only")
+
+    WalletAuditLog.objects.create(event_type="gate_probe", payload={})
+    before = WalletAuditLog.objects.count()
+    with pytest.raises(DatabaseError):
+        with _txn.atomic():
+            WalletAuditLog.objects.all().delete()
+    assert WalletAuditLog.objects.count() == before
+
+
+def test_the_client_inline_cannot_delete_a_person(make_user, client):
+    """The inline's object is the client's USER ACCOUNT. With the default
+    `can_delete = True`, the DELETE box on a trainer's "Clients" row read as "remove this
+    client" and deleted the person, with their history cascading away."""
+    from users.admin import ClientInline
+
+    assert ClientInline.can_delete is False
+    assert ClientInline.has_add_permission(ClientInline, None) is False
+
+    superuser = make_user("gate_inline_su", user_type="admin")
+    superuser.is_superuser = True
+    superuser.save()
+    client.force_login(superuser)
+    trainer = make_user("gate_inline_trainer", user_type="trainer")
+    kid = make_user("gate_inline_kid", user_type="client")
+    kid.assigned_trainer = trainer
+    kid.save()
+    page = client.get(f"/admin/users/customuser/{trainer.pk}/change/")
+    assert page.status_code == 200
+    assert b"clients-0-DELETE" not in page.content
+
+
+def test_a_staff_account_with_no_permissions_is_not_shown_the_platform(make_user, client):
+    """Replacing `AdminSite.index` also replaced the one place the admin filters through
+    `has_module_permission`; `admin_view` only checks `is_staff`. A staff account refused
+    on every changelist was shown the newest users with their email addresses and
+    everyone's recent activity on the landing page."""
+    import re as _re
+
+    make_user("gate_index_bystander", user_type="client")
+    staff = make_user("gate_index_staff", user_type="client")
+    staff.is_staff = True
+    staff.save()
+    client.force_login(staff)
+
+    page = client.get("/dj-admin/")
+    assert page.status_code == 200
+    emails = set(_re.findall(rb"[\w.+-]+@gate\.test", page.content))
+    assert emails <= {b"gate_index_staff@gate.test"}, emails
+    assert b"Training Platform Dashboard" not in page.content
+
+
+def test_bulk_user_actions_go_through_the_model_and_are_logged(make_user, client):
+    """`queryset.update()` skipped `CustomUser.save()` and wrote no admin log: an
+    admin-type account activated in bulk never got `is_staff`, and a bulk privilege change
+    left no record of who made it. The correct version lived in a class no site
+    registered."""
+    from django.contrib.admin.models import LogEntry
+
+    from users.models import CustomUser
+
+    superuser = make_user("gate_bulk_su", user_type="admin")
+    superuser.is_superuser = True
+    superuser.save()
+    client.force_login(superuser)
+
+    target = make_user("gate_bulk_target", user_type="admin")
+    CustomUser.objects.filter(pk=target.pk).update(is_active=False, is_staff=False)
+    client.post("/admin/users/customuser/", {"action": "activate_users",
+                                            "_selected_action": [target.pk]})
+    target.refresh_from_db()
+    assert target.is_active is True and target.is_staff is True
+    assert LogEntry.objects.filter(object_id=str(target.pk)).exists()
+
+
+def test_environment_settings_extend_the_throttle_rates_rather_than_replace_them():
+    """settings_local and settings_production each assigned a NEW dict to
+    `DEFAULT_THROTTLE_RATES`, silently dropping every scope settings_base declared — so a
+    view throttled on a base scope raised in every real environment."""
+    from rest_framework.settings import api_settings
+
+    assert "analytics_write" in api_settings.DEFAULT_THROTTLE_RATES
+    assert "charging" in api_settings.DEFAULT_THROTTLE_RATES
+
+
+def test_a_missed_reminder_is_recovered_briefly_and_never_sent_twice(make_user, monkeypatch):
+    """Two failures that pull against each other, pinned at fixed clock times so the
+    result does not depend on when the gate runs.
+
+    Exactly-on-the-hour lost every user a cut-off sweep did not reach, for the whole day.
+    The first fix — "at or past their hour on the same local day" — compared hours on a
+    0-23 line, so a 02:00 reminder fired at 21:00, nineteen hours late; the gate only
+    caught it because it happened to run in the evening. The window is now a few hours
+    after the due hour, measured mod 24, and the dedup date is the date it was DUE.
+    """
+    import datetime as _dt
+
+    from django.utils import timezone as _tz
+
+    from notifications.models import Notification
+    from notifications.tasks import REMINDER_CATCH_UP_HOURS, send_workout_reminders
+    from routine.models import Routine, RoutineProgress
+
+    trainer = make_user("gate_catchup_t", user_type="trainer")
+    routine = Routine.objects.create(name="Gate catch-up", created_by=trainer, days=3,
+                                     start_date=_dt.date(2026, 3, 1))
+
+    def client_due_at(name, hour):
+        user = make_user(name, user_type="client")
+        user.preferred_timezone = "UTC"
+        user.workout_reminder_hour = hour
+        user.save()
+        routine.assigned_to.add(user)
+        RoutineProgress.objects.get_or_create(
+            user=user, routine=routine, day=1, date=routine.start_date,
+            defaults={"status": "not_started"})
+        return user
+
+    def run_at(when):
+        monkeypatch.setattr(_tz, "now", lambda: when)
+        send_workout_reminders()
+
+    def reminders(user):
+        return Notification.objects.filter(recipient=user, event_type="session_reminder").count()
+
+    late_night = client_due_at("gate_catchup_2300", 23)
+
+    # The 23:00 sweep reaches them.
+    run_at(_dt.datetime(2026, 3, 10, 23, 10, tzinfo=_dt.timezone.utc))
+    assert reminders(late_night) == 1
+
+    # A second user due at 23:00 whom that sweep never reached (it was cut off).
+    missed = client_due_at("gate_catchup_missed", 23)
+    # And someone whose reminder was hours ago.
+    long_gone = client_due_at("gate_catchup_2000", 20)
+
+    # Two hours later, across midnight: the missed user is recovered, the first user is
+    # NOT reminded again (same due date, same dedup key), and the 20:00 user is too late.
+    assert REMINDER_CATCH_UP_HOURS >= 2
+    run_at(_dt.datetime(2026, 3, 11, 1, 10, tzinfo=_dt.timezone.utc))
+    assert reminders(missed) == 1, "a user a cut-off sweep missed was never recovered"
+    assert reminders(late_night) == 1, "a recovered reminder was sent a second time"
+    assert reminders(long_gone) == 0, "a reminder five hours late was sent anyway"
+
+    # And a user whose reminder is 02:00 is not messaged at 21:00 the evening before.
+    early = client_due_at("gate_catchup_0200", 2)
+    run_at(_dt.datetime(2026, 3, 11, 21, 10, tzinfo=_dt.timezone.utc))
+    assert reminders(early) == 0, "a 02:00 reminder fired nineteen hours late"

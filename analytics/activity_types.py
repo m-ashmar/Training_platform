@@ -28,3 +28,17 @@ WORKOUT = (ROUTINE_COMPLETED, EXERCISE_COMPLETED)
 #: "The client ate something they had planned." There is no separate manual food log;
 #: completing a meal IS the log.
 MEAL = (MEAL_COMPLETED,)
+
+
+#: What a CLIENT may write through the API: telemetry about the app, nothing more.
+#:
+#: `UserActivity` was a plain ModelViewSet, so a client could POST, PATCH and DELETE any
+#: row of any type — and `achievements/engine.py` counts `routine_completed` rows to award
+#: workout badges while `post_save` on this model fires the award check. Three POSTs of
+#: `routine_completed` earned "Three Workouts" with no routine, no session and no set log
+#: anywhere. `analytics/recorder.py` exists precisely to make the SERVER the writer of those
+#: facts; the API left the client as a co-writer with full CRUD.
+#:
+#: So the facts the server records — and `login`, which feeds streak achievements, and the
+#: money events — are refused from the client. What remains is what only the client knows.
+CLIENT_LOGGABLE = frozenset({"page_view", "feature_used", "error_occurred", "logout"})
