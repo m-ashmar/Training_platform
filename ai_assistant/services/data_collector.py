@@ -70,9 +70,23 @@ class DataCollector:
                 ai_response=ai_response,
                 response_tokens=response_tokens,
                 response_latency_ms=response_latency_ms,
+                # The tap may have landed before this background write.
+                user_feedback=self._feedback_already_given(message, message_id),
             )
         except Exception as e:
             logger.exception(f"Failed to log training data: {e}")
+
+    @staticmethod
+    def _feedback_already_given(message, message_id):
+        from ai_assistant.models import ChatMessage
+
+        if message is not None:
+            return ChatMessage.objects.filter(pk=message.pk).values_list(
+                'feedback', flat=True).first()
+        if message_id is not None:
+            return ChatMessage.objects.filter(pk=message_id).values_list(
+                'feedback', flat=True).first()
+        return None
 
     def _build_context_snapshot(self, user) -> dict:
         """

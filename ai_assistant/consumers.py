@@ -384,15 +384,19 @@ class AIChatConsumer(AsyncWebsocketConsumer):
             # and `True` was returned unconditionally, so the user tapped 👍, saw
             # "Thanks for the feedback!", and nothing was recorded. The quality signal
             # for the entire assistant was silently zero.
+            msg.feedback = feedback
+            msg.save(update_fields=['feedback'])
+            # Mirrored onto the training row when the user consented and it is already
+            # written; a row written later copies it from the message.
             updated = AITrainingData.objects.filter(
                 user=self.user, message=msg).update(user_feedback=feedback)
             if not updated:
                 # A turn logged before the FK existed: fall back to the session and the
                 # full response text, which is at least an exact comparison.
-                updated = AITrainingData.objects.filter(
+                AITrainingData.objects.filter(
                     user=self.user, session=msg.session, message__isnull=True,
                     ai_response=msg.content).update(user_feedback=feedback)
-            return bool(updated)
+            return True
         except ChatMessage.DoesNotExist:
             return False
 

@@ -206,6 +206,13 @@ def api_exception_handler(exc, context):
     elif "code" in data and isinstance(data["code"], str):
         # simplejwt already sets a precise one (e.g. "token_not_valid") — keep it.
         code = data["code"]
+    elif isinstance(exc, exceptions.APIException) and isinstance(exc.get_codes(), str):
+        # The code the exception was RAISED with, not its class default. DRF passes a
+        # permission's `code` into PermissionDenied(detail, code=...), and reading
+        # `default_code` dropped it: the paywall's `no_entitlement` reached the app as
+        # `permission_denied`, indistinguishable from an authorization failure.
+        # `get_codes()` falls back to the class default when none was given.
+        code = exc.get_codes()
 
     # Django builds an Http404's message by interpolating a model's verbose_name into
     # a sentence, so it never reaches the translation catalogue: 401, 403 and 400 all

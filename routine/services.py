@@ -1,4 +1,20 @@
+import uuid
+
+from django.db import transaction
+
 from .tasks import send_async_notification
+
+#: Routine notifications that may legitimately happen again for the same object. A
+#: trainer re-assigning the same routine (new sets, a new block) is a new event and must
+#: reach the client again. Each emission gets its own event_id, which is what the
+#: notification store deduplicates on, so only a redelivery of THIS emission is
+#: suppressed. Keyed on the routine id instead, the second assignment was dropped by a
+#: permanent unique constraint: no push, no unread badge.
+#:
+#: Everything else stays once per object: a session is completed once, and two racing
+#: "finish" requests must not congratulate twice.
+REPEATABLE_TYPES = frozenset({"routine_assignment", "custom"})
+
 
 def send_notification(user, notif_type, message, related_object=None):
     """
@@ -11,19 +27,23 @@ def send_notification(user, notif_type, message, related_object=None):
         related_object: Optional model instance (Routine, WorkoutSession, etc.)
     Returns:
         None (Async execution)
+
+    Queued on commit: called inside a transaction that later rolls back, the task used
+    to tell the client about an assignment or a completion that never happened.
     """
     related_object_id = None
     related_object_type = None
     if related_object is not None:
         related_object_id = related_object.id
         related_object_type = related_object.__class__.__name__
-        
-    # Send notification asynchronously
-    send_async_notification.delay(
+    event_id = str(uuid.uuid4()) if notif_type in REPEATABLE_TYPES else None
+
+    transaction.on_commit(lambda: send_async_notification.delay(
         user.id,
         notif_type,
         message,
         related_object_id,
-        related_object_type
-    )
-    return None 
+        related_object_type,
+        event_id=event_id,
+    ))
+    return None

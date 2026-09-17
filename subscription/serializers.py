@@ -96,10 +96,14 @@ class SubscriptionSerializer(serializers.ModelSerializer):
 class SubscriptionCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating new subscriptions"""
     plan_id = serializers.IntegerField()
-    
+
     class Meta:
         model = Subscription
-        fields = ['plan_id', 'auto_renew']
+        # `id` and `status` in the response: the next step (POST /v1/gateways/) needs
+        # the subscription id, and the create answered only {plan_id, auto_renew}, so
+        # the app had to call /subscriptions/current/ to learn what it had just made.
+        fields = ['id', 'plan_id', 'auto_renew', 'status']
+        read_only_fields = ['id', 'status']
     
     def validate_plan_id(self, value):
         try:

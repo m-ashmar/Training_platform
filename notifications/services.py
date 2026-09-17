@@ -163,15 +163,25 @@ class NotificationService:
                 # resend. An FCM outage of any length cost every push issued during it,
                 # permanently and invisibly, because the in-app row survives.
                 logger.error(f"FCM dispatch failed for {notification.id}: {e}", exc_info=True)
+                #
+                # The earlier record replaced the whole `fcm` block, dropping
+                # `sent_tokens` (so a retry pushed again to devices that already had
+                # it) and `attempts` (so the drain's retry cap never advanced).
                 try:
-                    status = dict(notification.status or {})
-                    status['fcm'] = {
-                        'status': 'failed',
-                        'error': str(e)[:500],
-                        'failed_at': timezone.now().isoformat(),
-                    }
-                    type(notification).objects.filter(pk=notification.pk).update(
-                        status=status)
+                    with transaction.atomic():
+                        locked = type(notification).objects.select_for_update().get(
+                            pk=notification.pk)
+                        status = dict(locked.status or {})
+                        previous = dict(status.get('fcm') or {})
+                        previous.update({
+                            'status': 'partial' if previous.get('sent_tokens') else 'failed',
+                            'error': str(e)[:500],
+                            'attempts': previous.get('attempts', 0) + 1,
+                            'failed_at': timezone.now().isoformat(),
+                        })
+                        status['fcm'] = previous
+                        type(notification).objects.filter(pk=notification.pk).update(
+                            status=status)
                 except Exception:
                     logger.debug("could not record the FCM failure", exc_info=True)
             

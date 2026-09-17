@@ -7695,23 +7695,42 @@ def test_an_abandoned_checkout_is_cancelled_not_refunded():
     assert "chargeback" in subscription_views.REFUND_STATUSES
 
 
-def test_a_push_that_failed_to_send_is_recorded_and_retried():
+def test_a_push_that_failed_to_send_is_recorded_and_retried(make_user, monkeypatch):
     """`_dispatch_channels` caught the transport error and logged it, and
     `notification.status` is written INSIDE `FCMChannel.send` after the sends — so a
     failure before that point left `status = {}`. No query anywhere read
     `status['fcm']['status'] == 'failed'` and the admin offered no resend, so an FCM
     outage of any length cost every push issued during it, permanently and invisibly,
-    because the in-app row survives."""
-    import inspect
+    because the in-app row survives.
 
-    from notifications import services as notification_services
-    from notifications import tasks as notification_tasks
+    Exercised rather than grepped: the source check matched a literal that a correct
+    record (keeping the delivery history) no longer spells the same way."""
+    import uuid
 
-    dispatch = inspect.getsource(notification_services.NotificationService._dispatch_channels)
-    assert "'status': 'failed'" in dispatch, "an FCM failure is not recorded"
+    from notifications.channels.fcm import FCMChannel
+    from notifications.models import Notification
+    from notifications.services import NotificationService
+    from notifications.tasks import drain_dead_letter_queue
 
-    drain = inspect.getsource(notification_tasks.drain_dead_letter_queue)
-    assert "status__fcm__status" in drain, "nothing re-sends a push that failed"
+    user = make_user(f"gate_push_{uuid.uuid4().hex[:8]}")
+    notification = Notification.objects.create(
+        recipient=user, event_type="custom", related_object_id="x",
+        metadata={"context": {"message": "hi"}, "data": {}},
+        deduplication_key=uuid.uuid4().hex)
+
+    calls = []
+
+    def outage(cls, n):
+        calls.append(n.pk)
+        raise ConnectionError("FCM unreachable")
+
+    monkeypatch.setattr(FCMChannel, "send", classmethod(outage))
+    NotificationService._dispatch_channels(notification)
+    notification.refresh_from_db()
+    assert notification.status["fcm"]["status"] == "failed", "an FCM failure is not recorded"
+
+    drain_dead_letter_queue()
+    assert calls.count(notification.pk) == 2, "nothing re-sends a push that failed"
 
 
 def test_no_view_orders_on_a_column_that_is_not_a_total_order():

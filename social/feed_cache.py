@@ -43,19 +43,47 @@ def remove_post_from_feeds(post_id, follower_ids=None):
 
     `has_more` now counts the ZSET rather than the survivors, so a hole no longer ends
     the feed; this keeps the holes from accumulating in the first place.
+
+    The feeds to clean are the ones the fan-out actually WROTE, read from the post's
+    carrier set, not only the author's current followers: the fan-out also writes the
+    author's own feed, and anyone who unfollowed since still holds the id. Evicting
+    by current followers left both.
     """
     client = get_redis_client()
     if not client:
         return
     member = str(post_id)
-    keys = ["feed_global:v1"]
+    carriers_key = feed_carriers_key(post_id)
+    keys = {"feed_global:v1"}
     for follower_id in (follower_ids or []):
-        keys.append(f"feed:v1:{follower_id}")
-    for key in keys:
+        keys.add(f"feed:v1:{follower_id}")
+    try:
+        keys.update(k.decode() if isinstance(k, bytes) else k
+                    for k in client.smembers(carriers_key))
+    except Exception as exc:
+        logger.warning("Could not read the feeds carrying post %s: %s", post_id, exc)
+    for key in sorted(keys):
         try:
             client.zrem(key, member)
         except Exception as exc:
             logger.warning("Could not remove post %s from %s: %s", post_id, key, exc)
+    try:
+        client.delete(carriers_key)
+    except Exception:
+        logger.debug("could not drop carrier set for post %s", post_id, exc_info=True)
+
+
+#: A feed key expires 24 h after its LAST write, so an active reader's key can hold a
+#: post for days. The carrier set is small (one key per recipient) and is kept for a
+#: week; a post older than that is usually trimmed out of its feeds (500 per key), and
+#: the reader tolerates any hole that remains.
+FEED_TTL_SECONDS = 86400
+FEED_CARRIERS_TTL_SECONDS = 7 * 86400
+
+
+def feed_carriers_key(post_id):
+    """The Redis set of feed keys a post was fanned out into."""
+    return f"feed_carriers:v1:{post_id}"
 
 
 def get_user_feed(user_id, offset=0, limit=20):

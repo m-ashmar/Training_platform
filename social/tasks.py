@@ -65,12 +65,18 @@ def fan_out_batch(user_ids, post_id, timestamp):
     if not redis_cli:
         return
         
+    from .feed_cache import FEED_CARRIERS_TTL_SECONDS, FEED_TTL_SECONDS, feed_carriers_key
+
     pipeline = redis_cli.pipeline()
+    carriers = feed_carriers_key(post_id)
     for uid in user_ids:
         key = f"feed:v1:{uid}"
         pipeline.zadd(key, {str(post_id): timestamp})
         pipeline.zremrangebyrank(key, 0, -501)
-        pipeline.expire(key, 86400)  # 24h expiration
+        pipeline.expire(key, FEED_TTL_SECONDS)
+        # Remember where the post went, so deleting it cleans every feed it reached.
+        pipeline.sadd(carriers, key)
+    pipeline.expire(carriers, FEED_CARRIERS_TTL_SECONDS)
         
     try:
         pipeline.execute()

@@ -1,5 +1,18 @@
-from rest_framework import permissions
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+from rest_framework import permissions
+
+#: Why a subscriber was refused, as the stable codes the app branches on.
+#:
+#: These permissions returned a bare False, so DRF answered every refusal with its
+#: generic "You do not have permission to perform this action." / `permission_denied`.
+#: A lapsed client and a client whose plan lacks a feature got the same body as an
+#: authorization error, the app could not show "renew your subscription", and the
+#: `no_entitlement` responses written inside the diet views were unreachable because
+#: this check runs first.
+NO_ENTITLEMENT = ("no_entitlement", _("An active subscription is needed for this feature."))
+NOT_IN_PLAN = ("feature_not_in_plan", _("Your plan does not include this feature."))
 
 #: A trainer is exempt from the paywall only once a human has VERIFIED them.
 #:
@@ -25,8 +38,8 @@ class HasActiveSubscription(permissions.BasePermission):
     """
     Permission to check if user has an active subscription.
     """
-    message = "You need an active subscription to access this feature."
-    
+    code, message = NO_ENTITLEMENT
+
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             return False
@@ -38,22 +51,28 @@ class HasActiveSubscription(permissions.BasePermission):
         user = request.user
         if _is_exempt_from_paywall(user):
             return True
-        
+
+        # Only "has no subscription" is a refusal. A catch-all turned a database error
+        # into a 403 telling a paying subscriber they had no subscription.
         try:
             subscription = request.user.subscription
-            return subscription.is_active
-        except Exception:
+        except ObjectDoesNotExist:
             return False
+        return subscription.is_active
+
 
 class HasSubscriptionFeature(permissions.BasePermission):
     """
     Permission to check if user's subscription includes specific features.
     """
-    
+    required_feature = None
+    code, message = NO_ENTITLEMENT
+
     def __init__(self, required_feature=None):
-        self.required_feature = required_feature
+        if required_feature is not None:
+            self.required_feature = required_feature
         super().__init__()
-    
+
     def has_permission(self, request, view):
         # Staff, trainers and admins are not subscribers. `HasDietAccess` delegates
         # here, so without this every trainer diet endpoint was refused before its own
@@ -64,58 +83,56 @@ class HasSubscriptionFeature(permissions.BasePermission):
             return False
         if _is_exempt_from_paywall(user):
             return True
-        
+
         try:
             subscription = request.user.subscription
-            
-            if not subscription.is_active:
-                return False
-            
-            if self.required_feature == 'diet':
-                return subscription.has_diet_access
-            elif self.required_feature == 'routine':
-                return subscription.has_routine_access
-            elif self.required_feature == 'challenges':
-                return subscription.has_challenges_access
-            elif self.required_feature == 'ai_advice':
-                return subscription.has_ai_advice
-            elif self.required_feature == 'priority_support':
-                return subscription.has_priority_support
-            else:
-                return True
-                
-        except Exception:
+        except ObjectDoesNotExist:
+            self.code, self.message = NO_ENTITLEMENT
             return False
 
-class HasDietAccess(permissions.BasePermission):
+        if not subscription.is_active:
+            self.code, self.message = NO_ENTITLEMENT
+            return False
+
+        flag = {
+            'diet': 'has_diet_access',
+            'routine': 'has_routine_access',
+            'challenges': 'has_challenges_access',
+            'ai_advice': 'has_ai_advice',
+            'priority_support': 'has_priority_support',
+        }.get(self.required_feature)
+        if flag is None or getattr(subscription, flag):
+            return True
+        self.code, self.message = NOT_IN_PLAN
+        return False
+
+
+# Subclasses rather than wrappers that built a fresh HasSubscriptionFeature: DRF reads
+# `code` and `message` off the instance it holds, so a wrapper's refusal reason was lost.
+class HasDietAccess(HasSubscriptionFeature):
     """Permission to check if user has diet feature access."""
-    
-    def has_permission(self, request, view):
-        return HasSubscriptionFeature('diet').has_permission(request, view)
+    required_feature = 'diet'
 
-class HasRoutineAccess(permissions.BasePermission):
+
+class HasRoutineAccess(HasSubscriptionFeature):
     """Permission to check if user has routine feature access."""
-    
-    def has_permission(self, request, view):
-        return HasSubscriptionFeature('routine').has_permission(request, view)
+    required_feature = 'routine'
 
-class HasChallengesAccess(permissions.BasePermission):
+
+class HasChallengesAccess(HasSubscriptionFeature):
     """Permission to check if user has challenges feature access."""
-    
-    def has_permission(self, request, view):
-        return HasSubscriptionFeature('challenges').has_permission(request, view)
+    required_feature = 'challenges'
 
-class HasAIAdviceAccess(permissions.BasePermission):
+
+class HasAIAdviceAccess(HasSubscriptionFeature):
     """Permission to check if user has AI advice feature access."""
-    
-    def has_permission(self, request, view):
-        return HasSubscriptionFeature('ai_advice').has_permission(request, view)
+    required_feature = 'ai_advice'
 
-class HasPrioritySupportAccess(permissions.BasePermission):
+
+class HasPrioritySupportAccess(HasSubscriptionFeature):
     """Permission to check if user has priority support access."""
-    
-    def has_permission(self, request, view):
-        return HasSubscriptionFeature('priority_support').has_permission(request, view)
+    required_feature = 'priority_support'
+
 
 class SubscriptionUsageLimit(permissions.BasePermission):
     """Whether the caller has any of a metered feature left.

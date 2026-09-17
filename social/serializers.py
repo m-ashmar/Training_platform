@@ -4,6 +4,7 @@ Social Features Serializers
 Serializers for social models to handle API data conversion.
 """
 
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from .models import (
     UserFollow, Post, PostLike, Comment, CommentLike,
@@ -151,7 +152,31 @@ class CommentSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at', 'likes_count', 'is_liked'
         ]
         read_only_fields = ['id', 'author', 'created_at', 'updated_at']
-    
+
+    def validate(self, attrs):
+        """Where a comment lives is fixed at creation, and a reply lives in its parent's
+        thread.
+
+        `post` and `parent_comment` were writable on update and only `perform_create`
+        checked visibility, so the author of any comment could PATCH it into another
+        user's private post (and leave both posts' comment counters wrong). A reply
+        could also name a parent comment from a different, hidden post.
+        """
+        attrs = super().validate(attrs)
+        if self.instance is not None:
+            for name in ('post', 'parent_comment'):
+                if name in attrs and attrs[name] != getattr(self.instance, name):
+                    raise serializers.ValidationError(
+                        {name: _('A comment cannot be moved.')})
+            return attrs
+        parent = attrs.get('parent_comment')
+        post = attrs.get('post')
+        if parent is not None and (post is None or parent.post_id != post.pk
+                                   or parent.is_hidden):
+            raise serializers.ValidationError(
+                {'parent_comment': _('Reply to a comment on the same post.')})
+        return attrs
+
     def get_is_liked(self, obj):
         """Whether the current user has liked this comment.
 
@@ -192,7 +217,13 @@ class ChallengeSerializer(serializers.ModelSerializer):
             'is_joined', 'user_progress', 'is_active'
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'participants_count']
-    
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # The stored value only records a close; the phase comes from the dates.
+        data['status'] = instance.lifecycle_status
+        return data
+
     def get_is_joined(self, obj):
         """Check if current user has joined this challenge"""
         # Prefer annotated field to avoid N+1 queries

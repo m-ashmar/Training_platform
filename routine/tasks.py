@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
     retry_jitter=True,
     max_retries=3,
 )
-def send_async_notification(user_id, notif_type, message, related_object_id=None, related_object_type=None):
+def send_async_notification(user_id, notif_type, message, related_object_id=None,
+                            related_object_type=None, event_id=None):
     """
     Asynchronously create a routine notification.
 
@@ -33,30 +34,35 @@ def send_async_notification(user_id, notif_type, message, related_object_id=None
     so the notification is readable at /api/social/notifications/ and is dispatched
     to FCM. Previously this wrote to the legacy routine.Notification table, which no
     API endpoint reads — those notifications were invisible to users.
+
+    Errors PROPAGATE. `create_and_send` raises instead of returning None precisely so a
+    database error reaches a retry, and a catch-all here undid that: the task logged a
+    line, reported SUCCESS, and the notification was gone. A missing user is the one
+    permanent failure worth discarding.
     """
     from notifications.services import NotificationService
 
     User = get_user_model()
     try:
         user = User.objects.get(pk=user_id)
-        metadata = {
-            # Pre-rendered message kept under context so the FCM template resolver
-            # can fall back to it when no template exists for this event type.
-            'context': {'message': message},
-            'data': {
-                'type': notif_type,
-                'related_object_id': str(related_object_id) if related_object_id is not None else None,
-                'related_object_type': related_object_type,
-            },
-        }
-        NotificationService.create_and_send(
-            recipient=user,
-            event_type=notif_type,
-            related_object_id=str(related_object_id) if related_object_id is not None else '',
-            metadata=metadata,
-        )
-        logger.info(f"Notification sent to user {user_id} (type: {notif_type})")
     except User.DoesNotExist:
         logger.error(f"Failed to send notification: User {user_id} not found")
-    except Exception as e:
-        logger.error(f"Error sending notification to user {user_id}: {str(e)}")
+        return
+    metadata = {
+        # Pre-rendered message kept under context so the FCM template resolver
+        # can fall back to it when no template exists for this event type.
+        'context': {'message': message},
+        'data': {
+            'type': notif_type,
+            'related_object_id': str(related_object_id) if related_object_id is not None else None,
+            'related_object_type': related_object_type,
+        },
+    }
+    NotificationService.create_and_send(
+        recipient=user,
+        event_type=notif_type,
+        related_object_id=str(related_object_id) if related_object_id is not None else '',
+        metadata=metadata,
+        event_id=event_id,
+    )
+    logger.info(f"Notification sent to user {user_id} (type: {notif_type})")

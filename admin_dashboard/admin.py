@@ -539,7 +539,7 @@ class AdminDashboardView:
         
         # Recent posts and challenges
         recent_posts = Post.objects.select_related('author').order_by('-created_at')[:5]
-        active_challenges = Challenge.objects.filter(status='active')[:5]
+        active_challenges = Challenge.objects.filter(Challenge.running_q())[:5]
         
         context = {
             'title': 'Training Platform Dashboard',

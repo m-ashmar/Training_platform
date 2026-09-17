@@ -100,6 +100,14 @@ class FCMChannel:
 
             if not tokens_to_send:
                 logger.info(f"No new tokens to send for {recipient.id}. Completed: {len(sent_tokens_history)}")
+                # Leaving a 'failed' or 'partial' status in place here is what kept
+                # the hourly drain re-selecting a push nothing can deliver any more: its
+                # tokens were deactivated as dead, so this returned early every hour and
+                # the row stayed 'failed' for ever, crowding real outage failures out of
+                # the drain's window. Settle it: delivered to at least one device, or to
+                # none that still exists.
+                if current_status.get('status') in cls.RETRYABLE_STATUSES:
+                    cls._settle(notification, 'sent' if sent_tokens_history else 'undeliverable')
                 return
 
             # --- Template resolution at delivery boundary ---
@@ -120,14 +128,16 @@ class FCMChannel:
             total_success = 0
             total_failure = 0
             newly_sent_tokens = []
+            dead_tokens = []
 
             # Chunk tokens
             for i in range(0, len(tokens_to_send), cls.CHUNK_SIZE):
                 chunk = tokens_to_send[i:i + cls.CHUNK_SIZE]
-                success, failure, success_tokens = cls._send_chunk(chunk, title, body, data)
+                success, failure, success_tokens, chunk_dead = cls._send_chunk(chunk, title, body, data)
                 total_success += success
                 total_failure += failure
                 newly_sent_tokens.extend(success_tokens)
+                dead_tokens.extend(chunk_dead)
 
             # Update metrics
             try:
@@ -152,8 +162,16 @@ class FCMChannel:
 
                 attempts = status_data.get('attempts', 0) + 1
 
+                # 'partial' when some device failed for a reason that was not a dead
+                # token: those tokens are still active and not in sent_tokens, so a
+                # retry reaches exactly them. Recording 'sent' on the first success hid a
+                # multi-device user's transient failure from the drain for good.
+                if total_failure > len(dead_tokens):
+                    outcome = 'partial' if updated_sent else 'failed'
+                else:
+                    outcome = 'sent' if updated_sent else 'undeliverable'
                 new_status = {
-                    'status': 'sent' if total_success > 0 else 'failed',
+                    'status': outcome,
                     'success_count': status_data.get('success_count', 0) + total_success,
                     'failure_count': status_data.get('failure_count', 0) + total_failure,
                     'sent_tokens': updated_sent,
@@ -168,7 +186,7 @@ class FCMChannel:
     def _send_chunk(cls, tokens, title, body, data):
         """
         Send a batch of messages.
-        Returns (success_count, failure_count, success_tokens_list)
+        Returns (success_count, failure_count, success_tokens_list, dead_tokens_list)
         """
         success_tokens = []
         try:
@@ -197,25 +215,29 @@ class FCMChannel:
                     # surrounding failures invisible in logs. Control flow is unchanged.
                     logger.debug('suppressed non-fatal error', exc_info=True)
 
-            return response.success_count, response.failure_count, success_tokens
+            return response.success_count, response.failure_count, success_tokens, invalid_tokens
 
         except Exception as e:
             logger.error(f"FCM Multicast/Chunk error: {e}", exc_info=True)
-            return 0, len(tokens), []
+            return 0, len(tokens), [], []
 
-    #: The canonical Google error codes the PYTHON admin SDK reports for a token that
-    #: will never deliver again. The list here used to be
-    #: `registration-token-not-registered` / `invalid-registration-token`, which are the
-    #: legacy NODE.js SDK's codes: `firebase_admin` returns `NOT_FOUND`,
-    #: `INVALID_ARGUMENT` and `PERMISSION_DENIED`, so the comparison could never be
-    #: true, `_mark_tokens_inactive` below was unreachable, and this was the only
-    #: automatic deactivation path in the product. Every uninstall, reinstall and OS
-    #: token rotation left a permanently active row that was re-attempted on every
-    #: single push, for ever.
+    #: Statuses the hourly drain retries. 'undeliverable' (no active device left) and
+    #: 'sent' are final.
+    RETRYABLE_STATUSES = frozenset({'failed', 'partial'})
+
+    #: Code strings for a dead token, consulted ONLY for an exception that did not come
+    #: from the Firebase SDK (a stubbed transport, or an older SDK's vocabulary).
+    #:
+    #: A real SDK exception is judged by its class alone. The generic canonical codes are
+    #: not token-specific: `firebase_admin` turns ANY 403 without an FCM error detail
+    #: (an IAM denial on the service account) into PermissionDeniedError with code
+    #: PERMISSION_DENIED, any 400 (a bad data payload) into InvalidArgumentError with
+    #: INVALID_ARGUMENT, and a 404 for a wrong project into NotFoundError with NOT_FOUND.
+    #: Matching those codes deactivated every token of every recipient on the first push
+    #: after a credential or payload mistake, and nobody received anything again until
+    #: each app re-registered.
     DEAD_TOKEN_CODES = frozenset({
-        "NOT_FOUND", "INVALID_ARGUMENT", "PERMISSION_DENIED",
-        # Kept so a future SDK or a stubbed transport that still speaks the old
-        # vocabulary is also understood.
+        "NOT_FOUND", "UNREGISTERED", "SENDER_ID_MISMATCH",
         "registration-token-not-registered", "invalid-registration-token",
         "messaging/registration-token-not-registered",
         "messaging/invalid-registration-token",
@@ -225,23 +247,40 @@ class FCMChannel:
     def _token_is_dead(cls, exception) -> bool:
         """Is this per-token failure permanent, or worth retrying later?
 
-        Matched on the exception CLASS first, because that is what the SDK actually
-        guarantees; the code string is the belt to that brace. A transport error or a
-        quota rejection is not a dead token and must not deactivate anything.
+        The SDK guarantees the exception CLASS: UNREGISTERED and SENDER_ID_MISMATCH are
+        the only token-specific FCM errors and have their own classes. Everything else
+        the SDK raises (auth, quota, payload, transport) says nothing about the token and
+        must not deactivate it.
         """
         if exception is None:
             return False
         try:
+            from firebase_admin import exceptions as _fb_exceptions
             from firebase_admin import messaging as _messaging
+        except Exception:
+            logger.debug("could not consult firebase exception types", exc_info=True)
+        else:
             dead_types = tuple(
                 t for t in (getattr(_messaging, "UnregisteredError", None),
                             getattr(_messaging, "SenderIdMismatchError", None))
                 if t is not None)
             if dead_types and isinstance(exception, dead_types):
                 return True
-        except Exception:
-            logger.debug("could not consult firebase exception types", exc_info=True)
+            if isinstance(exception, _fb_exceptions.FirebaseError):
+                return False
         return getattr(exception, "code", None) in cls.DEAD_TOKEN_CODES
+
+    @classmethod
+    def _settle(cls, notification, outcome):
+        with transaction.atomic():
+            locked = Notification.objects.select_for_update().get(id=notification.id)
+            fcm = dict(locked.status.get('fcm', {}))
+            if fcm.get('status') not in cls.RETRYABLE_STATUSES:
+                return
+            fcm['status'] = outcome
+            fcm['last_attempt'] = timezone.now().isoformat()
+            locked.status['fcm'] = fcm
+            locked.save(update_fields=['status'])
 
     @classmethod
     def _mark_tokens_inactive(cls, tokens):

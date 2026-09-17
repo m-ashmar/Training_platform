@@ -1,6 +1,8 @@
 import logging
 import importlib
+from datetime import timedelta
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import InterfaceError, OperationalError
 
@@ -19,7 +21,12 @@ from training_platform.task_retries import no_retry_on_timeout
 
 logger = logging.getLogger(__name__)
 
+#: How long an undelivered push is still worth retrying, and how many attempts it gets.
+PUSH_RETRY_WINDOW = timedelta(hours=24)
+PUSH_MAX_ATTEMPTS = 5
+
 @shared_task(bind=True, max_retries=3)
+@no_retry_on_timeout
 def process_event_task(self, event_path: str, event_data: dict):
     """
     Async task to process domain events.
@@ -50,7 +57,11 @@ def process_event_task(self, event_path: str, event_data: dict):
         
         logger.info(f"Async processing event: {class_name}")
         EventDispatcher.dispatch(event)
-        
+
+    except SoftTimeLimitExceeded:
+        # An overrun is not a transient fault; `SoftTimeLimitExceeded` subclasses
+        # Exception, so the handler below retried it three more times from scratch.
+        raise
     except Exception as e:
         logger.error(f"Failed to process event {event_path}: {e}", exc_info=True)
         try:
@@ -95,6 +106,10 @@ def drain_dead_letter_queue():
     """
     from django.core.management import call_command
 
+    from django.db.models import Q
+    from django.utils import timezone
+
+    from notifications.channels.fcm import FCMChannel
     from notifications.models import Notification, NotificationFailure
     from notifications.services import NotificationService
 
@@ -105,28 +120,42 @@ def drain_dead_letter_queue():
 
     # And the pushes that were never delivered because the transport was down. The
     # in-app row survives an FCM outage, so the loss is invisible unless someone greps
-    # worker logs; `status.fcm.status == 'failed'` is now recorded and this is the only
-    # thing that reads it.
+    # worker logs; `status.fcm.status` records it and this is the only thing that reads
+    # it.
+    #
+    # Bounded, because the unbounded version re-selected the same rows for ever: a push
+    # whose devices are all gone could never leave 'failed', and once a hundred of those
+    # piled up the window held nothing else, so pushes lost to a real outage were
+    # starved. Only 'failed' and 'partial' (some device still owed it) are retried, only
+    # for PUSH_RETRY_WINDOW (a day-old "time to train" is noise, not a notification),
+    # and only PUSH_MAX_ATTEMPTS times.
+    cutoff = timezone.now() - PUSH_RETRY_WINDOW
     failed_pushes = list(
-        Notification.objects.filter(status__fcm__status="failed")
-        .order_by("-created_at", "-id")[:100])
-    resent = 0
+        Notification.objects.filter(
+            status__fcm__status__in=sorted(FCMChannel.RETRYABLE_STATUSES),
+            created_at__gte=cutoff,
+        )
+        # Not `.exclude(attempts__gte=N)`: a JSON key that is absent compares as NULL
+        # and the exclusion dropped exactly the rows a crash recorded with no count.
+        .filter(Q(status__fcm__attempts__isnull=True)
+                | Q(status__fcm__attempts__lt=PUSH_MAX_ATTEMPTS))
+        .order_by("created_at", "id")[:100])
+    delivered = 0
     for notification in failed_pushes:
-        try:
-            NotificationService._dispatch_channels(notification)
-            resent += 1
-        except Exception:
-            logger.debug("re-dispatch failed for %s", notification.pk, exc_info=True)
+        NotificationService._dispatch_channels(notification)
+        notification.refresh_from_db(fields=["status"])
+        if (notification.status.get("fcm") or {}).get("status") == "sent":
+            delivered += 1
     if failed_pushes:
-        logger.warning("Re-dispatched %s of %s notification(s) whose push had failed",
-                       resent, len(failed_pushes))
+        logger.warning("Retried %s undelivered push(es); %s now delivered",
+                       len(failed_pushes), delivered)
 
     stuck = NotificationFailure.objects.filter(is_resolved=False, retry_count__gte=5).count()
     if stuck:
         logger.critical(
             "%s notification(s) have exhausted retries and need a human", stuck
         )
-    return f"pending={pending} stuck={stuck} resent={resent}"
+    return f"pending={pending} stuck={stuck} retried={len(failed_pushes)} delivered={delivered}"
 
 
 @shared_task(

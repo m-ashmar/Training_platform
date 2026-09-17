@@ -75,6 +75,15 @@ class ChatMessage(models.Model):
         help_text="Data returned by each tool call",
     )
     tokens_used = models.IntegerField(default=0)
+    # The user's 👍/👎 on an assistant reply. It belongs to the reply, not to the
+    # training row: training rows exist only for users who opted into training-data
+    # consent (off by default), and are written by a background task that may run AFTER
+    # the tap. Stored only there, feedback from every default user matched zero rows and
+    # answered "Could not save feedback."
+    feedback = models.CharField(
+        max_length=10, null=True, blank=True,
+        choices=[('positive', '👍'), ('negative', '👎')],
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -116,18 +116,17 @@ class Command(BaseCommand):
             # `UserFoodWeight` (the planner's LEARNED per-client weights),
             # `UserFoodCategoryPreference`, and both sides of the liked/disliked M2M —
             # the entire signal the personalisation is built on.
-            from diet.models import (MealComponent, MealSwap, UserFoodCategoryPreference,
-                                     UserFoodPreference, UserFoodWeight)
+            #
+            # And then it happened again: the five macro-choice M2Ms on
+            # UserFoodPreference (protein/carb/fat/vegetable/fruit choices — the
+            # strongest preference signal the planner reads) were never added to the
+            # hand-written list, so a reseed with no meal history erased every client's
+            # chosen foods with no refusal. The list is now derived from the model graph:
+            # every table that points at FoodItem, except the catalogue's own recipe
+            # lines, which this command rebuilds from the file.
+            from diet.models import MealComponent, MealSwap
 
-            at_risk = {
-                "meal component(s) — what clients have eaten": MealComponent.objects.count(),
-                "meal swap(s)": MealSwap.objects.count(),
-                "learned food weight(s) — the planner's personalisation":
-                    UserFoodWeight.objects.count(),
-                "food category preference(s)": UserFoodCategoryPreference.objects.count(),
-                "liked food(s)": UserFoodPreference.liked_foods.through.objects.count(),
-                "disliked food(s)": UserFoodPreference.disliked_foods.through.objects.count(),
-            }
+            at_risk = _client_data_referencing_foods()
             losses = {label: n for label, n in at_risk.items() if n}
             if losses and not opts.get("force"):
                 detail = "\n  ".join(f"{n} {label}" for label, n in losses.items())
@@ -237,3 +236,62 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 f"  {unverified} row(s) are not verified and will not be served to a "
                 f"client with a declared allergy — add them to diet/data/food_allergens.py"))
+
+
+#: Tables that point at FoodItem but are part of the catalogue this command rebuilds.
+CATALOGUE_OWNED = frozenset({"RecipeIngredient"})
+
+#: What the operator is told they would erase. A relation missing from here is still
+#: counted and refused, under a label built from the model.
+CLIENT_DATA_LABELS = {
+    "MealComponent": "meal component(s) — what clients have eaten",
+    "MealSwap": "meal swap(s)",
+    "UserFoodWeight": "learned food weight(s) — the planner's personalisation",
+    "UserFoodCategoryPreference": "food category preference(s)",
+    "UserFoodPreference.liked_foods": "liked food(s)",
+    "UserFoodPreference.disliked_foods": "disliked food(s)",
+    "UserFoodPreference.protein_choices": "chosen protein(s)",
+    "UserFoodPreference.carb_choices": "chosen carb(s)",
+    "UserFoodPreference.fat_choices": "chosen fat(s)",
+    "UserFoodPreference.vegetable_choices": "chosen vegetable(s)",
+    "UserFoodPreference.fruit_choices": "chosen fruit(s)",
+}
+
+
+def _client_data_referencing_foods():
+    """{label: row count} for every non-catalogue table with a foreign key to FoodItem.
+
+    Derived from `FoodItem._meta`, so a relation added later is counted without anyone
+    remembering this guard exists. M2M through tables are included (they are hidden
+    relations) and labelled by the field they back.
+    """
+    from django.db.models import Q
+
+    from diet.models import FoodItem
+
+    by_model = {}
+    for rel in FoodItem._meta.get_fields(include_hidden=True):
+        if not (rel.is_relation and rel.auto_created and not rel.concrete):
+            continue
+        if rel.many_to_many:
+            continue  # counted through its hidden through-table relation below
+        model = rel.related_model
+        if model.__name__ in CATALOGUE_OWNED:
+            continue
+        by_model.setdefault(model, []).append(rel.field.name)
+
+    counts = {}
+    for model, fields in by_model.items():
+        references = Q()
+        for name in fields:
+            references |= Q(**{f"{name}__isnull": False})
+        if model._meta.auto_created:
+            owner = model._meta.auto_created.__name__
+            m2m = next(f.name for f in model._meta.auto_created._meta.many_to_many
+                       if f.remote_field.through is model)
+            name = f"{owner}.{m2m}"
+        else:
+            name = model.__name__
+        label = CLIENT_DATA_LABELS.get(name, f"{name} row(s)")
+        counts[label] = model.objects.filter(references).count()
+    return counts

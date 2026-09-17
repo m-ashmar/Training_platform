@@ -406,12 +406,40 @@ class Challenge(models.Model):
     def __str__(self):
         return f"{self.title} ({self.get_status_display()})"
     
+    #: Statuses a person sets. Everything else follows from the dates.
+    TERMINAL_STATUSES = ('completed', 'cancelled')
+
+    @property
+    def lifecycle_status(self):
+        """Where the challenge is, from its dates unless someone closed it.
+
+        `status` defaults to 'upcoming' and nothing ever moved it to 'active' — no task,
+        no signal — while `is_active` required 'active'. Every challenge created through
+        the API therefore stayed "not running" for its whole window, and joining it was
+        refused until its creator happened to PATCH the status by hand. Only closing a
+        challenge (completed / cancelled) is a decision; upcoming vs running vs over is
+        a fact about the clock.
+        """
+        if self.status in self.TERMINAL_STATUSES:
+            return self.status
+        now = timezone.now()
+        if now < self.start_date:
+            return 'upcoming'
+        if now > self.end_date:
+            return 'completed'
+        return 'active'
+
     @property
     def is_active(self):
-        """Check if challenge is currently active"""
-        now = timezone.now()
-        return (self.status == 'active' and 
-                self.start_date <= now <= self.end_date)
+        """Is the challenge running right now?"""
+        return self.lifecycle_status == 'active'
+
+    @classmethod
+    def running_q(cls, now=None):
+        """`is_active` as a query."""
+        now = now or timezone.now()
+        return (~models.Q(status__in=cls.TERMINAL_STATUSES)
+                & models.Q(start_date__lte=now, end_date__gte=now))
 
 
 class ChallengeParticipation(models.Model):
