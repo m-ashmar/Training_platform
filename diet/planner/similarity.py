@@ -76,6 +76,22 @@ class SimilarityIndex:
         self.foods = {f.id: f for f in foods}
         self.vectors = {f.id: features(f) for f in foods}
 
+    def stable_key(self, food_id: int):
+        """Order candidates by NAME, never by row id.
+
+        Two foods often score the same similarity, and every tie below used to be
+        settled by the order the caller happened to iterate — usually a `set` of ids,
+        whose order is the id VALUES. So the engine's choice changed with the primary
+        keys: the same catalogue on a freshly created database (ids from 1) produced
+        measurably different plans from one that had been reseeded (ids in the hundreds),
+        and the recorded quality baseline only held for the id range it was recorded on.
+        Measured: a dish served 4 times in a client's week on low ids against 3 on high
+        ids, from identical data.
+        """
+        food = self.foods.get(food_id)
+        name = (getattr(food, "name_en", None) or getattr(food, "name", "") or "").lower()
+        return (name, food_id)
+
     def similarity(self, a_id: int, b_id: int) -> float:
         if a_id == b_id:
             return 1.0
@@ -102,13 +118,14 @@ class SimilarityIndex:
             sim = self.similarity(food_id, other_id)
             if sim >= threshold:
                 scored.append((other, sim))
-        scored.sort(key=lambda pair: -pair[1])
+        # Ties by name, so the neighbour list does not depend on row ids.
+        scored.sort(key=lambda pair: (-pair[1], self.stable_key(pair[0].id)))
         return scored[:k]
 
     def nearest_of(self, food_id: int, candidate_ids: Sequence[int]) -> Tuple[Optional[int], float]:
         """Among `candidate_ids`, the one most like `food_id`, with its similarity."""
         best, best_sim = None, -1.0
-        for cid in candidate_ids:
+        for cid in sorted(candidate_ids, key=self.stable_key):
             sim = self.similarity(food_id, cid)
             if sim > best_sim:
                 best, best_sim = cid, sim

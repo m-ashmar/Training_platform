@@ -200,9 +200,20 @@ def _best_portioning(components, targets, policy, movable):
     return refine(components, targets, policy.tolerance, movable)
 
 
-def _augment(match: RecipeMatch, lines, targets, policy, pool, meal_name, edges, rng, recent):
+def _augment(match: RecipeMatch, lines, targets, policy, pool, meal_name, edges, rng,
+             recent_food_ids):
     """One food from the client's pool, chosen for the largest macro shortfall, portioned
-    jointly with the dish. Returns None when the pool has nothing to add."""
+    jointly with the dish. Returns None when the pool has nothing to add.
+
+    `recent_food_ids` are FOODS served recently. It used to receive `recent` — the RECENT
+    DISHES — and `_pick` reads it as food ids: `if food.id in recent`. Two different
+    tables, one number space. Where the ranges overlap, which is every freshly created
+    database (both start at 1), a food was demoted to a tenth of its weight because a
+    RECIPE with the same id number had been served, and where they do not overlap the
+    penalty never applied at all. So the engine's choice depended on primary keys:
+    measured on identical data, ids from 1 gave a dish served 4 times in a client's week
+    and dish rate 0.8810, against 3 and 0.8929 on ids in the thousands.
+    """
     from .templates import _pick
 
     dev = match.deviation
@@ -215,8 +226,8 @@ def _augment(match: RecipeMatch, lines, targets, policy, pool, meal_name, edges,
     candidates = [f for f in pool.get(meal_name, slot) if f.id not in already]
     if not candidates:
         return None
-    food = _pick(candidates, [f.id for f, _g, _s in lines], edges or {}, set(recent), rng,
-                 pool.weights(meal_name, slot))
+    food = _pick(candidates, [f.id for f, _g, _s in lines], edges or {},
+                 set(recent_food_ids or ()), rng, pool.weights(meal_name, slot))
     if food is None:
         return None
     combined = list(match.components) + [(food, 0.0)]
@@ -310,9 +321,12 @@ def _substitute_chosen(lines, pool, meal_name, policy, index, chosen_ids, recipe
         if title and _names_the_dish(plain_name(food), title):
             continue
         slot = classify_food(food)
-        # Sorted: a frozenset iterates in id-hash order, and an exact tie in
-        # similarity then resolved differently across database rebuilds.
-        for cid in sorted(chosen_ids):
+        # By NAME, not by row id. A frozenset iterates in id-hash order, so an exact
+        # tie in similarity was settled by the primary keys; sorting by id only moved
+        # the dependency, because which of two tied foods comes first still changed when
+        # the catalogue was rebuilt with different ids. Measured on identical data:
+        # dish rate 0.8929 on a reseeded database against 0.9107 on a fresh one.
+        for cid in sorted(chosen_ids, key=index.stable_key):
             if cid in present:
                 continue
             chosen = index.foods.get(cid)
@@ -345,6 +359,11 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
                 exclude_ids: Sequence[int] = (),
                 recipes: Optional[Sequence] = None, user=None, rng=None,
                 recent_ids: Sequence[int] = (),
+                #: FOODS served recently, for the augmenting pick. Distinct from
+                #: `recent_ids`, which are recent DISHES: they are different tables and
+                #: mixing them made the choice depend on whether the two id ranges
+                #: happened to overlap.
+                recent_food_ids: Sequence[int] = (),
                 ladders: Optional[Dict[int, List[float]]] = None,
                 pool=None, edges: Optional[Dict[int, "collections.Counter"]] = None,
                 index=None, chosen_ids: Optional[frozenset] = None,
@@ -534,7 +553,8 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         # and it multiplies the reach of every recipe in the library.
         if (pool is not None and not match.deviation.within(policy.tolerance)
                 and match.deviation.calories < -float(policy.tolerance.get("calories", 0.10))):
-            augmented = _augment(match, lines, targets, policy, pool, meal_name, edges, rng, recent)
+            augmented = _augment(match, lines, targets, policy, pool, meal_name, edges, rng,
+                                 recent_food_ids)
             if augmented is not None and _better(augmented.deviation, match.deviation, policy.tolerance):
                 match = augmented
 
@@ -600,6 +620,17 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
             if n:
                 weights[i] *= RECENCY_PENALTY ** n
         return rng.choices(matches, weights=weights, k=1)[0]
+
+    # The cap applies to `best` too. `within` holds the dishes that FIT; emptying it and
+    # then returning the closest dish anyway handed the slot straight back to a dish
+    # already at its weekly limit — the caller accepts `best` whenever it is within
+    # tolerance, so the cap leaked exactly when it was supposed to bind. Measured: a
+    # dish served 5 times in one client's week with WEEK_MAX_SERVINGS = 2.
+    if (best is not None and max_servings is not None and served_counts
+            and int(served_counts.get(getattr(best.recipe, "id", None), 0)) >= max_servings):
+        logger.debug("Best recipe for %s is already at its weekly limit; leaving the slot "
+                     "to the template path", meal_name)
+        return None
 
     if best is not None:
         logger.debug("Best recipe for %s is outside tolerance (%s); caller may fall back",

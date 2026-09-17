@@ -947,6 +947,10 @@ class RuleBasedPlanner:
                 index=self._similarity(),
                 exclude_ids=tuple(getattr(day_ctx, "served_today", ())),
                 recent_ids=tuple(served),
+                # FOODS, for the augmenting pick — the same set the template path gets.
+                recent_food_ids=tuple(
+                    day_ctx.recent_exclusions_ids.get(meal_name, ())
+                    if getattr(day_ctx, "recent_exclusions_ids", None) else ()),
                 served_counts=counts,
                 max_servings=WEEK_MAX_SERVINGS,
                 user=self.user,

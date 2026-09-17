@@ -219,6 +219,8 @@ def _generate_personalized_advice(user):
     """
     from django.utils import translation
 
+    from training_platform.user_time import today_for
+
     # In the CLIENT'S language, not the worker's. This was hardcoded English and
     # then persisted into `DailyAdvice.text`, so an Arabic client got English prose
     # and activating Arabic later could not fix the stored rows. Render it under
@@ -232,8 +234,17 @@ def _generate_personalized_advice(user):
         # fallback: a trainer's plan, or one generated at an earlier weight, has its own
         # target, and the advice named a different figure from the one on the plan
         # screen beside it.
-        active_plan = (DietPlan.objects.filter(user=user, is_active=True)
-                       .order_by('-created_at', '-id').only('daily_calories').first())
+        #
+        # The plan governing TODAY, resolved exactly as every screen resolves it
+        # (trainer_services._get_active_diet_plan). "Newest active" is not the same
+        # question: create_diet_plan only supersedes plans whose dates OVERLAP, so a
+        # trainer scheduling next week leaves two active rows and the newer one is not
+        # the one the client is eating from.
+        today = today_for(user)
+        active_plan = (DietPlan.objects
+                       .filter(user=user, is_active=True,
+                               start_date__lte=today, end_date__gte=today)
+                       .order_by('-start_date', '-id').only('daily_calories').first())
         if active_plan is not None and active_plan.daily_calories:
             daily_calories = round(float(active_plan.daily_calories))
         else:

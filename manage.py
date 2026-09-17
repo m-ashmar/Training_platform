@@ -9,10 +9,18 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Run administrative tasks."""
+    # NEVER in production. `.env` is a developer's file: it used to be baked into the
+    # image by `COPY . .` (see .dockerignore) and `load_dotenv` then supplied a value for
+    # every variable `fly secrets set` did not, so the release machine ran on a mixture
+    # of production secrets and the author's laptop — including a
+    # FIREBASE_CREDENTIALS_PATH pointing at a path that exists on neither, which aborted
+    # `manage.py migrate` and therefore every deploy.
+    settings_module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
     try:
-        from dotenv import load_dotenv
-        from pathlib import Path
-        load_dotenv(Path(__file__).resolve().parent / '.env')
+        if not settings_module.endswith("settings_production"):
+            from dotenv import load_dotenv
+            from pathlib import Path
+            load_dotenv(Path(__file__).resolve().parent / '.env')
     except ImportError:
         # Optional side effect: swallowing this silently is what made the
         # surrounding failures invisible in logs. Control flow is unchanged.

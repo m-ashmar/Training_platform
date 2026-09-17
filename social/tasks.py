@@ -135,3 +135,24 @@ def dispatch_notification(user_id, title, body, data=None):
         logger.warning(f"Celery broker unavailable, sending FCM synchronously: {e}")
         send_firebase_notification(user_id=user_id, title=title, body=body, data=data)
 
+
+@shared_task(
+    name="social.advance_challenge_phases",
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+def advance_challenge_phases():
+    """Hourly: move stored challenge status with the clock.
+
+    The API reads the phase from the dates; the admin reads the column. Without this
+    they disagree from the moment a challenge starts.
+    """
+    from .models import Challenge
+
+    started, ended = Challenge.advance_stored_phases()
+    if started or ended:
+        logger.info("challenges started: %s, ended: %s", started, ended)
+    return f"started={started} ended={ended}"

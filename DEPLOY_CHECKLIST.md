@@ -23,7 +23,22 @@ fly secrets set \
   EMAIL_HOST_USER="..." EMAIL_HOST_PASSWORD="..." \
   JWT_PRIVATE_KEY="..." JWT_PUBLIC_KEY="..." \
   FIELD_ENCRYPTION_KEY="..."
+
+# Push notifications. A PATH cannot be delivered to a Fly machine: `fly secrets set`
+# sets environment variables, and the service-account key is outside the repository and
+# excluded from the image. Hand over the JSON itself, base64 encoded:
+fly secrets set FIREBASE_CREDENTIALS_JSON="$(base64 -i path/to/service-account.json)"
 ```
+
+Leave `FIREBASE_CREDENTIALS_JSON` unset only if you intend to launch with push
+notifications disabled — the app boots and logs a warning. Setting it to something
+unusable fails the boot on purpose.
+
+`.env` is NEVER part of a deploy. `.dockerignore` keeps it (and `key.md`, the Firebase
+key under `_excluded/`, `db.sqlite3` and the git worktrees) out of the image, and
+`manage.py` does not read it when `DJANGO_SETTINGS_MODULE` ends in `settings_production`.
+Anything the secrets above do not set is simply unset in production, which is what the
+startup checks are there to catch.
 
 These are read straight from the process environment. `get_secret()` goes to AWS
 Secrets Manager only when `AWS_SECRET_NAME` is set; leave it unset on Fly. Either way a

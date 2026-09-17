@@ -438,6 +438,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'subscription.expire_lapsed_subscriptions',
         'schedule': crontab(minute=5),
     },
+    # The API derives a challenge's phase from its dates; this moves the stored column
+    # with it, so the admin changelist and its status filter agree with what clients see.
+    'advance-challenge-phases': {
+        'task': 'social.advance_challenge_phases',
+        'schedule': crontab(minute=10),
+    },
     'close-idle-ai-sessions': {
         'task': 'ai_assistant.tasks.close_idle_sessions',
         'schedule': 600,
@@ -535,6 +541,12 @@ EDAMAM_APP_KEY = get_env("EDAMAM_APP_KEY", "")
 # Firebase / Push Notifications — optional; empty disables push (already degrades)
 # ========================
 FIREBASE_CREDENTIALS_PATH = get_env("FIREBASE_CREDENTIALS_PATH", "")
+#: The service-account JSON itself, raw or base64. A PATH cannot be delivered to a Fly
+#: machine — `fly secrets set` sets environment variables, and the key file is outside
+#: the repository and out of the image — so the only reason a path ever resolved in
+#: production was the developer `.env` that `COPY . .` used to bake in. Set this instead:
+#:   fly secrets set FIREBASE_CREDENTIALS_JSON="$(base64 -i service-account.json)"
+FIREBASE_CREDENTIALS_JSON = get_env("FIREBASE_CREDENTIALS_JSON", "")
 FIREBASE_PROJECT_ID = get_env("FIREBASE_PROJECT_ID", "")
 
 # ========================

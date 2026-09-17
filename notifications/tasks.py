@@ -140,22 +140,35 @@ def drain_dead_letter_queue():
         .filter(Q(status__fcm__attempts__isnull=True)
                 | Q(status__fcm__attempts__lt=PUSH_MAX_ATTEMPTS))
         .order_by("created_at", "id")[:100])
-    delivered = 0
+    delivered, broken = 0, 0
     for notification in failed_pushes:
-        NotificationService._dispatch_channels(notification)
-        notification.refresh_from_db(fields=["status"])
+        # Per row. The selection is deterministic and oldest-first, so one row that
+        # raises something the task's retry policy does not cover took the rest of the
+        # batch with it AND the dead-letter alert below — every hour, until it aged out
+        # of the window. This is the only path that re-sends a push lost to an outage.
+        try:
+            NotificationService._dispatch_channels(notification)
+            notification.refresh_from_db(fields=["status"])
+        except TRANSIENT_ERRORS:
+            # The database or the broker, not this row: let the task retry.
+            raise
+        except Exception:
+            broken += 1
+            logger.exception("re-dispatch failed for notification %s", notification.pk)
+            continue
         if (notification.status.get("fcm") or {}).get("status") == "sent":
             delivered += 1
     if failed_pushes:
-        logger.warning("Retried %s undelivered push(es); %s now delivered",
-                       len(failed_pushes), delivered)
+        logger.warning("Retried %s undelivered push(es); %s now delivered, %s errored",
+                       len(failed_pushes), delivered, broken)
 
     stuck = NotificationFailure.objects.filter(is_resolved=False, retry_count__gte=5).count()
     if stuck:
         logger.critical(
             "%s notification(s) have exhausted retries and need a human", stuck
         )
-    return f"pending={pending} stuck={stuck} retried={len(failed_pushes)} delivered={delivered}"
+    return (f"pending={pending} stuck={stuck} retried={len(failed_pushes)} "
+            f"delivered={delivered} errored={broken}")
 
 
 @shared_task(

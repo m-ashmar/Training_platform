@@ -435,6 +435,25 @@ class Challenge(models.Model):
         return self.lifecycle_status == 'active'
 
     @classmethod
+    def advance_stored_phases(cls, now=None):
+        """Bring the stored `status` column in line with the clock.
+
+        `lifecycle_status` answers the API, but the column is what every operator
+        surface reads: admin_dashboard's changelist displays it and filters on it, so a
+        challenge the app called 'active' still listed as 'upcoming' and filtering
+        status=active found nothing. Two UPDATEs, hourly — a close (completed/cancelled)
+        set by a person is never overwritten.
+
+        Returns (started, ended).
+        """
+        now = now or timezone.now()
+        started = cls.objects.filter(status='upcoming', start_date__lte=now,
+                                     end_date__gte=now).update(status='active')
+        ended = cls.objects.filter(status__in=('upcoming', 'active'),
+                                   end_date__lt=now).update(status='completed')
+        return started, ended
+
+    @classmethod
     def running_q(cls, now=None):
         """`is_active` as a query."""
         now = now or timezone.now()

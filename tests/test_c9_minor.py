@@ -787,3 +787,235 @@ def test_every_permission_class_is_wired_or_declared_pending():
     assert not unused, unused
     assert not wired_but_pending, (
         f"now wired — remove from PENDING: {wired_but_pending}")
+
+
+# --- Cycle 10 fixes ------------------------------------------------------------------
+
+def test_the_deploy_image_cannot_carry_secrets_or_the_repository():
+    """`COPY . .` copies the build context, which .gitignore has no say in: the image
+    carried .env, key.md, the Firebase service-account key, db.sqlite3 and seven git
+    worktrees — 1.01 GB of context, every production credential readable by anyone who
+    can pull the image."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    ignore = (root / ".dockerignore")
+    assert ignore.exists(), ".dockerignore is missing; the image gets the whole tree"
+    patterns = {line.strip() for line in ignore.read_text().splitlines()
+                if line.strip() and not line.startswith("#")}
+    for required in (".env", "key.md", "_excluded/", "db.sqlite3", ".git/", ".claude/",
+                     ".venv/", "*firebase*adminsdk*.json"):
+        assert required in patterns, f"{required} would be baked into the image"
+
+
+def test_production_never_reads_the_developers_env_file():
+    """manage.py loaded .env before Django started. With .env inside the image it
+    supplied a value for everything `fly secrets set` did not — including a
+    FIREBASE_CREDENTIALS_PATH from the author's laptop, which aborted the release."""
+    import pathlib
+    import re
+
+    source = (pathlib.Path(__file__).resolve().parent.parent / "manage.py").read_text()
+    code = "\n".join(line for line in source.splitlines()
+                     if not line.strip().startswith("#"))
+    guard = re.search(r"if not settings_module\.endswith\(.settings_production.\)", code)
+    assert guard, "manage.py loads .env unconditionally"
+    assert code.index("settings_module = os.environ.get") < code.index("load_dotenv")
+
+
+def test_importing_celery_does_not_start_django():
+    """`training_platform/__init__.py` imports celery.py, and Django must run that
+    package before it can import settings_production — so django.setup() there ran
+    inside Django's own bootstrap. populate() is not reentrant: the real error from any
+    AppConfig.ready() was swallowed and the operator got "populate() isn't reentrant",
+    which names the app registry instead of the variable that was wrong."""
+    import inspect
+
+    from training_platform import celery as celery_module
+
+    source = inspect.getsource(celery_module)
+    body = "\n".join(line for line in source.splitlines()
+                     if not line.strip().startswith("#"))
+    assert "django.setup()" not in body
+    assert "worker_init.connect" in body and "beat_init.connect" in body
+
+
+def test_firebase_credentials_can_arrive_as_json(settings, tmp_path):
+    """A PATH cannot be delivered to a Fly machine: secrets are environment variables and
+    the key file is out of the repository and out of the image. The only reason a path
+    ever resolved in production was the baked .env."""
+    import base64
+    import json as _json
+
+    from training_platform.firebase_credentials import (
+        FirebaseCredentialsError, credentials_source)
+
+    account = {"type": "service_account", "project_id": "p", "private_key": "k",
+               "client_email": "a@b.iam.gserviceaccount.com"}
+    settings.FIREBASE_CREDENTIALS_PATH = ""
+
+    settings.FIREBASE_CREDENTIALS_JSON = _json.dumps(account)
+    assert credentials_source(settings) == ("json", account)
+
+    settings.FIREBASE_CREDENTIALS_JSON = base64.b64encode(
+        _json.dumps(account).encode()).decode()
+    assert credentials_source(settings) == ("json", account)
+
+    # Nothing configured: push is off, the app still boots.
+    settings.FIREBASE_CREDENTIALS_JSON = ""
+    assert credentials_source(settings) == (None, None)
+
+    # Configured and wrong is a misconfiguration, never a silent disable.
+    settings.FIREBASE_CREDENTIALS_JSON = "not json at all"
+    with pytest.raises(FirebaseCredentialsError):
+        credentials_source(settings)
+
+    settings.FIREBASE_CREDENTIALS_JSON = _json.dumps({"type": "service_account"})
+    with pytest.raises(FirebaseCredentialsError):
+        credentials_source(settings)
+
+    settings.FIREBASE_CREDENTIALS_JSON = ""
+    settings.FIREBASE_CREDENTIALS_PATH = str(tmp_path / "nope.json")
+    with pytest.raises(FirebaseCredentialsError):
+        credentials_source(settings)
+
+
+def test_the_finiteness_migration_applies_to_a_plan_that_stored_zero(make_user):
+    """The constraint was `daily_calories > 0`, a rule nothing had ever enforced — the
+    model accepted 0, validate_row() runs with validate_constraints=False and the admin
+    leaves the field editable. Postgres validates existing rows when ADD CONSTRAINT runs,
+    so the release died at the migration step. The CHECK is finiteness; the product rule
+    lives in clean(), where it can say what is wrong."""
+    from django.core.exceptions import ValidationError
+    from django.db import IntegrityError, transaction
+
+    from diet.models import DietPlan
+
+    user = make_user(f"zero_{uuid.uuid4().hex[:8]}")
+    today = timezone.localdate()
+    plan = DietPlan.objects.create(user=user, goal="Maintain", daily_calories=2000,
+                                   start_date=today, end_date=today)
+
+    # A row that already holds 0 is accepted by the database — otherwise migrate dies.
+    DietPlan.objects.filter(pk=plan.pk).update(daily_calories=0)
+    assert DietPlan.objects.filter(pk=plan.pk, daily_calories=0).exists()
+
+    # NaN and Infinity are still refused there.
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(IntegrityError), transaction.atomic():
+            DietPlan.objects.filter(pk=plan.pk).update(daily_calories=bad)
+
+    # And no writer can store 0 through the model any more.
+    with pytest.raises(ValidationError) as refused:
+        DietPlan.objects.create(user=user, goal="Maintain", daily_calories=0,
+                                start_date=today, end_date=today)
+    assert "greater than zero" in str(refused.value)
+
+
+def test_daily_advice_names_the_plan_that_governs_today(make_user):
+    """The lookup took the newest ACTIVE plan with no date window, while every screen
+    resolves the plan covering today. create_diet_plan only supersedes plans whose dates
+    overlap, so a trainer scheduling next week left two active rows and the advice quoted
+    the wrong one."""
+    from diet.models import DailyAdvice, DietPlan
+    from diet.tasks import generate_daily_advice
+
+    client = make_user(f"adv2_{uuid.uuid4().hex[:8]}", preferred_language="en",
+                       weight=80, height=180, age=30, gender="male")
+    today = timezone.localdate()
+    DietPlan.objects.create(user=client, goal="Maintain", daily_calories=1737,
+                            start_date=today - timedelta(days=2),
+                            end_date=today + timedelta(days=4))
+    DietPlan.objects.create(user=client, goal="Maintain", daily_calories=2456,
+                            start_date=today + timedelta(days=5),
+                            end_date=today + timedelta(days=11))
+
+    generate_daily_advice(user_id=client.id)
+    advice = DailyAdvice.objects.get(user=client)
+    assert "1737" in advice.text, advice.text
+
+
+def test_one_broken_push_does_not_abandon_the_batch_or_the_alert(make_user, monkeypatch, caplog):
+    """The retry loop is deterministic and oldest-first, so one row raising anything the
+    task's retry policy does not cover took the rest of the batch with it — and the
+    dead-letter CRITICAL below it — every hour until it aged out of the window."""
+    import logging
+
+    from notifications.models import Notification, NotificationFailure
+    from notifications.services import NotificationService
+    from notifications.tasks import drain_dead_letter_queue
+
+    _user_a, poison = _push_setup(make_user, ["t-poison"])
+    _user_b, healthy = _push_setup(make_user, ["t-healthy"])
+    for row in (poison, healthy):
+        row.status = {"fcm": {"status": "failed"}}
+        row.save(update_fields=["status"])
+    Notification.objects.filter(pk=poison.pk).update(
+        created_at=timezone.now() - timedelta(hours=2))
+    NotificationFailure.objects.create(event_type="x", event_payload={},
+                                       error_message="boom", retry_count=7)
+
+    seen = []
+    real = NotificationService._dispatch_channels.__func__
+
+    def dispatch(cls, notification):
+        seen.append(notification.pk)
+        if notification.pk == poison.pk:
+            raise AttributeError("something unexpected in this row")
+        return real(cls, notification)
+
+    monkeypatch.setattr(NotificationService, "_dispatch_channels", classmethod(dispatch))
+    with caplog.at_level(logging.CRITICAL):
+        drain_dead_letter_queue()
+
+    assert poison.pk in seen and healthy.pk in seen, seen
+    assert any("need a human" in r.message for r in caplog.records)
+
+
+def test_a_challenge_phase_is_advanced_in_the_column_too(make_user):
+    """The API derived the phase from the dates and the stored column never moved, so
+    admin_dashboard's changelist displayed 'upcoming' for a running challenge and its
+    status filter found nothing."""
+    from social.models import Challenge
+
+    creator = make_user(f"chp_{uuid.uuid4().hex[:8]}", user_type="trainer")
+    now = timezone.now()
+
+    def make(start, end, status="upcoming"):
+        return Challenge.objects.create(
+            title="Steps", description="walk", challenge_type="habit", creator=creator,
+            start_date=start, end_date=end, status=status)
+
+    running = make(now - timedelta(hours=1), now + timedelta(days=7))
+    over = make(now - timedelta(days=9), now - timedelta(days=2))
+    cancelled = make(now - timedelta(hours=1), now + timedelta(days=7), status="cancelled")
+
+    started, ended = Challenge.advance_stored_phases()
+    assert (started, ended) >= (1, 1)
+
+    running.refresh_from_db(); over.refresh_from_db(); cancelled.refresh_from_db()
+    assert running.status == "active"
+    assert over.status == "completed"
+    assert cancelled.status == "cancelled", "a close set by a person is never overwritten"
+
+
+def test_a_client_cannot_set_a_phase_the_dates_decide(make_user, api):
+    import json as _json
+
+    from social.models import Challenge
+
+    creator = make_user(f"chw_{uuid.uuid4().hex[:8]}", user_type="trainer")
+    now = timezone.now()
+    challenge = Challenge.objects.create(
+        title="Steps", description="walk", challenge_type="habit", creator=creator,
+        start_date=now + timedelta(days=2), end_date=now + timedelta(days=9))
+
+    refused = api(creator).patch(f"/api/social/challenges/{challenge.id}/",
+                                 _json.dumps({"status": "active"}),
+                                 content_type="application/json")
+    assert refused.status_code == 400, refused.content
+
+    closed = api(creator).patch(f"/api/social/challenges/{challenge.id}/",
+                                _json.dumps({"status": "cancelled"}),
+                                content_type="application/json")
+    assert closed.status_code == 200, closed.content

@@ -29,15 +29,19 @@ class FirebaseNotificationService:
         Initialize Firebase Admin SDK with credentials from settings.
         Fails closed: crashes if credentials are missing or invalid.
         """
+        from training_platform.firebase_credentials import build_certificate
+
         try:
             if not firebase_admin._apps:
-                cred_path = getattr(settings, 'FIREBASE_CREDENTIALS_PATH', None)
-                if not cred_path:
+                # One definition of "configured", shared with notifications/apps.py:
+                # the JSON in FIREBASE_CREDENTIALS_JSON (what production can be given) or
+                # a path (local development).
+                cred = build_certificate(settings)
+                if cred is None:
                     raise ValueError(
-                        "FIREBASE_CREDENTIALS_PATH is not configured. "
-                        "Push notifications will not work."
+                        "Neither FIREBASE_CREDENTIALS_JSON nor FIREBASE_CREDENTIALS_PATH "
+                        "is configured. Push notifications will not work."
                     )
-                cred = credentials.Certificate(cred_path)
                 firebase_admin.initialize_app(cred)
                 logger.info("Firebase Admin SDK initialized successfully.")
         except Exception as e:

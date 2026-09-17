@@ -23,6 +23,7 @@ os.environ.setdefault("LOCAL_PROD_TEST", "True")
 # Left set, a stray FIREBASE_CREDENTIALS_PATH in the build environment aborts the
 # build during collectstatic.
 os.environ["FIREBASE_CREDENTIALS_PATH"] = ""
+os.environ["FIREBASE_CREDENTIALS_JSON"] = ""
 
 # Minimal placeholders for values settings_base loads via get_secret at import.
 for _k, _v in {

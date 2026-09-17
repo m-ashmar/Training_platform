@@ -2,8 +2,6 @@ from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 import firebase_admin
-from firebase_admin import credentials
-import os
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,30 +21,41 @@ class NotificationsConfig(AppConfig):
         self._initialize_firebase()
 
     def _initialize_firebase(self):
-        cred_path = getattr(settings, 'FIREBASE_CREDENTIALS_PATH', '') or ''
+        """Start the SDK when credentials are configured; refuse to boot when they are
+        configured and wrong.
+
+        Where the credentials come from is decided in
+        `training_platform.firebase_credentials`: the JSON itself
+        (FIREBASE_CREDENTIALS_JSON, what production can actually be given) or a path
+        (local development). This used to read the path only, and
+        `social.firebase_service` disagreed with it about what "configured" meant.
+        """
+        from training_platform.firebase_credentials import (
+            FirebaseCredentialsError, build_certificate)
+
+        try:
+            certificate = build_certificate(settings)
+        except FirebaseCredentialsError as exc:
+            # Configured but unusable: a real misconfiguration (they intended Firebase
+            # and got it wrong). Fail closed in production.
+            logger.critical(str(exc))
+            if not settings.DEBUG:
+                raise ImproperlyConfigured(str(exc)) from exc
+            return
 
         # Not configured → Firebase is an OPTIONAL integration: disable push and
         # continue booting (matches deploy-pipeline.md). Do NOT crash the app.
-        if not cred_path:
-            logger.warning("FIREBASE_CREDENTIALS_PATH not set — push notifications disabled.")
-            return
-
-        # Configured but the file is missing → a real misconfiguration (they
-        # intended Firebase but it's wrong): fail closed in production.
-        if not os.path.exists(cred_path):
-            error_msg = f"Firebase credentials path is set but not found at {cred_path}."
-            logger.critical(error_msg)
-            if not settings.DEBUG:
-                raise ImproperlyConfigured(error_msg)
+        if certificate is None:
+            logger.warning(
+                "Neither FIREBASE_CREDENTIALS_JSON nor FIREBASE_CREDENTIALS_PATH is set "
+                "— push notifications disabled.")
             return
 
         try:
-            # Check if app is already initialized
             try:
                 firebase_admin.get_app()
             except ValueError:
-                cred = credentials.Certificate(cred_path)
-                firebase_admin.initialize_app(cred)
+                firebase_admin.initialize_app(certificate)
                 logger.info("Firebase Admin SDK initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize Firebase: {e}")

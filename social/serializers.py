@@ -218,6 +218,14 @@ class ChallengeSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'participants_count']
 
+    def validate_status(self, value):
+        """Only a CLOSE is a decision. 'upcoming' and 'active' follow from the dates, so
+        accepting them from a client produced a write that read back as something else."""
+        if value not in Challenge.TERMINAL_STATUSES:
+            raise serializers.ValidationError(
+                _('A challenge starts and ends by its dates; only closing it is a choice.'))
+        return value
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         # The stored value only records a close; the phase comes from the dates.

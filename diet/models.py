@@ -727,8 +727,16 @@ class DietPlan(RowValidationMixin, models.Model):
             # A NaN target was accepted by every validator (`nan < 1000` and
             # `nan > 6000` are both False) and, stored, made every screen rendering the
             # plan answer 500 for good. `> 0` alone would admit it; see FoodItem.
+            # FINITENESS only, not the product rule. `daily_calories > 0` is the rule
+            # (DietPlan.clean enforces it for every writer), but a CHECK is validated
+            # against rows that are already there: nothing ever stopped a 0 being
+            # stored, `validate_row()` runs with validate_constraints=False, and the
+            # admin leaves the field freely editable — so `> 0` here aborted
+            # `manage.py migrate` on any database holding one, taking the whole release
+            # down with it. `>= 0` still refuses NaN and Infinity, because in Postgres
+            # NaN sorts above every number and only the upper bound rejects it.
             models.CheckConstraint(
-                condition=models.Q(daily_calories__gt=0, daily_calories__lt=FINITE_CEILING),
+                condition=models.Q(daily_calories__gte=0, daily_calories__lt=FINITE_CEILING),
                 name='dietplan_calories_are_a_finite_amount',
             ),
             *[models.CheckConstraint(
@@ -819,6 +827,22 @@ class DietPlan(RowValidationMixin, models.Model):
         super().clean()
         if self.start_date and self.end_date and self.end_date < self.start_date:
             raise ValidationError({'end_date': 'Must not be before start_date.'})
+
+        # A plan is a target to eat to, so the target has to be a positive real number.
+        # The service layer already bounds it (1,000–6,000 kcal), but `clean()` is what
+        # runs for every writer — the admin form, a management command, a fixture — and
+        # nothing here checked it, so a 0 could be stored and six read paths in
+        # diet/views.py grew `if daily_calories > 0 else 0` guards around it. The
+        # database constraint deliberately checks only FINITENESS (NaN and Infinity),
+        # because it is applied to rows that already exist; this is where the product
+        # rule belongs, where it can say what is wrong.
+        if self.daily_calories is not None:
+            calories = float(self.daily_calories)
+            if calories != calories or calories in (float('inf'), float('-inf')):
+                raise ValidationError({'daily_calories': 'Must be a real number.'})
+            if calories <= 0:
+                raise ValidationError(
+                    {'daily_calories': 'Must be greater than zero — a plan is a target to eat to.'})
 
     def overlapping_active_plans(self):
         """Other active plans of this user's covering any of the same days."""
