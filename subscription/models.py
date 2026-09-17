@@ -25,6 +25,10 @@ PAYMENT_STATUS_TRANSITIONS = {
     'expired':    set(),
 }
 
+#: A payment that can still turn into money. A subscription has at most ONE of these at
+#: a time: it is the checkout, whichever button opened it. See PaymentService.start_payment.
+OPEN_PAYMENT_STATUSES = ('pending', 'processing', 'authorized')
+
 # Currencies the platform can price and charge in. ShamCash settles in SYP; USD exists
 # only for historical rows written before plans carried a currency of their own.
 SUPPORTED_CURRENCIES = [
@@ -316,7 +320,25 @@ class Payment(RowValidationMixin, models.Model):
     gateway_event_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     # Invoice number generated exactly once, when the payment completes.
     invoice_number = models.CharField(max_length=64, blank=True, null=True, db_index=True)
-    
+
+    # The access this payment bought, stamped when it completes. A refund takes back
+    # exactly this much. It used to take back `plan.duration_days` whenever any other
+    # completed payment existed, with no idea what the refunded one had added — so
+    # refunding a double charge cancelled the month the customer had still paid for, and
+    # for a new subscriber landed `end_date` on `start_date` and crashed the refund on
+    # every retry. NULL on rows completed before the period was recorded.
+    covers_from = models.DateTimeField(null=True, blank=True)
+    covers_until = models.DateTimeField(null=True, blank=True)
+
+    # When the trainer payout for this payment was resolved: paid, or found not owed
+    # (no trainer, a wallet already holding another currency). NULL on a completed
+    # payment means the payout is still OWED. The payout runs on commit, after the
+    # payment row already says 'completed', and every retry used to decide "done" from
+    # that status — so one transient fault in the receiver (a deadlock, a dropped
+    # connection) answered 500, the gateway's redelivery answered 200, and the trainer
+    # was never paid. Written by `wallet.signals.handle_payment_completed`.
+    payout_settled_at = models.DateTimeField(null=True, blank=True)
+
     # Metadata
     description = models.TextField(blank=True)
     metadata = models.JSONField(default=dict, blank=True)
@@ -333,6 +355,12 @@ class Payment(RowValidationMixin, models.Model):
             models.Index(fields=['payment_method', 'status']),
             models.Index(fields=['transaction_id']),
             models.Index(fields=['payment_intent_id']),
+            # The payout sweep reads exactly these rows. Partial, so it stays the size of
+            # the backlog rather than the size of the ledger.
+            models.Index(
+                fields=['updated_at'], name='payment_payout_owed_idx',
+                condition=Q(status='completed', payout_settled_at__isnull=True),
+            ),
         ]
         constraints = [
             # Idempotency guards — each external identifier maps to at most one
