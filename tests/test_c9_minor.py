@@ -688,3 +688,102 @@ def test_the_suite_does_not_need_a_collectstatic_artifact():
 
     backend = settings.STORAGES["staticfiles"]["BACKEND"]
     assert "Manifest" not in backend, backend
+
+
+# --- Auth (cycle 10 dive) ------------------------------------------------------------
+
+def test_verify_otp_does_not_say_which_emails_have_accounts(make_user, api):
+    """The function whose docstring promises anti-enumeration split its error on "does
+    this address have a pending code": a registered address with no pending OTP got
+    "OTP code not found", an unregistered one got "Invalid OTP code". One wrong code per
+    address told the caller which of them are registered."""
+    from users.utils import verify_otp
+
+    registered = make_user(f"otpx_{uuid.uuid4().hex[:8]}")
+    ok_a, _otp_a, message_registered = verify_otp(registered.email, "000000")
+    ok_b, _otp_b, message_stranger = verify_otp(f"nobody_{uuid.uuid4().hex[:8]}@gate.test", "000000")
+
+    assert ok_a is False and ok_b is False
+    assert message_registered == message_stranger, (message_registered, message_stranger)
+
+
+def test_a_pending_code_is_not_named_in_the_cache_key(make_user):
+    """The login counter hashed the address; this one spelled it out, so every Redis key
+    listing named who was verifying."""
+    from users.utils import _get_otp_attempt_cache_key
+
+    key = _get_otp_attempt_cache_key("Someone@Example.com", "registration")
+    assert "someone@example.com" not in key.lower()
+
+
+def test_a_database_outage_is_not_reported_as_a_wrong_code(make_user, monkeypatch):
+    from django.db import OperationalError
+
+    from users import models as user_models
+    from users.utils import verify_otp
+
+    user = make_user(f"otpd_{uuid.uuid4().hex[:8]}")
+
+    class Broken:
+        def get(self, *a, **kw):
+            raise OperationalError("server closed the connection")
+
+    monkeypatch.setattr(user_models.CustomUser, "objects", Broken())
+    with pytest.raises(OperationalError):
+        verify_otp(user.email, "123456")
+
+
+def test_every_permission_class_is_wired_or_declared_pending():
+    """Unused permission code reads as vetted and is not: `IsExerciseOwnerOrGlobal`
+    returned True for any authenticated caller on an exercise with no creator, for
+    writes as well as reads, so wiring it up would have let any client edit or delete
+    every global exercise in the library.
+
+    The pending list below is the honest part: those classes exist, decide a real
+    entitlement, and no view has been given them yet — routines, workout sessions, set
+    logs, analytics and challenge joins answer 2xx without a subscription today. Wiring
+    them is owned by the cycle-9 payments branch. A class that is neither wired nor
+    listed here is dead security code."""
+    import inspect
+    import pathlib
+
+    from rest_framework.permissions import BasePermission
+
+    # name -> why it is not wired yet.
+    PENDING = {
+        "HasActiveSubscription": "no view uses it; feature-specific classes are used instead",
+        "HasRoutineAccess": "routine/views.py does not gate on the plan yet",
+        "HasChallengesAccess": "social/views.py challenge join does not gate on the plan yet",
+        "HasPrioritySupportAccess": "no support endpoint exists yet",
+    }
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    # Application code only: a test naming a permission class does not wire it to
+    # anything, and this file names every pending one below.
+    sources = {p: p.read_text(errors="ignore") for p in root.glob("*/*.py")
+               if not {"_excluded", "tests"} & set(p.parts)}
+    unused, wired_but_pending = [], []
+    for module_path in sorted(root.glob("*/permissions.py")):
+        app = module_path.parts[-2]
+        if app == "_excluded":
+            continue
+        module = __import__(f"{app}.permissions", fromlist=["*"])
+        classes = [obj for obj in vars(module).values()
+                   if inspect.isclass(obj) and issubclass(obj, BasePermission)
+                   and obj.__module__ == module.__name__]
+        # A base class used only by its own subclasses in the same module is wired
+        # through them.
+        bases = {b for cls in classes for b in cls.__mro__[1:]}
+        for cls in classes:
+            if cls in bases:
+                continue
+            name = cls.__name__
+            hits = sum(1 for path, text in sources.items() if path != module_path
+                       for line in text.splitlines() if name in line.split("#")[0])
+            if hits and name in PENDING:
+                wired_but_pending.append(name)
+            elif not hits and name not in PENDING:
+                unused.append(f"{app}/permissions.py:{name}")
+    assert not unused, unused
+    assert not wired_but_pending, (
+        f"now wired — remove from PENDING: {wired_but_pending}")

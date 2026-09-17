@@ -1,5 +1,12 @@
 """Who may act on whom.
 
+Every class here is WIRED to a view. Three were not: `IsClientOrTrainerOrAdmin`,
+`IsTrainerForClient` (named in a routine/views.py comment as though it were enforcing
+something, and enforcing nothing) and `IsExerciseOwnerOrGlobal`, which returned True for
+any authenticated caller on an exercise with no creator — for WRITES as well as reads, so
+wiring it to the exercise viewset would have let any client edit or delete every global
+exercise in the library. Unused permission code reads as vetted and is not.
+
 SOURCE OF TRUTH: an approved `TrainerClientRelation`, read through
 `can_access_user_data` / `accessible_user_ids` below. Nothing in this module may test
 `CustomUser.assigned_trainer` — that column is a denormalised pointer for display, and
@@ -80,68 +87,6 @@ class IsTrainerOrAdmin(BasePermission):
         return request.method in SAFE_METHODS
 
 
-class IsClientOrTrainerOrAdmin(BasePermission):
-    """
-    Permission to allow clients, their assigned trainers, and admins to access.
-    """
-    
-    def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated
-    
-    def has_object_permission(self, request, view, obj):
-        user = request.user
-        
-        # Admins can access everything
-        if user.is_admin:
-            return True
-            
-        # For user objects, check if it's the user themselves or their trainer
-        if hasattr(obj, 'user_type'):
-            if obj.user_type == 'client':
-                return user == obj or can_access_user_data(user, obj.id)
-            elif obj.user_type == 'trainer':
-                return user == obj
-            else:
-                return user == obj
-        
-        # For other objects, check if user is assigned to them
-        if hasattr(obj, 'assigned_to'):
-            return user in obj.assigned_to.all()
-        
-        # For objects with created_by field
-        if hasattr(obj, 'created_by'):
-            return user == obj.created_by
-        
-        # Default to user being the owner
-        return user == obj
-
-
-class IsTrainerForClient(BasePermission):
-    """
-    Permission to allow trainers to access their assigned clients' data.
-    """
-    
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and (request.user.is_trainer or request.user.is_admin)
-    
-    def has_object_permission(self, request, view, obj):
-        user = request.user
-        
-        # Admins can access everything
-        if user.is_admin:
-            return True
-        
-        # For client objects, check if user is their assigned trainer
-        if hasattr(obj, 'user_type') and obj.user_type == 'client':
-            return can_access_user_data(user, obj.id)
-        
-        # For other objects, check if they belong to a client assigned to this trainer
-        if hasattr(obj, 'user') and obj.user.user_type == 'client':
-            return can_access_user_data(user, obj.user_id)
-        
-        return False
-
-
 class IsClientOrAssignedTrainer(BasePermission):
     """
     Permission to allow clients and their assigned trainers to access data.
@@ -207,32 +152,6 @@ class IsRoutineOwnerOrAssigned(BasePermission):
                    for cid in obj.assigned_to.values_list('id', flat=True))
         
         return False
-
-
-class IsExerciseOwnerOrGlobal(BasePermission):
-    """
-    Permission for exercises - allows creators and global access.
-    """
-    
-    def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated
-    
-    def has_object_permission(self, request, view, obj):
-        user = request.user
-        
-        # Admins can access everything
-        if user.is_admin:
-            return True
-        
-        # Creators can access their exercises
-        if hasattr(obj, 'created_by') and user == obj.created_by:
-            return True
-        
-        # Global exercises (no creator) are accessible to all
-        if hasattr(obj, 'created_by') and obj.created_by is None:
-            return True
-        
-        return False 
 
 
 class IsTrainerOfApprovedClient(BasePermission):

@@ -134,38 +134,11 @@ class HasPrioritySupportAccess(HasSubscriptionFeature):
     required_feature = 'priority_support'
 
 
-class SubscriptionUsageLimit(permissions.BasePermission):
-    """Whether the caller has any of a metered feature left.
-
-    The decision, the period it is counted over and the increment all live in
-    `subscription.quota`. This class used to hold its own copy of the lookup, and it
-    disagreed with the table's unique key in a way that let concurrent requests insert
-    duplicate rows and then locked the subscriber out permanently.
-
-    `limit_field` is accepted for the two subclasses below that still pass it; the
-    authoritative mapping from feature to plan field is `quota.FEATURES`.
-    """
-
-    def __init__(self, feature_name=None, limit_field=None):
-        self.feature_name = feature_name
-        self.limit_field = limit_field
-        super().__init__()
-
-    def has_permission(self, request, view):
-        if not request.user.is_authenticated:
-            return False
-        from subscription import quota
-        return quota.has_headroom(request.user, self.feature_name)
-
-
-class MealUsageLimit(permissions.BasePermission):
-    """Permission to check daily meal creation limits."""
-    
-    def has_permission(self, request, view):
-        return SubscriptionUsageLimit('daily_meals', 'max_meals_per_day').has_permission(request, view)
-
-class RoutineUsageLimit(permissions.BasePermission):
-    """Permission to check routine creation limits."""
-    
-    def has_permission(self, request, view):
-        return SubscriptionUsageLimit('routines', 'max_routines').has_permission(request, view) 
+# The three metering permission classes that stood here — `SubscriptionUsageLimit`,
+# `MealUsageLimit`, `RoutineUsageLimit` — were wired to nothing. Metering is enforced
+# where the work happens: `diet/views.py` calls `subscription.quota.reserve(...)` inside
+# the same atomic act as the generation, because a permission class can only READ the
+# counter and every concurrent request then passed the same check. A permission class
+# that duplicates that decision is a second answer waiting to disagree with the first,
+# and one of them did: it kept its own copy of the lookup and inserted duplicate rows
+# that locked the subscriber out. `subscription.quota.FEATURES` is the authority.

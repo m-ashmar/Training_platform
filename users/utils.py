@@ -5,7 +5,15 @@ from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
 from django.core.mail import send_mail
+from django.db import InterfaceError, OperationalError
 from django.template.loader import render_to_string
+from django.utils.translation import gettext_lazy as _lazy
+
+#: What the caller is told when a code does not match. Translatable, because this API
+#: serves English and Arabic and these were the last auth messages hardcoded in English.
+_INVALID_OTP = _lazy("Invalid or expired code. Please request a new one.")
+_OTP_EXPIRED = _lazy("This code has expired. Please request a new one.")
+_OTP_LOCKED_OUT = _lazy("Too many failed attempts. Please try again in 15 minutes.")
 
 logger = logging.getLogger(__name__)
 
@@ -272,8 +280,13 @@ def send_password_reset_email(user, otp_code):
 
 
 def _get_otp_attempt_cache_key(email: str, purpose: str) -> str:
-    """Build a Redis/cache key for OTP attempt tracking."""
-    return f"otp_attempts:{purpose}:{email}"
+    """Cache key for OTP attempt tracking (hashed email — no PII in keys).
+
+    The login counter below already hashed it; this one carried the address in clear, so
+    every Redis key listing, slow-log line and monitoring sample named who was verifying.
+    """
+    email_hash = hashlib.sha256((email or '').strip().lower().encode('utf-8')).hexdigest()[:32]
+    return f"otp_attempts:{purpose}:{email_hash}"
 
 
 def _check_otp_lockout(email: str, purpose: str) -> tuple:
@@ -383,7 +396,7 @@ def verify_otp(email, otp_code, purpose='registration'):
     is_locked, remaining = _check_otp_lockout(email, purpose)
     if is_locked:
         logger.warning(f"OTP lockout active for {email} ({purpose})")
-        return False, None, "Too many failed attempts. Please try again in 15 minutes."
+        return False, None, str(_OTP_LOCKED_OUT)
     
     try:
         # Find user by email
@@ -412,16 +425,20 @@ def verify_otp(email, otp_code, purpose='registration'):
             attempts = _record_otp_failure(email, purpose)
             logger.warning(f"Failed OTP attempt {attempts}/5 for {email} ({purpose})")
             
-            # Check if any unverified OTP exists for better error messages
-            otp_exists = candidates.exists()
-            if not otp_exists:
-                return False, None, "OTP code not found. Please request a new one."
-            else:
-                return False, None, "Invalid OTP code. Please check and try again."
+            # ONE message, whatever the reason. Splitting it on "does this email have a
+            # pending OTP" made the endpoint an account oracle, inside the one function
+            # whose docstring promises anti-enumeration: "OTP code not found" came back
+            # only for an address that HAS an account and no pending code, while an
+            # address with no account got "Invalid OTP code". Probing a list of emails
+            # with one wrong code told the caller which of them are registered.
+            return False, None, str(_INVALID_OTP)
         
         # Check if OTP is still valid (not expired)
         if not matched_otp.is_valid():
-            return False, None, "OTP code has expired. Please request a new one."
+            # Distinguishable on purpose: the caller had to hold the real code to get
+            # here, so it reveals nothing they did not know, and "request a new one" is
+            # the action they need.
+            return False, None, str(_OTP_EXPIRED)
         
         # Mark OTP as verified
         matched_otp.is_verified = True
@@ -437,7 +454,12 @@ def verify_otp(email, otp_code, purpose='registration'):
     except CustomUser.DoesNotExist:
         # Anti-enumeration: same error message whether user exists or not
         _record_otp_failure(email, purpose)
-        return False, None, "Invalid OTP code. Please check and try again."
+        return False, None, str(_INVALID_OTP)
+    except (OperationalError, InterfaceError):
+        # The database, not the code. Answering "invalid" during an outage tells the user
+        # their correct code is wrong and sends them to ask for another one.
+        logger.exception("OTP verification could not reach the database for %s", email)
+        raise
     except Exception as e:
         logger.error(f"Error verifying OTP for {email}: {str(e)}")
-        return False, None, "An error occurred while verifying OTP. Please try again."
+        return False, None, str(_lazy("Something went wrong. Please try again."))
