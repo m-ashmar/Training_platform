@@ -513,3 +513,89 @@ def test_subscribing_returns_the_subscription_it_created(make_user, api):
     body = response.json()
     assert body["id"] == str(client.subscription.id)
     assert body["status"] == client.subscription.status
+
+
+# --- Diet learning (cycle 10 dive) ---------------------------------------------------
+
+def _two_foods():
+    from diet.models import FoodCategory, FoodItem
+
+    cat = FoodCategory.objects.create(name=f"learn-{uuid.uuid4().hex[:6]}")
+    return [FoodItem.objects.create(
+        name=name, name_en=name, category=cat, api_id=f"learn-{uuid.uuid4().hex[:8]}",
+        calories=kcal, protein=p, carbs=c, fat=f, serving_size="100g",
+        allergens=[], allergen_source="verified")
+        for name, kcal, p, c, f in (("Broccoli", 34, 2.8, 7, 0.4),
+                                    ("Lentils (Cooked)", 116, 9, 20, 0.4))]
+
+
+def test_learning_counts_only_meals_the_client_was_offered(make_user):
+    """Every MealComponent counted as "served": tomorrow's dinner, and every meal of a
+    plan replaced on day two. For a client who uses the completion screen those read as
+    served-and-not-finished, so the foods of their CURRENT plan were pushed down nightly
+    and each regeneration added a month of phantom refusals."""
+    from diet.models import DietPlan, Meal, MealComponent
+    from diet.planner.learning import observations_for, update_weights
+    from training_platform.user_time import today_for
+
+    user = make_user(f"learn_{uuid.uuid4().hex[:8]}")
+    today = today_for(user)
+    eaten, planned_only = _two_foods()
+
+    old = DietPlan.objects.create(user=user, goal="Maintain", daily_calories=2000,
+                                  start_date=today - timedelta(days=10),
+                                  end_date=today + timedelta(days=19), is_active=False)
+    new = DietPlan.objects.create(user=user, goal="Maintain", daily_calories=2000,
+                                  start_date=today - timedelta(days=3),
+                                  end_date=today + timedelta(days=26))
+    DietPlan.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(days=10))
+
+    meals = {}
+
+    def component(plan, day, food, **kw):
+        meal = meals.get((plan.pk, day))
+        if meal is None:
+            meal = meals[(plan.pk, day)] = Meal.objects.create(
+                diet_plan=plan, date=day, meal_type="Lunch", scheduled_time="12:00")
+        return MealComponent.objects.create(meal=meal, food=food, quantity=100.0, **kw)
+
+    for offset in range(-10, 20):          # the replaced plan, its whole month
+        component(old, today + timedelta(days=offset), eaten,
+                  is_completed=offset == -10)
+        component(old, today + timedelta(days=offset), planned_only)
+    for offset in range(-3, 27):           # the current plan, mostly still ahead
+        component(new, today + timedelta(days=offset), eaten)
+        if offset >= 0:
+            component(new, today + timedelta(days=offset), planned_only)
+
+    stats = observations_for(user)
+    # Offered: old plan days -10..-4 (7) and new plan days -3..-1 (3).
+    assert stats[eaten.id]["served"] == 10
+    assert stats[planned_only.id]["served"] == 7   # only the old plan's offered week
+
+    before = stats[planned_only.id]
+    changes = update_weights(user)
+    # 7 offered, none finished: that is real evidence. The 30 future and superseded
+    # servings of `planned_only` must not have deepened it.
+    assert before["served"] == 7
+    assert changes.get(eaten.id, 1.0) >= changes.get(planned_only.id, 1.0)
+
+
+def test_diet_review_actions_are_logged_with_who_did_them(make_user, client):
+    from django.contrib.admin.models import LogEntry
+    from django.contrib.contenttypes.models import ContentType
+
+    from diet.models import Recipe
+
+    admin_user = make_user(f"dadm_{uuid.uuid4().hex[:8]}", user_type="admin")
+    recipe = Recipe.objects.create(name=f"Review me {uuid.uuid4().hex[:6]}", reviewed=False)
+    client.force_login(admin_user)
+    response = client.post("/admin/diet/recipe/", {
+        "action": "mark_reviewed", "_selected_action": [recipe.pk]})
+    assert response.status_code in (200, 302), response.status_code
+
+    recipe.refresh_from_db()
+    assert recipe.reviewed is True and recipe.reviewed_at is not None
+    assert LogEntry.objects.filter(
+        user=admin_user, object_id=str(recipe.pk),
+        content_type=ContentType.objects.get_for_model(Recipe)).exists()

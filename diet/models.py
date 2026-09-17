@@ -958,13 +958,21 @@ class Meal(RowValidationMixin, models.Model):
     def update_completion_status(self):
         """
         Update is_completed status based on components.
+
+        Under the meal's row lock, for the reason `DailyProgress.update_progress` gives:
+        two ingredients ticked together each read the other as unfinished, and the one
+        that read first could write `False` last — a meal with every component eaten
+        that never counted as completed, so the day never did either.
         """
-        components = self.components.all()
-        if not components.exists():
-            self.is_completed = False
-        else:
-            self.is_completed = all(c.is_completed for c in components)
-        self.save(update_fields=['is_completed'])
+        from django.db import transaction
+
+        with transaction.atomic():
+            list(Meal.objects.select_for_update().filter(pk=self.pk)
+                 .values_list('pk', flat=True))
+            flags = list(MealComponent.objects.filter(meal_id=self.pk)
+                         .values_list('is_completed', flat=True))
+            self.is_completed = bool(flags) and all(flags)
+            self.save(update_fields=['is_completed'])
     
     @property
     def completion_percentage(self):
@@ -1161,13 +1169,28 @@ class DailyProgress(models.Model):
         Args:
             meals_qs: Optional queryset of meals to reuse existing data if available.
         """
+        from django.db import transaction
+
+        # One recompute at a time per day. Two ingredients ticked a moment apart each
+        # aggregated what was committed when THEY looked and each wrote the whole row:
+        # the request that read first could save last, and the day showed one
+        # ingredient's calories with both marked eaten — and `is_day_completed` False
+        # on a finished day — until something else recomputed it. Under the row lock
+        # the later recompute always reads the earlier one's work.
+        with transaction.atomic():
+            if self.pk is not None:
+                list(DailyProgress.objects.select_for_update()
+                     .filter(pk=self.pk).values_list('pk', flat=True))
+            self._recompute(meals_qs)
+
+    def _recompute(self, meals_qs=None):
         from django.db.models import Count, F, FloatField, Q, Sum
         from django.db.models.functions import Coalesce
-        
+
         # Use provided queryset or fetch efficient queryset
         if meals_qs is None:
             meals_qs = self.diet_plan.meals.filter(date=self.date)
-            
+
         # 1. Update basic meal counters (single query)
         counts = meals_qs.aggregate(
             total=Count('id'),

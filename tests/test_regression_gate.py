@@ -8289,8 +8289,9 @@ def test_admin_bulk_actions_do_not_bypass_the_model(db):
             continue
         for number, line in enumerate(path.read_text().splitlines(), 1):
             code = line.split("#")[0]
-            if "queryset.update(" in code and path.parts[-2] in ("users", "subscription",
-                                                                 "admin_dashboard", "wallet"):
+            # Every app's admin, not a list of four: the list left diet/admin.py's review
+            # actions writing unlogged, which is how the rule stayed half-applied.
+            if "queryset.update(" in code:
                 offenders.append(f"{path.parts[-2]}/admin.py:{number}")
     assert not offenders, offenders
 

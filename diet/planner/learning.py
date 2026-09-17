@@ -24,9 +24,39 @@ LEARNING_RATE = 0.15
 REFUSED_RATIO = 0.5
 
 
+def _was_offered(meal, today, later_plans_by_plan) -> bool:
+    """Did the client actually get this meal, or at least touch it?
+
+    A plan writes every meal of its 7 or 30 days up front, and a regenerated plan is
+    deactivated with all its meals still in the table. Counting every row as "served"
+    read tomorrow's dinner, and every meal of a plan replaced on day two, as food the
+    client was given and did not finish — the same silence-as-dislike inversion
+    `score_from` describes, arriving by another door. A client who uses the completion
+    screen had every food of their CURRENT plan pushed down nightly for the weeks it had
+    left, and each regeneration added a month of phantom refusals.
+
+    Offered means: due before today on a plan nothing newer replaced for that date — or
+    touched at all (completed, rated, a quantity logged), which is evidence whatever the
+    date says.
+    """
+    if meal.date >= today:
+        return False
+    return not any(start <= meal.date <= end for start, end in later_plans_by_plan.get(
+        meal.diet_plan_id, ()))
+
+
 def observations_for(user) -> Dict[int, Dict[str, float]]:
-    """Per-food evidence from this user's completed meals."""
-    from diet.models import MealComponent
+    """Per-food evidence from the meals this user was actually offered."""
+    from diet.models import DietPlan, MealComponent
+    from training_platform.user_time import today_for
+
+    today = today_for(user)
+    plans = list(DietPlan.objects.filter(user=user).values_list(
+        "id", "created_at", "start_date", "end_date"))
+    later_plans_by_plan = {
+        pid: [(s, e) for other, c2, s, e in plans if (c2, other) > (created, pid)]
+        for pid, created, _s, _e in plans
+    }
 
     stats: Dict[int, Dict[str, float]] = {}
     components = (
@@ -34,9 +64,14 @@ def observations_for(user) -> Dict[int, Dict[str, float]]:
         .filter(meal__diet_plan__user=user)
         .select_related("meal")
         .only("food_id", "quantity", "actual_quantity_consumed", "is_completed", "is_liked",
-              "meal__is_liked")
+              "meal__is_liked", "meal__date", "meal__diet_plan")
     )
     for comp in components:
+        touched = (comp.is_completed or comp.is_liked is not None
+                   or comp.actual_quantity_consumed is not None
+                   or getattr(comp.meal, "is_liked", None) is not None)
+        if not touched and not _was_offered(comp.meal, today, later_plans_by_plan):
+            continue
         rec = stats.setdefault(comp.food_id, {"served": 0.0, "completed": 0.0,
                                               "refused": 0.0, "liked": 0.0, "disliked": 0.0})
         rec["served"] += 1

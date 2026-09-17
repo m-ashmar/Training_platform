@@ -26,11 +26,22 @@ def refresh_food_weights():
 
     from .learning import update_weights
 
+    from django.db import InterfaceError, OperationalError
+
     User = get_user_model()
     total = 0
-    for user in User.objects.filter(is_active=True).iterator(chunk_size=500):
+    # Only people with a diet history: every trainer, admin and client who never took a
+    # plan cost two queries a night for nothing.
+    users = (User.objects.filter(is_active=True, diet_plans__isnull=False)
+             .distinct().iterator(chunk_size=500))
+    for user in users:
         try:
             total += len(update_weights(user))
+        except (OperationalError, InterfaceError):
+            # The database, not this user. Swallowed per user, an outage logged one
+            # traceback per client and the task reported success, so the retry
+            # configured above never ran.
+            raise
         except Exception:
             logger.exception("Weight refresh failed for user %s", user.pk)
     return f"adjusted {total} food weights"

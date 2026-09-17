@@ -230,7 +230,11 @@ class ImprovedFoodItemAdmin(TranslAdmin):
 
     @admin.action(description='Send back: stop the planner serving these')
     def send_back_for_review(self, request, queryset):
-        n = queryset.update(needs_review=True)
+        # Through the model and into the admin log, like every other bulk action: taking
+        # a food out of every client's plans is a decision someone has to own.
+        from training_platform.admin_utils import bulk_apply
+
+        n = bulk_apply(request, queryset, "Sent back for review", needs_review=True)
         self.message_user(request, f"{n} food(s) held for review.", messages.SUCCESS)
 
     @admin.action(description='Guess household unit, role and slots from the name')
@@ -964,14 +968,23 @@ class RecipeAdmin(TranslAdmin):
             'carbs {} g &nbsp; fat {} g</p>',
             format_html(rows), n['calories'], n['protein'], n['carbs'], n['fat'])
 
+    # Logged per dish. Marking a recipe reviewed is the sign-off that its grams and its
+    # allergens were checked by a person; `queryset.update()` recorded the date and not
+    # who, so the review trail the owner relies on had no reviewer in it.
     @admin.action(description='Mark selected dishes reviewed')
     def mark_reviewed(self, request, queryset):
-        n = queryset.update(reviewed=True, reviewed_at=timezone.now())
+        from training_platform.admin_utils import bulk_apply
+
+        n = bulk_apply(request, queryset, "Marked reviewed",
+                       reviewed=True, reviewed_at=timezone.now())
         self.message_user(request, f"{n} dish(es) marked reviewed.", messages.SUCCESS)
 
     @admin.action(description='Mark selected dishes NOT reviewed')
     def mark_unreviewed(self, request, queryset):
-        n = queryset.update(reviewed=False, reviewed_at=None)
+        from training_platform.admin_utils import bulk_apply
+
+        n = bulk_apply(request, queryset, "Sent back for review",
+                       reviewed=False, reviewed_at=None)
         self.message_user(request, f"{n} dish(es) sent back for review.", messages.SUCCESS)
 
 
