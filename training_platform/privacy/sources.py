@@ -136,8 +136,26 @@ register(PersonalDataSource(label="follows", model="social.UserFollow",
 # attached to them — writing NEW personal data about someone who had asked to be
 # forgotten — and the erased account could no longer call unassign-trainer to stop it,
 # because erasure had deactivated it.
+#
+# And the row is also a record of money: `hold_reference` names the client's charge
+# sitting in escrow until a routine is assigned. It is returned before the row goes, and
+# if it cannot be returned nothing is erased. See `release_holds_before_erasure`.
+def _return_held_money(user, queryset, *, dry_run):
+    from users.trainer_relations import HoldFailed, release_holds_before_erasure
+
+    from .registry import ErasureRefused
+
+    try:
+        return release_holds_before_erasure(user, queryset, dry_run=dry_run)
+    except HoldFailed as exc:
+        raise ErasureRefused(
+            "Money held for a trainer relation could not be returned, so nothing was "
+            "erased.") from exc
+
+
 register(PersonalDataSource(label="trainer_relations", model="users.TrainerClientRelation",
-                            user_field=("trainer", "client")))
+                            user_field=("trainer", "client"),
+                            before_erase=_return_held_money))
 # Short-lived credentials: deleted on erasure, and expired rows purged on a schedule.
 register(PersonalDataSource(label="otp_verifications", model="users.OTPVerification", user_field="user",
                             retention_days=1))

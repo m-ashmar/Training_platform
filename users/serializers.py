@@ -55,8 +55,14 @@ class CustomRegisterSerializer(RegisterSerializer):
             user = super().save(request)
             user.phone_number = self.validated_data.get('phone_number')
             user.user_type = self.validated_data.get('user_type', 'client')
-            # Set user as inactive until email is verified
-            user.is_active = False
+            # Unverified, and NOT disabled. This wrote `is_active = False` to mean "not
+            # verified yet", which is also what a suspension writes, so resend-otp could
+            # not tell a pending signup from a suspended account and refused both —
+            # measured: the first code expires, resend answers 200 and sends nothing,
+            # and the account can never be verified, logged into or registered again.
+            # Credentials are withheld on `email_verified` instead (login, token).
+            user.is_active = True
+            user.email_verified = False
             user.save()
             return user
         except IntegrityError as e:
@@ -114,8 +120,11 @@ class CustomLoginSerializer(LoginSerializer):
                     {"non_field_errors": [_("Unable to log in with provided credentials.")]}
                 )
 
-            # Check if user account is active (email verified)
-            if not self.user.is_active:
+            # Verified, not merely enabled. This tested `is_active`, which the backend
+            # had already refused above, so the branch was dead: a pending signup was
+            # told "Unable to log in with provided credentials" and never routed to the
+            # code screen. A disabled account still stops at `authenticate`.
+            if not self.user.email_verified:
                 raise serializers.ValidationError(
                     {
                         "non_field_errors": [_("Please verify your email address before logging in. Check your inbox for the OTP code.")],

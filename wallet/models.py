@@ -358,6 +358,24 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
         raise ValueError(f"Currency mismatch: {sorted(currencies)}")
 
     with transaction.atomic():
+        # The actor's user row BEFORE any wallet, in the mode the ledger row's foreign
+        # key will take anyway. `Transaction.actor` is DEFERRABLE INITIALLY DEFERRED, so
+        # Postgres takes FOR KEY SHARE on that row at COMMIT — after the wallets, which
+        # is the reverse of approval, settlement and unassign (relation, user rows,
+        # wallets). A client's transfer then held its wallet and waited at COMMIT for a
+        # user row that an approval held while waiting for the same wallet: 20
+        # deadlocks in 60 contended pairs. Taken here, the order is the same
+        # everywhere, and a transfer that has to wait does so holding no wallet. See
+        # "Lock order" in users/trainer_relations.py.
+        if actor_id is not None and connection.vendor == "postgresql":
+            from django.contrib.auth import get_user_model
+
+            meta = get_user_model()._meta
+            table, pk = (connection.ops.quote_name(meta.db_table),
+                         connection.ops.quote_name(meta.pk.column))
+            with connection.cursor() as cur:
+                cur.execute(f"SELECT 1 FROM {table} WHERE {pk} = %s FOR KEY SHARE", [actor_id])
+
         # Lock every wallet involved in ONE deterministic order (ascending id) before
         # touching any of them. Locking in argument order meant a concurrent A->B and
         # B->A pair each held the lock the other needed: Postgres aborted one with

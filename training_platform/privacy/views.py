@@ -12,7 +12,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .registry import erase_user_data, export_user_data
+from .registry import ErasureRefused, erase_user_data, export_user_data
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,19 @@ class PersonalDataEraseView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         user_id = request.user.pk
-        report = erase_user_data(request.user)
+        try:
+            report = erase_user_data(request.user)
+        except ErasureRefused:
+            # Rolled back whole, and safe to retry: the escrow could not return a held
+            # trainer charge, and deleting its record anyway would lose the money for
+            # good.
+            logger.exception("Erasure refused for user %s", user_id)
+            return Response(
+                {"error": _("Your data could not be erased right now because a payment "
+                            "held for your trainer could not be returned. Nothing was "
+                            "changed; please try again later."),
+                 "code": "erasure_refused"},
+                status=status.HTTP_409_CONFLICT,
+            )
         logger.warning("Personal data erased for user %s: %s", user_id, report)
         return Response({"message": _("Your personal data has been erased."), "detail": report})

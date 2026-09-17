@@ -40,6 +40,13 @@ class CustomUserManager(BaseUserManager):
             raise ValueError("The Email field must be set")
         
         extra_fields.setdefault('is_active', True)
+        # Accounts made here are made by the platform — createsuperuser, seed commands,
+        # staff tooling — so the operator vouches for the address. Self-service signup
+        # never comes through the manager (allauth instantiates the model and
+        # CustomRegisterSerializer writes `email_verified=False` itself), and signing in
+        # now requires a verified address, so without this every operator-created
+        # account would be locked out of the API.
+        extra_fields.setdefault('email_verified', True)
         email = self.normalize_email(email)
         # phone_number is NOT NULL with a model-level default. Passing None here
         # (the signature default) overrode that default and raised NotNullViolation,
@@ -187,6 +194,25 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     #: email_verified=True`, which the resend endpoint declines and verify-otp cannot
     #: re-enable. `default=False` and a migration that back-fills every already-enabled
     #: account, so nobody has to re-verify.
+    #:
+    #: The split was only half done. Registration still wrote `is_active=False` to mean
+    #: "not verified yet", so a pending signup and a suspended account both read
+    #: `is_active=False` and the resend endpoint, unable to tell them apart, refused
+    #: both. Measured: register 201, the 10-minute code expires (or the first email
+    #: never leaves), resend answers 200 "a new OTP has been sent" and sends nothing,
+    #: and the address can never be verified, logged into, reset or registered again.
+    #: Each column now has one meaning and one set of writers:
+    #:
+    #:     is_active  email_verified
+    #:     True       False           pending signup: may request and enter a code,
+    #:                                gets no credential until it does
+    #:     True       True            a working account
+    #:     False      either          disabled (suspended, erased, a ledger owner):
+    #:                                no code, no credential, and verifying never
+    #:                                re-enables it
+    #:
+    #: `is_active` is written by staff and by erasure; `email_verified` by verify-otp.
+    #: Anything that lists people to other people (trainer directories) asks for both.
     email_verified = models.BooleanField(
         default=False, db_index=True,
         help_text="The address was confirmed by OTP. Separate from is_active, which is "

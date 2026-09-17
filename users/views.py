@@ -176,7 +176,8 @@ class CustomRegisterView(RegisterView):
         which tries to redirect inactive users to account_inactive URL.
         """
         user = serializer.save(self.request)
-        # User is already set to is_active=False in the serializer
+        # The serializer leaves the account enabled and unverified; no credential is
+        # issued until the address is verified.
         return user
     
     def create(self, request, *args, **kwargs):
@@ -186,7 +187,7 @@ class CustomRegisterView(RegisterView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        # Create user (will be inactive)
+        # Create the user: enabled, unverified, and holding no credential
         user = self.perform_create(serializer)
         
         # Generate and send OTP for email verification
@@ -251,19 +252,20 @@ class OTPVerificationView(APIView):
         # account — so a suspended user tapped Resend, entered the code that arrived in
         # their own inbox, and was handed a working token with the suspension undone.
         user = otp_instance.user
-        was_verified = user.email_verified
-        user.email_verified = True
-        if not was_verified:
-            # First verification enables the account. A later one cannot re-enable a
-            # suspended one, because the account was already verified when it was
-            # suspended.
-            user.is_active = True
-        user.save(update_fields=['email_verified', 'is_active'])
+        # It never writes `is_active` at all now. "First verification enables the
+        # account" was an inference from `email_verified=False`, and that state also
+        # described accounts nobody meant to enable: a spam signup a moderator had
+        # disabled was re-enabled, with a token, by the code already in its inbox. A
+        # signup is enabled from the moment it registers, so there is nothing here to
+        # enable; an inactive account is a disabled one, whatever it has verified.
         if not user.is_active:
             return Response(
                 {'error': _('This account is not available. Contact support.'),
                  'code': 'account_disabled'},
                 status=status.HTTP_403_FORBIDDEN)
+        if not user.email_verified:
+            user.email_verified = True
+            user.save(update_fields=['email_verified'])
         
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
@@ -344,11 +346,13 @@ class ResendOTPView(APIView):
             logger.info(f"OTP resend requested for unknown email (hash: {rate_key})")
             return Response({'message': _GENERIC_MSG}, status=status.HTTP_200_OK)
 
-        # Already verified, or suspended: still 200, and still no OTP. This gated on
-        # `is_active` alone, which is false for BOTH an unverified signup and a
+        # Already verified, or disabled: still 200, and still no OTP. This gated on
+        # `is_active` alone, which was false for BOTH an unverified signup and a
         # suspended account — so suspension made an account eligible for a fresh
-        # registration code. Verification is now its own column and is the only thing
-        # this endpoint services.
+        # registration code. The rewrite kept `not is_active` while registration still
+        # wrote `is_active=False` for "unverified", so it refused every pending signup
+        # instead. A pending signup is enabled-and-unverified now (see
+        # `CustomUser.email_verified`), which is exactly what this serves.
         if user.email_verified or not user.is_active:
             logger.info(f"OTP resend declined for user {user.id} "
                         f"(verified={user.email_verified}, active={user.is_active})")
@@ -686,10 +690,15 @@ class PublicTrainersListView(APIView):
         from django.db.models import Count, Q
         from routine.views import StandardResultsSetPagination
         
+        # Enabled AND verified. `is_active` alone used to hide unverified signups
+        # because registration wrote them inactive; a pending signup is enabled now, so
+        # without `email_verified` anyone could register as a trainer with an address
+        # they do not own and be offered to clients before proving it.
         trainers = CustomUser.objects.filter(
             user_type='trainer',
             trainer_is_available=True,
-            is_active=True
+            is_active=True,
+            email_verified=True,
         ).annotate(
             client_count_anno=Count('clients')
         )
@@ -772,10 +781,12 @@ class PublicTrainerClientStatsView(APIView):
             is_active=True
         ).count()
         
-        # Count total active trainers
+        # Count total active trainers. Verified too: an unverified signup is enabled,
+        # but it is not a trainer anyone can use yet.
         total_trainers_count = CustomUser.objects.filter(
             user_type='trainer',
-            is_active=True
+            is_active=True,
+            email_verified=True,
         ).count()
         
         return Response({
@@ -800,10 +811,12 @@ class AvailableTrainersView(APIView):
         from django.db.models import Count, Q
         from routine.views import StandardResultsSetPagination
         
+        # Verified as well as enabled; see PublicTrainersListView.
         trainers = CustomUser.objects.filter(
             user_type='trainer',
             trainer_is_available=True,
-            is_active=True
+            is_active=True,
+            email_verified=True,
         ).annotate(
             client_count_anno=Count('clients')
         )
@@ -998,16 +1011,37 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Custom JWT token serializer that includes user information"""
     
+    @classmethod
+    def get_token(cls, user):
+        """The one place this serializer mints a credential, so the verification gate
+        lives here: after `authenticate` has checked the password and refused a disabled
+        account, and before any token exists.
+
+        The gate used to be a lookup ahead of `super().validate()` testing
+        `not user.is_active`, and it stopped gating anything once a pending signup was
+        no longer inactive: measured, register 201 then POST /token/ 200 with access and
+        refresh, no code ever entered. Being ahead of the password check it also told
+        anyone without a password which addresses were unverified — and called a
+        suspended account "unverified" too.
+        """
+        from rest_framework import serializers
+
+        if not user.email_verified:
+            raise serializers.ValidationError(
+                {
+                    "detail": _("Please verify your email address before logging in. Check your inbox for the OTP code."),
+                    "requires_verification": True,
+                    "email": user.email
+                }
+            )
+        return super().get_token(user)
+
     def validate(self, attrs):
-        # Authenticate user first
-        from django.contrib.auth import authenticate
-        from .models import CustomUser
         from .utils import check_login_lockout, record_login_failure, clear_login_attempts
         from rest_framework_simplejwt.exceptions import AuthenticationFailed
         from rest_framework import serializers
 
         email = attrs.get('email') or attrs.get('username')  # Support both email and username
-        password = attrs.get('password')
 
         # Per-account brute-force lockout (10 failures → 15-min cooldown)
         if email:
@@ -1017,22 +1051,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     {"detail": _("Too many failed login attempts. Please try again in 15 minutes.")}
                 )
 
-        if email and password:
-            try:
-                user = CustomUser.objects.get(email=email)
-            except CustomUser.DoesNotExist:
-                user = None
-
-            if user and not user.is_active:
-                raise serializers.ValidationError(
-                    {
-                        "detail": _("Please verify your email address before logging in. Check your inbox for the OTP code."),
-                        "requires_verification": True,
-                        "email": user.email
-                    }
-                )
-
-        # Call the parent validate method to get the standard token response
+        # Authenticate, then mint through `get_token` above
         try:
             data = super().validate(attrs)
         except AuthenticationFailed:
@@ -1356,8 +1375,11 @@ class ClientCancelTrainerRequestView(APIView):
             # — destroyed. `unassign-trainer` then reported success and refunded nothing.
             # 4 of 30 contended attempts in an uninstrumented run.
             with transaction.atomic():
+                # `of=('self',)`: without it the join to `trainer` locked the trainer's
+                # user row FOR UPDATE as well, which blocks every ledger write whose
+                # actor is that trainer (the lock order in `users/trainer_relations.py`).
                 pending_request = (TrainerClientRelation.objects
-                                   .select_for_update()
+                                   .select_for_update(of=('self',))
                                    .select_related('trainer')
                                    .filter(client=request.user, status='pending',
                                            initiated_by='client')
@@ -1544,8 +1566,10 @@ class ClientRespondToTrainerInviteView(APIView):
 
         trainer_id, trainer = relation.trainer_id, relation.trainer
         if action == 'reject':
-            relation.status = 'rejected'
-            relation.save(update_fields=['status', 'updated_at'])
+            # Under the approval's lock, never from the unlocked copy read above.
+            refusal, relation = reject_trainer_relation(relation, request.user)
+            if refusal is not None:
+                return refusal
             transaction.on_commit(lambda: emit_event(ClientRequestRejectedEvent(
                 actor_id=request.user.id, recipient_id=trainer_id,
                 trainer_name=trainer.full_name or trainer.username)))
@@ -1598,6 +1622,10 @@ def approve_trainer_relation(relation, actor):
     the charge is taken BEFORE the relation is granted — a failure to take it refuses
     the approval instead of granting a relationship nobody paid for.
 
+    Locks are taken in the platform's one order — the relation row, then user rows
+    (FOR NO KEY UPDATE, never FOR UPDATE), then wallets inside `move_funds_atomic` —
+    see "Lock order" in `users/trainer_relations.py`.
+
     Returns (response_or_None, relation). A response means refuse with it.
     """
     from rest_framework import status as http
@@ -1607,13 +1635,30 @@ def approve_trainer_relation(relation, actor):
     from .trainer_relations import HoldFailed, take_hold
 
     with transaction.atomic():
-        relation = (TrainerClientRelation.objects
-                    .select_for_update()
-                    .select_related('trainer', 'client')
-                    .get(pk=relation.pk))
+        # `of=('self',)`: the relation row only. A bare `select_for_update()` with
+        # `select_related` locks every joined row too, so this took FOR UPDATE on the
+        # trainer's and the client's user rows before locking any wallet — the
+        # deadlock with the same client's transfer described at `locked_client`.
+        locked = (TrainerClientRelation.objects
+                  .select_for_update(of=('self',))
+                  .select_related('trainer', 'client')
+                  .filter(pk=relation.pk)
+                  .first())
+        if locked is None:
+            # Gone while we waited for the lock — a cancel, an unassign, or the other
+            # party's erasure. `.get()` here raised DoesNotExist, which is not one of
+            # the passthrough exceptions, so the client-side caller answered 500.
+            return Response({'error': _('Request not found or already processed')},
+                            status=http.HTTP_404_NOT_FOUND), relation
+        # The caller checked who asked on its unlocked copy, and consent depends on it:
+        # you approve what the OTHER side asked for. A row declined and re-sent from the
+        # other side in between is the same pk, pending again, and would otherwise be
+        # approved by the party that just sent it.
+        stale_initiator = relation.initiated_by
+        relation = locked
         client, trainer = relation.client, relation.trainer
 
-        if relation.status != 'pending':
+        if relation.status != 'pending' or relation.initiated_by != stale_initiator:
             return Response({'error': _('This request has already been answered')},
                             status=http.HTTP_409_CONFLICT), relation
         # A trainer who has since been deactivated cannot be accepted weeks later.
@@ -1621,7 +1666,14 @@ def approve_trainer_relation(relation, actor):
             return Response({'error': _('That trainer is no longer available')},
                             status=http.HTTP_409_CONFLICT), relation
 
-        locked_client = CustomUser.objects.select_for_update().get(pk=client.pk)
+        # FOR NO KEY UPDATE, which still serialises two approvals for this client but no
+        # longer blocks FOR KEY SHARE. Every ledger row written with `actor=client`
+        # takes FOR KEY SHARE on this row — the deferred foreign-key check at COMMIT —
+        # after its wallets are locked, while this transaction held the row FOR UPDATE
+        # and then waited for those same wallets. Measured: 20 deadlocks in 60 contended
+        # approve/transfer pairs; transfers answered 500 with their idempotency key
+        # stuck, approvals 402 with Postgres internals in the body.
+        locked_client = CustomUser.objects.select_for_update(no_key=True).get(pk=client.pk)
         if locked_client.assigned_trainer_id and locked_client.assigned_trainer_id != trainer.id:
             return Response({'error': _('Client is already assigned to another trainer')},
                             status=http.HTTP_400_BAD_REQUEST), relation
@@ -1642,6 +1694,59 @@ def approve_trainer_relation(relation, actor):
         relation.save(update_fields=['status', 'updated_at'])
         locked_client.assigned_trainer = trainer
         locked_client.save(update_fields=['assigned_trainer'])
+    return None, relation
+
+
+def reject_trainer_relation(relation, actor):
+    """Decline a pending trainer/client relation, whichever side is declining.
+
+    The counterpart of `approve_trainer_relation`, and under the same row lock. Both
+    reject paths read the row with no lock and then wrote it unconditionally, so a
+    reject that had read 'pending' waited out a concurrent approval and then overwrote
+    it. The trainer path's full `save()` of its stale copy also put back
+    `hold_reference=''`, erasing the only link to the escrow transaction the approval
+    had just committed; the client path left the hold on a rejected row. Measured: both
+    calls 200, client charged 100.00, relation 'rejected', escrow 100.00 over its open
+    holds, and every unassign and cancel endpoint answered without refunding — a retry
+    then charged the client a second time.
+
+    Locked, the status re-read, and only `status` written. A row that somehow carries a
+    hold while pending is refunded before it is declined, because nothing is being
+    granted for that money.
+
+    Returns (response_or_None, relation). A response means refuse with it.
+    """
+    from rest_framework import status as http
+    from rest_framework.response import Response
+
+    from .models import TrainerClientRelation
+    from .trainer_relations import HoldFailed, release_hold
+
+    with transaction.atomic():
+        locked = (TrainerClientRelation.objects
+                  .select_for_update(of=('self',))
+                  .filter(pk=relation.pk)
+                  .first())
+        if locked is None:
+            # Gone while we waited for the lock; see `approve_trainer_relation`.
+            return Response({'error': _('Request not found or already processed')},
+                            status=http.HTTP_404_NOT_FOUND), relation
+        stale_initiator = relation.initiated_by   # see `approve_trainer_relation`
+        relation = locked
+        if relation.status != 'pending' or relation.initiated_by != stale_initiator:
+            return Response({'error': _('This request has already been answered')},
+                            status=http.HTTP_409_CONFLICT), relation
+        if relation.hold_reference:
+            try:
+                release_hold(relation, actor)
+            except HoldFailed as exc:
+                logger.error("Refund failed while declining relation %s: %s",
+                             relation.id, exc)
+                return Response({'error': _('We could not return the held payment. '
+                                            'Nothing was changed; please try again.')},
+                                status=http.HTTP_409_CONFLICT), relation
+        relation.status = 'rejected'
+        relation.save(update_fields=['status', 'updated_at'])
     return None, relation
 
 
@@ -1734,9 +1839,12 @@ class TrainerRespondToRequestView(APIView):
                 }, status=status.HTTP_200_OK)
                 
             else:  # reject
-                # Reject the request
-                relation.status = 'rejected'
-                relation.save()
+                # Under the approval's lock, never from the unlocked copy read above:
+                # its full `save()` wrote `status='rejected', hold_reference=''` over an
+                # approval that had committed in between.
+                refusal, relation = reject_trainer_relation(relation, request.user)
+                if refusal is not None:
+                    return refusal
                 
                 # Emit domain event — notification handled at delivery boundary
                 emit_event(ClientRequestRejectedEvent(

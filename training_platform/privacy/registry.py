@@ -45,6 +45,21 @@ class PersonalDataSource:
     #: category health data — injury text, weight, BMI, goals — kept for twice the
     #: declared window, in the one source where the declared window is the promise.
     retention_is_deadline: bool = False
+    #: Runs inside the erasure transaction, before ANY source is deleted or anonymised,
+    #: as `before_erase(user, queryset, dry_run=...)`. For a row that is personal data
+    #: and also a record of money: the obligation has to be discharged while the row
+    #: that names it still exists. May return a dict, merged into this source's report
+    #: (a dry run reports what it would do); raises `ErasureRefused` to abort the whole
+    #: erasure.
+    #:
+    #: The registry had no such step, so `TrainerClientRelation` — whose
+    #: `hold_reference` is the only record of whose money is in escrow — went through a
+    #: bulk `qs.delete()`. Measured: approve, escrow 80.00; erase, 200; relation gone,
+    #: escrow still 80.00, no release in the ledger, and no code path left that could
+    #: ever refund it. A trainer's erasure did the same to every client still waiting
+    #: for a routine, while those clients stayed active and were told "Successfully
+    #: unassigned".
+    before_erase: Callable | None = None
 
     def get_model(self):
         from django.apps import apps
@@ -65,6 +80,15 @@ class PersonalDataSource:
 
 
 registry: dict[str, PersonalDataSource] = {}
+
+
+class ErasureRefused(Exception):
+    """A `before_erase` step could not discharge what the rows it guards stand for.
+
+    Raised out of the erasure transaction, so nothing at all is erased: deleting the
+    record of an obligation that could not be met is the one outcome worse than
+    refusing, because it cannot be retried.
+    """
 
 
 def register(source: PersonalDataSource) -> PersonalDataSource:
@@ -129,6 +153,17 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
     report: dict[str, dict] = {}
 
     def _run():
+        # Every `before_erase` first, before any row is touched. Besides needing the
+        # rows they guard to still exist, these take row and wallet locks, and taking
+        # them ahead of the profile anonymisation keeps erasure in the same lock order
+        # as approval and settlement (relation, user rows, wallets) instead of holding
+        # the user row while it waits for a relation an approval has locked.
+        extra: dict[str, dict] = {}
+        for source in registry.values():
+            if source.before_erase is not None:
+                extra[source.label] = source.before_erase(
+                    user, source.queryset_for(user), dry_run=dry_run) or {}
+
         for source in registry.values():
             qs = source.queryset_for(user)
             count = qs.count()
@@ -148,7 +183,8 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
                         for key, value in values.items():
                             setattr(obj, key, value)
                         obj.save(update_fields=list(values))
-            report[source.label] = {"rows": count, "action": action}
+            report[source.label] = {"rows": count, "action": action,
+                                    **extra.get(source.label, {})}
 
     if dry_run:
         _run()

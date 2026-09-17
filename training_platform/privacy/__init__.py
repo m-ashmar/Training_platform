@@ -17,6 +17,7 @@ is visible — `audit_coverage()` lists every model holding a user FK that nobod
 """
 from . import sources  # noqa: F401  (registers every app's data on import)
 from .registry import (  # noqa: F401
+    ErasureRefused,
     PersonalDataSource,
     audit_coverage,
     erase_user_data,
