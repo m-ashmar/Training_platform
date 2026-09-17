@@ -87,3 +87,7 @@ _excluded/**/*_bundle.txt
 
 # API keys handed over during development
 key.md
+
+# Rotated log files were tracked (logs/diet.log.1, logs/django.log.1 — 90k lines):
+# `*.log` did not match them, so they were committed and would ship in any archive.
+logs/
