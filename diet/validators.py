@@ -3,9 +3,27 @@ Input Validation Module for Diet System
 Prevents invalid data from entering the system and causing calculation errors.
 """
 
+import math
 from typing import Dict, Any, List, Tuple
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
+
+
+def _number(value) -> float:
+    """A real number, or ValueError.
+
+    `float()` accepts "NaN" and "Infinity", and every range check below is a pair of
+    `<`/`>` comparisons, which NaN fails both of — so "nan" passed as a valid daily
+    calorie target. A trainer's plan was stored with NaN calories, and every screen that
+    rendered it answered 500 from then on, because JSON has no NaN. A boolean is not a
+    number either (`float(True)` is 1.0).
+    """
+    if isinstance(value, bool):
+        raise ValueError("a boolean is not a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("not a finite number")
+    return number
 
 
 class DietInputValidator:
@@ -25,7 +43,7 @@ class DietInputValidator:
     def validate_daily_calories(calories: float) -> float:
         """Validate daily calorie target."""
         try:
-            calories = float(calories)
+            calories = _number(calories)
         except (ValueError, TypeError):
             raise ValidationError(
                 _("Daily calories must be a number."), code="invalid_calories_type"
@@ -93,7 +111,7 @@ class DietInputValidator:
     def validate_quantity(quantity: float, context: str = "quantity") -> float:
         """Validate food quantity in grams."""
         try:
-            quantity = float(quantity)
+            quantity = _number(quantity)
         except (ValueError, TypeError):
             raise ValidationError(
                 _("Quantity must be a number."), code="invalid_quantity_type"
@@ -117,9 +135,9 @@ class DietInputValidator:
     def validate_macro_targets(protein_g: float, carb_g: float, fat_g: float) -> Tuple[float, float, float]:
         """Validate macro targets are reasonable."""
         try:
-            protein_g = float(protein_g)
-            carb_g = float(carb_g)
-            fat_g = float(fat_g)
+            protein_g = _number(protein_g)
+            carb_g = _number(carb_g)
+            fat_g = _number(fat_g)
         except (ValueError, TypeError):
             raise ValidationError(
                 _("Macro targets must be numbers."), code="invalid_macro_type"
@@ -202,10 +220,10 @@ class DietInputValidator:
         
         # Validate nutritional values
         try:
-            calories = float(food_data['calories'])
-            protein = float(food_data['protein'])
-            carbs = float(food_data['carbs'])
-            fat = float(food_data['fat'])
+            calories = _number(food_data['calories'])
+            protein = _number(food_data['protein'])
+            carbs = _number(food_data['carbs'])
+            fat = _number(food_data['fat'])
             serving_size_grams = int(food_data['serving_size_grams'])
         except (ValueError, TypeError):
             raise ValidationError(

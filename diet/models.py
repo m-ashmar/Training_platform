@@ -19,6 +19,11 @@ from training_platform.model_validation import RowValidationMixin
 #: named here so the database and the validator cannot drift apart.
 MAX_PORTION_GRAMS = 1000.0
 
+#: An upper bound no real quantity reaches, used by CHECK constraints to refuse NaN and
+#: Infinity: Postgres sorts NaN above every number, so `x >= 0` holds for NaN and only
+#: `x < ceiling` rejects it.
+FINITE_CEILING = 1e6
+
 logger = logging.getLogger(__name__)
 
 class FoodCategory(models.Model):
@@ -343,6 +348,14 @@ class FoodItem(RowValidationMixin, models.Model):
             # and it read as the client's mistake.
             models.CheckConstraint(condition=models.Q(serving_size_grams__gt=0),
                                    name="serving_size_is_a_real_amount"),
+            # Finite and non-negative. A `>= 0` check alone admits NaN, because Postgres
+            # orders NaN above every number; the upper bound is what refuses it (and
+            # Infinity). Deliberately far above any real food so no stored row can trip
+            # it — the physical ceilings live in clean().
+            *[models.CheckConstraint(
+                condition=models.Q(**{f"{field}__gte": 0, f"{field}__lt": FINITE_CEILING}),
+                name=f"food_{field}_is_a_finite_amount")
+              for field in ("calories", "protein", "carbs", "fat")],
         ]
 
     # Physical ceilings. Nothing validated nutrition before, so the catalogue contains
@@ -711,6 +724,18 @@ class DietPlan(RowValidationMixin, models.Model):
                 check=models.Q(end_date__gte=models.F('start_date')),
                 name='dietplan_end_after_start',
             ),
+            # A NaN target was accepted by every validator (`nan < 1000` and
+            # `nan > 6000` are both False) and, stored, made every screen rendering the
+            # plan answer 500 for good. `> 0` alone would admit it; see FoodItem.
+            models.CheckConstraint(
+                condition=models.Q(daily_calories__gt=0, daily_calories__lt=FINITE_CEILING),
+                name='dietplan_calories_are_a_finite_amount',
+            ),
+            *[models.CheckConstraint(
+                condition=(models.Q(**{f"{field}__isnull": True})
+                           | models.Q(**{f"{field}__gte": 0, f"{field}__lt": FINITE_CEILING})),
+                name=f'dietplan_{field}_is_a_finite_amount')
+              for field in ('target_protein', 'target_carbs', 'target_fat')],
         ]
         indexes = [
             models.Index(fields=['user', 'is_active']),
@@ -1085,6 +1110,9 @@ class MealComponent(models.Model):
             # is already constrained; the numerator was not.
             models.CheckConstraint(condition=models.Q(quantity__gt=0),
                                    name='a_portion_is_a_positive_amount'),
+            # `> 0` is true for NaN in Postgres; the ceiling is what refuses it.
+            models.CheckConstraint(condition=models.Q(quantity__lt=FINITE_CEILING),
+                                   name='a_portion_is_a_finite_amount'),
             # See the field comment: the client's own "how much did you eat" was the
             # one numeric input in the diet app with no bound anywhere.
             models.CheckConstraint(

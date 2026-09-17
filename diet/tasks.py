@@ -185,6 +185,10 @@ def generate_daily_advice(user_id=None):
                         "advice_type": "daily_nutrition"
                     }
                 )
+            except TRANSIENT_ERRORS:
+                # The database, not this client: caught here, an outage was logged once
+                # per client and the retry below never saw it.
+                raise
             except Exception:
                 # One user's bad profile must not cancel everyone else's
                 # advice. This exception reached the task-level handler,
@@ -213,20 +217,29 @@ def _generate_personalized_advice(user):
     Returns:
         str: Personalized advice text
     """
+    from django.utils import translation
+
+    # In the CLIENT'S language, not the worker's. This was hardcoded English and
+    # then persisted into `DailyAdvice.text`, so an Arabic client got English prose
+    # and activating Arabic later could not fix the stored rows. Render it under
+    # the client's own language so the text is right when it is written.
+    language = (getattr(user, 'preferred_language', None)
+                or getattr(settings, 'LANGUAGE_CODE', 'en'))
     try:
         # Get user metrics
         bmi = user.calculate_bmi() if hasattr(user, 'calculate_bmi') else None
-        daily_calories = user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None
+        # The number the client's PLAN is built to. The profile formula is only a
+        # fallback: a trainer's plan, or one generated at an earlier weight, has its own
+        # target, and the advice named a different figure from the one on the plan
+        # screen beside it.
+        active_plan = (DietPlan.objects.filter(user=user, is_active=True)
+                       .order_by('-created_at', '-id').only('daily_calories').first())
+        if active_plan is not None and active_plan.daily_calories:
+            daily_calories = round(float(active_plan.daily_calories))
+        else:
+            daily_calories = user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None
         goal = user.resolve_fitness_goal()
-        
-        # In the CLIENT'S language, not the worker's. This was hardcoded English and
-        # then persisted into `DailyAdvice.text`, so an Arabic client got English prose
-        # and activating Arabic later could not fix the stored rows. Render it under
-        # the client's own language so the text is right when it is written.
-        from django.utils import translation
 
-        language = (getattr(user, 'preferred_language', None)
-                    or getattr(settings, 'LANGUAGE_CODE', 'en'))
         with translation.override(language):
             if goal == 'Lose':
                 advice = _("Aim for a moderate deficit of 300 to 500 calories a day. "
@@ -243,7 +256,10 @@ def _generate_personalized_advice(user):
 
         return str(advice)
         
+    except TRANSIENT_ERRORS:
+        raise
     except Exception as e:
         log_json(logger, "error", "Error generating personalized advice", error=str(e))
-        return "Stay hydrated and maintain a balanced diet with regular meals."
+        with translation.override(language):
+            return str(_("Stay hydrated and maintain a balanced diet with regular meals."))
 

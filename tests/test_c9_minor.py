@@ -599,3 +599,81 @@ def test_diet_review_actions_are_logged_with_who_did_them(make_user, client):
     assert LogEntry.objects.filter(
         user=admin_user, object_id=str(recipe.pk),
         content_type=ContentType.objects.get_for_model(Recipe)).exists()
+
+
+def test_daily_advice_names_the_plans_target(make_user):
+    """The advice quoted the profile formula while the plan screen beside it showed the
+    plan's own target — a trainer's plan, or one built at an earlier weight."""
+    from diet.models import DailyAdvice, DietPlan
+    from diet.tasks import generate_daily_advice
+
+    client = make_user(f"adv_{uuid.uuid4().hex[:8]}", preferred_language="en",
+                       weight=80, height=180, age=30, gender="male")
+    today = timezone.localdate()
+    DietPlan.objects.create(user=client, goal="Maintain", daily_calories=1737,
+                            start_date=today, end_date=today + timedelta(days=6))
+    assert round(float(client.calculate_daily_calories())) != 1737
+
+    generate_daily_advice(user_id=client.id)
+    advice = DailyAdvice.objects.get(user=client)
+    assert "1737" in advice.text, advice.text
+
+
+def test_a_database_outage_during_the_advice_sweep_reaches_the_retry(make_user, monkeypatch):
+    from django.db import OperationalError
+
+    from diet import tasks as diet_tasks
+
+    client = make_user(f"advo_{uuid.uuid4().hex[:8]}")
+
+    def outage(user):
+        raise OperationalError("server closed the connection")
+
+    monkeypatch.setattr(diet_tasks, "_generate_personalized_advice", outage)
+    with pytest.raises(OperationalError):
+        diet_tasks.generate_daily_advice.run(user_id=client.id)
+
+
+@pytest.mark.parametrize("value", ["NaN", "nan", "Infinity", "-inf", float("nan"), True])
+def test_diet_validators_refuse_what_is_not_a_real_number(value):
+    """`float("nan")` passes `< MIN` and `> MAX` alike, so "nan" was a valid daily calorie
+    target: a trainer's plan was stored with NaN and every screen that rendered it
+    answered 500 for good, because JSON has no NaN."""
+    from django.core.exceptions import ValidationError
+
+    from diet.validators import DietInputValidator as V
+
+    for check in (lambda: V.validate_daily_calories(value),
+                  lambda: V.validate_quantity(value),
+                  lambda: V.validate_macro_targets(value, 100, 60),
+                  lambda: V.validate_food_item({"name": "x", "calories": value, "protein": 1,
+                                                "carbs": 1, "fat": 1,
+                                                "serving_size_grams": 100})):
+        with pytest.raises(ValidationError):
+            check()
+
+
+def test_the_database_refuses_a_nan_diet_number(make_user):
+    """Postgres orders NaN above every number, so `calories >= 0` and `quantity > 0`
+    both held for NaN; only an upper bound refuses it."""
+    from django.db import IntegrityError, transaction
+
+    from diet.models import DietPlan, FoodCategory, FoodItem
+
+    user = make_user(f"nan_{uuid.uuid4().hex[:8]}")
+    today = timezone.localdate()
+    plan = DietPlan.objects.create(user=user, goal="Maintain", daily_calories=2000,
+                                   start_date=today, end_date=today)
+    cat = FoodCategory.objects.create(name=f"nan-{uuid.uuid4().hex[:6]}")
+    food = FoodItem.objects.create(
+        name="Nan Test", name_en="Nan Test", category=cat, api_id=f"nan-{uuid.uuid4().hex}",
+        calories=100, protein=5, carbs=10, fat=2, serving_size="100g",
+        allergens=[], allergen_source="verified")
+
+    for queryset, field in ((DietPlan.objects.filter(pk=plan.pk), "daily_calories"),
+                            (DietPlan.objects.filter(pk=plan.pk), "target_protein"),
+                            (FoodItem.objects.filter(pk=food.pk), "calories"),
+                            (FoodItem.objects.filter(pk=food.pk), "fat")):
+        for bad in (float("nan"), float("inf")):
+            with pytest.raises(IntegrityError), transaction.atomic():
+                queryset.update(**{field: bad})
