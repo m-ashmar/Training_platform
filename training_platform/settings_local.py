@@ -79,6 +79,23 @@ CACHES = {
 
 # Celery runs synchronously in local dev
 CELERY_TASK_ALWAYS_EAGER = True
+
+# Static files WITHOUT the manifest. `settings_base` uses
+# `CompressedManifestStaticFilesStorage`, whose manifest is written by `collectstatic`
+# during the Docker build and shipped in the image — it is not in the repository, and
+# `staticfiles/` is gitignored. So in a fresh clone (a new worktree, a CI checkout) every
+# page that renders `{% static %}` raised "Missing staticfiles manifest entry for
+# 'admin/css/base.css'", and six admin tests failed for a reason that had nothing to do
+# with the code under test. Development and the test suite serve the files from their own
+# apps; production keeps the hashed, compressed manifest.
+#
+# Still WhiteNoise — it is what serves /static/ when DEBUG is off and the gate pins it —
+# just the variant that does not need a manifest.
+STORAGES = {
+    **STORAGES,
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage'},
+}
+
 # Eager tasks keep their result in memory so plans/tasks/<id>/ can be exercised
 # without a broker; production stores results in Redis (settings_base).
 CELERY_TASK_STORE_EAGER_RESULT = True

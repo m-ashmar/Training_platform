@@ -677,3 +677,14 @@ def test_the_database_refuses_a_nan_diet_number(make_user):
         for bad in (float("nan"), float("inf")):
             with pytest.raises(IntegrityError), transaction.atomic():
                 queryset.update(**{field: bad})
+
+
+def test_the_suite_does_not_need_a_collectstatic_artifact():
+    """`staticfiles/` is gitignored and its manifest is written during the Docker build,
+    so in a fresh checkout — a CI runner, a new worktree — every page rendering
+    {% static %} raised "Missing staticfiles manifest entry for 'admin/css/base.css'" and
+    six admin tests failed for a reason unrelated to the code under test."""
+    from django.conf import settings
+
+    backend = settings.STORAGES["staticfiles"]["BACKEND"]
+    assert "Manifest" not in backend, backend
