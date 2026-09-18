@@ -561,7 +561,7 @@ class CacheMiddleware(MiddlewareMixin):
                     backend.set(cache_key, response_data, rule['ttl'])
                     logger.debug(f"Cached response for {request.path} into {'private' if is_private else 'public'} cache")
                     # Inform CDN / proxies of dimensions that affect this response
-                    response['Vary'] = 'Accept-Language, Authorization'
+                    response['Vary'] = 'Accept-Language, Authorization, X-App-Channel, X-App-Version'
             except (json.JSONDecodeError, AttributeError):
                 # Optional side effect: swallowing this silently is what made the
                 # surrounding failures invisible in logs. Control flow is unchanged.
@@ -648,14 +648,23 @@ class CacheMiddleware(MiddlewareMixin):
     def _build_key(self, request, identity, rule=None):
         """
         Build a versioned, hashed cache key.
-        Dimensions: identity + Accept-Language + path + querystring. User-Agent is
-        intentionally excluded (public catalog data does not vary by device).
+        Dimensions: identity + Accept-Language + the declared build + path + querystring.
+        User-Agent is intentionally excluded (public catalog data does not vary by device).
+
+        The build (`X-App-Channel`, `X-App-Version`) is a dimension because responses
+        differ by it: a store build is never sent a plan's price (`policy/services.py`).
+        Without it the catalogue cached for the direct APK, prices included, was served
+        to the next iOS request for the same path — found by the test that asks for the
+        list as each build in turn.
         """
         from django.utils import translation as trans
         import hashlib
 
+        from policy.channels import VERSION_HEADER, channel_of
+
         qs = request.GET.urlencode()
-        key_parts = ['api_cache', trans.get_language() or 'en', identity, request.path, qs]
+        build = f"{channel_of(request) or '-'}@{(request.headers.get(VERSION_HEADER) or '').strip()[:17]}"
+        key_parts = ['api_cache', trans.get_language() or 'en', identity, build, request.path, qs]
 
         # Version bucket comes from the registry entry, so it can never point at a
         # different resource than the caching rule itself (the old if/elif chain

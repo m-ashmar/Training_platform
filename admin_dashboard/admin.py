@@ -645,6 +645,12 @@ except Exception:  # pragma: no cover — admin wiring must never break boot
     # surrounding failures invisible in logs. Control flow is unchanged.
     logger.debug('suppressed non-fatal error', exc_info=True)
 
+# What each build may show and sell, and the append-only record of every change to it.
+from policy.admin import CapabilityChangeLogAdmin, ChannelCapabilitiesAdmin  # noqa: E402
+from policy.models import CapabilityChangeLog, ChannelCapabilities  # noqa: E402
+admin_site.register(ChannelCapabilities, ChannelCapabilitiesAdmin)
+admin_site.register(CapabilityChangeLog, CapabilityChangeLogAdmin)
+
 admin_site.register(UserActivity, UserActivityAdmin)
 admin_site.register(PerformanceMetric, PerformanceMetricAdmin)
 admin_site.register(UserSession)

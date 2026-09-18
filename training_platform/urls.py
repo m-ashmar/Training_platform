@@ -54,6 +54,9 @@ urlpatterns = [
     # personal-data registry in training_platform/privacy/.
     path('api/privacy/', include('training_platform.privacy.urls', namespace='privacy')),
 
+    # What each build may show and sell (X-App-Channel). See policy/models.py.
+    path('api/v1/config/', include('policy.urls', namespace='policy')),
+
     # Notification preferences (listing lives under /api/social/notifications/)
     path('api/notifications/', include('notifications.urls', namespace='notifications')),
 ]

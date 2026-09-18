@@ -52,6 +52,8 @@ import uuid
 from rest_framework.exceptions import NotFound, PermissionDenied, NotAuthenticated
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 from wallet.throttles import ChargingRateThrottle
+from policy.money import MoneyType
+from policy.services import flags_for_request, require_purchase_allowed
 
 
 def _checkout_opener(request, subscription, gateway_name, gateway_service):
@@ -156,6 +158,20 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             return SubscriptionUpdateSerializer
         return SubscriptionSerializer
     
+    def create(self, request, *args, **kwargs):
+        # Choosing a paid plan is the first step of buying one, so a build that may not
+        # sell plans is refused here, before a pending subscription and its payment
+        # exist. A free plan is not a purchase and stays open to every build. An id that
+        # names no plan is treated as paid: the refusal must not depend on a lookup.
+        try:
+            plan = SubscriptionPlan.objects.filter(
+                pk=request.data.get('plan_id'), is_active=True).first()
+        except (TypeError, ValueError):
+            plan = None
+        if plan is None or plan.price > 0:
+            require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
+        return super().create(request, *args, **kwargs)
+
     def perform_create(self, serializer):
         """Create a new subscription for the current user with proper error handling"""
         try:
@@ -286,6 +302,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         PaymentService.complete_payment.
         """
         try:
+            require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
             subscription = self.get_object()
             gateway_name = request.data.get('gateway', 'shamcash')
 
@@ -346,7 +363,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         """Get current user's subscription with proper error handling"""
         try:
             subscription = request.user.subscription
-            serializer = UserSubscriptionSummarySerializer(subscription)
+            serializer = UserSubscriptionSummarySerializer(subscription, context={'request': request})
             return Response(serializer.data)
         except Subscription.DoesNotExist:
             return Response(
@@ -487,6 +504,7 @@ class SubscriptionManagementView(APIView):
                 user=user,
                 plan=plan,
                 status='trial',
+                source='trial',
                 trial_end_date=trial_end
             )
             
@@ -745,6 +763,11 @@ class PaymentGatewayView(APIView):
             List of available gateways with their capabilities
         """
         try:
+            # How to pay is a payment instruction. A build that may not sell plans gets
+            # an empty list — the same for every user of that build, reviewer or not.
+            if not flags_for_request(request)['can_purchase_platform_sub']:
+                return Response({'success': True, 'gateways': []})
+
             available_gateways = PaymentGatewayManager.get_available_gateways()
             
             gateway_list = []
@@ -804,6 +827,7 @@ class PaymentGatewayView(APIView):
         than the figure they agreed to.
         """
         try:
+            require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
             body = body_dict(request)
             gateway_name = body.get('gateway')
             subscription_id = body.get('subscription_id')

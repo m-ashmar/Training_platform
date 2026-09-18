@@ -34,6 +34,8 @@ from django.db import transaction
 from django.dispatch import Signal
 from django.utils import timezone
 
+from policy.money import source_of_payment_method
+
 from ..models import OPEN_PAYMENT_STATUSES, Payment, Subscription
 
 logger = logging.getLogger(__name__)
@@ -124,7 +126,8 @@ class PaymentService:
                 payment.invoice_number = cls._generate_invoice_number()
 
             # --- Activate / extend the subscription, and record what that bought ---
-            payment.covers_from, payment.covers_until = cls._activate_subscription(subscription)
+            payment.covers_from, payment.covers_until = cls._activate_subscription(
+                subscription, source_of_payment_method(payment.payment_method))
             payment.save()
 
             logger.info(
@@ -476,8 +479,11 @@ class PaymentService:
         return subscription, payment
 
     @staticmethod
-    def _activate_subscription(subscription: Subscription):
+    def _activate_subscription(subscription: Subscription, source: str):
         """Grant one plan period for a payment that cleared; return the window it bought.
+
+        `source` is where that money came from (`policy.money.EntitlementSource`); it is
+        recorded and never consulted for access.
 
         The period runs from when the money cleared, or from the end of cover the
         customer already holds — never from a date written before they paid. The first
@@ -512,6 +518,7 @@ class PaymentService:
         # status='active' and no access.
         subscription.trial_end_date = None
         subscription.status = 'active'
+        subscription.source = source
         # `auto_renew` is NOT touched. It is the customer's setting, and writing True on
         # every completion silently undid a customer who had turned it off.
         subscription.save()

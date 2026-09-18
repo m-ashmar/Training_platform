@@ -78,7 +78,10 @@ def test_every_model_has_a_total_order():
 def test_anonymous_gets_no_5xx_and_reaches_only_public_endpoints(api):
     """An unauthenticated sweep caught permission classes that 500'd instead of 401ing."""
     anon = api()
-    allowed = {"/api/auth/health/", "/api/auth/trainers/public/", "/api/auth/trainers/stats/"}
+    allowed = {"/api/auth/health/", "/api/auth/trainers/public/", "/api/auth/trainers/stats/",
+               # What a build may show and sell. Public on purpose: the app asks at launch,
+               # before anyone has signed in, and the answer never depends on who asks.
+               "/api/v1/config/capabilities", "/api/v1/config/capabilities/"}
     errors, reachable = [], []
     for path in _routes():
         resp = anon.get(path)

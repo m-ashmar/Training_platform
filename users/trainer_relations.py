@@ -40,6 +40,8 @@ from decimal import Decimal
 
 from django.db import transaction
 
+from policy.money import MoneyType
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,6 +88,7 @@ def take_hold(relation, actor) -> None:
         tx = move_funds_atomic(
             client_wallet, get_escrow_wallet(), amount,
             actor_id=getattr(actor, 'id', None), tx_type='transfer',
+            money_type=MoneyType.COACHING_1TO1,
             metadata={'purpose': 'trainer_request_hold',
                       'trainer_id': relation.trainer_id,
                       'client_id': relation.client_id,
@@ -166,6 +169,7 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose):
             tx = move_funds_atomic(
                 escrow, _wallet_for(destination_owner(locked), owner_type), held.amount,
                 actor_id=getattr(actor, 'id', None), tx_type='transfer',
+                money_type=MoneyType.COACHING_1TO1,
                 metadata={'purpose': purpose,
                           'hold_reference': locked.hold_reference,
                           'trainer_id': locked.trainer_id,

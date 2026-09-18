@@ -6,6 +6,8 @@ from django.core.validators import MinValueValidator
 import uuid
 from decimal import Decimal
 
+from policy.money import MoneyType
+
 
 def generate_reference_id():
     return str(uuid.uuid4())
@@ -163,6 +165,14 @@ class Transaction(models.Model):
     destination_wallet = models.ForeignKey(Wallet, on_delete=models.SET_NULL, null=True, blank=True, related_name="incoming_transactions")
     amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     currency = models.CharField(max_length=8, default="USD")
+    #: Which of the four kinds of money this row moved (`policy.money`). The store rules
+    #: attach to the kind, not to the endpoint: a plan payment's legs are PLATFORM_SUB, a
+    #: coaching hold and its release are COACHING_1TO1, and a plain top-up or transfer is
+    #: WALLET_MOVE — which is also the honest reading of a movement nobody gave a purpose.
+    #: Every call in the codebase names its own; `tests/test_policy_money.py` fails on one
+    #: that does not.
+    money_type = models.CharField(max_length=16, choices=MoneyType.choices,
+                                  default=MoneyType.WALLET_MOVE, db_index=True)
     metadata = models.JSONField(default=dict, blank=True)
     #: The transaction this one reverses, when it is a reversal. A OneToOne, so the
     #: DATABASE says a transfer can be reversed at most once.
@@ -204,6 +214,11 @@ class Transaction(models.Model):
             # with 10,000 ledger rows scanned 10,000 to find 500.
             models.Index(fields=["actor", "tx_type", "created_at"],
                          name="tx_actor_type_time_idx"),
+        ]
+        constraints = [
+            # `choices` is only checked by forms; the ledger is written by services.
+            models.CheckConstraint(condition=Q(money_type__in=MoneyType.values),
+                                   name="tx_money_type_known"),
         ]
 
 
@@ -333,13 +348,22 @@ def wallet_for(owner, owner_type: str, currency: str | None = None) -> "Wallet":
 
 def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
                       actor_id=None, tx_type="transfer", metadata=None, reverses=None,
-                      currency: str | None = None) -> Transaction:
+                      currency: str | None = None,
+                      money_type: str | None = None) -> Transaction:
     """
     Atomically move funds between wallets. If source is None, it's a credit (e.g., top-up).
     If destination is None, it's a debit. Creates a Transaction record on success.
+
+    `money_type` says which kind of money this is (`policy.money.MoneyType`). A reversal
+    that names none takes the kind of the transaction it reverses; anything else that
+    names none is a plain wallet movement.
     """
     if amount <= 0:
         raise ValueError("Amount must be positive")
+    if money_type is None:
+        money_type = reverses.money_type if reverses is not None else MoneyType.WALLET_MOVE
+    if money_type not in MoneyType.values:
+        raise ValueError(f"Unknown money type: {money_type!r}")
 
     metadata = metadata or {}
 
@@ -424,6 +448,7 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
             destination_wallet=dst,
             amount=amount,
             currency=(destination.currency if destination else (source.currency if source else "USD")),
+            money_type=money_type,
             metadata=metadata,
             reverses=reverses,
         )

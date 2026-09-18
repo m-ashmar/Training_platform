@@ -168,6 +168,10 @@ register(PersonalDataSource(label="transactions", model="wallet.Transaction", us
 register(PersonalDataSource(label="wallet_audit_log", model="wallet.WalletAuditLog", user_field="actor", on_erase="keep"))
 register(PersonalDataSource(label="idempotency_keys", model="wallet.IdempotencyKey", user_field="created_by",
                             on_erase="keep", retention_days=30))
+# Which operator changed what a build may sell. Kept: it is the platform's evidence to a
+# store that a policy change was made by a named person, and it holds no customer data.
+register(PersonalDataSource(label="capability_changes", model="policy.CapabilityChangeLog",
+                            user_field="changed_by", on_erase="keep"))
 
 # --- reachable only through another row ---------------------------------------
 # Everything below holds data about a person but does not point at them directly, so

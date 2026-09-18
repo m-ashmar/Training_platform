@@ -47,7 +47,8 @@ def _set(subscription, **fields):
 def activate_subscriptions(modeladmin, request, queryset):
     count = _each_subscription_under_lock(
         request, queryset, "Activated via bulk admin action",
-        lambda s: _set(s, status='active'))
+        # Access with no payment behind it: recorded as the operator's grant it is.
+        lambda s: _set(s, status='active', source='operator_grant'))
     modeladmin.message_user(request, f"Activated {count} subscriptions.")
 
 
@@ -64,7 +65,9 @@ def cancel_subscriptions(modeladmin, request, queryset):
 def extend_subscriptions(modeladmin, request, queryset):
     count = _each_subscription_under_lock(
         request, queryset, "Extended by 30 days via bulk admin action",
-        lambda s: _set(s, end_date=s.end_date + timezone.timedelta(days=30)))
+        # Keeps the source of cover somebody paid for; names itself only where there was none.
+        lambda s: _set(s, end_date=s.end_date + timezone.timedelta(days=30),
+                       source=s.source or 'operator_grant'))
     modeladmin.message_user(request, f"Extended {count} subscriptions.")
 
 @admin.register(SubscriptionPlan)

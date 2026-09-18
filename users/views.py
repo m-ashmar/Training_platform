@@ -1129,6 +1129,13 @@ class ClientRequestTrainerView(APIView):
         try:
             from .models import TrainerClientRelation
             trainer = CustomUser.objects.get(id=trainer_id, user_type='trainer')
+            # Asking a trainer who charges is agreeing to pay them, so it answers to what
+            # this build may do (policy/services.py). A trainer who charges nothing can be
+            # asked from any build. Outside the `try` below, which swallows everything.
+            if (getattr(trainer, 'trainer_hourly_rate', None) or 0) > 0:
+                from policy.money import MoneyType
+                from policy.services import require_purchase_allowed
+                require_purchase_allowed(request, MoneyType.COACHING_1TO1)
             # Enforce wallet balance >= trainer charge before allowing request
             try:
                 from wallet.models import Wallet
@@ -1575,6 +1582,14 @@ class ClientRespondToTrainerInviteView(APIView):
                 trainer_name=trainer.full_name or trainer.username)))
             return Response({'message': _('Invitation declined.'),
                              'trainer_id': trainer_id, 'status': 'rejected'})
+
+        # Accepting an invitation that carries a price is the client agreeing to pay it,
+        # so it answers to what this build may do. Declining above never does.
+        from .trainer_relations import price_of
+        if price_of(relation) > 0:
+            from policy.money import MoneyType
+            from policy.services import require_purchase_allowed
+            require_purchase_allowed(request, MoneyType.COACHING_1TO1)
 
         refusal, relation = approve_trainer_relation(relation, request.user)
         if refusal is not None:

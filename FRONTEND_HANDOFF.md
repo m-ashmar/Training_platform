@@ -40,6 +40,13 @@ Backend state: 334 API routes, 370 tests green on a freshly created database.
 5. **Do not persist media URLs.** They carry an expiring signature (§5).
 6. **Send `Accept-Language`** on every request (`en` or `ar`) — and keep your own strings
    in the app: about a quarter of backend messages are still English-only (§6).
+7. **Send `X-App-Channel` and `X-App-Version` on every request**, from the same API layer.
+   The channel is a build flavor constant — `apk`, `play`, `ios` (the payment hub sends
+   `web`) — never read from the device, locale, account or a remote value, and never
+   changed at runtime. Render commerce from `GET /api/v1/config/capabilities` (fetch at
+   launch and after sign-in, cache the last answer) and from nothing else: no buy button,
+   price, "subscribe on our website" text or hub link unless its flag is true. The
+   `play` and `ios` flavors must not contain the hub URL or a WebView that can load it.
 
 ## 3. What changed since `API_CONTRACT.md` was frozen
 
@@ -77,6 +84,26 @@ sending `active` returns 400. Do not compute the phase client-side.
 previously be PATCHed into another user's private post). A reply must name a parent on
 the same post.
 
+**Channels and capabilities (branch `spec/payments-compliance`, not yet on
+`noti-system`).** `GET /api/v1/config/capabilities` returns ten flat fields: `channel`
+and nine booleans (`can_purchase_platform_sub`, `can_purchase_routine_product`,
+`can_pay_coaching_in_app`, `can_show_prices`, `can_show_coaching_prices`,
+`can_show_web_hub_link`, `can_view_entitlements`, `can_view_wallet`,
+`can_transfer_wallet`). Play's "coaching prices only" is `can_show_prices: false` with
+`can_show_coaching_prices: true`. The server enforces the flags:
+
+- No `X-App-Channel` on an endpoint that opens a checkout or moves wallet money →
+  `400 app_channel_required`. Blocked for the build → `403 not_available_on_channel`.
+  Affected: `POST v1/subscriptions/` for a paid plan, `renew`, `POST v1/gateways/`,
+  `wallet/client/transfer/`, `wallet/agent/topup/proxy`, and requesting or accepting a
+  trainer who charges.
+- A build that may not show plan prices is not sent them: `price` is absent from the plan
+  endpoints, `plan_price` from `subscriptions/current/`, and `GET v1/gateways/` is `[]`.
+  Treat those fields as optional in the DTOs.
+- New read-only fields: `money_type` on payments and wallet transactions, `source` on
+  subscriptions. What was bought on any channel works on every channel; after returning
+  from the hub, re-fetch `subscriptions/current/` — the deep link carries nothing.
+
 **AI chat feedback.** 👍/👎 now succeeds for every user; it previously errored for anyone
 who had not opted into training-data consent, which is the default.
 
@@ -84,7 +111,7 @@ who had not opted into training-data consent, which is the default.
 
 | Area | Risk |
 |---|---|
-| Payments: renew, refund, pay-after-lapse | Fix branch unmerged and unreviewed. Double-tap and refund behaviour will change |
+| Payments: renew, refund, pay-after-lapse | Fix merged on `spec/payments-compliance`: one open checkout per subscription (a second tap gets the same `reference`), the paid period starts when the money clears. Still to come: `POST /api/v1/checkout/sessions`, payment states with push, receipts |
 | Automatic payment reconciliation | Today a transfer activates nothing unless the client calls reconcile. A background reconciler is coming; the client may stop needing to poll |
 | Trainer-side diet editing, meal interact | Fix branch unmerged; write paths and 409 semantics on superseded plans will change |
 | Routine sessions, bulk complete | Fix branch unmerged |

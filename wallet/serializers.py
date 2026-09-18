@@ -26,6 +26,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             "destination_wallet",
             "amount",
             "currency",
+            "money_type",
             "metadata",
             "created_at",
             "source_owner",

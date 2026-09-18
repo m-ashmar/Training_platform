@@ -41,6 +41,26 @@ def english_active():
     translation.deactivate()
 
 
+@pytest.fixture(autouse=True)
+def speaks_as_the_direct_apk(monkeypatch):
+    """Every test client declares the direct-APK channel unless the request says otherwise.
+
+    The server refuses to open a checkout or move wallet money for a caller that does
+    not say which build it is (`policy/services.py`), and every real build always does.
+    A test that is about another build passes `HTTP_X_APP_CHANNEL="ios"` on the request;
+    one that is about a caller declaring nothing passes `HTTP_X_APP_CHANNEL=""`.
+    """
+    from django.test.client import RequestFactory
+
+    original = RequestFactory.__init__
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.defaults.setdefault("HTTP_X_APP_CHANNEL", "apk")
+
+    monkeypatch.setattr(RequestFactory, "__init__", __init__)
+
+
 @pytest.fixture
 def make_user(db):
     from users.models import CustomUser

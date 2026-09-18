@@ -9,6 +9,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from decimal import Decimal
 from training_platform.model_validation import RowValidationMixin
+from policy.money import EntitlementSource, MoneyType
 
 
 # Payment lifecycle state machine. The ONLY code allowed to move a payment
@@ -152,6 +153,12 @@ class Subscription(RowValidationMixin, models.Model):
     
     auto_renew = models.BooleanField(default=True, db_index=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    # Where the money behind the current entitlement came from. Blank on a row that has
+    # never entitled anyone (a checkout opened and not yet paid). Access NEVER reads it:
+    # `is_active` is the only test, so what was bought on one channel works on all.
+    source = models.CharField(max_length=16, choices=EntitlementSource.choices,
+                              blank=True, default='', db_index=True)
     
     # Access flags (inherited from plan but can be overridden)
     has_diet_access = models.BooleanField(default=False, db_index=True)
@@ -308,6 +315,13 @@ class Payment(RowValidationMixin, models.Model):
         db_index=True
     )
 
+    # Which of the four kinds of money this is (`policy.money`). A row in this table pays
+    # for a plan, so it is PLATFORM_SUB by construction; the column exists so that every
+    # payment, ledger row and checkout answers the same question the same way, and the
+    # channel policy reads it rather than inferring it from the table.
+    money_type = models.CharField(max_length=16, choices=MoneyType.choices,
+                                  default=MoneyType.PLATFORM_SUB, db_index=True)
+
     # External payment provider details
     transaction_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     payment_intent_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
@@ -385,6 +399,8 @@ class Payment(RowValidationMixin, models.Model):
                 condition=Q(invoice_number__isnull=False),
                 name='uniq_payment_invoice_number',
             ),
+            models.CheckConstraint(condition=Q(money_type__in=MoneyType.values),
+                                   name='payment_money_type_known'),
         ]
         verbose_name = "Payment"
         verbose_name_plural = "Payments"

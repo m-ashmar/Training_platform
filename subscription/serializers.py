@@ -5,8 +5,31 @@ from .models import (
 )
 from users.serializers import CustomUserSerializer
 from django.utils.translation import gettext_lazy as _
+from policy.money import MoneyType
+from policy.services import can_show_price
 
-class SubscriptionPlanSerializer(serializers.ModelSerializer):
+
+class PlanPriceByChannelMixin:
+    """Leaves a plan's price out of a response to a build that may not show it.
+
+    A store build shows what the user holds — plan, status, expiry — and never what a plan
+    costs, so the number is not sent to it at all rather than sent and trusted to be
+    hidden. Decided from the request's channel alone, so it is the same for every user of
+    a build. With no request in the context the caller is server-side code (the operator
+    console, a task), and nothing is removed.
+    """
+    price_fields = ('price',)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if request is not None and not can_show_price(request, MoneyType.PLATFORM_SUB):
+            for name in self.price_fields:
+                data.pop(name, None)
+        return data
+
+
+class SubscriptionPlanSerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
     """Serializer for subscription plans"""
     
     class Meta:
@@ -37,7 +60,8 @@ class PaymentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'subscription', 'amount', 'currency', 'status',
             'payment_method', 'transaction_id', 'payment_intent_id',
-            'invoice_number', 'description', 'metadata', 'created_at'
+            'invoice_number', 'description', 'metadata', 'created_at',
+            'money_type',
         ]
         read_only_fields = fields
 
@@ -74,12 +98,12 @@ class SubscriptionSerializer(serializers.ModelSerializer):
             'has_diet_access', 'has_routine_access', 'has_challenges_access',
             'has_ai_advice', 'has_priority_support', 'is_active',
             'is_trial', 'days_remaining', 'payments', 'usage',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'source',
         ]
         read_only_fields = [
             'id', 'user', 'start_date', 'end_date', 'trial_end_date',
             'cancelled_at', 'is_active', 'is_trial', 'days_remaining',
-            'payments', 'usage', 'created_at', 'updated_at'
+            'payments', 'usage', 'created_at', 'updated_at', 'source',
         ]
     
     def create(self, validated_data):
@@ -172,7 +196,7 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(_("Invalid subscription"))
         return value
 
-class SubscriptionPlanListSerializer(serializers.ModelSerializer):
+class SubscriptionPlanListSerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
     """Simplified serializer for listing subscription plans"""
     
     class Meta:
@@ -183,16 +207,18 @@ class SubscriptionPlanListSerializer(serializers.ModelSerializer):
             'has_challenges_access', 'has_ai_advice', 'has_priority_support'
         ]
 
-class UserSubscriptionSummarySerializer(serializers.ModelSerializer):
+class UserSubscriptionSummarySerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
     """Summary serializer for user's current subscription"""
     plan_name = serializers.CharField(source='plan.name', read_only=True)
     plan_price = serializers.DecimalField(source='plan.price', max_digits=10, decimal_places=2, read_only=True)
     is_active = serializers.ReadOnlyField()
     days_remaining = serializers.ReadOnlyField()
     
+    price_fields = ('plan_price',)
+
     class Meta:
         model = Subscription
         fields = [
             'id', 'plan_name', 'plan_price', 'status', 'start_date',
-            'end_date', 'is_active', 'days_remaining', 'auto_renew'
+            'end_date', 'is_active', 'days_remaining', 'auto_renew', 'source',
         ] 

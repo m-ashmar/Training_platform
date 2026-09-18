@@ -130,6 +130,7 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
                 payment.amount,
                 actor_id=client.id,
                 tx_type="topup",
+                money_type=payment.money_type,
                 # The payment's OWN currency, checked against the wallet. Without it the
                 # mint leg was the one path with no currency check anywhere, and a SYP
                 # payment credited a USD-labelled wallet at 1:1.
@@ -148,6 +149,7 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
             actor_id=client.id,
             currency=payment.currency,
             tx_type="transfer",
+            money_type=payment.money_type,
             metadata={
                 "original_payment_id": str(payment.id),
                 "subscription_id": str(subscription.id),
@@ -200,6 +202,7 @@ def unwind_payment(payment) -> int:
             move_funds_atomic(
                 leg.destination_wallet, leg.source_wallet, leg.amount,
                 actor_id=leg.actor_id, tx_type="reversal",
+                money_type=leg.money_type,
                 metadata={"original_reference": leg.reference_id,
                           "original_payment_id": str(payment.id),
                           "reason": "payment refunded"},

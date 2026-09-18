@@ -348,6 +348,33 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 | `GET` | `/api/notifications/preferences/event_types/` | auth | `NotificationPreferenceViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/notifications/preferences/{id}/` | auth | `NotificationPreferenceViewSet` |
 
+### Platform policy (what each build may show and sell)
+
+Every request carries `X-App-Channel: apk | play | ios | web` and `X-App-Version`. The
+channel is a constant compiled into the build, never derived at runtime. The response is
+computed from those two headers alone and is identical for every user of a build.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/config/capabilities/` | public | `CapabilitiesView` |
+
+Response: `{channel, can_purchase_platform_sub, can_purchase_routine_product,
+can_pay_coaching_in_app, can_show_prices, can_show_coaching_prices, can_show_web_hub_link,
+can_view_entitlements, can_view_wallet, can_transfer_wallet}` — all booleans but `channel`.
+
+The flags are enforced by the server, not only rendered by the app:
+
+| `code` | Status | When |
+|---|---|---|
+| `app_channel_required` | 400 | The capabilities endpoint, or any endpoint that opens a checkout or moves wallet money, called without a known `X-App-Channel` |
+| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
+
+On a build with `can_show_prices: false` the plan endpoints omit `price`, `subscriptions/current/`
+omits `plan_price`, and `GET v1/gateways/` answers an empty list. Additive fields:
+`money_type` on payments and wallet transactions (`PLATFORM_SUB`, `COACHING_1TO1`,
+`ROUTINE_PRODUCT`, `WALLET_MOVE`) and `source` on subscriptions (`shamcash`, `agent_wallet`,
+`operator_grant`, `trial`, reserved: `apple_iap`, `google_play`; blank until entitled).
+
 ### Privacy (GDPR)
 
 | Method | Path | Auth | View |

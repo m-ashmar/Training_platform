@@ -66,6 +66,7 @@ INSTALLED_APPS = [
     "wallet",
     "notifications",
     "ai_assistant",
+    "policy",
 
     # Third-party
     "rest_framework",
@@ -316,6 +317,10 @@ SIMPLE_JWT = {
 # CORS Configuration
 # ========================
 CORS_ALLOW_CREDENTIALS = True
+# The build headers every client sends (policy/channels.py). Without this a browser — the
+# web payment hub — fails its preflight, because neither is in the default allow-list.
+from corsheaders.defaults import default_headers as _cors_default_headers  # noqa: E402
+CORS_ALLOW_HEADERS = (*_cors_default_headers, "x-app-channel", "x-app-version")
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in get_env("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")

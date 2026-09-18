@@ -340,7 +340,8 @@ def audit_coverage() -> list[str]:
     from django.db import models as M
 
     local = {"users", "wallet", "diet", "routine", "subscription", "social",
-             "ai_assistant", "achievements", "analytics", "notifications", "challenges"}
+             "ai_assistant", "achievements", "analytics", "notifications", "challenges",
+             "policy"}
     claimed = set(registry)
     missing = []
     for model in apps.get_models():

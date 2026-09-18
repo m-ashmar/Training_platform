@@ -29,6 +29,7 @@ def create_trial_subscription(user, plan_id, trial_days=7):
                 user=user,
                 plan=plan,
                 status='trial',
+                source='trial',
                 trial_end_date=trial_end
             )
             

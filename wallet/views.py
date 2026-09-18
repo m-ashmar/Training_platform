@@ -32,6 +32,8 @@ from .security import (
 )
 from .throttles import ChargingRateThrottle
 import uuid
+from policy.money import MoneyType
+from policy.services import require_purchase_allowed
 from training_platform.query_params import int_param
 from wallet import idempotency
 
@@ -262,6 +264,7 @@ class AgentTopUpView(APIView):
                 amount,
                 actor_id=request.user.id,
                 tx_type="topup",
+                money_type=MoneyType.WALLET_MOVE,
                 metadata={"agent_id": request.user.id, "api_key_id": getattr(api_key, "key_id", None)},
             )
             # refresh balance from DB to reflect updated value
@@ -278,6 +281,10 @@ class ClientTransferToTrainerView(APIView):
     throttle_classes = [ChargingRateThrottle]
 
     def post(self, request):
+        # Before anything else: a build that may not move wallet money is told so with
+        # the same code whatever it sent. See policy/services.py.
+        require_purchase_allowed(request, MoneyType.WALLET_MOVE)
+
         serializer = TransferRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -307,7 +314,8 @@ class ClientTransferToTrainerView(APIView):
 
         amount = serializer.validated_data["amount"]
         try:
-            tx = move_funds_atomic(client_wallet, trainer_wallet, amount, actor_id=request.user.id, tx_type="transfer", metadata={"trainer_id": trainer.id})
+            tx = move_funds_atomic(client_wallet, trainer_wallet, amount, actor_id=request.user.id, tx_type="transfer",
+                                   money_type=MoneyType.WALLET_MOVE, metadata={"trainer_id": trainer.id})
         except ValueError as e:
             # No funds moved (atomic rollback) — release the key so the caller can retry.
             idempotency.release(idem)
@@ -360,6 +368,8 @@ class AdminReversalView(APIView):
             tx = move_funds_atomic(
                 original.destination_wallet, original.source_wallet, original.amount,
                 actor_id=request.user.id, tx_type="reversal",
+                # The kind of money that is going back is the kind that came.
+                money_type=original.money_type,
                 metadata={"original_reference": original.reference_id,
                           "reason": serializer.validated_data.get("reason", "")},
                 reverses=original)
@@ -469,6 +479,10 @@ class AgentTopUpProxyView(APIView):
     throttle_classes = [ChargingRateThrottle]
 
     def post(self, request):
+        # The app-facing way to move money, so it answers to the build's policy like the
+        # client transfer does. The HMAC endpoint is server-to-server and has no build.
+        require_purchase_allowed(request, MoneyType.WALLET_MOVE)
+
         serializer = AgentTopUpProxyRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -517,7 +531,8 @@ class AgentTopUpProxyView(APIView):
                 return Response(replay, status=status.HTTP_200_OK)
 
             client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
-            tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id, tx_type="topup", metadata={"agent_id": request.user.id})
+            tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id, tx_type="topup",
+                                   money_type=MoneyType.WALLET_MOVE, metadata={"agent_id": request.user.id})
             client_wallet.refresh_from_db()
             resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance)}
             idempotency.complete(idem, resp)
