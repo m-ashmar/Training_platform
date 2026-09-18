@@ -11,7 +11,6 @@ and store-compliance spec. Not yet deployed.
 | File | What it gives you |
 |---|---|
 | `PAYMENTS_COMPLIANCE_PLAN.md` | The work state: 12 build steps, what is done, what is next, the owner's decisions, the ready-made prompt for each step |
-| `FRONTEND_HANDOFF.md` | The contract the mobile app builds against. Every API change lands here in the same commit |
 | `API_CONTRACT.md` | Every route. A gate test diffs it against the URLconf — a new route that is not listed fails the suite |
 | `SYSTEM_OVERVIEW.md` | Architecture map. Read the section you need, not the file |
 
@@ -38,10 +37,10 @@ Settings: `settings_base.py` (shared) · `settings_local.py` (tests, dev) ·
 `settings_production.py` (kill-switch `enforce_production_safety()`) · secrets only through
 `require_env()` / AWS Secrets Manager.
 
-Mobile: `yalla_gym/` is the Flutter client, built by its own sessions — a backend session
-does not edit it; it changes `FRONTEND_HANDOFF.md` instead. `mobile/` and `flutter/` are
-earlier attempts: ask before touching. `_excluded/` is not part of the codebase: never read
-or modify it.
+Mobile: `yalla_gym/` is the Flutter client, built by its own sessions from the design canvas
+and from THIS SOURCE CODE — not from documents (owner, 2026-09-19). A backend session does
+not edit it. `mobile/` and `flutter/` are abandoned attempts: never read or touch them.
+`_excluded/` is not part of the codebase: never read or modify it.
 
 ## Commands
 
@@ -84,8 +83,11 @@ edit produces a false failure. After adding a migration, the gate is `--create-d
 
 **API and docs**
 - Contract changes are additive, or go behind a new version prefix. The app branches on
-  `code`, never on message text. New route → `API_CONTRACT.md`; anything the app must know →
-  `FRONTEND_HANDOFF.md` §3; both in the same commit.
+  `code`, never on message text, so a `code` value never changes.
+- The mobile sessions read the views and serializers themselves: the docstring of a view is
+  its contract. Say there what the endpoint needs (headers, body), every `code` it can
+  answer, and what differs by build. New route → `API_CONTRACT.md` in the same commit (the
+  gate enforces it). `FRONTEND_HANDOFF.md` is no longer read by anyone — do not maintain it.
 - Every user-facing string goes through gettext; Arabic is the primary language.
 
 **Never**

@@ -15,8 +15,9 @@ description: Build the next step of the payments and store-compliance plan, end 
 3. Check out the branch the plan names. Do not push; do not merge into `noti-system`.
 4. Build it with tests written from the behaviour the owner is owed. Follow `CLAUDE.md`:
    `require_purchase_allowed` first on any money endpoint, `money_type` on every
-   `move_funds_atomic`, additive API changes, new routes into `API_CONTRACT.md`, anything
-   the app must know into `FRONTEND_HANDOFF.md` §3.
+   `move_funds_atomic`, additive API changes, new routes into `API_CONTRACT.md`, and
+   view docstrings that state headers, body and every `code` — the mobile sessions read
+   the source, not documents.
 5. Run the step's own tests, then the full gate with `--create-db` in the background to a
    log file in the scratchpad. Do not edit `.py` files while it runs. Read only failures.
 6. When green: update the plan (status, what exists, what is left, new traps), commit on
