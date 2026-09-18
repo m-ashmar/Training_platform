@@ -3923,12 +3923,16 @@ def test_a_task_status_is_only_readable_by_whoever_started_it(seeded_catalogue):
 
 def test_a_fitting_dish_at_the_weekly_cap_beats_a_plate_that_misses(seeded_catalogue, monkeypatch):
     """The cap demotes a dish only below a FITTING plate; it must never hand the client
-    an off-target plate to avoid a third serving."""
-    from diet.services.rule_based_planner import RuleBasedPlanner
+    an off-target plate to avoid one more serving.
+
+    "At the cap" is expressed as WEEK_MAX_SERVINGS, not as the literal 2 it happened to
+    be when this was written: the owner sets that number (3 since 2026-09-18), and a
+    hardcoded count stops describing this scenario the moment it changes."""
+    from diet.services.rule_based_planner import WEEK_MAX_SERVINGS, RuleBasedPlanner
 
     user, _chosen = _chooser("cap-judge")
     planner = RuleBasedPlanner(user, seed_salt="cap")
-    capped_dish = ("dish", True, 10.0, 2, 0.01, lambda: None)
+    capped_dish = ("dish", True, 10.0, WEEK_MAX_SERVINGS, 0.01, lambda: None)
     missing_plate = ("plate", False, 500.0, False, 0.20, lambda: None)
     monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_recipe", lambda *a, **k: capped_dish)
     monkeypatch.setattr(RuleBasedPlanner, "_plan_meal_from_template", lambda *a, **k: missing_plate)

@@ -1,36 +1,36 @@
 {
-  "_comment": "Diet engine quality baseline. Re-recorded because CANDIDATE ORDERING was wrong and the template shortlist was too short. Two defects, one visible effect. (1) CandidatePool added a structure score (meal-library membership, macro role, cuisine, density) to a preference score, and the structure half was unbounded: a food that matched several structural rules out-scored an explicit like. STRUCTURE_CEILING was meant to cap it and did not, because it capped each term rather than the sum. The fix scales the whole structure component down proportionally once the widest one exceeds the ceiling, so an explicit choice always outranks a merely well-fitting food. (2) diet/planner/templates.py hardcoded a 12-food shortlist per slot; with the corrected ordering that window was too narrow and staples the client had chosen (chicken breast, beef mince, chickpeas, broccoli) could not be reached at all. SHORTLIST is now a named constant at 20, chosen by measurement:\n  variant                    dish    distinct  chosen  pref    drift  repeats\n  previous baseline          0.8036  60        0.3066  0.6875  3.330  7\n  bounded ordering, cap 12   0.8690  61        0.2313  0.6250  2.809  7\n  bounded ordering, cap 20   0.8929  65        0.2411  0.6875  2.181  6\n  bounded ordering, cap 30   0.8690  61        0.2409  0.6875  2.890  7\nKept at 20: dish rate 0.804 -> 0.893, distinct dishes 60 -> 65, worst calorie drift 3.33 -> 2.18, weekly repeats of one dish 7 -> 6, preference satisfaction unchanged at 0.6875. The price is chosen-ingredient share 0.3066 -> 0.2411, and it is a real cost recorded deliberately: the old number was inflated by the same unbounded structure score that let a handful of well-connected foods dominate every plate, so a larger share of components came from a smaller set of the client's likes. The new plans reach more of the catalogue, portion closer to target, and repeat less. Earlier deliberate trades still hold: a substitution may not replace the ingredient a dish is named after, and min_distinct_portions_per_food is measured over engine-BUILT plates only, because a recipe author's pinned clove of garlic is meant to be identical every time. The catalogue-lookup defect this file was previously re-recorded for (FoodCategory.by_canonical_name resolving to None under modeltranslation, 86 of 136 foods uncategorised) is fixed and its numbers are superseded by the table above.\n\nA HALF-FIX to the weekly serving cap, and an open decision for the owner. `find_recipe` filtered the fitting dishes down to those under `WEEK_MAX_SERVINGS` and then wrote `if fresh: within = fresh` \u2014 so when EVERY fitting dish was already at the cap, which is exactly the situation the cap exists for, the filter was discarded entirely. That is an unambiguous defect and it is fixed: an over-cap dish is no longer offered at all, and the slot falls to the template path.\n\nThat alone does not make the cap bind, because `_plan_meal`'s ranking places \"is inside tolerance\" ABOVE the serving count \u2014 so when the template plate does not fit, an over-cap dish still wins. Measured on the harness:\n  variant                                 dish    distinct  weekrepeat  drift\n  cap advisory (both gates open)          0.8929  65        3           2.181\n  cap binding (ranking also changed)      0.8750  66        2           2.181\nMaking it bind costs 1.8 points of dish rate \u2014 about three of 168 meals become a built plate \u2014 and costs NOTHING in accuracy: worst drift is identical. But it reverses a deliberate earlier decision, pinned by `test_a_fitting_dish_at_the_weekly_cap_beats_a_plate_that_misses`, whose docstring says the cap 'must never hand the client an off-target plate to avoid a third serving'. The two positions want opposite answers on the same inputs and no threshold separates them: the real case is a dish at 0.284 against a plate at 0.446, the test's case a dish at 0.01 against a plate at 0.20.\n\nSo the ranking is UNCHANGED and the earlier decision stands. The owner chooses: accuracy first (today's behaviour, a dish can reach three servings in a week) or variety first (the cap binds at two, for 1.8 points of dish rate).",
-  "recorded": "2026-09-10",
+  "_comment": "Diet engine quality baseline, re-recorded 2026-09-18 on the CORRECTED engine. Everything recorded before this date is INVALID and must not be restored.\n\nWHY THE PREVIOUS BASELINE WAS INVALID. `find_recipe` passed the recent DISHES into the augmenting food picker, and `_pick` reads that argument as FOOD ids (`if food.id in recent: weight *= RECENCY_PENALTY`). Two different tables, one number space. Where the ranges overlapped \u2014 every freshly created database, both sequences starting at 1 \u2014 a food was cut to a tenth of its weight because a RECIPE happened to share its number; where they did not overlap the penalty never applied. So the engine's output depended on primary keys. Proven by shifting only diet_recipe.id by +100000 on one database, leaving every row otherwise identical:\n  recipe ids      max repeats/week   dish rate   distinct dishes\n  1..105          4                  0.8810      68\n  100001..100105  3                  0.8929      65\nThe old baseline was recorded on a reseeded development database (high ids), so it described one accidental draw of that collision. A fresh install \u2014 CI, and production on day one \u2014 got the other, which is why two gate tests failed on every clean database while passing on the developer's. The ids are out of the engine now: the same data measures identically at both ranges. Similarity ties are settled by name for the same reason.\n\nWEEKLY SERVING CAP: 3, chosen by the owner on 2026-09-18. `find_recipe` also leaked the cap \u2014 when every fitting dish was at its limit it returned its closest match anyway and the caller accepted it, so WEEK_MAX_SERVINGS = 2 still allowed five servings of one dish in a client's week. An over-cap dish is now not offered at all and the slot falls to the template path. Measured on the corrected engine:\n  cap   max repeats/week   dish rate   distinct dishes\n  2     2                  0.8214      65\n  3     3                  0.8512      64\n  4     4                  0.8690      64\nThree keeps most of the named-dish rate while holding repetition below what reads as a pattern.\n\nWHAT MOVED against the invalid baseline, and why each is honest: dish rate 0.8929 -> 0.8512 and distinct dishes 65 -> 64, because the cap now binds \u2014 about seven of 168 meals become a built plate instead of a dish served a fourth time. Preference satisfaction 0.6875 -> 0.6250 and chosen-ingredient share 0.2411 -> 0.2308, because the recency penalty now lands on the foods it was written for: under the collision a client's chosen food escaped the penalty whenever no recipe shared its id, which flattered both numbers. Worst calorie drift and absurd portions are unchanged, and days with a repeated dish stays 0.\n\nEARLIER DELIBERATE TRADES THAT STILL HOLD. The pool's structure score is bounded by STRUCTURE_CEILING so an explicit choice always outranks a merely well-fitting food. The template shortlist is 20 (measured: 12 could not reach chosen staples, 30 was worse on drift and distinct dishes). A substitution may never replace the ingredient a dish is named after. `min_distinct_portions_per_food` is measured over engine-BUILT plates only, because a recipe author's pinned clove of garlic is meant to be identical every time. `_plan_meal`'s ranking still places \"inside tolerance\" above the serving count, pinned by test_a_fitting_dish_at_the_weekly_cap_beats_a_plate_that_misses: the cap must never hand the client an off-target plate.",
+  "recorded": "2026-09-18",
   "catalogue": {
     "foods": 136,
     "recipes": 105
   },
   "measured": {
-    "dish_rate_overall": 0.8929,
+    "dish_rate_overall": 0.8512,
     "dish_rate_by_slot": {
-      "Breakfast": 0.9286,
-      "Lunch": 0.9524,
-      "Dinner": 0.8571,
-      "Snack": 0.8333
+      "Breakfast": 0.7857,
+      "Lunch": 0.9286,
+      "Dinner": 0.8095,
+      "Snack": 0.881
     },
     "meals_measured": 168,
-    "distinct_dishes": 65,
-    "max_repeats_of_one_dish": 6,
+    "distinct_dishes": 64,
+    "max_repeats_of_one_dish": 8,
     "absurd_portion_rate": 0.0,
     "max_repeats_by_slot": {
-      "Lunch": 3,
-      "Dinner": 4,
-      "Snack": 6,
+      "Lunch": 4,
+      "Dinner": 3,
+      "Snack": 8,
       "Breakfast": 4
     },
     "distinct_dishes_by_slot": {
-      "Lunch": 23,
-      "Dinner": 18,
+      "Lunch": 25,
+      "Dinner": 22,
       "Snack": 11,
-      "Breakfast": 22
+      "Breakfast": 18
     },
     "days_repeating_a_dish": 0,
-    "portions_measured": 809,
+    "portions_measured": 790,
     "min_distinct_portions_per_food": 2,
     "floor_pinned_foods": [],
     "ceiling_pinned_foods": [],
@@ -43,12 +43,12 @@
     },
     "drift_all_one_sided": false,
     "drift_worst_abs": 2.181,
-    "twin_identical_meals": 1,
+    "twin_identical_meals": 0,
     "twin_total_meals": 28,
     "twin_identical_built": 0,
-    "twin_built_meals": 5,
-    "chosen_ingredient_share": 0.2411,
-    "preference_satisfaction": 0.6875,
+    "twin_built_meals": 6,
+    "chosen_ingredient_share": 0.2308,
+    "preference_satisfaction": 0.625,
     "max_repeats_per_client_week": 3,
     "chooser_pool_ranked_first": true,
     "condiment_slots": [],

@@ -162,7 +162,15 @@ def _reasons(meal_name: str, chosen_foods, cuisine: str = "", built: bool = Fals
 #: behind them.
 WEEK_WINDOW_DAYS = 7
 #: The most times one dish is served in that window while anything else fits.
-WEEK_MAX_SERVINGS = 2
+#:
+#: THREE, chosen by the owner on 2026-09-18 from measurements on the corrected engine:
+#:   cap 2: a dish twice a week, dish rate 0.8214, 65 distinct dishes
+#:   cap 3: three times,        dish rate 0.8512, 64 distinct dishes
+#:   cap 4: four times,         dish rate 0.8690, 64 distinct dishes
+#: Three keeps most of the named-dish rate — a plate the client recognises as food rather
+#: than an assembled pile — while holding repetition to what a person would not notice
+#: as a pattern.
+WEEK_MAX_SERVINGS = 3
 
 
 def _last(count: int, sequence):
