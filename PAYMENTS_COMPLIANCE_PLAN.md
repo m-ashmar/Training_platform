@@ -14,10 +14,10 @@ Rule zero: no hidden flows, no reviewer detection. Server behaviour depends on t
 | 1 | `money_type` on payments, ledger, checkouts; `source` on entitlements | DONE | `policy/money.py`; `wallet.Transaction.money_type` (0013 backfill, 0014 check); `subscription.Payment.money_type`, `Subscription.source` (0012). Checkout sessions get theirs when the model exists (step 5) |
 | 2 | Capabilities endpoint, channel header, server-side refusal | DONE, 2 follow-ups | `policy/` app, `GET /api/v1/config/capabilities`, seeded per spec §4, change log, operator console. Left: (a) AI coach must decline "how do I pay" on `play`/`ios` — needs the channel on the WebSocket handshake; (b) `preferred_language`-independent: notification texts for `PLATFORM_SUB` states on store channels (arrives with step 5) |
 | 3 | Merge the unmerged payments fix | DONE | `c9-fix-payments` merged here; full suite on a fresh DB is the gate |
-| 4 | Double-entry ledger, commission settings + snapshot, replace the 100% forward | TODO | `wallet/signals.py:handle_payment_completed` still forwards 100% to the trainer. Owner must confirm the two rates first (see Decisions) |
+| 4 | Double-entry ledger, commission settings + snapshot, remove the 100% forward | NEXT | `wallet/signals.py:handle_payment_completed` still forwards 100% of a plan payment to the trainer. Rates decided — see Owner's decisions |
 | 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | TODO | `preferred_language` cannot be set by any endpoint yet (HIGH). Remove `auto_renew` from API/UI here |
 | 6 | Trainer verification, then withdrawals | TODO | |
-| 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age | TODO | Store blockers B1, B2, B5 |
+| 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | TODO | Store blockers B1, B2, B5 |
 | 8 | Two-way trainer–client chat with report/block hooks | TODO | Makes the 1:1 coaching claim real-time in fact |
 | 9 | Agent limits, receivable tracking, agent history/status | TODO | Defaults (200/day) are below the cheapest plan |
 | 10 | Routine products | TODO | Refusal for `ROUTINE_PRODUCT` on store channels already exists in `policy/services.py` — call `require_purchase_allowed` first in the purchase endpoint |
@@ -51,10 +51,39 @@ Rule zero: no hidden flows, no reviewer detection. Server behaviour depends on t
 | Same ShamCash transaction cannot confirm two sessions | existing `uniq_payment_transaction_id` + c9 tests; re-prove on the step 5 session model |
 | Remaining eight items | not started — steps 4–12 |
 
-## Decisions waiting for the owner
+## Owner's decisions (2026-09-19)
 
-1. Commission: 20% platform on coaching and routine products; 20% trainer share of a
-   linked client's plan payment (open comment in the spec, §8). Blocks step 4's defaults only.
-2. Minimum age (spec recommends 16). Blocks step 7.
-3. Missing `X-App-Channel` is refused on money endpoints — the mobile client must send it
-   before its subscribe flow works against this branch.
+| # | Decision | Effect |
+|---|---|---|
+| 1 | The platform keeps **20% of every coaching fee** a client pays a trainer; the trainer gets 80% | Step 4: `COACHING_COMMISSION_RATE = 0.20`, also applied to routine-product sales (spec §8) |
+| 2 | A plan payment stays **100% with the platform**, whether or not the client has a trainer | Step 4: `SUBSCRIPTION_TRAINER_SHARE = 0` — the 100% forward in `wallet/signals.py:handle_payment_completed` is removed, not reduced. Keep the setting so the owner can raise it later |
+| 3 | Minimum age **14** | Step 7: date of birth at signup, enforced by the server |
+| 4 | `yalla_gym/` is the mobile app, built by its own sessions | Backend sessions do not edit it. It already sends `X-App-Channel` / `X-App-Version` |
+
+Both rates are operator-editable settings, snapshotted onto the transaction when the price
+is locked (spec §8); the numbers above are the defaults.
+
+## Open
+
+1. `yalla_gym/lib/core/config/env.dart` defaults `APP_CHANNEL` to `apk` and validates with
+   `assert`, which release builds strip. An iOS or Play build made without the define would
+   declare itself the direct APK and be offered purchasing. Owner/mobile session: no
+   default (empty → the server's strictest behaviour) and a release-mode check.
+2. Step 2 follow-up: the AI coach must decline "how do I pay" on `play`/`ios`.
+
+## One step per session — what to paste
+
+Open a NEW session for each step and paste the line. Effort: **max** only where money,
+locking or idempotency is designed; **default** for the rest.
+
+| Step | Effort | Paste this |
+|---|---|---|
+| 4 | max | `Read PAYMENTS_COMPLIANCE_PLAN.md and do step 4: double-entry ledger accounts, the two commission settings with snapshotting, and remove the 100% subscription forward. Done = new tests + full gate with --create-db, plan file updated, committed on the branch.` |
+| 5 | max | `Read PAYMENTS_COMPLIANCE_PLAN.md and do step 5 (payment lifecycle). Split it: first the checkout session model + states + idempotency, stop and report; the poller, notifications and receipts are separate sessions.` |
+| 6 | max | `... do step 6: trainer verification flow, then withdrawals.` |
+| 7 | default | `... do step 7: reports, blocking, moderation queue, AI consent, date of birth with minimum age 14.` |
+| 8 | default | `... do step 8: two-way trainer–client chat with report and block hooks.` |
+| 9 | high | `... do step 9: agent limits, receivable tracking, agent history and status.` |
+| 10 | high | `... do step 10: routine products.` |
+| 11 | default | `... do step 11: web hub API surface, deep-link files, APK version endpoint.` |
+| 12 | default | `... do step 12: demo seeding command, review notes, data inventory from the privacy registry.` |

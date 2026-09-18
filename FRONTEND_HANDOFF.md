@@ -47,6 +47,10 @@ Backend state: 334 API routes, 370 tests green on a freshly created database.
    launch and after sign-in, cache the last answer) and from nothing else: no buy button,
    price, "subscribe on our website" text or hub link unless its flag is true. The
    `play` and `ios` flavors must not contain the hub URL or a WebView that can load it.
+   **The channel has no default.** A build compiled without it must declare nothing (the
+   server then behaves as its strictest) or fail to start — never fall back to `apk`, and
+   never rely on `assert`, which release builds strip: a store build that forgot the define
+   would announce itself as the direct APK and be offered purchasing.
 
 ## 3. What changed since `API_CONTRACT.md` was frozen
 

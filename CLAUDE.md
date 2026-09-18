@@ -1,134 +1,125 @@
-# Training Platform — Claude Code Project Context
+# Training Platform (Yalla Gym) — Claude Code Project Context
 
-## What This Project Is
+## What this is, and where it stands
 
-Production Django 5.1 REST + WebSocket backend serving a Flutter mobile app.
-Current state: **final pre-production audit phase — not yet in production.**
+Django 5.1 REST + WebSocket backend for a Flutter mobile app. Arabic-first, Syrian market,
+payments through ShamCash. **Phase: building to production** against the owner's payments
+and store-compliance spec. Not yet deployed.
 
-Read `SYSTEM_OVERVIEW.md` for the complete architecture map before doing anything else.
+**Start every session here, in this order, and read nothing else until you need it:**
 
----
-
-## Architecture at a Glance
-
-```
-Language:    Python 3.12
-Framework:   Django 5.1.3 + Django REST Framework 3.15.2
-ASGI Server: Daphne (WebSockets via Django Channels 4.x)
-Database:    PostgreSQL (prod) / SQLite (dev: db.sqlite3)
-Cache:       Redis — 6 segmented logical DBs (DB0–DB5)
-Jobs:        Celery 5.5 + Redis broker
-Auth:        RS256 JWT (simplejwt) + custom OTP flow
-Deployment:  Docker → Fly.io (Amsterdam)
-```
-
-## User Roles
-- `client` — end-user athlete
-- `trainer` — manages client routines and diet plans
-- `agent` — financial agent with wallet + API key access
-- `admin` — platform superuser
-
-## 12 Django Apps
-
-| App | Key Files |
+| File | What it gives you |
 |---|---|
-| `users` | models.py (CustomUser, OTP), views.py (29 routes), utils.py |
-| `wallet` | models.py (Wallet, Transaction, AuditLog), views.py (12 routes), security.py |
-| `diet` | views.py (54 routes, ~92KB), engine/ (10 rule modules), ai/ (LLM pipeline) |
-| `routine` | views.py (10 routes), models.py, permissions.py |
-| `subscription` | views.py, gateways/ (baraka, bemo, syriatel), Stripe |
-| `social` | views.py, consumers.py (WebSocket), services.py |
-| `ai_assistant` | consumers.py (WebSocket AI chat), tools/ (5 tools), services/ |
-| `achievements` | engine.py, registry.py (signal-driven award system) |
-| `analytics` | views.py (progress tracking) |
-| `notifications` | channels/fcm.py (Firebase), domain/, listeners/ |
-| `challenges` | basic fitness challenges |
-| `admin_dashboard` | custom admin UI at /dj-admin/ |
+| `PAYMENTS_COMPLIANCE_PLAN.md` | The work state: 12 build steps, what is done, what is next, the owner's decisions, the ready-made prompt for each step |
+| `FRONTEND_HANDOFF.md` | The contract the mobile app builds against. Every API change lands here in the same commit |
+| `API_CONTRACT.md` | Every route. A gate test diffs it against the URLconf — a new route that is not listed fails the suite |
+| `SYSTEM_OVERVIEW.md` | Architecture map. Read the section you need, not the file |
 
-## Settings Split
+## Architecture at a glance
+
 ```
-training_platform/
-├── settings_secrets.py   ← require_env(), get_secret(), AWS Secrets Manager
-├── settings_base.py      ← shared config, zero hardcoded secrets
-├── settings_local.py     ← DEBUG=True, SQLite, LocMemCache
-├── settings_production.py ← DEBUG=False hardcoded, enforce_production_safety() kill-switch
-└── settings.py           ← environment router
+Python 3.12 · Django 5.1.3 · DRF 3.15 · Channels 4 (Daphne) · Celery 5.5
+PostgreSQL (prod, and tests: Docker on :5433) · Redis, 6 logical DBs · RS256 JWT + OTP
+Docker → Fly.io (Amsterdam)
 ```
 
-## Security Posture
-- JWT: RS256 asymmetric (private key signs, public key verifies)
-- OTP: `secrets` module, hash-stored, constant-time compare, 5-attempt lockout
-- Redis: 6 isolated DBs (sessions/ratelimit/public/private/edamam/channels)
-- Wallet: atomic transfers, append-only audit log, WALLET_DEV_MODE hardcoded False in prod
-- Rate limiting: 3-layer (CDN → NGINX → django-ratelimit on Redis DB1)
-- Production kill-switch: `enforce_production_safety()` crashes process on misconfiguration
-- All secrets: zero hardcoded — loaded via `require_env()` or AWS Secrets Manager
+Roles: `client`, `trainer`, `agent` (cash top-ups), `admin`.
 
-## Excluded Directories
-The `_excluded/` folder contains files NOT part of the architecture:
-- All test files and test directories
-- All database migrations
-- All fixture/datadump JSON files  
-- Debug/verify/generate one-off scripts
-- Firebase credential JSON
-- Media, static, .venv
-
-**Never read files from `_excluded/` — they are not part of the active codebase.**
-
-## Key Files for Audit Priority
-1. `training_platform/settings_*.py` — production config correctness
-2. `training_platform/middleware.py` — 17-layer middleware stack
-3. `users/views.py` + `users/utils.py` — auth, OTP, registration
-4. `wallet/models.py` + `wallet/views.py` — financial logic
-5. `diet/views.py` — largest file (54 endpoints, ~92KB)
-6. `diet/engine/` — 10 rule-based planner modules
-7. `subscription/gateways/` — 3 payment gateway integrations
-8. `routine/permissions.py` — trainer/client boundary enforcement
-
-## Project Skills (read these for platform-specific patterns)
-
-These files document established conventions and known issues for this project.
-Read them before auditing the relevant area — they contain project-specific rules that
-Fable should use to detect deviations:
-
-| File | Read When |
+| App | What lives there |
 |---|---|
-| `.agents/skills/django-conventions.md` | Auditing any Django app — OTP flow, cache keys, serializer rules, view patterns |
-| `.agents/skills/debug-checklist.md` | Cross-checking known production bugs — verify they are fixed, not just documented |
-| `.agents/skills/api-contract-sync.md` | Auditing users/views.py — verify actual endpoints match declared API contracts |
-| `.agents/skills/deploy-pipeline.md` | Auditing settings_production.py, Dockerfile, fly.toml — verify all required env vars are covered |
+| `users` | CustomUser, OTP, registration, trainer–client relations and the coaching hold (`trainer_relations.py`) |
+| `wallet` | Wallet, append-only `Transaction` ledger, `move_funds_atomic`, audit log, agent top-ups |
+| `subscription` | Plans, `Subscription` (the entitlement), `Payment`, `services/payment_service.py` (the ONLY code that moves a payment's state), `gateways/shamcash.py` |
+| `policy` | The four kinds of money (`money.py`) and what each build may show and sell (`services.py`, `models.py`, `defaults.py`) |
+| `diet` | 54 endpoints, rule engine in `engine/`, LLM pipeline in `ai/` |
+| `routine`, `social`, `ai_assistant`, `achievements`, `analytics`, `notifications`, `challenges`, `admin_dashboard` | As named. Operator console is `admin_dashboard` at `/dj-admin/` |
 
-**Skip entirely (not part of this audit):**
-- `.agents/skills/flutter-conventions.md` — Flutter client, not Django backend
-- `.agents/skills/nextjs-conventions.md` — Next.js does not exist in this project
+Settings: `settings_base.py` (shared) · `settings_local.py` (tests, dev) ·
+`settings_production.py` (kill-switch `enforce_production_safety()`) · secrets only through
+`require_env()` / AWS Secrets Manager.
 
----
+Mobile: `yalla_gym/` is the Flutter client, built by its own sessions — a backend session
+does not edit it; it changes `FRONTEND_HANDOFF.md` instead. `mobile/` and `flutter/` are
+earlier attempts: ask before touching. `_excluded/` is not part of the codebase: never read
+or modify it.
 
-## What to NEVER Do
-- Never modify files in `_excluded/`
-- Never run `python manage.py migrate` without confirming DB target
-- Never commit `.env` or any credential file
-- Never set `DEBUG=True` in settings_production.py
-- Never bypass the OTP flow in users/views.py
+## Commands
 
----
+```bash
+docker compose up -d db                                                    # Postgres 15 on :5433
+.venv/bin/python manage.py check --settings=training_platform.settings_local
+.venv/bin/python manage.py makemigrations --check --dry-run --settings=training_platform.settings_local
+.venv/bin/python -m pytest tests/test_policy_channels.py -q -p no:cacheprovider      # one file: seconds
+.venv/bin/python -m pytest --create-db -q -p no:cacheprovider > <scratchpad>/suite.log 2>&1   # full gate: ~35 min
+```
 
-## Output Format Rules (apply to ALL responses)
+Run the full gate in the background, to a log file, and read only the failures. **Never
+edit a `.py` file while it runs** — several gate tests read source from disk and a mid-run
+edit produces a false failure. After adding a migration, the gate is `--create-db`.
 
-These rules are mandatory. They exist to minimize output token usage without losing quality.
+## Rules that always hold
 
-1. **Findings only** — do NOT narrate what you checked or summarize clean sections. Silence = no issue.
-2. **No code reproduction** — reference by `file.py:L42` format, never paste code blocks unless asked.
-3. **Compact finding format** — use this exact structure per finding:
+**Money**
+- Every payment and ledger row carries a `money_type`; every `move_funds_atomic(...)` call
+  names it. A payment's state changes only inside `PaymentService`.
+- Any endpoint that opens a checkout or moves wallet money calls
+  `policy.services.require_purchase_allowed(request, money_type)` FIRST.
+- Rule zero of the spec: no hidden flows, no reviewer detection. Behaviour may depend on the
+  build (`X-App-Channel`, `X-App-Version`) and on nothing else — never on user, country, IP,
+  date or a "review mode". Plan and routine-product purchasing on `play`/`ios` is locked off
+  in code; do not add a way around it.
+- Lock order is subscription → payment, user rows → wallets (ascending id). Money moves on
+  commit, idempotently. Read the docstrings in `payment_service.py`, `wallet/models.py` and
+  `users/trainer_relations.py` before changing any of them.
+- Owner's numbers (2026-09-19): platform keeps 20% of every coaching fee; plan payments stay
+  100% with the platform; minimum age 14.
+
+**Tests**
+- Never edit a test's assertion to match code, and never restore an old baseline to make a
+  gate green. A deliberate contract change updates shared setup or the allow-list, with the
+  reason in a comment.
+- Thread-based tests (`test_zz_*`) flush every table: never rely on rows seeded by a migration.
+- Diet engine changes are measured on `tests/diet_quality.py` before they land; the baseline
+  is re-recorded only deliberately, with the reason written in it.
+
+**API and docs**
+- Contract changes are additive, or go behind a new version prefix. The app branches on
+  `code`, never on message text. New route → `API_CONTRACT.md`; anything the app must know →
+  `FRONTEND_HANDOFF.md` §3; both in the same commit.
+- Every user-facing string goes through gettext; Arabic is the primary language.
+
+**Never**
+- Never run `manage.py migrate` against anything but the local test database without
+  confirming the target. Never commit `.env` or a credential file. Never set `DEBUG=True` in
+  production settings. Never bypass the OTP flow. Never push, and never merge into
+  `noti-system` or `main`, unless the owner asks.
+
+## How to work (keeps quality up and usage down)
+
+1. One build step per session. The state lives in `PAYMENTS_COMPLIANCE_PLAN.md`, not in the
+   conversation — finish by updating it, then the owner starts a fresh session.
+2. Work on the branch the plan names. Commit when the step's tests and the full gate pass;
+   say exactly what was run.
+3. Build inline. Subagents only for independent parallel work, at most 10 per task.
+4. When you learn something the next session needs (a trap, a convention, an owner
+   decision), write it where it will be found: a rule here, state in the plan, a preference
+   in memory. Do not leave it in the chat.
+5. Project conventions and known bugs: `.agents/skills/django-conventions.md`,
+   `debug-checklist.md`, `api-contract-sync.md`, `deploy-pipeline.md` — read the one that
+   matches the area before changing it. Skip `flutter-conventions.md` and
+   `nextjs-conventions.md`.
+
+## Output rules (apply to every response)
+
+1. No introductions, no conclusions, no follow-up offers. Silence means no issue.
+2. No code reproduction — reference `file.py:L42`; paste code only when asked.
+3. Tables over paragraphs when comparing items.
+4. Build work ends with: what changed, what was run and its result, decisions the owner owes.
+5. Audits and reviews use this exact shape per finding, CRITICAL/HIGH/MEDIUM only unless asked:
    ```
    [SEVERITY] file.py:L<line> — <issue in one line>
    Impact: <one line>
    Fix: <one line>
    ```
-4. **No introductions or conclusions** — start directly with findings. No "I will now analyze..." or "In summary..."
-5. **Skip LOW and INFO** unless explicitly asked — focus on CRITICAL, HIGH, MEDIUM only.
-6. **Dead code** — list as a simple bullet list: `app/file.py:L<line> — <what is unused>`
-7. **Tables over paragraphs** — if comparing multiple items, use a markdown table.
-8. **No follow-up offers** — do not end with "Would you like me to..."
-9. **Phase headers only** — use a single line `## PHASE N — TITLE` between phases, nothing else.
-10. **If a phase has zero findings** — write `## PHASE N — TITLE: CLEAN` and move on.
+   Dead code is a bullet list: `app/file.py:L<line> — <what is unused>`. A phase with no
+   findings is `## PHASE N — TITLE: CLEAN`.
