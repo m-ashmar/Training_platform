@@ -11,6 +11,7 @@ marked 'active' are already past their end_date. Nothing moves a subscription ou
 'active' when its cover ends, so paid access never lapses on its own.
 """
 import logging
+from datetime import timedelta
 
 from celery import shared_task
 
@@ -65,3 +66,63 @@ def expire_lapsed_subscriptions():
     if expired:
         logger.info("Expired %s lapsed subscription(s)", expired)
     return expired
+
+
+#: How long a completed payment's payout is left to the on-commit receiver before the
+#: sweep treats it as lost. That receiver runs milliseconds after the COMMIT; the margin
+#: is for a worker that is slow, not for one that is working.
+PAYOUT_GRACE = timedelta(minutes=10)
+
+
+@shared_task(
+    name="subscription.settle_owed_payouts",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+@no_retry_on_timeout
+def settle_owed_payouts(batch_size=200):
+    """Pay the trainer for every completed payment whose payout never landed.
+
+    The payout runs on commit, after the payment row already says 'completed'. One
+    transient fault in it — a deadlock with the client's own transfer, a dropped
+    connection, a worker killed between the COMMIT and the receiver — rolled the payout
+    back and left nothing that remembered it was owed. The retry paths now look at
+    `payout_settled_at` instead of the status, but they only run if something calls
+    again: a gateway that got its 200 elsewhere, or a reconcile the customer never
+    repeats, leaves the trainer unpaid. Measured before this: after one injected fault,
+    redelivery, a new event id, reconcile and the admin action all left `legs=[]` and the
+    trainer at 0.00.
+
+    Sends `payment_completed` again for each, exactly as `PaymentService.redeliver_payout`
+    does; the receiver is idempotent under the payment row lock, so one that lands
+    meanwhile is not paid twice. One payment failing does not stop the others. Returns
+    how many were sent.
+    """
+    from django.utils import timezone
+
+    from .models import Payment
+    from .services.payment_service import PaymentService, payment_completed
+
+    cutoff = timezone.now() - PAYOUT_GRACE
+    owed = list(
+        Payment.objects.filter(status='completed', payout_settled_at__isnull=True,
+                               updated_at__lt=cutoff)
+        .order_by('updated_at', 'id').values_list('pk', flat=True)[:batch_size]
+    )
+    sent = 0
+    for pk in owed:
+        payment = (Payment.objects.select_related('subscription', 'subscription__user',
+                                                  'subscription__plan').get(pk=pk))
+        try:
+            payment_completed.send(sender=PaymentService, payment=payment,
+                                   subscription=payment.subscription)
+            sent += 1
+        except Exception:
+            logger.exception("Owed payout for payment %s failed again; the next sweep retries",
+                             payment.pk)
+    if owed:
+        logger.warning("Sent %s of %s owed payout(s)", sent, len(owed))
+    return sent

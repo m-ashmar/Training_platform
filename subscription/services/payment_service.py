@@ -17,6 +17,11 @@ funnel through this service, which:
 
 Illegal state transitions raise InvalidPaymentTransition. Amount/currency
 mismatches raise PaymentVerificationError. Both refuse to activate anything.
+
+Lock order: the SUBSCRIPTION row first, then its payment rows. Every method here that
+takes both takes them in that order, so a checkout (which starts from the subscription)
+and a completion (which starts from a payment) wait for each other instead of
+deadlocking.
 """
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ from django.db import transaction
 from django.dispatch import Signal
 from django.utils import timezone
 
-from ..models import Payment, Subscription
+from ..models import OPEN_PAYMENT_STATUSES, Payment, Subscription
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,10 @@ class PaymentVerificationError(PaymentError):
     """Raised when gateway-reported data does not match the payment record."""
 
 
+class SubscriptionAlreadyActive(PaymentError):
+    """A first payment was asked for while the subscription's cover is still running."""
+
+
 class PaymentService:
     """Centralized, verified payment lifecycle operations."""
 
@@ -66,19 +75,16 @@ class PaymentService:
             amount, currency, status  (+ optional transaction_id, reference, event_id)
 
         Idempotent: replays (same event id, or already-completed payment) return
-        the existing payment without side effects.
+        the existing payment without granting anything again — but a replay of a payment
+        whose payout is still owed sends the payout again (see `redeliver_payout`).
         """
         with transaction.atomic():
-            payment = (
-                Payment.objects
-                .select_for_update()
-                .select_related('subscription', 'subscription__plan')
-                .get(id=payment_id)
-            )
+            subscription, payment = cls._lock_subscription_and_payment(payment_id)
 
             # --- Idempotency: already completed → no-op replay ---
             if payment.status == 'completed':
                 logger.info(f"complete_payment idempotent no-op for {payment.id} (already completed)")
+                cls.redeliver_payout(payment)
                 return payment
 
             event_id = verified_data.get('event_id')
@@ -86,6 +92,7 @@ class PaymentService:
                 dup = Payment.objects.filter(gateway_event_id=event_id).exclude(id=payment.id).first()
                 if dup:
                     logger.warning(f"Duplicate gateway_event_id {event_id}: already on payment {dup.id}")
+                    cls.redeliver_payout(dup)
                     return dup
 
             # --- State machine: must be legal to reach 'completed' ---
@@ -115,10 +122,10 @@ class PaymentService:
                 payment.gateway_response = verified_data['gateway_data']
             if not payment.invoice_number:
                 payment.invoice_number = cls._generate_invoice_number()
-            payment.save()
 
-            # --- Activate / extend the subscription ---
-            cls._activate_subscription(payment)
+            # --- Activate / extend the subscription, and record what that bought ---
+            payment.covers_from, payment.covers_until = cls._activate_subscription(subscription)
+            payment.save()
 
             logger.info(
                 f"Payment {payment.id} completed (invoice {payment.invoice_number}), "
@@ -132,6 +139,37 @@ class PaymentService:
         transaction.on_commit(lambda: payment_completed.send(
             sender=cls, payment=payment, subscription=payment.subscription))
         return payment
+
+    @classmethod
+    def redeliver_payout(cls, payment: Payment) -> bool:
+        """Send `payment_completed` again if this payment's payout is still owed.
+
+        The payout runs on commit, AFTER the payment row already says 'completed', and
+        every way of retrying a payment decided "done" from that status alone: the
+        webhook's event-id replay check, the already-completed no-op above, the reconcile
+        view's early return and the admin action. Measured with one injected fault in the
+        payout: delivery 1 -> 500 with no payout legs; the gateway's redelivery -> 200,
+        legs []; a new event id -> 200, legs []; reconcile -> 200, legs []. The gateway
+        stops on a 200, so the trainer was never paid.
+
+        Each of those paths now calls this, and `subscription.settle_owed_payouts` sweeps
+        whatever no retry ever reaches. It is on commit for the same reason the first
+        send is — the receiver moves money and the caller's transaction can still roll
+        back — and outside a transaction Django runs it immediately. A failure still
+        propagates, so the caller answers 500 and the gateway tries again. The receiver
+        is idempotent under the payment row lock, so a payout that did land is not paid
+        twice; any receiver added to `payment_completed` has to be idempotent too, because
+        this is the same signal sent again.
+
+        Returns whether a payout was (re)scheduled.
+        """
+        if payment.status != 'completed' or payment.payout_settled_at is not None:
+            return False
+        logger.warning("Payment %s is completed but its payout is still owed; sending it again",
+                       payment.id)
+        transaction.on_commit(lambda: payment_completed.send(
+            sender=cls, payment=payment, subscription=payment.subscription))
+        return True
 
     @classmethod
     def cancel_payment(cls, payment_id, reason: str = "") -> Payment:
@@ -166,18 +204,12 @@ class PaymentService:
         or a chargeback, and the admin action wrote the column with `queryset.update()`
         — so the money went back and the subscription stayed active either way.
 
-        Access is withdrawn in proportion to what was refunded: a renewal loses the
-        period it bought, an initial payment ends the subscription outright. If that
-        leaves the end date in the past the subscription is expired rather than left
-        nominally active with a stale date.
+        Access is withdrawn by exactly what the refunded payment bought (`covers_from` to
+        `covers_until`). If nothing paid for is left the subscription is cancelled rather
+        than left nominally active with a stale date.
         """
         with transaction.atomic():
-            payment = (
-                Payment.objects
-                .select_for_update()
-                .select_related('subscription', 'subscription__plan')
-                .get(id=payment_id)
-            )
+            subscription, payment = cls._lock_subscription_and_payment(payment_id)
             if payment.status == 'refunded':
                 return payment
             if not payment.can_transition_to('refunded'):
@@ -199,33 +231,31 @@ class PaymentService:
                 payment.gateway_error = reason[:2000]
             payment.save()
 
-            subscription = (
-                Subscription.objects.select_for_update()
-                .select_related('plan')
-                .get(pk=payment.subscription_id)
-            )
             now = timezone.now()
-            # ONE period comes off, whichever payment it was. The `else` branch set
-            # `end_date = now` unconditionally, with no reference to what else had been
-            # paid — so refunding a customer's FIRST month destroyed the two months they
-            # had paid for and kept: 15,000 SYP paid over three payments, one 5,000
-            # refunded, and the subscription cancelled outright with the trainer holding
-            # 10,000 and the client holding nothing.
+            # What THIS payment bought comes off — no more, no less. An earlier version
+            # set `end_date = now` whatever else had been paid, so refunding a customer's
+            # FIRST month destroyed the two months they had paid for and kept. Its
+            # replacement took `plan.duration_days` off whenever any other completed
+            # payment existed, which assumed every completed payment had bought a period;
+            # one that cleared while cover was already running had bought nothing. So
+            # refunding a double charge — the normal fix for one — cancelled the month
+            # the customer still paid for, and for a new subscriber landed `end_date`
+            # exactly on `start_date`: `validate_row()` raised, the refund webhook
+            # answered 500 on every redelivery, the admin action raised, and the trainer
+            # kept both payouts.
             #
-            # A refund gives back one period of access because it gave back one period of
-            # money. If nothing else has been paid, that ends the subscription, which is
-            # what the old branch was right about in the single-payment case.
-            other_completed = Payment.objects.filter(
-                subscription_id=payment.subscription_id, status='completed'
-            ).exclude(pk=payment.pk).count()
-            if subscription.end_date and other_completed:
-                subscription.end_date = subscription.end_date - timedelta(
-                    days=subscription.plan.duration_days
-                )
+            # Every completion now buys one period and records it on the payment, so the
+            # subtraction is the recorded one — and none at all for a period the
+            # subscription has since lapsed past and restarted (`_cover_to_take_back`).
+            remaining_until = (subscription.end_date - cls._cover_to_take_back(payment, subscription)
+                               if subscription.end_date else now)
+            if remaining_until > now:
+                subscription.end_date = remaining_until
             else:
-                subscription.end_date = now
-
-            if subscription.end_date <= now:
+                # Nothing paid for is left. Clamped to now rather than written as the
+                # subtraction: the subtraction can land on or before `start_date`, which
+                # is a row `Subscription.clean()` rightly refuses to store.
+                subscription.end_date = min(subscription.end_date or now, now)
                 subscription.status = 'cancelled'
                 subscription.cancelled_at = now
                 subscription.auto_renew = False
@@ -283,54 +313,119 @@ class PaymentService:
         return payment
 
     @classmethod
-    def start_renewal(cls, subscription: Subscription) -> Payment:
+    def start_renewal(cls, subscription: Subscription, initiate=None) -> Payment:
         """
-        Begin a renewal by creating a PENDING payment only. This never mutates
-        the subscription — activation happens later via complete_payment once the
-        gateway confirms funds.
-        """
-        if subscription.status not in ('active', 'expired'):
-            raise PaymentError("Subscription is not in a renewable state")
+        Begin a renewal: return the subscription's open checkout, opening one if it has
+        none. This never mutates the subscription — activation happens later via
+        complete_payment once the gateway confirms funds.
 
-        # One renewal in flight at a time, and the check has to hold under concurrency.
+        `initiate(payment)` opens the gateway session and returns
+        `(payment_method, reference, gateway_response)`; see `_checkout_under_lock`.
+        Without it the payment is created without a reference.
+        """
+        # One checkout in flight at a time, and the check has to hold under concurrency.
         # It was a `.filter(...).first()` followed by a `.create(...)` with no lock, so
         # two real threads both found nothing and both opened one: a double-tapped Renew
         # button charged 10,000 SYP for a 5,000 SYP plan and granted 60 days. Both
         # charges then cleared verification, because both were legitimate.
         #
-        # The subscription row is the lock, because it is what "a renewal for this
-        # subscription" is scoped to, and the whole check-and-create happens under it.
+        # The subscription row is the lock, because it is what "a checkout for this
+        # subscription" is scoped to, and the whole check-create-INITIATE happens under
+        # it. The lock used to end when this function returned, before the view wrote
+        # the reference: a second tap got the same payment back with no reference yet,
+        # generated its own, and the last save won. 30 of 30 double taps on a barrier
+        # handed the customer a reference that matched no payment, and a payment quoting
+        # it was answered 400 by the webhook for ever.
         with transaction.atomic():
-            Subscription.objects.select_for_update().filter(pk=subscription.pk).first()
+            locked = (Subscription.objects.select_for_update(of=('self',))
+                      .select_related('plan').get(pk=subscription.pk))
+            if locked.status not in ('active', 'expired'):
+                raise PaymentError("Subscription is not in a renewable state")
 
-            existing = Payment.objects.filter(
-                subscription=subscription,
-                status__in=('pending', 'processing', 'authorized'),
-                metadata__kind='renewal',
-            ).first()
-            if existing:
-                logger.info(
-                    "Renewal already pending for subscription %s (payment %s)",
-                    subscription.id, existing.id,
-                )
-                return existing
-
-            return cls._create_renewal_payment(subscription)
+            # ANY open payment, not only `metadata.kind='renewal'` ones. After a lapse
+            # the app offers both Renew and Pay; each deduplicated only its own kind, so
+            # both handed out a live reference and paying both charged twice.
+            open_payments = Payment.objects.filter(
+                subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
+            return cls._checkout_under_lock(locked, open_payments, 'renewal', initiate)
 
     @classmethod
-    def _create_renewal_payment(cls, subscription: Subscription) -> Payment:
-        return Payment.objects.create(
-            subscription=subscription,
-            amount=subscription.plan.price,
-            # The plan's own currency. Hardcoding 'USD' here made every renewal
-            # unclearable: plans are priced in SYP, ShamCash reports SYP, and
-            # _verify_amount_and_currency rejected the mismatch on arrival.
-            currency=subscription.plan.currency,
-            status='pending',
-            payment_method='shamcash',
-            description=f"Renewal for {subscription.plan.name}",
-            metadata={'kind': 'renewal'},
-        )
+    def start_payment(cls, subscription: Subscription, initiate) -> Payment:
+        """The Pay button: the subscription's open checkout, opening one if it has none.
+
+        Refused while cover is running — extending an active subscription is what renew
+        is for. That check used to be the ONLY one on this path: nothing deduplicated,
+        so two taps on a subscription that was pending or had lapsed each created a
+        Payment with its own reference, both payable, and the second bought nothing.
+        """
+        with transaction.atomic():
+            locked = (Subscription.objects.select_for_update(of=('self',))
+                      .select_related('plan').get(pk=subscription.pk))
+            if locked.is_active:
+                raise SubscriptionAlreadyActive(
+                    f"Subscription {locked.id} is already active; renew extends it")
+            open_payments = Payment.objects.filter(
+                subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
+            return cls._checkout_under_lock(locked, open_payments, 'initial', initiate)
+
+    @classmethod
+    def _checkout_under_lock(cls, subscription: Subscription, open_payments, kind: str,
+                             initiate) -> Payment:
+        """Return the open checkout, or open one. The caller holds the subscription lock.
+
+        * An open payment that already has a reference is THE checkout: the customer may
+          already be paying against it. It comes back as it is, with the gateway
+          response it was opened with, and `already_open` set.
+        * An open payment with no reference was never offered to anyone, so it is
+          adopted rather than left beside a new one. POST /subscriptions/ writes exactly
+          such a row; nothing could ever complete it, and every subscriber's history
+          carried it as an orphan 'pending' payment beside the one that cleared.
+        * Otherwise a new payment is created.
+
+        The gateway is initiated while the lock is held. In transfer/reconcile mode that
+        is local work; in hosted mode it is a round trip to ShamCash, and holding the
+        lock across it is the point: a second tap waits and then receives the first
+        tap's session instead of opening a second one. Only this subscription's row is
+        held. If initiation fails the transaction rolls back and nothing is left behind.
+        """
+        candidates = list(open_payments.order_by('created_at', 'id'))
+        for payment in candidates:
+            if payment.gateway_transaction_reference:
+                logger.info("Checkout %s already open for subscription %s",
+                            payment.id, subscription.id)
+                payment.already_open = True
+                return payment
+        if candidates and initiate is None:
+            candidates[0].already_open = True
+            return candidates[0]
+
+        plan = subscription.plan
+        payment = candidates[0] if candidates else Payment(subscription=subscription,
+                                                           status='pending')
+        payment.subscription = subscription
+        # The plan's price and the plan's own currency. A row nobody has been asked to
+        # pay yet carries no promise, so it follows the plan as it is now. Hardcoding
+        # 'USD' here made every renewal unclearable: plans are priced in SYP, ShamCash
+        # reports SYP, and _verify_amount_and_currency rejected the mismatch on arrival.
+        payment.amount = plan.price
+        payment.currency = plan.currency
+        metadata = dict(payment.metadata or {})
+        if kind == 'renewal':
+            metadata['kind'] = 'renewal'
+            payment.description = f"Renewal for {plan.name}"
+        else:
+            metadata.pop('kind', None)
+            payment.description = f"Payment for {plan.name}"
+        payment.metadata = metadata
+
+        if initiate is not None:
+            method, reference, response = initiate(payment)
+            payment.payment_method = method
+            payment.gateway_transaction_reference = reference
+            payment.gateway_response = response or {}
+        payment.save()
+        payment.already_open = False
+        return payment
 
     # ------------------------------------------------------------------ #
     # Internals
@@ -355,32 +450,97 @@ class PaymentService:
             )
 
     @staticmethod
-    def _activate_subscription(payment: Payment) -> None:
-        # Take the subscription's own row lock. The caller holds the *payment* row, and
-        # two payments for one subscription are different rows, so without this both
-        # would read the same end_date and both write base + duration — the later write
-        # overwriting the earlier, and a customer who paid twice getting one period.
-        subscription = (
-            Subscription.objects.select_for_update()
-            .select_related('plan')
-            .get(pk=payment.subscription_id)
-        )
+    def _lock_subscription_and_payment(payment_id):
+        """Lock a payment's subscription, THEN the payment, and return both.
+
+        The subscription is locked because two payments for one subscription are
+        different rows: without it both would read the same end_date and both write
+        base + duration, the later write overwriting the earlier. It is locked FIRST
+        because a checkout starts from the subscription and then touches its payments;
+        taking them the other way round here was a deadlock waiting for a webhook to land
+        during a tap.
+
+        `of=('self',)`: `select_for_update()` with `select_related('subscription__plan')`
+        also locked the PLAN row, so every completion for any subscriber on a plan queued
+        behind every other one, and so did creating a subscription on it (the foreign key
+        check needs a share lock the update lock excludes).
+        """
+        subscription_id = (Payment.objects.filter(pk=payment_id)
+                           .values_list('subscription_id', flat=True).first())
+        if subscription_id is None:
+            raise Payment.DoesNotExist(f"Payment {payment_id} does not exist")
+        subscription = (Subscription.objects.select_for_update(of=('self',))
+                        .select_related('plan').get(pk=subscription_id))
+        payment = Payment.objects.select_for_update().get(pk=payment_id)
+        payment.subscription = subscription
+        return subscription, payment
+
+    @staticmethod
+    def _activate_subscription(subscription: Subscription):
+        """Grant one plan period for a payment that cleared; return the window it bought.
+
+        The period runs from when the money cleared, or from the end of cover the
+        customer already holds — never from a date written before they paid. The first
+        payment kept the `end_date` that `Subscription.save()` derived when the PENDING
+        row was created at checkout, whenever that date was still in the future: a
+        30-day plan paid ten days after opening the checkout delivered 20.00 days, and
+        paid on day 29 delivered one. And a payment that was not tagged as a renewal
+        added nothing at all if cover was already running, yet was marked completed,
+        invoiced and paid out to the trainer.
+
+        The caller holds the subscription lock.
+        """
         now = timezone.now()
         duration = timedelta(days=subscription.plan.duration_days)
-        is_renewal = str(payment.metadata.get('kind', '')) == 'renewal'
 
-        if is_renewal:
-            base = subscription.end_date if (subscription.end_date and subscription.end_date > now) else now
-            subscription.end_date = base + duration
+        if subscription.is_active:
+            # Cover the customer already holds is kept, and the new period follows it.
+            # A trial's cover ends at its trial end.
+            base = subscription.end_date
+            if subscription.trial_end_date:
+                base = min(base, subscription.trial_end_date)
         else:
-            # Initial activation: the subscription was created with an end_date
-            # already; only reset it if missing or already in the past.
-            if not subscription.end_date or subscription.end_date <= now:
-                subscription.end_date = now + duration
+            # Pending, lapsed or cancelled: nothing is running, so the paid period starts
+            # now, and so does the row's own window. A start date left at checkout time
+            # would show a customer who paid today a period that began ten days ago.
+            base = now
+            subscription.start_date = now
 
+        subscription.end_date = base + duration
+        # Paid, so no longer a trial. `is_active` refuses a row whose trial has ended, and
+        # this was never cleared: a trial user who paid after the trial got
+        # status='active' and no access.
+        subscription.trial_end_date = None
         subscription.status = 'active'
-        subscription.auto_renew = True
+        # `auto_renew` is NOT touched. It is the customer's setting, and writing True on
+        # every completion silently undid a customer who had turned it off.
         subscription.save()
+        return base, subscription.end_date
+
+    @staticmethod
+    def _cover_to_take_back(payment: Payment, subscription: Subscription) -> timedelta:
+        """How much of the subscription's current cover a refunded payment paid for.
+
+        The length of the window it bought — not its dates. A refund that takes a period
+        out of the middle of a run of renewals moves every later period earlier, so the
+        later payments' recorded dates stop matching the row while their lengths still do.
+
+        Nothing, if the subscription has restarted since that window began. Activation
+        moves `start_date` to the moment the money cleared whenever cover had lapsed or
+        been cancelled, so a window that began before `start_date` belongs to cover that
+        already ran out: refunding January's payment in March must not take March's
+        paid month with it.
+        """
+        began = payment.covers_from or payment.created_at
+        if subscription.start_date and began and began < subscription.start_date:
+            return timedelta(0)
+        if payment.covers_from and payment.covers_until:
+            return payment.covers_until - payment.covers_from
+        # Completed before the window was recorded. One plan period is what a completion
+        # buys, which is the best statement available about a row that never said — and
+        # `created_at` stands in above for the window it never recorded, so a refund of an
+        # old row still cannot take back cover bought after the subscription restarted.
+        return timedelta(days=subscription.plan.duration_days)
 
     @staticmethod
     def _generate_invoice_number() -> str:

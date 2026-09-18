@@ -4,6 +4,7 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.utils import timezone
 
 from subscription.services.payment_service import payment_completed
 
@@ -49,14 +50,6 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
 
     subscription = subscription or payment.subscription
     client = subscription.user
-    # The trainer this client actually has a relationship with, not the pointer.
-    # Reading the pointer meant a subscription payment forwarded the FULL price to
-    # whoever the pointer named, outside the hold system entirely: no agreed rate, no
-    # escrow, no idempotency against the relation. `current_trainer` reads the approved
-    # relation, which is the platform's single source of truth for the bond.
-    trainer = client.current_trainer
-    if not trainer:
-        return
 
     # ONE transaction, with the payment row locked. The idempotency checks were reads
     # outside any transaction followed by writes, so two gateway callbacks for one
@@ -81,9 +74,21 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
                 payment.pk, getattr(locked, "status", "gone"))
             return
         payment = locked
+
+        # The trainer this client actually has a relationship with, not the pointer.
+        # Reading the pointer meant a subscription payment forwarded the FULL price to
+        # whoever the pointer named, outside the hold system entirely: no agreed rate, no
+        # escrow, no idempotency against the relation. `current_trainer` reads the approved
+        # relation, which is the platform's single source of truth for the bond.
+        trainer = client.current_trainer
+        if not trainer:
+            _mark_payout_settled(payment)
+            return
+
         if Transaction.objects.filter(
                 tx_type="transfer",
                 metadata__original_payment_id=str(payment.id)).exists():
+            _mark_payout_settled(payment)
             return
 
         # In the payment's OWN currency. `get_or_create` with only `owner_type` left the
@@ -93,11 +98,26 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
         for w, who in ((client_wallet, "client"), (trainer_wallet, "trainer")):
             if w.currency != payment.currency:
                 # A wallet that already holds money in another currency. There is no FX
-                # here, so this is refused loudly rather than converted at 1:1.
+                # here, so this is refused loudly rather than converted at 1:1 — and
+                # recorded as resolved, because retrying cannot change the answer; the
+                # error log is what puts it in front of a person.
                 logger.error(
                     "payout skipped for payment %s: the %s's wallet holds %s and the "
                     "payment is %s", payment.pk, who, w.currency, payment.currency)
+                _mark_payout_settled(payment)
                 return
+
+        # BOTH wallets, in id order, before either leg moves. The top-up leg locked the
+        # client's wallet alone and the transfer leg then asked for both sorted by id —
+        # client first, trainer second whenever the trainer signed up first, which is
+        # the ordinary case. A client's own transfer to their trainer at the same moment
+        # (`move_funds_atomic` sorts too) held the trainer's wallet and waited for the
+        # client's: a real Postgres deadlock cycle. When the payout was the victim it
+        # rolled back after the payment had committed, and nothing ever paid it again —
+        # 13 lost payouts in 400 runs. `move_funds_atomic` re-locks these rows inside
+        # this transaction, which costs nothing once they are held.
+        list(Wallet.objects.select_for_update()
+             .filter(pk__in={client_wallet.pk, trainer_wallet.pk}).order_by("pk"))
 
         # A Payment means money entered the system, so the client's wallet is credited
         # first and the trainer is paid out of it.
@@ -134,6 +154,19 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
                 "plan_id": subscription.plan_id,
             },
         )
+        _mark_payout_settled(payment)
+
+
+def _mark_payout_settled(payment) -> None:
+    """Record, in the payout's own transaction, that nothing more is owed for `payment`.
+
+    Until this is written a completed payment's payout is OWED, and every retry path
+    (`PaymentService.redeliver_payout`) and the sweep (`subscription.settle_owed_payouts`)
+    sends it again. Written with `update()` so the row's `updated_at` — which the sweep's
+    grace period reads — is left alone.
+    """
+    type(payment).objects.filter(pk=payment.pk, payout_settled_at__isnull=True).update(
+        payout_settled_at=timezone.now())
 
 
 def unwind_payment(payment) -> int:

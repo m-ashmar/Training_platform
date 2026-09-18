@@ -40,6 +40,7 @@ from django.utils.decorators import method_decorator
 from .services.payment_gateways import PaymentGatewayService, PaymentGatewayError
 from .services.payment_service import (
     PaymentService, PaymentError, InvalidPaymentTransition, PaymentVerificationError,
+    SubscriptionAlreadyActive,
 )
 # NOTE: use PaymentGatewayManager.get_available_gateways() (returns a dict of
 # gateway_name -> info). The same-named helper in settings.gateway_config returns
@@ -51,6 +52,46 @@ import uuid
 from rest_framework.exceptions import NotFound, PermissionDenied, NotAuthenticated
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 from wallet.throttles import ChargingRateThrottle
+
+
+def _checkout_opener(request, subscription, gateway_name, gateway_service):
+    """The gateway call that opens a checkout, for `PaymentService` to run under its lock.
+
+    `gateway_service` is a callable returning the service, so a caller that may be handed
+    back an already-open checkout resolves the gateway only when a new one is opened.
+    Returns `(payment_method, reference, gateway_response)`.
+    """
+    def initiate(payment):
+        service = gateway_service()
+        reference = service._generate_reference()
+        init = service.initiate_payment(
+            amount=payment.amount,
+            currency=payment.currency,
+            user_data={
+                'email': request.user.email,
+                'phone': request.user.phone_number,
+                'name': f"{request.user.first_name} {request.user.last_name}".strip(),
+            },
+            reference=reference,
+            metadata={'subscription_id': str(subscription.id),
+                      **({'kind': payment.metadata['kind']}
+                         if (payment.metadata or {}).get('kind') else {}),
+                      'description': payment.description},
+            callback_url=request.build_absolute_uri(f"/api/subscription/webhook/{gateway_name}/"),
+        )
+        return gateway_name, reference, init.get('response', {})
+    return initiate
+
+
+def _locked_subscription(pk):
+    """The subscription row under `SELECT ... FOR UPDATE`, for a write that must not race.
+
+    `of=('self',)`: without it the lock reaches through `select_related` to the plan row,
+    and every subscriber on a plan would queue behind every other one.
+    """
+    return (Subscription.objects.select_for_update(of=('self',))
+            .select_related('plan').get(pk=pk))
+
 
 class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for subscription plans (read-only for users)"""
@@ -139,58 +180,91 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             logger.error(f"Error creating subscription: {str(e)}")
             raise
     
+    def update(self, request, *args, **kwargs):
+        """PATCH/PUT: the customer's own settings (`auto_renew`), under the row lock.
+
+        `UpdateModelMixin` validated the row `get_object()` had read with no lock and then
+        saved EVERY column of it back. A renewal that cleared between that read and that
+        write had its new `end_date` overwritten with the old one: turning auto-renew off
+        while a renewal cleared lost the 30 days just paid for, 20 of 20 times on a
+        barrier, both calls answering 200 and the payment staying 'completed'. The row is
+        now read under `select_for_update` — the lock the payment service takes before it
+        extends cover — and only the fields the request changes are written.
+        """
+        partial = kwargs.pop('partial', False)
+        subscription = self.get_object()
+        with transaction.atomic():
+            locked = _locked_subscription(subscription.pk)
+            serializer = self.get_serializer(locked, data=request.data, partial=partial)
+            serializer.is_valid(raise_exception=True)
+            for field, value in serializer.validated_data.items():
+                setattr(locked, field, value)
+            locked.save(update_fields=[*serializer.validated_data, 'updated_at'])
+        return Response(serializer.data)
+
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         """Cancel a subscription with proper validation and logging"""
         try:
             subscription = self.get_object()
-            serializer = SubscriptionCancelSerializer(
-                data=request.data,
-                context={'subscription': subscription}
-            )
-            
-            if serializer.is_valid():
+            with transaction.atomic():
+                # Decided and written on the row as it is under the lock, and only the
+                # columns a cancellation owns are written. This read the row with no lock
+                # and saved every column back from that copy, so a renewal that cleared in
+                # between had its extension overwritten: 18 of 20 paid renewals lost their
+                # 30 days, and with `immediate` the stale write also put status back to
+                # 'cancelled' over the reactivation.
+                subscription = _locked_subscription(subscription.pk)
+                serializer = SubscriptionCancelSerializer(
+                    data=request.data,
+                    context={'subscription': subscription}
+                )
+                if not serializer.is_valid():
+                    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
                 reason = serializer.validated_data.get('reason', '')
                 immediate = serializer.validated_data.get('immediate', False)
-                
-                with transaction.atomic():
-                    if immediate:
-                        subscription.status = 'cancelled'
-                        subscription.cancelled_at = timezone.now()
-                        state_changed = True
-                    else:
-                        # Turning auto-renew off twice is not a second cancellation.
-                        # The serializer only rejects an already-'cancelled' row, so a
-                        # non-immediate cancel stayed 'active' and could be replayed
-                        # without limit, appending an audit row to the caller's own
-                        # payment history on every call.
-                        state_changed = subscription.auto_renew
-                        subscription.auto_renew = False
 
-                    subscription.save()
+                if immediate:
+                    subscription.status = 'cancelled'
+                    subscription.cancelled_at = timezone.now()
+                    # A cancelled subscription does not renew, as a refund's cancellation
+                    # already says. Activation no longer switches this back on, so a row
+                    # left at True here would read "renews" for good.
+                    subscription.auto_renew = False
+                    state_changed = True
+                else:
+                    # Turning auto-renew off twice is not a second cancellation.
+                    # The serializer only rejects an already-'cancelled' row, so a
+                    # non-immediate cancel stayed 'active' and could be replayed
+                    # without limit, appending an audit row to the caller's own
+                    # payment history on every call.
+                    state_changed = subscription.auto_renew
+                    subscription.auto_renew = False
 
-                    if state_changed:
-                        # Audit row. Currency follows the plan like every other Payment;
-                        # 'USD' here was a third independent guess at a currency the
-                        # platform does not charge in.
-                        Payment.objects.create(
-                            subscription=subscription,
-                            amount=0,
-                            currency=subscription.plan.currency,
-                            status='cancelled',
-                            description=f"Subscription cancelled: {reason}",
-                            metadata={'reason': reason, 'immediate': immediate}
-                        )
-                
-                logger.info(f"Cancelled subscription {subscription.id} for user {request.user.id}")
-                
-                return Response({
-                    'message': _('Subscription cancelled successfully'),
-                    'status': subscription.status
-                })
-            
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-            
+                subscription.save(update_fields=[
+                    'status', 'cancelled_at', 'auto_renew', 'updated_at'])
+
+                if state_changed:
+                    # Audit row. Currency follows the plan like every other Payment;
+                    # 'USD' here was a third independent guess at a currency the
+                    # platform does not charge in.
+                    Payment.objects.create(
+                        subscription=subscription,
+                        amount=0,
+                        currency=subscription.plan.currency,
+                        status='cancelled',
+                        description=f"Subscription cancelled: {reason}",
+                        metadata={'reason': reason, 'immediate': immediate}
+                    )
+
+            logger.info(f"Cancelled subscription {subscription.id} for user {request.user.id}")
+
+            return Response({
+                'message': _('Subscription cancelled successfully'),
+                'status': subscription.status
+            })
+
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -213,68 +287,44 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         """
         try:
             subscription = self.get_object()
-
-            try:
-                payment = PaymentService.start_renewal(subscription)
-            except PaymentError as e:
-                return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
-
             gateway_name = request.data.get('gateway', 'shamcash')
 
-            # A renewal already in flight keeps the reference the customer was given.
-            # `start_renewal` deliberately returns the EXISTING pending payment, and
-            # this then generated a fresh reference, opened a SECOND live session at the
-            # gateway, and wrote the new reference over the old one — which is unique, so
-            # the first was destroyed rather than kept as an alias. The customer pays
-            # against the instructions from their first tap, the webhook carrying that
-            # reference matches nothing, and the platform banks the money and grants
-            # nothing.
-            if payment.gateway_transaction_reference:
-                logger.info("Renewal %s already initiated; returning its reference",
-                            payment.id)
-                resp = payment.gateway_response or {}
-                return Response({
-                    'message': _('A renewal payment is already awaiting completion.'),
-                    'payment_id': str(payment.id),
-                    'reference': payment.gateway_transaction_reference,
-                    'status': payment.status,
-                    'payment_url': resp.get('payment_url'),
-                    'instructions': resp.get('instructions'),
-                })
-
+            # Reserving the checkout, opening the gateway session and storing its reference
+            # are ONE step under the subscription lock, inside `start_renewal`. They were
+            # three: the service committed a reference-less payment and released the lock,
+            # and this view then generated a reference and saved it. Every tap that had
+            # been waiting on the lock was released into that gap, saw no reference, made
+            # its own and saved over the others — 30 of 30 double taps handed the customer
+            # a reference that matched no payment, and a transfer quoting it was answered
+            # 400 by the webhook on every redelivery. The same call also hands back a
+            # checkout the Pay button already opened, rather than a second payable one.
             try:
-                # Through the manager, so an unconfigured gateway refuses instead of
-                # handing out transfer instructions to an empty account.
-                gateway_service = PaymentGatewayManager.get_service_for_initiation(gateway_name)
-                reference = gateway_service._generate_reference()
-                init = gateway_service.initiate_payment(
-                    amount=payment.amount,
-                    currency=payment.currency,
-                    user_data={
-                        'email': request.user.email,
-                        'phone': request.user.phone_number,
-                        'name': f"{request.user.first_name} {request.user.last_name}".strip(),
-                    },
-                    reference=reference,
-                    metadata={'subscription_id': str(subscription.id), 'kind': 'renewal',
-                              'description': f"Renewal for {subscription.plan.name}"},
-                    callback_url=request.build_absolute_uri(f"/api/subscription/webhook/{gateway_name}/"),
+                payment = PaymentService.start_renewal(
+                    subscription,
+                    initiate=_checkout_opener(
+                        request, subscription, gateway_name,
+                        # Through the manager, so an unconfigured gateway refuses instead
+                        # of handing out transfer instructions to an empty account.
+                        lambda: PaymentGatewayManager.get_service_for_initiation(gateway_name)),
                 )
-                payment.payment_method = gateway_name
-                payment.gateway_transaction_reference = reference
-                payment.gateway_response = init.get('response', {})
-                payment.save()
             except PaymentGatewayError as e:
-                PaymentService.fail_payment(payment.id, str(e))
+                logger.warning("Renewal for subscription %s not initiated: %s", subscription.id, e)
+                return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
+            except PaymentError:
                 return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
 
-            logger.info(f"Renewal payment {payment.id} initiated for subscription {subscription.id}")
-            resp = init.get('response', {})
+            resp = payment.gateway_response or {}
+            if payment.already_open:
+                logger.info("Checkout %s already open; returning its reference", payment.id)
+                message = _('A renewal payment is already awaiting completion.')
+            else:
+                logger.info(f"Renewal payment {payment.id} initiated for subscription {subscription.id}")
+                message = _('Renewal payment initiated. Complete payment to extend your subscription.')
             return Response({
-                'message': _('Renewal payment initiated. Complete payment to extend your subscription.'),
+                'message': message,
                 'payment_id': str(payment.id),
-                'reference': reference,
-                'status': 'pending',
+                'reference': payment.gateway_transaction_reference,
+                'status': payment.status,
                 'payment_url': resp.get('payment_url'),
                 'instructions': resp.get('instructions'),
             })
@@ -611,10 +661,17 @@ class PaymentWebhookView(APIView):
         Route a verified webhook to the single authority (PaymentService). This
         method never sets payment/subscription state directly.
         """
-        # Idempotency: a replayed event id that already landed is a no-op.
+        # Idempotency: a replayed event id that already landed grants nothing again —
+        # but it is how the gateway retries a delivery we answered 500, and the usual
+        # reason for that 500 is a payout that failed AFTER the payment committed. This
+        # returned early on the payment's status alone, answered 200, and the gateway
+        # stopped retrying with the trainer unpaid. A payout still owed is sent again.
         event_id = payment_data.get('event_id')
-        if event_id and Payment.objects.filter(gateway_event_id=event_id, status='completed').exists():
+        replayed = (Payment.objects.filter(gateway_event_id=event_id, status='completed').first()
+                    if event_id else None)
+        if replayed:
             logger.info(f"Webhook event {event_id} already processed; ignoring replay")
+            PaymentService.redeliver_payout(replayed)
             return
 
         payment = Payment.objects.filter(
@@ -782,16 +839,6 @@ class PaymentGatewayView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Paying again while cover is still running buys nothing: activation only
-            # moves end_date when it is missing or already past, so the money would be
-            # taken and no time added. Extending an active subscription is what the
-            # renew action is for.
-            if subscription.is_active:
-                return Response(
-                    {'error': _('This subscription is already active. Use renew to extend it.')},
-                    status=status.HTTP_409_CONFLICT
-                )
-
             # --- Optional client confirmation of the price it displayed ---
             quoted_amount = request.data.get('amount')
             if quoted_amount is not None:
@@ -830,51 +877,43 @@ class PaymentGatewayView(APIView):
                      'code': 'gateway_unavailable'},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE
                 )
-            reference = gateway_service._generate_reference()
 
-            # Prepare user data
-            user_data = {
-                'email': request.user.email,
-                'phone': request.user.phone_number,
-                'name': f"{request.user.first_name} {request.user.last_name}".strip()
-            }
+            # The subscription's ONE open checkout: returned if it has one — whichever
+            # button opened it — and otherwise opened, with the gateway session and its
+            # reference stored under the subscription lock. This created a new Payment on
+            # every call, so two taps on a subscription that was pending or had lapsed
+            # each handed out their own payable reference, and Renew and Pay after a lapse
+            # did the same between them. Paying both charged 10,000 SYP for one 5,000 SYP
+            # period.
+            try:
+                payment = PaymentService.start_payment(
+                    subscription,
+                    _checkout_opener(request, subscription, gateway_name,
+                                     lambda: gateway_service),
+                )
+            except SubscriptionAlreadyActive:
+                # Extending an active subscription is what the renew action is for. Decided
+                # under the lock, so a payment clearing at this moment is seen.
+                return Response(
+                    {'error': _('This subscription is already active. Use renew to extend it.')},
+                    status=status.HTTP_409_CONFLICT
+                )
 
-            # Initiate payment (caller owns the reference, tied to the Payment row)
-            payment_result = gateway_service.initiate_payment(
-                amount=amount,
-                currency=currency,
-                user_data=user_data,
-                reference=reference,
-                metadata={'subscription_id': str(subscription_id),
-                          'description': f"Payment for {subscription.plan.name}"},
-                callback_url=request.build_absolute_uri(f"/api/subscription/webhook/{gateway_name}/"),
-            )
+            if payment.already_open:
+                logger.info("Checkout %s already open; returning its reference", payment.id)
+            else:
+                logger.info(f"Payment initiated: {payment.id} via {gateway_name}")
 
-            # Create the PENDING payment record. It becomes 'completed' only via
-            # PaymentService after gateway confirmation.
-            payment = Payment.objects.create(
-                subscription=subscription,
-                amount=amount,
-                currency=currency,
-                status='pending',
-                payment_method=gateway_name,
-                gateway_transaction_reference=reference,
-                gateway_response=payment_result['response'],
-                description=f"Payment for {subscription.plan.name}"
-            )
-
-            logger.info(f"Payment initiated: {payment.id} via {gateway_name}")
-
-            resp = payment_result['response']
+            resp = payment.gateway_response or {}
             return Response({
                 'success': True,
                 'payment_id': str(payment.id),
-                'reference': reference,
+                'reference': payment.gateway_transaction_reference,
                 'payment_url': resp.get('payment_url'),
                 'instructions': resp.get('instructions'),
                 'expires_at': resp.get('expires_at')
             })
-            
+
         except PaymentGatewayError as e:
             logger.error(f"Payment gateway error: {str(e)}")
             return Response(
@@ -942,6 +981,8 @@ class PaymentReconcileView(APIView):
             return Response({'error': _('Payment not found')}, status=status.HTTP_404_NOT_FOUND)
 
         if payment.status == 'completed':
+            # Already completed is not "nothing left to do" while its payout is owed.
+            PaymentService.redeliver_payout(payment)
             return Response({'success': True, 'status': 'completed',
                              'invoice_number': payment.invoice_number})
 
