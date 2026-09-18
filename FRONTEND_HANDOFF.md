@@ -22,7 +22,7 @@ Backend state: 334 API routes, 370 tests green on a freshly created database.
 | Social feed, posts, comments, challenges | `/api/social/` | Stable; comment rules tightened (§3) |
 | Notifications, device tokens | `/api/notifications/`, `/api/auth/device-token/` | Stable |
 | Analytics, achievements | `/api/analytics/`, `/api/achievements/` | Stable |
-| Wallet (agent role) | `/api/wallet/` | Stable; not needed for the client app |
+| Wallet (clients, trainers, agents) | `/api/wallet/` | Stable. **Clients need it:** requesting a trainer requires the fee in the wallet, top-ups from agents land there, and clients can send money to a trainer. Trainers see earnings there; agents top up clients from it |
 
 ## 2. Integration rules that will save you a refactor
 
