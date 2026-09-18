@@ -106,7 +106,10 @@ Read paths in all of these are safe. It is the writes and their error codes that
 
 `Accept-Language: ar` switches the API's own messages, and the user's stored
 `preferred_language` drives anything the backend renders asynchronously (emails, pushes,
-daily advice). **169 of 723 backend strings have no Arabic translation yet** (102 of them
+daily advice, AI coach replies). **Nothing can set that stored language today** — it is
+not in the profile update, and signup does not save it — so all of that arrives in
+English for every user until the backend adds it. Keep a language setting in the app
+anyway; it will start saving once the field is writable. **169 of 723 backend strings have no Arabic translation yet** (102 of them
 in diet), so an Arabic user will see some English from the API until that pass lands.
 Plan the UI so a backend message is never the only text the user gets for a critical
 action — keep your own localized copy for buttons, screen titles and validation.
