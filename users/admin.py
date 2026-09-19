@@ -117,7 +117,7 @@ class CustomUserAdmin(UserAdmin):
         }),
         ('Personal info', {
             'fields': (
-                'first_name', 'last_name', 'profile_picture', 'height', 
+                'first_name', 'last_name', 'profile_picture', 'date_of_birth', 'height',
                 'weight', 'age', 'gender', 'activity_level', 'specific_injury'
             )
         }),
@@ -125,12 +125,16 @@ class CustomUserAdmin(UserAdmin):
             'fields': (
                 'trainer_bio', 'trainer_specializations', 'trainer_certifications', 
                 'trainer_experience_years', 'trainer_hourly_rate', 
-                'trainer_is_verified', 'trainer_is_available'
+                'trainer_is_verified', 'trainer_is_available',
+                # Matching codes, e.g. ["strength", "build_muscle"].
+                'trainer_goal_focus', 'trainer_injury_focus', 'trainer_training_places',
             ),
             'classes': ('collapse',)
         }),
         ('Client info', {
-            'fields': ('assigned_trainer', 'client_goals', 'client_preferences'),
+            'fields': ('assigned_trainer', 'client_goals', 'client_preferences',
+                       'training_goal', 'training_place', 'training_days_per_week',
+                       'injury_areas'),
             'description': ('Setting a trainer here writes the pointer only. The '
                             'relationship, the client\'s consent and the escrow hold '
                             'live on TrainerClientRelation, and save() below keeps '

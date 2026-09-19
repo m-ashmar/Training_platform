@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+from django.utils import timezone
 from django.utils.translation import gettext as _
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
@@ -141,13 +142,17 @@ class UpdateUserDetailsView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
-        """Update user details."""
+        """Update user details.
+
+        Errors go through the API envelope, so each field error carries its `code`
+        (`field_errors.<field>[0].code`), e.g. `under_minimum_age` on `date_of_birth`
+        or `age`. The field keys stay at the top level as before.
+        """
         user = request.user
         serializer = UserDetailsSerializer(user, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({'message': _('Details updated successfully!')}, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({'message': _('Details updated successfully!')}, status=status.HTTP_200_OK)
     
     
 class UserDetailsView(APIView):
@@ -405,10 +410,10 @@ class TrainerProfileView(APIView):
             )
         
         serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({'message': _('Trainer profile updated successfully!')}, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({'message': _('Trainer profile updated successfully!')}, status=status.HTTP_200_OK)
 
 class TrainerClientsView(APIView):
     """View for trainer to manage their clients"""
@@ -506,7 +511,8 @@ class AssignClientView(APIView):
                     trainer=request.user,
                     client=client,
                     defaults={'status': 'pending', 'initiated_by': 'trainer',
-                              'agreed_rate': getattr(request.user, 'trainer_hourly_rate', None)}
+                              'agreed_rate': getattr(request.user, 'trainer_hourly_rate', None),
+                              'requested_at': timezone.now(), 'responded_at': None}
                 )
             
             if not created:
@@ -525,7 +531,9 @@ class AssignClientView(APIView):
                     relation.status = 'pending'
                     relation.initiated_by = 'trainer'
                     relation.agreed_rate = getattr(request.user, 'trainer_hourly_rate', None)
+                    relation.requested_at, relation.responded_at = timezone.now(), None
                     relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
+                                                 'requested_at', 'responded_at',
                                                  'updated_at'])
             
             # On commit, like the client-side path beside it: a notification queued
@@ -676,10 +684,10 @@ class ClientProfileView(APIView):
             )
         
         serializer = ClientProfileSerializer(request.user, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({'message': _('Client profile updated successfully!')}, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({'message': _('Client profile updated successfully!')}, status=status.HTTP_200_OK)
 
 class PublicTrainersListView(APIView):
     """Public view to get all available trainers without authentication"""
@@ -1188,7 +1196,8 @@ class ClientRequestTrainerView(APIView):
                 defaults={'status': 'pending', 'initiated_by': 'client',
                           # The price the client is agreeing to, right now. Read again
                           # at approval it was whatever the trainer had since set it to.
-                          'agreed_rate': getattr(trainer, 'trainer_hourly_rate', None)}
+                          'agreed_rate': getattr(trainer, 'trainer_hourly_rate', None),
+                          'requested_at': timezone.now(), 'responded_at': None}
             )
             
             if not created:
@@ -1207,7 +1216,9 @@ class ClientRequestTrainerView(APIView):
                     relation.status = 'pending'
                     relation.initiated_by = 'client'
                     relation.agreed_rate = getattr(trainer, 'trainer_hourly_rate', None)
+                    relation.requested_at, relation.responded_at = timezone.now(), None
                     relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
+                                                 'requested_at', 'responded_at',
                                                  'updated_at'])
             
             # Emit domain event — notification handled at delivery boundary.
@@ -1706,7 +1717,9 @@ def approve_trainer_relation(relation, actor):
                             status=http.HTTP_402_PAYMENT_REQUIRED), relation
 
         relation.status = 'approved'
-        relation.save(update_fields=['status', 'updated_at'])
+        relation.responded_at = timezone.now()
+        relation.save(update_fields=['status', 'responded_at', 'updated_at'])
+        _record_outcome(relation)
         locked_client.assigned_trainer = trainer
         locked_client.save(update_fields=['assigned_trainer'])
     return None, relation
@@ -1761,8 +1774,29 @@ def reject_trainer_relation(relation, actor):
                                             'Nothing was changed; please try again.')},
                                 status=http.HTTP_409_CONFLICT), relation
         relation.status = 'rejected'
-        relation.save(update_fields=['status', 'updated_at'])
+        relation.responded_at = timezone.now()
+        relation.save(update_fields=['status', 'responded_at', 'updated_at'])
+        _record_outcome(relation)
     return None, relation
+
+
+def _record_outcome(relation):
+    """Keep the answer beyond the life of the relation row (`TrainerRequestOutcome`).
+
+    Called inside the answering transaction, under the relation's row lock, so the
+    record and the status change commit together. A request sent before
+    `requested_at` existed has no start time and is not recorded: a response time
+    guessed from `created_at` would be wrong for every re-sent request.
+    """
+    from .models import TrainerRequestOutcome
+
+    if relation.requested_at is None or relation.responded_at is None:
+        return
+    TrainerRequestOutcome.objects.create(
+        trainer_id=relation.trainer_id, client_id=relation.client_id,
+        initiated_by=relation.initiated_by, outcome=relation.status,
+        requested_at=relation.requested_at,
+        responded_at=max(relation.responded_at, relation.requested_at))
 
 
 class TrainerRespondToRequestView(APIView):

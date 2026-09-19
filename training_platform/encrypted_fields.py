@@ -97,3 +97,57 @@ class EncryptedTextField(models.TextField):
             # log it so a botched rotation is visible instead of silent.
             logger.debug("Undecryptable value in %s — returning stored value.", self.name)
             return value
+
+
+class EncryptedCodeListField(EncryptedTextField):
+    """A short list of codes (`['knee', 'lower_back']`), encrypted at rest.
+
+    For structured health data: which parts of a body are injured is as sensitive as
+    the free text in `specific_injury`, and nothing filters on it — it is read whole by
+    its owner, their approved trainer, and the matching code, which works on one row at
+    a time. Stored as the codes joined by commas, then encrypted; an empty list is
+    stored as an empty string. Codes must not contain commas.
+    """
+
+    def get_prep_value(self, value):
+        # Not through `super()`: `TextField.get_prep_value` calls `self.to_python`, which
+        # here turns the joined string back into a list, and the parent then encrypted
+        # that list's repr ("['knee']").
+        if isinstance(value, (list, tuple)):
+            value = ",".join(str(v) for v in value)
+        if value is None or value == "" or self.cipher is None:
+            return value
+        return self.cipher.encrypt(str(value).encode("utf-8")).decode("utf-8")
+
+    def from_db_value(self, value, expression, connection):
+        return self._split(self._decrypt(value))
+
+    def to_python(self, value):
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        return self._split(self._decrypt(value))
+
+    def value_to_string(self, obj):
+        return ",".join(self.value_from_object(obj) or [])
+
+    def formfield(self, **kwargs):
+        # An admin form edits the list as "knee,lower_back", not as a Python repr.
+        from django import forms
+
+        class CodeListFormField(forms.CharField):
+            def prepare_value(self, value):
+                return ",".join(value) if isinstance(value, (list, tuple)) else value
+
+            def to_python(self, value):
+                value = super().to_python(value)
+                return [part.strip() for part in value.split(",") if part.strip()]
+
+        return super().formfield(**{"form_class": CodeListFormField, **kwargs})
+
+    @staticmethod
+    def _split(value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        return [part for part in str(value).split(",") if part]

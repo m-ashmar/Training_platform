@@ -10,7 +10,7 @@ from datetime import date, timedelta
 from django.conf import settings
 import os
 import uuid
-from training_platform.encrypted_fields import EncryptedTextField
+from training_platform.encrypted_fields import EncryptedCodeListField, EncryptedTextField
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.translation import gettext_lazy as _
@@ -123,6 +123,72 @@ ACTIVITY_LEVELS = [
     ('Active', 'Active'),
     ('VeryActive', 'Very Active'),
 ]
+
+
+#: The onboarding vocabulary (design v2: OnbGoal, OnbActivity, OnbHealth). Codes are the
+#: contract: the app draws its own labels for them, and they never change once shipped.
+TRAINING_GOALS = [
+    ('build_muscle', 'Build muscle'),
+    ('fat_loss', 'Lose fat'),
+    ('strength', 'Strength'),
+    ('general_fitness', 'General fitness'),
+]
+TRAINING_PLACES = [
+    ('gym', 'Gym'),
+    ('home', 'Home'),
+]
+#: Where it hurts. "None" is an empty list, not a code; 'other' is a health condition
+#: the client describes in `specific_injury`.
+INJURY_AREAS = [
+    ('shoulder', 'Shoulder'),
+    ('lower_back', 'Lower back'),
+    ('knee', 'Knee'),
+    ('neck', 'Neck'),
+    ('wrist', 'Wrist'),
+    ('ankle', 'Ankle'),
+    ('hip', 'Hip'),
+    ('other', 'Other health condition'),
+]
+#: What a trainer coaches: the client goals, plus nutrition (a roster filter).
+TRAINER_FOCUS = TRAINING_GOALS + [('nutrition', 'Nutrition')]
+
+
+def _validate_codes(value, choices):
+    """A list of codes drawn from `choices`, each at most once."""
+    allowed = {c for c, _label in choices}
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise DjangoValidationError(_("Send a list of codes."), code="invalid")
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise DjangoValidationError(_("Unknown codes: %(codes)s."),
+                                    params={"codes": ", ".join(unknown)}, code="invalid_choice")
+    if len(set(value)) != len(value):
+        raise DjangoValidationError(_("A code is listed twice."), code="duplicate")
+
+
+# Module-level, so migrations can name them.
+def validate_injury_areas(value):
+    _validate_codes(value, INJURY_AREAS)
+
+
+def validate_trainer_focus(value):
+    _validate_codes(value, TRAINER_FOCUS)
+
+
+def validate_training_places(value):
+    _validate_codes(value, TRAINING_PLACES)
+
+
+def age_on(born, today=None):
+    """Whole years from `born` to `today` (default: today). Feb 29 turns a year older
+    on Mar 1 in a year without one."""
+    today = today or timezone.localdate()
+    return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
+def minimum_age():
+    """The youngest a person may be to hold an account (owner's decision: 14)."""
+    return int(getattr(settings, 'MINIMUM_AGE_YEARS', 14))
 
 
 class CustomUser(AbstractBaseUser, PermissionsMixin):
@@ -279,7 +345,25 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         choices=ACTIVITY_LEVELS,
         default='Sedentary'
     )
-    
+
+    #: Asked at sign-up; the server refuses anyone younger than `minimum_age()`. While
+    #: it is set, `age` is derived from it on every save and refreshed each night
+    #: (`users.refresh_ages_from_birth_dates`), because the diet engine and every
+    #: existing reader use `age` and must not see a number frozen at sign-up.
+    date_of_birth = models.DateField(null=True, blank=True)
+    # Onboarding (design v2). Empty means "not answered yet".
+    training_goal = models.CharField(max_length=20, choices=TRAINING_GOALS, blank=True,
+                                     default='')
+    training_place = models.CharField(max_length=10, choices=TRAINING_PLACES, blank=True,
+                                      default='')
+    training_days_per_week = models.PositiveSmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(7)])
+    #: Structured health data, so encrypted like `specific_injury`. Shown to the client
+    #: and their approved trainer only; the matcher reads it to find trainers who work
+    #: with these injuries.
+    injury_areas = EncryptedCodeListField(default=list, blank=True,
+                                          validators=[validate_injury_areas])
+
     # Trainer-specific fields
     trainer_bio = models.TextField(blank=True, null=True, help_text="Trainer's professional bio")
     trainer_specializations = models.JSONField(
@@ -312,7 +396,15 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         default=True,
         help_text="Whether trainer is currently accepting new clients"
     )
-    
+    # What the trainer coaches, as codes the matcher can compare with a client's
+    # onboarding answers. `trainer_specializations` stays the free text shown on cards.
+    trainer_goal_focus = models.JSONField(default=list, blank=True,
+                                          validators=[validate_trainer_focus])
+    trainer_injury_focus = models.JSONField(default=list, blank=True,
+                                            validators=[validate_injury_areas])
+    trainer_training_places = models.JSONField(default=list, blank=True,
+                                               validators=[validate_training_places])
+
     # Client-specific fields
     assigned_trainer = models.ForeignKey(
         'self',
@@ -454,6 +546,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     _GOAL_LOSE_WORDS = ('lose', 'loss', 'fat', 'cut', 'slim', 'lean')
     _GOAL_GAIN_WORDS = ('gain', 'muscle', 'bulk', 'mass', 'strength')
+    #: The same reading of the onboarding codes the word lists give their free text.
+    _TRAINING_GOAL_DIRECTION = {'build_muscle': 'Gain', 'strength': 'Gain',
+                                'fat_loss': 'Lose', 'general_fitness': 'Maintain'}
 
     def resolve_fitness_goal(self):
         """This user's goal, as one of `FITNESS_GOALS`.
@@ -464,7 +559,12 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
         A profile asking for both directions at once gets Maintain. Guessing between a
         deficit and a surplus is worse than declining to guess.
+
+        The structured onboarding answer, `training_goal`, wins when it is set: it is a
+        single code the client chose, where `client_goals` is free text.
         """
+        if self.training_goal:
+            return self._TRAINING_GOAL_DIRECTION.get(self.training_goal, 'Maintain')
         words = ' '.join(str(g) for g in (self.client_goals or [])).lower()
         wants_loss = any(w in words for w in self._GOAL_LOSE_WORDS)
         wants_gain = any(w in words for w in self._GOAL_GAIN_WORDS)
@@ -643,7 +743,16 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         # Ensure trainers can't be assigned to other trainers
         if self.is_trainer and self.assigned_trainer:
             self.assigned_trainer = None
-            
+
+        # `age` follows the date of birth whenever there is one; see `date_of_birth`.
+        if self.date_of_birth:
+            derived = age_on(self.date_of_birth)
+            if self.age != derived:
+                self.age = derived
+                update_fields = kwargs.get('update_fields')
+                if update_fields is not None and 'age' not in update_fields:
+                    kwargs['update_fields'] = [*update_fields, 'age']
+
         # Replaced-file cleanup lives in training_platform.signals, which defers the
         # delete until the transaction commits and skips files another row still
         # references. Doing it here destroyed the old picture even when the save was
@@ -700,6 +809,14 @@ class TrainerClientRelation(models.Model):
     #: One hold, named here, is what makes taking it, giving it back and paying it out
     #: the same single event.
     hold_reference = models.CharField(max_length=36, blank=True, default='', db_index=True)
+    #: When the request now pending (or last answered) was sent. Not `created_at`: a
+    #: declined request sent again reuses this row, so `created_at` is when the pair
+    #: first met, not when this request was made.
+    requested_at = models.DateTimeField(null=True, blank=True)
+    #: When the other side approved or declined it ("training together since"). Each
+    #: answer is also written to `TrainerRequestOutcome`, which outlives this row and
+    #: is what response times are measured from.
+    responded_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -731,6 +848,46 @@ class TrainerClientRelation(models.Model):
 
     def __str__(self):
         return f"{self.trainer.username} ↔ {self.client.username} ({self.status})"
+
+
+class TrainerRequestOutcome(models.Model):
+    """One answered request: who asked whom, when, and how long the answer took.
+
+    Append-only, written in the same transaction as the approval or decline. The
+    relation row itself is deleted when a client leaves, cancels or is erased, so a
+    statistic read from relations would quietly lose the requests that went well. This
+    is the record a trainer's typical response time is computed from
+    (`users/trainer_proof.py`): platform timestamps only, never a number anyone types.
+    """
+    OUTCOME_CHOICES = [('approved', 'Approved'), ('rejected', 'Declined')]
+
+    trainer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                related_name='request_outcomes_as_trainer')
+    client = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                               related_name='request_outcomes_as_client')
+    #: Which side asked. Response time is the OTHER side's; the trainer's statistic
+    #: reads only rows the client initiated.
+    initiated_by = models.CharField(max_length=8, choices=TrainerClientRelation.INITIATOR_CHOICES)
+    outcome = models.CharField(max_length=8, choices=OUTCOME_CHOICES)
+    requested_at = models.DateTimeField()
+    responded_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        ordering = ['-responded_at', '-id']
+        indexes = [models.Index(fields=['trainer', 'initiated_by', '-responded_at'],
+                                name='outcome_trainer_recent_idx')]
+        constraints = [
+            models.CheckConstraint(condition=Q(responded_at__gte=models.F('requested_at')),
+                                   name='outcome_answered_after_asked'),
+        ]
+
+    def __str__(self):
+        return f"{self.trainer_id} ← {self.client_id}: {self.outcome}"
+
+    @property
+    def response_seconds(self):
+        return (self.responded_at - self.requested_at).total_seconds()
+
 
 class DeviceToken(models.Model):
     PLATFORM_CHOICES = [

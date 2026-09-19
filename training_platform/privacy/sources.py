@@ -12,8 +12,9 @@ from .registry import PersonalDataSource, register
 register(PersonalDataSource(
     label="profile", model="users.CustomUser", user_field="pk",
     fields=["id", "username", "email", "phone_number", "first_name", "last_name",
-            "age", "gender", "height", "weight", "activity_level", "specific_injury",
-            "client_goals", "date_joined"],
+            "age", "date_of_birth", "gender", "height", "weight", "activity_level",
+            "specific_injury", "injury_areas", "client_goals", "training_goal",
+            "training_place", "training_days_per_week", "date_joined"],
     on_erase="anonymise",
     anonymise={
         "is_active": False,
@@ -22,6 +23,10 @@ register(PersonalDataSource(
         "phone_number": "0000000000",
         "first_name": "", "last_name": "",
         "specific_injury": "", "client_goals": [],
+        # Health data and the date that identifies a person; the onboarding answers
+        # beside them say nothing once these are gone, but go too.
+        "date_of_birth": None, "injury_areas": [],
+        "training_goal": "", "training_place": "", "training_days_per_week": None,
         # The denormalised pointer to the trainer. The relation rows are deleted by the
         # trainer_relations source below; leaving this set would keep the display name
         # of a trainer on an erased account, and leave the two sources of truth
@@ -34,6 +39,12 @@ register(PersonalDataSource(
 ))
 register(PersonalDataSource(
     label="devices", model="users.DeviceToken", user_field="user", on_erase="delete"))
+# A trainer's photographs (the media kit). Deleted with the account; the files go with
+# the rows (training_platform/signals.py). `uploaded_by` names the operator who
+# uploaded a picture and is not what makes it personal data.
+register(PersonalDataSource(
+    label="media_kit", model="mediakit.MediaAsset", user_field="person",
+    fields=["owner_type", "slot", "alt_ar", "alt_en", "created_at"], on_erase="delete"))
 
 # --- training -----------------------------------------------------------------
 register(PersonalDataSource(label="workout_sessions", model="routine.WorkoutSession", user_field="user"))
@@ -156,6 +167,13 @@ def _return_held_money(user, queryset, *, dry_run):
 register(PersonalDataSource(label="trainer_relations", model="users.TrainerClientRelation",
                             user_field=("trainer", "client"),
                             before_erase=_return_held_money))
+# Answered requests, kept for the trainer's response-time statistic. Deleted with either
+# person: the statistic loses a sample, and nothing else depends on the row. The
+# statistic reads the last 90 days (users/trainer_proof.py); twice that is kept, then the
+# record of who asked whom goes.
+register(PersonalDataSource(label="trainer_request_outcomes", model="users.TrainerRequestOutcome",
+                            user_field=("trainer", "client"),
+                            retention_days=180, retention_field="responded_at"))
 # Short-lived credentials: deleted on erasure, and expired rows purged on a schedule.
 register(PersonalDataSource(label="otp_verifications", model="users.OTPVerification", user_field="user",
                             retention_days=1))

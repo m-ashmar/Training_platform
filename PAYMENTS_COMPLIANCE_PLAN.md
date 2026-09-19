@@ -7,6 +7,10 @@ as the work; a new session starts here, not from the spec.
 Rule zero: no hidden flows, no reviewer detection. Server behaviour depends on the build
 (`X-App-Channel`, `X-App-Version`) and on nothing else.
 
+A second workstream shares this branch: the backend changes the v2 app designs assume
+(media slots, onboarding fields, trainer matching and proof, chat, home, ...). Its state
+and order live in `BACKEND_DELTA.md`, not here.
+
 ## Build order
 
 | # | Step | Status | Where / what is left |
@@ -17,7 +21,7 @@ Rule zero: no hidden flows, no reviewer detection. Server behaviour depends on t
 | 4 | Double-entry ledger, commission settings + snapshot, remove the 100% forward | NEXT | `wallet/signals.py:handle_payment_completed` still forwards 100% of a plan payment to the trainer. Rates decided — see Owner's decisions |
 | 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | TODO | `preferred_language` cannot be set by any endpoint yet (HIGH). Remove `auto_renew` from API/UI here |
 | 6 | Trainer verification, then withdrawals | TODO | |
-| 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | TODO | Store blockers B1, B2, B5 |
+| 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | PART DONE | Date of birth + minimum age 14 DONE with the design-v2 work (`BACKEND_DELTA.md` item 3: validated at sign-up and on every profile write, `MINIMUM_AGE_YEARS`; making it required at sign-up is an owner decision in that file). Left: reports, blocking, moderation queue, AI consent — store blockers B1, B2, B5 |
 | 8 | Two-way trainer–client chat with report/block hooks | TODO | Makes the 1:1 coaching claim real-time in fact |
 | 9 | Agent limits, receivable tracking, agent history/status | TODO | Defaults (200/day) are below the cheapest plan |
 | 10 | Routine products | TODO | Refusal for `ROUTINE_PRODUCT` on store channels already exists in `policy/services.py` — call `require_purchase_allowed` first in the purchase endpoint |

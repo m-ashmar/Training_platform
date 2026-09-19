@@ -118,6 +118,7 @@ def bust_recent_progress_cache(sender, instance, **kwargs):
 LOCAL_APPS_FOR_FILE_CLEANUP = {
     'users', 'wallet', 'diet', 'routine', 'subscription', 'social',
     'ai_assistant', 'achievements', 'analytics', 'notifications', 'challenges',
+    'mediakit',
 }
 
 _FILE_FIELD_CACHE = {}

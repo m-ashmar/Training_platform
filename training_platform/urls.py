@@ -57,6 +57,13 @@ urlpatterns = [
     # What each build may show and sell (X-App-Channel). See policy/models.py.
     path('api/v1/config/', include('policy.urls', namespace='policy')),
 
+    # Pictures the app itself shows (intro story, banners, empty states). Media for
+    # trainers, exercises and programs travels inside those objects. See mediakit/.
+    path('api/v1/content/', include('mediakit.urls', namespace='mediakit')),
+
+    # The design-v2 trainer screens: roster, profile, matches. See users/trainer_views.py.
+    path('api/v1/trainers/', include('users.urls_v1', namespace='trainers')),
+
     # Notification preferences (listing lives under /api/social/notifications/)
     path('api/notifications/', include('notifications.urls', namespace='notifications')),
 ]

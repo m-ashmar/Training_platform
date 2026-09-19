@@ -2,21 +2,153 @@
 
 from dj_rest_auth.registration.serializers import RegisterSerializer
 from dj_rest_auth.serializers import LoginSerializer
-from .models import CustomUser, DeviceToken
+from .models import (CustomUser, DeviceToken, INJURY_AREAS, TRAINER_FOCUS, TRAINING_PLACES,
+                     age_on, minimum_age)
 from rest_framework import serializers
 import logging
 import re  # Add this import
 from django.db import IntegrityError
 from django.conf import settings
 from django.core.files.images import get_image_dimensions
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------------
+# Date of birth and the onboarding answers (design v2)
+# ---------------------------------------------------------------------------------
+#: A date further back than this is a typo or a test, not a person's birthday.
+OLDEST_PLAUSIBLE_AGE = 100
+
+
+def check_date_of_birth(value):
+    """Refuse a date of birth the platform must not accept. Codes (field-level):
+    `date_of_birth_in_future`, `date_of_birth_implausible`, `under_minimum_age`."""
+    today = timezone.localdate()
+    if value > today:
+        raise serializers.ValidationError(_("The date of birth cannot be in the future."),
+                                          code="date_of_birth_in_future")
+    age = age_on(value, today)
+    if age > OLDEST_PLAUSIBLE_AGE:
+        raise serializers.ValidationError(_("Enter your real date of birth."),
+                                          code="date_of_birth_implausible")
+    if age < minimum_age():
+        raise serializers.ValidationError(
+            _("You must be at least %(age)s years old to use Yalla Gym.") % {"age": minimum_age()},
+            code="under_minimum_age")
+    return value
+
+
+def _code_list(choices, *, allow_none=False):
+    codes = [c for c, _label in choices] + (["none"] if allow_none else [])
+    return serializers.ListField(child=serializers.ChoiceField(choices=codes),
+                                 required=False, allow_empty=True)
+
+
+def _unique_codes(value, *, none_alone=False):
+    """No code twice; `none` (when allowed) means the empty list and stands alone."""
+    if len(set(value)) != len(value):
+        raise serializers.ValidationError(_("A code is listed twice."), code="duplicate")
+    if none_alone and "none" in value:
+        if len(value) > 1:
+            raise serializers.ValidationError(
+                _("'none' cannot be combined with an injury area."), code="none_with_areas")
+        return []
+    return value
+
+
+CLIENT_ONBOARDING_FIELDS = ('training_goal', 'training_place', 'training_days_per_week',
+                            'injury_areas')
+TRAINER_MATCHING_FIELDS = ('trainer_goal_focus', 'trainer_injury_focus',
+                           'trainer_training_places')
+
+
+class OnboardingFieldsMixin(serializers.Serializer):
+    """The v2 onboarding answers and the date of birth, shared by the profile serializers.
+
+    Writing: `date_of_birth` (ISO date, see `check_date_of_birth`), `training_goal`,
+    `training_place`, `training_days_per_week` (1-7), `injury_areas` (a list of codes;
+    `["none"]` or `[]` means none). Once a date of birth is known, a written `age` is
+    ignored: `age` is derived from the date. A legacy `age` below the minimum is refused
+    with `under_minimum_age`.
+
+    Reading adds `onboarding_missing`: the fields still unanswered, in screen order.
+    `onboarding_completed` keeps its original meaning.
+    """
+    injury_areas = _code_list(INJURY_AREAS, allow_none=True)
+    onboarding_missing = serializers.SerializerMethodField()
+    # Declared without the model's MinValueValidator(13): that floor answered `min_value`
+    # for every age under 13, before `validate_age` could say `under_minimum_age`.
+    age = serializers.IntegerField(required=False, allow_null=True, max_value=100)
+
+    def validate_date_of_birth(self, value):
+        if value is None:
+            # Clearing it would reopen the legacy `age` field to a younger number.
+            raise serializers.ValidationError(_("The date of birth cannot be removed."),
+                                              code="date_of_birth_required")
+        return check_date_of_birth(value)
+
+    def validate_injury_areas(self, value):
+        return _unique_codes(value, none_alone=True)
+
+    def validate_age(self, value):
+        if value is not None and value < minimum_age():
+            raise serializers.ValidationError(
+                _("You must be at least %(age)s years old to use Yalla Gym.") % {"age": minimum_age()},
+                code="under_minimum_age")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        born = attrs.get('date_of_birth') or getattr(self.instance, 'date_of_birth', None)
+        if born:
+            attrs.pop('age', None)
+        return attrs
+
+    def get_onboarding_missing(self, obj):
+        missing = [f for f in ('first_name', 'last_name', 'date_of_birth') if not getattr(obj, f)]
+        if obj.is_client:
+            missing += [f for f in ('gender', 'height', 'weight', 'training_goal',
+                                    'training_place', 'training_days_per_week')
+                        if not getattr(obj, f)]
+        return missing
+
+
+class TrainerMatchingFieldsMixin(serializers.Serializer):
+    """What a trainer coaches, as codes the matcher compares with a client's answers:
+    `trainer_goal_focus` (goals + `nutrition`), `trainer_injury_focus`,
+    `trainer_training_places`. Lists of codes, each at most once."""
+    trainer_goal_focus = _code_list(TRAINER_FOCUS)
+    trainer_injury_focus = _code_list(INJURY_AREAS)
+    trainer_training_places = _code_list(TRAINING_PLACES)
+
+    def validate_trainer_goal_focus(self, value):
+        return _unique_codes(value)
+
+    def validate_trainer_injury_focus(self, value):
+        return _unique_codes(value)
+
+    def validate_trainer_training_places(self, value):
+        return _unique_codes(value)
+
 class CustomRegisterSerializer(RegisterSerializer):
+    """POST /api/auth/register/.
+
+    `date_of_birth` (ISO date) is accepted and, when sent, the server refuses anyone
+    younger than `MINIMUM_AGE_YEARS` (14). Field codes: `under_minimum_age`,
+    `date_of_birth_in_future`, `date_of_birth_implausible`. The v2 sign-up screen always
+    sends it. It is optional on this route so existing callers keep working; making it
+    required is an owner decision (BACKEND_DELTA.md) and a one-word change here.
+    """
     phone_number = serializers.CharField(max_length=15,  required=True)
     user_type = serializers.ChoiceField(choices=[('client', 'Client'), ('trainer', 'Trainer'), ('agent', 'Agent'), ('admin', 'Administrator')], required=False, default='client')
+    date_of_birth = serializers.DateField(required=False)
+
+    def validate_date_of_birth(self, value):
+        return check_date_of_birth(value)
 
     def validate_phone_number(self, value):
         # Regex for phone number validation (international format)
@@ -47,7 +179,8 @@ class CustomRegisterSerializer(RegisterSerializer):
 
     class Meta:
         model = CustomUser
-        fields = ['username', 'email', 'phone_number', 'password1', 'password2', 'user_type']
+        fields = ['username', 'email', 'phone_number', 'password1', 'password2', 'user_type',
+                  'date_of_birth']
 
     def save(self, request):
         logger.info("CustomRegisterSerializer.save() called")
@@ -55,6 +188,7 @@ class CustomRegisterSerializer(RegisterSerializer):
             user = super().save(request)
             user.phone_number = self.validated_data.get('phone_number')
             user.user_type = self.validated_data.get('user_type', 'client')
+            user.date_of_birth = self.validated_data.get('date_of_birth')
             # Unverified, and NOT disabled. This wrote `is_active = False` to mean "not
             # verified yet", which is also what a suspension writes, so resend-otp could
             # not tell a pending signup from a suspended account and refused both —
@@ -87,7 +221,9 @@ class CustomRegisterSerializer(RegisterSerializer):
                 raise serializers.ValidationError(
                     {"username": _("A user with that username already exists.")}
                 )
-            raiser
+            # Was `raiser`: any other integrity error became a NameError and a 500 that
+            # hid the constraint that actually failed.
+            raise
     
     
     
@@ -143,7 +279,8 @@ class CustomLoginSerializer(LoginSerializer):
         attrs['user'] = self.user
         return attrs
     
-class UserDetailsSerializer(serializers.ModelSerializer):
+class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
+                            serializers.ModelSerializer):
     profile_picture = serializers.SerializerMethodField()
     onboarding_completed = serializers.BooleanField(source='is_onboarding_completed', read_only=True)
     
@@ -160,6 +297,9 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             # "localized dates and times" never happened; it now decides when the
             # workout reminder fires in the user's own day.
             'preferred_timezone', 'workout_reminder_hour',
+            # Design v2: see OnboardingFieldsMixin and TrainerMatchingFieldsMixin.
+            'date_of_birth', *CLIENT_ONBOARDING_FIELDS, 'onboarding_missing',
+            *TRAINER_MATCHING_FIELDS,
         ]
         # assigned_trainer is read-only here: trainer assignment must go through
         # the request/approval + wallet-escrow flow, never self-service update.
@@ -192,22 +332,32 @@ class UserDetailsSerializer(serializers.ModelSerializer):
         return safe_file
 
     def validate(self, attrs):
+        attrs = super().validate(attrs)
         user = self.instance
         if user and user.user_type == 'trainer':
             # Trainers can't have assigned_trainer
             if 'assigned_trainer' in attrs:
                 attrs.pop('assigned_trainer')
+            # ...nor a client's onboarding answers.
+            for field in CLIENT_ONBOARDING_FIELDS:
+                attrs.pop(field, None)
         elif user and user.user_type == 'client':
             # Clients can't have trainer-specific fields
             trainer_fields = ['trainer_bio', 'trainer_specializations', 'trainer_certifications',
-                            'trainer_experience_years', 'trainer_hourly_rate', 'trainer_is_available']
+                            'trainer_experience_years', 'trainer_hourly_rate', 'trainer_is_available',
+                            *TRAINER_MATCHING_FIELDS]
             for field in trainer_fields:
                 if field in attrs:
                     attrs.pop(field)
         return attrs
 
-class TrainerProfileSerializer(serializers.ModelSerializer):
-    """Serializer for trainer-specific profile data"""
+class TrainerProfileSerializer(TrainerMatchingFieldsMixin, serializers.ModelSerializer):
+    """Serializer for trainer-specific profile data.
+
+    Also takes the matching codes (`trainer_goal_focus`, `trainer_injury_focus`,
+    `trainer_training_places`), which decide which clients the trainer is matched with
+    and why (`GET /api/v1/trainers/matches`).
+    """
     client_count = serializers.SerializerMethodField()
     profile_picture = serializers.SerializerMethodField()
     
@@ -219,7 +369,8 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name', 'profile_picture',
             'trainer_bio', 'trainer_specializations', 'trainer_certifications',
             'trainer_experience_years', 'trainer_hourly_rate', 'trainer_is_verified',
-            'trainer_is_available', 'client_count', 'is_active', 'onboarding_completed'
+            'trainer_is_available', 'client_count', 'is_active', 'onboarding_completed',
+            *TRAINER_MATCHING_FIELDS,
         ]
         read_only_fields = ['id', 'username', 'email', 'trainer_is_verified', 'is_active', 'onboarding_completed']
 
@@ -253,13 +404,15 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
         return safe_file
 
     def validate(self, attrs):
+        attrs = super().validate(attrs)
         # Ensure only trainers can use this serializer
         if self.instance and not self.instance.is_trainer:
             raise serializers.ValidationError(_("This serializer is only for trainers"))
         return attrs
 
-class ClientProfileSerializer(serializers.ModelSerializer):
-    """Serializer for client-specific profile data"""
+class ClientProfileSerializer(OnboardingFieldsMixin, serializers.ModelSerializer):
+    """Serializer for client-specific profile data, including the v2 onboarding
+    answers and the date of birth (see OnboardingFieldsMixin)."""
     assigned_trainer_name = serializers.SerializerMethodField()
     profile_picture = serializers.SerializerMethodField()
     
@@ -269,7 +422,8 @@ class ClientProfileSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name', 'profile_picture',
             'height', 'weight', 'age', 'gender', 'specific_injury',
             'activity_level', 'assigned_trainer', 'assigned_trainer_name',
-            'client_goals', 'client_preferences'
+            'client_goals', 'client_preferences',
+            'date_of_birth', *CLIENT_ONBOARDING_FIELDS, 'onboarding_missing',
         ]
         # `assigned_trainer` is READ-ONLY. It was writable here, so a client could
         # PATCH their own profile and attach any trainer to themselves — no request,
@@ -311,6 +465,7 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         return safe_file
 
     def validate(self, attrs):
+        attrs = super().validate(attrs)
         # Ensure only clients can use this serializer
         if self.instance and not self.instance.is_client:
             raise serializers.ValidationError(_("This serializer is only for clients"))

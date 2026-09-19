@@ -67,6 +67,7 @@ INSTALLED_APPS = [
     "notifications",
     "ai_assistant",
     "policy",
+    "mediakit",
 
     # Third-party
     "rest_framework",
@@ -390,6 +391,12 @@ CELERY_IMPORTS = (
 )
 
 CELERY_BEAT_SCHEDULE = {
+    # `age` follows `date_of_birth` (users/models.py). Saves keep it right; this moves
+    # everyone whose birthday it is and nobody else writes to their row today.
+    'refresh-ages-from-birth-dates': {
+        'task': 'users.refresh_ages_from_birth_dates',
+        'schedule': crontab(hour=0, minute=10),
+    },
     # Workout reminders. `session_reminder` was registered and templated from the
     # start but nothing ever emitted it, so the platform had no re-engagement loop.
     # Hourly, not daily: the task itself decides who is due, by comparing each user's
@@ -564,6 +571,11 @@ LANGUAGE_CODE = "en"
 # (breaking streaks) and a legitimate "today" could be rejected as a future date.
 # Env-overridable so a future region change needs no code edit.
 TIME_ZONE = get_env("TIME_ZONE", "Asia/Damascus")
+
+# The youngest a person may be to hold an account, enforced at sign-up and on every
+# date-of-birth or age write. The owner's decision (2026-09-19); one number for every
+# user and every build.
+MINIMUM_AGE_YEARS = 14
 USE_I18N = True
 USE_L10N = True
 USE_TZ = True

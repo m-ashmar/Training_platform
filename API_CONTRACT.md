@@ -30,8 +30,8 @@ the old token is dead the moment it is exchanged.
 
 ```
 POST /api/auth/register/
-     {username, email, password1, password2, phone_number, user_type}
-  -> 201 {user}                       account created INACTIVE, OTP emailed
+     {username, email, password1, password2, phone_number, user_type, date_of_birth}
+  -> 201 {user}                       account created unverified, OTP emailed
 
 POST /api/auth/verify-otp/   {email, otp_code}
   -> 200 {message, user, access, refresh}     account activated
@@ -41,7 +41,16 @@ POST /api/auth/resend-otp/   {email}
 ```
 
 Note `password1`/`password2` — not `password`. `user_type` is one of
-`client`, `trainer`, `agent`.
+`client`, `trainer`, `agent`. `date_of_birth` (ISO `YYYY-MM-DD`) is optional on this
+route (the v2 sign-up screen always sends it); when sent, the server refuses anyone younger
+than 14 with `field_errors.date_of_birth[0].code` = `under_minimum_age` (also
+`date_of_birth_in_future`, `date_of_birth_implausible`). The same rule applies wherever the
+date or `age` is written (`user/update/`, `client/profile/`), and once set the date cannot
+be removed (`date_of_birth_required`).
+The v2 onboarding answers (`training_goal`, `training_place`, `training_days_per_week`,
+`injury_areas`) and `onboarding_missing` are on those two profile endpoints; the trainer
+matching codes (`trainer_goal_focus`, `trainer_injury_focus`, `trainer_training_places`)
+are on `trainer/profile/`. See `users/serializers.py` (`OnboardingFieldsMixin`).
 
 ### Login
 
@@ -302,7 +311,7 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 | `POST` | `/api/auth/trainer/respond-to-request/` | auth | `TrainerRespondToRequestView` |
 | `POST` | `/api/auth/trainer/unassign-client/` | auth | `UnassignClientView` |
 | `GET` | `/api/auth/trainers/public/` | public | `PublicTrainersListView` |
-| `GET` | `/api/auth/trainers/stats/` | public | `PublicTrainerClientStatsView` |
+| `GET` | `/api/auth/trainers/stats/` | auth | `PublicTrainerClientStatsView` |
 | `GET` | `/api/auth/user/details/` | auth | `UserDetailsView` |
 | `DELETE, POST` | `/api/auth/user/profile-picture/` | auth | `ProfilePictureUploadView` |
 | `GET, POST` | `/api/auth/user/update/` | auth | `UpdateUserDetailsView` |
@@ -347,6 +356,28 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 | `GET, POST` | `/api/notifications/preferences/` | auth | `NotificationPreferenceViewSet` |
 | `GET` | `/api/notifications/preferences/event_types/` | auth | `NotificationPreferenceViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/notifications/preferences/{id}/` | auth | `NotificationPreferenceViewSet` |
+
+### Media (design v2 slots)
+
+Every picture fills a named slot and travels as `media: {"<slot>": {url_1x, url_2x, blur,
+focal: [x, y], brightness, alt_ar, alt_en}}`; an empty slot is absent. Trainer cards carry
+theirs; the app's own pictures are here. See `mediakit/slots.py` for the slot list.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/content/media/` | public | `AppMediaView` |
+
+### Trainers (design v2)
+
+One card shape for all three (`users/trainer_views.py`): `proof` (platform-verified
+numbers), `media`, and `coaching_price` + `money_type` only on a build that may show a
+coaching fee. Matches carry up to three `reasons`, each `{code, text: {ar, en}}`.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/trainers/` | public | `TrainerRosterView` |
+| `GET` | `/api/v1/trainers/matches/` | auth (client) | `TrainerMatchesView` |
+| `GET` | `/api/v1/trainers/{id}/` | public | `TrainerDetailView` |
 
 ### Platform policy (what each build may show and sell)
 

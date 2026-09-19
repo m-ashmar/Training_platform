@@ -651,6 +651,12 @@ from policy.models import CapabilityChangeLog, ChannelCapabilities  # noqa: E402
 admin_site.register(ChannelCapabilities, ChannelCapabilitiesAdmin)
 admin_site.register(CapabilityChangeLog, CapabilityChangeLogAdmin)
 
+# Media kit: every picture the app draws, by slot. `Media slots > kits/` lists each
+# trainer's completeness.
+from mediakit.admin import MediaAssetAdmin  # noqa: E402
+from mediakit.models import MediaAsset  # noqa: E402
+admin_site.register(MediaAsset, MediaAssetAdmin)
+
 admin_site.register(UserActivity, UserActivityAdmin)
 admin_site.register(PerformanceMetric, PerformanceMetricAdmin)
 admin_site.register(UserSession)

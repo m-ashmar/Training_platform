@@ -1,0 +1,20 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<p>A trainer cannot be featured or matched first until every required slot is filled:
+{{ required|join:", " }}. Video and signature slots are not counted until their upload
+pipeline exists.</p>
+<table>
+  <thead><tr><th>Trainer</th><th>Filled</th><th>Missing</th></tr></thead>
+  <tbody>
+  {% for row in rows %}
+    <tr>
+      <td>{{ row.trainer.full_name }} (#{{ row.trainer.pk }})</td>
+      <td>{{ row.filled }} / {{ row.required }}{% if row.complete %} &#10003;{% endif %}</td>
+      <td>{{ row.missing|join:", "|default:"-" }}</td>
+    </tr>
+  {% empty %}
+    <tr><td colspan="3">No active trainers.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

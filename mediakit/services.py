@@ -1,0 +1,173 @@
+"""Storing a slot, and the one shape every API response uses for media.
+
+    "media": {
+      "trainer.portrait": {"url_1x": "...", "url_2x": "...", "blur": "data:image/webp;...",
+                           "focal": [0.5, 0.3], "brightness": 0.21,
+                           "alt_ar": "...", "alt_en": "..."}
+    }
+
+A slot with nothing in it is ABSENT from the object, never present with null URLs, so
+the app's `YgMedia` either draws the slot or draws its typographic fallback.
+
+Lists must load media for the whole page at once (`media_map`), never per row.
+"""
+from __future__ import annotations
+
+from django.core.files.base import ContentFile
+from django.db import transaction
+
+from .models import MediaAsset
+from .processing import process_upload
+from .slots import APP_OWNER_ID, OwnerType, required_keys, resolve
+
+
+def _absolute(url, request):
+    if request is not None and url and url.startswith("/"):
+        return request.build_absolute_uri(url)
+    return url
+
+
+def payload(asset: MediaAsset, request=None) -> dict:
+    return {
+        "url_1x": _absolute(asset.file_1x.url, request),
+        "url_2x": _absolute(asset.file_2x.url, request),
+        "blur": asset.blur,
+        "focal": [asset.focal_x, asset.focal_y],
+        "brightness": asset.brightness,
+        "alt_ar": asset.alt_ar,
+        "alt_en": asset.alt_en,
+    }
+
+
+def media_map(owner_type: str, owner_ids, request=None) -> dict[int, dict]:
+    """{owner_id: {slot: payload}} for every owner in `owner_ids`, in one query.
+
+    Owners with nothing filled map to `{}`, so a caller can index without a default.
+    """
+    ids = {int(i) for i in owner_ids}
+    out = {i: {} for i in ids}
+    if not ids:
+        return out
+    for asset in MediaAsset.objects.filter(owner_type=owner_type, owner_id__in=ids):
+        out[asset.owner_id][asset.slot] = payload(asset, request)
+    return out
+
+
+def media_for(owner_type: str, owner_id: int, request=None) -> dict:
+    return media_map(owner_type, [owner_id], request)[int(owner_id)]
+
+
+def app_media(request=None) -> dict:
+    return media_for(OwnerType.APP, APP_OWNER_ID, request)
+
+
+def kit_status(owner_type: str, filled_slots) -> dict:
+    """How complete an owner's kit is: `{complete, filled, required, missing}`."""
+    required = required_keys(owner_type)
+    filled = set(filled_slots)
+    missing = [k for k in required if k not in filled]
+    return {"complete": not missing, "filled": len(required) - len(missing),
+            "required": len(required), "missing": missing}
+
+
+def complete_kits(owner_type: str, owner_ids) -> set[int]:
+    """The owners among `owner_ids` whose required slots are all filled. One query."""
+    required = set(required_keys(owner_type))
+    if not required:
+        return {int(i) for i in owner_ids}
+    filled: dict[int, set] = {}
+    for owner_id, slot in (MediaAsset.objects
+                           .filter(owner_type=owner_type, owner_id__in=list(owner_ids),
+                                   slot__in=required)
+                           .values_list("owner_id", "slot")):
+        filled.setdefault(owner_id, set()).add(slot)
+    return {owner_id for owner_id, slots in filled.items() if required <= slots}
+
+
+def resolve_owner(owner_type, owner_id, slot_key):
+    """Check that the slot belongs to this kind of owner and that the owner exists.
+
+    Returns `(owner_id, person)`: the app's single owner id, and the trainer row when
+    the owner is a trainer. Raises `ValidationError` with a `code`.
+    """
+    from django.core.exceptions import ValidationError
+    from django.utils.translation import gettext as _
+
+    slot = resolve(slot_key)
+    if slot is None or slot.owner_type != owner_type:
+        raise ValidationError(_("This slot does not belong to this kind of owner."),
+                              code="media_unknown_slot")
+    if owner_type == OwnerType.APP:
+        return APP_OWNER_ID, None
+    model = _OWNER_MODELS[owner_type]()
+    filters = {"pk": owner_id}
+    if owner_type == OwnerType.TRAINER:
+        filters["user_type"] = "trainer"
+    owner = model.objects.filter(**filters).first()
+    if owner is None:
+        raise ValidationError(_("Nothing of this kind has this id."), code="media_unknown_owner")
+    return int(owner_id), owner if owner_type == OwnerType.TRAINER else None
+
+
+def _user_model():
+    from users.models import CustomUser
+    return CustomUser
+
+
+def _exercise_model():
+    from routine.models import Exercise
+    return Exercise
+
+
+def _routine_model():
+    from routine.models import Routine
+    return Routine
+
+
+def _recipe_model():
+    from diet.models import Recipe
+    return Recipe
+
+
+_OWNER_MODELS = {OwnerType.TRAINER: _user_model, OwnerType.EXERCISE: _exercise_model,
+                 OwnerType.PROGRAM: _routine_model, OwnerType.DISH: _recipe_model}
+
+
+def apply_upload(asset: MediaAsset, processed) -> None:
+    """Write a processed upload onto `asset` (files to storage, fields in memory)."""
+    asset.blur = processed.blur
+    asset.brightness = processed.brightness
+    asset.width, asset.height = processed.width, processed.height
+    asset.original.save(f"master.{processed.master_ext}",
+                        ContentFile(processed.master), save=False)
+    asset.file_1x.save("1x.webp", ContentFile(processed.rendition_1x), save=False)
+    asset.file_2x.save("2x.webp", ContentFile(processed.rendition_2x), save=False)
+
+
+def store(*, owner_type, owner_id, slot_key, upload, uploaded_by=None,
+          focal=None, alt_ar=None, alt_en=None) -> MediaAsset:
+    """Process `upload` and put it in the slot, replacing whatever was there.
+
+    Raises `django.core.exceptions.ValidationError` (with a `code`) when the upload or
+    the slot is refused. The replaced files are removed once the transaction commits
+    (`training_platform/signals.py`), so a rollback never leaves a row without its files.
+    """
+    owner_id, person = resolve_owner(owner_type, owner_id, slot_key)
+    processed = process_upload(upload, resolve(slot_key))
+
+    with transaction.atomic():
+        asset = (MediaAsset.objects.select_for_update()
+                 .filter(owner_type=owner_type, owner_id=owner_id, slot=slot_key).first()
+                 or MediaAsset(owner_type=owner_type, owner_id=owner_id, slot=slot_key))
+        asset.person = person
+        asset.uploaded_by = uploaded_by
+        if focal is not None:
+            asset.focal_x, asset.focal_y = (min(1.0, max(0.0, float(v))) for v in focal)
+        if alt_ar is not None:
+            asset.alt_ar = alt_ar
+        if alt_en is not None:
+            asset.alt_en = alt_en
+        apply_upload(asset, processed)
+        asset.full_clean()
+        asset.save()
+    return asset

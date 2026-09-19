@@ -2359,3 +2359,207 @@ msgstr "يمكن للعملاء فقط بدء عمليات النقل"
 #| msgid "This account is already verified"
 msgid "Transaction has already been reversed"
 msgstr "هذا الحساب تم التحقق منه بالفعل"
+
+#: mediakit/processing.py
+msgid "This slot does not accept uploads yet."
+msgstr "هذه الخانة لا تقبل الرفع بعد."
+
+#: mediakit/processing.py
+msgid "Upload a JPEG, PNG or WebP image."
+msgstr "ارفع صورة بصيغة JPEG أو PNG أو WebP."
+
+#: mediakit/processing.py
+#, python-format
+msgid "This slot needs a %(w)s:%(h)s image."
+msgstr "هذه الخانة تحتاج صورة بنسبة %(w)s:%(h)s."
+
+#: mediakit/processing.py
+#, python-format
+msgid "This slot needs an image at least %(w)s x %(h)s pixels."
+msgstr "هذه الخانة تحتاج صورة لا تقل عن %(w)s × %(h)s بكسل."
+
+#: mediakit/processing.py
+msgid "This slot needs a transparent PNG."
+msgstr "هذه الخانة تحتاج صورة PNG بخلفية شفافة."
+
+#: mediakit/models.py mediakit/services.py
+msgid "This slot does not belong to this kind of owner."
+msgstr "هذه الخانة لا تخص هذا النوع من المحتوى."
+
+#: mediakit/models.py
+msgid "A trainer's media must name that trainer."
+msgstr "يجب أن تُنسب وسائط المدرب إلى ذلك المدرب نفسه."
+
+#: mediakit/services.py
+msgid "Nothing of this kind has this id."
+msgstr "لا يوجد عنصر من هذا النوع بهذا المعرّف."
+
+#: users/models.py
+msgid "Send a list of codes."
+msgstr "أرسل قائمة من الرموز."
+
+#: users/models.py
+#, python-format
+msgid "Unknown codes: %(codes)s."
+msgstr "رموز غير معروفة: %(codes)s."
+
+#: users/models.py users/serializers.py
+msgid "A code is listed twice."
+msgstr "أحد الرموز مكرر."
+
+#: users/serializers.py
+msgid "The date of birth cannot be in the future."
+msgstr "لا يمكن أن يكون تاريخ الميلاد في المستقبل."
+
+#: users/serializers.py
+msgid "Enter your real date of birth."
+msgstr "أدخل تاريخ ميلادك الحقيقي."
+
+#: users/serializers.py
+#, python-format
+msgid "You must be at least %(age)s years old to use Yalla Gym."
+msgstr "يجب أن يكون عمرك %(age)s عاماً على الأقل لاستخدام يلا جيم."
+
+#: users/serializers.py
+msgid "'none' cannot be combined with an injury area."
+msgstr "لا يمكن اختيار «لا شيء» مع منطقة إصابة."
+
+#: users/serializers.py
+msgid "The date of birth cannot be removed."
+msgstr "لا يمكن حذف تاريخ الميلاد."
+
+#: users/trainer_views.py
+msgid "Unknown focus code."
+msgstr "رمز تخصص غير معروف."
+
+#: users/trainer_views.py
+msgid "Trainer not found."
+msgstr "المدرب غير موجود."
+
+#: users/trainer_views.py
+msgid "Only clients are matched with trainers."
+msgstr "المطابقة مع المدربين للمتدربين فقط."
+
+#: users/trainer_views.py
+#, python-format
+msgid "limit must be a whole number from 1 to %(max)s."
+msgstr "يجب أن يكون limit عدداً صحيحاً من 1 إلى %(max)s."
+
+#: users/trainer_directory.py
+msgctxt "matching goal"
+msgid "building muscle"
+msgstr "بناء العضل"
+
+#: users/trainer_directory.py
+msgctxt "matching goal"
+msgid "losing fat"
+msgstr "خسارة الدهون"
+
+#: users/trainer_directory.py
+msgctxt "matching goal"
+msgid "strength"
+msgstr "القوة"
+
+#: users/trainer_directory.py
+msgctxt "matching goal"
+msgid "general fitness"
+msgstr "اللياقة العامة"
+
+#: users/trainer_directory.py
+msgctxt "injury area"
+msgid "shoulder"
+msgstr "الكتف"
+
+#: users/trainer_directory.py
+msgctxt "injury area"
+msgid "lower back"
+msgstr "أسفل الظهر"
+
+#: users/trainer_directory.py
+msgctxt "injury area"
+msgid "knee"
+msgstr "الركبة"
+
+#: users/trainer_directory.py
+msgctxt "injury area"
+msgid "neck"
+msgstr "الرقبة"
+
+#: users/trainer_directory.py
+msgctxt "injury area"
+msgid "wrist"
+msgstr "المعصم"
+
+#: users/trainer_directory.py
+msgctxt "injury area"
+msgid "ankle"
+msgstr "الكاحل"
+
+#: users/trainer_directory.py
+msgctxt "injury area"
+msgid "hip"
+msgstr "الورك"
+
+#: users/trainer_directory.py
+#, python-format
+msgid "Specialises in your goal: %(goal)s"
+msgstr "متخصص في هدفك: %(goal)s"
+
+#: users/trainer_directory.py
+#, python-format
+msgid "Experience with %(area)s injuries"
+msgstr "خبرة مع إصابات %(area)s"
+
+#: users/trainer_directory.py
+msgctxt "matching reason"
+msgid "Programs for training at the gym"
+msgstr "برامج للتمرين في النادي"
+
+#: users/trainer_directory.py
+msgctxt "matching reason"
+msgid "Programs for training at home"
+msgstr "برامج للتمرين في المنزل"
+
+#: users/trainer_directory.py
+#, python-format
+msgid "Writes %(days)s-day programs"
+msgid_plural "Writes %(days)s-day programs"
+msgstr[0] "برامج %(days)s يوماً"
+msgstr[1] "برامج يوم واحد"
+msgstr[2] "برامج يومين"
+msgstr[3] "برامج %(days)s أيام"
+msgstr[4] "برامج %(days)s يوماً"
+msgstr[5] "برامج %(days)s يوم"
+
+#: users/trainer_directory.py
+#, python-format
+msgid "Usually replies within %(hours)s hour"
+msgid_plural "Usually replies within %(hours)s hours"
+msgstr[0] "يرد خلال %(hours)s ساعة عادةً"
+msgstr[1] "يرد خلال ساعة عادةً"
+msgstr[2] "يرد خلال ساعتين عادةً"
+msgstr[3] "يرد خلال %(hours)s ساعات عادةً"
+msgstr[4] "يرد خلال %(hours)s ساعة عادةً"
+msgstr[5] "يرد خلال %(hours)s ساعة عادةً"
+
+#: users/trainer_directory.py
+#, python-format
+msgid "%(count)s client finished their program"
+msgid_plural "%(count)s clients finished their program"
+msgstr[0] "%(count)s أنهوا برنامجهم"
+msgstr[1] "متدرب واحد أنهى برنامجه"
+msgstr[2] "متدربان أنهيا برنامجهما"
+msgstr[3] "%(count)s أنهوا برنامجهم"
+msgstr[4] "%(count)s أنهوا برنامجهم"
+msgstr[5] "%(count)s أنهوا برنامجهم"
+
+#: users/trainer_directory.py
+#, python-format
+msgid "%(years)s year of experience"
+msgid_plural "%(years)s years of experience"
+msgstr[0] "%(years)s سنة خبرة"
+msgstr[1] "سنة خبرة واحدة"
+msgstr[2] "سنتان من الخبرة"
+msgstr[3] "%(years)s سنوات خبرة"
+msgstr[4] "%(years)s سنة خبرة"
+msgstr[5] "%(years)s سنة خبرة"

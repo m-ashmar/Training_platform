@@ -750,6 +750,9 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
     tdee = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
     training_history = serializers.SerializerMethodField()
+    # The onboarding answers the client gave for their trainer (design v2). The date of
+    # birth is NOT here: a trainer gets `age`, never the date.
+    injury_areas = serializers.ListField(child=serializers.CharField(), read_only=True)
     
     class Meta:
         model = get_user_model()
@@ -757,6 +760,7 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'full_name', 'profile_picture',
             'height', 'weight', 'age', 'gender', 'specific_injury',
             'activity_level', 'client_goals', 'client_preferences',
+            'training_goal', 'training_place', 'training_days_per_week', 'injury_areas',
             'bmi', 'bmr', 'tdee', 'training_history',
             'date_joined', 'last_login'
         ]
