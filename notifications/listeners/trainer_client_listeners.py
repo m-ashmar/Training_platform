@@ -24,6 +24,7 @@ from notifications.domain.trainer_client_events import (
     ClientRequestCancelledEvent,
     ClientUnassignedTrainerEvent,
     CoachingEndedEvent,
+    CoachingFinishedEvent,
     CoachingPaymentDueEvent,
     CoachingRenewedEvent,
 )
@@ -285,3 +286,10 @@ def handle_coaching_ended(event: CoachingEndedEvent):
     _send_coaching(event, event_type='coaching_ended', related_id=event.relation_id,
                    context={'name': event.other_name},
                    data={'type': 'coaching_ended', 'user_id': event.actor_id})
+
+
+@subscribe(CoachingFinishedEvent)
+def handle_coaching_finished(event: CoachingFinishedEvent):
+    _send_coaching(event, event_type='coaching_finished', related_id=event.relation_id,
+                   context={'name': event.other_name},
+                   data={'type': 'coaching_finished', 'user_id': event.actor_id})

@@ -127,9 +127,13 @@ def trainer_cards(trainers, request, *, proof=None) -> list[dict]:
     return cards
 
 
+#: How many of a trainer's public routines the profile shows ("a few", owner).
+PROFILE_PUBLIC_ROUTINES = 6
+
+
 def trainer_profile(trainer, request) -> dict:
     """The profile screen: the card, plus what only the profile shows."""
-    from routine.models import Exercise
+    from routine.models import Exercise, RoutineTemplate
 
     card = trainer_cards([trainer], request)[0]
     # Retired exercises (`is_active=False`) are refused to everyone by
@@ -143,6 +147,12 @@ def trainer_profile(trainer, request) -> dict:
             'exercise_count': library.count(),
             'preview': [{'id': e.pk, 'name': e.name} for e in library[:3]],
         },
+        # The routines the trainer chose to make public (templates, `is_public`), newest
+        # first. A client's own routine is private to that client and never listed.
+        'public_routines': [
+            {'id': t.pk, 'name': t.name, 'goal': t.goal, 'days': t.days}
+            for t in RoutineTemplate.objects.filter(created_by=trainer, is_public=True)
+            .order_by('-created_at', '-id')[:PROFILE_PUBLIC_ROUTINES]],
     })
     return card
 

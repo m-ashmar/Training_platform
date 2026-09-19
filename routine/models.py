@@ -942,7 +942,7 @@ def update_routine_progress_on_exercise_progress(sender, instance, created, **kw
     refresh_routine_progress(instance)
 
 
-def refresh_routine_progress(instance, routine_scope=None):
+def refresh_routine_progress(instance, routine_scope=None, day_scope=None):
     """Write `RoutineProgress` for the work this `UserExerciseProgress` represents.
 
     `routine_scope`, when given, is the routine the client was actually training. It
@@ -966,7 +966,10 @@ def refresh_routine_progress(instance, routine_scope=None):
     session = _session_of_record(instance)
     if routine_scope is None:
         routine_scope = getattr(session, 'routine', None)
-    day_scope = getattr(session, 'day', None)
+    if day_scope is None:
+        # A caller that knows the day says so (`bulk-complete`, BACKEND_BUGS B-011);
+        # otherwise the session of record does.
+        day_scope = getattr(session, 'day', None)
 
     # Pre-fetch the related routine_exercises to avoid N+1 down the line
     routines = Routine.objects.filter(
@@ -1040,6 +1043,14 @@ def refresh_routine_progress(instance, routine_scope=None):
             # untrained day report `in_progress`. A fully-completed day is different —
             # every exercise it schedules was trained today, which is the verdict.
             if routine_scope is None and status != 'completed':
+                continue
+
+            # A day the person completed stays completed: completing it with sets still
+            # unlogged is allowed after a warning (owner, BACKEND_BUGS B-011), and a set
+            # logged after that must not undo it.
+            if status != 'completed' and RoutineProgress.objects.filter(
+                    user=user, routine=routine, day=day, date=progress_date,
+                    status='completed').exists():
                 continue
 
             # Update or create the RoutineProgress record

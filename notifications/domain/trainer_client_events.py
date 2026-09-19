@@ -141,3 +141,17 @@ class CoachingEndedEvent(BaseDomainEvent):
     recipient_id: int = 0
     other_name: str = ""
     relation_id: int = 0
+
+
+@dataclass
+class CoachingFinishedEvent(BaseDomainEvent):
+    """The coaching ended for a reason other than money: the trainer stopped at the end
+    of the month, or an account was suspended. Sent to both people."""
+    template = NotificationTemplate(
+        title=_("Coaching ended"),
+        body=_("Coaching between you and %(name)s has ended."),
+    )
+    actor_id: int = 0          # the other person
+    recipient_id: int = 0
+    other_name: str = ""
+    relation_id: int = 0

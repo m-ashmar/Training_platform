@@ -45,6 +45,7 @@ EVENT_CLASS_REGISTRY = {
     'coaching_renewed': 'notifications.domain.trainer_client_events.CoachingRenewedEvent',
     'coaching_payment_due': 'notifications.domain.trainer_client_events.CoachingPaymentDueEvent',
     'coaching_ended': 'notifications.domain.trainer_client_events.CoachingEndedEvent',
+    'coaching_finished': 'notifications.domain.trainer_client_events.CoachingFinishedEvent',
     # Routine events. These keys are the notif_type strings passed to
     # routine.services.send_notification(); routine.models.Notification was dropped
     # (migration 0013), so there is no model to match against any more.

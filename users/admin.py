@@ -197,7 +197,8 @@ class CustomUserAdmin(UserAdmin):
         if obj.assigned_trainer_id:
             TrainerClientRelation.objects.update_or_create(
                 trainer_id=obj.assigned_trainer_id, client=obj,
-                defaults={'status': 'approved', 'initiated_by': 'trainer'})
+                defaults={'status': 'approved', 'initiated_by': 'trainer',
+                          'ends_at_period_end': False})
             TrainerClientRelation.objects.filter(client=obj, status='approved').exclude(
                 trainer_id=obj.assigned_trainer_id).update(status='rejected')
         else:

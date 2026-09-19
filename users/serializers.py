@@ -260,6 +260,10 @@ class CustomLoginSerializer(LoginSerializer):
             # Authenticate using email and password
             self.user = self.authenticate(email=email, password=password)
             if not self.user:
+                # The right password on a suspended account: say so (owner, B-004).
+                from .exceptions import AccountDisabled, disabled_account_with_password
+                if disabled_account_with_password(email, password):
+                    raise AccountDisabled()
                 record_login_failure(email)
                 raise serializers.ValidationError(
                     {"non_field_errors": [_("Unable to log in with provided credentials.")]}

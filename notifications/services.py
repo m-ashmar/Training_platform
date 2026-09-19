@@ -19,18 +19,12 @@ class NotificationService:
         Handles Layer 2 Deduplication (DB constraint).
         """
         
-        # Check User Preferences (Early Exit)
-        # Check global disable
-        try:
-            pref = UserNotificationPreference.objects.get(user=recipient, event_type=event_type)
-            if not pref.is_enabled:
-                 logger.info(f"Notification suppressed by user preference: {recipient.id} - {event_type}")
-                 return None
-        except UserNotificationPreference.DoesNotExist:
-            # Optional side effect: swallowing this silently is what made the
-            # surrounding failures invisible in logs. Control flow is unchanged.
-            logger.debug('suppressed non-fatal error', exc_info=True)
-        
+        # Preferences decide DELIVERY, not whether the thing happened: the in-app row is
+        # always written, and `_dispatch_channels` asks the preferences before pushing
+        # (UserNotificationPreference.is_channel_enabled). A muted type used to leave
+        # no row at all, so a person who silenced a kind of push also lost the record of
+        # it — a payment or a trainer's answer — from their inbox (BACKEND_BUGS B-014).
+
         # calculate dedup key
         dedup_key = cls._generate_dedup_key(recipient.id, event_type, related_object_id, event_id)
         

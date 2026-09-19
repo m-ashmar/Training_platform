@@ -192,6 +192,10 @@ def renew(relation_id, now=None) -> str:
         if not (trainer.is_active and trainer.is_trainer and client.is_active):
             end_coaching(relation, reason='account_disabled')
             return 'ended'
+        if relation.ends_at_period_end:
+            # The trainer asked to stop when this month ended; it has.
+            end_coaching(relation, reason='ended_by_trainer')
+            return 'ended'
         # The month's own price, never the trainer's current rate.
         price = last.price
 
@@ -239,12 +243,22 @@ def renew(relation_id, now=None) -> str:
         return 'renewed'
 
 
+def running_month(relation, now=None):
+    """The paid month the client is in right now, or None."""
+    now = now or timezone.now()
+    last = relation.periods.order_by('-number').first()
+    if last is not None and last.status == 'settled' and last.ends_at and last.ends_at > now:
+        return last
+    return None
+
+
 def end_coaching(relation, *, reason):
     """End a relation whose month went unpaid. Caller holds the relation row, in a
     transaction. Nothing is held for it (a renewal only runs on a paid-out month), so
     there is no money to return: the months paid were delivered."""
     from notifications.domain.dispatcher import emit_event
-    from notifications.domain.trainer_client_events import CoachingEndedEvent
+    from notifications.domain.trainer_client_events import (CoachingEndedEvent,
+                                                            CoachingFinishedEvent)
 
     from .models import CustomUser, TrainerClientRelation
 
@@ -255,13 +269,14 @@ def end_coaching(relation, *, reason):
     relation_id, trainer, client_user = relation.pk, relation.trainer, relation.client
     TrainerClientRelation.objects.filter(pk=relation_id).delete()
     logger.info("Coaching %s ended (%s)", relation_id, reason)
+    # "The monthly fee was not paid" only when that is why; otherwise a plain ending.
+    Event = CoachingEndedEvent if reason == 'unpaid' else CoachingFinishedEvent
     events = [
-        CoachingEndedEvent(actor_id=trainer.pk, recipient_id=client_user.pk,
-                           other_name=trainer.full_name or trainer.username,
-                           relation_id=relation_id),
-        CoachingEndedEvent(actor_id=client_user.pk, recipient_id=trainer.pk,
-                           other_name=client_user.full_name or client_user.username,
-                           relation_id=relation_id),
+        Event(actor_id=trainer.pk, recipient_id=client_user.pk,
+              other_name=trainer.full_name or trainer.username, relation_id=relation_id),
+        Event(actor_id=client_user.pk, recipient_id=trainer.pk,
+              other_name=client_user.full_name or client_user.username,
+              relation_id=relation_id),
     ]
     transaction.on_commit(lambda: [emit_event(e) for e in events])
 
@@ -294,7 +309,9 @@ def coaching_status(relation, now=None) -> dict:
     now = now or timezone.now()
     last = relation.periods.order_by('-number').first()
     body = {'trainer_id': relation.trainer_id, 'since': relation.responded_at,
-            'status': 'active', 'period': None, 'renews_at': None, 'grace_until': None}
+            'status': 'active', 'period': None, 'renews_at': None, 'grace_until': None,
+            # The trainer is stopping when the current month ends: no renewal.
+            'ending': relation.ends_at_period_end}
     if last is None:
         # Held before months existed, or free, or sold as one fee before months existed.
         if relation.hold_reference:
@@ -314,7 +331,7 @@ def coaching_status(relation, now=None) -> dict:
         # A renewal was tried and the wallet could not cover it.
         body['status'] = 'payment_due'
         body['grace_until'] = last.ends_at + grace_period()
-    else:
+    elif not relation.ends_at_period_end:
         # Includes the minutes between a month's end and the hourly renewal.
         body['renews_at'] = last.ends_at
     return body

@@ -2638,3 +2638,34 @@ msgstr "لا يمكن أن يستمر التمرين أكثر من %(hours)d س�
 #: notifications/views.py
 msgid "Unknown notification type."
 msgstr "نوع إشعار غير معروف."
+
+#: users/exceptions.py
+msgid "This account is suspended. Please contact support."
+msgstr "هذا الحساب موقوف. يرجى التواصل مع الدعم."
+
+#: routine/views.py
+msgid "Some sets of this day are not logged yet."
+msgstr "بعض مجموعات هذا اليوم لم تُسجَّل بعد."
+
+#: routine/views.py
+msgid ""
+"This routine already belongs to another client. Create a copy for this client "
+"instead."
+msgstr "هذا البرنامج مخصص لمتدرب آخر. أنشئ نسخة لهذا المتدرب بدلاً منه."
+
+#: users/views.py
+msgid "Coaching will end when the current month ends."
+msgstr "سينتهي التدريب بنهاية الشهر الحالي."
+
+#: users/views.py
+msgid "The client has a paid month running. You can end the coaching when it finishes."
+msgstr "لدى المتدرب شهر مدفوع جارٍ. يمكنك إنهاء التدريب عند انتهائه."
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "Coaching between you and %(name)s has ended."
+msgstr "انتهى التدريب بينك وبين %(name)s."
+
+#: routine/views.py
+msgid "Only the trainer who wrote this routine can copy it."
+msgstr "لا يمكن نسخ هذا البرنامج إلا للمدرب الذي كتبه."

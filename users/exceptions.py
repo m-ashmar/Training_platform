@@ -25,3 +25,32 @@ class TooManyAttempts(APIException):
         # One code for the whole refusal; the number above has none to walk.
         return self.default_code
 
+
+
+class AccountDisabled(APIException):
+    """The password is right and the account is suspended or retired (owner, 2026-09-19:
+    "they should see account suspended").
+
+    Only said to someone who proved the password, so it tells a stranger nothing: a wrong
+    password on a suspended account still reads as a wrong password. The same code
+    `verify-otp` answers with.
+    """
+    status_code = status.HTTP_403_FORBIDDEN
+    default_code = 'account_disabled'
+    default_detail = _("This account is suspended. Please contact support.")
+
+
+def disabled_account_with_password(email, password):
+    """The disabled account `email` names, if `password` is its password; else None."""
+    from .models import CustomUser
+
+    if not email or not password:
+        return None
+    user = CustomUser.objects.filter(email__iexact=email.strip(), is_active=False).first()
+    if user is None:
+        # The same one hash every failed sign-in costs here, so a suspended address is
+        # not slower to refuse than any other: timing must not tell a stranger either.
+        from django.contrib.auth.hashers import make_password
+        make_password(password)
+        return None
+    return user if user.check_password(password) else None

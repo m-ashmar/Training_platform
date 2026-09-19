@@ -594,7 +594,14 @@ class AssignClientView(APIView):
             )
 
 class UnassignClientView(APIView):
-    """View for trainer to unassign a client"""
+    """POST /api/auth/trainer/unassign-client/ — a trainer ends coaching with a client.
+
+    Body: `client_id`, optional `at_period_end` (bool). A trainer cannot end a paid month
+    the client is in (owner, 2026-09-19): while one runs this answers
+    409 `coaching_month_active` with `ends_at`, and with `at_period_end: true` it instead
+    schedules the end — 200 `{scheduled: true, ends_at}` — and the month is not renewed.
+    Before the first program (month 1 only held) the client is released and refunded.
+    """
     permission_classes = [IsAuthenticated]
     
     def post(self, request):
@@ -629,36 +636,63 @@ class UnassignClientView(APIView):
                     status='approved'
                 )
 
-                if client.assigned_trainer_id == request.user.id:
-                    client.assigned_trainer = None
-                    client.save(update_fields=['assigned_trainer'])
+                from .coaching import running_month
+                # ONE transaction under the relation's lock, from the check to the
+                # delete: checked in one transaction and deleted in another, a first
+                # program settled in between paid out a month and the coaching was then
+                # deleted anyway (users/trainer_relations.py lock order: the relation,
+                # then the client's row, then wallets).
+                with transaction.atomic():
+                    locked = (TrainerClientRelation.objects.select_for_update(of=('self',))
+                              .get(pk=relation.pk))
+                    month = running_month(locked)
+                    if month is not None:
+                        if str(request.data.get('at_period_end')).lower() in ('1', 'true', 'yes'):
+                            locked.ends_at_period_end = True
+                            locked.save(update_fields=['ends_at_period_end', 'updated_at'])
+                            return Response({
+                                'message': _('Coaching will end when the current month ends.'),
+                                'client_id': client.id, 'scheduled': True,
+                                'ends_at': month.ends_at}, status=status.HTTP_200_OK)
+                        return Response({
+                            'error': _('The client has a paid month running. You can end the '
+                                       'coaching when it finishes.'),
+                            'code': 'coaching_month_active', 'ends_at': month.ends_at},
+                            status=status.HTTP_409_CONFLICT)
 
-                # Refund first, and only then let go of the record. `release_hold`
-                # raises when it cannot move the money, and deleting the relation
-                # anyway would destroy the only record of whose money is in escrow.
-                from .trainer_relations import HoldFailed, release_hold
-                try:
-                    release_hold(relation, request.user)
-                except HoldFailed as exc:
-                    logger.error("Refund failed for relation %s: %s", relation.id, exc)
-                    return Response(
-                        {'error': _('We could not return the held payment. '
-                                    'Nothing was changed; please try again.')},
-                        status=status.HTTP_409_CONFLICT
-                    )
-                # Every row for this pair, not just the approved one: a stale pending
-                # or rejected row left the client's own request-status screen
-                # contradicting itself, and could re-trigger the block on choosing
-                # another trainer.
-                TrainerClientRelation.objects.filter(
-                    trainer=request.user, client=client).delete()
+                    locked_client = CustomUser.objects.select_for_update(no_key=True).get(pk=client.pk)
+                    if locked_client.assigned_trainer_id == request.user.id:
+                        locked_client.assigned_trainer = None
+                        locked_client.save(update_fields=['assigned_trainer'])
+
+                    # Refund first, and only then let go of the record. `release_hold`
+                    # raises when it cannot move the money, and deleting the relation
+                    # anyway would destroy the only record of whose money is in escrow.
+                    from .trainer_relations import HoldFailed, release_hold
+                    try:
+                        release_hold(locked, request.user)
+                    except HoldFailed as exc:
+                        logger.error("Refund failed for relation %s: %s", relation.id, exc)
+                        transaction.set_rollback(True)
+                        return Response(
+                            {'error': _('We could not return the held payment. '
+                                        'Nothing was changed; please try again.')},
+                            status=status.HTTP_409_CONFLICT
+                        )
+                    # Every row for this pair, not just the approved one: a stale pending
+                    # or rejected row left the client's own request-status screen
+                    # contradicting itself, and could re-trigger the block on choosing
+                    # another trainer.
+                    TrainerClientRelation.objects.filter(
+                        trainer=request.user, client=client).delete()
                 
                 # Emit domain event — notification handled at delivery boundary
-                emit_event(TrainerUnassignmentEvent(
+                _event = TrainerUnassignmentEvent(
                     actor_id=request.user.id,
                     recipient_id=client.id,
                     trainer_name=getattr(request.user, 'full_name', None) or request.user.username,
-                ))
+                )
+                transaction.on_commit(lambda: emit_event(_event))
                 logger.info(f"Trainer {request.user.id} unassigned client {client.id}")
                 
                 # Invalidate client cache
@@ -1091,6 +1125,9 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             # DRF's AuthenticationFailed: simplejwt raises the base class, and the
             # simplejwt subclass this caught never matched, so /token/ counted no failed
             # attempt and its lockout never engaged (BACKEND_BUGS B-004).
+            from .exceptions import AccountDisabled, disabled_account_with_password
+            if disabled_account_with_password(email, attrs.get('password')):
+                raise AccountDisabled()
             if email:
                 record_login_failure(email)
             raise
@@ -1774,7 +1811,11 @@ def approve_trainer_relation(relation, actor):
 
         relation.status = 'approved'
         relation.responded_at = timezone.now()
-        relation.save(update_fields=['status', 'responded_at', 'updated_at'])
+        # A new coaching starts renewing: a stop a trainer scheduled on an earlier
+        # approval of this same row is not this one's.
+        relation.ends_at_period_end = False
+        relation.save(update_fields=['status', 'responded_at', 'ends_at_period_end',
+                                     'updated_at'])
         _record_outcome(relation)
         locked_client.assigned_trainer = trainer
         locked_client.save(update_fields=['assigned_trainer'])

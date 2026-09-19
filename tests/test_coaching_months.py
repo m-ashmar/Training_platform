@@ -350,3 +350,54 @@ def test_coaching_paid_as_one_fee_before_months_existed_is_active_and_never_rene
     body = api(client).get("/api/v1/coaching/current/").json()["coaching"]
     assert body["status"] == "active" and body["period"] is None
     assert relation.pk not in due_relation_ids()
+
+
+# ------------------------------------------- owner: a trainer cannot end a paid month
+def test_a_trainer_cannot_end_a_paid_month_but_can_stop_it_renewing(
+        make_user, api, django_capture_on_commit_callbacks):
+    from users.coaching import renew
+    from users.models import TrainerClientRelation
+
+    trainer, client, relation = _accepted(make_user, api, "trainer_end")
+    _deliver_first_program(api, trainer, client)
+    url = "/api/auth/trainer/unassign-client/"
+    refused = api(trainer).post(url, {"client_id": client.pk}, content_type=JSON)
+    assert (refused.status_code, refused.json()["code"]) == (409, "coaching_month_active")
+    assert TrainerClientRelation.objects.filter(pk=relation.pk).exists()
+
+    scheduled = api(trainer).post(url, {"client_id": client.pk, "at_period_end": True},
+                                  content_type=JSON)
+    assert scheduled.status_code == 200 and scheduled.json()["scheduled"] is True
+    status_ = api(client).get("/api/v1/coaching/current/").json()["coaching"]
+    assert status_["ending"] is True and status_["renews_at"] is None
+
+    _end_month(relation)
+    with mock.patch("notifications.domain.dispatcher.emit_event") as sent, \
+            django_capture_on_commit_callbacks(execute=True):
+        assert renew(relation.pk) == "ended"
+    assert _balance(client) == Decimal("900.00"), "the next month was not charged"
+    assert not TrainerClientRelation.objects.filter(pk=relation.pk).exists()
+    # A plain ending, not "the monthly fee was not paid".
+    assert {type(c.args[0]).__name__ for c in sent.call_args_list} == {"CoachingFinishedEvent"}
+
+
+def test_a_new_approval_forgets_a_stop_scheduled_on_an_earlier_one(make_user, api):
+    from users.models import TrainerClientRelation
+    from users.views import approve_trainer_relation
+
+    trainer, client, relation = _accepted(make_user, api, "reuse")
+    TrainerClientRelation.objects.filter(pk=relation.pk).update(
+        status="pending", ends_at_period_end=True, hold_reference="")
+    relation.refresh_from_db()
+    refused, approved = approve_trainer_relation(relation, trainer)
+    assert refused is None
+    approved.refresh_from_db()
+    assert approved.ends_at_period_end is False
+
+
+def test_before_the_first_program_a_trainer_can_still_release_the_client(make_user, api):
+    trainer, client, relation = _accepted(make_user, api, "release")
+    resp = api(trainer).post("/api/auth/trainer/unassign-client/", {"client_id": client.pk},
+                             content_type=JSON)
+    assert resp.status_code == 200, resp.content
+    assert _balance(client) == Decimal("1000.00"), "month 1 was only held, and comes back"

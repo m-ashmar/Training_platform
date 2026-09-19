@@ -72,8 +72,10 @@ edit produces a false failure. After adding a migration, the gate is `--create-d
 - Lock order is subscription → payment, user rows → wallets (ascending id). Money moves on
   commit, idempotently. Read the docstrings in `payment_service.py`, `wallet/models.py` and
   `users/trainer_relations.py` before changing any of them.
-- Owner's numbers (2026-09-19): platform keeps 20% of every coaching fee; plan payments stay
-  100% with the platform; minimum age 14.
+- Owner's numbers (2026-09-19): platform keeps 20% of every coaching fee, and coaching is
+  sold by the month (the 20% comes off every renewal); a trainer cannot end a paid month
+  the client is in; plan payments stay 100% with the platform; minimum age 14; signed-in
+  clients 1500 requests an hour.
 
 **Tests**
 - Never edit a test's assertion to match code, and never restore an old baseline to make a

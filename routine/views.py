@@ -558,6 +558,39 @@ class RoutineViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
 
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def copy(self, request, pk=None):
+        """POST /api/routine/routines/{id}/copy/ — a fresh copy of your routine, for
+        another client.
+
+        A routine belongs to one client (BACKEND_BUGS B-001), so a trainer who wants the
+        same program for someone else copies it: same days and exercises, no assignee,
+        starting today. Only the trainer who wrote it (or an admin); 403 otherwise.
+        201 with the new routine.
+        """
+        from .models import Routine, RoutineExercise
+
+        original = self.get_object()
+        if not (original.created_by_id == request.user.id
+                or getattr(request.user, 'is_admin', False)):
+            return Response({'error': _('Only the trainer who wrote this routine can copy it.'),
+                             'code': 'permission_denied'}, status=status.HTTP_403_FORBIDDEN)
+        with transaction.atomic():
+            copy = Routine.objects.create(
+                name=original.name, description=original.description,
+                translations=original.translations, created_by=original.created_by,
+                days=original.days, difficulty_level=original.difficulty_level,
+                estimated_duration=original.estimated_duration, is_active=True)
+            RoutineExercise.objects.bulk_create([
+                RoutineExercise(routine=copy, exercise_id=rex.exercise_id, sets=rex.sets,
+                                reps=rex.reps, rest_time=rex.rest_time, day=rex.day,
+                                order=rex.order, weight=rex.weight, duration=rex.duration,
+                                distance=rex.distance, notes=rex.notes)
+                for rex in original.routine_exercises.all()])
+            copy.exercises.set(original.exercises.all())
+        return Response(RoutineSerializer(copy, context={'request': request}).data,
+                        status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=['post'], permission_classes=[IsTrainerOrAdminForAssignment])
     def assign_to_client(self, request, pk=None):
         """
@@ -620,6 +653,18 @@ class RoutineViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+            # One client per routine: a coach writes a routine FOR a client, and clients
+            # never share one (owner, 2026-09-19; BACKEND_BUGS B-001). A second client
+            # gets their own copy (templates exist for reuse).
+            if routine.assigned_to.exclude(pk=client.pk).exists():
+                return Response(
+                    {"error": _("This routine already belongs to another client. "
+                                "Create a copy for this client instead."),
+                     "code": "routine_belongs_to_another_client",
+                     "routine_id": routine.id,
+                     "copy_url": f"/api/routine/routines/{routine.id}/copy/"},
+                    status=status.HTTP_409_CONFLICT)
+
             # Assign routine to client
             routine.assigned_to.add(client)
 
@@ -768,7 +813,16 @@ class RoutineViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def update_progress(self, request, pk=None):
-        """Custom action to update progress for a user on a routine."""
+        """POST /api/routine/routines/{id}/update_progress/ — set a day's status for today.
+
+        Body: `day`, `status` (`not_started | in_progress | completed | skipped`), and
+        `confirm_unlogged` (bool). Completing a day does not require every set to be
+        logged, but the person must be warned first (owner, 2026-09-19): while any
+        prescribed set of that day is unlogged today, `completed` answers
+        409 `unlogged_sets` with `{prescribed, logged, unlogged}`, and the app sends the
+        same request again with `confirm_unlogged: true` once the person has seen it.
+        Other codes: 400 `bad_status`; 403 when the routine is not yours.
+        """
         routine = self.get_object()
         user = request.user
         day = request.data.get("day")
@@ -803,6 +857,13 @@ class RoutineViewSet(viewsets.ModelViewSet):
         valid_days = [exercise.day for exercise in routine.routine_exercises.all()]
         if day_number not in valid_days:
             return Response({"error": _("Day %(day)s is not part of the routine.") % {"day": day}}, status=400)
+
+        if status == 'completed' and not _truthy(request.data.get('confirm_unlogged')):
+            counts = _day_set_counts(routine, user, day_number)
+            if counts['unlogged']:
+                return Response({
+                    'error': _('Some sets of this day are not logged yet.'),
+                    'code': 'unlogged_sets', **counts}, status=409)
 
         try:
             updated_progress = routine.update_progress(user=user, day=day_number, status=status)
@@ -982,6 +1043,42 @@ def _records_in_window(user, start_date) -> int:
             with_record.add(exercise)
         best[exercise] = max(best.get(exercise, weight), weight)
     return len(with_record)
+
+def _truthy(value) -> bool:
+    return value is True or str(value).strip().lower() in ('1', 'true', 'yes')
+
+
+def _day_set_counts(routine, user, day) -> dict:
+    """Prescribed, logged and unlogged sets of one routine day, for today.
+
+    Logged means a set log today for one of the day's exercises, counted at most up to
+    what that exercise prescribes (a tenth set does not make up for a missing exercise).
+    """
+    from django.db.models import Count
+
+    from .models import UserExerciseProgress
+
+    today = timezone.localdate()
+    prescribed = {}
+    for exercise_id, sets in (routine.routine_exercises.filter(day=day)
+                              .values_list('exercise_id', 'sets')):
+        # An exercise with no set count still asks for one (a treadmill run).
+        prescribed[exercise_id] = prescribed.get(exercise_id, 0) + max(sets or 0, 1)
+    logged = dict(ExerciseSetLog.objects
+                  .filter(user_exercise_progress__user=user,
+                          user_exercise_progress__exercise_id__in=list(prescribed),
+                          date=today)
+                  .order_by().values('user_exercise_progress__exercise_id')
+                  .annotate(n=Count('id'))
+                  .values_list('user_exercise_progress__exercise_id', 'n'))
+    # "Log a whole day" (bulk-complete) records completed sets without set logs.
+    for exercise_id, done in (UserExerciseProgress.objects
+                              .filter(user=user, exercise_id__in=list(prescribed), date=today)
+                              .values_list('exercise_id', 'completed_sets')):
+        logged[exercise_id] = max(logged.get(exercise_id, 0), done or 0)
+    total = sum(prescribed.values())
+    done = sum(min(logged.get(e, 0), n) for e, n in prescribed.items())
+    return {'prescribed': total, 'logged': done, 'unlogged': total - done}
 
 def _prescribed_weight(value):
     """A customised working weight in kg, or None if it is not a number from 0 to 1000."""
@@ -2346,12 +2443,17 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST)
         results = []
         errors = []
+        written = []
+        from .models import refresh_routine_progress, suspend_progress_recalc
         for rex in exercises:
             try:
                 # Savepoint: same reason as the set-log loop above — this one keeps
                 # going after a failure, so the failed write must not take the
-                # surrounding transaction with it.
-                with transaction.atomic():
+                # surrounding transaction with it. The per-row recalculation is
+                # suspended: with no set log naming a session it walked EVERY routine
+                # holding the exercise (BACKEND_BUGS B-011); it runs once below, scoped
+                # to the routine and day this request is about.
+                with transaction.atomic(), suspend_progress_recalc():
                     obj, created = UserExerciseProgress.objects.update_or_create(
                         user=user,
                         exercise=rex.exercise,
@@ -2367,6 +2469,7 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
                         }
                     )
                 results.append({'exercise': rex.exercise.name, 'created': created, 'id': obj.id})
+                written.append(obj)
             except IntegrityError as e:
                 if 'unique constraint' in str(e).lower():
                     errors.append({'exercise': rex.exercise.name, 'error': 'Duplicate progress for this user, exercise, and date.'})
@@ -2374,6 +2477,9 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
                     logger.exception("bulk progress write failed for %s", rex.exercise_id)
                     errors.append({'exercise': rex.exercise.name,
                                    'error': _('Could not record progress for this exercise.')})
+        if written:
+            # One pass decides the whole day from every exercise's progress.
+            refresh_routine_progress(written[-1], routine_scope=routine, day_scope=day)
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
 

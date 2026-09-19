@@ -62,6 +62,12 @@ class NotificationPreferenceViewSet(viewsets.ModelViewSet):
     PATCH  /api/notifications/preferences/{id}/       update one
     DELETE /api/notifications/preferences/{id}/       revert to default (enabled)
     GET    /api/notifications/preferences/event_types/  discoverable event types
+
+    What a preference does: it governs PUSHES only. `event_type: "all"` is the master
+    switch — `is_enabled: false` (or `channels: {"fcm": false}`) stops every push; a
+    type's own row can then stop that type's pushes. The in-app inbox always receives
+    the notification, whatever the settings (BACKEND_BUGS B-014). An `event_type` that is
+    neither `all` nor one `event_types/` lists answers 400 `unknown_event_type`.
     """
     serializer_class = UserNotificationPreferenceSerializer
     permission_classes = [IsAuthenticated]

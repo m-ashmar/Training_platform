@@ -7160,9 +7160,12 @@ def test_a_progress_status_must_be_one_we_declared(make_user, api):
     routine.assigned_to.add(client_user)
 
     def set_status(value):
+        # `confirm_unlogged`: since the owner's decision of 2026-09-19 (BACKEND_BUGS
+        # B-011) completing a day with unlogged sets is allowed only after the person
+        # was warned; this test is about which statuses are accepted, not about that.
         return api(client_user).post(
             f"/api/routine/routines/{routine.id}/update_progress/",
-            data=_json.dumps({"day": 1, "status": value}),
+            data=_json.dumps({"day": 1, "status": value, "confirm_unlogged": True}),
             content_type="application/json").status_code
 
     assert set_status("banana") == 400

@@ -82,8 +82,9 @@ class TrainerDetailView(APIView):
     """GET /api/v1/trainers/{id}/ — one trainer's profile screen.
 
     Public and blind to who is asking, like the roster. Returns the card plus `bio`,
-    `certifications` (the trainer's own claim) and `library: {exercise_count, preview:
-    [{id, name}] (up to 3)}`. 404 `not_found` for anyone who is not a trainer the app may
+    `certifications` (the trainer's own claim), `library: {exercise_count, preview:
+    [{id, name}] (up to 3)}` and `public_routines: [{id, name, goal, days}]` (up to 6 of
+    the trainer's public templates; a client's own routine is never listed). 404 `not_found` for anyone who is not a trainer the app may
     show (disabled, unverified address, or not a trainer).
     """
     authentication_classes = []

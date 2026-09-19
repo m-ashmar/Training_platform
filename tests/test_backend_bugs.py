@@ -549,3 +549,229 @@ def test_b006_a_cache_outage_does_not_fail_signed_in_requests(make_user, monkeyp
     middleware = mw.RateLimitMiddleware(lambda r: None)
     assert middleware._get_user_type(request) == "trainer"
     assert middleware.process_request(request) is None, "the limiter fails open"
+
+
+# --------------------------------------------------------- batch 3: owner's answers
+@pytest.mark.parametrize("path", ["/api/auth/token/", "/api/auth/login/"])
+def test_b004_a_suspended_account_is_told_so_only_after_its_password(make_user, api, path):
+    user = make_user("bb4_banned")
+    user.is_active = False
+    user.save(update_fields=["is_active"])
+    right = api().post(path, {"email": user.email, "password": "Xx!23456"}, content_type=JSON)
+    assert (right.status_code, right.json()["code"]) == (403, "account_disabled")
+    wrong = api().post(path, {"email": user.email, "password": "nope-nope-1"},
+                       content_type=JSON)
+    assert wrong.json().get("code") != "account_disabled"
+
+
+def test_b011_completing_a_day_with_unlogged_sets_needs_the_warning_first(make_user, api):
+    from routine.models import ExerciseSetLog, RoutineProgress
+
+    trainer, client, routine, progress = _session_setup(make_user, "warn")
+    ExerciseSetLog.objects.create(user_exercise_progress=progress, set_number=1, weight=40,
+                                  reps=8)
+    url = f"/api/routine/routines/{routine.pk}/update_progress/"
+    warned = api(client).post(url, {"day": 1, "status": "completed"}, content_type=JSON)
+    assert warned.status_code == 409
+    assert {k: warned.json()[k] for k in ("code", "prescribed", "logged", "unlogged")} == \
+        {"code": "unlogged_sets", "prescribed": 3, "logged": 1, "unlogged": 2}
+    assert not RoutineProgress.objects.filter(user=client, routine=routine, day=1,
+                                              status="completed").exists()
+    confirmed = api(client).post(url, {"day": 1, "status": "completed",
+                                       "confirm_unlogged": True}, content_type=JSON)
+    assert confirmed.status_code == 200, confirmed.content
+
+
+def test_b011_log_a_whole_day_marks_only_that_routines_day(make_user, api):
+    from django.utils import timezone
+
+    from routine.models import Exercise, Routine, RoutineExercise, RoutineProgress
+
+    trainer = make_user("bb11_t", user_type="trainer")
+    client = make_user("bb11_c")
+    squat = Exercise.objects.create(name="bb11 squat", created_by=trainer)
+    posted = Routine.objects.create(name="bb11 posted", created_by=trainer, days=1)
+    other = Routine.objects.create(name="bb11 other", created_by=trainer, days=1)
+    for routine in (posted, other):
+        RoutineExercise.objects.create(routine=routine, exercise=squat, day=1, sets=3, reps=5)
+        routine.assigned_to.add(client)
+    resp = api(client).post("/api/routine/user-exercise-progress/bulk-complete/", {
+        "routine_id": posted.pk, "day": 1, "date": timezone.localdate().isoformat(),
+        "completed_sets": 3}, content_type=JSON)
+    assert resp.status_code == 200, resp.content
+    today = timezone.localdate()
+    assert RoutineProgress.objects.get(user=client, routine=posted, day=1, date=today).status \
+        == "completed"
+    assert not RoutineProgress.objects.filter(user=client, routine=other, date=today,
+                                              status="completed").exists()
+
+
+def test_b014_a_muted_type_keeps_its_inbox_row_and_all_mutes_every_push(make_user):
+    from unittest import mock
+
+    from notifications.models import Notification, UserNotificationPreference
+    from notifications.services import NotificationService
+
+    user = make_user("bb14_mute")
+    UserNotificationPreference.objects.create(user=user, event_type="custom", is_enabled=False)
+    with mock.patch("notifications.services.FCMChannel.send") as pushed:
+        made = NotificationService.create_and_send(
+            recipient=user, event_type="custom", related_object_id="a", metadata={})
+    assert made is not None and Notification.objects.filter(pk=made.pk).exists()
+    assert not pushed.called, "a muted type is not pushed"
+
+    other = make_user("bb14_master")
+    UserNotificationPreference.objects.create(user=other, event_type="all", is_enabled=False)
+    with mock.patch("notifications.services.FCMChannel.send") as pushed:
+        NotificationService.create_and_send(
+            recipient=other, event_type="post_liked", related_object_id="b", metadata={})
+    assert not pushed.called, "`all` off stops every push"
+    assert UserNotificationPreference.is_channel_enabled(make_user("bb14_default"), "custom")
+
+
+def test_b001_clients_never_see_each_other_on_a_routine(make_user, api):
+    from routine.models import Routine
+
+    trainer = make_user("bb1_t", user_type="trainer")
+    me, other = make_user("bb1_me"), make_user("bb1_other")
+    routine = Routine.objects.create(name="bb1 shared", created_by=trainer, days=1)
+    routine.assigned_to.add(me, other)    # data from before one-client-per-routine
+    for body in (api(me).get("/api/routine/routines/").json()["results"],
+                 [api(me).get(f"/api/routine/routines/{routine.pk}/").json()]):
+        row = next(r for r in body if r["id"] == routine.pk)
+        assert row["assigned_usernames"] == [me.username]
+        assert row["client_count"] == 1
+        assert all(other.username not in s for s in row["assigned_to"])
+    mine = api(trainer).get(f"/api/routine/routines/{routine.pk}/").json()
+    assert sorted(mine["assigned_usernames"]) == sorted([me.username, other.username])
+
+
+def test_b001_a_routine_belongs_to_one_client(make_user, api):
+    from routine.models import Routine
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("bb1_owner", user_type="trainer")
+    first, second = make_user("bb1_first"), make_user("bb1_second")
+    for c in (first, second):
+        TrainerClientRelation.objects.create(trainer=trainer, client=c, status="approved",
+                                             initiated_by="client")
+    routine = Routine.objects.create(name="bb1 private", created_by=trainer, days=1)
+    url = f"/api/routine/routines/{routine.pk}/assign_to_client/"
+    assert api(trainer).post(url, {"client_id": first.pk}, content_type=JSON).status_code == 200
+    again = api(trainer).post(url, {"client_id": second.pk}, content_type=JSON)
+    assert (again.status_code, again.json()["code"]) == (409, "routine_belongs_to_another_client")
+
+
+def test_b001_a_trainer_shows_a_few_public_routines_on_their_page(make_user, api):
+    from routine.models import RoutineTemplate
+
+    trainer = make_user("bb1_pub", user_type="trainer")
+    for i in range(8):
+        RoutineTemplate.objects.create(name=f"bb1 public {i}", goal="Strength", days=3,
+                                       created_by=trainer, is_public=True)
+    RoutineTemplate.objects.create(name="bb1 private tpl", goal="Strength", days=3,
+                                   created_by=trainer, is_public=False)
+    body = api().get(f"/api/v1/trainers/{trainer.pk}/").json()
+    names = [r["name"] for r in body["public_routines"]]
+    assert len(names) == 6 and "bb1 private tpl" not in names and names[0] == "bb1 public 7"
+
+
+def test_b006_signed_in_clients_get_the_owners_1500_an_hour(settings):
+    from training_platform.middleware import RateLimitMiddleware
+
+    settings.DEBUG = False
+    assert RateLimitMiddleware(lambda r: None).rate_limits["client"]["requests"] == 1500
+
+
+# --------------------------------------------------------- batch 3: review fixes
+def test_b014_a_muted_reminder_is_not_written_at_all(make_user, monkeypatch):
+    """A reminder is a nudge, not a record: muting it stops the daily inbox row too."""
+    import datetime as _dt
+
+    from django.utils import timezone as _tz
+
+    from notifications.models import Notification, UserNotificationPreference
+    from notifications.tasks import send_workout_reminders
+    from routine.models import Routine, RoutineProgress
+
+    trainer = make_user("bb14r_t", user_type="trainer")
+    routine = Routine.objects.create(name="bb14 reminders", created_by=trainer, days=3,
+                                     start_date=_dt.date(2026, 3, 1))
+    people = []
+    for name in ("bb14r_on", "bb14r_off"):
+        user = make_user(name)
+        user.preferred_timezone, user.workout_reminder_hour = "UTC", 20
+        user.save()
+        routine.assigned_to.add(user)
+        RoutineProgress.objects.get_or_create(user=user, routine=routine, day=1,
+                                              date=routine.start_date,
+                                              defaults={"status": "not_started"})
+        people.append(user)
+    UserNotificationPreference.objects.create(user=people[1], event_type="session_reminder",
+                                              is_enabled=False)
+    monkeypatch.setattr(_tz, "now", lambda: _dt.datetime(2026, 3, 10, 20, 5, tzinfo=_dt.timezone.utc))
+    send_workout_reminders()
+    counts = [Notification.objects.filter(recipient=u, event_type="session_reminder").count()
+              for u in people]
+    assert counts == [1, 0]
+
+
+def test_b011_a_day_logged_as_a_whole_is_not_warned_about(make_user, api):
+    from django.utils import timezone
+
+    trainer, client, routine, progress = _session_setup(make_user, "whole")
+    logged = api(client).post("/api/routine/user-exercise-progress/bulk-complete/", {
+        "routine_id": routine.pk, "day": 1, "date": timezone.localdate().isoformat(),
+        "completed_sets": 3}, content_type=JSON)
+    assert logged.status_code == 200, logged.content
+    done = api(client).post(f"/api/routine/routines/{routine.pk}/update_progress/",
+                            {"day": 1, "status": "completed"}, content_type=JSON)
+    assert done.status_code == 200, done.content
+
+
+def test_b011_an_exercise_with_no_set_count_still_asks_for_one(make_user, api):
+    from routine.models import Exercise, RoutineExercise
+
+    trainer, client, routine, progress = _session_setup(make_user, "noset")
+    RoutineExercise.objects.create(routine=routine, day=1, sets=None, reps=None,
+                                   exercise=Exercise.objects.create(name="bb11 treadmill",
+                                                                    created_by=trainer))
+    warned = api(client).post(f"/api/routine/routines/{routine.pk}/update_progress/",
+                              {"day": 1, "status": "completed"}, content_type=JSON)
+    assert warned.status_code == 409 and warned.json()["prescribed"] == 4
+
+
+def test_b011_a_confirmed_completed_day_stays_completed(make_user, api):
+    from routine.models import ExerciseSetLog, RoutineProgress, WorkoutSession
+
+    trainer, client, routine, progress = _session_setup(make_user, "stays")
+    api(client).post(f"/api/routine/routines/{routine.pk}/update_progress/",
+                     {"day": 1, "status": "completed", "confirm_unlogged": True},
+                     content_type=JSON)
+    session = WorkoutSession.objects.create(user=client, routine=routine, day=1)
+    from routine.models import refresh_routine_progress
+    ExerciseSetLog.objects.create(user_exercise_progress=progress, workout_session=session,
+                                  set_number=1, weight=40, reps=8)
+    progress.refresh_from_db()
+    refresh_routine_progress(progress)
+    assert RoutineProgress.objects.get(user=client, routine=routine, day=1,
+                                       date=progress.date).status == "completed"
+
+
+def test_b001_a_trainer_copies_a_routine_for_another_client(make_user, api):
+    from routine.models import Exercise, Routine, RoutineExercise
+
+    trainer = make_user("bb1_copier", user_type="trainer")
+    client = make_user("bb1_copy_c")
+    routine = Routine.objects.create(name="bb1 program", created_by=trainer, days=2)
+    RoutineExercise.objects.create(routine=routine, day=2, sets=4, reps=6, weight=70,
+                                   exercise=Exercise.objects.create(name="bb1 row",
+                                                                    created_by=trainer))
+    routine.assigned_to.add(client)
+    made = api(trainer).post(f"/api/routine/routines/{routine.pk}/copy/")
+    assert made.status_code == 201, made.content
+    copy = Routine.objects.get(pk=made.json()["id"])
+    assert copy.pk != routine.pk and copy.assigned_to.count() == 0
+    assert list(copy.routine_exercises.values_list("day", "sets", "weight")) == [(2, 4, 70.0)]
+    stranger = make_user("bb1_not_mine", user_type="trainer")
+    assert api(stranger).post(f"/api/routine/routines/{routine.pk}/copy/").status_code in (403, 404)

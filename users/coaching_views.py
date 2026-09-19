@@ -31,6 +31,8 @@ class CurrentCoachingView(APIView):
             "renews_at": datetime | null,          when the next month is charged
             "grace_until": datetime | null,        payment_due only: after this the
                                                    coaching ends
+            "ending": bool,                        the trainer stops when this month ends
+                                                   (`period.ends_at`); nothing renews
             "coaching_price", "money_type"}}       ONLY on a build that may show a
                                                    coaching fee (not `ios` today)
 

@@ -77,7 +77,9 @@ class RateLimitMiddleware(MiddlewareMixin):
                 # weaken any of them.
                 'anonymous': {'requests': 2000, 'window': 3600},
                 # Authenticated buckets are keyed by user id, so NAT does not apply.
-                'client': {'requests': 500, 'window': 3600},
+                # 1500, the owner's number (2026-09-19): a workout session with set
+                # logging, home and chat outruns 500 an hour.
+                'client': {'requests': 1500, 'window': 3600},
                 'trainer': {'requests': 1000, 'window': 3600},
                 'admin': {'requests': 5000, 'window': 3600},
             }

@@ -155,10 +155,14 @@ def test_a_disabled_account_is_refused_a_token_not_told_to_verify(api, make_user
     user.is_active = False
     user.save(update_fields=["is_active"])
 
-    for password in ("Xx!23456", "wrong-wrong-1"):
+    # The owner's decision of 2026-09-19 (BACKEND_BUGS B-004): the RIGHT password on a
+    # suspended account is told the account is suspended (403 `account_disabled`). What
+    # this test guards is unchanged — someone holding only the address learns nothing,
+    # and nobody is told to "verify": the wrong password still reads as a wrong password.
+    for password, statuses in (("Xx!23456", (403,)), ("wrong-wrong-1", (400, 401))):
         r = api().post("/api/auth/token/", {"email": user.email, "password": password},
                        content_type="application/json")
-        assert r.status_code in (400, 401), r.content
+        assert r.status_code in statuses, r.content
         assert "access" not in r.json()
         assert "requires_verification" not in str(r.content), (password, r.content)
 

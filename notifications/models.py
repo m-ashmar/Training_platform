@@ -58,22 +58,21 @@ class UserNotificationPreference(models.Model):
     
     @classmethod
     def is_channel_enabled(cls, user, event_type, channel='fcm'):
-        # Check specific preference
-        try:
-            pref = cls.objects.get(user=user, event_type=event_type)
-            if not pref.is_enabled:
+        """May this kind of notification be PUSHED to `user` on `channel`?
+
+        The rule (BACKEND_BUGS B-014): the `all` row is a master switch — off, or its
+        channel off, and nothing is pushed; then the type's own row may turn its pushes
+        off. Nothing here ever stops the in-app row being written: settings govern
+        delivery, the inbox keeps the record. No row means on.
+        """
+        rows = {p.event_type: p for p in cls.objects.filter(user=user,
+                                                             event_type__in=('all', event_type))}
+        for key in ('all', event_type):
+            pref = rows.get(key)
+            if pref is None:
+                continue
+            if not pref.is_enabled or (pref.channels or {}).get(channel) is False:
                 return False
-            channel_pref = pref.channels.get(channel)
-            if channel_pref is False:
-                return False
-            # If True or None, check 'all' preference?
-        except cls.DoesNotExist:
-            # Optional side effect: swallowing this silently is what made the
-            # surrounding failures invisible in logs. Control flow is unchanged.
-            logger.debug('suppressed non-fatal error', exc_info=True)
-            
-        # Check global 'all' preference if specific not found or inconclusive? 
-        # For simplicity, default is True
         return True
 
 class NotificationFailure(models.Model):

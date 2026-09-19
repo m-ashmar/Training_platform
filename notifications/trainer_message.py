@@ -109,7 +109,9 @@ class TrainerMessageView(APIView):
         )
 
         if notification is None:
-            # The only remaining cause is the client disabling `custom` notifications.
+            # Not reached by a muted type any more: the message is kept in the client's
+            # inbox and only its push is withheld (BACKEND_BUGS B-014). Kept for any
+            # other path that yields no row.
             return Response(
                 {"message": _("The client has turned off messages of this kind."),
                  "delivered": False},

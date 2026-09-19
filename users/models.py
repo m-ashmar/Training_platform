@@ -813,6 +813,10 @@ class TrainerClientRelation(models.Model):
     #: declined request sent again reuses this row, so `created_at` is when the pair
     #: first met, not when this request was made.
     requested_at = models.DateTimeField(null=True, blank=True)
+    #: The trainer asked to stop at the end of the paid month. A trainer cannot end a
+    #: month the client is in (owner, 2026-09-19); the renewal then ends the coaching
+    #: instead of charging the next month (users/coaching.py).
+    ends_at_period_end = models.BooleanField(default=False)
     #: What the client wrote to the trainer with the request ("introduce yourself",
     #: RequestSheet). Encrypted: people describe injuries here. Shown to that trainer
     #: only, on client-initiated requests; replaced by each new request.

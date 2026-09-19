@@ -282,9 +282,11 @@ contract, every user-facing string goes through gettext with an Arabic entry in
     then the coaching ends (`coaching_ended` to both). Paid months are not refunded.
   - `GET /api/v1/coaching/current/`: status `awaiting_first_program | active |
     payment_due`, the latest month, `renews_at`, `grace_until`, and the price by build.
+  - A trainer cannot end a paid month the client is in (owner): unassign answers 409
+    `coaching_month_active`; `at_period_end: true` sets `ends_at_period_end` and the
+    renewal ends the coaching instead of charging (`ending: true` on the status).
 - **Still to do:** operator-editable rates and double-entry ledger accounts (plan step 4);
-  a pro-rata refund if a TRAINER ends coaching mid-month (owner decision below); a client
-  "stop renewing" switch (today leaving is the way to stop).
+  a client "stop renewing" switch (today leaving is the way to stop).
 
 ## Migration-safe order
 
@@ -317,9 +319,16 @@ only on Postgres), no backfill that invents data, no rename.
 | 6 | Grade dish photos black and white | No, food keeps its colour | `dish.top` `mono=False` |
 | 7 | Where videos live | Google Cloud Storage | Item 2 step 1; bucket + service account owed |
 
+| 8 | A trainer who ends coaching mid-month | A trainer cannot end a paid month the client is in | `trainer/unassign-client/` 409 `coaching_month_active`; `at_period_end: true` stops the renewal instead |
+| 10 | Suspended account at sign-in | Tell them, after the right password | 403 `account_disabled` (BACKEND_BUGS B-004) |
+| 11 | Completing a day with unlogged sets | Allowed, but warn first | 409 `unlogged_sets` until `confirm_unlogged` (B-011) |
+| 12 | Notification settings | The backend's call | Settings govern pushes; `all` is a master switch; the inbox always keeps the row (B-014) |
+| 13 | Routines | Private, coach to one client; a trainer lists a few public routines on their page | One client per routine; clients never see each other; `public_routines` on the profile (B-001) |
+| 14 | Client rate limit | 1500 an hour | `training_platform/middleware.py` |
+
 ## Decisions still owed
 
 | # | Decision | What the code does now |
 |---|---|---|
-| 8 | A trainer who ends coaching mid-month: refund the unused days? | No refund |
 | 9 | Grace before unpaid coaching ends (3 days) and whether the client can switch off renewal | 3 days; leaving is the way to stop |
+| 15 | A trainer who DELETES their account while clients are mid-month (erasure is a legal right): refuse until the months end, or refund the unused days? | Erasure goes ahead; paid months are not refunded |

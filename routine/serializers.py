@@ -186,7 +186,46 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
 
 from training_platform.utils.serializers import TranslatedJSONFieldMixin
 
-class RoutineSerializer(TranslatedJSONFieldMixin, serializers.ModelSerializer):
+
+class RoutineAssigneesMixin(serializers.Serializer):
+    """Who a routine is for, as far as the CALLER may know (BACKEND_BUGS B-001).
+
+    A routine is written by a coach for ONE client (owner, 2026-09-19): clients never see
+    each other. The trainer who wrote it (or an admin) sees its assignee; another trainer
+    sees only their own approved clients among them; a client sees only themselves. The
+    keys stay (`assigned_to`, `assigned_usernames`, `client_count`); their contents follow
+    the caller.
+    """
+    assigned_to = serializers.SerializerMethodField()
+    assigned_usernames = serializers.SerializerMethodField()
+    client_count = serializers.SerializerMethodField()
+
+    def _visible_assignees(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        people = list(obj.assigned_to.all())
+        if user is None or getattr(user, 'is_admin', False) or obj.created_by_id == user.id:
+            return people
+        if getattr(user, 'is_trainer', False):
+            if not hasattr(self, '_accessible_ids'):
+                from .permissions import accessible_user_ids
+                self._accessible_ids = accessible_user_ids(user)
+            ids = self._accessible_ids
+            return people if ids is None else [p for p in people if p.id in ids]
+        return [p for p in people if p.id == user.id]
+
+    def get_assigned_to(self, obj):
+        return [str(p) for p in self._visible_assignees(obj)]
+
+    def get_assigned_usernames(self, obj):
+        """Retrieve assigned user names."""
+        return [p.username for p in self._visible_assignees(obj)]
+
+    def get_client_count(self, obj):
+        """Clients this routine is assigned to that the caller may know about."""
+        return sum(1 for p in self._visible_assignees(obj) if p.user_type == 'client')
+
+class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, serializers.ModelSerializer):
     """
     Enhanced Serializer for Routines with improved assignment validation.
     
@@ -201,10 +240,7 @@ class RoutineSerializer(TranslatedJSONFieldMixin, serializers.ModelSerializer):
     TODO: Add routine sharing between trainers
     """
     routine_exercises = RoutineExerciseSerializer(many=True, read_only=True)
-    assigned_to = serializers.StringRelatedField(many=True, read_only=True)
-    assigned_usernames = serializers.SerializerMethodField()
     created_by = serializers.StringRelatedField(read_only=True)
-    client_count = serializers.SerializerMethodField()
     estimated_duration_minutes = serializers.SerializerMethodField()
     target_muscles = serializers.SerializerMethodField()
 
@@ -253,17 +289,6 @@ class RoutineSerializer(TranslatedJSONFieldMixin, serializers.ModelSerializer):
             ex.exercise.target_muscle 
             for ex in obj.routine_exercises.all()
         ))
-
-    def get_assigned_usernames(self, obj):
-        """Retrieve assigned user names."""
-        return [user.username for user in obj.assigned_to.all()]
-
-    def get_client_count(self, obj):
-        """Get count of clients assigned to this routine."""
-        # Use annotated value if available
-        if hasattr(obj, 'client_count'):
-            return obj.client_count
-        return obj.assigned_to.filter(user_type='client').count()
 
     def validate(self, attrs):
         """
@@ -669,7 +694,7 @@ class UserDailySummarySerializer(serializers.ModelSerializer):
         return 'not_started'
 
 
-class TrainerRoutineSerializer(serializers.ModelSerializer):
+class TrainerRoutineSerializer(RoutineAssigneesMixin, serializers.ModelSerializer):
     """
     Enhanced Serializer for trainer-specific routine operations.
     
@@ -683,9 +708,6 @@ class TrainerRoutineSerializer(serializers.ModelSerializer):
     TODO: Add routine completion statistics
     """
     routine_exercises = RoutineExerciseSerializer(many=True, read_only=True)
-    assigned_to = serializers.StringRelatedField(many=True, read_only=True)
-    assigned_usernames = serializers.SerializerMethodField()
-    client_count = serializers.SerializerMethodField()
     completion_rate = serializers.SerializerMethodField()
     
     class Meta:
@@ -696,16 +718,6 @@ class TrainerRoutineSerializer(serializers.ModelSerializer):
             'client_count', 'completion_rate'
         ]
         read_only_fields = ['created_at', 'updated_at']
-
-    def get_assigned_usernames(self, obj):
-        """Retrieve assigned user names."""
-        return [user.username for user in obj.assigned_to.all()]
-
-    def get_client_count(self, obj):
-        """Get count of clients assigned to this routine."""
-        if hasattr(obj, 'client_count'):
-            return obj.client_count
-        return obj.assigned_to.filter(user_type='client').count()
 
     def get_completion_rate(self, obj):
         """

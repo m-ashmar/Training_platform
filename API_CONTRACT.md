@@ -385,7 +385,10 @@ Coaching is sold by the month: month 1 is held when the trainer accepts and paid
 the first program arrives; each later month is charged from the wallet when the last one
 ends, with `COACHING_RENEWAL_GRACE_DAYS` (3) to top up before the coaching ends. The
 platform keeps 20% of every month. Pushes: `coaching_renewed`, `coaching_payment_due`,
-`coaching_ended`.
+`coaching_ended` (unpaid), `coaching_finished` (the trainer stopped at the month's end, or
+an account was suspended). A trainer cannot end a paid month the client is in
+(`trainer/unassign-client/` answers 409 `coaching_month_active`; `at_period_end: true`
+stops the renewal instead).
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -452,6 +455,7 @@ omits `plan_price`, and `GET v1/gateways/` answers an empty list. Additive field
 | `GET` | `/api/routine/routines/my_clients_progress/` | IsTrainerOrAdmin | `RoutineViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/routines/{id}/` | IsTrainerOrAdmin | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/assign_to_client/` | IsTrainerOrAdminForAssignment | `RoutineViewSet` |
+| `POST` | `/api/routine/routines/{id}/copy/` | auth (the routine's trainer) | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/unassign_from_client/` | IsTrainerOrAdminForAssignment | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/update_progress/` | auth | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{pk}/assign_to_client/` | IsTrainerOrAdmin | `RoutineViewSet` |

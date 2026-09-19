@@ -341,6 +341,11 @@ def send_workout_reminders():
                 ) % {"days": gap}
             data = {"type": "session_reminder", "reason": "drift", "days_since_last_workout": gap}
 
+        # A reminder is a nudge, not a record: muted means not written at all (the
+        # inbox otherwise keeps every notification, BACKEND_BUGS B-014).
+        from notifications.models import UserNotificationPreference
+        if not UserNotificationPreference.is_channel_enabled(user, 'session_reminder'):
+            continue
         result = NotificationService.create_and_send(
             recipient=user,
             event_type="session_reminder",
