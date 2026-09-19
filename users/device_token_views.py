@@ -56,7 +56,10 @@ class FCMTokenView(APIView):
                                 status=status.HTTP_400_BAD_REQUEST)
 
         # Optional device metadata sent by the mobile client.
-        platform = request.data.get('platform') or 'android'
+        # Text only, compared lower-cased: a list raised TypeError (unhashable) as a 500,
+        # and "iOS" was stored as android.
+        platform = request.data.get('platform')
+        platform = platform.strip().lower() if isinstance(platform, str) else ''
         if platform not in dict(DeviceToken.PLATFORM_CHOICES):
             platform = 'android'
         app_version = request.data.get('app_version')

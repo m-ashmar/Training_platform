@@ -1487,7 +1487,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         `idempotency_conflict`) and optional `start_time` for a workout logged offline
         (at most 30 days back: `start_time_in_future`, `start_time_too_old`); `end_time`
         is then checked against it. Field codes (400): `routine_inactive` on `routine`,
-        `day_out_of_range` / `day_has_no_exercises` on `day`."""
+        `day_out_of_range` / `day_has_no_exercises` on `day` — here, and on a PATCH that
+        changes the routine or the day (a status-only PATCH is not checked)."""
         def create_it():
             response = super(WorkoutSessionViewSet, self).create(request, *args, **kwargs)
             if response.status_code == status.HTTP_201_CREATED and \
@@ -1590,7 +1591,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                 notif_type="session_completed",
                 message=in_recipients_language(trainer, lambda: _(
                     "%(name)s finished a workout on %(routine)s.")
-                    % {'name': client.full_name or client.username,
+                    % {'name': f"{client.first_name or ''} {client.last_name or ''}".strip()
+                               or client.username,
                        'routine': routine_name_for(instance.routine, trainer)}),
                 related_object=instance
             )

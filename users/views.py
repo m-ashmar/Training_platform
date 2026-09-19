@@ -251,8 +251,16 @@ class CustomRegisterView(RegisterView):
 
 class OTPVerificationView(APIView):
     """
-    View to verify OTP code and activate user account.
-    After successful verification, returns JWT tokens.
+    POST /api/auth/verify-otp/ — verify the sign-up code; answers JWT tokens.
+
+    Body: `{email, otp_code}`. 200 `{message, user, access, refresh}`.
+    Refusals: 400 `{error, detail, code}` with `code` one of `otp_invalid` (a wrong code,
+    no pending code, or an unknown address — one answer for all three, so addresses
+    cannot be enumerated), `otp_expired` (the right code, too late: ask for a new one) or
+    `too_many_attempts` (five wrong codes for this address and purpose lock it for 15
+    minutes; carries `retry_after_seconds` and `Retry-After`; the right code is refused
+    too while locked). The address is matched lower-cased (BACKEND_BUGS B-021, B-033).
+    403 `account_disabled`: the code is right but the account is suspended.
     """
     permission_classes = [AllowAny]
     
@@ -323,9 +331,12 @@ class OTPVerificationView(APIView):
 
 class ResendOTPView(APIView):
     """
-    View to resend OTP code to user's email.
-    Rate limited to 3 requests per hour per IP (django-ratelimit) + soft cache counter.
-    Anti-enumeration: always returns 200 with the same message.
+    POST /api/auth/resend-otp/ — send a new sign-up code. Body: `{email}`.
+
+    Anti-enumeration: 200 with the same message whether or not the address exists, is
+    verified or is suspended. Limit: 3 an hour per address (lower-cased) and IP, then
+    429 `{error, detail, code: "throttled", retry_after_seconds}` with `Retry-After` —
+    the seconds really left in the hour (BACKEND_BUGS B-022); the same for every address.
     """
     permission_classes = [AllowAny]
 
@@ -1121,6 +1132,13 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         from rest_framework import serializers
 
         email = attrs.get('email') or attrs.get('username')  # Support both email and username
+        # The stored spelling of the address (BACKEND_BUGS B-033): `Samer@Example.com`
+        # with the right password was refused, and five such tries locked the real
+        # account, whose counter is keyed on the lower-cased address.
+        from .utils import find_by_email
+        found = find_by_email(email) if isinstance(email, str) else None
+        if found is not None and self.username_field in attrs:
+            attrs[self.username_field] = found.email
 
         # Per-account brute-force lockout (5 failures → 15-min cooldown; users/utils.py)
         if email:
@@ -2232,8 +2250,10 @@ class PasswordResetRequestView(APIView):
     
     Sends a 6-digit OTP to the user's email. Returns a generic success message
     regardless of whether the email exists (prevents user enumeration).
-    
-    Rate limited: 3 requests per hour per email via cache.
+
+    Body: `{email}`, matched lower-cased. Limit: 3 an hour per address, then 429
+    `{error, detail, code: "throttled", retry_after_seconds}` with `Retry-After` — the
+    seconds really left in the hour (BACKEND_BUGS B-022); the same for every address.
     """
     permission_classes = [AllowAny]
 
@@ -2295,9 +2315,15 @@ class PasswordResetRequestView(APIView):
 class PasswordResetVerifyView(APIView):
     """
     Step 2: Verify the password reset OTP.
-    
-    On success, returns a single-use UUID reset token (valid for 15 minutes)
-    that must be submitted with the new password.
+
+    Body: `{email, otp_code}`. On success, 200 `{message, reset_token}`: a single-use
+    token (valid for 15 minutes) to submit with the new password.
+    Refusals: 400 `{error, detail, code}` with `code` one of `otp_invalid` (a wrong code,
+    no pending code, or an unknown address — one answer for all three, so addresses
+    cannot be enumerated), `otp_expired` (the right code, too late: ask for a new one) or
+    `too_many_attempts` (five wrong codes for this address and purpose lock it for 15
+    minutes; carries `retry_after_seconds` and `Retry-After`; the right code is refused
+    too while locked). The address is matched lower-cased (BACKEND_BUGS B-021, B-033).
     """
     permission_classes = [AllowAny]
 
@@ -2342,9 +2368,11 @@ class PasswordResetVerifyView(APIView):
 class PasswordResetConfirmView(APIView):
     """
     Step 3: Set a new password using the reset token.
-    
-    Consumes the single-use token and updates the user's password.
-    Django password validators are enforced.
+
+    Body: `{reset_token, new_password}`. Consumes the single-use token and updates the
+    user's password. The new password answers the same validator codes as sign-up on
+    `field_errors.new_password` (`password_too_short`, `password_too_common`,
+    `password_entirely_numeric`; BACKEND_BUGS B-034).
     """
     permission_classes = [AllowAny]
 

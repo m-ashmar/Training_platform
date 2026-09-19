@@ -81,11 +81,11 @@ class CoachingEnded(_TrainingRefused):
 
 def disabled_account_with_password(email, password):
     """The disabled account `email` names, if `password` is its password; else None."""
-    from .models import CustomUser
-
     if not email or not password:
         return None
-    user = CustomUser.objects.filter(email__iexact=email.strip(), is_active=False).first()
+    # Lower-cased or as typed, never `iexact` (users/utils.py `find_by_email`).
+    from .utils import find_by_email
+    user = find_by_email(email, is_active=False)
     if user is None:
         # The same one hash every failed sign-in costs here, so a suspended address is
         # not slower to refuse than any other: timing must not tell a stranger either.

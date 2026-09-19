@@ -286,8 +286,12 @@ class CustomLoginSerializer(LoginSerializer):
                 from .utils import lockout_seconds_left
                 raise TooManyAttempts(lockout_seconds_left(email))
 
-            # Authenticate using email and password
-            self.user = self.authenticate(email=email, password=password)
+            # Authenticate using email and password, with the address as stored
+            # (BACKEND_BUGS B-033): a different case was refused and counted a failure.
+            from .utils import find_by_email
+            found = find_by_email(email)
+            self.user = self.authenticate(email=found.email if found else email,
+                                          password=password)
             if not self.user:
                 # The right password on a suspended account: say so (owner, B-004).
                 from .exceptions import AccountDisabled, disabled_account_with_password
@@ -580,7 +584,7 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
     # the Django validators ran, while registration refuses the same rule as
     # `password_too_short` — two codes for one rule (BACKEND_BUGS B-034). The validators
     # (AUTH_PASSWORD_VALIDATORS, minimum 8) decide, with their own codes.
-    new_password = serializers.CharField(required=True, write_only=True, max_length=128)
+    new_password = serializers.CharField(required=True, write_only=True)
 
     def validate_new_password(self, value):
         from django.contrib.auth.password_validation import validate_password

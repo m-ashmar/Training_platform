@@ -657,10 +657,8 @@ msgid "Great job! You made progress in \"%(title)s\" — %(progress)s %(unit)s"
 msgstr ""
 
 #: notifications/domain/routine_events.py:25
-#, fuzzy
-#| msgid "Token reassigned successfully"
 msgid "Routine Assigned"
-msgstr "تمت إعادة تعيين الرمز المميز بنجاح"
+msgstr "تم تعيين برنامج"
 
 #: notifications/domain/routine_events.py:26
 #: notifications/domain/routine_events.py:36

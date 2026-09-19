@@ -1007,3 +1007,116 @@ def test_b036_no_dead_image_method():
     from routine.serializers import ExerciseSerializer
 
     assert not hasattr(ExerciseSerializer, "get_image")
+
+
+# ------------------------------------------------ found when the rows were re-verified
+def test_b023_moving_a_session_is_checked_like_opening_one(make_user, api):
+    from routine.models import Routine, WorkoutSession
+
+    trainer, client, routine, progress = _session_setup(make_user, "move")
+    session = WorkoutSession.objects.create(user=client, routine=routine, day=1)
+    url = f"/api/routine/workout-sessions/{session.pk}/"
+    moved = api(client).patch(url, {"day": 9}, content_type=JSON)
+    assert (moved.status_code, _field_code(moved, "day")) == (400, "day_out_of_range")
+    Routine.objects.filter(pk=routine.pk).update(is_active=False)
+    finished = api(client).patch(url, {"status": "completed"}, content_type=JSON)
+    assert finished.status_code == 200, "a session begun before retirement is finished"
+
+
+def test_b021_the_reset_code_route_says_why_too(make_user, api):
+    from users.utils import _clear_otp_attempts
+
+    user = make_user("bb21_reset")
+    _clear_otp_attempts(user.email, "password_reset")
+    resp = api().post("/api/auth/forgot-password/verify/",
+                      {"email": user.email, "otp_code": "111111"}, content_type=JSON)
+    assert (resp.status_code, resp.json()["code"]) == (400, "otp_invalid")
+    _clear_otp_attempts(user.email, "password_reset")
+
+
+def test_b022_the_global_limiter_reports_the_seconds_left(make_user, api, monkeypatch):
+    from training_platform.cache import ratelimit_cache
+    from training_platform.middleware import RateLimitMiddleware
+
+    monkeypatch.setattr(RateLimitMiddleware, "_is_rate_limited", lambda self, c, t: True)
+    monkeypatch.setattr(ratelimit_cache(), "ttl", lambda key: 777, raising=False)
+    resp = api().get("/api/v1/content/media/")
+    assert resp.status_code == 429
+    body = resp.json()
+    assert (body["code"], body["retry_after_seconds"], resp["Retry-After"]) == \
+        ("rate_limited", 777, "777")
+
+
+def test_b025_platform_must_be_text(make_user, api):
+    user = make_user("bb25_platform")
+    resp = api(user).post("/api/auth/device-token/", {"token": "tok-bb25", "platform": ["ios"]},
+                          content_type=JSON)
+    assert resp.status_code == 201, resp.content
+    ios = api(user).post("/api/auth/device-token/", {"token": "tok-bb25b", "platform": "iOS"},
+                         content_type=JSON)
+    assert ios.status_code == 201
+    from users.models import DeviceToken
+    assert DeviceToken.objects.get(token="tok-bb25b").platform == "ios"
+
+
+def test_b029_a_paused_coaching_does_not_silence_another_programme(make_user, monkeypatch):
+    import datetime as _dt
+    import uuid
+
+    from django.utils import timezone as _tz
+
+    from notifications.models import Notification
+    from notifications.tasks import send_workout_reminders
+    from routine.models import Routine, RoutineProgress
+    from users.models import CoachingPeriod
+
+    ended_coach = make_user("bb29_old_t", user_type="trainer")
+    current_coach = make_user("bb29_new_t", user_type="trainer")
+    client = make_user("bb29_c")
+    client.preferred_timezone, client.workout_reminder_hour = "UTC", 20
+    client.save()
+    start = _dt.date(2026, 3, 1)
+    old = Routine.objects.create(name="bb29 old", created_by=ended_coach, days=3, start_date=start)
+    new = Routine.objects.create(name="bb29 new", created_by=current_coach, days=3, start_date=start)
+    for routine, day in ((old, 1), (new, 2)):
+        routine.assigned_to.add(client)
+        RoutineProgress.objects.update_or_create(user=client, routine=routine, day=day, date=start,
+                                                 defaults={"status": "not_started"})
+    # A paid month with the old coach, long over: their routine may not be started.
+    CoachingPeriod.objects.create(
+        trainer=ended_coach, client=client, number=1, price="100.00", commission_rate="0.20",
+        status="settled", hold_reference=str(uuid.uuid4()),
+        starts_at=_dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc),
+        ends_at=_dt.datetime(2026, 1, 31, tzinfo=_dt.timezone.utc))
+    monkeypatch.setattr(_tz, "now", lambda: _dt.datetime(2026, 3, 10, 20, 5, tzinfo=_dt.timezone.utc))
+    send_workout_reminders()
+    (notice,) = Notification.objects.filter(recipient=client, event_type="session_reminder")
+    assert notice.metadata["data"]["routine_id"] == str(new.pk)
+
+
+def test_b030_a_first_name_alone_still_names_the_client(make_user, api):
+    from unittest import mock
+
+    from routine.models import WorkoutSession
+    from users.models import TrainerClientRelation
+
+    trainer, client, routine, progress = _session_setup(make_user, "first")
+    type(client).objects.filter(pk=client.pk).update(first_name="Sami", last_name="")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client, status="approved")
+    session = WorkoutSession.objects.create(user=client, routine=routine, day=1)
+    with mock.patch("routine.views.send_notification") as sent:
+        api(client).patch(f"/api/routine/workout-sessions/{session.pk}/",
+                          {"status": "completed"}, content_type=JSON)
+    to_trainer = [c.kwargs["message"] for c in sent.call_args_list
+                  if c.kwargs["user"].pk == trainer.pk]
+    assert to_trainer and to_trainer[0].startswith("Sami ")
+
+
+def test_b033_sign_in_matches_the_address_as_stored(make_user, api):
+    from users.utils import clear_login_attempts
+
+    user = make_user("bb33_signin", email="bb33.signin@gate.test")
+    clear_login_attempts(user.email)
+    resp = api().post("/api/auth/token/", {"email": "BB33.SignIn@gate.test",
+                                           "password": "Xx!23456"}, content_type=JSON)
+    assert resp.status_code == 200, resp.content

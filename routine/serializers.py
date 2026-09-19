@@ -912,23 +912,19 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
             # Fixed once written: the start is the record, and the id is the retry key.
             attrs.pop('start_time', None)
             attrs.pop('client_uuid', None)
+            # Moving a session to another day or routine is checked like opening one:
+            # PATCH {"day": 9} stored a day whose sets move no progress. A status-only
+            # PATCH is not checked, so a session begun before a routine was retired can
+            # still be finished.
+            routine = attrs.get('routine', self.instance.routine)
+            day = attrs.get('day', self.instance.day)
+            if (routine is not None and getattr(routine, 'pk', None) != self.instance.routine_id) \
+                    or ('day' in attrs and day != self.instance.day):
+                self._check_routine_day(routine, day)
             return attrs
         # A session is for a day the routine actually has (BACKEND_BUGS B-023): any day
         # was accepted, and so was a retired routine, whose sets never move its progress.
-        routine, day = attrs.get('routine'), attrs.get('day')
-        if routine is not None:
-            if not routine.is_active:
-                raise serializers.ValidationError({'routine': [serializers.ErrorDetail(
-                    _("This routine has been retired."), code='routine_inactive')]})
-            if day is not None:
-                if not 1 <= day <= (routine.days or 0):
-                    raise serializers.ValidationError({'day': [serializers.ErrorDetail(
-                        _("Day %(day)s is not part of this routine.") % {'day': day},
-                        code='day_out_of_range')]})
-                if not routine.routine_exercises.filter(day=day).exists():
-                    raise serializers.ValidationError({'day': [serializers.ErrorDetail(
-                        _("Day %(day)s has no exercises.") % {'day': day},
-                        code='day_has_no_exercises')]})
+        self._check_routine_day(attrs.get('routine'), attrs.get('day'))
         end = attrs.get('end_time')
         if end is not None:
             start = attrs.get('start_time') or timezone.now()
@@ -940,6 +936,26 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
                     _("A workout cannot last longer than %(hours)d hours.")
                     % {"hours": self.MAX_SESSION_SECONDS // 3600}]})
         return attrs
+
+    @staticmethod
+    def _check_routine_day(routine, day):
+        """`routine_inactive` on `routine`; `day_out_of_range` / `day_has_no_exercises`
+        on `day` (BACKEND_BUGS B-023)."""
+        if routine is None:
+            return
+        if not routine.is_active:
+            raise serializers.ValidationError({'routine': [serializers.ErrorDetail(
+                _("This routine has been retired."), code='routine_inactive')]})
+        if day is None:
+            return
+        if not 1 <= day <= (routine.days or 0):
+            raise serializers.ValidationError({'day': [serializers.ErrorDetail(
+                _("Day %(day)s is not part of this routine.") % {'day': day},
+                code='day_out_of_range')]})
+        if not routine.routine_exercises.filter(day=day).exists():
+            raise serializers.ValidationError({'day': [serializers.ErrorDetail(
+                _("Day %(day)s has no exercises.") % {'day': day},
+                code='day_has_no_exercises')]})
 
     def validate_end_time(self, value):
         """A workout ends after it starts, and lasts a plausible length of time.

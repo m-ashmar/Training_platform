@@ -300,8 +300,20 @@ def send_workout_reminders():
         # under a fresh dedup key.
         today = (local - timedelta(hours=hours_late)).date()
 
-        # Is a routine actually scheduled for today?
-        pending = (
+        # Is a routine actually scheduled for today? One the client may see and not
+        # start — its coaching is paused or over (the owner, 2026-09-19) — is not
+        # "waiting for you": the coaching's own notices ask them to pay. It is skipped,
+        # not the person: another trainer's routine may still be waiting. Asked once
+        # per trainer, the answer depends on nothing else.
+        from users.coaching import training_refusal
+        refused_by = {}
+
+        def refused(routine):
+            if routine.created_by_id not in refused_by:
+                refused_by[routine.created_by_id] = training_refusal(user, routine)
+            return refused_by[routine.created_by_id]
+
+        waiting = (
             RoutineProgress.objects.filter(
                 user=user,
                 routine__is_active=True,
@@ -310,19 +322,23 @@ def send_workout_reminders():
             )
             .filter(Q(routine__end_date__isnull=True) | Q(routine__end_date__gte=today))
             .select_related("routine")
-            .order_by("day")
-            .first()
+            .order_by("day", "id")
         )
-
-        # A routine the client may see and not start — their coaching is paused or over
-        # (the owner, 2026-09-19) — is not "waiting for you": the coaching's own notices
-        # ask them to pay, and this one would invite a refusal.
-        from users.coaching import training_refusal
-        if pending and training_refusal(user, pending.routine):
-            continue
+        pending = None
+        saw_refused = False
+        for candidate in waiting[:50]:
+            if refused(candidate.routine):
+                saw_refused = True
+                continue
+            pending = candidate
+            break
         if not pending:
+            # No day waiting that can be started. The drift nudge ("it has been N days")
+            # only while some routine of theirs can still be trained on.
             routines = list(user.assigned_routines.all()[:20])
-            if routines and all(training_refusal(user, r) for r in routines):
+            if saw_refused and not routines:
+                continue
+            if routines and all(refused(r) for r in routines):
                 continue
 
         if pending:
