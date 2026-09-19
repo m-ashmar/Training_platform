@@ -63,6 +63,8 @@ urlpatterns = [
 
     # The design-v2 trainer screens: roster, profile, matches. See users/trainer_views.py.
     path('api/v1/trainers/', include('users.urls_v1', namespace='trainers')),
+    # The client's monthly coaching (users/coaching.py).
+    path('api/v1/coaching/', include('users.urls_coaching', namespace='coaching')),
 
     # Notification preferences (listing lives under /api/social/notifications/)
     path('api/notifications/', include('notifications.urls', namespace='notifications')),

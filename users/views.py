@@ -47,6 +47,30 @@ from training_platform.query_params import body_dict
 
 logger = logging.getLogger(__name__)
 
+
+#: The longest note a client may send with a request (RequestSheet).
+CLIENT_NOTE_MAX_LENGTH = 500
+
+
+def _shown_coaching_price(request, value):
+    """A coaching fee on a legacy payload, or None where this BUILD may not show one.
+
+    The key stays (additive); its value is null on a build whose
+    `can_show_coaching_prices` is off (`ios` today) or that declares no channel — the
+    spec's "no price strings reach store builds" (BACKEND_BUGS.md B-007). The
+    `/api/v1/trainers/` cards omit the key instead.
+    """
+    from policy.money import MoneyType
+    from policy.services import can_show_price
+
+    # Once per request, not per row: `can_show_price` reads the channel's row, and a
+    # 100-row page cost 100 queries.
+    shown = getattr(request, '_coaching_price_shown', None)
+    if shown is None:
+        shown = can_show_price(request, MoneyType.COACHING_1TO1)
+        request._coaching_price_shown = shown
+    return value if shown else None
+
 class CustomLoginView(LoginView):
     serializer_class = CustomLoginSerializer
     permission_classes = [AllowAny]
@@ -532,9 +556,10 @@ class AssignClientView(APIView):
                     relation.initiated_by = 'trainer'
                     relation.agreed_rate = getattr(request.user, 'trainer_hourly_rate', None)
                     relation.requested_at, relation.responded_at = timezone.now(), None
+                    relation.client_note = ''    # the client's old note is not theirs to keep
                     relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
                                                  'requested_at', 'responded_at',
-                                                 'updated_at'])
+                                                 'client_note', 'updated_at'])
             
             # On commit, like the client-side path beside it: a notification queued
             # inside an open transaction can be delivered before the row exists, or
@@ -739,7 +764,7 @@ class PublicTrainersListView(APIView):
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_certifications': trainer.trainer_certifications,
                     'trainer_experience_years': trainer.trainer_experience_years,
-                    'trainer_hourly_rate': trainer.trainer_hourly_rate,
+                    'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
                     'trainer_is_verified': trainer.trainer_is_verified,
                     'client_count': trainer.client_count_anno,
                 })
@@ -760,7 +785,7 @@ class PublicTrainersListView(APIView):
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
                 'trainer_experience_years': trainer.trainer_experience_years,
-                'trainer_hourly_rate': trainer.trainer_hourly_rate,
+                'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
                 'trainer_is_verified': trainer.trainer_is_verified,
                 'client_count': trainer.client_count_anno,
             })
@@ -858,7 +883,7 @@ class AvailableTrainersView(APIView):
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_certifications': trainer.trainer_certifications,
                     'trainer_experience_years': trainer.trainer_experience_years,
-                    'trainer_hourly_rate': trainer.trainer_hourly_rate,
+                    'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
                     'trainer_is_verified': trainer.trainer_is_verified,
                     'client_count': trainer.client_count_anno,
                 })
@@ -881,7 +906,7 @@ class AvailableTrainersView(APIView):
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
                 'trainer_experience_years': trainer.trainer_experience_years,
-                'trainer_hourly_rate': trainer.trainer_hourly_rate,
+                'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
                 'trainer_is_verified': trainer.trainer_is_verified,
                 'client_count': trainer.client_count_anno,
             })
@@ -1051,7 +1076,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         email = attrs.get('email') or attrs.get('username')  # Support both email and username
 
-        # Per-account brute-force lockout (10 failures → 15-min cooldown)
+        # Per-account brute-force lockout (5 failures → 15-min cooldown; users/utils.py)
         if email:
             is_locked, _remaining = check_login_lockout(email)
             if is_locked:
@@ -1098,18 +1123,23 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 # ============================================================================
 
 class ClientRequestTrainerView(APIView):
-    """
-    Enhanced view for clients to request trainer assignment.
-    
-    Features:
-    - Client can send request to specific trainer
-    - Prevents duplicate requests
-    - Sends notification to trainer
-    - Proper error handling and validation
-    
-    TODO: Add request message support
-    TODO: Implement request expiration
-    TODO: Add request history tracking
+    """POST /api/auth/client/request-trainer/ — a client asks a trainer to coach them.
+
+    Body: `trainer_id` (required), `note` (optional, up to 500 characters; `message` is
+    accepted as the same field for older builds). Headers: `X-App-Channel` — asking a
+    trainer who charges is agreeing to pay them, so it answers to what the build may do.
+
+    Nothing is charged here: month 1 of the coaching is held when the trainer accepts
+    (users/coaching.py). The note is kept for this request and shown to that trainer
+    only (`trainer/pending-requests/`), and to the client (`client/request-status/`).
+
+    200 `{message, trainer_id, status: "pending"}`. Refusals, each with its `code`:
+    400 `trainer_id_required`, `invalid_note`, `note_too_long`, `trainer_not_accepting`,
+    `already_has_trainer`, `request_pending_elsewhere`, `already_with_this_trainer`,
+    `request_already_pending`, `app_channel_required` (no known `X-App-Channel`, for a
+    trainer who charges); 402 `insufficient_balance` (with `required`, `balance`);
+    403 `permission_denied` (the caller is not a client), `not_available_on_channel`;
+    404 `not_found`.
     """
     permission_classes = [IsAuthenticated]
     
@@ -1126,11 +1156,22 @@ class ClientRequestTrainerView(APIView):
             )
         
         trainer_id = request.data.get('trainer_id')
-        message = request.data.get('message', '')
+        # The note to the trainer (RequestSheet), optional. `message` is the name older
+        # builds sent it under; it used to be read and thrown away.
+        note = request.data.get('note', request.data.get('message', '')) or ''
+        if not isinstance(note, str):
+            return Response({'error': _('The note must be text.'), 'code': 'invalid_note'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        note = note.strip()
+        if len(note) > CLIENT_NOTE_MAX_LENGTH:
+            return Response(
+                {'error': _('The note can be at most %(max)s characters.')
+                 % {'max': CLIENT_NOTE_MAX_LENGTH}, 'code': 'note_too_long'},
+                status=status.HTTP_400_BAD_REQUEST)
         
         if not trainer_id:
             return Response(
-                {'error': _('trainer_id is required')}, 
+                {'error': _('trainer_id is required'), 'code': 'trainer_id_required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1152,7 +1193,9 @@ class ClientRequestTrainerView(APIView):
                     client_wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
                     if client_wallet.balance < trainer_charge:
                         return Response(
-                            {'error': _('Insufficient wallet balance to request this trainer'), 'required': str(trainer_charge), 'balance': str(client_wallet.balance)},
+                            {'error': _('Insufficient wallet balance to request this trainer'),
+                             'code': 'insufficient_balance',
+                             'required': str(trainer_charge), 'balance': str(client_wallet.balance)},
                             status=status.HTTP_402_PAYMENT_REQUIRED
                         )
             except Exception:
@@ -1163,14 +1206,16 @@ class ClientRequestTrainerView(APIView):
             # Check if trainer is available
             if not trainer.trainer_is_available:
                 return Response(
-                    {'error': _('This trainer is not currently accepting new clients')}, 
+                    {'error': _('This trainer is not currently accepting new clients'),
+                     'code': 'trainer_not_accepting'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
             # Enforce single-trainer rule: if client already assigned, block new requests
             if request.user.assigned_trainer is not None and request.user.assigned_trainer_id != trainer.id:
                 return Response(
-                    {'error': _('You are already assigned to a trainer. Unassign first to request another trainer.')},
+                    {'error': _('You are already assigned to a trainer. Unassign first to request another trainer.'),
+                     'code': 'already_has_trainer'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -1185,7 +1230,8 @@ class ClientRequestTrainerView(APIView):
             ).exclude(trainer_id=trainer.id).exists()
             if has_pending_elsewhere:
                 return Response(
-                    {'error': _('You already have a pending request with another trainer. Please wait for a response or cancel it first.')},
+                    {'error': _('You already have a pending request with another trainer. Please wait for a response or cancel it first.'),
+                     'code': 'request_pending_elsewhere'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1197,18 +1243,21 @@ class ClientRequestTrainerView(APIView):
                           # The price the client is agreeing to, right now. Read again
                           # at approval it was whatever the trainer had since set it to.
                           'agreed_rate': getattr(trainer, 'trainer_hourly_rate', None),
-                          'requested_at': timezone.now(), 'responded_at': None}
+                          'requested_at': timezone.now(), 'responded_at': None,
+                          'client_note': note}
             )
             
             if not created:
                 if relation.status == 'approved':
                     return Response(
-                        {'error': _('You are already assigned to this trainer')}, 
+                        {'error': _('You are already assigned to this trainer'),
+                         'code': 'already_with_this_trainer'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'pending':
                     return Response(
-                        {'error': _('Request is already pending with this trainer')}, 
+                        {'error': _('Request is already pending with this trainer'),
+                         'code': 'request_already_pending'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'rejected':
@@ -1217,9 +1266,11 @@ class ClientRequestTrainerView(APIView):
                     relation.initiated_by = 'client'
                     relation.agreed_rate = getattr(trainer, 'trainer_hourly_rate', None)
                     relation.requested_at, relation.responded_at = timezone.now(), None
+                    # This request's note, never the declined one's.
+                    relation.client_note = note
                     relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
                                                  'requested_at', 'responded_at',
-                                                 'updated_at'])
+                                                 'client_note', 'updated_at'])
             
             # Emit domain event — notification handled at delivery boundary.
             # On commit: this runs inside an open transaction, and a message queued
@@ -1518,8 +1569,10 @@ class TrainerPendingRequestsView(APIView):
                     'client_gender': client.gender,
                     'client_goals': client.client_goals,
                     'client_activity_level': client.activity_level,
-                    'requested_at': relation.created_at,
-                    'status': relation.status
+                    # When THIS request was sent; `created_at` for rows older than that.
+                    'requested_at': relation.requested_at or relation.created_at,
+                    'status': relation.status,
+                    'note': relation.client_note,
                 })
             
             return Response({
@@ -1630,7 +1683,7 @@ class ClientPendingTrainerInvitesView(APIView):
             'request_id': r.id,
             'trainer_id': r.trainer_id,
             'trainer_name': r.trainer.full_name or r.trainer.username,
-            'agreed_rate': r.agreed_rate,
+            'agreed_rate': _shown_coaching_price(request, r.agreed_rate),
             'created_at': r.created_at,
         } for r in rows]})
 
@@ -1972,9 +2025,15 @@ class ClientRequestStatusView(APIView):
                     'trainer_bio': trainer.trainer_bio,
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_experience_years': trainer.trainer_experience_years,
-                    'trainer_hourly_rate': trainer.trainer_hourly_rate,
-                    'requested_at': relation.created_at,
-                    'status': relation.status
+                    'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
+                    # When THIS request was sent (a re-sent request reuses the row).
+                    'requested_at': relation.requested_at or relation.created_at,
+                    'status': relation.status,
+                    # Additive (B-008): the answer's time ("training together since"),
+                    # the price this client agreed to, and their note.
+                    'responded_at': relation.responded_at,
+                    'agreed_rate': _shown_coaching_price(request, relation.agreed_rate),
+                    'note': relation.client_note,
                 })
             
             return Response({
@@ -2025,8 +2084,11 @@ class ProfilePictureUploadView(APIView):
             try:
                 safe_file, ext = process_uploaded_image(image_file, max_bytes=2 * 1024 * 1024)
             except DjangoValidationError as e:
+                # With the refusal's own code (`file_too_large`, `unsupported_format`,
+                # `image_dimensions_too_large`, ...), not the generic `bad_request`.
                 return Response(
-                    {'error': e.messages[0] if getattr(e, 'messages', None) else str(e)},
+                    {'error': e.messages[0] if getattr(e, 'messages', None) else str(e),
+                     'code': getattr(e, 'code', None) or 'invalid_image'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 

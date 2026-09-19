@@ -114,6 +114,18 @@ def test_an_upload_that_does_not_fit_its_slot_is_refused_with_a_code(make_user, 
     assert not MediaAsset.objects.exists()
 
 
+def test_a_dish_keeps_its_colour(make_user):
+    """Everything else is graded black and white; food is the owner's exception."""
+    from diet.models import Recipe
+    from mediakit.services import store
+
+    dish = Recipe.objects.create(name="dv2 colour test dish", meal_types=["lunch"])
+    asset = store(owner_type="dish", owner_id=dish.pk, slot_key="dish.top",
+                  upload=_image(960, 1200))
+    r, g, b = Image.open(asset.file_1x).convert("RGB").getpixel((240, 300))
+    assert r - b > 100, "a dish must keep its colour"
+
+
 def test_a_phone_photo_is_turned_upright_before_its_ratio_is_checked(make_user):
     """EXIF orientation 6: stored 1250 wide, shown 1000 wide. Read as stored, a 4:5
     portrait looks like 5:4 and is refused; the platform guard alone drops the tag."""
@@ -226,22 +238,16 @@ def _register(api, username, **extra):
     (lambda: _years_ago(14) + timedelta(days=1), "under_minimum_age"),
     (lambda: timezone.localdate() + timedelta(days=1), "date_of_birth_in_future"),
     (lambda: date(1900, 1, 1), "date_of_birth_implausible"),
+    (None, "required"),   # the owner's decision of 2026-09-19
 ])
 def test_sign_up_refuses_a_date_of_birth_it_must_not_accept(api, born, code):
     from users.models import CustomUser
 
-    resp = _register(api, "dv2_young", date_of_birth=born().isoformat())
+    extra = {"date_of_birth": born().isoformat()} if born else {}
+    resp = _register(api, "dv2_young", **extra)
     assert resp.status_code == 400
     assert _codes(resp.json()["field_errors"]["date_of_birth"]) == [code]
     assert not CustomUser.objects.filter(username="dv2_young").exists()
-
-
-def test_sign_up_without_a_date_of_birth_still_works_for_existing_callers(api):
-    """Additive: the field is validated when sent, and not yet required (owner's call)."""
-    from users.models import CustomUser
-
-    assert _register(api, "dv2_nodob").status_code == 201
-    assert CustomUser.objects.get(username="dv2_nodob").date_of_birth is None
 
 
 def test_sign_up_at_exactly_the_minimum_age_is_accepted_and_age_follows_the_date(api):

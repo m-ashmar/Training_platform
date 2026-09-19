@@ -41,6 +41,10 @@ EVENT_CLASS_REGISTRY = {
     'client_request_rejected': 'notifications.domain.trainer_client_events.ClientRequestRejectedEvent',
     'client_request_cancelled': 'notifications.domain.trainer_client_events.ClientRequestCancelledEvent',
     'client_unassigned_trainer': 'notifications.domain.trainer_client_events.ClientUnassignedTrainerEvent',
+    # Monthly coaching (users/coaching.py).
+    'coaching_renewed': 'notifications.domain.trainer_client_events.CoachingRenewedEvent',
+    'coaching_payment_due': 'notifications.domain.trainer_client_events.CoachingPaymentDueEvent',
+    'coaching_ended': 'notifications.domain.trainer_client_events.CoachingEndedEvent',
     # Routine events. These keys are the notif_type strings passed to
     # routine.services.send_notification(); routine.models.Notification was dropped
     # (migration 0013), so there is no model to match against any more.

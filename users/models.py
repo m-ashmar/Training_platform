@@ -813,6 +813,10 @@ class TrainerClientRelation(models.Model):
     #: declined request sent again reuses this row, so `created_at` is when the pair
     #: first met, not when this request was made.
     requested_at = models.DateTimeField(null=True, blank=True)
+    #: What the client wrote to the trainer with the request ("introduce yourself",
+    #: RequestSheet). Encrypted: people describe injuries here. Shown to that trainer
+    #: only, on client-initiated requests; replaced by each new request.
+    client_note = EncryptedTextField(blank=True, default='')
     #: When the other side approved or declined it ("training together since"). Each
     #: answer is also written to `TrainerRequestOutcome`, which outlives this row and
     #: is what response times are measured from.
@@ -887,6 +891,76 @@ class TrainerRequestOutcome(models.Model):
     @property
     def response_seconds(self):
         return (self.responded_at - self.requested_at).total_seconds()
+
+
+class CoachingPeriod(models.Model):
+    """One month of one-to-one coaching, and what happened to the money for it.
+
+    Coaching is sold by the month (owner, 2026-09-19). Month 1 is held in escrow when the
+    trainer accepts (`take_hold`) and paid out when the first program arrives
+    (`settle_hold`); that moment starts the month. Each later month is charged from the
+    client's wallet when the one before it ends and paid out at once
+    (`users/coaching.py`). Every payout splits the price: `commission` to the platform at
+    the `commission_rate` copied here when the month was charged, the rest to the
+    trainer.
+
+    A money record: kept on erasure, and it outlives the relation it belongs to (a
+    client who leaves deletes the relation row, never this).
+    """
+    STATUS_CHOICES = [
+        ('held', 'Held in escrow'),       # month 1, before the first program
+        ('settled', 'Paid out'),          # trainer and platform paid; the month runs
+        ('refunded', 'Returned to the client'),
+    ]
+
+    trainer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                                related_name='coaching_periods_as_trainer')
+    client = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                               related_name='coaching_periods_as_client')
+    relation = models.ForeignKey(TrainerClientRelation, on_delete=models.SET_NULL,
+                                 null=True, blank=True, related_name='periods')
+    #: 1 for the first month of this relation, then 2, 3, ...
+    number = models.PositiveIntegerField()
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    commission_rate = models.DecimalField(max_digits=5, decimal_places=4)
+    commission = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    trainer_share = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='held',
+                              db_index=True)
+    #: The client -> escrow ledger row for this month.
+    hold_reference = models.CharField(max_length=36, unique=True)
+    payout_reference = models.CharField(max_length=36, blank=True, default='')
+    commission_reference = models.CharField(max_length=36, blank=True, default='')
+    #: Set when the month is paid out. Month 1 starts then; a renewal starts where the
+    #: month before it ended, so the cycle never drifts.
+    starts_at = models.DateTimeField(null=True, blank=True)
+    ends_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    #: When the client was told this month's successor could not be charged. Set once,
+    #: so the reminder is sent once however many times the renewal is retried.
+    renewal_reminder_sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            # One month per (pair, start): two workers renewing the same month collide
+            # here instead of charging twice.
+            models.UniqueConstraint(fields=['trainer', 'client', 'starts_at'],
+                                    condition=Q(starts_at__isnull=False),
+                                    name='one_coaching_period_per_start'),
+            models.UniqueConstraint(fields=['relation', 'number'],
+                                    condition=Q(relation__isnull=False),
+                                    name='one_coaching_period_number_per_relation'),
+            models.CheckConstraint(condition=Q(price__gt=0), name='coaching_period_price_positive'),
+            models.CheckConstraint(
+                condition=Q(commission_rate__gte=0) & Q(commission_rate__lte=1),
+                name='coaching_commission_rate_is_a_fraction'),
+        ]
+        indexes = [models.Index(fields=['relation', '-number'], name='period_relation_latest_idx')]
+
+    def __str__(self):
+        return f"{self.trainer_id}/{self.client_id} month {self.number} ({self.status})"
 
 
 class DeviceToken(models.Model):

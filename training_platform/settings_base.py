@@ -272,6 +272,17 @@ AGENT_DEFAULT_MONTHLY_LIMIT = _Decimal(get_env("AGENT_DEFAULT_MONTHLY_LIMIT", "5
 # signatures, since SECRET_KEY is not stored in the database.
 AGENT_APIKEY_ENC_KEY = get_env("AGENT_APIKEY_ENC_KEY", "")
 
+# One-to-one coaching is sold by the month (owner, 2026-09-19): the first month is held
+# when the trainer accepts and paid out when the first program arrives; each month after
+# is charged from the client's wallet when the last one ends. The platform keeps
+# COACHING_COMMISSION_RATE of EVERY month, first and renewals alike; the rate is copied
+# onto each period when it is charged, so changing it never reprices a month already paid.
+# A month the wallet cannot cover gets COACHING_RENEWAL_GRACE_DAYS, then the coaching
+# ends. See users/coaching.py.
+COACHING_COMMISSION_RATE = _Decimal("0.20")
+COACHING_PERIOD_DAYS = 30
+COACHING_RENEWAL_GRACE_DAYS = 3
+
 # ========================
 # JWT Configuration — RS256 asymmetric signing
 # Private key signs tokens; public key verifies.
@@ -391,6 +402,12 @@ CELERY_IMPORTS = (
 )
 
 CELERY_BEAT_SCHEDULE = {
+    # Coaching is monthly: charge the months that ended, remind, and end the ones whose
+    # grace ran out (users/coaching.py). Hourly, so a renewal lands within the hour.
+    'renew-coaching-periods': {
+        'task': 'users.renew_coaching_periods',
+        'schedule': crontab(minute=25),
+    },
     # `age` follows `date_of_birth` (users/models.py). Saves keep it right; this moves
     # everyone whose birthday it is and nobody else writes to their row today.
     'refresh-ages-from-birth-dates': {
@@ -636,6 +653,9 @@ CSRF_TRUSTED_ORIGINS = [
 # ========================
 PLATFORM_ESCROW_EMAIL = get_env('PLATFORM_ESCROW_EMAIL', 'platform_escrow@local')
 PLATFORM_ESCROW_USERNAME = get_env('PLATFORM_ESCROW_USERNAME', 'platform_escrow')
+# Where the platform's commission lands (wallet.utils.get_platform_revenue_wallet).
+PLATFORM_REVENUE_EMAIL = get_env('PLATFORM_REVENUE_EMAIL', 'platform_revenue@local')
+PLATFORM_REVENUE_USERNAME = get_env('PLATFORM_REVENUE_USERNAME', 'platform_revenue')
 
 # ========================
 # Logging Configuration

@@ -61,6 +61,20 @@ def speaks_as_the_direct_apk(monkeypatch):
     monkeypatch.setattr(RequestFactory, "__init__", __init__)
 
 
+@pytest.fixture(autouse=True)
+def coaching_commission_is_set_per_test(settings):
+    """The platform's cut of coaching (owner, 2026-09-19: 20%) is 0 unless a test sets it.
+
+    A deliberate contract change: every coaching payout now pays the platform its
+    commission. The tests written before it pin exact trainer balances to prove a hold is
+    paid ONCE — idempotency and lock order, not the split — and they keep proving that
+    with the rate at 0. The split has its own tests (tests/test_coaching_months.py),
+    which set the owner's rate explicitly.
+    """
+    from decimal import Decimal
+    settings.COACHING_COMMISSION_RATE = Decimal("0")
+
+
 @pytest.fixture
 def make_user(db):
     from users.models import CustomUser

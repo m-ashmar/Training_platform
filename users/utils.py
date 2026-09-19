@@ -72,8 +72,22 @@ def generate_otp():
     return str(secrets.randbelow(900000) + 100000)
 
 
+#: Arabic-Indic and Extended Arabic-Indic (Persian) digits -> 0-9. An Arabic keyboard
+#: types these, and a code or phone number is the same number either way.
+_EASTERN_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
+def western_digits(value):
+    """`value` with every Arabic-Indic digit written as 0-9 (None stays None)."""
+    return value.translate(_EASTERN_DIGITS) if isinstance(value, str) else value
+
+
 def _hash_otp(otp_code: str) -> str:
     """Keyed hash of an OTP.
+
+    Digits are made Western first: "١٢٣٤٥٦" typed on an Arabic keyboard is the code
+    123456, and hashing it as typed failed the comparison and burned an attempt
+    (BACKEND_BUGS.md B-015).
 
     A bare sha256 over a 6-digit code is reversible instantly from a database dump —
     the whole domain is 10^6 values, so a precomputed table breaks every stored code.
@@ -85,7 +99,7 @@ def _hash_otp(otp_code: str) -> str:
 
     return hmac.new(
         settings.SECRET_KEY.encode('utf-8'),
-        (otp_code or '').strip().encode('utf-8'),
+        western_digits(otp_code or '').strip().encode('utf-8'),
         hashlib.sha256,
     ).hexdigest()
 

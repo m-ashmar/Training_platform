@@ -182,6 +182,10 @@ register(PersonalDataSource(label="password_reset_tokens", model="users.Password
 
 # Financial and audit: KEPT under erasure. Deleting these would destroy the ledger.
 register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", user_field="user", on_erase="keep"))
+# Each paid month of coaching: what was charged, the commission and the trainer's share.
+# Kept like the ledger rows it names.
+register(PersonalDataSource(label="coaching_periods", model="users.CoachingPeriod",
+                            user_field=("trainer", "client"), on_erase="keep"))
 register(PersonalDataSource(label="transactions", model="wallet.Transaction", user_field="actor", on_erase="keep"))
 register(PersonalDataSource(label="wallet_audit_log", model="wallet.WalletAuditLog", user_field="actor", on_erase="keep"))
 register(PersonalDataSource(label="idempotency_keys", model="wallet.IdempotencyKey", user_field="created_by",

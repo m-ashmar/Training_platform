@@ -59,7 +59,7 @@ class FileSecurityValidator:
         self.quarantine_dir = os.path.join(settings.MEDIA_ROOT, 'quarantine')
         os.makedirs(self.quarantine_dir, exist_ok=True)
     
-    def validate_file(self, file, file_type='image') -> Dict[str, Any]:
+    def validate_file(self, file, file_type='image', scan_content=True) -> Dict[str, Any]:
         """
         Comprehensive file validation
         
@@ -99,8 +99,12 @@ class FileSecurityValidator:
             # Generate file hash for duplicate detection
             file_hash = self._generate_file_hash(file)
             
-            # Check for malicious content
-            self._scan_for_malicious_content(file)
+            # Check for malicious content. Skipped only by a caller that re-encodes the
+            # file from decoded pixels (`process_uploaded_image`): nothing of the upload's
+            # bytes survives that, and searching compressed image data for strings such
+            # as `<%` or `MZ` refused most real photographs (BACKEND_BUGS.md B-002).
+            if scan_content:
+                self._scan_for_malicious_content(file)
             
             results.update({
                 'is_valid': True,
@@ -524,8 +528,10 @@ def process_uploaded_image(file, max_bytes=None):
             code="file_too_large",
         )
 
-    # Magic-byte + MIME + extension + malicious-content checks.
-    FileSecurityValidator().validate_file(file, 'image')
+    # Magic-byte + MIME + extension checks. No byte-pattern scan: the file is decoded and
+    # re-encoded below, so no payload in it can reach storage, and the scan matched
+    # ordinary JPEG data — 36 of 40 genuine 512 px photos were refused (B-002).
+    FileSecurityValidator().validate_file(file, 'image', scan_content=False)
 
     # Decode with a guard against decompression bombs.
     file.seek(0)

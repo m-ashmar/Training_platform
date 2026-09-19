@@ -379,6 +379,18 @@ coaching fee. Matches carry up to three `reasons`, each `{code, text: {ar, en}}`
 | `GET` | `/api/v1/trainers/matches/` | auth (client) | `TrainerMatchesView` |
 | `GET` | `/api/v1/trainers/{id}/` | public | `TrainerDetailView` |
 
+### Coaching (monthly)
+
+Coaching is sold by the month: month 1 is held when the trainer accepts and paid out when
+the first program arrives; each later month is charged from the wallet when the last one
+ends, with `COACHING_RENEWAL_GRACE_DAYS` (3) to top up before the coaching ends. The
+platform keeps 20% of every month. Pushes: `coaching_renewed`, `coaching_payment_due`,
+`coaching_ended`.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/coaching/current/` | auth (client) | `CurrentCoachingView` |
+
 ### Platform policy (what each build may show and sell)
 
 Every request carries `X-App-Channel: apk | play | ios | web` and `X-App-Version`. The

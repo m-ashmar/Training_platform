@@ -314,16 +314,19 @@ class ExerciseCreateWithImageView(APIView):
 
             # Validate additional media photos if provided
             media_photos = request.FILES.getlist('media_photos')
+            # (re-encoded file, detected extension). These — never the uploads — are what
+            # is stored: the originals were saved byte for byte under the client's own
+            # filename, so a JPEG with HTML appended, named `x.html`, was kept as it came.
+            validated_photos = []
             if media_photos:
                 from training_platform.file_security import process_uploaded_image
                 from django.core.exceptions import ValidationError as DjangoValidationError
-                validated_photos = []
                 for i, photo in enumerate(media_photos):
                     # Same content validation as the main image — header checks alone
                     # let arbitrary payloads through.
                     try:
-                        safe_photo, _ext = process_uploaded_image(photo, max_bytes=5 * 1024 * 1024)
-                        validated_photos.append(safe_photo)
+                        safe_photo, photo_ext = process_uploaded_image(photo, max_bytes=5 * 1024 * 1024)
+                        validated_photos.append((safe_photo, photo_ext))
                     except DjangoValidationError as e:
                         msg = e.messages[0] if getattr(e, 'messages', None) else str(e)
                         return Response(
@@ -381,10 +384,11 @@ class ExerciseCreateWithImageView(APIView):
             media_created = []
             
             # Handle additional photo uploads
-            for i, photo_file in enumerate(media_photos):
+            for i, (photo_file, photo_ext) in enumerate(validated_photos):
                 # For uploaded photos, we need to save them and create a URL
-                # Since ExerciseMedia.content expects URLs, we'll store the file path
-                photo_name = f"exercise_media_{exercise.id}_{i}_{photo_file.name}"
+                # Since ExerciseMedia.content expects URLs, we'll store the file path.
+                # A server-made name with the DETECTED format's extension.
+                photo_name = f"exercise_media_{exercise.id}_{i}.{photo_ext}"
                 
                 # Save photo to media storage (you might want to use a specific upload path)
                 from django.core.files.storage import default_storage

@@ -2563,3 +2563,48 @@ msgstr[2] "سنتان من الخبرة"
 msgstr[3] "%(years)s سنوات خبرة"
 msgstr[4] "%(years)s سنة خبرة"
 msgstr[5] "%(years)s سنة خبرة"
+
+#: notifications/domain/trainer_client_events.py
+msgid "Coaching renewed"
+msgstr "تم تجديد التدريب"
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "Your coaching with %(name)s continues for another month."
+msgstr "يستمر تدريبك مع %(name)s لشهر آخر."
+
+#: notifications/domain/trainer_client_events.py
+msgid "Top up to keep your coaching"
+msgstr "اشحن محفظتك لتحافظ على تدريبك"
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid ""
+"Your wallet could not cover the next month with %(name)s. Top up within "
+"%(days)s days to keep your trainer."
+msgstr ""
+"رصيد محفظتك لا يكفي للشهر التالي مع %(name)s. اشحنها خلال %(days)s أيام "
+"لتحتفظ بمدربك."
+
+#: notifications/domain/trainer_client_events.py
+msgid "Coaching ended"
+msgstr "انتهى التدريب"
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid ""
+"Coaching between you and %(name)s has ended: the monthly fee was not paid."
+msgstr "انتهى التدريب بينك وبين %(name)s لأن الرسوم الشهرية لم تُدفع."
+
+#: users/coaching_views.py
+msgid "Only clients have coaching."
+msgstr "التدريب للمتدربين فقط."
+
+#: users/views.py
+msgid "The note must be text."
+msgstr "يجب أن تكون الملاحظة نصاً."
+
+#: users/views.py
+#, python-format
+msgid "The note can be at most %(max)s characters."
+msgstr "يمكن أن تكون الملاحظة %(max)s حرفاً على الأكثر."

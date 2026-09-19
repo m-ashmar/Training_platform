@@ -98,3 +98,46 @@ class ClientUnassignedTrainerEvent(BaseDomainEvent):
     actor_id: int = 0
     recipient_id: int = 0
     client_name: str = ""
+
+
+# --- monthly coaching (users/coaching.py). No amounts in the text: a push reaches every
+# build, and a store build may not show a coaching price.
+@dataclass
+class CoachingRenewedEvent(BaseDomainEvent):
+    """A new month of coaching was charged from the client's wallet."""
+    template = NotificationTemplate(
+        title=_("Coaching renewed"),
+        body=_("Your coaching with %(name)s continues for another month."),
+    )
+    actor_id: int = 0          # the trainer
+    recipient_id: int = 0      # the client
+    trainer_name: str = ""
+    period_id: int = 0
+
+
+@dataclass
+class CoachingPaymentDueEvent(BaseDomainEvent):
+    """The month ended and the wallet could not cover the next one."""
+    template = NotificationTemplate(
+        title=_("Top up to keep your coaching"),
+        body=_("Your wallet could not cover the next month with %(name)s. "
+               "Top up within %(days)s days to keep your trainer."),
+    )
+    actor_id: int = 0          # the trainer
+    recipient_id: int = 0      # the client
+    trainer_name: str = ""
+    days: int = 0
+    period_id: int = 0
+
+
+@dataclass
+class CoachingEndedEvent(BaseDomainEvent):
+    """The grace period ran out unpaid, so the coaching ended. Sent to both people."""
+    template = NotificationTemplate(
+        title=_("Coaching ended"),
+        body=_("Coaching between you and %(name)s has ended: the monthly fee was not paid."),
+    )
+    actor_id: int = 0          # the other person
+    recipient_id: int = 0
+    other_name: str = ""
+    relation_id: int = 0

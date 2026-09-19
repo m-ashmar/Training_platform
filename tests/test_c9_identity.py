@@ -19,10 +19,14 @@ from tests.test_regression_gate import _trainer_and_client
 
 # ------------------------------------------------------------------ helpers
 def _register(api, username, user_type="client"):
+    # `date_of_birth` is required at sign-up since the owner's decision of 2026-09-19
+    # (minimum age 14, BACKEND_DELTA.md item 3): a deliberate contract change, so the
+    # shared helper sends an adult's date.
     return api().post("/api/auth/register/", {
         "username": username, "email": f"{username}@gate.test",
         "phone_number": "+963999999999", "password1": "Xx!23456long",
         "password2": "Xx!23456long", "user_type": user_type,
+        "date_of_birth": "1995-06-15",
     }, content_type="application/json")
 
 

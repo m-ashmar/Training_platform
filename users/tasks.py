@@ -37,3 +37,28 @@ def refresh_ages_from_birth_dates():
     if stale:
         logger.info("Refreshed age for %d users", len(stale))
     return len(stale)
+
+
+@shared_task(
+    name="users.renew_coaching_periods",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+@no_retry_on_timeout
+def renew_coaching_periods():
+    """Charge every coaching month that has ended, remind, or end what went unpaid.
+
+    See users/coaching.py. Every step is idempotent, so a retried run charges nothing
+    twice; a relation that failed is retried with the rest.
+    """
+    from .coaching import renew_due
+
+    result = renew_due()
+    if result['counts']:
+        logger.info("Coaching renewals: %s", result['counts'])
+    if result['failed']:
+        raise RuntimeError(f"coaching renewal failed for relations {result['failed']}")
+    return result['counts']

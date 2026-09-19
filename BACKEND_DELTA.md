@@ -25,12 +25,13 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 7 | Per-trainer exercise media library | L | TODO (needs 2) |
 | 8 | Two-way chat: voice, image, video, program cards, report, block | XL | TODO = plan step 8 |
 | 9 | Server-driven home + day timeline | L | TODO (needs 2, 8 for voice) |
-| 10 | Note to the trainer on a request | S | TODO |
+| 10 | Note to the trainer on a request | S | DONE (with BACKEND_BUGS B-008) |
 | 11 | Effort rating 1-5, progression suggestion | L | TODO |
 | 12 | Personal records (always 0 today) | M | TODO |
 | 13 | Intro story content + remote theme override | M | Story media DONE (item 2); theme TODO |
 | 14 | Offline set logging idempotency (build guide section 6) | M | TODO |
 | 15 | Owner may edit/delete a saved set (build guide section 6) | M | TODO |
+| 16 | Coaching by the month, commission on every month (owner decision 3) | L | DONE |
 
 ## 1. Capabilities endpoint and channel header
 
@@ -69,12 +70,16 @@ contract, every user-facing string goes through gettext with an Arabic entry in
   - `GET /api/v1/content/media`: the app's own slots (intro story, banner, empty states).
   - Trainer objects in `/api/v1/trainers/...` carry `media`.
 - **Still to do, in order:**
-  1. Object storage (S3/R2 behind `USE_EXTERNAL_MEDIA_STORAGE`) and the volume permission
-     fix for uploads (`/data` is root-owned at runtime; `FileSecurityValidator` calls
-     `makedirs` on every upload). Video cannot pass the 15 MB body cap: needs presigned
-     direct upload.
-  2. Video slots: transcode to HLS 360p/540p/720p + poster (ffmpeg, a worker that can read
-     the file). Serialized as an additional `hls_url` + `poster` in the same slot object.
+  1. Videos live on Google Cloud Storage (owner, 2026-09-19): a GCS bucket behind
+     `django-storages[google]` for video slots, credentials from AWS Secrets Manager like
+     every other secret, uploaded by the operator console through a V4 signed PUT URL
+     straight to GCS (video cannot pass the 15 MB body cap), and served by signed GET
+     URLs. Needs from the owner: the bucket name and a service account with object
+     read/write on it. Images stay on the volume for now; the volume permission fix for
+     uploads (`/data` is root-owned at runtime) is still owed.
+  2. Video slots: transcode to HLS 360p/540p/720p + poster (GCP Transcoder API writing
+     back to the same bucket, or ffmpeg in a worker). Serialized as an additional
+     `hls_url` + `poster` in the same slot object.
   3. `trainer.signature`: an SVG sanitiser (allow-list of elements and attributes).
   4. `media` on `ExerciseSerializer` (with item 7), on routines/templates (`program.cover`,
      with routine products, plan step 10) and on meals via `Recipe` (`dish.top`). Each
@@ -102,10 +107,9 @@ contract, every user-facing string goes through gettext with an Arabic entry in
     profile endpoints now raise their validation errors through the API envelope, so each
     field error carries its `code` (field keys stay at the top level).
   - Trainers see `age`, never the date (`ClientProfileViewSerializer` unchanged there).
-- **Not yet required at sign-up**, to keep `register/` additive: a caller that omits the
-  date still gets an account (and `onboarding_missing` lists `date_of_birth`). Requiring
-  it is decision 2 below; the change is `required=True` on
-  `CustomRegisterSerializer.date_of_birth` plus the shared test helper.
+- **Required at sign-up** since the owner's decision 2 (2026-09-19): omitting it answers
+  `field_errors.date_of_birth[0].code = required`. No build that omits it was released;
+  the shared test helper sends one, with the reason.
 
 ## 4. Onboarding fields
 
@@ -210,11 +214,11 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 
 ## 10. Note to the trainer on a request
 
-- **Today:** `ClientRequestTrainerView` reads `message` and drops it
-  (`users/views.py`, "TODO: Add request message support").
-- **Must change:** `TrainerClientRelation.note` (encrypted text, max 500), accept `note`
-  (and `message` as an alias), reset it on a re-request, return it on the trainer's
-  pending list (client-initiated rows only) and on request-status. No new route.
+- **Built:** `TrainerClientRelation.client_note` (encrypted, max 500). The request accepts
+  `note` (and `message`, the name older builds used), replaces it on a re-sent request,
+  and clears it when the trainer re-invites. Shown on the trainer's pending list
+  (client-initiated rows only) and on the client's request-status. Codes `note_too_long`,
+  `invalid_note`. No new route.
 
 ## 11. Effort rating and progression
 
@@ -254,6 +258,28 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 - **Must change:** `post_delete` recalculation first, then allow the owner, with an edit
   window code (`set_locked`).
 
+## 16. Coaching by the month
+
+- **Before:** one fee per relationship, held on accept, paid 100% to the trainer at the
+  first program; no commission anywhere; the design says "per month".
+- **Built** (owner decision 3, `users/coaching.py`):
+  - `CoachingPeriod`: one row per month (price, commission rate copied at charge time,
+    commission, trainer share, the three ledger references, start/end). A money record:
+    kept on erasure, outlives the relation.
+  - Month 1: held on accept as before; at the first program it is split — trainer
+    `price - commission`, platform `commission` (`COACHING_COMMISSION_RATE`, 20%, to the
+    new platform revenue wallet) — and the month starts.
+  - Renewal: hourly beat `users.renew_coaching_periods` charges the next month from the
+    client's wallet when the last one ends, at the price the client agreed to, split the
+    same way, starting where the last ended. Idempotent (row lock + unique start per pair).
+  - Unpaid: one `coaching_payment_due` push, `COACHING_RENEWAL_GRACE_DAYS` (3) to top up,
+    then the coaching ends (`coaching_ended` to both). Paid months are not refunded.
+  - `GET /api/v1/coaching/current/`: status `awaiting_first_program | active |
+    payment_due`, the latest month, `renews_at`, `grace_until`, and the price by build.
+- **Still to do:** operator-editable rates and double-entry ledger accounts (plan step 4);
+  a pro-rata refund if a TRAINER ends coaching mid-month (owner decision below); a client
+  "stop renewing" switch (today leaving is the way to stop).
+
 ## Migration-safe order
 
 Every step is additive: new tables, or new nullable/constant-default columns (metadata
@@ -264,7 +290,7 @@ only on Postgres), no backfill that invents data, no rename.
    `TrainerRequestOutcome`. Done.
 3. Object storage + volume fix (settings, no schema).
 4. Media video/SVG pipeline (columns on `MediaAsset` for `hls_url`, `poster`, `duration`).
-5. Item 10 note (one column).
+5. Item 10 note + item 16 `CoachingPeriod`: `users/0041`. Done.
 6. Item 14 `client_uuid` columns + partial unique indexes (before any real data).
 7. Item 11 `effort_rating` (+ check constraint).
 8. Item 12 (no schema if computed on read).
@@ -273,14 +299,21 @@ only on Postgres), no backfill that invents data, no rename.
 11. Item 9 home (no schema; optional `HomeSection`).
 12. Item 13 theme (new tables).
 
-## Decisions owed by the owner
+## Owner's decisions (2026-09-19)
+
+| # | Decision | Answer | Done |
+|---|---|---|---|
+| 1 | Minimum age | 14 (the Dob screen's "16" is the app's to change) | `MINIMUM_AGE_YEARS = 14` |
+| 2 | Require the date of birth at sign-up | Yes | `required=True`, code `required` |
+| 3 | Coaching "per month" | Yes, and the commission comes off every renewal too | Item 16 |
+| 4 | Hide the coaching price from store builds on the legacy payloads | Not answered; the spec's own acceptance item ("no price strings reach store builds") decided it | Value null on those builds, key kept (BACKEND_BUGS B-007) |
+| 5 | Match unverified trainers | Keep both | Unchanged: ranked below verified |
+| 6 | Grade dish photos black and white | No, food keeps its colour | `dish.top` `mono=False` |
+| 7 | Where videos live | Google Cloud Storage | Item 2 step 1; bucket + service account owed |
+
+## Decisions still owed
 
 | # | Decision | What the code does now |
 |---|---|---|
-| 1 | Minimum age: owner said 14 on 2026-09-19, the design pack's Dob screen says 16 | 14 (`MINIMUM_AGE_YEARS`); the Dob copy must match |
-| 2 | Require the date of birth at sign-up (breaks callers that omit it; none are live) | Optional, validated when sent |
-| 3 | The design prices coaching "per month" (ل.س شهرياً); the server charges one fee per relationship | Unchanged; the app must not say "monthly" until coaching periods exist |
-| 4 | Hide `trainer_hourly_rate` from iOS on the five legacy trainer payloads | Not changed (additive rule); new endpoints hide it |
-| 5 | Are unverified trainers matched? | Yes, ranked below verified ones; the card says `verified: false` |
-| 6 | `dish.top` graded black and white like everything else | Yes (brand rule "ember is the only colour") |
-| 7 | Video storage/CDN provider and budget (HLS) | Not built |
+| 8 | A trainer who ends coaching mid-month: refund the unused days? | No refund |
+| 9 | Grace before unpaid coaching ends (3 days) and whether the client can switch off renewal | 3 days; leaving is the way to stop |

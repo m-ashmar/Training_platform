@@ -23,6 +23,9 @@ from notifications.domain.trainer_client_events import (
     ClientRequestRejectedEvent,
     ClientRequestCancelledEvent,
     ClientUnassignedTrainerEvent,
+    CoachingEndedEvent,
+    CoachingPaymentDueEvent,
+    CoachingRenewedEvent,
 )
 from notifications.services import NotificationService
 
@@ -245,3 +248,40 @@ def handle_client_unassigned_trainer(event: ClientUnassignedTrainerEvent):
         # silently deleted the notification. The `DoesNotExist` branch above
         # stays a swallow: a deleted user is nothing to retry.
         raise
+
+
+def _send_coaching(event, *, event_type, related_id, context, data):
+    """One body for the three coaching notices; raises for a retry like the others."""
+    try:
+        actor = User.objects.filter(id=event.actor_id).first()
+        recipient = User.objects.get(id=event.recipient_id)
+        NotificationService.create_and_send(
+            recipient=recipient, actor=actor, event_type=event_type,
+            related_object_id=str(related_id),
+            metadata={'context': context, 'data': data}, event_id=event.event_id)
+    except User.DoesNotExist:
+        logger.warning("User not found for %s: %s", event_type, event.recipient_id)
+    except Exception as e:
+        logger.error("Error handling %s: %s", event_type, e, exc_info=True)
+        raise
+
+
+@subscribe(CoachingRenewedEvent)
+def handle_coaching_renewed(event: CoachingRenewedEvent):
+    _send_coaching(event, event_type='coaching_renewed', related_id=event.period_id,
+                   context={'name': event.trainer_name},
+                   data={'type': 'coaching_renewed', 'trainer_id': event.actor_id})
+
+
+@subscribe(CoachingPaymentDueEvent)
+def handle_coaching_payment_due(event: CoachingPaymentDueEvent):
+    _send_coaching(event, event_type='coaching_payment_due', related_id=event.period_id,
+                   context={'name': event.trainer_name, 'days': event.days},
+                   data={'type': 'coaching_payment_due', 'trainer_id': event.actor_id})
+
+
+@subscribe(CoachingEndedEvent)
+def handle_coaching_ended(event: CoachingEndedEvent):
+    _send_coaching(event, event_type='coaching_ended', related_id=event.relation_id,
+                   context={'name': event.other_name},
+                   data={'type': 'coaching_ended', 'user_id': event.actor_id})

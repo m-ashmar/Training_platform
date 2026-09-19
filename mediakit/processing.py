@@ -1,7 +1,8 @@
 """Turn one uploaded master into what the app draws.
 
 On upload, once: validate it against its slot, apply the black-and-white grade (the
-library must match whoever shot it — ember stays the only colour on screen), write WebP
+library must match whoever shot it — ember stays the only colour on screen; food is the
+owner's one exception and keeps its colour, `Slot.mono`), write WebP
 at 1x and 2x, a blur preview of a few hundred bytes to paint instantly, and the average
 brightness the app sets its text scrim from.
 
@@ -84,15 +85,17 @@ def process_upload(upload, slot: Slot) -> ProcessedImage:
         _refuse(_("This slot needs a transparent PNG."), "media_needs_transparency")
 
     # The grade. Alpha slots keep their transparency; nothing else carries one.
+    # Brightness is measured on the grey version either way: it drives the text scrim.
     if slot.alpha:
         rgba = img.convert("RGBA")
         alpha = rgba.getchannel("A")
         gray = ImageOps.grayscale(rgba)
-        graded = Image.merge("RGBA", (gray, gray, gray, alpha))
+        graded = Image.merge("RGBA", (gray, gray, gray, alpha)) if slot.mono else rgba
         brightness = _brightness(gray, mask=alpha)
     else:
-        gray = ImageOps.grayscale(img.convert("RGB"))
-        graded = gray.convert("RGB")
+        rgb = img.convert("RGB")
+        gray = ImageOps.grayscale(rgb)
+        graded = gray.convert("RGB") if slot.mono else rgb
         brightness = _brightness(gray)
     # `convert` copies `info`, and the encoders re-emit what it holds (EXIF included).
     graded.info = {}

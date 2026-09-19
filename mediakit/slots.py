@@ -2,7 +2,8 @@
 
 The photo team shoots to a slot, the operator console uploads to a slot, the API serves
 the slot and the app's `YgMedia(slot)` draws it. Nobody invents a size: a slot fixes
-the aspect ratio, the smallest upload that can fill it, and how it is graded.
+the aspect ratio, the smallest upload that can fill it, and how it is graded (black and
+white, except food, which the owner keeps in colour).
 
 The source is the owner's Frontend Build Guide, section 5 "Media Kit". Changing a slot
 here is a contract change for the app — add slots, never rename one.
@@ -52,6 +53,8 @@ class Slot:
     #: Counts towards a trainer's kit being complete. A trainer cannot be featured or
     #: matched first until every required slot is filled.
     required: bool = False
+    #: Graded black and white on upload. Food keeps its colour (owner, 2026-09-19).
+    mono: bool = True
 
     @property
     def min_size(self) -> tuple[int, int]:
@@ -78,7 +81,7 @@ SLOTS: dict[str, Slot] = {s.key: s for s in (
     # Other kits. The guide gives dishes 4:5 and 1:1 and program covers 16:9 and 4:5:
     # one master is stored at the wider ratio and the app crops the other around the
     # focal point.
-    Slot("dish.top", OwnerType.DISH, IMAGE, (4, 5), 480),
+    Slot("dish.top", OwnerType.DISH, IMAGE, (4, 5), 480, mono=False),
     Slot("program.cover", OwnerType.PROGRAM, IMAGE, (16, 9), 640),
     Slot("app.story", OwnerType.APP, IMAGE, (9, 16), 540, max_index=8),
     Slot("app.banner", OwnerType.APP, IMAGE, (21, 9), 720),

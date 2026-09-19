@@ -13,6 +13,7 @@ and store-compliance spec. Not yet deployed.
 | `PAYMENTS_COMPLIANCE_PLAN.md` | The work state: 12 build steps, what is done, what is next, the owner's decisions, the ready-made prompt for each step |
 | `API_CONTRACT.md` | Every route. A gate test diffs it against the URLconf — a new route that is not listed fails the suite |
 | `BACKEND_DELTA.md` | The second workstream: what the v2 app designs need from the backend, item by item, what is done, and the migration-safe order |
+| `BACKEND_BUGS.md` | Bugs the app session finds while wiring screens. Check it at the start and while working; fix, then fill **Status** and **Backend note** (never the other columns) |
 | `SYSTEM_OVERVIEW.md` | Architecture map. Read the section you need, not the file |
 
 ## Architecture at a glance

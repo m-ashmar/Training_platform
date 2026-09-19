@@ -137,22 +137,25 @@ class TrainerMatchingFieldsMixin(serializers.Serializer):
 class CustomRegisterSerializer(RegisterSerializer):
     """POST /api/auth/register/.
 
-    `date_of_birth` (ISO date) is accepted and, when sent, the server refuses anyone
-    younger than `MINIMUM_AGE_YEARS` (14). Field codes: `under_minimum_age`,
-    `date_of_birth_in_future`, `date_of_birth_implausible`. The v2 sign-up screen always
-    sends it. It is optional on this route so existing callers keep working; making it
-    required is an owner decision (BACKEND_DELTA.md) and a one-word change here.
+    `date_of_birth` (ISO date) is required: the server refuses anyone younger than
+    `MINIMUM_AGE_YEARS` (14). Field codes on `field_errors.date_of_birth`:
+    `required`, `under_minimum_age`, `date_of_birth_in_future`,
+    `date_of_birth_implausible`. Required by the owner's decision (2026-09-19); no build
+    that omits it was ever released.
     """
     phone_number = serializers.CharField(max_length=15,  required=True)
     user_type = serializers.ChoiceField(choices=[('client', 'Client'), ('trainer', 'Trainer'), ('agent', 'Agent'), ('admin', 'Administrator')], required=False, default='client')
-    date_of_birth = serializers.DateField(required=False)
+    date_of_birth = serializers.DateField(required=True)
 
     def validate_date_of_birth(self, value):
         return check_date_of_birth(value)
 
     def validate_phone_number(self, value):
-        # Regex for phone number validation (international format)
-        phone_regex = re.compile(r'^\+?1?\d{9,15}$')
+        # Stored with Western digits: `\d` also matched Arabic-Indic digits, so
+        # "+٩٦٣..." was kept as typed and matched nothing later (B-015).
+        from .utils import western_digits
+        value = western_digits(value)
+        phone_regex = re.compile(r'^\+?1?[0-9]{9,15}$')
         if not phone_regex.match(value):
             raise serializers.ValidationError(
                 _("Phone number must be entered in the format: '+999999999'. Up to 15 digits allowed.")
@@ -241,7 +244,7 @@ class CustomLoginSerializer(LoginSerializer):
         if email and password:
             from .utils import check_login_lockout, record_login_failure, clear_login_attempts
 
-            # Per-account brute-force lockout (10 failures → 15-min cooldown)
+            # Per-account brute-force lockout (5 failures → 15-min cooldown; users/utils.py)
             is_locked, _remaining = check_login_lockout(email)
             if is_locked:
                 raise serializers.ValidationError(
@@ -531,7 +534,9 @@ class PasswordResetVerifySerializer(serializers.Serializer):
     otp_code = serializers.CharField(max_length=6, min_length=6, required=True)
 
     def validate_otp_code(self, value):
-        if not value.isdigit():
+        from .utils import western_digits
+        value = western_digits(value)
+        if not re.fullmatch(r'[0-9]{6}', value):
             raise serializers.ValidationError(_("OTP code must be a 6-digit number."))
         return value
 

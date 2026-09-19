@@ -39,6 +39,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 
 from policy.money import MoneyType
 
@@ -104,9 +105,12 @@ def take_hold(relation, actor) -> None:
         raise HoldFailed("the charge could not be moved; please try again") from exc
     relation.hold_reference = tx.reference_id
     relation.save(update_fields=['hold_reference', 'updated_at'])
+    # Month 1 of the coaching, with the commission rate of today (users/coaching.py).
+    from .coaching import open_period
+    open_period(relation, tx)
 
 
-def _move_hold(relation, actor, destination_owner, owner_type, purpose):
+def _move_hold(relation, actor, destination_owner, owner_type, purpose, *, pay_out=False):
     """Move this relation's held money to `destination_owner`, once.
 
     One body for the refund and the payout, because they differ only in where the
@@ -144,6 +148,9 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose):
                 locked.hold_reference = ''
                 locked.save(update_fields=['hold_reference', 'updated_at'])
                 return None
+            from .models import CoachingPeriod
+            period = (CoachingPeriod.objects.select_for_update()
+                      .filter(hold_reference=locked.hold_reference).first())
             if Transaction.objects.filter(reverses=held).exists():
                 # An administrator already put this money back through
                 # /api/wallet/admin/reversal/ — the one recovery path support has for a
@@ -157,7 +164,24 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose):
                 locked.hold_reference = ''
                 locked.save(update_fields=['hold_reference', 'updated_at'])
                 relation.hold_reference = ''
+                if period is not None and period.status == 'held':
+                    period.status = 'refunded'
+                    period.save(update_fields=['status', 'updated_at'])
                 return None
+
+            if pay_out:
+                # The first month is delivered: pay the trainer their share and the
+                # platform its commission, and start the month (users/coaching.py).
+                from . import coaching
+                if period is None:
+                    # A hold taken before months existed.
+                    period = coaching.open_period(locked, held)
+                tx = coaching.pay_out(period, actor_id=getattr(actor, 'id', None),
+                                      starts_at=timezone.now(), trainer_purpose=purpose)
+                locked.hold_reference = ''
+                locked.save(update_fields=['hold_reference', 'updated_at'])
+                relation.hold_reference = ''
+                return tx
 
             escrow = get_escrow_wallet()
             if escrow.balance < held.amount:
@@ -177,6 +201,9 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose):
             locked.hold_reference = ''
             locked.save(update_fields=['hold_reference', 'updated_at'])
             relation.hold_reference = ''
+            if period is not None:
+                period.status = 'refunded'
+                period.save(update_fields=['status', 'updated_at'])
             return tx
     except HoldFailed:
         raise
@@ -197,14 +224,19 @@ def release_hold(relation, actor):
 
 
 def settle_hold(relation, actor):
-    """Pay the trainer the money held for THIS client, once, and forget the hold.
+    """Pay out the money held for THIS client, once, and forget the hold.
+
+    The first program has arrived, so month 1 of the coaching starts: the trainer gets
+    the price less the platform's commission and the platform gets the commission, at
+    the rate copied onto the month when it was held (`users/coaching.py`). Returns the
+    trainer's ledger row.
 
     The routine app used to move `trainer_hourly_rate` from the shared escrow wallet
     to the trainer on every routine assignment, with no link to any hold: fifty
     assignments were fifty payouts, drawn from whatever other clients had deposited.
     """
     return _move_hold(relation, actor, lambda r: r.trainer, "trainer",
-                      'trainer_assignment_settlement')
+                      'trainer_assignment_settlement', pay_out=True)
 
 
 def release_holds_before_erasure(user, relations, *, dry_run=False) -> dict:

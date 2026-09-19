@@ -18,7 +18,7 @@ and order live in `BACKEND_DELTA.md`, not here.
 | 1 | `money_type` on payments, ledger, checkouts; `source` on entitlements | DONE | `policy/money.py`; `wallet.Transaction.money_type` (0013 backfill, 0014 check); `subscription.Payment.money_type`, `Subscription.source` (0012). Checkout sessions get theirs when the model exists (step 5) |
 | 2 | Capabilities endpoint, channel header, server-side refusal | DONE, 2 follow-ups | `policy/` app, `GET /api/v1/config/capabilities`, seeded per spec §4, change log, operator console. Left: (a) AI coach must decline "how do I pay" on `play`/`ios` — needs the channel on the WebSocket handshake; (b) `preferred_language`-independent: notification texts for `PLATFORM_SUB` states on store channels (arrives with step 5) |
 | 3 | Merge the unmerged payments fix | DONE | `c9-fix-payments` merged here; full suite on a fresh DB is the gate |
-| 4 | Double-entry ledger, commission settings + snapshot, remove the 100% forward | NEXT | `wallet/signals.py:handle_payment_completed` still forwards 100% of a plan payment to the trainer. Rates decided — see Owner's decisions |
+| 4 | Double-entry ledger, commission settings + snapshot, remove the 100% forward | PART DONE | Coaching commission DONE with the monthly coaching (`users/coaching.py`, `BACKEND_DELTA.md` item 16): 20% of every month, rate copied onto each `CoachingPeriod`, to a platform revenue wallet. Left: `wallet/signals.py:handle_payment_completed` still forwards 100% of a plan payment to the trainer; the rates are settings, not yet operator-editable rows; no named double-entry accounts yet |
 | 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | TODO | `preferred_language` cannot be set by any endpoint yet (HIGH). Remove `auto_renew` from API/UI here |
 | 6 | Trainer verification, then withdrawals | TODO | |
 | 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | PART DONE | Date of birth + minimum age 14 DONE with the design-v2 work (`BACKEND_DELTA.md` item 3: validated at sign-up and on every profile write, `MINIMUM_AGE_YEARS`; making it required at sign-up is an owner decision in that file). Left: reports, blocking, moderation queue, AI consent — store blockers B1, B2, B5 |
@@ -63,6 +63,7 @@ and order live in `BACKEND_DELTA.md`, not here.
 | 2 | A plan payment stays **100% with the platform**, whether or not the client has a trainer | Step 4: `SUBSCRIPTION_TRAINER_SHARE = 0` — the 100% forward in `wallet/signals.py:handle_payment_completed` is removed, not reduced. Keep the setting so the owner can raise it later |
 | 3 | Minimum age **14** | Step 7: date of birth at signup, enforced by the server |
 | 4 | `yalla_gym/` is the mobile app, built by its own sessions | Backend sessions do not edit it. It already sends `X-App-Channel` / `X-App-Version` |
+| 5 | Coaching is sold **by the month**, and the 20% comes off every renewal too | Built: `users/coaching.py` (`BACKEND_DELTA.md` item 16) |
 
 Both rates are operator-editable settings, snapshotted onto the transaction when the price
 is locked (spec §8); the numbers above are the defaults.
