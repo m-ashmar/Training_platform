@@ -27,9 +27,9 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 9 | Server-driven home + day timeline | L | TODO (needs 2, 8 for voice) |
 | 10 | Note to the trainer on a request | S | DONE (with BACKEND_BUGS B-008) |
 | 11 | Effort rating 1-5, progression suggestion | L | TODO |
-| 12 | Personal records (always 0 today) | M | TODO |
+| 12 | Personal records (always 0 today) | M | `prs` DONE (BACKEND_BUGS B-013); records on the completion response TODO |
 | 13 | Intro story content + remote theme override | M | Story media DONE (item 2); theme TODO |
-| 14 | Offline set logging idempotency (build guide section 6) | M | TODO |
+| 14 | Offline set logging idempotency (build guide section 6) | M | DONE (BACKEND_BUGS B-003) |
 | 15 | Owner may edit/delete a saved set (build guide section 6) | M | TODO |
 | 16 | Coaching by the month, commission on every month (owner decision 3) | L | DONE |
 
@@ -133,7 +133,7 @@ contract, every user-facing string goes through gettext with an Arabic entry in
     (`GET /api/auth/trainer/client-profile/{id}/`).
 - **Still to do:** the reminder wheel offers minutes (00/15/30) but reminders fire hourly
   (`workout_reminder_hour`, beat at minute 0): needs `workout_reminder_minute` and a
-  quarter-hourly beat. `preferred_language` still cannot be set (plan step 5).
+  quarter-hourly beat. `preferred_language` is settable since BACKEND_BUGS B-005.
 
 ## 5. Trainer proof stats
 
@@ -245,8 +245,14 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 
 ## 14. Offline set logging
 
-- **Today:** no idempotency key and no unique constraint on `ExerciseSetLog`; a retried
-  POST duplicates. A single set needs a server `UserExerciseProgress` id up front.
+- **Built (B-003):** `client_uuid` (unique) on `WorkoutSession` and `ExerciseSetLog`: the
+  first POST with it answers 201, a retry 200 with the same row, someone else's id 409
+  `idempotency_conflict`. A session's `start_time` is writable on create (at most 30 days
+  back), so a workout synced later keeps its clock; `end_time` is checked against it.
+- **Still to do:** log a set by `exercise` + session instead of a server progress id, and
+  a batch `sync/` endpoint.
+- **Before:** no idempotency key and no unique constraint on `ExerciseSetLog`; a retried
+  POST duplicated. A single set needs a server `UserExerciseProgress` id up front.
 - **Must change:** nullable `client_uuid` + partial unique index on `WorkoutSession` and
   `ExerciseSetLog`, replay returns the original row, log by `exercise` + session, optional
   batch `sync/`.

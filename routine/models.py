@@ -716,9 +716,16 @@ class WorkoutSession(models.Model):
     day = models.PositiveIntegerField(
         null=True, blank=True,
         help_text="Which day of the routine this session covers, when the client said.")
-    start_time = models.DateTimeField(auto_now_add=True)
+    #: When the workout began. Defaults to the moment the row is written, and the app
+    #: may say otherwise on create: a workout logged offline is written when the phone
+    #: syncs, and `auto_now_add` stamped that time instead of the real one, so the
+    #: 12-hour cap on `end_time` then refused the real finish (BACKEND_BUGS B-003).
+    start_time = models.DateTimeField(default=timezone.now)
     end_time = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=[('active', 'Active'), ('completed', 'Completed'), ('abandoned', 'Abandoned')], default='active')
+    #: The app's own id for this session, so a retried create returns the first row
+    #: instead of writing a second one (B-003). Optional; unique when given.
+    client_uuid = models.UUIDField(null=True, blank=True, unique=True)
     
     class Meta:
         verbose_name = "Workout Session"
@@ -791,6 +798,9 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
     notes = models.TextField(blank=True, help_text="Notes about this specific set")
     
     date = models.DateField(default=timezone.localdate, null=True, blank=True, help_text="Date of the set")  # TODO: Backfill and make non-nullable if desired
+    #: The app's own id for this set: a retried POST (the write landed, the answer was
+    #: lost) returns the first row instead of logging the set twice (B-003).
+    client_uuid = models.UUIDField(null=True, blank=True, unique=True)
 
     class Meta:
         verbose_name = "Exercise Set Log"

@@ -2608,3 +2608,33 @@ msgstr "يجب أن تكون الملاحظة نصاً."
 #, python-format
 msgid "The note can be at most %(max)s characters."
 msgstr "يمكن أن تكون الملاحظة %(max)s حرفاً على الأكثر."
+
+#: routine/views.py
+msgid "This id belongs to another record."
+msgstr "هذا المعرّف يخص سجلاً آخر."
+
+#: routine/serializers.py
+msgid "A workout cannot start in the future."
+msgstr "لا يمكن أن يبدأ التمرين في المستقبل."
+
+#: routine/serializers.py
+#, python-format
+msgid "A workout can be logged up to %(days)d days late."
+msgstr "يمكن تسجيل التمرين متأخراً %(days)d يوماً على الأكثر."
+
+#: routine/serializers.py
+msgid "Weight must be between 0 and 1000 kg."
+msgstr "يجب أن يكون الوزن بين 0 و1000 كغ."
+
+#: routine/serializers.py
+msgid "A workout cannot end before it started."
+msgstr "لا يمكن أن ينتهي التمرين قبل أن يبدأ."
+
+#: routine/serializers.py
+#, python-format
+msgid "A workout cannot last longer than %(hours)d hours."
+msgstr "لا يمكن أن يستمر التمرين أكثر من %(hours)d ساعة."
+
+#: notifications/views.py
+msgid "Unknown notification type."
+msgstr "نوع إشعار غير معروف."

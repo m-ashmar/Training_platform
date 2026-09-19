@@ -382,6 +382,16 @@ def record_login_failure(email: str) -> int:
     return attempts
 
 
+def lockout_seconds_left(email: str) -> int:
+    """Seconds until a locked address may try again (the whole window if unknown)."""
+    from training_platform.cache import ratelimit_cache
+    try:
+        ttl = ratelimit_cache().ttl(_get_login_attempt_cache_key(email))
+    except Exception:
+        ttl = None          # a backend without `ttl` (the in-memory one in tests)
+    return int(ttl) if isinstance(ttl, (int, float)) and ttl > 0 else 15 * 60
+
+
 def clear_login_attempts(email: str):
     """Clear the login attempt counter after a successful login."""
     from training_platform.cache import ratelimit_cache

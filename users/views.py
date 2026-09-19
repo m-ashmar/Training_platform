@@ -1071,7 +1071,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         from .utils import check_login_lockout, record_login_failure, clear_login_attempts
-        from rest_framework_simplejwt.exceptions import AuthenticationFailed
+        from rest_framework.exceptions import AuthenticationFailed
         from rest_framework import serializers
 
         email = attrs.get('email') or attrs.get('username')  # Support both email and username
@@ -1080,14 +1080,17 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         if email:
             is_locked, _remaining = check_login_lockout(email)
             if is_locked:
-                raise serializers.ValidationError(
-                    {"detail": _("Too many failed login attempts. Please try again in 15 minutes.")}
-                )
+                from .exceptions import TooManyAttempts
+                from .utils import lockout_seconds_left
+                raise TooManyAttempts(lockout_seconds_left(email))
 
         # Authenticate, then mint through `get_token` above
         try:
             data = super().validate(attrs)
         except AuthenticationFailed:
+            # DRF's AuthenticationFailed: simplejwt raises the base class, and the
+            # simplejwt subclass this caught never matched, so /token/ counted no failed
+            # attempt and its lockout never engaged (BACKEND_BUGS B-004).
             if email:
                 record_login_failure(email)
             raise
@@ -2321,6 +2324,11 @@ class PasswordResetConfirmView(APIView):
                 BlacklistedToken.objects.get_or_create(token=_t)
         except Exception as e:
             logger.error(f"Failed to blacklist tokens after password reset for user {user.id}: {e}")
+
+        # The person just proved they own the address: the failures that locked them out
+        # are forgiven, or they were locked out again right after resetting (B-017).
+        from .utils import clear_login_attempts
+        clear_login_attempts(user.email)
 
         logger.info(f"Password reset completed for user {user.id} ({user.email})")
 

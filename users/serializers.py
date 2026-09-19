@@ -192,6 +192,12 @@ class CustomRegisterSerializer(RegisterSerializer):
             user.phone_number = self.validated_data.get('phone_number')
             user.user_type = self.validated_data.get('user_type', 'client')
             user.date_of_birth = self.validated_data.get('date_of_birth')
+            if user.user_type == 'trainer':
+                # Closed until the trainer opens: `trainer_is_available` defaults to True,
+                # so an empty profile was listed, and matched, the moment the address was
+                # verified (BACKEND_BUGS B-010). The trainer switches it on from their
+                # profile once there is something to show.
+                user.trainer_is_available = False
             # Unverified, and NOT disabled. This wrote `is_active = False` to mean "not
             # verified yet", which is also what a suspension writes, so resend-otp could
             # not tell a pending signup from a suspended account and refused both —
@@ -247,9 +253,9 @@ class CustomLoginSerializer(LoginSerializer):
             # Per-account brute-force lockout (5 failures → 15-min cooldown; users/utils.py)
             is_locked, _remaining = check_login_lockout(email)
             if is_locked:
-                raise serializers.ValidationError(
-                    {"non_field_errors": [_("Too many failed login attempts. Please try again in 15 minutes.")]}
-                )
+                from .exceptions import TooManyAttempts
+                from .utils import lockout_seconds_left
+                raise TooManyAttempts(lockout_seconds_left(email))
 
             # Authenticate using email and password
             self.user = self.authenticate(email=email, password=password)
@@ -303,6 +309,9 @@ class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
             # Design v2: see OnboardingFieldsMixin and TrainerMatchingFieldsMixin.
             'date_of_birth', *CLIENT_ONBOARDING_FIELDS, 'onboarding_missing',
             *TRAINER_MATCHING_FIELDS,
+            # The language of this person's e-mails and pushes (`ar` | `en`). Nothing could
+            # set it, so every one of them went out in English (BACKEND_BUGS B-005).
+            'preferred_language',
         ]
         # assigned_trainer is read-only here: trainer assignment must go through
         # the request/approval + wallet-escrow flow, never self-service update.

@@ -960,9 +960,93 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
             return base_qs.filter(user=user)
 
 
+
+def _records_in_window(user, start_date) -> int:
+    """How many exercises `user` set a record in from `start_date` on.
+
+    A record is a set heavier than every set of that exercise logged before it —
+    including earlier sets inside the window, so a first month of steady progress counts.
+    The very first set of an exercise is where records are measured from, not one.
+    """
+    key = 'user_exercise_progress__exercise'
+    weighted = ExerciseSetLog.objects.filter(user_exercise_progress__user=user, weight__gt=0)
+    exercises = list(weighted.filter(date__gte=start_date).order_by()
+                     .values_list(key, flat=True).distinct())
+    if not exercises:
+        return 0
+    best: dict = {}
+    with_record = set()
+    for exercise, day, weight in (weighted.filter(**{f'{key}__in': exercises})
+                                  .order_by('date', 'id').values_list(key, 'date', 'weight')):
+        if exercise in best and weight > best[exercise] and day >= start_date:
+            with_record.add(exercise)
+        best[exercise] = max(best.get(exercise, weight), weight)
+    return len(with_record)
+
+def _prescribed_weight(value):
+    """A customised working weight in kg, or None if it is not a number from 0 to 1000."""
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        return None
+    return weight if 0 <= weight <= 1000 else None
+
+def _idempotent_create(view, request, model, owner_of, create):
+    """Create — or, for a retry, answer with the row the first attempt already wrote.
+
+    The app logs sets and workouts offline and syncs them later, and a retry whose first
+    attempt DID land (the answer was lost) used to write a second row and double the
+    volume (BACKEND_BUGS B-003). A request may carry `client_uuid`, the app's own id for
+    the row: the first request with it is created (201); any later one answers 200 with
+    that row, unchanged. An id that belongs to someone else's row answers
+    409 `idempotency_conflict` and says nothing about the row.
+    """
+    import uuid as _uuid
+
+    from .permissions import can_access_user_data
+
+    raw = request.data.get('client_uuid') if hasattr(request.data, 'get') else None
+    try:
+        # As DRF's UUIDField reads it: a string, or the 128-bit integer form.
+        key = (None if raw in (None, '') else
+               _uuid.UUID(int=raw) if isinstance(raw, int) and not isinstance(raw, bool)
+               else _uuid.UUID(str(raw)))
+    except (ValueError, TypeError, AttributeError):
+        key = None      # malformed: the serializer answers for it
+
+    def replay():
+        found = model.objects.filter(client_uuid=key).first()
+        if found is None:
+            return None
+        owner_id, user = owner_of(found), request.user
+        if owner_id == user.id or getattr(user, 'is_admin', False) or (
+                user.is_trainer and owner_id and can_access_user_data(user, owner_id)):
+            return Response(view.get_serializer(found).data, status=status.HTTP_200_OK)
+        return Response({'error': _('This id belongs to another record.'),
+                         'code': 'idempotency_conflict'}, status=status.HTTP_409_CONFLICT)
+
+    if key is not None:
+        answer = replay()
+        if answer is not None:
+            return answer
+    try:
+        with transaction.atomic():
+            return create()
+    except IntegrityError:
+        # Two attempts raced; the unique index let one through. Answer with its row.
+        answer = replay() if key is not None else None
+        if answer is None:
+            raise
+        return answer
+
 class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     """
     ViewSet for logging individual exercise sets.
+
+    POST may carry `client_uuid` (the app's id for the set): the first POST with it
+    answers 201, a retry answers 200 with the same row, and an id already used by
+    someone else's set answers 409 `idempotency_conflict`. `date` is writable, so a set
+    logged offline keeps its day.
     """
     queryset = ExerciseSetLog.objects.all()
     serializer_class = ExerciseSetLogSerializer
@@ -1000,10 +1084,19 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         else:
             return base_qs.filter(user_exercise_progress__user=user)
 
+    def create(self, request, *args, **kwargs):
+        return _idempotent_create(
+            self, request, ExerciseSetLog,
+            lambda s: (s.user_exercise_progress.user_id if s.user_exercise_progress_id
+                       else s.workout_session.user_id if s.workout_session_id else None),
+            lambda: super(ExerciseSetLogViewSet, self).create(request, *args, **kwargs))
+
     def perform_create(self, serializer):
         try:
             serializer.save()
         except IntegrityError as e:
+            if 'client_uuid' in str(e):
+                raise       # a retry racing its first attempt: `create` answers it
             if 'unique constraint' in str(e).lower():
                 raise serializers.ValidationError({'detail': _('A set log for this progress, set number, and date already exists.')})
             raise
@@ -1239,6 +1332,22 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
             return self.queryset
         return self.queryset.filter(user_id__in=allowed_ids)
 
+    def create(self, request, *args, **kwargs):
+        """POST: open a session. Body: `routine`, `day`, optional `client_uuid` (the
+        app's id: a retry answers 200 with the first row; someone else's id answers 409
+        `idempotency_conflict`) and optional `start_time` for a workout logged offline
+        (at most 30 days back: `start_time_in_future`, `start_time_too_old`); `end_time`
+        is then checked against it."""
+        def create_it():
+            response = super(WorkoutSessionViewSet, self).create(request, *args, **kwargs)
+            if response.status_code == status.HTTP_201_CREATED and \
+                    response.data.get('status') == 'completed':
+                # A workout synced already finished gets what finishing it online gets.
+                self._completed(WorkoutSession.objects.get(pk=response.data['id']), response)
+            return response
+
+        return _idempotent_create(self, request, WorkoutSession, lambda s: s.user_id, create_it)
+
     def perform_create(self, serializer):
         """
         Handles creation of a workout session, assigning to the correct user.
@@ -1278,41 +1387,52 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         # If session is marked as completed, notify trainer and client
         if (not was_completed and 'status' in request.data
                 and request.data['status'] == 'completed'):
-            # Stamp end_time so `duration` is computable. Nothing set this before,
-            # so every completed session reported duration = None forever.
-            if instance.end_time is None:
-                instance.end_time = timezone.now()
-                instance.save(update_fields=['end_time'])
-                response.data['end_time'] = instance.end_time
-            # Notify client (self)
+            self._completed(instance, response)
+        return response
+
+    def _completed(self, instance, response):
+        """What finishing a workout does, whether it is finished by PATCH or created
+        already finished by an offline sync (BACKEND_BUGS B-003)."""
+        # Stamp end_time so `duration` is computable. Nothing set this before,
+        # so every completed session reported duration = None forever. Never more
+        # than the longest a session may last: an offline session is dated when it
+        # began, and "now" may be days after that.
+        if instance.end_time is None:
+            cap = instance.start_time + timedelta(
+                seconds=WorkoutSessionSerializer.MAX_SESSION_SECONDS)
+            instance.end_time = min(timezone.now(), cap)
+            instance.save(update_fields=['end_time'])
+            response.data['end_time'] = instance.end_time
+            response.data['duration'] = int(
+                (instance.end_time - instance.start_time).total_seconds())
+        # Notify client (self)
+        send_notification(
+            user=instance.user,
+            notif_type="session_completed",
+            message=f"Congratulations! You completed your workout session for routine: {instance.routine.name}",
+            related_object=instance
+        )
+        # Notify the trainer this client actually has an APPROVED relation with.
+        # Reading `assigned_trainer` would tell a dismissed trainer what their former
+        # client trained today, which is the client's data, not theirs.
+        from users.models import TrainerClientRelation
+        for trainer in (t.trainer for t in TrainerClientRelation.objects
+                        .filter(client=instance.user, status='approved')
+                        .select_related('trainer')):
             send_notification(
-                user=instance.user,
+                user=trainer,
                 notif_type="session_completed",
-                message=f"Congratulations! You completed your workout session for routine: {instance.routine.name}",
+                message=f"Your client {instance.user.username} completed a workout session for routine: {instance.routine.name}",
                 related_object=instance
             )
-            # Notify the trainer this client actually has an APPROVED relation with.
-            # Reading `assigned_trainer` would tell a dismissed trainer what their former
-            # client trained today, which is the client's data, not theirs.
-            from users.models import TrainerClientRelation
-            for trainer in (t.trainer for t in TrainerClientRelation.objects
-                            .filter(client=instance.user, status='approved')
-                            .select_related('trainer')):
-                send_notification(
-                    user=trainer,
-                    notif_type="session_completed",
-                    message=f"Your client {instance.user.username} completed a workout session for routine: {instance.routine.name}",
-                    related_object=instance
-                )
 
-            # Milestones. Deferred to on_commit so a rolled-back completion cannot
-            # congratulate anyone, and pushed to the worker because computing a streak
-            # walks backwards day by day through the activity log.
-            from django.db import transaction
+        # Milestones. Deferred to on_commit so a rolled-back completion cannot
+        # congratulate anyone, and pushed to the worker because computing a streak
+        # walks backwards day by day through the activity log.
+        from django.db import transaction
 
-            _user_id = instance.user_id
-            transaction.on_commit(lambda: _queue_milestones(_user_id))
-        return response
+        _user_id = instance.user_id
+        transaction.on_commit(lambda: _queue_milestones(_user_id))
 
 
 def _queue_milestones(user_id):
@@ -1406,11 +1526,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # Bounded by the window, so it can never exceed it.
         days_trained = min(setlogs.values('date').distinct().count(), days_in_period)
         
-        # PRs (Personal Records) in this period - simplified check
-        # Ideally would check if weight > max(previous weights) for each exercise
-        # For now, we'll return a placeholder or check simplified logic if available
-        # Implementation of true PR tracking requires checking history per exercise
-        prs = 0 
+        # Personal records set in this period: exercises whose heaviest set in the window
+        # beats every earlier set of that exercise. A first-ever log is where a record is
+        # measured from, not a record. This was the literal 0 (BACKEND_BUGS B-013).
+        prs = _records_in_window(user, start_date)
 
         # Comparison Data (Previous Period)
         prev_setlogs = ExerciseSetLog.objects.filter(
@@ -1955,6 +2074,9 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
                         sets=ex_custom.get('sets', t_ex.sets),
                         reps=ex_custom.get('reps', t_ex.reps),
                         rest_time=ex_custom.get('rest_time', t_ex.rest_time),
+                        # A template carries no weight; a per-client customisation can
+                        # prescribe one (B-012). Anything but a sane number is dropped.
+                        weight=_prescribed_weight(ex_custom.get('weight')),
                         day=client_day,
                         order=t_ex.order
                     )

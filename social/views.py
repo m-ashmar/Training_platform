@@ -412,7 +412,10 @@ class CommentCursorPagination(CursorPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 50
-    ordering = '-created_at'
+    # `-id` breaks ties: rows written in the same instant came back in whatever order
+    # the database chose on each query, so a page boundary between them repeated one and
+    # dropped another (BACKEND_BUGS B-016).
+    ordering = ('-created_at', '-id')
 
 
 class CommentViewSet(viewsets.ModelViewSet):
@@ -427,7 +430,9 @@ class CommentViewSet(viewsets.ModelViewSet):
     filterset_fields = ['post', 'author', 'parent_comment']
     search_fields = ['content']
     ordering_fields = ['created_at', 'updated_at', 'likes_count']
-    ordering = ['-created_at']
+    # What the cursor actually pages by (OrderingFilter's ordering wins over the
+    # paginator's): `-id` breaks ties (B-016).
+    ordering = ['-created_at', '-id']
     
     def get_queryset(self):
         user = self.request.user
@@ -944,7 +949,10 @@ class NotificationCursorPagination(CursorPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 50
-    ordering = '-created_at'
+    # `-id` breaks ties: rows written in the same instant came back in whatever order
+    # the database chose on each query, so a page boundary between them repeated one and
+    # dropped another (BACKEND_BUGS B-016).
+    ordering = ('-created_at', '-id')
 
     def paginate_queryset(self, queryset, request, view=None):
         # `?page=` belongs to the offset paginator every other list endpoint uses.

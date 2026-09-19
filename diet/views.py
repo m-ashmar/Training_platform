@@ -1428,14 +1428,38 @@ class GenerateDietPlanRuleBasedView(APIView):
 
 class DailyAdviceView(APIView):
     """
-    API endpoint to retrieve the latest daily advice for the authenticated user.
+    API endpoint to retrieve TODAY's daily advice for the authenticated user (today in
+    their `preferred_timezone`); `{"advice": null, "message"}` when there is none yet.
     Requires active subscription with AI advice access.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     
     def get(self, request):
         try:
-            advice = DailyAdvice.objects.filter(user=request.user).order_by('-generated_at').first()
+            # Today's advice only, in the client's own calendar. This returned the newest
+            # row ever written, so advice about a plan that had ended kept showing for as
+            # long as nothing newer was generated (BACKEND_BUGS B-018). Rows from before
+            # `for_date` existed count as today's for 24 hours after they were written.
+            from datetime import timedelta as _td
+            from zoneinfo import ZoneInfo
+
+            from django.db.models import Q
+            from django.utils import timezone as _tz
+            try:
+                zone = ZoneInfo(request.user.preferred_timezone or '')
+            except Exception:
+                zone = _tz.get_current_timezone()
+            now = _tz.now()
+            today = _tz.localtime(now, zone).date()
+            # The sweep runs at 06:00 server time, which is the evening before for
+            # anyone far enough west, so yesterday's row counts while it is under a day
+            # old.
+            fresh = Q(generated_at__gte=now - _td(hours=24))
+            advice = (DailyAdvice.objects.filter(user=request.user)
+                      .filter(Q(for_date=today)
+                              | (Q(for_date=today - _td(days=1)) & fresh)
+                              | (Q(for_date__isnull=True) & fresh))
+                      .order_by('-generated_at').first())
             
             if not advice:
                 return Response({

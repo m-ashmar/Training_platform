@@ -44,6 +44,12 @@ class UserNotificationPreferenceSerializer(serializers.ModelSerializer):
         value = (value or '').strip()
         if not value:
             raise serializers.ValidationError(_("event_type is required."))
+        # One of the types `event_types/` lists. A typo answered 201 and muted nothing
+        # (BACKEND_BUGS B-014).
+        from notifications.channels.fcm import EVENT_CLASS_REGISTRY
+        if value != 'all' and value not in EVENT_CLASS_REGISTRY:
+            raise serializers.ValidationError(_("Unknown notification type."),
+                                              code="unknown_event_type")
         return value
 
 

@@ -121,8 +121,16 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RoutineExercise
-        fields = ['id', 'routine', 'exercise', 'exercise_id', 'sets', 'reps', 'rest_time', 'day', 'order', 'notes', 'created_at', 'updated_at']
+        # `weight`: the prescribed working weight in kg, null for none. It was on the model
+        # and reachable by no endpoint (BACKEND_BUGS B-012).
+        fields = ['id', 'routine', 'exercise', 'exercise_id', 'sets', 'reps', 'rest_time', 'day', 'order', 'notes', 'weight', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
+
+    def validate_weight(self, value):
+        if value is not None and not 0 <= value <= 1000:
+            raise serializers.ValidationError(_("Weight must be between 0 and 1000 kg."),
+                                              code="weight_out_of_range")
+        return value
 
     def validate(self, attrs):
         user = self.context['request'].user
@@ -572,6 +580,8 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         """A set log belongs to ONE person: the session and the progress must agree."""
         attrs = super().validate(attrs)
+        if self.instance is not None:
+            attrs.pop('client_uuid', None)      # the retry key is fixed once written
         progress = attrs.get('user_exercise_progress') or getattr(
             self.instance, 'user_exercise_progress', None)
         session = attrs.get('workout_session') or getattr(
@@ -588,8 +598,12 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user_exercise_progress', 'workout_session', 'set_number', 
             'weight', 'reps', 'volume', 'one_rep_max_estimate', 
-            'date', 'notes', 'rest_time', 'rpe'
+            'date', 'notes', 'rest_time', 'rpe',
+            # The app's id for the set; a retried POST returns the first row (B-003).
+            'client_uuid',
         ]
+        # The unique index decides, not a validator (see WorkoutSessionSerializer).
+        extra_kwargs = {'client_uuid': {'validators': []}}
         # TODO: Add more fields as needed for analytics/reporting
 
     def get_volume(self, obj):
@@ -837,11 +851,59 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
     #: twelve hours — but finite, which is the point.
     MAX_SESSION_SECONDS = 12 * 3600
 
+    #: How far back an offline workout may be dated, and the clock skew tolerated ahead.
+    MAX_BACKDATE_DAYS = 30
+    FUTURE_SKEW_SECONDS = 5 * 60
+
     class Meta:
         model = WorkoutSession
+        # `start_time` and `client_uuid` are written on create only (see `validate`).
         fields = ['id', 'user', 'routine', 'day', 'start_time', 'end_time', 'status',
-                  'duration']
-        read_only_fields = ['id', 'user', 'start_time', 'duration']
+                  'duration', 'client_uuid']
+        read_only_fields = ['id', 'user', 'duration']
+        # No uniqueness VALIDATOR on the retry key: a retry racing its first attempt
+        # would be told 400 "already exists" for a write that landed. The unique index
+        # decides, and `_idempotent_create` answers its IntegrityError with the row.
+        extra_kwargs = {'start_time': {'required': False},
+                        'client_uuid': {'validators': []}}
+
+    def validate_start_time(self, value):
+        """An offline workout says when it began. Codes: `start_time_in_future`,
+        `start_time_too_old`."""
+        from django.utils import timezone
+
+        if self.instance is not None:
+            return value            # ignored on update (see `validate`)
+        now = timezone.now()
+        if (value - now).total_seconds() > self.FUTURE_SKEW_SECONDS:
+            raise serializers.ValidationError(_("A workout cannot start in the future."),
+                                              code="start_time_in_future")
+        if (now - value).days > self.MAX_BACKDATE_DAYS:
+            raise serializers.ValidationError(
+                _("A workout can be logged up to %(days)d days late.")
+                % {"days": self.MAX_BACKDATE_DAYS}, code="start_time_too_old")
+        return value
+
+    def validate(self, attrs):
+        from django.utils import timezone
+
+        attrs = super().validate(attrs)
+        if self.instance is not None:
+            # Fixed once written: the start is the record, and the id is the retry key.
+            attrs.pop('start_time', None)
+            attrs.pop('client_uuid', None)
+            return attrs
+        end = attrs.get('end_time')
+        if end is not None:
+            start = attrs.get('start_time') or timezone.now()
+            if end < start:
+                raise serializers.ValidationError(
+                    {'end_time': [_("A workout cannot end before it started.")]})
+            if (end - start).total_seconds() > self.MAX_SESSION_SECONDS:
+                raise serializers.ValidationError({'end_time': [
+                    _("A workout cannot last longer than %(hours)d hours.")
+                    % {"hours": self.MAX_SESSION_SECONDS // 3600}]})
+        return attrs
 
     def validate_end_time(self, value):
         """A workout ends after it starts, and lasts a plausible length of time.

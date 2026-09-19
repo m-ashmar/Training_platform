@@ -204,3 +204,348 @@ def test_b002_an_exercise_photo_is_stored_re_encoded_under_a_server_name(make_us
     assert path.endswith(".jpg") and "x.html" not in path
     with default_storage.open(path) as stored:
         assert b"<script" not in stored.read()
+
+
+# ------------------------------------------------------------------------ B-003
+def _session_setup(make_user, tag):
+    from django.utils import timezone
+
+    from routine.models import Exercise, Routine, RoutineExercise, UserExerciseProgress
+
+    trainer = make_user(f"bb3_t_{tag}", user_type="trainer")
+    client = make_user(f"bb3_c_{tag}")
+    routine = Routine.objects.create(name=f"bb3 {tag}", created_by=trainer, days=1)
+    exercise = Exercise.objects.create(name=f"bb3 ex {tag}", created_by=trainer)
+    RoutineExercise.objects.create(routine=routine, exercise=exercise, day=1, sets=3, reps=10)
+    routine.assigned_to.add(client)
+    progress = UserExerciseProgress.objects.create(user=client, exercise=exercise,
+                                                   date=timezone.localdate(), target_sets=3)
+    return trainer, client, routine, progress
+
+
+def test_b003_a_retried_session_and_set_answer_with_the_first_row(make_user, api):
+    import uuid
+
+    from routine.models import ExerciseSetLog, WorkoutSession
+
+    trainer, client, routine, progress = _session_setup(make_user, "replay")
+    key = str(uuid.uuid4())
+    body = {"routine": routine.pk, "day": 1, "client_uuid": key}
+    first = api(client).post("/api/routine/workout-sessions/", body, content_type=JSON)
+    again = api(client).post("/api/routine/workout-sessions/", body, content_type=JSON)
+    assert (first.status_code, again.status_code) == (201, 200), (first.content, again.content)
+    assert first.json()["id"] == again.json()["id"]
+    assert WorkoutSession.objects.filter(user=client).count() == 1
+
+    set_key = str(uuid.uuid4())
+    set_body = {"user_exercise_progress": progress.pk, "workout_session": first.json()["id"],
+                "set_number": 1, "weight": 60, "reps": 8, "client_uuid": set_key}
+    one = api(client).post("/api/routine/set-logs/", set_body, content_type=JSON)
+    two = api(client).post("/api/routine/set-logs/", set_body, content_type=JSON)
+    assert (one.status_code, two.status_code) == (201, 200), (one.content, two.content)
+    assert ExerciseSetLog.objects.filter(client_uuid=set_key).count() == 1
+
+    stranger = make_user("bb3_stranger")
+    taken = api(stranger).post("/api/routine/set-logs/", set_body, content_type=JSON)
+    assert (taken.status_code, taken.json()["code"]) == (409, "idempotency_conflict")
+
+
+def test_b003_an_offline_workout_keeps_its_own_clock(make_user, api):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from routine.models import WorkoutSession
+
+    trainer, client, routine, progress = _session_setup(make_user, "clock")
+    began = timezone.now() - timedelta(days=2, hours=3)
+    resp = api(client).post("/api/routine/workout-sessions/", {
+        "routine": routine.pk, "day": 1, "start_time": began.isoformat(),
+        "end_time": (began + timedelta(minutes=50)).isoformat()}, content_type=JSON)
+    assert resp.status_code == 201, resp.content
+    session = WorkoutSession.objects.get(pk=resp.json()["id"])
+    assert abs((session.start_time - began).total_seconds()) < 1
+    assert resp.json()["duration"] == 50 * 60
+
+    def refused(start, end=None):
+        body = {"routine": routine.pk, "day": 1, "start_time": start.isoformat()}
+        if end is not None:
+            body["end_time"] = end.isoformat()
+        r = api(client).post("/api/routine/workout-sessions/", body, content_type=JSON)
+        assert r.status_code == 400, r.content
+        return r.json()["field_errors"]
+
+    now = timezone.now()
+    # Finishing a backdated session online never books days of training.
+    late = api(client).post("/api/routine/workout-sessions/", {
+        "routine": routine.pk, "day": 1,
+        "start_time": (now - timedelta(days=3)).isoformat()}, content_type=JSON).json()
+    done = api(client).patch(f"/api/routine/workout-sessions/{late['id']}/",
+                             {"status": "completed"}, content_type=JSON)
+    assert done.status_code == 200, done.content
+    assert done.json()["duration"] <= 12 * 3600
+    assert refused(now + timedelta(hours=1))["start_time"][0]["code"] == "start_time_in_future"
+    assert refused(now - timedelta(days=40))["start_time"][0]["code"] == "start_time_too_old"
+    assert "end_time" in refused(now - timedelta(hours=2), now - timedelta(hours=3))
+
+
+# ------------------------------------------------------------------------ B-004
+def test_b004_failed_token_attempts_lock_the_address_with_a_code(make_user, api):
+    user = make_user("bb4_lock")
+    creds = {"email": user.email, "password": "wrong-password-1"}
+    for _ in range(5):
+        assert api().post("/api/auth/token/", creds, content_type=JSON).status_code == 401
+    locked = api().post("/api/auth/token/", {**creds, "password": "Xx!23456"},
+                        content_type=JSON)
+    assert locked.status_code == 400
+    body = locked.json()
+    assert body["code"] == "too_many_attempts" and body["retry_after_seconds"] > 0
+    assert body["non_field_errors"], "the old key stays"
+
+
+# ------------------------------------------------------------------------ B-005
+def test_b005_the_language_of_emails_and_pushes_can_be_set(make_user, api):
+    user = make_user("bb5_lang")
+    assert api(user).post("/api/auth/user/update/", {"preferred_language": "ar"},
+                          content_type=JSON).status_code == 200
+    user.refresh_from_db()
+    assert user.preferred_language == "ar"
+    bad = api(user).post("/api/auth/user/update/", {"preferred_language": "fr"},
+                         content_type=JSON)
+    assert bad.status_code == 400
+
+
+# ------------------------------------------------------------------------ B-006
+def test_b006_a_bearer_caller_is_limited_as_their_role(make_user):
+    from django.test import RequestFactory
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    from training_platform.middleware import RateLimitMiddleware
+
+    middleware = RateLimitMiddleware(lambda r: None)
+    for user_type in ("client", "trainer"):
+        user = make_user(f"bb6_{user_type}", user_type=user_type)
+        token = RefreshToken.for_user(user).access_token
+        request = RequestFactory().get("/api/routine/routines/",
+                                       HTTP_AUTHORIZATION=f"Bearer {token}")
+        assert middleware._get_user_type(request) == user_type
+    assert middleware._get_user_type(RequestFactory().get("/")) == "anonymous"
+
+
+# ------------------------------------------------------------------------ B-010
+def test_b010_a_new_trainer_is_not_listed_until_they_open(api):
+    from users.models import CustomUser
+
+    resp = api().post("/api/auth/register/", {
+        "username": "bb10_coach", "email": "bb10_coach@gate.test",
+        "phone_number": "+963999999999", "password1": "Xx!23456long",
+        "password2": "Xx!23456long", "user_type": "trainer", "date_of_birth": "1990-01-01"},
+        content_type=JSON)
+    assert resp.status_code == 201, resp.content
+    assert CustomUser.objects.get(username="bb10_coach").trainer_is_available is False
+
+
+# ------------------------------------------------------------------------ B-012
+def test_b012_a_prescribed_working_weight_can_be_written_and_read(make_user, api):
+    from routine.models import Exercise, Routine
+
+    trainer = make_user("bb12_t", user_type="trainer")
+    routine = Routine.objects.create(name="bb12", created_by=trainer, days=1)
+    exercise = Exercise.objects.create(name="bb12 bench", created_by=trainer)
+    made = api(trainer).post("/api/routine/routine-exercises/", {
+        "routine": routine.pk, "exercise_id": exercise.pk, "sets": 3, "reps": 8,
+        "day": 1, "order": 1, "weight": 62.5}, content_type=JSON)
+    assert made.status_code == 201, made.content
+    assert made.json()["weight"] == 62.5
+    too_heavy = api(trainer).post("/api/routine/routine-exercises/", {
+        "routine": routine.pk, "exercise_id": exercise.pk, "sets": 3, "reps": 8,
+        "day": 1, "order": 2, "weight": 5000}, content_type=JSON)
+    assert too_heavy.status_code == 400
+
+
+# ------------------------------------------------------------------------ B-013
+def test_b013_a_heavier_set_than_ever_before_is_a_record(make_user, api):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from routine.models import Exercise, ExerciseSetLog, UserExerciseProgress
+
+    client = make_user("bb13_c")
+    today = timezone.localdate()
+    bench = Exercise.objects.create(name="bb13 bench")
+    squat = Exercise.objects.create(name="bb13 squat")
+    old = UserExerciseProgress.objects.create(user=client, exercise=bench,
+                                              date=today - timedelta(days=20))
+    ExerciseSetLog.objects.create(user_exercise_progress=old, set_number=1, weight=50,
+                                  reps=5, date=today - timedelta(days=20))
+    new = UserExerciseProgress.objects.create(user=client, exercise=bench, date=today)
+    ExerciseSetLog.objects.create(user_exercise_progress=new, set_number=1, weight=55,
+                                  reps=5, date=today)
+    first_squat = UserExerciseProgress.objects.create(user=client, exercise=squat, date=today)
+    ExerciseSetLog.objects.create(user_exercise_progress=first_squat, set_number=1,
+                                  weight=80, reps=5, date=today)   # a first log: a baseline
+    body = api(client).get("/api/routine/analytics/summary/?period=week").json()
+    assert body["prs"] == 1
+
+
+def test_b013_progress_inside_the_window_counts_even_for_a_first_month(make_user, api):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from routine.models import Exercise, ExerciseSetLog, UserExerciseProgress
+
+    client = make_user("bb13_new")
+    today = timezone.localdate()
+    press = Exercise.objects.create(name="bb13 press")
+    for days_ago, weight in ((5, 40), (2, 45)):     # both inside the week, first ever at 40
+        progress = UserExerciseProgress.objects.create(
+            user=client, exercise=press, date=today - timedelta(days=days_ago))
+        ExerciseSetLog.objects.create(user_exercise_progress=progress, set_number=1,
+                                      weight=weight, reps=5,
+                                      date=today - timedelta(days=days_ago))
+    assert api(client).get("/api/routine/analytics/summary/?period=week").json()["prs"] == 1
+
+
+# ------------------------------------------------------------------------ B-014
+def test_b014_an_unknown_notification_type_is_refused(make_user, api):
+    user = make_user("bb14_u")
+    bad = api(user).post("/api/notifications/preferences/",
+                         {"event_type": "post_likd", "is_enabled": False}, content_type=JSON)
+    assert bad.status_code == 400
+    assert bad.json()["field_errors"]["event_type"][0]["code"] == "unknown_event_type"
+    good = api(user).post("/api/notifications/preferences/",
+                          {"event_type": "post_liked", "is_enabled": False}, content_type=JSON)
+    assert good.status_code in (200, 201), good.content
+
+
+# ------------------------------------------------------------------------ B-016
+def test_b016_notifications_written_in_the_same_instant_page_without_repeats(make_user, api):
+    from notifications.models import Notification
+
+    user = make_user("bb16_u")
+    rows = [Notification.objects.create(recipient=user, event_type="custom",
+                                        deduplication_key=f"bb16-{i}") for i in range(4)]
+    Notification.objects.filter(pk__in=[r.pk for r in rows]).update(
+        created_at=rows[0].created_at)
+    seen, url = [], "/api/social/notifications/?page_size=1"
+    while url:
+        page = api(user).get(url).json()
+        seen += [n["id"] for n in page["results"]]
+        url = page["next"]
+    # Every row once, in the tie-break's order — not merely the right set.
+    expected = [str(pk) for pk in Notification.objects.filter(recipient=user)
+                .order_by("-created_at", "-id").values_list("pk", flat=True)]
+    assert seen == expected
+
+
+def test_b016_comments_page_by_id_after_time():
+    from social.views import CommentViewSet
+    assert CommentViewSet.ordering == ['-created_at', '-id']
+
+
+# ------------------------------------------------------------------------ B-017
+def test_b017_a_password_reset_ends_the_lockout(make_user, api):
+    from users.models import PasswordResetToken
+
+    user = make_user("bb17_u")
+    for _ in range(5):
+        api().post("/api/auth/token/", {"email": user.email, "password": "nope-nope-1"},
+                   content_type=JSON)
+    from users.utils import check_login_lockout
+    assert check_login_lockout(user.email)[0] is True, "the address must be locked first"
+    _token, raw = PasswordResetToken.issue(user)
+    reset = api().post("/api/auth/forgot-password/confirm/",
+                       {"reset_token": raw, "new_password": "Fresh!Pass123"}, content_type=JSON)
+    assert reset.status_code == 200, reset.content
+    signed_in = api().post("/api/auth/token/",
+                           {"email": user.email, "password": "Fresh!Pass123"}, content_type=JSON)
+    assert signed_in.status_code == 200, signed_in.content
+
+
+# ------------------------------------------------------------------------ B-018
+def test_b018_yesterdays_advice_is_not_todays(make_user, api):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from diet.models import DailyAdvice
+    from tests.test_regression_gate import _grant_diet_access
+
+    user = make_user("bb18_u")
+    _grant_diet_access(user)
+    today = timezone.localdate()
+    DailyAdvice.objects.create(user=user, text="old news", for_date=today - timedelta(days=3),
+                               context_data={})
+    assert api(user).get("/api/diet/v1/advice/latest/").json()["advice"] is None
+    DailyAdvice.objects.create(user=user, text="today", for_date=today, context_data={})
+    assert api(user).get("/api/diet/v1/advice/latest/").json()["advice"]["text"] == "today"
+
+
+def test_b018_advice_dated_yesterday_by_the_server_clock_still_shows(make_user, api):
+    """The sweep runs at 06:00 in Damascus, the evening before for anyone far west."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from diet.models import DailyAdvice
+    from tests.test_regression_gate import _grant_diet_access
+
+    user = make_user("bb18_west")
+    user.preferred_timezone = "America/New_York"
+    user.save(update_fields=["preferred_timezone"])
+    _grant_diet_access(user)
+    local_today = timezone.localtime(timezone.now(), __import__("zoneinfo").ZoneInfo(
+        "America/New_York")).date()
+    DailyAdvice.objects.create(user=user, text="made last night", context_data={},
+                               for_date=local_today - timedelta(days=1))
+    assert api(user).get("/api/diet/v1/advice/latest/").json()["advice"]["text"] == \
+        "made last night"
+
+
+def test_b003_a_workout_synced_already_finished_is_treated_as_finished(make_user, api):
+    """Created with status completed: the same notifications and milestones as a PATCH."""
+    from datetime import timedelta
+    from unittest import mock
+
+    from django.utils import timezone
+
+    trainer, client, routine, progress = _session_setup(make_user, "done")
+    began = timezone.now() - timedelta(hours=5)
+    with mock.patch("routine.views.send_notification") as notified:
+        resp = api(client).post("/api/routine/workout-sessions/", {
+            "routine": routine.pk, "day": 1, "status": "completed",
+            "start_time": began.isoformat(),
+            "end_time": (began + timedelta(minutes=45)).isoformat()}, content_type=JSON)
+    assert resp.status_code == 201, resp.content
+    assert notified.called, "finishing offline must notify like finishing online"
+
+
+def test_b003_a_retry_racing_its_first_attempt_is_not_told_the_id_is_taken(make_user, api):
+    """No uniqueness validator on `client_uuid`: the index decides and the answer is
+    the first row, whatever order the two attempts reach the database in."""
+    from routine.serializers import ExerciseSetLogSerializer, WorkoutSessionSerializer
+
+    for serializer in (ExerciseSetLogSerializer(), WorkoutSessionSerializer()):
+        assert serializer.fields["client_uuid"].validators == []
+
+
+def test_b006_a_cache_outage_does_not_fail_signed_in_requests(make_user, monkeypatch):
+    from django.test import RequestFactory
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    import training_platform.middleware as mw
+
+    class Down:
+        def get(self, *a, **k):
+            raise ConnectionError("redis is down")
+        set = incr = get
+
+    monkeypatch.setattr(mw, "ratelimit_cache", lambda: Down())
+    user = make_user("bb6_outage", user_type="trainer")
+    token = RefreshToken.for_user(user).access_token
+    request = RequestFactory().get("/api/routine/routines/", HTTP_AUTHORIZATION=f"Bearer {token}")
+    middleware = mw.RateLimitMiddleware(lambda r: None)
+    assert middleware._get_user_type(request) == "trainer"
+    assert middleware.process_request(request) is None, "the limiter fails open"

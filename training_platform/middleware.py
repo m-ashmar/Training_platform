@@ -164,12 +164,34 @@ class RateLimitMiddleware(MiddlewareMixin):
         return get_trusted_client_ip(request)
     
     def _get_user_type(self, request):
-        """
-        Get user type for rate limiting
+        """The tier of the caller, from the same identity `_get_client_id` reads.
+
+        The tier came from the session user only, which bearer-token callers (the whole
+        mobile app) never have: every one of them was bucketed by user id but limited as
+        `anonymous` (BACKEND_BUGS B-006). The type is read once per user and minute.
         """
         if hasattr(request, 'user') and request.user.is_authenticated:
             return getattr(request.user, 'user_type', 'client')
-        return 'anonymous'
+        client_id = self._get_client_id(request)
+        if not client_id.startswith('user_'):
+            return 'anonymous'
+        user_id = client_id[len('user_'):]
+        key = f"rl_tier:{user_id}"
+        # Fail open like the limiter itself: a cache outage must not turn every
+        # authenticated request into a 500.
+        try:
+            tier = ratelimit_cache().get(key)
+        except Exception:
+            tier = None
+        if tier is None:
+            from django.contrib.auth import get_user_model
+            tier = (get_user_model().objects.filter(pk=user_id)
+                    .values_list('user_type', flat=True).first()) or 'anonymous'
+            try:
+                ratelimit_cache().set(key, tier, 60)
+            except Exception:
+                logger.warning("rate limit: could not memoise the tier", exc_info=True)
+        return tier if tier in self.rate_limits else 'client'
     
     def _is_rate_limited(self, client_id, user_type):
         """
