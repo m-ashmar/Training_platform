@@ -263,6 +263,11 @@ def _make_client(username: str, goals, height, weight, age, gender, activity):
     user.client_goals = list(goals)
     user.height, user.weight, user.age, user.gender = height, weight, age, gender
     user.activity_level = activity
+    # Setup, not a measurement: these people CHOSE their level. Since the owner's rule of
+    # 2026-09-20 a plan is refused while the level is unanswered, and "Sedentary" alone
+    # no longer says it was answered (BACKEND_BUGS B-027).
+    from django.utils import timezone
+    user.activity_level_answered_at = timezone.now()
     user.save()
     return user
 

@@ -1120,3 +1120,63 @@ def test_b033_sign_in_matches_the_address_as_stored(make_user, api):
     resp = api().post("/api/auth/token/", {"email": "BB33.SignIn@gate.test",
                                            "password": "Xx!23456"}, content_type=JSON)
     assert resp.status_code == 200, resp.content
+
+
+# --------------------------------------------------- the owner's answers, 2026-09-20
+def _diet_subscriber(make_user, name, **profile):
+    from subscription.models import Subscription
+    from tests.test_c9_payments import _plan
+
+    user = make_user(name, height=175, weight=78, age=28, gender="Male", **profile)
+    Subscription.objects.create(user=user, plan=_plan(f"bb27 {name}", has_diet_access=True),
+                                status="active")
+    return type(user).objects.get(pk=user.pk)
+
+
+def test_b027_no_plan_until_the_activity_level_is_chosen(make_user, api):
+    """The owner (2026-09-20): refuse, and tell the person to choose their level; the
+    default used to pass for sedentary without a word."""
+    user = _diet_subscriber(make_user, "bb27_plan")
+    for path in ("/api/diet/v1/plans/generate-rule/", "/api/diet/v1/plans/generate/"):
+        resp = api(user).post(path, {"duration_days": 1}, content_type=JSON)
+        assert (resp.status_code, resp.json()["code"], resp.json()["field"]) == \
+            (400, "activity_level_required", "activity_level"), (path, resp.content)
+
+    answered = api(user).post("/api/auth/user/update/", {"activity_level": "Sedentary"},
+                              content_type=JSON)
+    assert answered.status_code == 200
+    resp = api(user).post("/api/diet/v1/plans/generate-rule/", {"duration_days": 1},
+                          content_type=JSON)
+    assert resp.json().get("code") != "activity_level_required", resp.content
+
+
+def test_b027_a_trainer_plan_needs_the_level_or_explicit_calories(make_user):
+    from django.core.exceptions import ValidationError
+
+    from diet.trainer_services import TrainerDietPlanService
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("bb27_t", user_type="trainer", trainer_is_verified=True)
+    client = make_user("bb27_c", height=170, weight=70, age=30, gender="Female")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client, status="approved")
+    with pytest.raises(ValidationError) as refused:
+        TrainerDietPlanService(trainer).create_diet_plan(
+            client=client, template=None, start_date=None, goal="Maintain")
+    assert refused.value.code == "client_activity_level_required"
+
+
+def test_b026_a_picture_sent_to_user_update_is_refused(make_user, api):
+    """The owner (2026-09-20): refuse it, and say where pictures go."""
+    user = make_user("bb26_user")
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), "blue").save(buf, format="PNG")
+    upload = SimpleUploadedFile("me.png", buf.getvalue(), content_type="image/png")
+    resp = api(user).post("/api/auth/user/update/", {"profile_picture": upload, "first_name": "S"})
+    assert (resp.status_code, resp.json()["code"], resp.json()["field"]) == \
+        (400, "profile_picture_read_only", "profile_picture")
+    user.refresh_from_db()
+    assert user.first_name != "S", "nothing is saved from a refused request"
+    echoed = api(user).post("/api/auth/user/update/",
+                            {"profile_picture": "http://testserver/media/x.png", "first_name": "S"},
+                            content_type=JSON)
+    assert echoed.status_code == 200, "a URL echoed back as text is not a file"

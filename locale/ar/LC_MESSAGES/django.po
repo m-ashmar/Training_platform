@@ -2624,3 +2624,17 @@ msgstr "هذه الميزة تحتاج إلى اشتراك فعّال."
 #: subscription/permissions.py
 msgid "Your plan does not include this feature."
 msgstr "خطتك لا تتضمن هذه الميزة."
+
+#: diet/views.py
+msgid "Choose your activity level first: your daily calories depend on it."
+msgstr "اختر مستوى نشاطك أولاً: سعراتك اليومية تعتمد عليه."
+
+#: diet/trainer_services.py
+msgid ""
+"This client has not chosen an activity level yet. Ask them to, or set the daily "
+"calories yourself."
+msgstr "لم يختر هذا المتدرب مستوى نشاطه بعد. اطلب منه ذلك، أو حدّد السعرات اليومية بنفسك."
+
+#: users/views.py
+msgid "Upload the profile picture with /api/auth/user/profile-picture/."
+msgstr "ارفع صورة الملف الشخصي عبر /api/auth/user/profile-picture/."

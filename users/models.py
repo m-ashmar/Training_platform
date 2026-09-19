@@ -531,6 +531,15 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             return round(self.weight / ((self.height/100) ** 2), 2)
         return None
 
+    @property
+    def activity_level_unanswered(self):
+        """True until the person chose an activity level. It has a default (Sedentary),
+        so the value alone cannot say; a row from before the stamp existed counts as
+        answered when it differs from the default (BACKEND_BUGS B-027). A plan is not
+        generated from an unanswered level (the owner, 2026-09-20): it would silently
+        use the sedentary factor."""
+        return self.activity_level_answered_at is None and self.activity_level == 'Sedentary'
+
     def calculate_bmr(self):
         """Calculate Basal Metabolic Rate using Mifflin-St Jeor Equation."""
         if self.gender and self.height and self.weight and self.age:

@@ -171,9 +171,18 @@ class UpdateUserDetailsView(APIView):
         Errors go through the API envelope, so each field error carries its `code`
         (`field_errors.<field>[0].code`), e.g. `under_minimum_age` on `date_of_birth`
         or `age`. The field keys stay at the top level as before. `profile_picture` is
-        read-only here: upload it with `POST /api/auth/user/profile-picture/`.
+        read-only here: a file sent as `profile_picture` answers 400
+        `profile_picture_read_only`; upload it with `POST /api/auth/user/profile-picture/`.
         """
         user = request.user
+        # Refused, not dropped (the owner, 2026-09-20; BACKEND_BUGS B-026): a picture
+        # sent here was ignored with 200. FILES, not data: a client echoing the picture
+        # URL it read back as text is not refused.
+        if 'profile_picture' in request.FILES:
+            message = _("Upload the profile picture with /api/auth/user/profile-picture/.")
+            return Response({'error': message, 'detail': message,
+                             'code': 'profile_picture_read_only', 'field': 'profile_picture'},
+                            status=status.HTTP_400_BAD_REQUEST)
         serializer = UserDetailsSerializer(user, data=request.data, partial=True,
                                            context={'request': request})
         serializer.is_valid(raise_exception=True)

@@ -341,6 +341,11 @@ true (3 days before the end). Pushes: `subscription_expiring` (3 days before),
 `subscription_expired` (on the day it ends, then after 3, 7, 14 and 30 days). No price and
 no link in either, on any build.
 
+No plan is generated from an activity level the client never chose (the owner,
+2026-09-20): `plans/generate/` and `plans/generate-rule/` answer 400
+`activity_level_required` (`field: "activity_level"`) until it is written, and a trainer's
+plan without `daily_calories` answers 400 `client_activity_level_required`.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/diet/v1/advice/latest/` | auth, HasDietAccess | `DailyAdviceView` |

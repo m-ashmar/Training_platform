@@ -1100,6 +1100,19 @@ def task_belongs_to(task_id, user) -> bool:
     return bool(owner is not None and getattr(user, "is_admin", False))
 
 
+
+def _activity_level_refusal(user):
+    """400 `activity_level_required` while the client has not chosen an activity level
+    (the owner, 2026-09-20). Their calories depend on it, and an unanswered level used to
+    become the sedentary factor without a word (BACKEND_BUGS B-027). Asked before the
+    daily allowance is claimed, so the refusal costs nothing."""
+    if not getattr(user, 'activity_level_unanswered', False):
+        return None
+    message = _("Choose your activity level first: your daily calories depend on it.")
+    return Response({"error": message, "detail": message,
+                     "code": "activity_level_required", "field": "activity_level"},
+                    status=status.HTTP_400_BAD_REQUEST)
+
 class GenerateDietPlanView(APIView):
     """
     Generate a plan off the request thread, for durations the synchronous endpoint
@@ -1111,6 +1124,10 @@ class GenerateDietPlanView(APIView):
     it keeps working.
 
     Read the outcome at plans/tasks/<task_id>/.
+
+    400 `activity_level_required` (with `field: "activity_level"`) until the client has
+    chosen an activity level: show the selector, then ask again. Checked before the
+    daily allowance is claimed.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
@@ -1121,6 +1138,9 @@ class GenerateDietPlanView(APIView):
                     {"error": _("Trainers cannot generate client plans here. Use trainer diet plan creation instead.")},
                     status=status.HTTP_403_FORBIDDEN
                 )
+            refusal = _activity_level_refusal(request.user)
+            if refusal is not None:
+                return refusal
 
             # Read once. These were computed here and then computed AGAIN at the
             # `.delay()` call with a different `snack_count` default, so the values
@@ -1237,6 +1257,10 @@ class PlanTaskStatusView(APIView):
 class GenerateDietPlanRuleBasedView(APIView):
     """
     Generate a deterministic plan using RuleBasedPlanner (no GPT, no Celery).
+
+    400 `activity_level_required` (with `field: "activity_level"`) until the client has
+    chosen an activity level: show the selector, then ask again. Checked before the
+    daily allowance is claimed.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
@@ -1244,6 +1268,9 @@ class GenerateDietPlanRuleBasedView(APIView):
         try:
             if request.user.is_trainer:
                 return Response({"error": _("Trainers cannot generate client plans here.")}, status=status.HTTP_403_FORBIDDEN)
+            refusal = _activity_level_refusal(request.user)
+            if refusal is not None:
+                return refusal
 
             from diet.services.plan_generation import (
                 MAX_INLINE_DAYS, InfeasibleCaloriesError, generate_and_save)
@@ -1609,6 +1636,10 @@ class TrainerTemplatesView(APIView):
 class TrainerDietPlanView(APIView):
     """
     API endpoint for trainers to create and manage diet plans for their clients.
+
+    POST without `daily_calories` computes them from the client's profile, and answers
+    400 `client_activity_level_required` while the client has not chosen an activity
+    level: ask the client, or send `daily_calories` yourself.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     

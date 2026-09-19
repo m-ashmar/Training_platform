@@ -34,6 +34,8 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 16 | Coaching by the month, commission on every month (owner decision 3) | L | DONE |
 | 17 | Templates: one template, a private personalised copy per client (owner decision 16) | M | DONE |
 | 18 | Renewal reminder 3 days ahead; unpaid or ended = frozen (read-only) (owner decision 17) | L | DONE |
+| 19 | Keep the missed work: planned vs done per day, reused in analytics (owner question, 2026-09-20) | L | PROPOSED — needs the owner's go |
+| 20 | Trainer pipeline gaps found while mapping it (2026-09-20) | M | LISTED |
 
 ## 1. Capabilities endpoint and channel header
 
@@ -341,6 +343,56 @@ contract, every user-facing string goes through gettext with an Arabic entry in
   should also freeze routines (today routines follow the coaching only); an instant
   unfreeze on top-up (today within the hour).
 
+## 19. Keep the missed work (planned vs done)
+
+- **Today** (read-only investigation, 2026-09-20): the 409 `unlogged_sets` counts
+  `{prescribed, logged, unlogged}` and throws them away; `confirm_unlogged` stores only
+  `RoutineProgress.status = completed`, so a day closed short looks exactly like a perfect
+  day in streaks, completion, the roster and achievements. What IS kept: per-set logs
+  (`ExerciseSetLog` reps, weight), per exercise and date `UserExerciseProgress`
+  (`completed_sets`, `target_sets`, `skipped`, `total_repetitions`, `total_weight`), and
+  per day `RoutineProgress.exercises_completed / total_exercises` (only for sets logged in a
+  session). The prescription (`RoutineExercise`) is edited in place with no snapshot, so a
+  trainer's edit rewrites every past week. A second silent path also completes a day: the
+  recalc marks it completed once every exercise meets `target_sets` (which the app sends,
+  default 0, so one set can be enough).
+- **Proposal** (additive, one migration): a `routine.DayOutcome` snapshot per (user,
+  routine, day, date), written when a day is closed by any path (update_progress with or
+  without `confirm_unlogged`, bulk-complete, bulk-create, a session finished with a day,
+  the recalc's own completion) and by a nightly job for days opened and never closed:
+  planned sets/reps/volume frozen at closing vs logged, `confirmed_unlogged`, exercises
+  full/partial/untouched/skipped, `prescription_exact`, `reps_known`. Registered in
+  `training_platform/privacy/sources.py`. Frozen/unpaid days (`training_refusal`) are not
+  counted as missed. A backfill command marks old weeks approximate.
+- **Reads:** `GET /api/routine/analytics/adherence/?period=&user_id=` (days closed, perfect
+  days and streak, sets and reps missed, planned vs done volume where a weight was set),
+  additive `outcome` on routine-progress and the update_progress answer, `missed_sets` /
+  `perfect_days` on the trainer's roster, and the AI progress tool. Existing streaks keep
+  their meaning; the perfect-days streak is a new field.
+- **Honest "benefit" copy only:** share of planned sets/reps done, planned volume left
+  (only where the coach set a weight), minutes left (labelled an estimate), the trend vs
+  last week. Never calories, muscle, fat-loss or "faster results" claims.
+- **Owner decisions owed:** build it; whether a day closed short still counts in the
+  existing streak and achievements; whether a new set log must carry reps (today an
+  omitted rep count is stored as 10).
+
+## 20. Trainer pipeline gaps (found while mapping it, 2026-09-20)
+
+Security (sent to their own sessions): a client can move a routine-progress row to any
+routine and date; `POST/PATCH /api/routine/exercises/` skips the image content check;
+`GET exercises/{id}/add-media/` shows any exercise's media. Product gaps: a trainer cannot
+retire an exercise (`is_active` not writable) though the 409 says to; deleting an unlogged
+exercise cascades it out of every routine and template; no "save routine as template";
+template rows cannot hold weight, notes or duration; `assign_to_client` accepts an empty
+or retired routine and pays month 1 for it; `Routine.days` has no upper bound; the three
+assign 400s share one code; clients are not told when a routine is unassigned or edited,
+or when a diet plan is written for them; the trainer cannot see a client's freeze, diet
+adherence, or whether the activity level was answered; `my_clients_progress` is a stub
+and `trainer/clients/` follows the pointer, not the relation; a diet plan never settles
+month 1; a coached client needs their own diet subscription to open the trainer's plan;
+a client who generates a plan silently retires the trainer's plan; unverified trainers
+are refused on diet but not on routines; routine days are ordinal, not weekdays.
+
 ## Migration-safe order
 
 Every step is additive: new tables, or new nullable/constant-default columns (metadata
@@ -384,6 +436,8 @@ only on Postgres), no backfill that invents data, no rename.
 | 16 | Templates | Reusable; each client gets a private, personalised copy | Item 17 |
 | 17 | When a month or plan ends | Remind 3 days before; after it ends the last diet plan and the routine stay visible and cannot be used; keep asking | Item 18 |
 | 9 | Grace before unpaid coaching ends | Replaced by decision 17: no grace, it freezes | Item 18 |
+| 22 | A plan from an unanswered activity level | Refuse, and tell the client to choose it (2026-09-20) | 400 `activity_level_required`; trainer plans `client_activity_level_required` (BACKEND_BUGS B-027) |
+| 23 | A picture sent to `user/update/` | Refuse it (2026-09-20) | 400 `profile_picture_read_only` (BACKEND_BUGS B-026) |
 
 ## Decisions still owed
 

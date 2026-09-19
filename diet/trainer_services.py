@@ -81,8 +81,14 @@ class TrainerDietPlanService:
         if not self._can_manage_client(client):
             raise ValidationError(_("You can only create diet plans for your assigned clients"), code="not_assigned_client")
         
-        # Calculate daily calories if not provided
+        # Calculate daily calories if not provided. Not from an activity level the client
+        # never chose (the owner, 2026-09-20): the default would pass for sedentary.
         if daily_calories is None:
+            if getattr(client, 'activity_level_unanswered', False):
+                raise ValidationError(
+                    _("This client has not chosen an activity level yet. Ask them to, or "
+                      "set the daily calories yourself."),
+                    code="client_activity_level_required")
             daily_calories = client.calculate_daily_calories(goal)
 
         # Validate the calorie target server-side (bounds + type). Prevents a

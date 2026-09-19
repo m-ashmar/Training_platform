@@ -132,7 +132,7 @@ class OnboardingFieldsMixin(serializers.Serializer):
             # `activity_level` defaults to Sedentary, so "never asked" and "beginner"
             # looked the same (BACKEND_BUGS B-027). Unanswered until written through the
             # API — or, for a row from before, until it differs from the default.
-            if obj.activity_level_answered_at is None and obj.activity_level == 'Sedentary':
+            if obj.activity_level_unanswered:
                 missing.append('activity_level')
             missing += [f for f in ('training_goal', 'training_place', 'training_days_per_week')
                         if not getattr(obj, f)]
