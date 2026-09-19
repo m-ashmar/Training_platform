@@ -208,12 +208,21 @@ class SubscriptionPlanListSerializer(PlanPriceByChannelMixin, serializers.ModelS
         ]
 
 class UserSubscriptionSummarySerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
-    """Summary serializer for user's current subscription"""
+    """Summary serializer for user's current subscription.
+
+    `access`: 'active' | 'frozen' (it ended after entitling you: your diet plans stay
+    readable and nothing can be used until you subscribe again — show the renewal
+    banner) | 'inactive' (never entitled, e.g. a checkout never paid).
+    `renewal_due`: true while active and ending within SUBSCRIPTION_RENEWAL_NOTICE_DAYS
+    (3) — show the renewal reminder. Neither carries a price: the same on every build.
+    """
     plan_name = serializers.CharField(source='plan.name', read_only=True)
     plan_price = serializers.DecimalField(source='plan.price', max_digits=10, decimal_places=2, read_only=True)
     is_active = serializers.ReadOnlyField()
     days_remaining = serializers.ReadOnlyField()
-    
+    access = serializers.ReadOnlyField()
+    renewal_due = serializers.SerializerMethodField()
+
     price_fields = ('plan_price',)
 
     class Meta:
@@ -221,4 +230,16 @@ class UserSubscriptionSummarySerializer(PlanPriceByChannelMixin, serializers.Mod
         fields = [
             'id', 'plan_name', 'plan_price', 'status', 'start_date',
             'end_date', 'is_active', 'days_remaining', 'auto_renew', 'source',
-        ] 
+            'access', 'renewal_due',
+        ]
+
+    def get_renewal_due(self, obj):
+        from datetime import timedelta
+
+        from django.conf import settings
+        from django.utils import timezone
+
+        if not obj.is_active or obj.effective_end is None:
+            return False
+        lead = timedelta(days=int(getattr(settings, 'SUBSCRIPTION_RENEWAL_NOTICE_DAYS', 3)))
+        return obj.effective_end - timezone.now() <= lead 

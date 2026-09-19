@@ -74,8 +74,13 @@ edit produces a false failure. After adding a migration, the gate is `--create-d
   `users/trainer_relations.py` before changing any of them.
 - Owner's numbers (2026-09-19): platform keeps 20% of every coaching fee, and coaching is
   sold by the month (the 20% comes off every renewal); a trainer cannot end a paid month
-  the client is in; plan payments stay 100% with the platform; minimum age 14; signed-in
-  clients 1500 requests an hour.
+  the client is in, nor delete the account while coaching anyone; plan payments stay 100%
+  with the platform; minimum age 14; signed-in clients 1500 requests an hour.
+- Owner's freeze rule (2026-09-19): every client is reminded 3 days before a month or plan
+  ends; unpaid or ended means frozen, never deleted: the diet plan and the coach's
+  routines stay readable and cannot be used (`users/coaching.py` `training_refusal`,
+  `subscription` `is_frozen`). A routine is one client's private copy
+  (`routine/assignment.py`); reuse goes through templates.
 
 **Tests**
 - Never edit a test's assertion to match code, and never restore an old baseline to make a

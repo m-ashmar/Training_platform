@@ -345,6 +345,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         choices=ACTIVITY_LEVELS,
         default='Sedentary'
     )
+    #: When the person chose `activity_level` through the API. The level has a default,
+    #: so without this "never asked" and "Sedentary" could not be told apart
+    #: (BACKEND_BUGS B-027); `onboarding_missing` lists it until this is set.
+    activity_level_answered_at = models.DateTimeField(null=True, blank=True)
 
     #: Asked at sign-up; the server refuses anyone younger than `minimum_age()`. While
     #: it is set, `age` is derived from it on every save and refreshed each night
@@ -726,6 +730,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         Wallets, transactions, payments and the audit chain are preserved — those
         sources are registered `on_erase="keep"`, and `Wallet.owner` is PROTECT so a
         deletion cannot destroy a balance in the first place.
+
+        Raises `ErasureRefused` (code `trainer_has_active_clients`) for a trainer who
+        still coaches someone: the owner's rule, and nothing is changed.
         """
         from training_platform.privacy import erase_user_data
 
@@ -939,9 +946,17 @@ class CoachingPeriod(models.Model):
     #: month before it ended, so the cycle never drifts.
     starts_at = models.DateTimeField(null=True, blank=True)
     ends_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    #: When the client was told this month's successor could not be charged. Set once,
-    #: so the reminder is sent once however many times the renewal is retried.
+    #: When the client was told this month renews soon (COACHING_RENEWAL_REMINDER_DAYS
+    #: before `ends_at`; the owner, 2026-09-19). Set once, so the notice is sent once.
     renewal_reminder_sent_at = models.DateTimeField(null=True, blank=True)
+    #: When the renewal after this month was tried and the wallet could not cover it:
+    #: the coaching is paused (frozen) from `ends_at` until a month is paid. The client
+    #: keeps seeing the trainer's routines and cannot start them (the owner, 2026-09-19).
+    #: A renewal paid later starts a new month at the moment of payment.
+    frozen_at = models.DateTimeField(null=True, blank=True)
+    #: How many "still paused" reminders have gone out after the freeze notice, one per
+    #: step of COACHING_FROZEN_REMINDER_DAYS.
+    frozen_notices = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

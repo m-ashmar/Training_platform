@@ -305,6 +305,29 @@ class Routine(RowValidationMixin, models.Model):
     # Scheduling
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
+    @staticmethod
+    def forget_translations(translations, *fields):
+        """`translations` without `fields` in any language: after the name or
+        description is edited, the edited column is what every language shows until a
+        translation is written again. A stale copy hid the edit from Arabic readers and
+        from every notification."""
+        if not fields or not isinstance(translations, dict):
+            return translations or {}
+        kept = {}
+        for language, texts in translations.items():
+            if isinstance(texts, dict):
+                texts = {k: v for k, v in texts.items() if k not in fields}
+                if texts:
+                    kept[language] = texts
+        return kept
+
+    # Which template this private copy was written from, if any. Values are copied, so
+    # editing or deleting the template never changes the routine; this only lets the
+    # trainer see which clients got which template.
+    source_template = models.ForeignKey(
+        'RoutineTemplate', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='generated_routines',
+        help_text="The template this routine was generated from (a copy, not a link)")
     start_date = models.DateField(default=date.today, help_text="Start date for the routine")
     end_date = models.DateField(blank=True, null=True, db_index=True, help_text="End date for the routine")
     

@@ -32,9 +32,28 @@ class FCMTokenView(APIView):
         responses={201: 'Token registered', 200: 'Token already exists', 400: 'Invalid input'}
     )
     def post(self, request):
+        """Body: `token` (required, text up to 255), optional `platform`
+        (android | ios | web), `app_version` (up to 50), `device_id` (up to 255).
+        201 registered, 200 already registered or moved to this account. 400
+        `bad_request` without a token, `field_too_long` / `invalid_field` with `field` — these
+        reached the database unchecked and came back as a generic 500, so the device
+        silently never registered (BACKEND_BUGS B-025)."""
         token = request.data.get('token')
         if not token:
             return Response({'error': _('Token is required')}, status=status.HTTP_400_BAD_REQUEST)
+        for name, limit in (('token', 255), ('app_version', 50), ('device_id', 255)):
+            value = request.data.get(name)
+            if value in (None, ''):
+                continue
+            if not isinstance(value, str):
+                return Response({'error': _('%(field)s must be text.') % {'field': name},
+                                 'code': 'invalid_field', 'field': name},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if len(value) > limit:
+                return Response({'error': _('%(field)s is longer than %(limit)s characters.')
+                                 % {'field': name, 'limit': limit},
+                                 'code': 'field_too_long', 'field': name},
+                                status=status.HTTP_400_BAD_REQUEST)
 
         # Optional device metadata sent by the mobile client.
         platform = request.data.get('platform') or 'android'

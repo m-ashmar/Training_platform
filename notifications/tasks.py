@@ -314,6 +314,17 @@ def send_workout_reminders():
             .first()
         )
 
+        # A routine the client may see and not start — their coaching is paused or over
+        # (the owner, 2026-09-19) — is not "waiting for you": the coaching's own notices
+        # ask them to pay, and this one would invite a refusal.
+        from users.coaching import training_refusal
+        if pending and training_refusal(user, pending.routine):
+            continue
+        if not pending:
+            routines = list(user.assigned_routines.all()[:20])
+            if routines and all(training_refusal(user, r) for r in routines):
+                continue
+
         if pending:
             message = _("Day %(day)d of %(routine)s is waiting for you.") % {
                 "day": pending.day,

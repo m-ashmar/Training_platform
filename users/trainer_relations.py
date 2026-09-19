@@ -50,6 +50,21 @@ class HoldFailed(Exception):
     """The client's charge could not be held, so the relation must not be granted."""
 
 
+class TrainerHasActiveClients(Exception):
+    """A trainer asked to erase their account while still coaching someone.
+
+    The owner (2026-09-19): a trainer with active clients can never delete the account.
+    Active means every APPROVED relation in which they are the trainer — month 1 held,
+    a paid month running, a month that ends at renewal, or a paused (frozen) coaching.
+    Each has a way out first: `trainer/unassign-client/` (a paid month only with
+    `at_period_end`, and the erasure then waits for the month to end).
+    """
+
+    def __init__(self, count):
+        super().__init__(count)
+        self.count = count
+
+
 def _wallet_for(user, owner_type):
     from wallet.models import Wallet
     wallet, _created = Wallet.objects.get_or_create(
@@ -253,8 +268,9 @@ def release_holds_before_erasure(user, relations, *, dry_run=False) -> dict:
     them; their unassign-trainer then found no approved relation, answered 200
     "Successfully unassigned" and refunded nothing.
 
-    Raises `HoldFailed` if any hold cannot be returned; the caller must then erase
-    nothing. Locks in the order at the top of this module: relation rows, user rows,
+    Raises `HoldFailed` if any hold cannot be returned, and `TrainerHasActiveClients` if
+    `user` is still the trainer on an approved relation (the owner's rule); the caller
+    must then erase nothing. A dry run never raises: it reports `active_clients`. Locks in the order at the top of this module: relation rows, user rows,
     then wallets — including the erased account's own row, FOR UPDATE, which the
     anonymisation that follows takes anyway when it rewrites `email` and `username`.
     Taken there instead — after the wallets — it deadlocked with any ledger write for
@@ -265,7 +281,8 @@ def release_holds_before_erasure(user, relations, *, dry_run=False) -> dict:
 
     rows = TrainerClientRelation.objects.filter(pk__in=relations.values('pk'))
     if dry_run:
-        return {'holds_released': rows.exclude(hold_reference='').count()}
+        return {'holds_released': rows.exclude(hold_reference='').count(),
+                'active_clients': rows.filter(trainer=user, status='approved').count()}
 
     with transaction.atomic():
         # A concurrent approval either committed before this lock, and its hold is
@@ -286,6 +303,12 @@ def release_holds_before_erasure(user, relations, *, dry_run=False) -> dict:
         # created and approved between the first lock and this one would have been
         # deleted below with its hold still in escrow.
         locked = list(rows.select_for_update().order_by('pk'))
+        # Checked here, under the locks: an approval that committed first is seen, and
+        # one still waiting finds this account's row gone. Raising (not returning) rolls
+        # back the pointers cleared above with everything else.
+        coaching = sum(1 for r in locked if r.trainer_id == user.pk and r.status == 'approved')
+        if coaching:
+            raise TrainerHasActiveClients(coaching)
 
         released = 0
         for relation in locked:

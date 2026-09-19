@@ -21,7 +21,8 @@ OWNER_RATE = Decimal("0.20")
 def owners_rate(settings):
     settings.COACHING_COMMISSION_RATE = OWNER_RATE
     settings.COACHING_PERIOD_DAYS = 30
-    settings.COACHING_RENEWAL_GRACE_DAYS = 3
+    # The grace setting went with the owner's freeze (2026-09-19); the notice lead replaced it.
+    settings.COACHING_RENEWAL_REMINDER_DAYS = 3
 
 
 def _fund(user, amount, owner_type="client"):
@@ -199,6 +200,11 @@ def test_months_missed_while_the_job_was_down_are_caught_up(make_user, api):
 
 def test_an_unpaid_month_reminds_once_then_ends_the_coaching_after_the_grace(
         make_user, api, django_capture_on_commit_callbacks):
+    """Changed deliberately (the owner, 2026-09-19): an unpaid month no longer ends the
+    coaching after a 3-day grace; it FREEZES it. The relation, the trainer pointer and
+    the paid months all stay; the client is told once when it freezes and again on each
+    step of COACHING_FROZEN_REMINDER_DAYS, never twice for one step; and the coaching is
+    never ended for money. The name is kept so the history of this rule stays findable."""
     from users.coaching import renew
     from users.models import CoachingPeriod, CustomUser, TrainerClientRelation
 
@@ -210,35 +216,45 @@ def test_an_unpaid_month_reminds_once_then_ends_the_coaching_after_the_grace(
 
     with mock.patch("notifications.domain.dispatcher.emit_event") as sent, \
             django_capture_on_commit_callbacks(execute=True):
-        assert renew(relation.pk) == "reminded"
-        assert renew(relation.pk) == "due"
+        assert renew(relation.pk) == "frozen"
+        assert renew(relation.pk) == "frozen"
     assert [type(c.args[0]).__name__ for c in sent.call_args_list] == ["CoachingPaymentDueEvent"]
     first.refresh_from_db()
-    assert first.renewal_reminder_sent_at is not None
+    assert first.frozen_at is not None
 
-    after_grace = first.ends_at + timedelta(days=3, minutes=1)
+    long_after = first.frozen_at + timedelta(days=40)
     with mock.patch("notifications.domain.dispatcher.emit_event") as sent, \
             django_capture_on_commit_callbacks(execute=True):
-        assert renew(relation.pk, now=after_grace) == "ended"
-    assert not TrainerClientRelation.objects.filter(pk=relation.pk).exists()
+        assert renew(relation.pk, now=first.frozen_at + timedelta(days=3, minutes=1)) == "reminded"
+        assert renew(relation.pk, now=first.frozen_at + timedelta(days=3, hours=2)) == "frozen"
+        assert renew(relation.pk, now=long_after) == "reminded"
+        assert renew(relation.pk, now=long_after) == "frozen"
+    steps = [c.args[0].step for c in sent.call_args_list]
+    assert steps == [1, 4], steps
+    assert TrainerClientRelation.objects.filter(pk=relation.pk, status="approved").exists()
     client.refresh_from_db()
-    assert client.assigned_trainer_id is None
+    assert client.assigned_trainer_id == trainer.pk
     assert CoachingPeriod.objects.filter(client=client).count() == 1, "paid months are kept"
-    ended = [c.args[0] for c in sent.call_args_list]
-    assert sorted(e.recipient_id for e in ended) == sorted([client.pk, trainer.pk])
 
 
 def test_a_top_up_inside_the_grace_keeps_the_coaching(make_user, api):
+    """Changed deliberately (the owner, 2026-09-19): there is no grace now; the unpaid
+    month freezes, and a top-up renews it on the next run. The new month starts when it
+    is paid, not where the last one ended: the paused days were not coached."""
     from users.coaching import renew
 
     trainer, client, relation = _accepted(make_user, api, "topup", funds="100.00")
     _deliver_first_program(api, trainer, client)
-    _end_month(relation)
+    first = _end_month(relation, ago=timedelta(days=2))
     with mock.patch("notifications.domain.dispatcher.emit_event"):
-        assert renew(relation.pk) == "reminded"
+        assert renew(relation.pk) == "frozen"
         _fund(client, "250.00")
         assert renew(relation.pk) == "renewed"
     assert _balance(client) == Decimal("150.00")
+    second = relation.periods.get(number=2)
+    assert second.frozen_at is None
+    assert abs((second.starts_at - timezone.now()).total_seconds()) < 60
+    assert second.starts_at > first.ends_at + timedelta(days=1)
 
 
 def test_a_free_trainer_has_no_months(make_user, api):
@@ -276,11 +292,14 @@ def test_the_client_sees_each_state_of_their_coaching(make_user, api):
     assert active["status"] == "active" and active["period"]["number"] == 1
     assert active["renews_at"] == active["period"]["ends_at"] and active["grace_until"] is None
 
+    # Changed deliberately (the owner, 2026-09-19): an unpaid month reads `frozen`, not
+    # `payment_due` with a grace; `grace_until` stays in the shape and is always null.
     _end_month(relation)
     with mock.patch("notifications.domain.dispatcher.emit_event"):
         renew(relation.pk)
     due = look()
-    assert due["status"] == "payment_due" and due["grace_until"] is not None
+    assert due["status"] == "frozen" and due["grace_until"] is None
+    assert due["frozen_since"] == due["period"]["ends_at"] and due["renews_at"] is None
 
     ios = api(client).get("/api/v1/coaching/current/", HTTP_X_APP_CHANNEL="ios").json()
     assert "coaching_price" not in ios["coaching"] and "money_type" not in ios["coaching"]

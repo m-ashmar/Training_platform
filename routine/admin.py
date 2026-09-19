@@ -1,4 +1,6 @@
+from django import forms
 from django.contrib import admin
+from django.utils.translation import gettext_lazy as _
 from .models import (
     Routine, RoutineExercise, Exercise,
     ExerciseMedia, UserExerciseProgress, ExerciseSetLog, RoutineProgress, WorkoutSession,
@@ -62,9 +64,68 @@ class ExerciseAdmin(TranslationAdmin):
     get_media_display.short_description = "Media"
 
 
+class OneClientRoutineForm(forms.ModelForm):
+    """A routine is one client's private program (the owner, 2026-09-19). The admin's
+    two-pane picker let staff put several clients on one routine, sharing its rows,
+    and with no settlement of any coaching month.
+
+    Only a client being ADDED is checked: removing clients, renaming or retiring a
+    routine (a legacy shared one included) always saves."""
+
+    class Meta:
+        model = Routine
+        fields = '__all__'
+
+    def clean_assigned_to(self):
+        from .assignment import trained_by_someone_else
+
+        chosen = self.cleaned_data.get('assigned_to')
+        if chosen is None:
+            return chosen
+        current = (set(self.instance.assigned_to.values_list('pk', flat=True))
+                   if self.instance.pk else set())
+        added = [c for c in chosen if c.pk not in current]
+        if not added:
+            return chosen
+        if len(chosen) > 1:
+            raise forms.ValidationError(
+                _("A routine belongs to one client. Copy it for each other client."),
+                code='routine_belongs_to_another_client')
+        if self.instance.pk and trained_by_someone_else(self.instance, added[0],
+                                                        check_assignees=False):
+            raise forms.ValidationError(
+                _("This routine already belongs to another client. "
+                  "Create a copy for this client instead."),
+                code='routine_belongs_to_another_client')
+        return chosen
+
+
+class OneClientRoutineAdminMixin:
+    """The console's side of `routine/assignment.py`, for both admin sites: one client
+    per routine; an edited name or description clears its stale translation; and a
+    client added here settles the coaching's first month, as the API's assignment does —
+    a first program assigned by staff left the trainer unpaid."""
+    form = OneClientRoutineForm
+
+    def save_model(self, request, obj, form, change):
+        edited = [f for f in ('name', 'description') if f in form.changed_data]
+        if change and edited:
+            obj.translations = Routine.forget_translations(obj.translations, *edited)
+        super().save_model(request, obj, form, change)
+
+    def save_related(self, request, form, formsets, change):
+        from .assignment import settle_first_month
+
+        routine = form.instance
+        before = set(routine.assigned_to.values_list('pk', flat=True))
+        super().save_related(request, form, formsets, change)
+        for client in routine.assigned_to.exclude(pk__in=before):
+            settle_first_month(routine.created_by, client)
+
+
 # Register ExerciseSetLog
 @admin.register(Routine)
-class RoutineAdmin(admin.ModelAdmin):
+class RoutineAdmin(OneClientRoutineAdminMixin, admin.ModelAdmin):
     list_display = ('name', 'created_by', 'is_active', 'start_date', 'end_date', 'get_assigned_clients')
     list_filter = ('is_active', 'created_by')
     search_fields = ('name', 'created_by__username', 'assigned_to__username')

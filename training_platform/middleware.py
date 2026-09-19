@@ -100,14 +100,18 @@ class RateLimitMiddleware(MiddlewareMixin):
         if self._is_rate_limited(client_id, user_type):
             # This response never reaches the DRF exception handler, so it carries
             # the contract keys itself: every error in the API has detail/error/code.
+            # The seconds the window really has left (BACKEND_BUGS B-022), not the
+            # window's full length every time.
+            wait = self._seconds_left(client_id, user_type)
             _msg = _('Too many requests. Please try again later.')
             return JsonResponse({
                 'detail': _msg,
                 'error': _msg,
                 'code': 'rate_limited',
                 'message': _msg,          # kept: existing key
-                'retry_after': 3600,
-            }, status=429, headers={'Retry-After': '3600'})
+                'retry_after': wait,
+                'retry_after_seconds': wait,
+            }, status=429, headers={'Retry-After': str(wait)})
         
         return None
     
@@ -195,6 +199,11 @@ class RateLimitMiddleware(MiddlewareMixin):
                 logger.warning("rate limit: could not memoise the tier", exc_info=True)
         return tier if tier in self.rate_limits else 'client'
     
+    def _seconds_left(self, client_id, user_type):
+        from training_platform.cache import seconds_left
+        limits = self.rate_limits.get(user_type, self.rate_limits['anonymous'])
+        return seconds_left(ratelimit_cache(), f"rate_limit:{client_id}", limits['window'])
+
     def _is_rate_limited(self, client_id, user_type):
         """
         Check if client is rate limited.

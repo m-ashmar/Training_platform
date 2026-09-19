@@ -114,6 +114,32 @@ class HasDietAccess(HasSubscriptionFeature):
     required_feature = 'diet'
 
 
+class HasDietAccessOrFrozenRead(HasDietAccess):
+    """Diet access, or READ access to your own plans after the subscription lapsed.
+
+    The owner (2026-09-19): after the plan ends the client still sees their last diet
+    plan and cannot use it — no generating, ticking, swapping, rating, advice or food
+    catalogue — until they subscribe again. So a GET passes for a frozen row
+    (`Subscription.is_frozen`) whose plan had the diet feature; every other refusal is
+    unchanged (`no_entitlement`, `feature_not_in_plan`), and the app tells "ended" from
+    "never subscribed" by `access` on `GET subscriptions/current/`.
+
+    Only on views that read the caller's own plans and progress. Never on a route in
+    CACHEABLE_ROUTES: the private cache key carries no entitlement.
+    """
+
+    def has_permission(self, request, view):
+        if super().has_permission(request, view):
+            return True
+        if request.method not in permissions.SAFE_METHODS:
+            return False
+        try:
+            subscription = request.user.subscription
+        except (ObjectDoesNotExist, AttributeError):
+            return False
+        return bool(subscription.is_frozen and subscription.has_diet_access)
+
+
 class HasRoutineAccess(HasSubscriptionFeature):
     """Permission to check if user has routine feature access."""
     required_feature = 'routine'

@@ -26,6 +26,7 @@ from notifications.domain.trainer_client_events import (
     CoachingEndedEvent,
     CoachingFinishedEvent,
     CoachingPaymentDueEvent,
+    CoachingRenewalSoonEvent,
     CoachingRenewedEvent,
 )
 from notifications.services import NotificationService
@@ -274,11 +275,22 @@ def handle_coaching_renewed(event: CoachingRenewedEvent):
                    data={'type': 'coaching_renewed', 'trainer_id': event.actor_id})
 
 
+@subscribe(CoachingRenewalSoonEvent)
+def handle_coaching_renewal_soon(event: CoachingRenewalSoonEvent):
+    _send_coaching(event, event_type='coaching_renewal_soon', related_id=event.period_id,
+                   context={'name': event.trainer_name, 'days': event.days},
+                   data={'type': 'coaching_renewal_soon', 'trainer_id': event.actor_id})
+
+
 @subscribe(CoachingPaymentDueEvent)
 def handle_coaching_payment_due(event: CoachingPaymentDueEvent):
-    _send_coaching(event, event_type='coaching_payment_due', related_id=event.period_id,
+    # One notice per step: the store deduplicates on the related id for good, so a
+    # reminder keyed on the period alone would be dropped after the first.
+    related = event.period_id if not event.step else f"{event.period_id}:{event.step}"
+    _send_coaching(event, event_type='coaching_payment_due', related_id=related,
                    context={'name': event.trainer_name, 'days': event.days},
-                   data={'type': 'coaching_payment_due', 'trainer_id': event.actor_id})
+                   data={'type': 'coaching_payment_due', 'trainer_id': event.actor_id,
+                         'status': 'frozen'})
 
 
 @subscribe(CoachingEndedEvent)

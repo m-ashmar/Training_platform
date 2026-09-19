@@ -46,14 +46,9 @@ class ExerciseSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'description', 'target_muscle', 'target_muscle_display',
                   'difficulty_level', 'difficulty_level_display', 'image', 'thumbnail', 'media']
 
-    def get_image(self, obj):
-        request = self.context.get('request')
-        if obj.image:
-            url = obj.image.url
-            if request is not None:
-                return request.build_absolute_uri(url)
-            return url
-        return None
+    # `get_image` stood here and never ran: `image` is a plain model field in
+    # `Meta.fields`, not a method field (BACKEND_BUGS B-036). DRF's ImageField already
+    # answers an absolute URL when the request is in the context.
 
     def get_thumbnail(self, obj):
         """Get first image/video thumbnail from media"""
@@ -251,9 +246,12 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
         fields = [
             'id', 'name', 'description', 'difficulty_level', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
-            'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles'
+            'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles',
+            'source_template',
         ]
-        read_only_fields = ['created_at', 'updated_at', 'created_by']
+        # `source_template`: the template this private copy was generated from, or null.
+        # A copy, not a link — set by `templates/{id}/generate/`, never by a write here.
+        read_only_fields = ['created_at', 'updated_at', 'created_by', 'source_template']
 
     def get_estimated_duration_minutes(self, obj):
         """
@@ -289,6 +287,16 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
             ex.exercise.target_muscle 
             for ex in obj.routine_exercises.all()
         ))
+
+    def update(self, instance, validated_data):
+        # An edited name or description is what every language shows until it is
+        # translated again: the stored translation used to hide the edit (see
+        # `Routine.forget_translations`).
+        edited = [f for f in ('name', 'description') if f in validated_data]
+        if edited:
+            validated_data['translations'] = Routine.forget_translations(
+                instance.translations, *edited)
+        return super().update(instance, validated_data)
 
     def validate(self, attrs):
         """
@@ -715,9 +723,9 @@ class TrainerRoutineSerializer(RoutineAssigneesMixin, serializers.ModelSerialize
         fields = [
             'id', 'name', 'description', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
-            'client_count', 'completion_rate'
+            'client_count', 'completion_rate', 'source_template',
         ]
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'source_template']
 
     def get_completion_rate(self, obj):
         """
@@ -905,6 +913,22 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
             attrs.pop('start_time', None)
             attrs.pop('client_uuid', None)
             return attrs
+        # A session is for a day the routine actually has (BACKEND_BUGS B-023): any day
+        # was accepted, and so was a retired routine, whose sets never move its progress.
+        routine, day = attrs.get('routine'), attrs.get('day')
+        if routine is not None:
+            if not routine.is_active:
+                raise serializers.ValidationError({'routine': [serializers.ErrorDetail(
+                    _("This routine has been retired."), code='routine_inactive')]})
+            if day is not None:
+                if not 1 <= day <= (routine.days or 0):
+                    raise serializers.ValidationError({'day': [serializers.ErrorDetail(
+                        _("Day %(day)s is not part of this routine.") % {'day': day},
+                        code='day_out_of_range')]})
+                if not routine.routine_exercises.filter(day=day).exists():
+                    raise serializers.ValidationError({'day': [serializers.ErrorDetail(
+                        _("Day %(day)s has no exercises.") % {'day': day},
+                        code='day_has_no_exercises')]})
         end = attrs.get('end_time')
         if end is not None:
             start = attrs.get('start_time') or timezone.now()
@@ -1011,6 +1035,51 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoutineTemplate
         fields = ['id', 'name', 'description', 'goal', 'days', 'is_public', 'created_by', 'created_at', 'exercises']
+
+    def validate(self, attrs):
+        """Every row must be one a client's routine can hold.
+
+        Refused under `exercises` (field_errors.exercises[0].code):
+          template_day_out_of_range  a row's day outside 1..days. It was saved, then
+                                     silently left out of every routine generated.
+          template_duplicate_row     the same exercise twice at the same day and order.
+                                     Generating it broke the routine's unique key: 500.
+          exercise_retired           an exercise taken out of use; the routine path
+                                     already refused it.
+        """
+        days = attrs.get('days', getattr(self.instance, 'days', None))
+        if days is None:
+            days = RoutineTemplate._meta.get_field('days').default
+        rows = attrs.get('routinetemplateexercise_set')
+        if rows is None:
+            if self.instance is not None and 'days' in attrs:
+                beyond = self.instance.routinetemplateexercise_set.filter(day__gt=days).exists()
+                if beyond or days < 1:
+                    raise serializers.ValidationError({'exercises': [serializers.ErrorDetail(
+                        _("Some exercises are on a day after the template's last day. "
+                          "Move them first."), code='template_day_out_of_range')]})
+            return attrs
+        seen = set()
+        for index, row in enumerate(rows, start=1):
+            day = row.get('day', 1)
+            if not 1 <= day <= days:
+                raise serializers.ValidationError({'exercises': [serializers.ErrorDetail(
+                    _("Exercise %(n)s is on day %(day)s; the template has %(days)s days.")
+                    % {'n': index, 'day': day, 'days': days},
+                    code='template_day_out_of_range')]})
+            exercise = row.get('exercise')
+            key = (getattr(exercise, 'pk', None), day, row.get('order', 1))
+            if key in seen:
+                raise serializers.ValidationError({'exercises': [serializers.ErrorDetail(
+                    _("Exercise %(n)s repeats another at the same day and position.")
+                    % {'n': index}, code='template_duplicate_row')]})
+            seen.add(key)
+            if exercise is not None and not exercise.is_active:
+                raise serializers.ValidationError({'exercises': [serializers.ErrorDetail(
+                    _("That exercise has been retired and cannot be added."),
+                    code='exercise_retired')]})
+        return attrs
+
     @transaction.atomic
     def create(self, validated_data):
         exercises_data = validated_data.pop('routinetemplateexercise_set', [])

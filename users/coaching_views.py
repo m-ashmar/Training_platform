@@ -23,18 +23,32 @@ class CurrentCoachingView(APIView):
                       | "active"                   a paid month is running (or renewing
                                                    within the hour; or coaching sold as
                                                    one fee before months existed)
-                      | "payment_due"              a renewal was tried and the wallet
-                                                   could not cover it
+                      | "frozen"                   the renewal found the wallet short:
+                                                   paused. Routines stay readable and
+                                                   cannot be started (403
+                                                   `coaching_frozen` on every training
+                                                   write) until a month is paid
                       | "unpaid",                  support returned month 1; nothing
                                                    renews until support resolves it
             "period": {"number", "starts_at", "ends_at"} | null,   the latest paid month
             "renews_at": datetime | null,          when the next month is charged
-            "grace_until": datetime | null,        payment_due only: after this the
-                                                   coaching ends
+            "renewal_reminder": bool,              the month ends within 3 days: show the
+                                                   renewal reminder (every client, the
+                                                   owner's rule; a push goes out too)
+            "frozen_since": datetime | null,       frozen only: when the paid month ended
+            "grace_until": null,                   always null since the freeze (kept so
+                                                   the shape does not change)
             "ending": bool,                        the trainer stops when this month ends
                                                    (`period.ends_at`); nothing renews
             "coaching_price", "money_type"}}       ONLY on a build that may show a
                                                    coaching fee (not `ios` today)
+
+    `payment_due` is no longer sent: an unpaid month freezes instead of ending after a
+    grace (the owner, 2026-09-19). A frozen coaching is charged by the hourly run as soon
+    as the wallet covers the month, and that month starts when it is paid. After a
+    coaching ends (`{"coaching": null}`) the trainer's routines stay readable and answer
+    403 `coaching_ended` to training writes; while the status is `unpaid` they answer
+    403 `coaching_unpaid`. Every such 403 carries `trainer_id` and no price.
 
     Each month is charged from the wallet automatically when the last one ends; the
     platform's commission is taken from every month and is not shown to the client.

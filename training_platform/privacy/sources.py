@@ -151,13 +151,24 @@ register(PersonalDataSource(label="follows", model="social.UserFollow",
 # And the row is also a record of money: `hold_reference` names the client's charge
 # sitting in escrow until a routine is assigned. It is returned before the row goes, and
 # if it cannot be returned nothing is erased. See `release_holds_before_erasure`.
+#
+# A trainer who still coaches someone cannot be erased at all (the owner, 2026-09-19):
+# the client paid for a month of coaching that an erased account cannot deliver.
 def _return_held_money(user, queryset, *, dry_run):
-    from users.trainer_relations import HoldFailed, release_holds_before_erasure
+    from users.trainer_relations import (
+        HoldFailed,
+        TrainerHasActiveClients,
+        release_holds_before_erasure,
+    )
 
     from .registry import ErasureRefused
 
     try:
         return release_holds_before_erasure(user, queryset, dry_run=dry_run)
+    except TrainerHasActiveClients as exc:
+        raise ErasureRefused(
+            "The trainer still coaches active clients, so nothing was erased.",
+            code="trainer_has_active_clients", active_clients=exc.count) from exc
     except HoldFailed as exc:
         raise ErasureRefused(
             "Money held for a trainer relation could not be returned, so nothing was "

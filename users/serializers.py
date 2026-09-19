@@ -60,6 +60,9 @@ def _unique_codes(value, *, none_alone=False):
     return value
 
 
+#: The free-text injury note's limit (BACKEND_BUGS B-028), the app's own cap.
+SPECIFIC_INJURY_MAX_LENGTH = 500
+
 CLIENT_ONBOARDING_FIELDS = ('training_goal', 'training_place', 'training_days_per_week',
                             'injury_areas')
 TRAINER_MATCHING_FIELDS = ('trainer_goal_focus', 'trainer_injury_focus',
@@ -75,8 +78,10 @@ class OnboardingFieldsMixin(serializers.Serializer):
     ignored: `age` is derived from the date. A legacy `age` below the minimum is refused
     with `under_minimum_age`.
 
-    Reading adds `onboarding_missing`: the fields still unanswered, in screen order.
-    `onboarding_completed` keeps its original meaning.
+    Reading adds `onboarding_missing`: the fields still unanswered, in screen order
+    (`activity_level` is listed until it is written, although it has a default).
+    `onboarding_completed` keeps its original meaning. `specific_injury` is at most 500
+    characters (`too_long`).
     """
     injury_areas = _code_list(INJURY_AREAS, allow_none=True)
     onboarding_missing = serializers.SerializerMethodField()
@@ -94,6 +99,15 @@ class OnboardingFieldsMixin(serializers.Serializer):
     def validate_injury_areas(self, value):
         return _unique_codes(value, none_alone=True)
 
+    def validate_specific_injury(self, value):
+        # Bounded (BACKEND_BUGS B-028): unbounded, one save could store up to the 15 MB
+        # body cap of encrypted text, and the same text goes to the trainer's view.
+        if value and len(value) > SPECIFIC_INJURY_MAX_LENGTH:
+            raise serializers.ValidationError(
+                _("Keep this to %(n)s characters.") % {"n": SPECIFIC_INJURY_MAX_LENGTH},
+                code="too_long")
+        return value
+
     def validate_age(self, value):
         if value is not None and value < minimum_age():
             raise serializers.ValidationError(
@@ -106,13 +120,21 @@ class OnboardingFieldsMixin(serializers.Serializer):
         born = attrs.get('date_of_birth') or getattr(self.instance, 'date_of_birth', None)
         if born:
             attrs.pop('age', None)
+        if 'activity_level' in attrs:
+            # The level has a default, so the value alone cannot say it was answered.
+            attrs['activity_level_answered_at'] = timezone.now()
         return attrs
 
     def get_onboarding_missing(self, obj):
         missing = [f for f in ('first_name', 'last_name', 'date_of_birth') if not getattr(obj, f)]
         if obj.is_client:
-            missing += [f for f in ('gender', 'height', 'weight', 'training_goal',
-                                    'training_place', 'training_days_per_week')
+            missing += [f for f in ('gender', 'height', 'weight') if not getattr(obj, f)]
+            # `activity_level` defaults to Sedentary, so "never asked" and "beginner"
+            # looked the same (BACKEND_BUGS B-027). Unanswered until written through the
+            # API — or, for a row from before, until it differs from the default.
+            if obj.activity_level_answered_at is None and obj.activity_level == 'Sedentary':
+                missing.append('activity_level')
+            missing += [f for f in ('training_goal', 'training_place', 'training_days_per_week')
                         if not getattr(obj, f)]
         return missing
 
@@ -141,7 +163,10 @@ class CustomRegisterSerializer(RegisterSerializer):
     `MINIMUM_AGE_YEARS` (14). Field codes on `field_errors.date_of_birth`:
     `required`, `under_minimum_age`, `date_of_birth_in_future`,
     `date_of_birth_implausible`. Required by the owner's decision (2026-09-19); no build
-    that omits it was ever released.
+    that omits it was ever released. An address or username already registered answers
+    `email_taken` or `username_taken` on its field (a malformed address stays
+    `invalid`; phone numbers are not unique); passwords answer the validators' codes
+    (`password_too_short`, `password_too_common`, `password_entirely_numeric`).
     """
     phone_number = serializers.CharField(max_length=15,  required=True)
     user_type = serializers.ChoiceField(choices=[('client', 'Client'), ('trainer', 'Trainer'), ('agent', 'Agent'), ('admin', 'Administrator')], required=False, default='client')
@@ -176,8 +201,15 @@ class CustomRegisterSerializer(RegisterSerializer):
         return value
 
     def validate_email(self, value):
-        if CustomUser.objects.filter(email=value).exists():
-            raise serializers.ValidationError(_("A user with this email already exists."))
+        # Its own code (BACKEND_BUGS B-020): `invalid` is also what a malformed address
+        # gets, and the app branches on the code. Without regard to case: addresses are
+        # stored lower-cased, so `Samer@x.com` beside `samer@x.com` passed here and
+        # failed at the database.
+        # Lower-cased or as typed, never `iexact` (see `users.utils.find_by_email`).
+        typed = (value or '').strip()
+        if CustomUser.objects.filter(email__in={typed.lower(), typed}).exists():
+            raise serializers.ValidationError(_("A user with this email already exists."),
+                                              code='email_taken')
         return value
 
     class Meta:
@@ -219,17 +251,14 @@ class CustomRegisterSerializer(RegisterSerializer):
             # backends' messages.
             message = str(e).lower()
             if "phone_number" in message:
-                raise serializers.ValidationError(
-                    {"phone_number": _("A user with this phone number already exists.")}
-                )
+                raise serializers.ValidationError({"phone_number": [serializers.ErrorDetail(
+                    _("A user with this phone number already exists."), code='phone_taken')]})
             if "email" in message:
-                raise serializers.ValidationError(
-                    {"email": _("A user with this email already exists.")}
-                )
+                raise serializers.ValidationError({"email": [serializers.ErrorDetail(
+                    _("A user with this email already exists."), code='email_taken')]})
             if "username" in message:
-                raise serializers.ValidationError(
-                    {"username": _("A user with that username already exists.")}
-                )
+                raise serializers.ValidationError({"username": [serializers.ErrorDetail(
+                    _("A user with that username already exists."), code='username_taken')]})
             # Was `raiser`: any other integrity error became a NameError and a 500 that
             # hid the constraint that actually failed.
             raise
@@ -330,22 +359,10 @@ class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
             return url
         return None
 
-    def validate_profile_picture(self, value):
-        # Content-based validation. The previous check trusted `content_type`, an
-        # attacker-controlled header, so this second upload path (/api/auth/user/update/)
-        # bypassed the hardening applied to the dedicated profile-picture endpoint.
-        if not value:
-            return value
-        from django.core.exceptions import ValidationError as DjangoValidationError
-        from training_platform.file_security import process_uploaded_image
-        import os as _os
-        try:
-            safe_file, ext = process_uploaded_image(value, max_bytes=2 * 1024 * 1024)
-        except DjangoValidationError as e:
-            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
-        base = _os.path.splitext(getattr(value, 'name', 'profile'))[0][:60] or 'profile'
-        safe_file.name = f"{base}.{ext}"
-        return safe_file
+    # `validate_profile_picture` stood here and never ran: `profile_picture` is a
+    # read-only method field, so a file posted to user/update/ was dropped (BACKEND_BUGS
+    # B-026). Pictures go through `POST /api/auth/user/profile-picture/`, which checks
+    # the content; this serializer only reads the URL.
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -559,7 +576,11 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
     # A url-safe random string now, not a UUID: the raw token is generated by
     # PasswordResetToken.issue() and only its keyed hash is stored.
     reset_token = serializers.CharField(required=True, max_length=128)
-    new_password = serializers.CharField(min_length=8, required=True, write_only=True)
+    # No `min_length` here: it refused a short password with code `min_length` before
+    # the Django validators ran, while registration refuses the same rule as
+    # `password_too_short` — two codes for one rule (BACKEND_BUGS B-034). The validators
+    # (AUTH_PASSWORD_VALIDATORS, minimum 8) decide, with their own codes.
+    new_password = serializers.CharField(required=True, write_only=True, max_length=128)
 
     def validate_new_password(self, value):
         from django.contrib.auth.password_validation import validate_password

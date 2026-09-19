@@ -47,7 +47,8 @@ from users.models import CustomUser
 from rest_framework.exceptions import PermissionDenied
 from django.db import transaction
 from django.http import Http404
-from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDenied,
+from rest_framework.exceptions import (APIException, NotAuthenticated, NotFound,
+                                       PermissionDenied,
                                        ValidationError as DRFValidationError)
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 from training_platform.query_params import int_param
@@ -471,9 +472,12 @@ class RoutineViewSet(viewsets.ModelViewSet):
     - Comprehensive error handling and logging
     - Support for notifications on assignment
     
-    TODO: Add routine templates and cloning functionality
-    TODO: Implement routine sharing between trainers
-    TODO: Add routine analytics and performance tracking
+    A routine is ONE client's private program (the owner, 2026-09-19). Reuse goes
+    through templates (`templates/{id}/generate/`) or `routines/{id}/copy/`; see
+    `routine/assignment.py`. `POST /routines/` writes an unassigned routine and ignores
+    `assigned_to`; assign with `routines/{id}/assign_to_client/`.
+
+    List filter: `?source_template=<template id>` — the copies generated from it.
     """
     queryset = Routine.objects.all()
     serializer_class = RoutineSerializer
@@ -507,7 +511,13 @@ class RoutineViewSet(viewsets.ModelViewSet):
         # like meant page 2 could repeat a routine from page 1 and skip another
         # outright. Re-apply the model's total order explicitly.
         ).order_by('-created_at', '-id')
-        
+
+        # `?source_template=<id>`: the private copies written from one template, e.g.
+        # "which of my clients got this program". Narrows; never widens what you see.
+        source = int_param(self.request.query_params, 'source_template')
+        if source is not None:
+            queryset = queryset.filter(source_template_id=source)
+
         if user.is_admin:
             # Admins can see all routines
             return queryset.all()
@@ -568,42 +578,34 @@ class RoutineViewSet(viewsets.ModelViewSet):
         starting today. Only the trainer who wrote it (or an admin); 403 otherwise.
         201 with the new routine.
         """
-        from .models import Routine, RoutineExercise
+        from .assignment import copy_routine
 
         original = self.get_object()
         if not (original.created_by_id == request.user.id
                 or getattr(request.user, 'is_admin', False)):
             return Response({'error': _('Only the trainer who wrote this routine can copy it.'),
                              'code': 'permission_denied'}, status=status.HTTP_403_FORBIDDEN)
-        with transaction.atomic():
-            copy = Routine.objects.create(
-                name=original.name, description=original.description,
-                translations=original.translations, created_by=original.created_by,
-                days=original.days, difficulty_level=original.difficulty_level,
-                estimated_duration=original.estimated_duration, is_active=True)
-            RoutineExercise.objects.bulk_create([
-                RoutineExercise(routine=copy, exercise_id=rex.exercise_id, sets=rex.sets,
-                                reps=rex.reps, rest_time=rex.rest_time, day=rex.day,
-                                order=rex.order, weight=rex.weight, duration=rex.duration,
-                                distance=rex.distance, notes=rex.notes)
-                for rex in original.routine_exercises.all()])
-            copy.exercises.set(original.exercises.all())
+        copy = copy_routine(original)
         return Response(RoutineSerializer(copy, context={'request': request}).data,
                         status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], permission_classes=[IsTrainerOrAdminForAssignment])
     def assign_to_client(self, request, pk=None):
-        """
-        Enhanced routine assignment to a client with improved validation.
-        
-        Requirements:
-        - Only trainers and admins can assign routines
-        - Client must have an approved TrainerClientRelation with the trainer
-        - Assignment triggers notifications
-        
-        TODO: Add assignment scheduling and conflict checking
-        TODO: Implement assignment limits per client
-        TODO: Add assignment history tracking
+        """POST /api/routine/routines/{id}/assign_to_client/ — make this routine one
+        client's program. Body: `client_id`.
+
+        Trainers (for an approved client of theirs) and admins. A routine belongs to one
+        client (the owner, 2026-09-19): the first assignment also settles the coaching's
+        first month, and the client is notified in their language.
+
+        200 `{message, routine_id, client_id, assignment_date}`.
+        400 `client_id` missing; 400 the client is not an approved client of yours; 400
+        already assigned to this client (nothing is paid twice).
+        404 no such client.
+        409 `routine_belongs_to_another_client` with `copy_url`: another client is on
+        it, or another client has trained on it (their history stays with it) — copy it
+        with `routines/{id}/copy/` instead. A trainer's own tries on a draft do not
+        count. Identical on every build.
         """
         routine = self.get_object()
         client_id = _int_or_none(request.data.get('client_id'))
@@ -655,8 +657,16 @@ class RoutineViewSet(viewsets.ModelViewSet):
             
             # One client per routine: a coach writes a routine FOR a client, and clients
             # never share one (owner, 2026-09-19; BACKEND_BUGS B-001). A second client
-            # gets their own copy (templates exist for reuse).
-            if routine.assigned_to.exclude(pk=client.pk).exists():
+            # gets their own copy (templates exist for reuse). `assign_routine` checks
+            # under a lock on the routine — two racing assignments for different clients
+            # both passed an unlocked check — and also refuses a routine someone else
+            # has trained on. Then it settles the hold taken for THIS client, once: this
+            # used to move the trainer's CURRENT hourly rate out of the shared escrow
+            # wallet on every assignment, with no link to any hold.
+            from .assignment import RoutineTaken, assign_routine
+            try:
+                assign_routine(routine, client, request.user)
+            except RoutineTaken:
                 return Response(
                     {"error": _("This routine already belongs to another client. "
                                 "Create a copy for this client instead."),
@@ -665,38 +675,14 @@ class RoutineViewSet(viewsets.ModelViewSet):
                      "copy_url": f"/api/routine/routines/{routine.id}/copy/"},
                     status=status.HTTP_409_CONFLICT)
 
-            # Assign routine to client
-            routine.assigned_to.add(client)
-
-            # Settle the hold taken for THIS client, once. This used to move the
-            # trainer's CURRENT hourly rate out of the single shared escrow wallet on
-            # every assignment, with no link to any hold: assigning fifty routines
-            # paid out fifty times, from money other clients had deposited, and a
-            # trainer who set a rate after approval collected against a hold that had
-            # never existed. `settle_hold` pays exactly what was held for this pair
-            # and then forgets it, so a repeat moves nothing.
-            from users.trainer_relations import HoldFailed, active_relation, settle_hold
-            relation = active_relation(request.user, client)
-            if relation is not None:
-                try:
-                    settle_hold(relation, request.user)
-                except HoldFailed as exc:
-                    # The routine is assigned either way; the payment is retried on
-                    # the next assignment because the hold is still on the relation.
-                    logger.error("Settlement deferred for relation %s: %s", relation.id, exc)
-            
             # Log the assignment
             logger.info(
                 f"Routine {routine.id} assigned to client {client.id} by trainer {request.user.id}"
             )
             
-            # Trigger notification to client about new assignment
-            send_notification(
-                user=client,
-                notif_type="routine_assignment",
-                message=f"You have been assigned a new routine: {routine.name}",
-                related_object=routine
-            )
+            # Trigger notification to client about new assignment, in their language.
+            from .services import notify_assignment
+            notify_assignment(client, routine)
             
             return Response({
                 "message": _("Routine assigned successfully."),
@@ -821,7 +807,9 @@ class RoutineViewSet(viewsets.ModelViewSet):
         prescribed set of that day is unlogged today, `completed` answers
         409 `unlogged_sets` with `{prescribed, logged, unlogged}`, and the app sends the
         same request again with `confirm_unlogged: true` once the person has seen it.
-        Other codes: 400 `bad_status`; 403 when the routine is not yours.
+        Other codes: 400 `bad_status`; 403 when the routine is not yours; 403
+        `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`) while the coaching this
+        routine came from is unpaid or over — readable, not trainable (the owner).
         """
         routine = self.get_object()
         user = request.user
@@ -830,6 +818,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
 
         if user not in routine.assigned_to.all():
             return Response({"error": _("You are not authorized to update this routine.")}, status=403)
+        _require_can_train(user, routine)
 
         if not day or not status:
             return Response({"error": _("Day and status are required.")}, status=400)
@@ -966,6 +955,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
     ViewSet for managing routine progress.
     Clients can only see their own progress.
     Trainers can see their clients' progress.
+    A client's create or update answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
+    `trainer_id`) while the coaching the routine came from is unpaid or over.
     """
     queryset = RoutineProgress.objects.all()
     serializer_class = RoutineProgressSerializer
@@ -989,6 +980,7 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
             or routine.assigned_to.filter(pk=user.pk).exists()
         ):
             raise PermissionDenied('This routine is not assigned to you.')
+        _require_can_train(user, routine, serializer.validated_data.get('date'))
         # (user, routine, day, date) is UNIQUE. Re-logging the same day is a normal
         # client action (correcting a set, finishing later), so upsert instead of
         # letting the constraint surface as a 500.
@@ -1000,6 +992,14 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
             user=user, routine=routine_obj, day=day, date=date, defaults=data,
         )
         serializer.instance = obj
+
+    def perform_update(self, serializer):
+        """A client's own day, refused like a create while the coaching is unpaid or
+        over (403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended`). A trainer's correction is not."""
+        instance = serializer.instance
+        _require_can_train(self.request.user, instance.routine,
+                           serializer.validated_data.get('date', instance.date))
+        serializer.save()
 
     def get_queryset(self):
         """Filter progress based on user role with optimized queries."""
@@ -1080,13 +1080,37 @@ def _day_set_counts(routine, user, day) -> dict:
     done = sum(min(logged.get(e, 0), n) for e, n in prescribed.items())
     return {'prescribed': total, 'logged': done, 'unlogged': total - done}
 
-def _prescribed_weight(value):
-    """A customised working weight in kg, or None if it is not a number from 0 to 1000."""
-    try:
-        weight = float(value)
-    except (TypeError, ValueError):
-        return None
-    return weight if 0 <= weight <= 1000 else None
+def _require_can_train(user, routine, at=None):
+    """403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when a client may see this routine but
+    not train on it (the owner, 2026-09-19; users/coaching.py `training_refusal`)."""
+    from users.coaching import require_can_train
+    require_can_train(user, routine, at)
+
+
+def _require_can_train_exercise(user, exercise_id, at=None):
+    """The same rule for a write that names only an exercise (a progress row, or a set
+    logged without a session): refused when EVERY routine of this client that holds
+    the exercise is refused. An exercise on none of their routines is theirs to log.
+    Asked once per trainer, not per routine: the answer depends on the pair alone, and a
+    long-term client holds many private copies from the same trainer."""
+    from users.coaching import _trainer_refusal, raise_refusal
+
+    if not getattr(user, 'is_client', False) or exercise_id is None:
+        return
+    trainers = set(Routine.objects.filter(assigned_to=user,
+                                          routine_exercises__exercise_id=exercise_id)
+                   .values_list('created_by_id', flat=True))
+    first = None
+    for trainer_id in sorted(t for t in trainers if t is not None):
+        if trainer_id == user.pk:
+            return
+        refusal = _trainer_refusal(user.pk, trainer_id, at)
+        if refusal is None:
+            return
+        first = first or (refusal, trainer_id)
+    if first is not None:
+        raise_refusal(*first)
+
 
 def _idempotent_create(view, request, model, owner_of, create):
     """Create — or, for a retry, answer with the row the first attempt already wrote.
@@ -1144,6 +1168,10 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     answers 201, a retry answers 200 with the same row, and an id already used by
     someone else's set answers 409 `idempotency_conflict`. `date` is writable, so a set
     logged offline keeps its day.
+
+    A client's new set answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
+    `trainer_id`) while the coaching its routine came from is unpaid or over, unless the
+    set is dated inside a paid month (training done offline while paid still syncs).
     """
     queryset = ExerciseSetLog.objects.all()
     serializer_class = ExerciseSetLogSerializer
@@ -1189,6 +1217,19 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             lambda: super(ExerciseSetLogViewSet, self).create(request, *args, **kwargs))
 
     def perform_create(self, serializer):
+        # After the idempotent replay in `create`: a set that landed while the coaching
+        # was paid is answered, not refused. Offline sets carry their own date.
+        # A set in a session is judged when the session began; one without is judged
+        # on the date it is stored with (the model's default is today), never on an
+        # older progress row's date, which let a frozen client log today's sets.
+        data = serializer.validated_data
+        session = data.get('workout_session')
+        progress = data.get('user_exercise_progress')
+        if session is not None:
+            _require_can_train(self.request.user, session.routine, session.start_time)
+        elif progress is not None:
+            _require_can_train_exercise(self.request.user, progress.exercise_id,
+                                        data.get('date') or timezone.localdate())
         try:
             serializer.save()
         except IntegrityError as e:
@@ -1248,6 +1289,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         """
         Bulk-create set logs for a user/routine/day.
         Input: routine_id, day, date, sets, weight, reps
+        403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`): the coaching this
+        routine came from is unpaid or over — readable, not trainable (the owner).
         """
         user = request.user
         routine_id = _int_or_none(request.data.get('routine_id'))
@@ -1308,6 +1351,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                 or user.is_admin):
             return Response({'error': _('You do not have access to this routine.')},
                             status=status.HTTP_403_FORBIDDEN)
+
+        _require_can_train(user, routine, date)
 
         exercises = RoutineExercise.objects.filter(routine=routine, day=day)
         if not exercises.exists():
@@ -1395,7 +1440,14 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 class WorkoutSessionViewSet(viewsets.ModelViewSet):
     """
     API endpoint for managing WorkoutSession objects.
-    Only owners (clients) can PATCH their session; only trainers/admins can create.
+    A client opens sessions on routines assigned to them; a trainer may open one for an
+    approved client (`user` in the body). The owner PATCHes their session.
+
+    While the coaching a routine came from is unpaid (frozen) or over, the routine stays
+    readable and opening or editing a session on it answers 403 `coaching_frozen` /
+    `coaching_unpaid` / `coaching_ended` with `trainer_id` (the owner, 2026-09-19). A
+    session begun while
+    paid can still be finished, and an offline one dated inside a paid month still syncs.
     
     Input: API requests with session data (POST), session updates (PATCH)
     Output: JSON responses with session data
@@ -1434,7 +1486,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         app's id: a retry answers 200 with the first row; someone else's id answers 409
         `idempotency_conflict`) and optional `start_time` for a workout logged offline
         (at most 30 days back: `start_time_in_future`, `start_time_too_old`); `end_time`
-        is then checked against it."""
+        is then checked against it. Field codes (400): `routine_inactive` on `routine`,
+        `day_out_of_range` / `day_has_no_exercises` on `day`."""
         def create_it():
             response = super(WorkoutSessionViewSet, self).create(request, *args, **kwargs)
             if response.status_code == status.HTTP_201_CREATED and \
@@ -1453,6 +1506,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         """
         logger = logging.getLogger(__name__)
         logger.debug(f"Creating WorkoutSession with data: {serializer.validated_data} by user {self.request.user}")
+        routine = serializer.validated_data.get('routine')
+        at = serializer.validated_data.get('start_time')
         if self.request.user.is_trainer or self.request.user.is_staff:
             user_id = self.request.data.get('user')
             if user_id:
@@ -1463,11 +1518,20 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                 if not can_access_user_data(self.request.user, user_id):
                     raise PermissionDenied(_('You may only create sessions for your approved clients.'))
                 user_obj = CustomUser.objects.get(pk=user_id)
+                _require_can_train(user_obj, routine, at)
                 serializer.save(user=user_obj)
                 logger.debug(f"WorkoutSession assigned to user {user_obj}")
                 return
+        _require_can_train(self.request.user, routine, at)
         serializer.save(user=self.request.user)
         logger.debug(f"WorkoutSession assigned to user {self.request.user}")
+
+    def perform_update(self, serializer):
+        # Judged at the session's own start: finishing a workout begun while the coaching
+        # was paid is allowed after it freezes.
+        instance = serializer.instance
+        _require_can_train(self.request.user, instance.routine, instance.start_time)
+        serializer.save()
 
     def partial_update(self, request, *args, **kwargs):
         """
@@ -1502,11 +1566,15 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
             response.data['end_time'] = instance.end_time
             response.data['duration'] = int(
                 (instance.end_time - instance.start_time).total_seconds())
-        # Notify client (self)
+        # Notify client (self), in their own language (BACKEND_BUGS B-030).
+        from .services import in_recipients_language, routine_name_for
+        client = instance.user
         send_notification(
-            user=instance.user,
+            user=client,
             notif_type="session_completed",
-            message=f"Congratulations! You completed your workout session for routine: {instance.routine.name}",
+            message=in_recipients_language(client, lambda: _(
+                "Well done! You finished a workout on %(routine)s.")
+                % {'routine': routine_name_for(instance.routine, client)}),
             related_object=instance
         )
         # Notify the trainer this client actually has an APPROVED relation with.
@@ -1516,10 +1584,14 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         for trainer in (t.trainer for t in TrainerClientRelation.objects
                         .filter(client=instance.user, status='approved')
                         .select_related('trainer')):
+            # The client's name, not their username, in the trainer's language.
             send_notification(
                 user=trainer,
                 notif_type="session_completed",
-                message=f"Your client {instance.user.username} completed a workout session for routine: {instance.routine.name}",
+                message=in_recipients_language(trainer, lambda: _(
+                    "%(name)s finished a workout on %(routine)s.")
+                    % {'name': client.full_name or client.username,
+                       'routine': routine_name_for(instance.routine, trainer)}),
                 related_object=instance
             )
 
@@ -2074,171 +2146,216 @@ class RoutineTemplateViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], permission_classes=[IsTrainerOrReadOnly])
     def generate(self, request, pk=None):
+        """POST /api/routine/templates/{id}/generate/ — a private routine per client.
+
+        The owner's model: the template is reused for as many clients as the trainer
+        likes, and every client gets their OWN routine — a copy of the values, never a
+        link. Editing the template later, or one client's copy, changes nobody else's.
+        Trainers only, on their own template or a public one, for their approved clients.
+
+        Body:
+          client_id       one approved client (int). Answer: 201, the routine.
+          client_ids      several (a list of 1-50 ints) instead of client_id. Every id is
+                          checked first and nothing is written if one is refused.
+                          Answer: 201 `{"routines": [...]}`, one per client, in the order
+                          given.
+          assign          default true. `false` writes ONE unassigned routine (a draft):
+                          no client needed, no notification, no payment. The trainer
+                          personalises it with `routine-exercises/` (add, remove, swap,
+                          per-day sets/reps/weight/notes) and then calls
+                          `routines/{id}/assign_to_client/`.
+          customizations  optional `{exercise_id: {sets 1-100, reps 1-1000,
+                          rest_time 0-3600, weight 0-1000}}`, applied to that exercise on
+                          every day it appears.
+          name            optional; replaces the template's name on the copy.
+          days            optional 1-365 (default: the template's days; a longer routine
+                          repeats the template's days in order). Or start_date and
+                          end_date (YYYY-MM-DD) to derive it.
+
+        Assigning also settles the coaching's first month, as assign_to_client does: a
+        program delivered from a template starts the paid month like any other.
+
+        Codes: 400 bad_request (client_id missing, dates or days malformed), 400
+        `bad_customization` (with `key`), 400 `invalid_client_ids`, 400
+        `template_empty` (no exercises), 400 `client_ids_need_assign`, 400
+        `generate_too_large` (clients x days above `max_routine_days`, 1000), 403
+        permission_denied (not your client), 403 `not_your_client` (with
+        `client_ids`, the list form), 404 not_found (no such client). Identical on
+        every build; no price and no purchase is involved.
         """
-        Generate a Routine for a client from this template.
-        Input: client_id, optional customizations (sets, reps, rest_time per exercise)
-        Output: Created Routine and RoutineExercises
-        
-        Security: Only trainers can generate routines for their own clients
-        """
-        template = self.get_object()
-        client_id = _int_or_none(request.data.get('client_id'))
-        
-        if not client_id:
-            return Response({'detail': _('client_id required')}, status=400)
-        
-        from users.models import CustomUser
-        try:
-            client = CustomUser.objects.get(pk=client_id)
-        except CustomUser.DoesNotExist:
-            return Response({'detail': _('Client not found')}, status=404)
-        
-        # Security check: only a trainer, and only for an approved client of theirs.
-        # This read `client.assigned_trainer_id`, the denormalised display pointer that
-        # routine/permissions.py opens by forbidding as an access test — it was the
-        # pointer that once granted access without consent.
+        from .assignment import (
+            MAX_CLIENTS_PER_GENERATE,
+            MAX_ROUTINE_DAYS_PER_GENERATE,
+            BadCustomization,
+            assign_routine,
+            clean_customizations,
+            routine_from_template,
+        )
         from .permissions import can_access_user_data
-        if not (request.user.is_trainer and can_access_user_data(request.user, client.pk)):
-            return Response({'detail': _('Permission denied. You can only assign routines to your own clients.')}, status=403)
-        
-        # Determine total duration for the routine
-        start_date = request.data.get('start_date')
-        end_date = request.data.get('end_date')
-        routine_days = request.data.get('days')
+        from .serializers import RoutineSerializer
+
+        template = self.get_object()
+        assign = str(request.data.get('assign', 'true')).strip().lower() not in ('false', '0', 'no')
+
+        raw_ids = request.data.get('client_ids')
+        clients = []
+        if raw_ids is not None:
+            if not assign:
+                return Response({'error': _('A draft is written for no one; assign it '
+                                            'afterwards with assign_to_client.'),
+                                 'code': 'client_ids_need_assign'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            ids = ([_int_or_none(v) for v in raw_ids] if isinstance(raw_ids, list) else [None])
+            if (not ids or None in ids or len(set(ids)) != len(ids)
+                    or len(ids) > MAX_CLIENTS_PER_GENERATE):
+                return Response({'error': _('client_ids must be a list of 1 to %(n)s '
+                                            'different client ids.')
+                                 % {'n': MAX_CLIENTS_PER_GENERATE},
+                                 'code': 'invalid_client_ids'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            found = {c.pk: c for c in CustomUser.objects.filter(pk__in=ids, user_type='client')}
+            refused = [i for i in ids if i not in found
+                       or not can_access_user_data(request.user, i)]
+            if refused or not request.user.is_trainer:
+                return Response({'error': _('You can only assign routines to your own '
+                                            'clients.'),
+                                 'code': 'not_your_client',
+                                 'client_ids': refused or ids},
+                                status=status.HTTP_403_FORBIDDEN)
+            clients = [found[i] for i in ids]
+        elif assign or request.data.get('client_id') not in (None, ''):
+            client_id = _int_or_none(request.data.get('client_id'))
+            if not client_id:
+                return Response({'detail': _('client_id required')}, status=400)
+            # A client, not whoever has that id: a trainer's own id passed
+            # `can_access_user_data` (it admits the caller) and wrote a routine assigned
+            # to the trainer.
+            client = CustomUser.objects.filter(pk=client_id, user_type='client').first()
+            if client is None:
+                return Response({'detail': _('Client not found')}, status=404)
+            # Only a trainer, and only for an approved client of theirs. This read
+            # `client.assigned_trainer_id`, the denormalised display pointer that
+            # routine/permissions.py opens by forbidding as an access test — it was the
+            # pointer that once granted access without consent.
+            if not (request.user.is_trainer and can_access_user_data(request.user, client.pk)):
+                return Response({'detail': _('Permission denied. You can only assign routines to your own clients.')}, status=403)
+            if assign:
+                clients = [client]
 
         # Parsed, not assumed, and bounded. `strptime` on "2026-13-45" raised into the
         # generic handler as a 500, and `days: 500000` built half a million exercise
-        # rows in memory before bulk_create was ever reached.
+        # rows in memory before bulk_create was ever reached. Dates are parsed whenever
+        # they are sent: with `days` present, a raw start_date string used to reach the
+        # model unparsed.
         MAX_GENERATED_DAYS = 365
-        if start_date and end_date and not routine_days:
-            d1, d2 = parse_date(str(start_date)), parse_date(str(end_date))
-            if not d1 or not d2:
-                return Response({'error': 'start_date and end_date must be YYYY-MM-DD'},
-                                status=status.HTTP_400_BAD_REQUEST)
-            if d2 < d1:
-                return Response({'error': 'end_date is before start_date'},
-                                status=status.HTTP_400_BAD_REQUEST)
-            routine_days = (d2 - d1).days + 1
-        elif routine_days:
+        start_date = request.data.get('start_date') or None
+        end_date = request.data.get('end_date') or None
+        d1 = parse_date(str(start_date)) if start_date else None
+        d2 = parse_date(str(end_date)) if end_date else None
+        if (start_date and not d1) or (end_date and not d2):
+            return Response({'error': 'start_date and end_date must be YYYY-MM-DD'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if d1 and d2 and d2 < d1:
+            return Response({'error': 'end_date is before start_date'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        routine_days = request.data.get('days')
+        if routine_days not in (None, ''):
             try:
                 routine_days = int(routine_days)
             except (TypeError, ValueError):
                 return Response({'error': 'days must be a whole number'},
                                 status=status.HTTP_400_BAD_REQUEST)
+        elif d1 and d2:
+            routine_days = (d2 - d1).days + 1
         else:
             routine_days = template.days
         if not 1 <= int(routine_days) <= MAX_GENERATED_DAYS:
             return Response({'error': f'days must be between 1 and {MAX_GENERATED_DAYS}'},
                             status=status.HTTP_400_BAD_REQUEST)
         routine_days = int(routine_days)
-
-        # Create Routine for client
-        from .models import Routine, RoutineExercise
-        routine_data = {
-            'name': template.name,
-            'description': f"{template.description} (Goal: {template.goal})",
-            'days': routine_days,
-            'created_by': request.user
-        }
-        if start_date:
-            routine_data['start_date'] = start_date
-        if end_date:
-            routine_data['end_date'] = end_date
-
-        # Assignment comes AFTER the exercises exist. The m2m receiver creates one
-        # RoutineProgress row per day and reads `routine_exercises.count()` to set
-        # `total_exercises`; assigning first meant every row was written with zero,
-        # `bulk_create` fires no signal to correct it, and the trainer's completion
-        # view then read 0% for that client forever.
-        customizations = request.data.get('customizations', {})
-        if not isinstance(customizations, dict):
-            return Response({'error': 'customizations must be an object'},
+        if len(clients) > 1 and len(clients) * routine_days > MAX_ROUTINE_DAYS_PER_GENERATE:
+            return Response({'error': _('Too much at once: split the clients over more than '
+                                        'one request.'),
+                             'code': 'generate_too_large',
+                             'max_routine_days': MAX_ROUTINE_DAYS_PER_GENERATE},
                             status=status.HTTP_400_BAD_REQUEST)
-        template_exercises = list(template.routinetemplateexercise_set.select_related('exercise').all())
-        new_routine_exercises = []
-        cycle_length = template.days or 1
-        
-        for client_day in range(1, routine_days + 1):
-            cycle_day = ((client_day - 1) % cycle_length) + 1
-            exercises_for_day = [ex for ex in template_exercises if ex.day == cycle_day]
-            
-            for t_ex in exercises_for_day:
-                ex_id = str(t_ex.exercise_id)
-                ex_custom = customizations.get(ex_id, {})
-                new_routine_exercises.append(
-                    RoutineExercise(
-                        exercise=t_ex.exercise,
-                        sets=ex_custom.get('sets', t_ex.sets),
-                        reps=ex_custom.get('reps', t_ex.reps),
-                        rest_time=ex_custom.get('rest_time', t_ex.rest_time),
-                        # A template carries no weight; a per-client customisation can
-                        # prescribe one (B-012). Anything but a sane number is dropped.
-                        weight=_prescribed_weight(ex_custom.get('weight')),
-                        day=client_day,
-                        order=t_ex.order
-                    )
-                )
-                
-        # One transaction: a failure partway through used to leave a routine with
-        # some of its days and a client already assigned to it.
-        with transaction.atomic():
-            routine = Routine.objects.create(**routine_data)
-            for pending in new_routine_exercises:
-                pending.routine = routine
-            if new_routine_exercises:
-                RoutineExercise.objects.bulk_create(new_routine_exercises)
-            routine.assigned_to.set([client])
 
-        # Send notification to client
-        from .services import send_notification
-        send_notification(
-            user=client,
-            notif_type="routine_assignment",
-            message=f"A new routine '{routine.name}' has been assigned to you.",
-            related_object=routine
-        )
-        
-        from .serializers import RoutineSerializer
-        return Response(RoutineSerializer(routine).data, status=201)
+        try:
+            customizations = clean_customizations(request.data.get('customizations'))
+        except BadCustomization as exc:
+            return Response({'error': exc.message, 'code': 'bad_customization',
+                             'key': exc.key}, status=status.HTTP_400_BAD_REQUEST)
+        if not template.routinetemplateexercise_set.exists():
+            return Response({'error': _('This template has no exercises yet.'),
+                             'code': 'template_empty'}, status=status.HTTP_400_BAD_REQUEST)
+        name = str(request.data.get('name') or '').strip()[:255] or None
+
+        def write():
+            return routine_from_template(
+                template, created_by=request.user, days=routine_days,
+                customizations=customizations, name=name, start_date=d1, end_date=d2)
+
+        context = {'request': request}
+        if not clients:
+            draft = write()
+            return Response(RoutineSerializer(draft, context=context).data, status=201)
+
+        # Rows first, then the client: the m2m receiver counts the rows into each day's
+        # progress. One fresh routine per client, never shared (`assign_routine`).
+        from .services import notify_assignment
+        routines = []
+        for client in clients:
+            routine = write()
+            assign_routine(routine, client, request.user)
+            notify_assignment(client, routine)
+            routines.append(routine)
+
+        if raw_ids is None:
+            return Response(RoutineSerializer(routines[0], context=context).data, status=201)
+        return Response({'routines': RoutineSerializer(routines, many=True, context=context).data},
+                        status=201)
 
     @action(detail=True, methods=['post'], permission_classes=[IsTrainerOrReadOnly])
     def copy(self, request, pk=None):
+        """POST /api/routine/templates/{id}/copy/ — a private copy of a template.
+
+        Your own template (to make a variant), or another trainer's PUBLIC one. 400 for
+        someone else's private template. 201 with the copy: private, in your library,
+        both languages of the name prefixed "Copy of".
+
+        Copying your own template answered 400 "Cannot copy your own template", so a
+        trainer could not make a variant of their own program to reuse.
         """
-        Copy a public template to create a private version for the trainer.
-        Only works with public templates from other trainers.
-        """
+        from django.conf import settings
+        from django.utils.translation import override
+
         template = self.get_object()
-        
-        # Only allow copying public templates from other trainers
-        if not template.is_public:
+        if not template.is_public and template.created_by_id != request.user.id:
             return Response({'detail': _('Can only copy public templates')}, status=400)
-        
-        if template.created_by == request.user:
-            return Response({'detail': _('Cannot copy your own template')}, status=400)
-        
-        # Create a copy
-        new_template = RoutineTemplate.objects.create(
-            name=f"Copy of {template.name}",
-            description=template.description,
-            goal=template.goal,
-            days=template.days,  # Copy days from template
-            is_public=False,  # Always private when copied
-            created_by=request.user
-        )
-        
-        # Copy exercises
-        for t_ex in template.routinetemplateexercise_set.all():
-            RoutineTemplateExercise.objects.create(
-                template=new_template,
-                exercise=t_ex.exercise,
-                sets=t_ex.sets,
-                reps=t_ex.reps,
-                rest_time=t_ex.rest_time,
-                day=t_ex.day,  # Copy day from template exercise
-                order=t_ex.order
+
+        names = {}
+        for language, _label in settings.LANGUAGES:
+            with override(language):
+                original = getattr(template, f'name_{language}', None) or template.name
+                names[f'name_{language}'] = (_('Copy of %(name)s') % {'name': original})[:255]
+        with transaction.atomic():
+            new_template = RoutineTemplate.objects.create(
+                **names,
+                **{f'description_{language}': getattr(template, f'description_{language}', '')
+                   or '' for language, _label in settings.LANGUAGES},
+                goal=template.goal,
+                days=template.days,
+                is_public=False,  # Always private when copied
+                created_by=request.user,
             )
-        
-        return Response(RoutineTemplateSerializer(new_template).data, status=201)
+            RoutineTemplateExercise.objects.bulk_create([
+                RoutineTemplateExercise(
+                    template=new_template, exercise_id=t_ex.exercise_id, sets=t_ex.sets,
+                    reps=t_ex.reps, rest_time=t_ex.rest_time, day=t_ex.day, order=t_ex.order)
+                for t_ex in template.routinetemplateexercise_set.all()])
+
+        return Response(RoutineTemplateSerializer(new_template, context={'request': request}).data,
+                        status=201)
 
     @action(detail=False, methods=['get'])
     def my_templates(self, request):
@@ -2310,10 +2427,27 @@ class RoutineTemplateExerciseViewSet(viewsets.ReadOnlyModelViewSet):
         return qs.filter(template__is_public=True)
 
 
+class ProgressExists(APIException):
+    """400 `progress_exists`: `{detail, error, code, id}` — the row already written for
+    this exercise and date."""
+    status_code = status.HTTP_400_BAD_REQUEST
+    default_code = 'progress_exists'
+
+    def __init__(self, existing_id):
+        super().__init__({'detail': _('A progress record for this user, exercise, and '
+                                      'date already exists.')})
+        self.detail['id'] = existing_id
+
+    def get_codes(self):
+        return self.default_code
+
+
 class UserExerciseProgressViewSet(viewsets.ModelViewSet):
     """
     API endpoint for managing UserExerciseProgress objects (per-user, per-exercise progress).
     Allows trainers, admins, and clients to create, view, and update their own progress records.
+    A client's create answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when every routine
+    of theirs holding the exercise comes from a coaching that is unpaid or over.
     """
     queryset = UserExerciseProgress.objects.all()
     serializer_class = UserExerciseProgressSerializer
@@ -2355,11 +2489,25 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
             return self.queryset.filter(user=user)
 
     def perform_create(self, serializer):
+        """400 `progress_exists` with the existing row's `id` when this exercise already
+        has a row for that date: the app adopts it (BACKEND_BUGS B-031). It answered
+        `validation_error`, the code of every real validation failure."""
+        exercise = serializer.validated_data.get('exercise')
+        _require_can_train_exercise(self.request.user, getattr(exercise, 'pk', None),
+                                    serializer.validated_data.get('date'))
+        date = serializer.validated_data.get('date') or timezone.localdate()
+        existing = UserExerciseProgress.objects.filter(
+            user=self.request.user, exercise=exercise, date=date).only('pk').first()
+        if existing is not None:
+            raise ProgressExists(existing.pk)
         try:
-            serializer.save(user=self.request.user)
+            with transaction.atomic():
+                serializer.save(user=self.request.user)
         except IntegrityError as e:
             if 'unique constraint' in str(e).lower():
-                raise serializers.ValidationError({'detail': _('A progress record for this user, exercise, and date already exists.')})
+                existing = UserExerciseProgress.objects.filter(
+                    user=self.request.user, exercise=exercise, date=date).only('pk').first()
+                raise ProgressExists(existing.pk if existing else None)
             raise
 
     @action(detail=False, methods=['get'], url_path='daily-summary')
@@ -2382,7 +2530,10 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         
         # Use the specific detailed serializer
         from .serializers import UserDailySummarySerializer
-        serializer = UserDailySummarySerializer(queryset, many=True)
+        # With the request, so `exercise.image` is absolute as it is everywhere else
+        # (BACKEND_BUGS B-032): without it the same exercise came back as a relative
+        # path here and a full URL from `routines/`.
+        serializer = UserDailySummarySerializer(queryset, many=True, context={'request': request})
         
         return Response({
             'date': date_str,
@@ -2395,6 +2546,9 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         """
         Mark all exercises for a given routine and day as done for the current user.
         Input: routine_id, day, date, completed_sets, target_sets
+        
+        403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`): the coaching this
+        routine came from is unpaid or over — readable, not trainable (the owner).
         """
         user = request.user
         routine_id = _int_or_none(request.data.get('routine_id'))
@@ -2435,6 +2589,8 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
                 or user.is_admin):
             return Response({'error': _('You do not have access to this routine.')},
                             status=status.HTTP_403_FORBIDDEN)
+
+        _require_can_train(user, routine, date)
 
         exercises = RoutineExercise.objects.filter(routine=routine, day=day)
         if not exercises.exists():

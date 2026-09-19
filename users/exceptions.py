@@ -40,6 +40,45 @@ class AccountDisabled(APIException):
     default_detail = _("This account is suspended. Please contact support.")
 
 
+class _TrainingRefused(APIException):
+    """403 with the trainer named: `{detail, error, code, trainer_id}`. No price, so the
+    body is the same on every build."""
+    status_code = status.HTTP_403_FORBIDDEN
+
+    def __init__(self, trainer_id):
+        super().__init__({'detail': self.default_detail})
+        self.detail['trainer_id'] = trainer_id
+
+    def get_codes(self):
+        return self.default_code
+
+
+class CoachingFrozen(_TrainingRefused):
+    """The coaching is paused: the renewal found the wallet short (the owner,
+    2026-09-19). The routine stays readable; starting or logging it waits until a month
+    is paid, which the hourly renewal charges as soon as the wallet covers it."""
+    default_code = 'coaching_frozen'
+    default_detail = _("Your coaching is paused until the next month is paid. You can "
+                       "still see your routine.")
+
+
+class CoachingUnpaid(_TrainingRefused):
+    """The coaching stands, but support returned the payment for its month (status
+    `unpaid` on `coaching/current/`): nothing is paid until support resolves it, and
+    asking for the trainer again is not the way out."""
+    default_code = 'coaching_unpaid'
+    default_detail = _("Your coaching is on hold until support resolves its payment. You "
+                       "can still see your routine.")
+
+
+class CoachingEnded(_TrainingRefused):
+    """The coaching this routine came from has ended. The routine stays readable; it
+    can be trained on again after a new coaching with the trainer starts."""
+    default_code = 'coaching_ended'
+    default_detail = _("Your coaching with this trainer has ended. You can still see "
+                       "this routine; start a new coaching to train on it.")
+
+
 def disabled_account_with_password(email, password):
     """The disabled account `email` names, if `password` is its password; else None."""
     from .models import CustomUser

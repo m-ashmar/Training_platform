@@ -277,11 +277,21 @@ AGENT_APIKEY_ENC_KEY = get_env("AGENT_APIKEY_ENC_KEY", "")
 # is charged from the client's wallet when the last one ends. The platform keeps
 # COACHING_COMMISSION_RATE of EVERY month, first and renewals alike; the rate is copied
 # onto each period when it is charged, so changing it never reprices a month already paid.
-# A month the wallet cannot cover gets COACHING_RENEWAL_GRACE_DAYS, then the coaching
-# ends. See users/coaching.py.
+# Every client is told COACHING_RENEWAL_REMINDER_DAYS before a month ends. A month the
+# wallet cannot cover FREEZES the coaching (the owner, 2026-09-19): the client still sees
+# the trainer's routines and cannot start them, and is reminded on each day of
+# COACHING_FROZEN_REMINDER_DAYS after the freeze, until a month is paid. See
+# users/coaching.py.
 COACHING_COMMISSION_RATE = _Decimal("0.20")
 COACHING_PERIOD_DAYS = 30
-COACHING_RENEWAL_GRACE_DAYS = 3
+COACHING_RENEWAL_REMINDER_DAYS = 3
+COACHING_FROZEN_REMINDER_DAYS = (3, 7, 14, 30)
+# The platform plan, the same way: a notice SUBSCRIPTION_RENEWAL_NOTICE_DAYS before it
+# ends, then one on each day of SUBSCRIPTION_LAPSED_REMINDER_DAYS after it ended (0 is
+# the day it ends). Lapsed, the last diet plan stays readable and nothing can be used.
+# See subscription/tasks.py.
+SUBSCRIPTION_RENEWAL_NOTICE_DAYS = 3
+SUBSCRIPTION_LAPSED_REMINDER_DAYS = (0, 3, 7, 14, 30)
 
 # ========================
 # JWT Configuration — RS256 asymmetric signing
@@ -402,11 +412,19 @@ CELERY_IMPORTS = (
 )
 
 CELERY_BEAT_SCHEDULE = {
-    # Coaching is monthly: charge the months that ended, remind, and end the ones whose
-    # grace ran out (users/coaching.py). Hourly, so a renewal lands within the hour.
+    # Coaching is monthly: remind 3 days ahead, charge the months that ended, freeze the
+    # ones the wallet cannot cover and keep reminding them (users/coaching.py). Hourly,
+    # so a renewal — or a top-up that unfreezes — lands within the hour.
     'renew-coaching-periods': {
         'task': 'users.renew_coaching_periods',
         'schedule': crontab(minute=25),
+    },
+    # The platform plan: "ends soon" 3 days ahead, then "ended" on the cadence in
+    # SUBSCRIPTION_LAPSED_REMINDER_DAYS (subscription/tasks.py). Daily at 17:00 UTC,
+    # 20:00 in Damascus: a reminder, not a 3 a.m. push. Runs after the hourly sweep.
+    'send-subscription-renewal-reminders': {
+        'task': 'subscription.send_renewal_reminders',
+        'schedule': crontab(hour=17, minute=35),
     },
     # `age` follows `date_of_birth` (users/models.py). Saves keep it right; this moves
     # everyone whose birthday it is and nobody else writes to their row today.

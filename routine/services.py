@@ -47,3 +47,40 @@ def send_notification(user, notif_type, message, related_object=None):
         event_id=event_id,
     ))
     return None
+
+
+def in_recipients_language(user, render):
+    """`render()` evaluated in `user`'s own language.
+
+    These messages are rendered once, here, and delivered as they are (the templates
+    are `%(message)s`), so rendering them in the request's language — or not at all, as
+    English f-strings — sent English to Arabic users (BACKEND_BUGS B-030).
+    """
+    from django.utils import translation
+
+    with translation.override(getattr(user, 'preferred_language', None) or 'ar'):
+        return render()
+
+
+def routine_name_for(routine, user):
+    """The routine's name in `user`'s language: `Routine.translations` for a language
+    other than the default, the column otherwise."""
+    from django.conf import settings
+
+    language = getattr(user, 'preferred_language', None) or 'ar'
+    if language == settings.LANGUAGE_CODE:
+        return routine.name
+    translated = (routine.translations or {}).get(language, {})
+    return (translated.get('name') if isinstance(translated, dict) else None) or routine.name
+
+
+def notify_assignment(client, routine):
+    """"A new routine has been assigned" for `client`, in their language."""
+    from django.utils.translation import gettext as _
+
+    message = in_recipients_language(client, lambda: _(
+        "A new routine, %(routine)s, has been assigned to you.")
+        % {'routine': routine_name_for(routine, client)})
+    send_notification(user=client, notif_type="routine_assignment", message=message,
+                      related_object=routine)
+

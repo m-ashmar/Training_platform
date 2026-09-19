@@ -6,7 +6,8 @@ from .services import app_media
 
 
 class AppMediaView(APIView):
-    """GET /api/v1/content/media — the pictures the app itself shows.
+    """GET /api/v1/content/media (with or without the trailing slash) — the pictures the
+    app itself shows.
 
     Open to everyone, visitors included: the intro story plays before sign-in. Returns
     `{"media": {"app.story.1": {...}, "app.banner": {...}, "app.empty.3": {...}}}` in the

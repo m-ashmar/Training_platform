@@ -32,6 +32,8 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 14 | Offline set logging idempotency (build guide section 6) | M | DONE (BACKEND_BUGS B-003) |
 | 15 | Owner may edit/delete a saved set (build guide section 6) | M | TODO |
 | 16 | Coaching by the month, commission on every month (owner decision 3) | L | DONE |
+| 17 | Templates: one template, a private personalised copy per client (owner decision 16) | M | DONE |
+| 18 | Renewal reminder 3 days ahead; unpaid or ended = frozen (read-only) (owner decision 17) | L | DONE |
 
 ## 1. Capabilities endpoint and channel header
 
@@ -278,15 +280,66 @@ contract, every user-facing string goes through gettext with an Arabic entry in
   - Renewal: hourly beat `users.renew_coaching_periods` charges the next month from the
     client's wallet when the last one ends, at the price the client agreed to, split the
     same way, starting where the last ended. Idempotent (row lock + unique start per pair).
-  - Unpaid: one `coaching_payment_due` push, `COACHING_RENEWAL_GRACE_DAYS` (3) to top up,
-    then the coaching ends (`coaching_ended` to both). Paid months are not refunded.
-  - `GET /api/v1/coaching/current/`: status `awaiting_first_program | active |
-    payment_due`, the latest month, `renews_at`, `grace_until`, and the price by build.
+  - Unpaid: the coaching FREEZES (item 18; this replaced "3 days' grace, then it
+    ends"). Paid months are not refunded.
+  - `GET /api/v1/coaching/current/`: status `awaiting_first_program | active | frozen |
+    unpaid`, the latest month, `renews_at`, `renewal_reminder`, `frozen_since`, and the
+    price by build (`grace_until` kept, always null; `payment_due` no longer sent).
   - A trainer cannot end a paid month the client is in (owner): unassign answers 409
     `coaching_month_active`; `at_period_end: true` sets `ends_at_period_end` and the
     renewal ends the coaching instead of charging (`ending: true` on the status).
 - **Still to do:** operator-editable rates and double-entry ledger accounts (plan step 4);
   a client "stop renewing" switch (today leaving is the way to stop).
+
+## 17. Templates become private copies
+
+- **Before:** `templates/{id}/generate/` made one routine for one client, never settled
+  the coaching's first month (a program delivered from a template left the coaching
+  `awaiting_first_program` and the trainer unpaid), answered 500 on a bad customisation
+  or a template row repeated, and let a trainer generate for themselves.
+- **Built** (`routine/assignment.py`): `routine_from_template` writes a private copy (both
+  languages in `Routine.translations`, `source_template` recorded — a copy, not a link);
+  `assign_routine` puts one client on it under a row lock, refuses a routine someone else
+  trained on, and settles month 1 for both assign paths. Generate takes `client_ids`
+  (1-50, all or nothing: 403 `not_your_client`), `assign: false` (an unassigned draft to
+  personalise with `routine-exercises/` and then assign), `name`; codes
+  `bad_customization`, `invalid_client_ids`, `template_empty`, `client_ids_need_assign`,
+  `generate_too_large` (clients x days above 1000).
+  Template writes refuse `template_day_out_of_range`, `template_duplicate_row`,
+  `exercise_retired`. A trainer can copy their own template. `routines/?source_template=`.
+  Both admins refuse a second client on a routine; the console's duplicate copies days.
+  Migration `routine/0022_routine_source_template`.
+- **Owner's call, not built:** whether another trainer may generate from someone's
+  PUBLIC template (today yes: public means a library, and the copy is theirs).
+
+## 18. Reminders and the freeze
+
+- **Coaching** (`users/coaching.py`): `remind_upcoming` tells every client 3 days before a
+  paid month ends (push `coaching_renewal_soon`, `renewal_reminder` on the status). An
+  unpaid month sets `CoachingPeriod.frozen_at`: the relation stays, the trainer's
+  routines stay readable, and `training_refusal` answers 403 `coaching_frozen` on every
+  training write (sessions, set logs, bulk logs, progress, update_progress,
+  bulk-complete); the same writes answer `coaching_ended` after the coaching ends, so
+  leaving no longer escapes the freeze; `coaching_unpaid` while support has returned the
+  month of a standing relation. Training inside a paid month still syncs (a session by
+  its start, a dated row by any paid part of its day, and up to the failed renewal).
+  Reminders at 0, 3, 7, 14 and 30 days (`frozen_notices`); the hourly run charges again
+  as soon as the wallet covers it and that month starts when paid. Workout reminders
+  skip routines that cannot be started. A pair with no paid month (free, legacy) is not
+  affected. Migration `users/0043_coaching_period_frozen`.
+- **Platform plan** (`subscription/`): `Subscription.is_frozen` / `access`; the eight diet
+  reads (plans, meals, nutrition, progress) answer 200 to a frozen subscriber whose plan
+  had diet, every use route keeps `no_entitlement`; `subscriptions/current/` gains
+  `access` and `renewal_due`, `access/check/` gains `frozen`. Daily task
+  `subscription.send_renewal_reminders` (17:35 UTC): `subscription_expiring` 3 days
+  ahead, `subscription_expired` on days 0, 3, 7, 14, 30. No price or link in any text.
+- **Trainer erasure** (decision 15): refused with 409 `trainer_has_active_clients` while
+  any relation is approved; the preview reports `active_clients`; no hard delete from
+  either admin.
+- **Owner's call, not built:** whether a freeze ever ends by itself (today it lasts until
+  paid, the client leaves, or the trainer ends it); whether a lapsed PLATFORM plan
+  should also freeze routines (today routines follow the coaching only); an instant
+  unfreeze on top-up (today within the hour).
 
 ## Migration-safe order
 
@@ -306,6 +359,8 @@ only on Postgres), no backfill that invents data, no rename.
 10. Item 8 chat app (new tables).
 11. Item 9 home (no schema; optional `HomeSection`).
 12. Item 13 theme (new tables).
+13. Item 17 `routine/0022` (`Routine.source_template`, nullable FK). Done.
+14. Item 18 `users/0043` (`CoachingPeriod.frozen_at` nullable, `frozen_notices` default 0). Done.
 
 ## Owner's decisions (2026-09-19)
 
@@ -325,10 +380,16 @@ only on Postgres), no backfill that invents data, no rename.
 | 12 | Notification settings | The backend's call | Settings govern pushes; `all` is a master switch; the inbox always keeps the row (B-014) |
 | 13 | Routines | Private, coach to one client; a trainer lists a few public routines on their page | One client per routine; clients never see each other; `public_routines` on the profile (B-001) |
 | 14 | Client rate limit | 1500 an hour | `training_platform/middleware.py` |
+| 15 | A trainer deletes the account mid-month | Never while he has active clients | 409 `trainer_has_active_clients` (item 18) |
+| 16 | Templates | Reusable; each client gets a private, personalised copy | Item 17 |
+| 17 | When a month or plan ends | Remind 3 days before; after it ends the last diet plan and the routine stay visible and cannot be used; keep asking | Item 18 |
+| 9 | Grace before unpaid coaching ends | Replaced by decision 17: no grace, it freezes | Item 18 |
 
 ## Decisions still owed
 
 | # | Decision | What the code does now |
 |---|---|---|
-| 9 | Grace before unpaid coaching ends (3 days) and whether the client can switch off renewal | 3 days; leaving is the way to stop |
-| 15 | A trainer who DELETES their account while clients are mid-month (erasure is a legal right): refuse until the months end, or refund the unused days? | Erasure goes ahead; paid months are not refunded |
+| 18 | Does a freeze ever end by itself (e.g. after 90 days)? | It lasts until paid, the client leaves, or the trainer ends it |
+| 19 | Should a lapsed platform plan also freeze routines? | No: routines follow the coaching they came from |
+| 20 | May another trainer generate from someone's public template? | Yes (public = library) |
+| 21 | A client "stop renewing" switch for coaching | Not built; leaving is the way to stop |

@@ -49,16 +49,22 @@ def refresh_ages_from_birth_dates():
 )
 @no_retry_on_timeout
 def renew_coaching_periods():
-    """Charge every coaching month that has ended, remind, or end what went unpaid.
+    """Remind 3 days ahead, charge every coaching month that has ended, freeze what the
+    wallet cannot cover and keep reminding it.
 
     See users/coaching.py. Every step is idempotent, so a retried run charges nothing
-    twice; a relation that failed is retried with the rest.
+    twice; a relation that failed is retried with the rest. Returns the renewal counts,
+    plus `renewal_reminders` when any "renews soon" notice went out.
     """
-    from .coaching import renew_due
+    from .coaching import remind_upcoming, renew_due
 
+    reminded = remind_upcoming()
     result = renew_due()
-    if result['counts']:
-        logger.info("Coaching renewals: %s", result['counts'])
+    counts = dict(result['counts'])
+    if reminded:
+        counts['renewal_reminders'] = reminded
+    if counts:
+        logger.info("Coaching renewals: %s", counts)
     if result['failed']:
         raise RuntimeError(f"coaching renewal failed for relations {result['failed']}")
-    return result['counts']
+    return counts

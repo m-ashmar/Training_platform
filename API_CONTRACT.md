@@ -35,9 +35,12 @@ POST /api/auth/register/
 
 POST /api/auth/verify-otp/   {email, otp_code}
   -> 200 {message, user, access, refresh}     account activated
+  -> 400 code otp_invalid | otp_expired | too_many_attempts (+ retry_after_seconds, Retry-After)
+  -> 403 code account_disabled
 
 POST /api/auth/resend-otp/   {email}
   -> 200 (always — see anti-enumeration)
+  -> 429 code throttled (+ retry_after_seconds, Retry-After) after 3 an hour
 ```
 
 Note `password1`/`password2` — not `password`. `user_type` is one of
@@ -69,9 +72,12 @@ and locks after **5 failed attempts** per email (counted in Redis, not on the ro
 ### Password reset
 
 ```
-POST /api/auth/forgot-password/         {email}                       -> 200 (always)
+POST /api/auth/forgot-password/         {email}                       -> 200 (always) | 429 throttled
 POST /api/auth/forgot-password/verify/  {email, otp_code}             -> 200 {reset_token}
+                                        | 400 otp_invalid | otp_expired | too_many_attempts
 POST /api/auth/forgot-password/confirm/ {reset_token, new_password}   -> 200
+                                        | 400 field_errors.new_password: password_too_short |
+                                          password_too_common | password_entirely_numeric (as at sign-up)
 ```
 
 The `reset_token` is a single-use opaque string, **valid 15 minutes**, and is never stored in
@@ -85,7 +91,10 @@ app must treat a post-reset `401 token_not_valid` as "log in again", not as an e
 
 `forgot-password` and `resend-otp` always return `200` with the same message whether or
 not the email exists. Do not use them to check account existence — the response is
-identical by design.
+identical by design. Their hourly limit (429 `throttled`) counts every address alike, so it
+tells nothing either; so does `otp_invalid`, the same answer for a wrong code, no pending
+code and an unknown address. Addresses are matched lower-cased (then as typed) on every
+auth route, sign-in included.
 
 ---
 
@@ -178,7 +187,9 @@ recipient's language.
 
 Every registered event type is emitted; there are no placeholders to skip.
 
-**Reminder scheduling.** `session_reminder` fires once a day, in the user's own
+**Reminder scheduling.** `session_reminder` fires at most once a day, and only for a
+client with a program they can start (an assigned routine whose coaching is not paused or
+over; nothing for someone with no program, or a trainer), in the user's own
 evening: the sweep runs hourly and sends only to users whose local hour — resolved
 through `preferred_timezone` — equals `workout_reminder_hour`. Both fields are on the
 profile and are written with `POST /api/auth/user/update/` (a client may also use
@@ -208,9 +219,11 @@ Endpoint-specific, identity-scoped limits sit on top and are the ones users actu
 |---|---|
 | `POST /api/auth/resend-otp/` | 3 / hour per email+IP |
 | `POST /api/auth/forgot-password/` | 3 / hour per email |
-| OTP verification | 5 attempts per email, then locked 1 hour |
+| OTP verification | 5 wrong codes per email and purpose, then locked 15 minutes (400 `too_many_attempts`) |
 
-A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
+Every limit answer carries `retry_after_seconds` and `Retry-After`: the seconds really left,
+not the window's length. The global limiter's `429` has `code: "rate_limited"`; the
+per-address limits above have `code: "throttled"`.
 
 ---
 
@@ -319,23 +332,32 @@ A `429` carries `Retry-After` (seconds) and `code: "rate_limited"`.
 
 ### Diet
 
+After the platform plan ends (the owner, 2026-09-19) the subscriber is **frozen**: the
+routes marked `HasDietAccessOrFrozenRead` keep answering 200 (the plans and progress stay
+readable), every other diet and AI route answers 403 `no_entitlement` as before. The app
+tells "ended" from "never subscribed" by `access` on `subscriptions/current/`
+(`active | frozen | inactive`), and shows the renewal reminder while `renewal_due` is
+true (3 days before the end). Pushes: `subscription_expiring` (3 days before),
+`subscription_expired` (on the day it ends, then after 3, 7, 14 and 30 days). No price and
+no link in either, on any build.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/diet/v1/advice/latest/` | auth, HasDietAccess | `DailyAdviceView` |
 | `POST` | `/api/diet/v1/client/meals/interact/` | auth, HasDietAccess | `ClientMealInteractionView` |
-| `GET` | `/api/diet/v1/client/meals/{meal_id}/` | auth, HasDietAccess | `ClientMealDetailsView` |
+| `GET` | `/api/diet/v1/client/meals/{meal_id}/` | auth, HasDietAccessOrFrozenRead | `ClientMealDetailsView` |
 | `POST` | `/api/diet/v1/client/meals/{meal_id}/complete/` | auth, HasDietAccess | `MealCompletionView` |
-| `GET` | `/api/diet/v1/client/progress/` | auth, HasDietAccess | `ClientProgressView` |
-| `GET` | `/api/diet/v1/client/progress/enhanced/` | auth, HasDietAccess | `EnhancedClientProgressView` |
-| `GET` | `/api/diet/v1/client/progress/weekly/` | auth, HasDietAccess | `ClientWeeklyProgressView` |
+| `GET` | `/api/diet/v1/client/progress/` | auth, HasDietAccessOrFrozenRead | `ClientProgressView` |
+| `GET` | `/api/diet/v1/client/progress/enhanced/` | auth, HasDietAccessOrFrozenRead | `EnhancedClientProgressView` |
+| `GET` | `/api/diet/v1/client/progress/weekly/` | auth, HasDietAccessOrFrozenRead | `ClientWeeklyProgressView` |
 | `GET` | `/api/diet/v1/food/categories/` | auth, HasDietAccess | `FoodCategoryListView` |
 | `POST` | `/api/diet/v1/food/import/` | auth, **admin** | `FoodImportView` |
 | `GET` | `/api/diet/v1/food/list/` | auth, HasDietAccess | `FoodListView` |
 | `GET` | `/api/diet/v1/food/search/` | auth | `FoodSearchView` |
-| `GET` | `/api/diet/v1/meals/{meal_id}/components/` | auth, HasDietAccess | `MealComponentsView` |
-| `GET` | `/api/diet/v1/my/diet-plans/` | auth, HasDietAccess | `MyDietPlansView` |
-| `GET` | `/api/diet/v1/nutrition/plan/{plan_id}/` | auth, HasDietAccess | `DietPlanNutritionView` |
-| `GET` | `/api/diet/v1/plan/{plan_id}/meals-with-ingredients/` | auth, HasDietAccess | `DietPlanMealsWithIngredientsView` |
+| `GET` | `/api/diet/v1/meals/{meal_id}/components/` | auth, HasDietAccessOrFrozenRead | `MealComponentsView` |
+| `GET` | `/api/diet/v1/my/diet-plans/` | auth, HasDietAccessOrFrozenRead | `MyDietPlansView` |
+| `GET` | `/api/diet/v1/nutrition/plan/{plan_id}/` | auth, HasDietAccessOrFrozenRead | `DietPlanNutritionView` |
+| `GET` | `/api/diet/v1/plan/{plan_id}/meals-with-ingredients/` | auth, HasDietAccessOrFrozenRead | `DietPlanMealsWithIngredientsView` |
 | `POST` | `/api/diet/v1/plans/generate-rule/` | auth, HasDietAccess | `GenerateDietPlanRuleBasedView` |
 | `POST` | `/api/diet/v1/plans/generate/` | auth, HasDietAccess | `GenerateDietPlanView` |
 | `GET` | `/api/diet/v1/plans/tasks/{task_id}/` | auth, HasDietAccess | `PlanTaskStatusView` |
@@ -382,13 +404,28 @@ coaching fee. Matches carry up to three `reasons`, each `{code, text: {ar, en}}`
 ### Coaching (monthly)
 
 Coaching is sold by the month: month 1 is held when the trainer accepts and paid out when
-the first program arrives; each later month is charged from the wallet when the last one
-ends, with `COACHING_RENEWAL_GRACE_DAYS` (3) to top up before the coaching ends. The
-platform keeps 20% of every month. Pushes: `coaching_renewed`, `coaching_payment_due`,
-`coaching_ended` (unpaid), `coaching_finished` (the trainer stopped at the month's end, or
-an account was suspended). A trainer cannot end a paid month the client is in
-(`trainer/unassign-client/` answers 409 `coaching_month_active`; `at_period_end: true`
-stops the renewal instead).
+the first program arrives — from `routines/{id}/assign_to_client/` or
+`templates/{id}/generate/`; each later month is charged from the wallet when the last one
+ends. The platform keeps 20% of every month. Every client is told 3 days before a month
+ends (`renewal_reminder` on `coaching/current/`, push `coaching_renewal_soon`). A month
+the wallet cannot cover **freezes** the coaching (the owner, 2026-09-19): status
+`frozen`, the trainer's routines stay readable and every training write on them answers
+403 `coaching_frozen` with `trainer_id` (sessions, set logs, bulk logs, progress,
+update_progress, bulk-complete); the push `coaching_payment_due` goes out when it freezes
+and after 3, 7, 14 and 30 days. The hourly run charges again once the wallet covers the
+month, and that month starts when it is paid. After a coaching ends the same writes
+answer 403 `coaching_ended` (`coaching_unpaid` while support has returned the month of a
+coaching that still stands). Training inside a paid month (offline sync) is always
+accepted. Other pushes: `coaching_renewed`, `coaching_finished` (the trainer stopped at
+the month's end, or an account was suspended). A trainer cannot end a paid month the
+client is in (`trainer/unassign-client/` answers 409 `coaching_month_active`;
+`at_period_end: true` stops the renewal instead), and cannot delete the account while
+coaching anyone (`DELETE privacy/erase/` answers 409 `trainer_has_active_clients`).
+
+Templates: a template is reused for any number of clients and every client gets a
+private copy (`templates/{id}/generate/`: `client_id`, or `client_ids` for several, or
+`assign: false` for an unassigned draft to personalise and then `assign_to_client`).
+`routines/?source_template=<id>` lists the copies made from one template.
 
 | Method | Path | Auth | View |
 |---|---|---|---|

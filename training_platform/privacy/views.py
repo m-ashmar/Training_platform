@@ -44,7 +44,19 @@ class PersonalDataEraseView(APIView):
     cannot destroy a balance, and payment history has to survive. Everything else is
     deleted or anonymised, and the account is deactivated.
 
-    `?dry_run=1` reports what would happen without touching anything.
+    `?dry_run=1` reports what would happen without touching anything. `GET` is the same
+    preview; for a trainer, `preview.trainer_relations.active_clients` counts the clients
+    they still coach, and while it is above 0 the erasure is refused.
+
+    Answers:
+      200 `{message, detail}`   erased.
+      400 `{error, detail, preview}`   `confirm=ERASE` missing.
+      409 `code: trainer_has_active_clients` with `active_clients` — a trainer still
+          coaches someone (the owner's rule: never while he has active clients). End
+          each coaching first: `POST /api/auth/trainer/unassign-client/`, with
+          `at_period_end` for a paid month, which then ends at the month's end.
+      409 `code: erasure_refused` — a held payment could not be returned; retry later.
+    Identical on every build.
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -68,7 +80,17 @@ class PersonalDataEraseView(APIView):
         user_id = request.user.pk
         try:
             report = erase_user_data(request.user)
-        except ErasureRefused:
+        except ErasureRefused as exc:
+            if exc.code == "trainer_has_active_clients":
+                logger.warning("Erasure refused for trainer %s: %s active clients",
+                               user_id, exc.extra.get("active_clients"))
+                return Response(
+                    {"error": _("You still coach active clients. End your coaching with "
+                                "each of them before deleting your account."),
+                     "code": "trainer_has_active_clients",
+                     "active_clients": exc.extra.get("active_clients", 0)},
+                    status=status.HTTP_409_CONFLICT,
+                )
             # Rolled back whole, and safe to retry: the escrow could not return a held
             # trainer charge, and deleting its record anyway would lose the money for
             # good.

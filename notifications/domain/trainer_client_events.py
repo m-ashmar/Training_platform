@@ -116,18 +116,37 @@ class CoachingRenewedEvent(BaseDomainEvent):
 
 
 @dataclass
-class CoachingPaymentDueEvent(BaseDomainEvent):
-    """The month ended and the wallet could not cover the next one."""
+class CoachingRenewalSoonEvent(BaseDomainEvent):
+    """The paid month ends in a few days (COACHING_RENEWAL_REMINDER_DAYS). Sent to every
+    client, whether or not the wallet covers the next month (the owner, 2026-09-19)."""
     template = NotificationTemplate(
-        title=_("Top up to keep your coaching"),
-        body=_("Your wallet could not cover the next month with %(name)s. "
-               "Top up within %(days)s days to keep your trainer."),
+        title=_("Your coaching renews soon"),
+        body=_("Your month of coaching with %(name)s ends in %(days)s days."),
     )
     actor_id: int = 0          # the trainer
     recipient_id: int = 0      # the client
     trainer_name: str = ""
     days: int = 0
     period_id: int = 0
+
+
+@dataclass
+class CoachingPaymentDueEvent(BaseDomainEvent):
+    """The month ended and the wallet could not cover the next one: the coaching is
+    paused (frozen). Sent when it freezes (`step` 0) and again on each step of
+    COACHING_FROZEN_REMINDER_DAYS while it stays paused. States the fact only: no amount,
+    no link, the same on every build."""
+    template = NotificationTemplate(
+        title=_("Your coaching is paused"),
+        body=_("Your coaching with %(name)s is paused until the next month is paid. "
+               "You can still see your routines."),
+    )
+    actor_id: int = 0          # the trainer
+    recipient_id: int = 0      # the client
+    trainer_name: str = ""
+    days: int = 0              # unused since the freeze; kept for queued events
+    period_id: int = 0
+    step: int = 0
 
 
 @dataclass

@@ -84,8 +84,9 @@ def test_anonymous_gets_no_5xx_and_reaches_only_public_endpoints(api):
                "/api/v1/config/capabilities", "/api/v1/config/capabilities/",
                # Design v2: the intro story plays and the trainer roster is browsed before
                # sign-in (the visitor shell). Neither runs authentication, and neither
-               # answer depends on who asks.
-               "/api/v1/content/media/", "/api/v1/trainers/"}
+               # answer depends on who asks. The media route answers both spellings, as
+               # capabilities does: its contract names it without the slash (B-035).
+               "/api/v1/content/media", "/api/v1/content/media/", "/api/v1/trainers/"}
     errors, reachable = [], []
     for path in _routes():
         resp = anon.get(path)

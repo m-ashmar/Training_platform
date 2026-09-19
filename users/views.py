@@ -160,9 +160,9 @@ class UpdateUserDetailsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Retrieve user details."""
+        """Retrieve user details. `profile_picture` is an absolute URL."""
         user = request.user
-        serializer = UserDetailsSerializer(user)
+        serializer = UserDetailsSerializer(user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -170,10 +170,12 @@ class UpdateUserDetailsView(APIView):
 
         Errors go through the API envelope, so each field error carries its `code`
         (`field_errors.<field>[0].code`), e.g. `under_minimum_age` on `date_of_birth`
-        or `age`. The field keys stay at the top level as before.
+        or `age`. The field keys stay at the top level as before. `profile_picture` is
+        read-only here: upload it with `POST /api/auth/user/profile-picture/`.
         """
         user = request.user
-        serializer = UserDetailsSerializer(user, data=request.data, partial=True)
+        serializer = UserDetailsSerializer(user, data=request.data, partial=True,
+                                           context={'request': request})
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response({'message': _('Details updated successfully!')}, status=status.HTTP_200_OK)
@@ -265,16 +267,15 @@ class OTPVerificationView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        from .utils import verify_otp
+        from .utils import otp_refusal_response, verify_otp_detailed
         from rest_framework_simplejwt.tokens import RefreshToken
-        
-        success, otp_instance, error_message = verify_otp(email, otp_code)
-        
+
+        success, otp_instance, error_message, code, retry_after = verify_otp_detailed(email, otp_code)
+
         if not success:
-            return Response(
-                {'error': error_message},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            # Its own `code` for each reason (BACKEND_BUGS B-021): `otp_invalid`,
+            # `otp_expired`, `too_many_attempts` (+ `retry_after_seconds`).
+            return otp_refusal_response(error_message, code, retry_after)
         
         # Verifying an email proves the address, and nothing else. It used to set
         # `is_active = True`, which is also the column a moderator clears to suspend an
@@ -340,11 +341,14 @@ class ResendOTPView(APIView):
         _GENERIC_MSG = _('If this email is registered and unverified, a new OTP has been sent.')
 
         email = request.data.get('email')
-        if not email:
+        if not email or not isinstance(email, str):
             return Response(
                 {'error': _('Email is required')},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        # Stored lower-cased: `Samer@Example.com` found nobody, answered 200, sent
+        # nothing and still spent one of the three requests (BACKEND_BUGS B-033).
+        email = email.strip().lower()
 
         # --- Layer 1: ratelimit_cache (DB1, Redis-backed, survives app cache flush) ---
         # Key: sha256 of email+IP so we don't store PII in Redis keys.
@@ -358,9 +362,14 @@ class ResendOTPView(APIView):
         rl_count = rl.get(rl_cache_key, 0)
         if rl_count >= 3:
             logger.warning(f"OTP resend rate limit hit for hash {rate_key}")
+            # The seconds left on the hour and a code (BACKEND_BUGS B-022).
+            from training_platform.cache import seconds_left
+            wait = seconds_left(rl, rl_cache_key, 3600)
+            message = _('Too many OTP requests. Please wait 1 hour before requesting again.')
             return Response(
-                {'error': _('Too many OTP requests. Please wait 1 hour before requesting again.')},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
+                {'error': message, 'detail': message, 'code': 'throttled',
+                 'retry_after_seconds': wait},
+                status=status.HTTP_429_TOO_MANY_REQUESTS, headers={'Retry-After': str(wait)}
             )
         try:
             rl.incr(rl_cache_key)
@@ -369,7 +378,10 @@ class ResendOTPView(APIView):
 
         # --- Anti-enumeration: look up user silently ---
         try:
-            user = CustomUser.objects.get(email=email)
+            from .utils import find_by_email
+            user = find_by_email(email)
+            if user is None:
+                raise CustomUser.DoesNotExist
         except CustomUser.DoesNotExist:
             # Do NOT reveal whether the email exists
             logger.info(f"OTP resend requested for unknown email (hash: {rate_key})")
@@ -2102,7 +2114,11 @@ class ClientRequestStatusView(APIView):
 class ProfilePictureUploadView(APIView):
     """
     Dedicated endpoint for uploading profile pictures.
-    Accepts multipart/form-data with image file.
+    Accepts multipart/form-data with image file (`profile_picture`).
+
+    400 with the refusal's code (`file_too_large`, `unsupported_format`,
+    `image_dimensions_too_large`, ...); 500 `upload_failed` when storage fails — the
+    body never carries the exception's text.
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -2162,9 +2178,13 @@ class ProfilePictureUploadView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
-        except Exception as e:
+        except Exception:
+            # Logged here, never sent: the exception text carried storage paths and
+            # library messages, untranslated and with no code (BACKEND_BUGS B-024).
+            logger.exception("Profile picture upload failed for user %s", request.user.pk)
+            message = _('The picture could not be saved. Please try again.')
             return Response(
-                {'error': f'Upload failed: {str(e)}'},
+                {'error': message, 'detail': message, 'code': 'upload_failed'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -2192,9 +2212,11 @@ class ProfilePictureUploadView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
-        except Exception as e:
+        except Exception:
+            logger.exception("Profile picture removal failed for user %s", request.user.pk)
+            message = _('The picture could not be removed. Please try again.')
             return Response(
-                {'error': f'Failed to remove profile picture: {str(e)}'},
+                {'error': message, 'detail': message, 'code': 'upload_failed'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -2233,13 +2255,22 @@ class PasswordResetRequestView(APIView):
         cache_key = f'pwd_reset_req:{email_hash}'
         request_count = rl.get(cache_key, 0)
         if request_count >= 3:
+            # The seconds left on the hour and a code (BACKEND_BUGS B-022).
+            from training_platform.cache import seconds_left
+            wait = seconds_left(rl, cache_key, 3600)
+            message = _('Too many password reset requests. Please wait 1 hour before trying again.')
             return Response(
-                {'error': _('Too many password reset requests. Please wait 1 hour before trying again.')},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
+                {'error': message, 'detail': message, 'code': 'throttled',
+                 'retry_after_seconds': wait},
+                status=status.HTTP_429_TOO_MANY_REQUESTS, headers={'Retry-After': str(wait)}
             )
 
         try:
-            user = CustomUser.objects.get(email=email, is_active=True)
+            # Without regard to case: the address is stored lower-cased (B-033).
+            from .utils import find_by_email
+            user = find_by_email(email, is_active=True)
+            if user is None:
+                raise CustomUser.DoesNotExist
             create_password_reset_otp(user)
         except CustomUser.DoesNotExist:
             # Do NOT reveal whether the email exists
@@ -2273,7 +2304,7 @@ class PasswordResetVerifyView(APIView):
     def post(self, request):
         from .serializers import PasswordResetVerifySerializer
         from .models import PasswordResetToken
-        from .utils import verify_otp
+        from .utils import otp_refusal_response, verify_otp_detailed
         from datetime import timedelta
 
         serializer = PasswordResetVerifySerializer(data=request.data)
@@ -2282,13 +2313,12 @@ class PasswordResetVerifyView(APIView):
         email = serializer.validated_data['email']
         otp_code = serializer.validated_data['otp_code']
 
-        success, otp_instance, error_message = verify_otp(email, otp_code, purpose='password_reset')
+        success, otp_instance, error_message, code, retry_after = verify_otp_detailed(
+            email, otp_code, purpose='password_reset')
 
         if not success:
-            return Response(
-                {'error': error_message},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            # `otp_invalid`, `otp_expired` or `too_many_attempts` (BACKEND_BUGS B-021).
+            return otp_refusal_response(error_message, code, retry_after)
 
         user = otp_instance.user
 

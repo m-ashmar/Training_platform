@@ -41,7 +41,7 @@ from datetime import date, time, datetime
 from django.db import models
 
 # Import subscription permissions
-from subscription.permissions import HasDietAccess
+from subscription.permissions import HasDietAccess, HasDietAccessOrFrozenRead
 from subscription import quota
 from django.utils import timezone
 from django.http import Http404
@@ -2068,8 +2068,13 @@ class DietPlanNutritionView(APIView):
     """
     Enhanced API endpoint to get detailed nutritional information for a diet plan.
     Shows total proteins, carbs, fats for the whole plan and each meal.
+
+    Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
+    (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
+    route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
+    `feature_not_in_plan`.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess]
+    permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
     def get(self, request, plan_id):
         """Get detailed nutritional breakdown for a diet plan."""
@@ -2243,8 +2248,13 @@ class MealComponentsView(APIView):
     """
     Enhanced API endpoint to get detailed components of any meal in a diet plan.
     Shows all food items, quantities, and nutritional breakdown.
+
+    Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
+    (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
+    route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
+    `feature_not_in_plan`.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess]
+    permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
     def get(self, request, meal_id):
         """Get detailed components of a specific meal."""
@@ -2419,8 +2429,13 @@ class EnhancedClientProgressView(APIView):
     """
     Enhanced API endpoint for clients to track detailed daily progress.
     Shows meal completion status, nutritional progress, and component details.
+
+    Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
+    (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
+    route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
+    `feature_not_in_plan`.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess]
+    permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
     def get(self, request):
         """Get enhanced daily progress with detailed meal and nutritional information."""
@@ -2599,8 +2614,13 @@ class MealCompletionView(APIView):
 class ClientProgressView(APIView):
     """
     API endpoint for clients to track their daily progress.
+
+    Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
+    (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
+    route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
+    `feature_not_in_plan`.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess]
+    permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
     def get(self, request):
         """Get daily progress for the authenticated client."""
@@ -2654,8 +2674,13 @@ class ClientProgressView(APIView):
 class ClientWeeklyProgressView(APIView):
     """
     API endpoint for clients to get weekly progress.
+
+    Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
+    (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
+    route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
+    `feature_not_in_plan`.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess]
+    permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
     def get(self, request):
         """Get weekly progress for the authenticated client."""
@@ -2913,8 +2938,13 @@ class ClientMealInteractionView(APIView):
 class ClientMealDetailsView(APIView):
     """
     API endpoint for clients to get detailed meal information.
+
+    Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
+    (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
+    route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
+    `feature_not_in_plan`.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess]
+    permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
     def get(self, request, meal_id):
         """Get detailed information about a specific meal."""
@@ -2966,8 +2996,13 @@ class MyDietPlansView(APIView):
     """
     List all diet plans for the authenticated client user.
     Supports standard pagination: ?page=N&page_size=N
+
+    Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
+    (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
+    route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
+    `feature_not_in_plan`.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess]
+    permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
     def get(self, request):
         from routine.views import StandardResultsSetPagination
@@ -3031,8 +3066,13 @@ class DietPlanMealsWithIngredientsView(APIView):
     """
     Fetch all meals and ingredients for a given diet plan.
     Clients can access their own plans; trainers can access plans they created.
+
+    Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
+    (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
+    route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
+    `feature_not_in_plan`.
     """
-    permission_classes = [IsAuthenticated, HasDietAccess]
+    permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
     def get(self, request, plan_id: int):
         try:

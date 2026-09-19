@@ -550,9 +550,14 @@ class SubscriptionAccessView(APIView):
             try:
                 subscription = user.subscription
                 if not subscription.is_active:
+                    # `subscription_status` and `frozen` added: a lapsed subscriber
+                    # (frozen: plans readable, nothing usable) and one who never paid
+                    # got the same answer.
                     return Response({
                         'has_access': False,
-                        'message': _('No active subscription')
+                        'message': _('No active subscription'),
+                        'subscription_status': subscription.status,
+                        'frozen': subscription.is_frozen,
                     })
                 
                 access_results = {}

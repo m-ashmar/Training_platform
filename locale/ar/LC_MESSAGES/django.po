@@ -67,10 +67,8 @@ msgid "Daily message limit reached. Resets at %(time)s."
 msgstr "بلغت الحد اليومي للرسائل. تتم إعادة التعيين في %(time)s."
 
 #: ai_assistant/consumers.py:197
-#, fuzzy
-#| msgid "Failed to send OTP. Please try again later."
 msgid "Something went wrong. Please try again."
-msgstr "فشل في إرسال رمز التحقق. يرجى المحاولة مرة أخرى لاحقاً."
+msgstr "حدث خطأ ما. يرجى المحاولة مرة أخرى."
 
 #: ai_assistant/consumers.py:210
 msgid "Feedback must be 'positive' or 'negative'."
@@ -1154,10 +1152,9 @@ msgid "You do not have access to this routine."
 msgstr "ليس لديك صلاحية لتنفيذ هذا الإجراء"
 
 #: routine/views.py:1003 routine/views.py:2037
-#, fuzzy, python-format
-#| msgid "Day %(day)s is not part of the routine."
+#, python-format
 msgid "Day %(day)s is not part of this routine."
-msgstr "اليوم %(day)s ليس جزءًا من الروتين."
+msgstr "اليوم %(day)s ليس جزءاً من هذا البرنامج."
 
 #: routine/views.py:1071
 #, fuzzy
@@ -1752,10 +1749,8 @@ msgid "Image has too many pixels."
 msgstr "الصورة تحتوي على عدد بكسلات كبير جدًا."
 
 #: training_platform/middleware.py:101
-#, fuzzy
-#| msgid "Failed to send OTP. Please try again later."
 msgid "Too many requests. Please try again later."
-msgstr "فشل في إرسال رمز التحقق. يرجى المحاولة مرة أخرى لاحقاً."
+msgstr "طلبات كثيرة جداً. يرجى المحاولة لاحقاً."
 
 #: training_platform/middleware.py:240
 msgid "Invalid input data"
@@ -1948,10 +1943,8 @@ msgid "A user with this phone number already exists."
 msgstr "يوجد مستخدم مسجل برقم الهاتف هذا."
 
 #: users/serializers.py:82
-#, fuzzy
-#| msgid "A user with this email already exists."
 msgid "A user with that username already exists."
-msgstr "يوجد مستخدم مسجل بهذا البريد الإلكتروني."
+msgstr "يوجد مستخدم بهذا الاسم بالفعل."
 
 #: users/serializers.py:106 users/views.py:933
 #, fuzzy
@@ -2263,12 +2256,9 @@ msgid "No profile picture to remove"
 msgstr "لا توجد صورة للملف الشخصي لإزالتها"
 
 #: users/views.py:1704
-#, fuzzy
-#| msgid "Too many OTP requests. Please wait 1 hour before requesting again."
 msgid ""
 "Too many password reset requests. Please wait 1 hour before trying again."
-msgstr ""
-"طلبات رمز التحقق كثيرة جداً. يرجى الانتظار ساعة واحدة قبل المحاولة مرة أخرى."
+msgstr "طلبات إعادة تعيين كلمة المرور كثيرة جداً. يرجى الانتظار ساعة واحدة قبل المحاولة مرة أخرى."
 
 #: users/views.py:1726
 msgid ""
@@ -2669,3 +2659,198 @@ msgstr "انتهى التدريب بينك وبين %(name)s."
 #: routine/views.py
 msgid "Only the trainer who wrote this routine can copy it."
 msgstr "لا يمكن نسخ هذا البرنامج إلا للمدرب الذي كتبه."
+
+#: training_platform/privacy/views.py
+msgid ""
+"You still coach active clients. End your coaching with each of them before "
+"deleting your account."
+msgstr "لا يزال لديك متدربون فاعلون. أنهِ التدريب مع كل منهم قبل حذف حسابك."
+
+#: routine/assignment.py
+msgid "customizations must be an object."
+msgstr "يجب أن تكون التخصيصات كائناً."
+
+#: routine/assignment.py
+msgid "Each customisation must be an object."
+msgstr "يجب أن يكون كل تخصيص كائناً."
+
+#: routine/assignment.py
+#, python-format
+msgid "%(field)s must be a whole number from %(low)s to %(high)s."
+msgstr "يجب أن تكون قيمة %(field)s عدداً صحيحاً من %(low)s إلى %(high)s."
+
+#: routine/views.py
+msgid ""
+"A draft is written for no one; assign it afterwards with assign_to_client."
+msgstr "المسودة لا تُكتب لأحد؛ عيّنها لاحقاً باستخدام assign_to_client."
+
+#: routine/views.py
+#, python-format
+msgid "client_ids must be a list of 1 to %(n)s different client ids."
+msgstr "يجب أن تكون client_ids قائمة من 1 إلى %(n)s من معرّفات متدربين مختلفة."
+
+#: routine/views.py
+msgid "You can only assign routines to your own clients."
+msgstr "يمكنك تعيين البرامج لمتدربيك فقط."
+
+#: routine/views.py
+msgid "This template has no exercises yet."
+msgstr "لا يحتوي هذا القالب على تمارين بعد."
+
+#: routine/views.py
+#, python-format
+msgid "Copy of %(name)s"
+msgstr "نسخة من %(name)s"
+
+#: routine/serializers.py
+msgid ""
+"Some exercises are on a day after the template's last day. Move them first."
+msgstr "بعض التمارين في يوم بعد آخر أيام القالب. انقلها أولاً."
+
+#: routine/serializers.py
+#, python-format
+msgid "Exercise %(n)s is on day %(day)s; the template has %(days)s days."
+msgstr "التمرين %(n)s في اليوم %(day)s، والقالب فيه %(days)s أيام."
+
+#: routine/serializers.py
+#, python-format
+msgid "Exercise %(n)s repeats another at the same day and position."
+msgstr "التمرين %(n)s يكرر تمريناً آخر في اليوم والترتيب نفسيهما."
+
+#: routine/admin.py
+msgid "A routine belongs to one client. Copy it for each other client."
+msgstr "البرنامج يخص متدرباً واحداً. انسخه لكل متدرب آخر."
+
+#: users/exceptions.py
+msgid ""
+"Your coaching is paused until the next month is paid. You can still see your "
+"routine."
+msgstr "تدريبك متوقف حتى يُدفع الشهر التالي. لا يزال بإمكانك الاطلاع على برنامجك."
+
+#: users/exceptions.py
+msgid ""
+"Your coaching with this trainer has ended. You can still see this routine; "
+"start a new coaching to train on it."
+msgstr ""
+"انتهى تدريبك مع هذا المدرب. لا يزال بإمكانك الاطلاع على هذا البرنامج؛ ابدأ "
+"تدريباً جديداً لتتمرن عليه."
+
+#: notifications/domain/trainer_client_events.py
+msgid "Your coaching renews soon"
+msgstr "يتجدد تدريبك قريباً"
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "Your month of coaching with %(name)s ends in %(days)s days."
+msgstr "ينتهي شهر تدريبك مع %(name)s خلال %(days)s أيام."
+
+#: notifications/domain/trainer_client_events.py
+msgid "Your coaching is paused"
+msgstr "تدريبك متوقف مؤقتاً"
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid ""
+"Your coaching with %(name)s is paused until the next month is paid. You can "
+"still see your routines."
+msgstr ""
+"تدريبك مع %(name)s متوقف حتى يُدفع الشهر التالي. لا يزال بإمكانك الاطلاع على "
+"برامجك."
+
+#: notifications/domain/subscription_events.py
+msgid "Your subscription ends soon"
+msgstr "ينتهي اشتراكك قريباً"
+
+#: notifications/domain/subscription_events.py
+#, python-format
+msgid "Your subscription ends in %(days)s days."
+msgstr "ينتهي اشتراكك خلال %(days)s أيام."
+
+#: notifications/domain/subscription_events.py
+msgid "Your subscription has ended"
+msgstr "انتهى اشتراكك"
+
+#: notifications/domain/subscription_events.py
+msgid ""
+"Your diet plan and routine are saved and you can still see them. Using them "
+"needs an active subscription."
+msgstr ""
+"خطتك الغذائية وبرنامجك التدريبي محفوظان ويمكنك الاطلاع عليهما. استخدامهما "
+"يحتاج إلى اشتراك فعّال."
+
+#: users/serializers.py
+#, python-format
+msgid "Keep this to %(n)s characters."
+msgstr "اجعل هذا في حدود %(n)s حرفاً."
+
+#: routine/serializers.py
+msgid "This routine has been retired."
+msgstr "تم إيقاف هذا البرنامج."
+
+#: routine/serializers.py
+#, python-format
+msgid "Day %(day)s has no exercises."
+msgstr "اليوم %(day)s لا يحتوي على تمارين."
+
+#: users/device_token_views.py
+#, python-format
+msgid "%(field)s must be text."
+msgstr "يجب أن يكون %(field)s نصاً."
+
+#: users/device_token_views.py
+#, python-format
+msgid "%(field)s is longer than %(limit)s characters."
+msgstr "%(field)s أطول من %(limit)s حرفاً."
+
+#: users/views.py
+msgid "The picture could not be saved. Please try again."
+msgstr "تعذّر حفظ الصورة. يرجى المحاولة مرة أخرى."
+
+#: users/views.py
+msgid "The picture could not be removed. Please try again."
+msgstr "تعذّرت إزالة الصورة. يرجى المحاولة مرة أخرى."
+
+#: routine/views.py
+#, python-format
+msgid "Well done! You finished a workout on %(routine)s."
+msgstr "أحسنت! أنهيت تمريناً من %(routine)s."
+
+#: routine/views.py
+#, python-format
+msgid "%(name)s finished a workout on %(routine)s."
+msgstr "أنهى %(name)s تمريناً من %(routine)s."
+
+#: routine/services.py
+#, python-format
+msgid "A new routine, %(routine)s, has been assigned to you."
+msgstr "تم تعيين برنامج جديد لك: %(routine)s."
+
+#: users/exceptions.py
+msgid ""
+"Your coaching is on hold until support resolves its payment. You can still see "
+"your routine."
+msgstr "تدريبك معلّق حتى يعالج الدعم دفعته. لا يزال بإمكانك الاطلاع على برنامجك."
+
+#: routine/views.py
+msgid "Too much at once: split the clients over more than one request."
+msgstr "هذا كثير دفعة واحدة: وزّع المتدربين على أكثر من طلب."
+
+#: users/utils.py
+msgid "Invalid or expired code. Please request a new one."
+msgstr "الرمز غير صحيح أو منتهي الصلاحية. يرجى طلب رمز جديد."
+
+#: users/utils.py
+msgid "This code has expired. Please request a new one."
+msgstr "انتهت صلاحية هذا الرمز. يرجى طلب رمز جديد."
+
+#: users/utils.py
+msgid "Too many failed attempts. Please try again in 15 minutes."
+msgstr "محاولات فاشلة كثيرة جداً. يرجى المحاولة بعد 15 دقيقة."
+
+#: subscription/permissions.py
+msgid "An active subscription is needed for this feature."
+msgstr "هذه الميزة تحتاج إلى اشتراك فعّال."
+
+#: subscription/permissions.py
+msgid "Your plan does not include this feature."
+msgstr "خطتك لا تتضمن هذه الميزة."

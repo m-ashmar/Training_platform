@@ -44,3 +44,14 @@ def ratelimit_cache():
 def edamam_cache():
     """DB4 — Edamam API response cache (24h TTL)."""
     return _get('edamam')
+
+
+def seconds_left(cache, key: str, default: int) -> int:
+    """Seconds until `key` expires in `cache`, or `default` when the backend cannot say
+    (the in-memory cache in tests has no `ttl`) or the key has no expiry. For the
+    `Retry-After` of a throttle: the window's real remainder, not its full length."""
+    try:
+        ttl = cache.ttl(key)
+    except Exception:
+        ttl = None
+    return int(ttl) if isinstance(ttl, (int, float)) and ttl > 0 else int(default)

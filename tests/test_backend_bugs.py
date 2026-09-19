@@ -775,3 +775,235 @@ def test_b001_a_trainer_copies_a_routine_for_another_client(make_user, api):
     assert list(copy.routine_exercises.values_list("day", "sets", "weight")) == [(2, 4, 70.0)]
     stranger = make_user("bb1_not_mine", user_type="trainer")
     assert api(stranger).post(f"/api/routine/routines/{routine.pk}/copy/").status_code in (403, 404)
+
+
+# ------------------------------------------------------------- B-020 .. B-036
+def _sign_up(api, username, email, phone):
+    return api().post("/api/auth/register/", {
+        "username": username, "email": email, "phone_number": phone,
+        "password1": "Xx!23456long", "password2": "Xx!23456long", "user_type": "client",
+        "date_of_birth": "1995-06-15"}, content_type=JSON)
+
+
+def _field_code(resp, field):
+    return resp.json()["field_errors"][field][0]["code"]
+
+
+def test_b020_an_address_already_registered_has_its_own_code(api):
+    assert _sign_up(api, "bb20_first", "bb20.taken@gate.test", "+963911000020").status_code == 201
+    again = _sign_up(api, "bb20_second", "BB20.Taken@gate.test", "+963911000021")
+    assert (again.status_code, _field_code(again, "email")) == (400, "email_taken")
+    malformed = _sign_up(api, "bb20_third", "not-an-address", "+963911000022")
+    assert _field_code(malformed, "email") == "invalid"
+
+
+def test_b021_each_refused_code_says_why(make_user, api, monkeypatch):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from users.models import OTPVerification
+    from users.utils import _clear_otp_attempts, create_otp
+
+    user = make_user("bb21_user", email_verified=False)
+    _clear_otp_attempts(user.email, "registration")
+    monkeypatch.setattr("users.utils.generate_otp", lambda: "246810")
+    create_otp(user)
+    url = "/api/auth/verify-otp/"
+
+    wrong = api().post(url, {"email": user.email, "otp_code": "111111"}, content_type=JSON)
+    assert (wrong.status_code, wrong.json()["code"]) == (400, "otp_invalid")
+
+    OTPVerification.objects.filter(user=user).update(expires_at=timezone.now() - timedelta(minutes=1))
+    late = api().post(url, {"email": user.email.upper(), "otp_code": "246810"}, content_type=JSON)
+    assert (late.status_code, late.json()["code"]) == (400, "otp_expired")
+
+    for _ in range(5):
+        api().post(url, {"email": user.email, "otp_code": "111111"}, content_type=JSON)
+    locked = api().post(url, {"email": user.email, "otp_code": "246810"}, content_type=JSON)
+    assert (locked.status_code, locked.json()["code"]) == (400, "too_many_attempts")
+    assert locked.json()["retry_after_seconds"] > 0 and locked.has_header("Retry-After")
+    _clear_otp_attempts(user.email, "registration")
+
+
+def test_b022_the_resend_limit_says_how_long_to_wait(make_user, api, monkeypatch):
+    from training_platform.cache import ratelimit_cache
+
+    # The test cache has no `ttl`; give it one, so the answer must be the REAL remainder
+    # and not the window's full length.
+    monkeypatch.setattr(ratelimit_cache(), "ttl", lambda key: 1234, raising=False)
+    user = make_user("bb22_user", email_verified=False)
+    for _ in range(3):
+        api().post("/api/auth/resend-otp/", {"email": user.email}, content_type=JSON)
+    limited = api().post("/api/auth/resend-otp/", {"email": user.email}, content_type=JSON)
+    assert (limited.status_code, limited.json()["code"]) == (429, "throttled")
+    assert (limited.json()["retry_after_seconds"], limited["Retry-After"]) == (1234, "1234")
+
+    for _ in range(3):
+        api().post("/api/auth/forgot-password/", {"email": user.email}, content_type=JSON)
+    reset = api().post("/api/auth/forgot-password/", {"email": user.email}, content_type=JSON)
+    assert (reset.status_code, reset.json()["code"], reset.json()["retry_after_seconds"]) == \
+        (429, "throttled", 1234)
+
+
+def test_b033_a_lookalike_address_never_reaches_the_account(make_user, api):
+    """Postgres folds `ſ` to `S` in a case-insensitive match where Python's `lower()`
+    does not: the lookalike reached the real account under another lockout key."""
+    from users.utils import find_by_email
+
+    user = make_user("bb33_look", email="samer.look@gate.test")
+    assert find_by_email("SAMER.Look@gate.test") == user
+    assert find_by_email("ſamer.look@gate.test") is None
+
+
+def test_b021_a_code_of_the_wrong_type_is_just_a_wrong_code(make_user, api):
+    from users.utils import _clear_otp_attempts
+
+    user = make_user("bb21_type", email_verified=False)
+    _clear_otp_attempts(user.email, "registration")
+    for email in (user.email, "nobody.bb21@gate.test"):
+        resp = api().post("/api/auth/verify-otp/", {"email": email, "otp_code": [1, 2]},
+                          content_type=JSON)
+        assert (resp.status_code, resp.json()["code"]) == (400, "otp_invalid"), email
+    _clear_otp_attempts(user.email, "registration")
+
+
+def test_b023_a_session_is_for_a_day_the_routine_has(make_user, api):
+    from routine.models import Routine
+
+    trainer, client, routine, progress = _session_setup(make_user, "days")
+    Routine.objects.filter(pk=routine.pk).update(days=2)
+    url = "/api/routine/workout-sessions/"
+    beyond = api(client).post(url, {"routine": routine.pk, "day": 3}, content_type=JSON)
+    assert (beyond.status_code, _field_code(beyond, "day")) == (400, "day_out_of_range")
+    rest = api(client).post(url, {"routine": routine.pk, "day": 2}, content_type=JSON)
+    assert (rest.status_code, _field_code(rest, "day")) == (400, "day_has_no_exercises")
+    Routine.objects.filter(pk=routine.pk).update(is_active=False)
+    retired = api(client).post(url, {"routine": routine.pk, "day": 1}, content_type=JSON)
+    assert (retired.status_code, _field_code(retired, "routine")) == (400, "routine_inactive")
+
+
+def test_b024_a_failed_upload_does_not_leak_the_exception(make_user, api, monkeypatch):
+    from django.db.models.fields.files import FieldFile
+
+    user = make_user("bb24_user")
+
+    def broken(*args, **kwargs):
+        raise OSError("/var/secret/storage/path is read-only")
+
+    monkeypatch.setattr(FieldFile, "save", broken)
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), "red").save(buf, format="PNG")
+    upload = SimpleUploadedFile("me.png", buf.getvalue(), content_type="image/png")
+    resp = api(user).post("/api/auth/user/profile-picture/", {"profile_picture": upload})
+    assert (resp.status_code, resp.json()["code"]) == (500, "upload_failed")
+    assert b"/var/secret" not in resp.content
+
+
+def test_b025_an_over_long_device_field_is_refused_not_a_500(make_user, api):
+    user = make_user("bb25_user")
+    resp = api(user).post("/api/auth/device-token/", {"token": "t" * 100, "app_version": "9" * 51},
+                          content_type=JSON)
+    assert (resp.status_code, resp.json()["code"], resp.json()["field"]) == \
+        (400, "field_too_long", "app_version")
+    resp = api(user).post("/api/auth/device-token/", {"token": "t" * 256}, content_type=JSON)
+    assert (resp.status_code, resp.json()["code"]) == (400, "field_too_long")
+
+
+def test_b026_no_dead_picture_validator():
+    from users.serializers import UserDetailsSerializer
+
+    assert not hasattr(UserDetailsSerializer, "validate_profile_picture")
+
+
+def test_b027_the_activity_level_is_unanswered_until_it_is_written(make_user, api):
+    user = make_user("bb27_user", first_name="Sam", last_name="K")
+    missing = api(user).get("/api/auth/user/update/").json()["onboarding_missing"]
+    assert "activity_level" in missing
+    resp = api(user).post("/api/auth/user/update/", {"activity_level": "Sedentary"},
+                          content_type=JSON)
+    assert resp.status_code == 200, resp.content
+    assert "activity_level" not in api(user).get("/api/auth/user/update/").json()["onboarding_missing"]
+
+
+def test_b028_the_injury_note_is_bounded(make_user, api):
+    user = make_user("bb28_user")
+    resp = api(user).post("/api/auth/user/update/", {"specific_injury": "x" * 501},
+                          content_type=JSON)
+    assert (resp.status_code, _field_code(resp, "specific_injury")) == (400, "too_long")
+    ok = api(user).post("/api/auth/user/update/", {"specific_injury": "x" * 500},
+                        content_type=JSON)
+    assert ok.status_code == 200
+
+
+def test_b030_a_finished_workout_is_announced_in_each_persons_language(make_user, api):
+    from unittest import mock
+
+    from routine.models import WorkoutSession
+    from users.models import TrainerClientRelation
+
+    trainer, client, routine, progress = _session_setup(make_user, "lang")
+    type(client).objects.filter(pk=client.pk).update(preferred_language="ar",
+                                                     first_name="Sami", last_name="Ali")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client, status="approved")
+    session = WorkoutSession.objects.create(user=client, routine=routine, day=1)
+    with mock.patch("routine.views.send_notification") as sent:
+        resp = api(client).patch(f"/api/routine/workout-sessions/{session.pk}/",
+                                 {"status": "completed"}, content_type=JSON)
+    assert resp.status_code == 200, resp.content
+    messages = {c.kwargs["user"].pk: c.kwargs["message"] for c in sent.call_args_list}
+    assert "أحسنت" in messages[client.pk]
+    assert "Sami Ali" in messages[trainer.pk] and client.username not in messages[trainer.pk]
+
+
+def test_b031_a_second_row_for_the_same_day_names_the_first(make_user, api):
+    from django.utils import timezone
+
+    trainer, client, routine, progress = _session_setup(make_user, "dup")
+    resp = api(client).post("/api/routine/user-exercise-progress/", {
+        "exercise": progress.exercise_id, "date": timezone.localdate().isoformat(),
+        "target_sets": 3}, content_type=JSON)
+    assert (resp.status_code, resp.json()["code"], resp.json()["id"]) == \
+        (400, "progress_exists", progress.pk)
+
+
+def test_b032_the_daily_summary_answers_absolute_image_urls(make_user, api):
+    from routine.models import Exercise
+
+    trainer, client, routine, progress = _session_setup(make_user, "img")
+    Exercise.objects.filter(pk=progress.exercise_id).update(image="exercises/bb32.png")
+    body = api(client).get("/api/routine/user-exercise-progress/daily-summary/").json()
+    rows = body.get("exercises") or body.get("results") or body.get("summary") or []
+    images = [r["exercise"]["image"] for r in rows if r.get("exercise")]
+    assert images and all(i.startswith("http") for i in images), body
+
+
+def test_b033_addresses_are_matched_without_regard_to_case(make_user, api):
+    from users.models import OTPVerification
+
+    user = make_user("bb33_user", email="bb33.case@gate.test")
+    resp = api().post("/api/auth/forgot-password/", {"email": "BB33.Case@Gate.test"},
+                      content_type=JSON)
+    assert resp.status_code == 200
+    assert OTPVerification.objects.filter(user=user, purpose="password_reset").exists()
+
+
+def test_b034_a_short_new_password_has_the_registration_code(make_user, api):
+    from users.models import PasswordResetToken
+
+    user = make_user("bb34_user")
+    _token, raw = PasswordResetToken.issue(user, minutes=15)
+    resp = api().post("/api/auth/forgot-password/confirm/",
+                      {"reset_token": raw, "new_password": "Ab1!x"}, content_type=JSON)
+    assert (resp.status_code, _field_code(resp, "new_password")) == (400, "password_too_short")
+
+
+def test_b035_the_media_route_answers_both_spellings(api):
+    assert api().get("/api/v1/content/media").status_code == 200
+    assert api().get("/api/v1/content/media/").status_code == 200
+
+
+def test_b036_no_dead_image_method():
+    from routine.serializers import ExerciseSerializer
+
+    assert not hasattr(ExerciseSerializer, "get_image")

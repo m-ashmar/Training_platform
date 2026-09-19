@@ -126,3 +126,97 @@ def settle_owed_payouts(batch_size=200):
     if owed:
         logger.warning("Sent %s of %s owed payout(s)", sent, len(owed))
     return sent
+
+
+@shared_task(
+    name="subscription.send_renewal_reminders",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+@no_retry_on_timeout
+def send_renewal_reminders(now=None):
+    """Remind before the plan ends, and keep asking after it ended (the owner,
+    2026-09-19: "we show a renewal reminder 3 days before ... after it ends ... keep
+    asking to re-subscribe").
+
+    Daily. Two passes:
+      * expiring — an entitled row whose cover ends within
+        SUBSCRIPTION_RENEWAL_NOTICE_DAYS gets `subscription_expiring`, once per cover
+        period (keyed on its end, so a renewal that moves the end is reminded again).
+      * lapsed — a frozen row (`Subscription.is_frozen`) gets `subscription_expired` for
+        each step of SUBSCRIPTION_LAPSED_REMINDER_DAYS it reaches after its end (the
+        latest one, so a missed run is made up), then no more.
+    Every subscriber, whatever `auto_renew` says: nothing charges a plan automatically.
+    The in-app row is always written; a muted type sends no push. Returns the counts.
+    """
+    from math import ceil
+
+    from django.conf import settings
+    from django.db.models import Q
+    from django.utils import timezone
+
+    from notifications.services import NotificationService
+
+    from .models import Subscription
+
+    now = now or timezone.now()
+    lead = timedelta(days=int(getattr(settings, 'SUBSCRIPTION_RENEWAL_NOTICE_DAYS', 3)))
+    steps = sorted(getattr(settings, 'SUBSCRIPTION_LAPSED_REMINDER_DAYS', (0, 3, 7, 14, 30)))
+    counts = {'expiring': 0, 'expired': 0}
+
+    # The whole window, every run: a run missed or cut short is made up by the next
+    # one. A notice already written is found by its key and not pushed again to a device
+    # that has it (the FCM channel skips tokens it already reached).
+    soon = (Subscription.objects.filter(status__in=Subscription.ENTITLED_STATUSES,
+                                        user__is_active=True)
+            .filter(Q(end_date__gt=now, end_date__lte=now + lead)
+                    | Q(trial_end_date__gt=now, trial_end_date__lte=now + lead))
+            .select_related('user'))
+    for sub in soon.iterator(chunk_size=500):
+        end = sub.effective_end
+        if not sub.is_active or end is None or not (now < end <= now + lead):
+            continue
+        # A cover shorter than the notice would be told "ends soon" the day it was
+        # bought.
+        if sub.start_date and end - sub.start_date <= lead:
+            continue
+        days = max(1, ceil((end - now) / timedelta(days=1)))
+        if NotificationService.create_and_send(
+                recipient=sub.user, event_type="subscription_expiring",
+                related_object_id=f"{sub.pk}:{end.isoformat()}",
+                metadata={'context': {'days': days},
+                          'data': {'type': 'subscription_expiring',
+                                   'subscription_id': str(sub.pk),
+                                   'ends_at': end.isoformat()}}) is not None:
+            counts['expiring'] += 1
+
+    if steps:
+        oldest = now - timedelta(days=steps[-1] + 1)
+        lapsed = (Subscription.objects.filter(user__is_active=True)
+                  .filter(Q(end_date__lte=now, end_date__gt=oldest)
+                          | Q(trial_end_date__lte=now, trial_end_date__gt=oldest))
+                  .select_related('user'))
+        for sub in lapsed.iterator(chunk_size=500):
+            end = sub.effective_end
+            if end is None or end > now or not sub.is_frozen:
+                continue
+            # The latest step reached, so a missed day is made up; each step once.
+            reached = [d for d in steps if d <= (now - end).days]
+            if not reached:
+                continue
+            days = reached[-1]
+            if NotificationService.create_and_send(
+                    recipient=sub.user, event_type="subscription_expired",
+                    related_object_id=f"{sub.pk}:{end.isoformat()}:{days}",
+                    metadata={'context': {},
+                              'data': {'type': 'subscription_expired',
+                                       'subscription_id': str(sub.pk),
+                                       'ended_at': end.isoformat()}}) is not None:
+                counts['expired'] += 1
+
+    logger.info("Subscription reminders: %s", counts)
+    return counts
+

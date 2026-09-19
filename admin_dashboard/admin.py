@@ -35,6 +35,7 @@ import logging
 
 # Import all models
 from users.models import CustomUser, TrainerClientRelation, DeviceToken
+from routine.admin import OneClientRoutineAdminMixin
 from routine.models import (
     Exercise, Routine, RoutineExercise, UserExerciseProgress, 
     ExerciseSetLog, RoutineProgress, WorkoutSession, RoutineTemplate,
@@ -209,8 +210,9 @@ class ExerciseAdmin(admin.ModelAdmin):
         # 30-row routine page. `list_select_related` fixes FKs, not reverse counts.
         return super().get_queryset(request).annotate(_media_count=Count('media', distinct=True))
 
-class RoutineAdmin(admin.ModelAdmin):
-    """Routine management with client assignment"""
+class RoutineAdmin(OneClientRoutineAdminMixin, admin.ModelAdmin):
+    """Routine management with client assignment. One client per routine, and a client
+    added here settles the coaching's first month (routine/assignment.py)."""
     
     # Without this each row re-queried created_by — ~100 extra
     # queries per changelist page.
@@ -260,16 +262,11 @@ class RoutineAdmin(admin.ModelAdmin):
     exercise_count.short_description = "Exercises"
     
     def duplicate_routines(self, request, queryset):
+        # The full program (days, rows, translations), unassigned and inactive. This
+        # copied only the vestigial `exercises` list: a routine with no days at all.
+        from routine.assignment import copy_routine
         for routine in queryset:
-            new_routine = Routine.objects.create(
-                name=f"{routine.name} (Copy)",
-                description=routine.description,
-                difficulty_level=routine.difficulty_level,
-                estimated_duration=routine.estimated_duration,
-                created_by=routine.created_by,
-                is_active=False
-            )
-            new_routine.exercises.set(routine.exercises.all())
+            copy_routine(routine, name=f"{routine.name} (Copy)"[:255], is_active=False)
         self.message_user(request, f"{queryset.count()} routines duplicated successfully.")
     duplicate_routines.short_description = "Duplicate selected routines"
 

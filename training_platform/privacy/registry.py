@@ -88,7 +88,16 @@ class ErasureRefused(Exception):
     Raised out of the erasure transaction, so nothing at all is erased: deleting the
     record of an obligation that could not be met is the one outcome worse than
     refusing, because it cannot be retried.
+
+    `code` tells the refusals apart for the app: `erasure_refused` (a held payment could
+    not be returned; retry later) or `trainer_has_active_clients` (the owner's rule: end
+    coaching with every client first). `extra` goes into the response body.
     """
+
+    def __init__(self, message="", *, code="erasure_refused", **extra):
+        super().__init__(message)
+        self.code = code
+        self.extra = extra
 
 
 def register(source: PersonalDataSource) -> PersonalDataSource:

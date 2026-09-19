@@ -398,8 +398,67 @@ def clear_login_attempts(email: str):
     ratelimit_cache().delete(_get_login_attempt_cache_key(email))
 
 
-def verify_otp(email, otp_code, purpose='registration'):
+def find_by_email(email, **filters):
+    """The account a typed address names, or None (BACKEND_BUGS B-033).
+
+    Addresses are stored lower-cased, so the lower-cased address is tried first, then the
+    address exactly as typed (an operator-made account keeps its case). Never `iexact`:
+    Postgres folds `ſ` to `S` and `ı` to `I` where Python's `lower()` does not, so a
+    lookalike reached the real account under a different lockout and rate-limit key.
     """
+    from .models import CustomUser
+
+    typed = (email or '').strip() if isinstance(email, str) else ''
+    if not typed:
+        return None
+    for candidate in dict.fromkeys((typed.lower(), typed)):
+        try:
+            return CustomUser.objects.get(email=candidate, **filters)
+        except CustomUser.DoesNotExist:
+            continue
+    return None
+
+
+def otp_lockout_seconds_left(email: str, purpose: str) -> int:
+    """Seconds until a locked address may try a code again (the whole window if unknown)."""
+    from training_platform.cache import ratelimit_cache
+    try:
+        ttl = ratelimit_cache().ttl(_get_otp_attempt_cache_key(email, purpose))
+    except Exception:
+        ttl = None          # a backend without `ttl` (the in-memory one in tests)
+    return int(ttl) if isinstance(ttl, (int, float)) and ttl > 0 else 15 * 60
+
+
+def verify_otp(email, otp_code, purpose='registration'):
+    """`(success, otp, message)`; see `verify_otp_detailed` for the reason's code."""
+    result = verify_otp_detailed(email, otp_code, purpose)
+    return result[0], result[1], result[2]
+
+
+def otp_refusal_response(message, code, retry_after):
+    """The 400 a verify endpoint answers for a refused code (BACKEND_BUGS B-021):
+    `{error, detail, code}` with `code` one of `otp_invalid` (wrong code, or no such
+    pending code — the same answer for an unknown address), `otp_expired` (the right
+    code, too late: ask for a new one) or `too_many_attempts` (five wrong codes: locked
+    for 15 minutes, `retry_after_seconds` and a `Retry-After` header; while locked even
+    the right code is refused, so the lock cannot be probed)."""
+    from rest_framework import status as http
+    from rest_framework.response import Response
+
+    body = {'error': message, 'detail': message, 'code': code}
+    headers = {}
+    if retry_after:
+        body['retry_after_seconds'] = retry_after
+        headers['Retry-After'] = str(retry_after)
+    return Response(body, status=http.HTTP_400_BAD_REQUEST, headers=headers)
+
+
+def verify_otp_detailed(email, otp_code, purpose='registration'):
+    """`(success, otp, message, code, retry_after_seconds)`.
+
+    The address is matched without regard to case (BACKEND_BUGS B-033): it is stored
+    lower-cased, and `Samer@Example.com` counted as a wrong code toward the lockout.
+
     Verify an OTP code for a user with security hardening:
     - Constant-time comparison via secrets.compare_digest
     - SHA-256 hashed OTP lookup (DB stores hash, not plaintext)
@@ -412,27 +471,41 @@ def verify_otp(email, otp_code, purpose='registration'):
         purpose: OTP purpose ('registration' or 'password_reset')
     
     Returns:
-        tuple: (success: bool, otp_instance: OTPVerification or None, error_message: str or None)
+        tuple: (success, otp_instance or None, error_message or None, code or None,
+        retry_after_seconds or None). `code`: `otp_invalid`, `otp_expired`,
+        `too_many_attempts`.
     """
     from .models import OTPVerification, CustomUser
-    
+
+    typed = email if isinstance(email, str) else ''
+    # ONE key for every spelling that can reach the account: `find_by_email` matches
+    # only the lower-cased address or the address exactly as typed, and both have this
+    # key. The lockout is checked and counted on it.
+    email = typed.strip().lower()
     # Check lockout BEFORE doing any DB work
     is_locked, remaining = _check_otp_lockout(email, purpose)
     if is_locked:
         logger.warning(f"OTP lockout active for {email} ({purpose})")
-        return False, None, str(_OTP_LOCKED_OUT)
-    
+        return (False, None, str(_OTP_LOCKED_OUT), 'too_many_attempts',
+                otp_lockout_seconds_left(email, purpose))
+    # A number or a list is a wrong code like any other, never a different answer: the
+    # crash it caused answered "something went wrong" for a real account only.
+    if not isinstance(otp_code, str):
+        otp_code = str(otp_code)
+
     try:
         # Find user by email
-        user = CustomUser.objects.get(email=email)
-        
+        user = find_by_email(typed)
+        if user is None:
+            raise CustomUser.DoesNotExist
+
         # Hash the user-provided OTP for comparison
         otp_hash = _hash_otp(otp_code)
-        
+
         # Find the most recent unverified OTP for this user with matching purpose
         candidates = OTPVerification.objects.filter(
             user=user,
-            email=email,
+            email=user.email,
             purpose=purpose,
             is_verified=False
         ).order_by('-created_at', '-id')
@@ -455,14 +528,14 @@ def verify_otp(email, otp_code, purpose='registration'):
             # only for an address that HAS an account and no pending code, while an
             # address with no account got "Invalid OTP code". Probing a list of emails
             # with one wrong code told the caller which of them are registered.
-            return False, None, str(_INVALID_OTP)
+            return False, None, str(_INVALID_OTP), 'otp_invalid', None
         
         # Check if OTP is still valid (not expired)
         if not matched_otp.is_valid():
             # Distinguishable on purpose: the caller had to hold the real code to get
             # here, so it reveals nothing they did not know, and "request a new one" is
             # the action they need.
-            return False, None, str(_OTP_EXPIRED)
+            return False, None, str(_OTP_EXPIRED), 'otp_expired', None
         
         # Mark OTP as verified
         matched_otp.is_verified = True
@@ -473,17 +546,20 @@ def verify_otp(email, otp_code, purpose='registration'):
         _clear_otp_attempts(email, purpose)
         
         logger.info(f"OTP ({purpose}) verified for user {user.id} ({email})")
-        return True, matched_otp, None
-        
+        return True, matched_otp, None, None, None
+
     except CustomUser.DoesNotExist:
         # Anti-enumeration: same error message whether user exists or not
         _record_otp_failure(email, purpose)
-        return False, None, str(_INVALID_OTP)
+        return False, None, str(_INVALID_OTP), 'otp_invalid', None
     except (OperationalError, InterfaceError):
         # The database, not the code. Answering "invalid" during an outage tells the user
         # their correct code is wrong and sends them to ask for another one.
         logger.exception("OTP verification could not reach the database for %s", email)
         raise
     except Exception as e:
+        # The same answer as a wrong code, and counted as one: a distinct answer here
+        # told a caller which addresses have accounts.
         logger.error(f"Error verifying OTP for {email}: {str(e)}")
-        return False, None, str(_lazy("Something went wrong. Please try again."))
+        _record_otp_failure(email, purpose)
+        return False, None, str(_INVALID_OTP), 'otp_invalid', None

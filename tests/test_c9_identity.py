@@ -292,13 +292,34 @@ def test_a_client_who_erases_gets_the_held_charge_back(seeded_catalogue, make_us
 def test_a_trainer_who_erases_refunds_every_unsettled_client(seeded_catalogue, make_user, api):
     """The reverse direction, and the worse one: the client is still active. They kept
     `assigned_trainer` pointing at the retired account, unassign-trainer answered 200
-    "Successfully unassigned", and the 80.00 stayed in escrow."""
-    from users.models import TrainerClientRelation
+    "Successfully unassigned", and the 80.00 stayed in escrow.
+
+    Changed deliberately (the owner, 2026-09-19): a trainer with active clients can never
+    delete the account, so the erasure is now refused with nothing changed, and the held
+    month comes back when the trainer first ends the coaching. What this guards is kept:
+    no held money is lost and no client is left pointing at a retired trainer."""
+    from users.models import CustomUser, TrainerClientRelation
     from wallet.models import Wallet
 
     trainer, client_user, t_api, c_api, relation, escrow_before = \
         _approved_pair_with_hold(make_user, "c9-erase-trainer")
 
+    preview = t_api.get("/api/privacy/erase/").json()["preview"]["trainer_relations"]
+    assert preview.get("active_clients") == 1, preview
+
+    r = t_api.delete("/api/privacy/erase/?confirm=ERASE")
+    assert r.status_code == 409, r.content
+    assert (r.json()["code"], r.json()["active_clients"]) == ("trainer_has_active_clients", 1)
+    fresh = CustomUser.objects.get(pk=trainer.pk)
+    assert fresh.is_active and fresh.email == trainer.email, "half an erasure committed"
+    client_user.refresh_from_db()
+    assert client_user.assigned_trainer_id == trainer.pk, "a refused erasure dropped the client"
+    relation.refresh_from_db()
+    assert relation.status == "approved" and relation.hold_reference
+
+    r = t_api.post("/api/auth/trainer/unassign-client/", {"client_id": client_user.id},
+                   content_type="application/json")
+    assert r.status_code == 200, r.content
     r = t_api.delete("/api/privacy/erase/?confirm=ERASE")
     assert r.status_code == 200, r.content
 

@@ -233,44 +233,10 @@ def expire_subscriptions():
     return expire_lapsed_subscriptions()
 
 
-def count_subscriptions_needing_notice():
-    """How many subscriptions are about to lapse. It does NOT notify anyone.
-
-    Renamed from `send_subscription_notifications`, which is what it was called while both
-    of its loops read `# Here you would send email/push notification / For now, we'll just
-    count them`. It is also scheduled nowhere. So nobody is warned before their access
-    ends: `expire-lapsed-subscriptions` runs hourly and cancels them with no notice.
-
-    Sending requires a `SubscriptionExpiringEvent` beside the five in
-    `notifications/domain/events.py`, a listener, an entry in `fcm.EVENT_CLASS_REGISTRY`
-    and a beat schedule — and the words a client reads, which is a product decision, not
-    a defect to be quietly patched. The name says what the function does until then.
-
-    Returns:
-        int: how many subscriptions are inside the notice window
-    """
-    now = timezone.now()
-    notification_count = 0
-    
-    # Notify users about expiring subscriptions
-    expiring_soon = Subscription.objects.filter(
-        status='active',
-        end_date__range=[now, now + timedelta(days=7)]
-    )
-    
-    for _subscription in expiring_soon:
-        notification_count += 1
-    
-    # Notify users about trial ending
-    trial_ending = Subscription.objects.filter(
-        status='trial',
-        trial_end_date__range=[now, now + timedelta(days=3)]
-    )
-    
-    for _subscription in trial_ending:
-        notification_count += 1
-    
-    return notification_count
+# `count_subscriptions_needing_notice` stood here: it counted subscriptions about to
+# lapse and told nobody. The notices exist now: `subscription.send_renewal_reminders`
+# (subscription/tasks.py) sends "ends soon" and, after the end, "has ended" (the owner,
+# 2026-09-19).
 
 # Import models at the top
 from django.db import models 

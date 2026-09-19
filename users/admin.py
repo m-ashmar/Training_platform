@@ -172,7 +172,15 @@ class CustomUserAdmin(UserAdmin):
                 '<span style="color: red;">✗ Not Set</span>'
             )
     password_status.short_description = 'Password Status'
-    
+
+    def has_delete_permission(self, request, obj=None):
+        """No hard delete from either admin site. `Wallet.owner` and
+        `CoachingPeriod.trainer` are PROTECT, so it failed for most accounts anyway, and
+        where it did not (a trainer with no wallet) it cascaded their clients' routines
+        away and skipped the owner's rule that a trainer with active clients is never
+        deleted. `CustomUser.retire()` is the one erasure path; suspend with `is_active`."""
+        return False
+
     def save_model(self, request, obj, form, change):
         """Hash a changed password, and keep the pointer and the relationship in step.
 

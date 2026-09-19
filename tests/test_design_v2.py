@@ -353,8 +353,13 @@ def test_a_bad_injury_list_is_refused_with_a_code(make_user, api, areas, code):
 
 
 def test_onboarding_missing_names_what_is_left_and_completed_keeps_its_meaning(make_user, api):
+    from django.utils import timezone
+
+    # Setup, not the assertion: since BACKEND_BUGS B-027 `activity_level` is listed until
+    # it is answered (it has a default, so the value alone cannot say so). This person
+    # answered it; the list below is otherwise what it always was.
     user = make_user("dv2_missing", first_name="Sam", last_name="Haddad", height=178,
-                     weight=82, age=27, gender="Male")
+                     weight=82, age=27, gender="Male", activity_level_answered_at=timezone.now())
     body = api(user).get("/api/auth/user/update/").json()
     assert body["onboarding_completed"] is True
     assert body["onboarding_missing"] == ["date_of_birth", "training_goal", "training_place",

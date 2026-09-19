@@ -234,6 +234,34 @@ class Subscription(RowValidationMixin, models.Model):
         )
     
     @property
+    def effective_end(self):
+        """When the entitlement ends: the trial's end if it comes first."""
+        if self.trial_end_date and (self.end_date is None or self.trial_end_date < self.end_date):
+            return self.trial_end_date
+        return self.end_date
+
+    @property
+    def is_frozen(self):
+        """Lapsed after once entitling its holder (the owner, 2026-09-19): the last diet
+        plan stays READABLE and nothing can be used until the plan is paid again.
+
+        Not active, and either in a status only an entitled row reaches (active or trial
+        whose date passed before the hourly sweep, or expired), or with a `source`
+        (paid, trial or granted, then cancelled or refunded). A checkout opened and
+        never paid is `pending` with no source: never entitled, not frozen.
+        """
+        if self.is_active:
+            return False
+        return self.status in ('active', 'trial', 'expired') or bool(self.source)
+
+    @property
+    def access(self):
+        """'active' | 'frozen' | 'inactive' — what the app shows (read-only after a lapse)."""
+        if self.is_active:
+            return 'active'
+        return 'frozen' if self.is_frozen else 'inactive'
+
+    @property
     def is_trial(self):
         """Check if subscription is in trial period"""
         now = timezone.now()
