@@ -30,6 +30,8 @@ from .permissions import (
     IsClientOrAssignedTrainer,  # Added for RoutineProgressViewSet
     # The one predicate for "this trainer may see this client": an APPROVED relation.
     accessible_user_ids,
+    # The one predicate for "this caller may read this exercise".
+    visible_exercises_for,
 )
 import logging
 from .services import send_notification
@@ -224,34 +226,17 @@ class ExerciseViewSet(viewsets.ModelViewSet):
     pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
-        """Filter exercises based on user role with optimized queries."""
-        user = self.request.user
-        
+        """Filter exercises based on user role with optimized queries.
+
+        The rule itself is `routine.permissions.visible_exercises_for` — admin sees
+        all, a trainer sees own + the shared catalogue, a client sees the catalogue +
+        their approved trainers' + whatever a routine assigned to them uses. It used
+        to be written out here and nowhere else, which is why `ExerciseAddMediaView`,
+        resolving ids on its own, had no visibility rule at all.
+        """
         # Optimize: prefetch media to avoid N+1 in serializer
         base_qs = self.queryset.prefetch_related('media').select_related('created_by')
-        
-        if user.is_admin:
-            return base_qs
-        elif user.is_trainer:
-            return base_qs.filter(
-                models.Q(created_by=user) | models.Q(created_by__isnull=True)
-            )
-        else:
-            # Clients: global exercises, plus anything their own trainer created,
-            # plus anything appearing in a routine assigned to them.
-            # This branch previously returned base_qs unfiltered, so every client
-            # could see every trainer's private custom exercises.
-            # `created_by__in=trainers`, from the approved relations — not
-            # `created_by=user.assigned_trainer`, the display pointer.
-            from users.models import TrainerClientRelation
-            trainers = (TrainerClientRelation.objects
-                        .filter(client=user, status='approved')
-                        .values_list('trainer_id', flat=True))
-            return base_qs.filter(
-                models.Q(created_by__isnull=True)
-                | models.Q(created_by_id__in=trainers)
-                | models.Q(routine_exercises__routine__assigned_to=user)
-            ).distinct()
+        return visible_exercises_for(self.request.user, base_qs)
 
     def perform_create(self, serializer):
         """Override to assign the exercise to the creator."""
@@ -3056,10 +3041,39 @@ class ExerciseImageUploadView(APIView):
 
 class ExerciseAddMediaView(APIView):
     """
-    Add media (videos, photos, text) to existing exercises via URLs.
-    Accepts JSON with media items to add to an exercise.
-    
-    Request format:
+    `/api/routine/exercises/{exercise_id}/add-media/` — an exercise's media
+    (video URLs, photo URLs, text form-tips). Signed in; no body on GET.
+
+    **Who sees what.** Every method resolves `exercise_id` through
+    `routine.permissions.visible_exercises_for` FIRST, the same rule the exercise
+    list and detail use: admin sees every exercise, a trainer sees their own plus the
+    shared catalogue, a client sees the catalogue, their approved trainers'
+    exercises, and anything a routine assigned to them uses. An exercise outside that
+    set answers `404 code="not_found"`, `{"error"/"detail": "Exercise not found"}` —
+    byte-identical to an id that does not exist, so ids cannot be probed for
+    existence. `GET` had no visibility rule at all and served any trainer's private
+    media to any signed-in caller.
+
+    **Who may write.** Reading is enough to see media; changing it is not. After the
+    404 gate, `POST` and `DELETE` additionally require ownership: the exercise's
+    `created_by`, or an admin. The shared catalogue (`created_by IS NULL`) is
+    admin-only — a client or trainer reading it gets 200 on GET and `403
+    code="permission_denied"`, "You do not have permission to modify this exercise",
+    on a write. A 403 is only ever returned for a row the caller can already see.
+    Keyed on `created_by_id`, not `is_global`: the "created_by => not global"
+    invariant lives in `Exercise.clean()`, which `.create()` never runs.
+
+    | Method | Answers |
+    |---|---|
+    | `GET` | `200` `{exercise_id, exercise_name, media_count, media_items[]}` · `404` |
+    | `POST` | `201` created · `207` some items rejected (`errors[]`, `partial_success`) · `400` no `media_items` · `403` not the owner · `404` |
+    | `DELETE` | `200` all deleted · `207` some ids missed · `400` no `media_ids` · `403` not the owner · `404` |
+
+    Nothing here varies by build (`X-App-Channel`): it sells nothing and moves no money.
+
+    POST body — `media_type` and `content` are required per item; `video` and `photo`
+    content must start with `http://` or `https://`; an item that fails either check is
+    reported in `errors[]` and the rest are still created (207):
     {
         "media_items": [
             {
@@ -3070,7 +3084,7 @@ class ExerciseAddMediaView(APIView):
                 "order": 1
             },
             {
-                "media_type": "photo", 
+                "media_type": "photo",
                 "content": "https://example.com/exercise-photo.jpg",
                 "title": "Form Check",
                 "description": "Proper form demonstration",
@@ -3085,36 +3099,57 @@ class ExerciseAddMediaView(APIView):
             }
         ]
     }
+
+    DELETE body — `{"media_ids": [1, 2]}`; ids belonging to another exercise are
+    reported in `errors[]`, never deleted.
     """
     permission_classes = [IsAuthenticated]
-    
-    def post(self, request, exercise_id):
-        """Add media items to an existing exercise"""
-        try:
-            # Get the exercise
-            try:
-                exercise = Exercise.objects.get(id=exercise_id)
-            except Exercise.DoesNotExist:
-                return Response(
-                    {'error': 'Exercise not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
 
-            # Check if user has permission to modify this exercise.
-            # Global exercises belong to the shared catalog: admin-only. The old
-            # guard was `not is_global and created_by != user`, which short-circuits
-            # to False for global exercises, leaving them writable by ANY user.
-            _is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
-            if exercise.created_by_id:
-                # Owned exercise: the creator (or an admin) may modify it. Keyed on
-                # ownership rather than is_global, because the "created_by => not
-                # global" invariant lives only in Exercise.clean(), which .create()
-                # never runs — so an owned row can still carry is_global=True.
-                allowed = (exercise.created_by_id == request.user.id) or _is_admin
-            else:
-                # No owner => shared global catalog => admin only.
-                allowed = _is_admin
-            if not allowed:
+    @staticmethod
+    def _not_found():
+        """The one answer for "no such exercise" and for "not yours to see".
+
+        A fresh dict per call, not a class constant: `normalize_error_envelope` fills
+        `detail` and `code` into `response.data` in place, so a shared dict would be
+        edited by the first 404 this process serves.
+        """
+        return Response({'error': 'Exercise not found'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    @staticmethod
+    def _visible_exercise(request, exercise_id):
+        """The exercise if this caller may read it at all, else None (-> 404).
+
+        `.first()` rather than `.get()`: the client branch of the visibility rule
+        joins through routine_exercises, and a row reachable by two routes must not
+        raise MultipleObjectsReturned at the caller.
+        """
+        return visible_exercises_for(request.user).filter(id=exercise_id).first()
+
+    @staticmethod
+    def _may_modify(request, exercise):
+        """Writes are owner-only: `created_by`, or an admin. See the class docstring."""
+        is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
+        if exercise.created_by_id:
+            return (exercise.created_by_id == request.user.id) or is_admin
+        # No owner => shared global catalog => admin only.
+        return is_admin
+
+    def post(self, request, exercise_id):
+        """Add media items to an existing exercise. Owner or admin; see the class docstring."""
+        try:
+            # Resolve through the visibility rule first: an exercise this caller cannot
+            # see is answered as missing, not as forbidden, so a 403 never confirms that
+            # someone else's exercise exists.
+            exercise = self._visible_exercise(request, exercise_id)
+            if exercise is None:
+                return self._not_found()
+
+            # Seeing it is not editing it. Global exercises belong to the shared
+            # catalog: admin-only. The old guard was
+            # `not is_global and created_by != user`, which short-circuits to False for
+            # global exercises, leaving them writable by ANY user.
+            if not self._may_modify(request, exercise):
                 return Response(
                     {'error': 'You do not have permission to modify this exercise'},
                     status=status.HTTP_403_FORBIDDEN
@@ -3205,16 +3240,16 @@ class ExerciseAddMediaView(APIView):
             )
 
     def get(self, request, exercise_id):
-        """Get all media for an exercise"""
+        """Get all media for an exercise this caller may see; 404 otherwise.
+
+        This resolved `Exercise.objects.get(id=exercise_id)` with no visibility check,
+        so any signed-in account could read any trainer's private exercise media —
+        photos, video URLs and coaching tips — by walking ids.
+        """
         try:
-            # Get the exercise
-            try:
-                exercise = Exercise.objects.get(id=exercise_id)
-            except Exercise.DoesNotExist:
-                return Response(
-                    {'error': 'Exercise not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
+            exercise = self._visible_exercise(request, exercise_id)
+            if exercise is None:
+                return self._not_found()
 
             # Get all media for this exercise
             media_items = exercise.media.all().order_by('order', 'created_at')
@@ -3250,32 +3285,19 @@ class ExerciseAddMediaView(APIView):
             )
 
     def delete(self, request, exercise_id):
-        """Delete specific media items from an exercise"""
+        """Delete specific media items from an exercise. Owner or admin; see the class docstring."""
         try:
-            # Get the exercise
-            try:
-                exercise = Exercise.objects.get(id=exercise_id)
-            except Exercise.DoesNotExist:
-                return Response(
-                    {'error': 'Exercise not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
+            # Same order as POST: invisible -> 404 (never a 403 that confirms the row
+            # exists), then ownership.
+            exercise = self._visible_exercise(request, exercise_id)
+            if exercise is None:
+                return self._not_found()
 
-            # Check if user has permission to modify this exercise.
-            # Global exercises belong to the shared catalog: admin-only. The old
-            # guard was `not is_global and created_by != user`, which short-circuits
-            # to False for global exercises, leaving them writable by ANY user.
-            _is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
-            if exercise.created_by_id:
-                # Owned exercise: the creator (or an admin) may modify it. Keyed on
-                # ownership rather than is_global, because the "created_by => not
-                # global" invariant lives only in Exercise.clean(), which .create()
-                # never runs — so an owned row can still carry is_global=True.
-                allowed = (exercise.created_by_id == request.user.id) or _is_admin
-            else:
-                # No owner => shared global catalog => admin only.
-                allowed = _is_admin
-            if not allowed:
+            # Seeing it is not editing it. Global exercises belong to the shared
+            # catalog: admin-only. The old guard was
+            # `not is_global and created_by != user`, which short-circuits to False for
+            # global exercises, leaving them writable by ANY user.
+            if not self._may_modify(request, exercise):
                 return Response(
                     {'error': 'You do not have permission to modify this exercise'},
                     status=status.HTTP_403_FORBIDDEN

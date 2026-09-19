@@ -24,5 +24,9 @@ r2=post(adm,gl);  print(f"  [{r2.status_code}] ADMIN  add-media on GLOBAL   -> {
 print(f"        media rows after admin: {ExerciseMedia.objects.filter(exercise=gl).count()}  errors={json.loads(r2.content).get('errors')}")
 r3=post(tr,own);  print(f"  [{r3.status_code}] TRAINER add-media on OWN     -> {'allowed (correct)' if r3.status_code in (200,201,207) else 'BLOCKED (regression!)'}")
 print(f"        media rows on own: {ExerciseMedia.objects.filter(exercise=own).count()}")
-r4=post(cli,own); print(f"  [{r4.status_code}] CLIENT add-media on OTHERS'  -> {'BLOCKED (correct)' if r4.status_code==403 else '*** ALLOWED ***'}")
+# 404 as well as 403 since 2026-09-20: `cli` has no relation with `tr`, so the exercise is
+# not visible to them at all and the endpoint answers exactly as it does for an id that
+# does not exist — a 403 here would confirm the row exists. Deliberate contract change,
+# covered by tests/test_exercise_media_visibility.py.
+r4=post(cli,own); print(f"  [{r4.status_code}] CLIENT add-media on OTHERS'  -> {'BLOCKED (correct)' if r4.status_code in (403,404) else '*** ALLOWED ***'}")
 r.teardown_databases(old)

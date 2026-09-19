@@ -464,7 +464,11 @@ and is listed to the coach as that, not as "slipping".
 
 Security (sent to their own sessions): a client can move a routine-progress row to any
 routine and date; `POST/PATCH /api/routine/exercises/` skips the image content check;
-`GET exercises/{id}/add-media/` shows any exercise's media. Product gaps: a trainer cannot
+~~`GET exercises/{id}/add-media/` shows any exercise's media~~ — FIXED 2026-09-20: all
+three methods resolve the id through `routine.permissions.visible_exercises_for` (the rule
+the list already used, now shared) and answer an invisible exercise exactly as a missing
+one; writes stay owner-or-admin (`tests/test_exercise_media_visibility.py`).
+Product gaps: a trainer cannot
 retire an exercise (`is_active` not writable) though the 409 says to; deleting an unlogged
 exercise cascades it out of every routine and template; no "save routine as template";
 template rows cannot hold weight, notes or duration; `assign_to_client` accepts an empty

@@ -12,6 +12,7 @@ SOURCE OF TRUTH: an approved `TrainerClientRelation`, read through
 `CustomUser.assigned_trainer` — that column is a denormalised pointer for display, and
 when the two disagreed it was the pointer that granted access without consent.
 """
+from django.db.models import Q
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 
@@ -347,3 +348,54 @@ def accessible_user_ids(requester):
             ).values_list('client_id', flat=True)
         )
     return ids
+
+
+# ============================================================================
+# Shared exercise visibility
+# ============================================================================
+def visible_exercises_for(requester, base_qs=None):
+    """
+    Single source of truth for "which exercises may `requester` READ?".
+
+    Visible to:
+      * admin — every exercise,
+      * a trainer — their own (`created_by=requester`) plus the shared catalogue
+        (`created_by IS NULL`, the rows `is_global` follows),
+      * a client — the shared catalogue, anything created by a trainer they have an
+        APPROVED relation with, and anything appearing in a routine assigned to them.
+
+    Everything else is another trainer's private exercise: not listed, not readable,
+    and answered exactly like an id that does not exist.
+
+    This rule lived only inside `ExerciseViewSet.get_queryset`, so every endpoint that
+    resolved an exercise by id for itself simply did not have it:
+    `ExerciseAddMediaView.get` served any exercise's media — photos, video URLs, form
+    tips — to any signed-in caller for any id. Any endpoint that takes an exercise id
+    resolves it through here, and returns the not-found answer when it misses.
+
+    `base_qs` lets a caller keep its own `select_related`/`prefetch_related`; the
+    filtering is identical either way.
+    """
+    from .models import Exercise
+
+    qs = Exercise.objects.all() if base_qs is None else base_qs
+
+    if requester is None or not getattr(requester, 'is_authenticated', False):
+        return qs.none()
+    if getattr(requester, 'is_admin', False):
+        return qs
+    if getattr(requester, 'is_trainer', False):
+        return qs.filter(Q(created_by=requester) | Q(created_by__isnull=True))
+
+    # Clients. `created_by__in=<approved relations>`, never
+    # `created_by=user.assigned_trainer` — that column is the display pointer, and when
+    # the two disagreed it was the pointer that granted access without consent.
+    from users.models import TrainerClientRelation
+    trainers = (TrainerClientRelation.objects
+                .filter(client=requester, status='approved')
+                .values_list('trainer_id', flat=True))
+    return qs.filter(
+        Q(created_by__isnull=True)
+        | Q(created_by_id__in=trainers)
+        | Q(routine_exercises__routine__assigned_to=requester)
+    ).distinct()
