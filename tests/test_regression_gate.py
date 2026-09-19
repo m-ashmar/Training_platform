@@ -1820,15 +1820,34 @@ def test_a_404_answers_in_the_callers_language(make_user, api):
     assert any("؀" <= ch <= "ۿ" for ch in detail), detail
 
 
+_PO_STRING = r'"(?:[^"\\]|\\.)*"'  # a quoted .po line; `"[^"]*"` stopped at an escaped \"
+
+
 def test_every_string_in_the_arabic_catalogue_is_translated():
+    """A msgid holding an escaped quote never matched `"[^"]*"`, so three empty
+    translations passed this check and reached Arabic users in English."""
     import re
     from pathlib import Path
 
     catalogue = Path("locale/ar/LC_MESSAGES/django.po").read_text(encoding="utf-8")
-    entries = re.findall(r'msgid ((?:"[^"]*"\s*)+)msgstr ((?:"[^"]*"\s*)+)', catalogue)
+    entries = re.findall(rf'msgid ((?:{_PO_STRING}\s*)+)msgstr ((?:{_PO_STRING}\s*)+)', catalogue)
     missing = [msgid for msgid, msgstr in entries
-               if msgstr.strip() == '""' and "".join(re.findall(r'"([^"]*)"', msgid))]
+               if msgstr.strip() == '""' and "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', msgid))]
     assert not missing, f"{len(missing)} untranslated entries, e.g. {missing[:3]}"
+
+
+def test_no_entry_in_the_arabic_catalogue_is_fuzzy():
+    """makemessages marks a changed msgid `fuzzy` and fills in the Arabic of the closest
+    old one; msgfmt leaves fuzzy entries out of the .mo, so Arabic users got English. 113
+    sat in the catalogue, many carrying another message's Arabic ("Calories cannot be
+    negative" read "Price cannot be negative"). Translate the new msgid, then drop the
+    flag and its `#| msgid` line."""
+    import re
+    from pathlib import Path
+
+    catalogue = Path("locale/ar/LC_MESSAGES/django.po").read_text(encoding="utf-8")
+    fuzzy = re.findall(rf'^#,.*\bfuzzy\b.*\n(?:#.*\n)*msgid ((?:{_PO_STRING}\s*)+)', catalogue, re.M)
+    assert not fuzzy, f"{len(fuzzy)} fuzzy entries, e.g. {fuzzy[:3]}"
 
 
 # ------------------------------------------------------------------------- volume
