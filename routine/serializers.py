@@ -23,13 +23,66 @@ class ExerciseMediaSerializer(serializers.ModelSerializer):
         fields = ['id', 'media_type', 'content']
 
 
-class ExerciseSerializer(serializers.ModelSerializer):
+class ExerciseMediaSlotsMixin:
+    """`media_slots` and `media_source`: WHOSE demonstration this viewer is shown.
+
+    The rule and the reasons are in `mediakit/resolution.py`; this only serves its
+    answer. In order: the author of the routine this exercise was read out of, else a
+    trainer the viewer has an approved relation with, else the shared catalogue.
+
+    Why not `media`. `media` on an exercise has been the legacy `ExerciseMedia` list —
+    `[{id, media_type, content}]` — since before the slot system existed, and every
+    build in the field reads it. The contract is additive or nothing (CLAUDE.md), so
+    the slots arrive beside it under their own name and the legacy list is untouched.
+    `media_slots` is the same shape the rest of the platform serves as `media`:
+    `{"<slot>": {url_1x, url_2x, blur, focal, ...}}` for a still,
+    `{video_url, poster_url, state, ...}` for a video, and an empty slot is absent.
+
+    `media_source` is `routine_author`, `my_trainer`, `catalogue`, or null when there
+    is no media anywhere; `media_trainer_id` names the coach (null for the
+    catalogue). A trainer reading their own library gets `my_trainer` with their own
+    id — they are the trainer they are connected to.
+
+    A page is resolved in one go by `routine.media_context`. Without it this still
+    answers correctly, one query per exercise.
+    """
+    def _resolved_media(self, obj):
+        from mediakit.resolution import ExerciseMediaCache, empty
+
+        from .media_context import CACHE_KEY, ROW_AUTHOR_KEY
+
+        if getattr(obj, 'pk', None) is None:
+            return empty()
+        cache = self.context.get(CACHE_KEY)
+        if cache is None:
+            request = self.context.get('request')
+            cache = ExerciseMediaCache(getattr(request, 'user', None), request)
+            self.context[CACHE_KEY] = cache
+        return cache.get(obj.pk, self.context.get(ROW_AUTHOR_KEY))
+
+    def get_media_slots(self, obj):
+        return self._resolved_media(obj)['media']
+
+    def get_media_source(self, obj):
+        return self._resolved_media(obj)['media_source']
+
+    def get_media_trainer_id(self, obj):
+        return self._resolved_media(obj)['media_trainer_id']
+
+
+class ExerciseSerializer(ExerciseMediaSlotsMixin, serializers.ModelSerializer):
     """
     Serializer for Exercises, with muscle group targeting.
     Input: name, description, target_muscle
     Output: Serialized Exercise data for API responses
+
+    `media` is the legacy `ExerciseMedia` list. `media_slots`, `media_source` and
+    `media_trainer_id` are the per-trainer library — see `ExerciseMediaSlotsMixin`.
     """
     media = ExerciseMediaSerializer(many=True, read_only=True)
+    media_slots = serializers.SerializerMethodField()
+    media_source = serializers.SerializerMethodField()
+    media_trainer_id = serializers.SerializerMethodField()
     thumbnail = serializers.SerializerMethodField()
     difficulty_level = serializers.CharField(read_only=True)
     # The stored value is the client's key; the label is what a person reads, and it
@@ -44,7 +97,8 @@ class ExerciseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Exercise
         fields = ['id', 'name', 'description', 'target_muscle', 'target_muscle_display',
-                  'difficulty_level', 'difficulty_level_display', 'image', 'thumbnail', 'media']
+                  'difficulty_level', 'difficulty_level_display', 'image', 'thumbnail',
+                  'media', 'media_slots', 'media_source', 'media_trainer_id']
 
     # `get_image` stood here and never ran: `image` is a plain model field in
     # `Meta.fields`, not a method field (BACKEND_BUGS B-036). DRF's ImageField already
@@ -89,18 +143,23 @@ class ExerciseSerializer(serializers.ModelSerializer):
         return None
 
 
-class ExerciseCreateWithImageSerializer(serializers.ModelSerializer):
+class ExerciseCreateWithImageSerializer(ExerciseMediaSlotsMixin,
+                                        serializers.ModelSerializer):
     """
     Serializer for creating exercises with optional image upload.
     Input: name, description, target_muscle, image (optional)
     Output: Serialized Exercise data for API responses
     """
     media = ExerciseMediaSerializer(many=True, read_only=True)
+    media_slots = serializers.SerializerMethodField()
+    media_source = serializers.SerializerMethodField()
+    media_trainer_id = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
 
     class Meta:
         model = Exercise
-        fields = ['id', 'name', 'description', 'target_muscle', 'image', 'media']
+        fields = ['id', 'name', 'description', 'target_muscle', 'image', 'media',
+                  'media_slots', 'media_source', 'media_trainer_id']
 
     def get_image(self, obj):
         request = self.context.get('request')
@@ -149,6 +208,38 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
         # and reachable by no endpoint (BACKEND_BUGS B-012).
         fields = ['id', 'routine', 'exercise', 'exercise_id', 'sets', 'reps', 'rest_time', 'day', 'order', 'notes', 'weight', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
+
+    def to_representation(self, instance):
+        """Name the coach who prescribed this row, for the length of this row.
+
+        Line (a) of the media rule — "the coach who prescribed it is the one
+        demonstrating it" — is a fact about the ROUTINE, and the nested
+        `ExerciseSerializer` only ever sees the exercise. The author is put in the
+        shared context around this one row and taken out again: serialization is
+        sequential and depth-first, so the nested serializer reads the value for the
+        row it is inside, and a later row (or a later routine, in a list of them)
+        cannot inherit it. The author map is built once per page by
+        `routine.media_context`, so this costs no query.
+        """
+        from .media_context import AUTHORS_KEY, ROW_AUTHOR_KEY
+
+        authors = self.context.get(AUTHORS_KEY) or {}
+        if instance.routine_id in authors:
+            author = authors[instance.routine_id]
+        elif instance.routine_id:
+            # Not prepared (a write response, or a view without the mixin). One query,
+            # and `in authors` above is what stops a routine with no author — the map
+            # holds the None — from paying for it on every row.
+            author = (Routine.objects.filter(pk=instance.routine_id)
+                      .values_list('created_by_id', flat=True).first())
+        else:
+            author = None
+        previous = self.context.get(ROW_AUTHOR_KEY)
+        self.context[ROW_AUTHOR_KEY] = author
+        try:
+            return super().to_representation(instance)
+        finally:
+            self.context[ROW_AUTHOR_KEY] = previous
 
     def validate_weight(self, value):
         if value is not None and not 0 <= value <= 1000:

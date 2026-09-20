@@ -806,8 +806,15 @@ def test_the_upload_route_answers_with_and_without_the_trailing_slash(library, a
 
     from mediakit.models import MediaAsset
 
+    # Both spellings of every large-upload route. The per-trainer exercise library
+    # joined the set on 2026-09-20 (BACKEND_DELTA item 7): a coach's own demonstration
+    # is the same video through the same pipeline, so it needs the same ceiling. The
+    # assertion stays exact rather than becoming a subset check — the point of it is
+    # that no route quietly acquires a 65 MB body limit.
     assert set(live.LARGE_UPLOAD_PATHS) == {"/api/v1/content/media/video",
-                                            "/api/v1/content/media/video/"}
+                                            "/api/v1/content/media/video/",
+                                            "/api/v1/trainer/exercise-media",
+                                            "/api/v1/trainer/exercise-media/"}
 
     response = api(library["owner"]).post("/api/v1/content/media/video", {
         "owner_type": "exercise", "owner_id": library["private"].pk,

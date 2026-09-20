@@ -943,7 +943,18 @@ MEDIA_VIDEO_MAX_SECONDS = int(get_env('MEDIA_VIDEO_MAX_SECONDS', 90))
 LARGE_UPLOAD_PATHS = {
     '/api/v1/content/media/video': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
     '/api/v1/content/media/video/': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
+    # A coach's own demonstration of a shared exercise takes the same video through
+    # the same pipeline, so it needs the same ceiling (mediakit/urls_trainer.py).
+    '/api/v1/trainer/exercise-media': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
+    '/api/v1/trainer/exercise-media/': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
 }
+
+# How many assets one trainer may hold on ONE exercise (mediakit/trainer_views.py).
+# Storage and egress are paid per byte and a library is per trainer PER EXERCISE, so
+# the bill is this number times every exercise times every coach. Replacing a filled
+# slot is free; a fourth different slot answers `media_library_full`. Three is the
+# poster, the loop and one cue — which is the demonstration the designs ask for.
+MEDIA_TRAINER_EXERCISE_MAX_ASSETS = int(get_env('MEDIA_TRAINER_EXERCISE_MAX_ASSETS', 3))
 
 STORAGES = {
     # Only signs when Django itself serves the files. With an external backend the

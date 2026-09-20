@@ -84,6 +84,14 @@ MODEL_VERSION_KEYS = {
     "achievements.Achievement": "ACHIEVEMENT",
     "achievements.UserAchievement": "ACHIEVEMENT",
     "achievements.AchievementProgress": "ACHIEVEMENT",
+    # An exercise's media no longer lives on the exercise row. `/api/routine/exercises/`
+    # is cached for five minutes and now carries `media_slots`, so without this a coach
+    # uploaded their demonstration, opened the app and saw the old one — for up to five
+    # minutes, on their own upload. Blunt on purpose: a `MediaAsset` write for a trainer
+    # portrait or an app banner bumps this counter too. That costs a re-fetch of one
+    # cached route; the alternative, filtering by owner type here, would put a second
+    # copy of the slot vocabulary in the cache layer.
+    "mediakit.MediaAsset": "EXERCISE",
 }
 
 

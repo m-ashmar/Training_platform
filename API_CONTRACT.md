@@ -508,10 +508,79 @@ exceed 15 MB (cap `MEDIA_VIDEO_MAX_BYTES`, 64 MB; duration cap `MEDIA_VIDEO_MAX_
 `payload_too_large` (413) from the body cap. Answers on both spellings, with and without
 the trailing slash, as `capabilities` does (B-035).
 
-`GET /api/v1/content/media/exercise/{id}/` answers `{exercise_id, media}` and obeys the
-exercise visibility rule exactly as `/api/routine/exercises/{id}/add-media/` does — an
-exercise the caller may not see answers `404 code="not_found"`, byte-identical to an id
-that does not exist. Video is not an exception to that rule.
+`GET /api/v1/content/media/exercise/{id}/` answers
+`{exercise_id, media, media_source, media_trainer_id}` and obeys the exercise visibility
+rule exactly as `/api/routine/exercises/{id}/add-media/` does — an exercise the caller
+may not see answers `404 code="not_found"`, byte-identical to an id that does not exist.
+Video is not an exception to that rule. Pass `?routine_id=` when the exercise was opened
+from inside a routine (see the next section for what that changes); a routine the caller
+is not part of is ignored, not refused.
+
+### The per-trainer exercise library (design v2 item 7)
+
+A coach puts THEIR OWN demonstration on a catalogue exercise, so the client watches
+their coach perform the move instead of a stock clip. The exercise row is shared and is
+never copied — one id, one history, one set of records for everybody — and the coach's
+footage hangs beside it as a `trainer_exercise` asset keyed by (trainer, exercise).
+
+**Which media a viewer is shown** is decided in one place,
+`mediakit.resolution.resolve_exercise_media`, and in this order:
+
+1. the media the author of THAT routine put on that exercise — the coach who
+   prescribed it is the one demonstrating it;
+2. failing that, the media of any trainer the viewer has an approved relation with;
+3. failing that, the shared catalogue's own media.
+
+A client with no coach gets (3). A trainer sees their own library over the catalogue. A
+whole source wins, not a slot at a time: a coach who filmed only `exercise.loop` shows
+their loop and no poster, rather than their loop over the catalogue's still.
+
+Every exercise object (`ExerciseSerializer`: the exercise list and detail, the routine
+day, the template rows, the daily summary) therefore carries three ADDITIVE fields:
+
+| field | value |
+|---|---|
+| `media_slots` | `{slot: payload}` in the shape above, resolved. An empty slot is absent |
+| `media_source` | `routine_author` \| `my_trainer` \| `catalogue`, or `null` when there is no media anywhere |
+| `media_trainer_id` | whose it is; `null` for the catalogue |
+
+`media` on an exercise is UNCHANGED — it is still the legacy `ExerciseMedia` list
+(`[{id, media_type, content}]`). The slots arrive under `media_slots` precisely so that
+nothing already shipped moves.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET, POST` | `/api/v1/trainer/exercise-media/` | auth (trainer, or admin with `trainer_id`) | `TrainerExerciseMediaView` |
+| `DELETE` | `/api/v1/trainer/exercise-media/{id}/` | auth (the asset's trainer, or admin) | `TrainerExerciseMediaDetailView` |
+
+`GET ?exercise_id=` answers `{exercise_id, trainer_id, count, limit, media}` — what THIS
+trainer has on that exercise, never the catalogue's and never another coach's.
+
+`POST` is `multipart/form-data`: `file`, `exercise_id`, `slot` (`exercise.poster`,
+`exercise.thumb`, `exercise.loop`, `exercise.cue`), optional `alt_ar`, `alt_en`, and
+`trainer_id` for an admin. Image or video is decided by the SLOT and each goes through
+the platform's existing pipeline for its kind — the same content sniffing and the same
+caps as `/api/v1/content/media/video/` (`MEDIA_VIDEO_MAX_BYTES` 64 MB,
+`MEDIA_VIDEO_MAX_SECONDS` 90 s), so this is the second route whose body may exceed
+15 MB. Uploading into a filled slot replaces it. Answers on both spellings, with and
+without the trailing slash.
+
+A trainer may only touch an exercise they may SEE (`visible_exercises_for`: their own
+plus the shared catalogue) and only their own assets. `DELETE` never reaches the
+catalogue's media, whoever asks. Verification (`trainer_is_verified`) is NOT required —
+it gates nothing else a trainer publishes on this platform.
+
+Codes: `media_exercise_id_required`, `media_file_required`, `media_unknown_slot`,
+`media_library_full` (the per-exercise cap, `MEDIA_TRAINER_EXERCISE_MAX_ASSETS`,
+3), `media_kind_not_supported_yet`, plus every code the image and video pipelines
+already answer (`media_not_a_video`, `media_video_too_large`, `media_video_too_long`,
+`media_wrong_ratio`, `media_too_small`, `media_unsupported_format`), `not_a_trainer`
+(403) and `not_found` (404). A catalogue asset, another coach's asset, an asset on an
+exercise the caller may not see and an id that does not exist all answer the same 404,
+byte for byte.
+
+`POST /api/v1/content/media/video/` refuses `owner_type=trainer_exercise` with 403: the
+coach's library has one way in, so the cap lives in one place.
 
 ### Trainers (design v2)
 

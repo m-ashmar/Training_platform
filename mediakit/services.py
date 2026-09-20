@@ -27,7 +27,8 @@ from training_platform.media_storage import media_url
 
 from .models import MediaAsset
 from .processing import process_upload
-from .slots import APP_OWNER_ID, VIDEO, OwnerType, required_keys, resolve
+from .slots import (APP_OWNER_ID, VIDEO, OwnerType, required_keys, resolve,
+                    slot_accepts)
 
 
 def payload(asset: MediaAsset, request=None) -> dict:
@@ -127,17 +128,35 @@ def complete_kits(owner_type: str, owner_ids) -> set[int]:
     return {owner_id for owner_id, slots in filled.items() if required <= slots}
 
 
-def resolve_owner(owner_type, owner_id, slot_key):
+def owner_key(owner_type, owner_id, slot_key, person=None) -> dict:
+    """The filter that names ONE stored slot.
+
+    For every owner but `trainer_exercise` a slot is identified by (type, id, slot).
+    That one is identified by (type, exercise, TRAINER, slot) — two owners share the
+    exercise id, which is the whole point of the per-trainer library — and the
+    database says the same thing in `one_trainer_asset_per_exercise_slot`. Anything
+    that looks a slot up for writing goes through here, or it will find, replace or
+    delete another coach's demonstration.
+    """
+    key = {"owner_type": owner_type, "owner_id": owner_id, "slot": slot_key}
+    if owner_type == OwnerType.TRAINER_EXERCISE:
+        key["person"] = person
+    return key
+
+
+def resolve_owner(owner_type, owner_id, slot_key, person=None):
     """Check that the slot belongs to this kind of owner and that the owner exists.
 
-    Returns `(owner_id, person)`: the app's single owner id, and the trainer row when
-    the owner is a trainer. Raises `ValidationError` with a `code`.
+    Returns `(owner_id, person)`: the app's single owner id, and the person row when
+    the owner belongs to one — the trainer themselves for `trainer`, the trainer who
+    shot it for `trainer_exercise` (where `owner_id` is the exercise). Raises
+    `ValidationError` with a `code`.
     """
     from django.core.exceptions import ValidationError
     from django.utils.translation import gettext as _
 
     slot = resolve(slot_key)
-    if slot is None or slot.owner_type != owner_type:
+    if not slot_accepts(slot, owner_type):
         raise ValidationError(_("This slot does not belong to this kind of owner."),
                               code="media_unknown_slot")
     if owner_type == OwnerType.APP:
@@ -149,6 +168,13 @@ def resolve_owner(owner_type, owner_id, slot_key):
     owner = model.objects.filter(**filters).first()
     if owner is None:
         raise ValidationError(_("Nothing of this kind has this id."), code="media_unknown_owner")
+    if owner_type == OwnerType.TRAINER_EXERCISE:
+        # `owner` is the exercise; the person is passed in, because which trainer this
+        # belongs to is the CALLER's identity and can never be derived from the id.
+        if person is None or not getattr(person, "is_trainer", False):
+            raise ValidationError(_("Nothing of this kind has this id."),
+                                  code="media_unknown_owner")
+        return int(owner_id), person
     return int(owner_id), owner if owner_type == OwnerType.TRAINER else None
 
 
@@ -173,7 +199,10 @@ def _recipe_model():
 
 
 _OWNER_MODELS = {OwnerType.TRAINER: _user_model, OwnerType.EXERCISE: _exercise_model,
-                 OwnerType.PROGRAM: _routine_model, OwnerType.DISH: _recipe_model}
+                 OwnerType.PROGRAM: _routine_model, OwnerType.DISH: _recipe_model,
+                 # `trainer_exercise` is keyed on the EXERCISE: that is the row whose
+                 # existence has to be proved. The trainer arrives as `person`.
+                 OwnerType.TRAINER_EXERCISE: _exercise_model}
 
 
 def apply_upload(asset: MediaAsset, processed) -> None:
@@ -188,20 +217,23 @@ def apply_upload(asset: MediaAsset, processed) -> None:
 
 
 def store(*, owner_type, owner_id, slot_key, upload, uploaded_by=None,
-          focal=None, alt_ar=None, alt_en=None) -> MediaAsset:
+          focal=None, alt_ar=None, alt_en=None, person=None) -> MediaAsset:
     """Process `upload` and put it in the slot, replacing whatever was there.
+
+    `person` is required for `trainer_exercise` and ignored everywhere else: it is the
+    trainer whose demonstration this is, and it is half of that owner's key.
 
     Raises `django.core.exceptions.ValidationError` (with a `code`) when the upload or
     the slot is refused. The replaced files are removed once the transaction commits
     (`training_platform/signals.py`), so a rollback never leaves a row without its files.
     """
-    owner_id, person = resolve_owner(owner_type, owner_id, slot_key)
+    owner_id, person = resolve_owner(owner_type, owner_id, slot_key, person)
     processed = process_upload(upload, resolve(slot_key))
+    key = owner_key(owner_type, owner_id, slot_key, person)
 
     with transaction.atomic():
-        asset = (MediaAsset.objects.select_for_update()
-                 .filter(owner_type=owner_type, owner_id=owner_id, slot=slot_key).first()
-                 or MediaAsset(owner_type=owner_type, owner_id=owner_id, slot=slot_key))
+        asset = (MediaAsset.objects.select_for_update().filter(**key).first()
+                 or MediaAsset(**key))
         asset.person = person
         asset.uploaded_by = uploaded_by
         if focal is not None:

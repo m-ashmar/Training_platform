@@ -25,13 +25,16 @@ from django.utils.translation import gettext as _
 from training_platform.file_security import process_uploaded_video
 
 from .models import MediaAsset
-from .services import resolve_owner
+from .services import owner_key, resolve_owner
 from .slots import VIDEO, resolve
 
 
 def store_video(*, owner_type, owner_id, slot_key, upload, uploaded_by=None,
-                alt_ar=None, alt_en=None) -> MediaAsset:
+                alt_ar=None, alt_en=None, person=None) -> MediaAsset:
     """Validate `upload` and put it in a video slot, replacing whatever was there.
+
+    `person` is required for `trainer_exercise` (the trainer whose demonstration this
+    is, half of that owner's key) and ignored for every other owner type.
 
     Raises `django.core.exceptions.ValidationError` carrying a `code`:
 
@@ -47,18 +50,18 @@ def store_video(*, owner_type, owner_id, slot_key, upload, uploaded_by=None,
     The replaced file is removed once the transaction commits
     (`training_platform/signals.py`), so a rollback never leaves a row without its file.
     """
-    owner_id, person = resolve_owner(owner_type, owner_id, slot_key)
+    owner_id, person = resolve_owner(owner_type, owner_id, slot_key, person)
     slot = resolve(slot_key)
     if slot.kind != VIDEO:
         raise ValidationError(_("This slot does not take a video."),
                               code="media_slot_is_not_video")
 
     facts = process_uploaded_video(upload)
+    key = owner_key(owner_type, owner_id, slot_key, person)
 
     with transaction.atomic():
-        asset = (MediaAsset.objects.select_for_update()
-                 .filter(owner_type=owner_type, owner_id=owner_id, slot=slot_key).first()
-                 or MediaAsset(owner_type=owner_type, owner_id=owner_id, slot=slot_key))
+        asset = (MediaAsset.objects.select_for_update().filter(**key).first()
+                 or MediaAsset(**key))
         asset.person = person
         asset.uploaded_by = uploaded_by
         if alt_ar is not None:

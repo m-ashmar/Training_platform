@@ -44,7 +44,14 @@ register(PersonalDataSource(
 # uploaded a picture and is not what makes it personal data.
 register(PersonalDataSource(
     label="media_kit", model="mediakit.MediaAsset", user_field="person",
-    fields=["owner_type", "slot", "alt_ar", "alt_en", "created_at"], on_erase="delete"))
+    # `owner_id` joined the export with the per-trainer exercise library: on a
+    # `trainer_exercise` row it is the EXERCISE the trainer filmed, which is a fact
+    # about them — which moves this coach demonstrates — and an export that hid it
+    # would list a row the subject could not identify. `person` still selects exactly
+    # the rows that belong to someone, so erasure needed no change: a trainer's
+    # demonstrations go with their account, files and all.
+    fields=["owner_type", "owner_id", "slot", "alt_ar", "alt_en", "created_at"],
+    on_erase="delete"))
 
 # --- training -----------------------------------------------------------------
 register(PersonalDataSource(label="workout_sessions", model="routine.WorkoutSession", user_field="user"))
