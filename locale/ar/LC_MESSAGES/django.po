@@ -2684,3 +2684,150 @@ msgstr "تدرّب %(trained)s من %(clients)s متدربين. %(attention)s ب
 #: routine/views.py
 msgid "Exercise not found."
 msgstr "التمرين غير موجود."
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "User"
+msgstr "مستخدم"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Chat message"
+msgstr "رسالة محادثة"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Routine"
+msgstr "برنامج تدريبي"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Diet plan"
+msgstr "خطة غذائية"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Exercise"
+msgstr "تمرين"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Post"
+msgstr "منشور"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Comment"
+msgstr "تعليق"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Spam"
+msgstr "محتوى مزعج"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Harassment or bullying"
+msgstr "تحرّش أو تنمّر"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Nudity or sexual content"
+msgstr "عري أو محتوى جنسي"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Violence or threats"
+msgstr "عنف أو تهديد"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Scam or fraud"
+msgstr "احتيال أو نصب"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Impersonation"
+msgstr "انتحال شخصية"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Something else"
+msgstr "شيء آخر"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Open"
+msgstr "قيد الانتظار"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Being reviewed"
+msgstr "قيد المراجعة"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Action taken"
+msgstr "تم اتخاذ إجراء"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Dismissed"
+msgstr "تم إغلاقه دون إجراء"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Report"
+msgstr "بلاغ"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Reports"
+msgstr "البلاغات"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Block"
+msgstr "حظر"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Blocks"
+msgstr "عمليات الحظر"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "AI consent"
+msgstr "الموافقة على المساعد الذكي"
+
+#: moderation/exceptions.py ai_assistant/services/chat_service.py
+msgid "Allow the AI coach to use your data before asking it anything."
+msgstr "اسمح للمدرب الذكي باستخدام بياناتك قبل أن تسأله أي شيء."
+
+#: moderation/exceptions.py users/views.py
+msgid "This is not available between these two accounts."
+msgstr "هذا غير متاح بين هذين الحسابين."
+
+#: moderation/views.py
+msgid "There is nothing here to report."
+msgstr "لا يوجد شيء هنا للإبلاغ عنه."
+
+#: moderation/views.py
+msgid "You cannot report yourself."
+msgstr "لا يمكنك الإبلاغ عن نفسك."
+
+#: moderation/views.py
+msgid "You have already reported this. It is being looked at."
+msgstr "لقد أبلغت عن هذا من قبل، وهو قيد النظر."
+
+#: moderation/views.py
+msgid "You cannot block yourself."
+msgstr "لا يمكنك حظر نفسك."
+
+#: moderation/views.py
+msgid "No such account."
+msgstr "لا يوجد حساب بهذا المعرّف."
+
+#: moderation/serializers.py
+msgid "Say which version of the policy is being agreed to."
+msgstr "حدّد إصدار السياسة الذي تجري الموافقة عليه."

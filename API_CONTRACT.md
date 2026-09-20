@@ -436,6 +436,69 @@ private copy (`templates/{id}/generate/`: `client_id`, or `client_ids` for sever
 |---|---|---|---|
 | `GET` | `/api/v1/coaching/current/` | auth (client) | `CurrentCoachingView` |
 
+### Safety: reporting, blocking, AI consent
+
+Identical on every `X-App-Channel` — a store reviewer tries these on the store build.
+All authenticated.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `POST` | `/api/v1/reports/` | auth | `ReportCreateView` |
+| `GET` | `/api/v1/reports/mine/` | auth | `MyReportsView` |
+| `GET, POST` | `/api/v1/blocks/` | auth | `BlockListCreateView` |
+| `DELETE` | `/api/v1/blocks/{user_id}/` | auth | `BlockDeleteView` |
+| `GET, POST` | `/api/v1/ai-consent/` | auth | `AIConsentView` |
+
+**Reporting.** `POST reports/` takes `{target_type, target_id, reason, note?}` and
+answers `201 {id, status}`. `target_type` is `user`, `chat_message`, `routine`,
+`diet_plan`, `exercise`, `social_post` or `comment`; `reason` is `spam`, `harassment`,
+`nudity`, `violence`, `scam`, `impersonation` or `other`; `note` is the reporter's own
+words, 1000 characters at most.
+
+| `code` | Status | When |
+|---|---|---|
+| `target_not_found` | 404 | No such target, **or** the reporter may not see it — one answer for both, so the route cannot be used to discover which private routines, plans and messages exist |
+| `cannot_report_yourself` | 403 | Your own account, or something you wrote. Content generated FOR you (your diet plan, the AI's replies) is not yours and stays reportable |
+| `already_reported` | 409 | You already have an open report on this target. Reportable again once it has been handled |
+
+`GET reports/mine/` pages `{id, target_type, target_id, reason, note, status,
+resolution_note, handled_at, created_at}`, newest first. `status` is `open`,
+`reviewing`, `actioned` or `dismissed`. Who handled it is never returned.
+
+**Blocking.** `POST blocks/` `{user_id}` → `201 {user_id, blocked: true}`, idempotent;
+`cannot_block_yourself` (400) and `user_not_found` (404). `DELETE blocks/{user_id}/` →
+204, also when there was no block. `GET blocks/` pages `{user_id, username,
+created_at}` — only the blocks this person MADE; one made against them is never
+disclosed.
+
+The effect is symmetric and immediate. Neither account appears in the other's post
+list, feed, post search, comment lists, follower and following lists, notifications,
+public profiles, the available-trainers list or trainer matches; neither can send the
+other a trainer request (`user_blocked`, 403, on `client/request-trainer/` and
+`trainer/assign-client/`), and a request sent before the block cannot be accepted
+after it (same code on `trainer/respond-to-request/` and `client/respond-to-invite/`).
+Blocking does not hide a challenge from either of them, but a blocked person is
+dropped from its leaderboard — with the ranks left as they were, so the board still
+reads 1, 2, 4.
+
+In the app's "report and block" flow, call `reports/` FIRST: what a blocked person
+wrote is no longer visible to the reporter, and therefore no longer reportable.
+
+**AI consent.** `GET ai-consent/` → `{granted, policy_version, granted_at,
+revoked_at}`; never asked reads as all-null with `granted: false`, which is how the
+app tells "not asked yet" from "said no" (`revoked_at` set). `POST ai-consent/`
+`{granted, policy_version}` returns the same body; `policy_version` is required when
+granting and ignored when revoking.
+
+Until it is granted, the AI coach refuses: `403 ai_consent_required` on every
+`/api/ai/` route except `DELETE /api/ai/data/` (deleting what the assistant holds has
+to work after consent is withdrawn — that is the commonest reason to ask), and over
+the WebSocket `ws/ai/chat/` the reply is
+`{"type": "error", "code": "ai_consent_required", "content": "..."}` with the socket
+left open, so the app can show the consent sheet and carry on in the same connection.
+Revoking takes effect on the very next message. On the REST routes the entitlement
+check runs first, so a lapsed subscriber is still told `no_entitlement`.
+
 ### Platform policy (what each build may show and sell)
 
 Every request carries `X-App-Channel: apk | play | ios | web` and `X-App-Version`. The

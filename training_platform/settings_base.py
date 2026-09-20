@@ -68,6 +68,8 @@ INSTALLED_APPS = [
     "ai_assistant",
     "policy",
     "mediakit",
+    # Reporting, blocking, the moderation queue and AI consent (moderation/models.py).
+    "moderation",
 
     # Third-party
     "rest_framework",

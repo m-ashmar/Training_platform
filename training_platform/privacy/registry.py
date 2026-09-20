@@ -348,9 +348,14 @@ def audit_coverage() -> list[str]:
     from django.apps import apps
     from django.db import models as M
 
+    # Every first-party app whose models the audit walks. An app left out of this set
+    # is silently exempt, and the audit then passes whether or not its models are
+    # registered — which is the rot this function exists to catch. `moderation` holds
+    # a person's complaints, who they have hidden and what they consented to, so it
+    # belongs here from its first migration.
     local = {"users", "wallet", "diet", "routine", "subscription", "social",
              "ai_assistant", "achievements", "analytics", "notifications", "challenges",
-             "policy"}
+             "policy", "moderation"}
     claimed = set(registry)
     missing = []
     for model in apps.get_models():

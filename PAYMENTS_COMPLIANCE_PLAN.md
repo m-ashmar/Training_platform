@@ -21,7 +21,7 @@ and order live in `BACKEND_DELTA.md`, not here.
 | 4 | Double-entry ledger, commission settings + snapshot, remove the 100% forward | PART DONE | Coaching commission DONE with the monthly coaching (`users/coaching.py`, `BACKEND_DELTA.md` item 16): 20% of every month, rate copied onto each `CoachingPeriod`, to a platform revenue wallet. Left: `wallet/signals.py:handle_payment_completed` still forwards 100% of a plan payment to the trainer; the rates are settings, not yet operator-editable rows; no named double-entry accounts yet |
 | 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | TODO | `preferred_language` is settable since BACKEND_BUGS B-005 (`POST /api/auth/user/update/`). Remove `auto_renew` from API/UI here — additively (keep the key, read-only): three tests PATCH it. Plan expiry notices EXIST (owner, 2026-09-19; `BACKEND_DELTA.md` item 18): `subscription_expiring` 3 days ahead and `subscription_expired` on days 0/3/7/14/30 from `subscription.send_renewal_reminders`, store-safe text, `access`/`renewal_due` on `subscriptions/current/`; extend these, never add parallel expiry notices |
 | 6 | Trainer verification, then withdrawals | TODO | |
-| 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | PART DONE | Date of birth + minimum age 14 DONE with the design-v2 work (`BACKEND_DELTA.md` item 3: validated at sign-up and on every profile write, `MINIMUM_AGE_YEARS`; making it required at sign-up is an owner decision in that file). Left: reports, blocking, moderation queue, AI consent — store blockers B1, B2, B5 |
+| 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | DONE (branch `build/moderation`, unmerged) | Date of birth + minimum age 14 was already done with the design-v2 work (`BACKEND_DELTA.md` item 3). B1/B2/B5 are the new `moderation/` app: `Report`, `Block`, `AIConsent`; `POST/GET /api/v1/reports/`, `reports/mine/`, `GET/POST/DELETE /api/v1/blocks/`, `GET/POST /api/v1/ai-consent/`; the queue at `/dj-admin/moderation/report/` (operator-only, two closing actions). Enforcement: `moderation.services.blocked_ids` filters posts, comments, follows, profiles, notifications, the challenge leaderboard, available-trainers and trainer matches; `is_blocked` refuses sending AND accepting a trainer request; `require_ai_consent`/`HasAIConsent` gate the AI coach on REST and in `chat_service.chat_stream`. Tests: `tests/test_moderation.py`. Left for step 8: the report/block hooks on the two-way chat |
 | 8 | Two-way trainer–client chat with report/block hooks | TODO | Makes the 1:1 coaching claim real-time in fact |
 | 9 | Agent limits, receivable tracking, agent history/status | TODO | Defaults (200/day) are below the cheapest plan |
 | 10 | Routine products | TODO | Refusal for `ROUTINE_PRODUCT` on store channels already exists in `policy/services.py` — call `require_purchase_allowed` first in the purchase endpoint. Make the buyer's copy with `routine/assignment.py` `routine_from_template` (the same private copy a trainer's generate writes); keep payment out of that function |
@@ -75,6 +75,32 @@ is locked (spec §8); the numbers above are the defaults.
    declare itself the direct APK and be offered purchasing. Owner/mobile session: no
    default (empty → the server's strictest behaviour) and a release-mode check.
 2. Step 2 follow-up: the AI coach must decline "how do I pay" on `play`/`ios`.
+3. Step 7 left three decisions for the owner. (a) The AI policy version is a bare string
+   the app sends; nothing on the server declares the CURRENT version, so nothing can ask
+   again after a policy change — a setting plus `policy_version_required` on
+   `capabilities` would. (b) A report is anonymised, not deleted, when the reporter
+   erases their account (the row and its outcome survive, their words go) — legal may
+   want a retention window instead. (c) Blocking does not hide a challenge whose creator
+   was blocked; only the leaderboard drops them, because hiding a shared activity would
+   take the blocker's own progress with it.
+
+## Traps this branch cost a session to find
+
+- **Testing async code that touches the ORM.** Inside a `django_db` test, an ORM read
+  made under `asyncio.run` gets a NEW connection and sees an EMPTY table — the row the
+  test just wrote is invisible and the assertion passes for the wrong reason. Measured
+  on `AIConsent`. `async_to_sync` is worse: `channels.db.database_sync_to_async` calls
+  `close_old_connections` on the test's own connection and everything after it fails
+  with "connection already closed". The way that works is to replace
+  `database_sync_to_async` with an inline shim and step the coroutine by hand — see
+  `tests/test_moderation.py::_chat`. `tests/test_c9_minor.py` reaches the same place by
+  unwrapping the decorator with `.func`.
+- **`reverse("admin:...")` from console code goes to `/admin/`, not `/dj-admin/`.** Both
+  sites publish the app namespace `admin`; only `current_app=self.admin_site.name`
+  picks the console (`moderation/targets.py` `console_link`).
+- **`privacy/registry.py` `audit_coverage()` has its own `local` app set.** An app that
+  is not in it is silently exempt and the coverage gate passes with the models
+  unregistered. A new app goes in that set in the same commit as its first model.
 
 ## One step per session — what to paste
 

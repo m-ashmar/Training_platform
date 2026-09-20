@@ -66,6 +66,11 @@ urlpatterns = [
     # The client's monthly coaching (users/coaching.py).
     path('api/v1/coaching/', include('users.urls_coaching', namespace='coaching')),
 
+    # Reporting, blocking and AI consent: the safety layer a store review asks for.
+    # Mounted at the version root, not under a prefix of its own — `reports/`,
+    # `blocks/` and `ai-consent/` are platform-wide, not one feature's sub-resource.
+    path('api/v1/', include('moderation.urls', namespace='moderation')),
+
     # Notification preferences (listing lives under /api/social/notifications/)
     path('api/notifications/', include('notifications.urls', namespace='notifications')),
 ]
