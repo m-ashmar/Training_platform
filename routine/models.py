@@ -9,7 +9,7 @@ from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
 from django.core.validators import MinValueValidator, MaxValueValidator
 from datetime import date
-from django.db.models.signals import post_save, m2m_changed
+from django.db.models.signals import post_delete, post_save, m2m_changed
 from django.dispatch import receiver
 import contextlib as _contextlib
 import threading as _threading
@@ -834,10 +834,26 @@ class WorkoutSession(models.Model):
     #: The app's own id for this session, so a retried create returns the first row
     #: instead of writing a second one (B-003). Optional; unique when given.
     client_uuid = models.UUIDField(null=True, blank=True, unique=True)
-    
+    #: How hard the workout felt, 1 (easy) to 5 (all I had), as the PERSON WHO TRAINED
+    #: judges it (BACKEND_DELTA item 11). Null while unanswered, and it stays answerable
+    #: afterwards — a client rates the session on its own screen, often the next morning.
+    #: Per-set `ExerciseSetLog.rpe` is 1-10 and about one set; this is about the session.
+    #: The check constraint below is the floor: a serializer can be bypassed, a
+    #: constraint cannot, and every progression rule divides by these numbers.
+    effort_rating = models.PositiveSmallIntegerField(
+        null=True, blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="How hard the whole session felt: 1 (easy) to 5 (all I had).")
+
     class Meta:
         verbose_name = "Workout Session"
         verbose_name_plural = "Workout Sessions"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(effort_rating__isnull=True)
+                | models.Q(effort_rating__gte=1, effort_rating__lte=5),
+                name='workoutsession_effort_rating_1_to_5'),
+        ]
         indexes = [
             models.Index(fields=['user', 'start_time']),
             models.Index(fields=['routine']),
@@ -1248,6 +1264,44 @@ def update_routine_progress_on_set_log(sender, instance, created, **kwargs):
     transaction.on_commit(lambda pk=progress.pk,
                           routine_pk=getattr(routine_scope, 'pk', None), day=day_scope:
                           _recalc_locked(pk, routine_pk, day))
+
+
+@receiver(post_delete, sender=ExerciseSetLog)
+def update_routine_progress_on_set_delete(sender, instance, **kwargs):
+    """A deleted set is subtracted from everything the created one added.
+
+    Nothing recomputed on delete before this (BACKEND_DELTA item 15), so removing a set
+    left `UserExerciseProgress.completed_sets`, `RoutineProgress` and the `DayOutcome`
+    claiming work that no longer exists: a day could stay "nothing missed" — and keep a
+    streak alive — on sets the client had deleted.
+
+    `_recalc_locked`, not `recalc_progress_for`: that helper returns early when the
+    progress row has no set logs left, which is exactly the case deleting the last set
+    of an exercise creates, and the stale totals would survive. `_recalc_locked` writes
+    the aggregate (zero, when nothing is left) and then propagates through
+    `refresh_routine_progress`, which refreshes any outcome the day already has.
+
+    The routine and the day come from the deleted row's own session when it had one:
+    without that scope the propagation walks every routine holding the exercise, which
+    is what B-011 was about. A cascade (the progress row, the session or the exercise
+    being deleted) leaves nothing to recompute; `_recalc_locked` updates zero rows and
+    returns.
+    """
+    if getattr(_recalc_state, 'suspended', False):
+        return
+    progress_pk = instance.user_exercise_progress_id
+    if not progress_pk:
+        return
+    # The ids only: touching `instance.workout_session` re-queries a row that may have
+    # been deleted in the same cascade, and this receiver must not raise into a delete.
+    routine_pk = day_scope = None
+    if instance.workout_session_id:
+        session = (WorkoutSession.objects.filter(pk=instance.workout_session_id)
+                   .values('routine_id', 'day').first())
+        if session is not None:
+            routine_pk, day_scope = session['routine_id'], session['day']
+    transaction.on_commit(lambda pk=progress_pk, routine=routine_pk, day=day_scope:
+                          _recalc_locked(pk, routine, day))
 
 
 def _recalc_locked(progress_pk, routine_pk=None, day_scope=None):

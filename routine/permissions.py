@@ -238,28 +238,50 @@ class IsSetLogCreatorOrTrainerOrAdmin(BasePermission):
     """
     Custom permission for ExerciseSetLogViewSet:
     - Allow POST (create) for any authenticated user (clients can log their own sets)
-    - Allow update/delete for trainers and admins only
+    - Allow update/delete for the person whose set it is, and for admins
     - Read-only for others
+
+    The name is the historical one (it is in `API_CONTRACT.md` against every set-log
+    route); the rule it enforces changed on 2026-09-20, in two directions at once.
+
+    The OWNER may now correct and delete their own set (BACKEND_DELTA item 15). They
+    could not, which is the wrong way round: they are the only person who knows what
+    they lifted, and a mistyped weight was permanent — it fed their volume, their
+    records, their one-rep-max estimates and their coach's screen for ever.
+
+    A TRAINER may no longer edit or delete a client's set. They did not lift it. A
+    coach who could rewrite the log could also rewrite the record it produced and the
+    adherence figure their own work is judged by, and the client has no way to see it
+    happen. A coach corrects a client by talking to them; if a set is wrong, the
+    client deletes it. Reads are unchanged — the trainer sees everything they saw.
+
+    Admin keeps the write, as the operator of last resort (`/dj-admin/` support work).
     """
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
             return bool(request.user and request.user.is_authenticated)
-        if request.method == 'POST':
-            return request.user and request.user.is_authenticated
-        return request.user.is_authenticated and (request.user.is_trainer or request.user.is_staff)
+        # Who may write THIS row is an object question, and answering it here as well
+        # only decided it for the wrong person: the class-level test read the caller's
+        # ROLE, so the owner of a set was refused before the object was ever loaded.
+        return bool(request.user and request.user.is_authenticated)
 
     def has_object_permission(self, request, view, obj):
         if request.method in SAFE_METHODS:
             return bool(request.user and request.user.is_authenticated)
         if request.method == 'POST':
-            return request.user and request.user.is_authenticated
-        if request.user and request.user.is_staff:
+            return bool(request.user and request.user.is_authenticated)
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if user.is_staff or getattr(user, 'is_admin', False):
             return True
-        if request.user.is_authenticated and request.user.is_trainer:
-            # Trainers can update/delete if they are assigned trainer of the client
-            if hasattr(obj, 'user_exercise_progress') and obj.user_exercise_progress:
-                return can_access_user_data(request.user, obj.user_exercise_progress.user_id)
-        return False 
+        progress = getattr(obj, 'user_exercise_progress', None)
+        if progress is not None:
+            return progress.user_id == user.id
+        # A set with no progress row behind it (an old row): fall back to the session's
+        # owner, and refuse when there is nothing to attribute it to.
+        session = getattr(obj, 'workout_session', None)
+        return session is not None and session.user_id == user.id
 
 
 class IsSessionOwnerOrTrainerOrAdmin(BasePermission):

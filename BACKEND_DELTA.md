@@ -26,11 +26,11 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 8 | Two-way chat: voice, image, video, program cards, report, block | XL | TODO = plan step 8 |
 | 9 | Server-driven home + day timeline | L | TODO (needs 2, 8 for voice) |
 | 10 | Note to the trainer on a request | S | DONE (with BACKEND_BUGS B-008) |
-| 11 | Effort rating 1-5, progression suggestion | L | TODO |
+| 11 | Effort rating 1-5, progression suggestion | L | DONE (2026-09-20) |
 | 12 | Personal records (always 0 today) | M | `prs` DONE (BACKEND_BUGS B-013); records on the completion response TODO |
 | 13 | Intro story content + remote theme override | M | Story media DONE (item 2); theme TODO |
-| 14 | Offline set logging idempotency (build guide section 6) | M | DONE (BACKEND_BUGS B-003) |
-| 15 | Owner may edit/delete a saved set (build guide section 6) | M | TODO |
+| 14 | Offline set logging idempotency (build guide section 6) | M | DONE (B-003 + `set-logs/sync/`, 2026-09-20) |
+| 15 | Owner may edit/delete a saved set (build guide section 6) | M | DONE (2026-09-20) |
 | 16 | Coaching by the month, commission on every month (owner decision 3) | L | DONE |
 | 17 | Templates: one template, a private personalised copy per client (owner decision 16) | M | DONE |
 | 18 | Renewal reminder 3 days ahead; unpaid or ended = frozen (read-only) (owner decision 17) | L | DONE |
@@ -227,11 +227,37 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 
 ## 11. Effort rating and progression
 
-- **Today:** no session rating (per-set RPE 1-10 exists), no progression logic.
-- **Must change:** `WorkoutSession.effort_rating` 1-5 (nullable, check constraint),
-  writable on a completed session, surfaced on the trainer's client-progress payloads;
-  then a computed-on-read `progression` per routine exercise with codes
-  `ready_to_increase | keep | reduce | insufficient_data`. The rule is an owner decision.
+- **Before:** no session rating (per-set RPE 1-10 existed), no progression logic.
+- **Built (2026-09-20):** `WorkoutSession.effort_rating` 1-5, nullable, with the check
+  constraint (`routine/0025`). Writable on create, on the PATCH that completes a
+  session, and on any later PATCH of the session detail — a client often rates a
+  workout the next morning. ONLY the person who trained may set it (400
+  `effort_not_yours` on the field, for their trainer and for an admin alike; 400
+  `effort_out_of_range` outside 1-5). Read back on the session, on
+  `WorkoutSessionDetailSerializer`, and on each `recent_activity` row of
+  `trainer/client-progress/{id}/`.
+- `routine/progression.py` turns it into a suggestion, computed on read, with the
+  numbers it used: `{code, effort: {typical, rated_sessions}, adherence_percent,
+  direction, sessions, latest, next, needs}`. Codes, closed set: `add_weight`,
+  `add_reps`, `hold`, `deload`, `not_enough_data` — NOT the
+  `ready_to_increase | keep | reduce | insufficient_data` sketched here before: the
+  built set names the LEVER, because "increase" does not say whether to load the bar or
+  do one more rep, which is the only part a client can act on. **The owner still owes
+  the rule**: the code names and the five thresholds below are this session's, and
+  changing either is a one-line change in `routine/progression.py` — but a `code` the
+  app has shipped against never changes, so the names want confirming before the app
+  branches on them.
+- The rule, first match wins, one sentence per code in that module's docstring:
+  `not_enough_data` under 3 training days of the exercise or no rated session;
+  `deload` typical effort >= 4.5, or >= 4 while the trend is easing; `hold` under 80%
+  of the last four weeks' planned sets done, or typical effort >= 4; `add_weight`
+  typical effort <= 2.5; `add_reps` everything between. It reads
+  `routine/outcomes.py adherence` and `routine/strength.py trend`; it invents nothing
+  and claims nothing about health.
+- Surfaced on `GET analytics/strength/?exercise_id=` (`progression`) and on the coach's
+  `trainer/client-progress/{id}/` — per exercise inside `top_movers`/`plateaus`, and as
+  a flat `strength.progression` list. One extra query for the whole roster screen.
+  `tests/test_routine_extras.py`.
 
 ## 12. Personal records
 
@@ -254,20 +280,41 @@ contract, every user-facing string goes through gettext with an Arabic entry in
   first POST with it answers 201, a retry 200 with the same row, someone else's id 409
   `idempotency_conflict`. A session's `start_time` is writable on create (at most 30 days
   back), so a workout synced later keeps its clock; `end_time` is checked against it.
-- **Still to do:** log a set by `exercise` + session instead of a server progress id, and
-  a batch `sync/` endpoint.
+- **Built (2026-09-20):** `POST /api/routine/set-logs/sync/` (and the
+  `exercisesetlogs/` alias). A batch of at most 200 entries, each naming what a phone
+  with no signal knows — `client_uuid` (required, the retry key), `exercise_id`,
+  `date`, `set_number`, `weight`, `reps` or `as_prescribed`, `routine_id`, `day`,
+  `workout_session_id`, `notes`, `rpe` — and the server resolves or creates the
+  `UserExerciseProgress` row itself from `(user, exercise, date)`. Idempotent per
+  `client_uuid`: a re-sent batch writes nothing and answers the same ids. Partial
+  success, each row `created` / `duplicate` / `error` with its `code`; the coaching
+  refusal is per row, so one paused coaching does not throw away the sets that belong
+  to another trainer's routine. The recomputation runs once per touched progress row
+  (`suspend_progress_recalc` + `recalc_progress_for`). Codes and the full shape are in
+  the view's docstring and in `API_CONTRACT.md`.
 - **Before:** no idempotency key and no unique constraint on `ExerciseSetLog`; a retried
-  POST duplicated. A single set needs a server `UserExerciseProgress` id up front.
-- **Must change:** nullable `client_uuid` + partial unique index on `WorkoutSession` and
-  `ExerciseSetLog`, replay returns the original row, log by `exercise` + session, optional
-  batch `sync/`.
+  POST duplicated. A single set needed a server `UserExerciseProgress` id up front.
 
 ## 15. Editing a saved set
 
-- **Today:** clients get 403 on PATCH/DELETE of their own set; deletes never recompute
-  progress.
-- **Must change:** `post_delete` recalculation first, then allow the owner, with an edit
-  window code (`set_locked`).
+- **Before:** clients got 403 on PATCH/DELETE of their own set; deletes never recomputed
+  progress, so a deleted set went on counting in `completed_sets`, in `RoutineProgress`
+  and in a closed day's `DayOutcome` — a streak could survive on sets its owner had
+  deleted.
+- **Built (2026-09-20):** `update_routine_progress_on_set_delete` in `routine/models.py`
+  runs `_recalc_locked` on commit (NOT `recalc_progress_for`, which returns early when
+  the last set of a row is the one being deleted), which propagates through
+  `refresh_routine_progress` and `refresh_day_quietly`. Deleting a set can therefore
+  turn a complete day short and break a streak, which is the point.
+- `IsSetLogCreatorOrTrainerOrAdmin` now means the OWNER and an admin: the person who
+  lifted it may correct `weight`, `reps`, `notes`, `rpe` and delete it, and a trainer
+  may not — they did not lift it, and a coach who could rewrite the log could rewrite
+  the adherence figure their own work is judged by. Moving a set (`user_exercise_progress`,
+  `workout_session`, `set_number`, `date`) answers 400 `set_immutable`. Both writes are
+  refused while the coaching is frozen, judged on the set's own date.
+- No edit window and no `set_locked`: nothing in the product locks a set after a time,
+  and inventing one would have been a rule the owner never asked for. If the owner wants
+  one, it is a check in `ExerciseSetLogViewSet._refuse_if_frozen`'s neighbourhood.
 
 ## 16. Coaching by the month
 
@@ -485,12 +532,19 @@ bust it. `accessible_user_ids` answers None for an admin — that means "everyon
 
 ## 20. Trainer pipeline gaps (found while mapping it, 2026-09-20)
 
-Security (sent to their own sessions): a client can move a routine-progress row to any
-routine and date; `POST/PATCH /api/routine/exercises/` skips the image content check;
-~~`GET exercises/{id}/add-media/` shows any exercise's media~~ — FIXED 2026-09-20: all
-three methods resolve the id through `routine.permissions.visible_exercises_for` (the rule
-the list already used, now shared) and answer an invisible exercise exactly as a missing
-one; writes stay owner-or-admin (`tests/test_exercise_media_visibility.py`).
+Security (sent to their own sessions): ~~a client can move a routine-progress row to any
+routine and date~~ — FIXED 2026-09-20: `routine`, `day` and `date` on `RoutineProgress`,
+and `exercise` and `date` on `UserExerciseProgress`, are fixed once written (400
+`progress_immutable`); re-sending the value a row already holds is a no-op, so a PUT of
+the whole object still works. ~~`POST/PATCH /api/routine/exercises/` skips the image
+content check~~ — FIXED 2026-09-20: `ExerciseSerializer.validate_image` runs
+`process_uploaded_image`, the same function the two other upload paths use, so the
+content is sniffed, the pixels capped, the file re-encoded and stored under the DETECTED
+format's extension. ~~`GET exercises/{id}/add-media/` shows any exercise's media~~ —
+FIXED 2026-09-20: all three methods resolve the id through
+`routine.permissions.visible_exercises_for` (the rule the list already used, now shared)
+and answer an invisible exercise exactly as a missing one; writes stay owner-or-admin
+(`tests/test_exercise_media_visibility.py`, `tests/test_routine_extras.py`).
 Product gaps: a trainer cannot
 retire an exercise (`is_active` not writable) though the 409 says to; deleting an unlogged
 exercise cascades it out of every routine and template; no "save routine as template";
@@ -516,7 +570,7 @@ only on Postgres), no backfill that invents data, no rename.
 4. Media video/SVG pipeline (columns on `MediaAsset` for `hls_url`, `poster`, `duration`).
 5. Item 10 note + item 16 `CoachingPeriod`: `users/0041`. Done.
 6. Item 14 `client_uuid` columns + partial unique indexes (before any real data).
-7. Item 11 `effort_rating` (+ check constraint).
+7. Item 11 `effort_rating` (+ check constraint): `routine/0025`. Done.
 8. Item 12 (no schema if computed on read).
 9. Item 7 trainer exercise media (owner type only, no new table).
 10. Item 8 chat app (new tables).

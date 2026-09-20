@@ -2684,3 +2684,73 @@ msgstr "تدرّب %(trained)s من %(clients)s متدربين. %(attention)s ب
 #: routine/views.py
 msgid "Exercise not found."
 msgstr "التمرين غير موجود."
+
+# Added 2026-09-20: routine extras (BACKEND_DELTA items 11, 14, 15) and the
+# two security gaps closed with them.
+
+#: routine/serializers.py routine/views.py
+msgid ""
+"A progress record cannot be moved to another exercise or date. Record "
+"the work on its own day."
+msgstr ""
+"لا يمكن نقل سجلّ التقدّم إلى تمرين آخر أو تاريخ آخر. سجّل العمل في يومه."
+
+#: routine/serializers.py
+msgid "A day's progress cannot be moved to another routine, day or date."
+msgstr "لا يمكن نقل تقدّم اليوم إلى برنامج آخر أو يوم آخر أو تاريخ آخر."
+
+#: routine/serializers.py
+msgid ""
+"A logged set cannot be moved to another exercise, session, set number "
+"or date. Delete it and log it where it belongs."
+msgstr ""
+"لا يمكن نقل المجموعة المسجّلة إلى تمرين آخر أو جلسة أخرى أو رقم مجموعة "
+"آخر أو تاريخ آخر. احذفها وسجّلها في مكانها الصحيح."
+
+#: routine/serializers.py
+msgid "How hard it felt is a number from %(low)d to %(high)d."
+msgstr "قيّم صعوبة التمرين برقم من %(low)d إلى %(high)d."
+
+#: routine/serializers.py
+msgid "Only the person who trained can say how hard it felt."
+msgstr "الشخص الذي تمرّن وحده يحدّد مدى صعوبة التمرين."
+
+#: routine/views.py
+msgid "Each set must be an object."
+msgstr "يجب أن تكون كل مجموعة كائناً."
+
+#: routine/views.py
+msgid ""
+"Every set needs its own `client_uuid`, so a re-sent batch is not logged "
+"twice."
+msgstr ""
+"كل مجموعة تحتاج إلى `client_uuid` خاص بها، حتى لا تُسجَّل الدفعة مرّتين "
+"عند إعادة إرسالها."
+
+#: routine/views.py
+msgid "exercise_id is required."
+msgstr "الحقل exercise_id مطلوب."
+
+#: routine/views.py
+msgid "Workout session not found."
+msgstr "جلسة التمرين غير موجودة."
+
+#: routine/views.py
+msgid "You cannot train this right now."
+msgstr "لا يمكنك التمرّن على هذا الآن."
+
+#: routine/views.py
+msgid "set_number must be between 1 and %(max)d."
+msgstr "يجب أن يكون رقم المجموعة بين 1 و %(max)d."
+
+#: routine/models.py routine/views.py
+msgid "RPE must be between 1 and 10."
+msgstr "يجب أن يكون مقياس الجهد المبذول بين 1 و 10."
+
+#: routine/views.py
+msgid "Send `sets`: the list of sets to sync."
+msgstr "أرسل `sets`: قائمة المجموعات المراد مزامنتها."
+
+#: routine/views.py
+msgid "A sync carries at most %(max)d sets."
+msgstr "تحمل عملية المزامنة الواحدة %(max)d مجموعة كحدّ أقصى."
