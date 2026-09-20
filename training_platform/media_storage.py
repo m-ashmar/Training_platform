@@ -80,3 +80,45 @@ class SignedMediaStorage(FileSystemStorage):
             # them, so a signature here would just be an unverifiable query string.
             return base
         return f"{base}?{urlencode({'s': sign_path(name)})}"
+
+
+def media_url(file, request=None, *, public=False, ttl=None):
+    """THE function that turns a stored file into a URL the app can load.
+
+    One place, not one per serializer: the two backends sign differently (a query-string
+    HMAC the filesystem serve view verifies, versus a GCS V4 signature), and a caller
+    that builds a URL by hand — `settings.MEDIA_URL + name`, or `.url` on a backend that
+    does not sign — hands out a link that either never expires or never works. Every
+    media payload in the project goes through here.
+
+    `file` is a FieldFile (`asset.original`) or a storage name. Empty -> "".
+    `public=True` is for objects the bucket serves to everyone (catalogue images that are
+    identical for every viewer); anything tied to a person stays private and signed.
+    `ttl` overrides `MEDIA_SIGNED_URL_TTL` for this one URL on a backend that signs per
+    call (GCS). The filesystem signature is bucketed on `MEDIA_URL_TTL` so that the same
+    file always yields the same bytes and can be cached by the client; it has no
+    per-URL life and ignores `ttl`.
+    `request` absolutises a filesystem URL, which is relative, so the mobile client gets
+    an absolute one; a signed cloud URL is already absolute and is returned untouched.
+    """
+    if not file:
+        return ""
+    name = getattr(file, "name", None) or str(file)
+    storage = getattr(file, "storage", None)
+    if storage is None:
+        from django.core.files.storage import default_storage
+        storage = default_storage
+
+    if public:
+        as_public = getattr(storage, "public_url", None)
+        if as_public is not None:
+            return as_public(name)
+
+    signer = getattr(storage, "signed_url", None)
+    if signer is not None:
+        return signer(name, ttl) if ttl is not None else signer(name)
+
+    url = storage.url(name)
+    if request is not None and url.startswith("/"):
+        return request.build_absolute_uri(url)
+    return url

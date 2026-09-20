@@ -296,6 +296,32 @@ def enforce_production_safety():
         if _bad:
             errors.append(f"{_name} contains wildcard/localhost entries in production: {_bad}")
 
+    # --- Object storage ---
+    # 'local' is the filesystem backend on the Fly volume, and it cannot be production.
+    # A Fly volume attaches to ONE machine while `auto_start_machines` runs several, so
+    # a picture uploaded through machine A is a 404 through machine B; the volume is
+    # 1 GB and also holds the upload spool; and video does not fit on it at all. The
+    # deploy sets MEDIA_BACKEND=gcs (the owner, 2026-09-19). Refused at boot rather than
+    # discovered from uploads that vanish.
+    _media_backend = (globals().get("MEDIA_BACKEND") or "local").lower()
+    if _media_backend != "gcs":
+        errors.append(
+            f"MEDIA_BACKEND is {_media_backend!r} — production must use object storage "
+            "('gcs'); the local filesystem backend loses every upload"
+        )
+    else:
+        if not globals().get("GS_BUCKET_NAME"):
+            errors.append("GS_BUCKET_NAME is not set — MEDIA_BACKEND=gcs cannot store anything")
+        # Signing a V4 URL needs the service account's private key. Without it every
+        # media URL raises at serialization time, which is a 500 on screens that work
+        # perfectly in development.
+        _cred_name = globals().get("GS_CREDENTIALS_SECRET_NAME", "GS_CREDENTIALS_JSON")
+        if not os.environ.get(_cred_name) and not os.environ.get("AWS_SECRET_NAME"):
+            errors.append(
+                f"{_cred_name} is not set and there is no secret store to read it from "
+                "— media URLs cannot be signed"
+            )
+
     # --- Field encryption key ---
     # Without it EncryptedTextField writes health data in plain text, and it does so
     # silently — the failure is invisible until someone reads a database dump.

@@ -2684,3 +2684,46 @@ msgstr "تدرّب %(trained)s من %(clients)s متدربين. %(attention)s ب
 #: routine/views.py
 msgid "Exercise not found."
 msgstr "التمرين غير موجود."
+
+#: training_platform/file_security.py
+msgid "This file is not a video. Upload an MP4 or a WebM."
+msgstr "هذا الملف ليس فيديو. ارفع ملف MP4 أو WebM."
+
+#: training_platform/file_security.py
+#, python-format
+msgid "This video is too large. The most that can be uploaded is %(mb)s MB."
+msgstr "هذا الفيديو كبير جدًا. الحد الأقصى للرفع هو %(mb)s ميغابايت."
+
+#: training_platform/file_security.py
+#, python-format
+msgid ""
+"This video is too long. The most that can be uploaded is %(seconds)s seconds."
+msgstr "هذا الفيديو طويل جدًا. الحد الأقصى للرفع هو %(seconds)s ثانية."
+
+#: mediakit/video.py mediakit/views.py
+msgid "This slot does not take a video."
+msgstr "هذه الخانة لا تقبل فيديو."
+
+#: mediakit/views.py
+msgid "Attach the video as `file`."
+msgstr "أرفق الفيديو في الحقل `file`."
+
+#: mediakit/views.py
+msgid "You do not have permission to modify this exercise."
+msgstr "لا تملك صلاحية تعديل هذا التمرين."
+
+#: mediakit/views.py
+msgid "This is not yours to change."
+msgstr "هذا ليس لك لتغييره."
+
+#: mediakit/models.py
+msgid "Pending"
+msgstr "قيد المعالجة"
+
+#: mediakit/models.py
+msgid "Ready"
+msgstr "جاهز"
+
+#: mediakit/models.py
+msgid "Failed"
+msgstr "فشل"

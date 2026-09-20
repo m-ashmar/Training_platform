@@ -633,3 +633,219 @@ class SecureImageField(serializers.ImageField):
         base = os.path.splitext(getattr(data, 'name', 'upload'))[0][:60] or 'upload'
         safe_file.name = f"{base}.{ext}"
         return safe_file
+
+
+# ============================================================================
+# Video — the same rule as images: the BYTES decide, never the name or the header
+# ============================================================================
+# A coach's library is images AND video, and video arrives from a phone, where the
+# filename and the Content-Type are whatever the client felt like sending. The image
+# path has decided by content since B-002; this is that rule for video.
+#
+# Two containers, because two is what the app can play everywhere: ISO BMFF (MP4/MOV,
+# the only thing an iPhone produces) and Matroska/WebM (what Android often produces).
+# Everything else — an AVI, an executable renamed to .mp4, an HTML page with a video
+# MIME type — is refused before a single byte is stored.
+
+#: Magic at the head of the file. ISO BMFF carries `ftyp` at offset 4; Matroska starts
+#: with the EBML signature.
+_ISO_BMFF_MARKER = b'ftyp'
+_MATROSKA_MAGIC = b'\x1a\x45\xdf\xa3'
+
+#: Brands we accept inside an ISO BMFF `ftyp` box, and the extension each is stored as.
+#: A brand outside this set is some other ISO container (a JPEG 2000 file is also BMFF).
+_ISO_BRANDS = {
+    b'isom': 'mp4', b'iso2': 'mp4', b'iso4': 'mp4', b'iso5': 'mp4', b'iso6': 'mp4',
+    b'mp41': 'mp4', b'mp42': 'mp4', b'avc1': 'mp4', b'dash': 'mp4', b'mmp4': 'mp4',
+    b'M4V ': 'mp4', b'M4VH': 'mp4', b'M4VP': 'mp4',
+    b'qt  ': 'mov',
+}
+
+VIDEO_CONTENT_TYPES = {'mp4': 'video/mp4', 'mov': 'video/quicktime', 'webm': 'video/webm'}
+
+#: How much of the head is enough to identify a container.
+VIDEO_SNIFF_BYTES = 32
+
+
+class VideoFacts:
+    """What the bytes themselves say: container, stored extension, duration if declared.
+
+    `duration_seconds` is None when the container does not declare one where we can read
+    it without decoding (WebM keeps it in the Segment Info element). The size cap still
+    applies, and the metadata task fills the duration with ffprobe afterwards.
+    """
+
+    __slots__ = ('container', 'extension', 'content_type', 'duration_seconds', 'size')
+
+    def __init__(self, container, extension, duration_seconds, size):
+        self.container = container
+        self.extension = extension
+        self.content_type = VIDEO_CONTENT_TYPES.get(extension, 'application/octet-stream')
+        self.duration_seconds = duration_seconds
+        self.size = size
+
+    def __repr__(self):
+        return (f"VideoFacts(container={self.container!r}, extension={self.extension!r}, "
+                f"duration_seconds={self.duration_seconds!r}, size={self.size!r})")
+
+
+def sniff_video_container(head: bytes):
+    """`('iso', 'mp4')`, `('iso', 'mov')`, `('matroska', 'webm')` — or None.
+
+    `head` is the first `VIDEO_SNIFF_BYTES` bytes. Nothing else about the upload is
+    consulted: not `file.name`, not `Content-Type`, not the extension the client chose.
+    """
+    if not head:
+        return None
+    if head.startswith(_MATROSKA_MAGIC):
+        return ('matroska', 'webm')
+    if len(head) >= 12 and head[4:8] == _ISO_BMFF_MARKER:
+        brand = head[8:12]
+        extension = _ISO_BRANDS.get(brand)
+        if extension is None:
+            return None
+        return ('iso', extension)
+    return None
+
+
+def _iso_boxes(fp, start, end, depth=0):
+    """Yield `(type, payload_start, payload_end)` for the boxes between two offsets.
+
+    Depth-limited and size-checked: a crafted file can declare a box that contains
+    itself, or one of length 0, and walking that naively never terminates.
+    """
+    offset = start
+    while offset + 8 <= end and depth < 4:
+        fp.seek(offset)
+        header = fp.read(8)
+        if len(header) < 8:
+            return
+        size = int.from_bytes(header[0:4], 'big')
+        box_type = header[4:8]
+        payload = offset + 8
+        if size == 1:
+            extra = fp.read(8)
+            if len(extra) < 8:
+                return
+            size = int.from_bytes(extra, 'big')
+            payload = offset + 16
+        elif size == 0:
+            size = end - offset            # "to the end of the file"
+        if size < (payload - offset):      # nonsense length: stop, do not loop
+            return
+        box_end = min(offset + size, end)
+        yield box_type, payload, box_end
+        if box_end <= offset:
+            return
+        offset = box_end
+
+
+def probe_declared_duration(file, container) -> float | None:
+    """The duration the container declares, read without decoding anything.
+
+    ISO BMFF keeps it in `moov/mvhd` as `duration / timescale`. We read that so an
+    oversize-in-TIME upload is refused at the door rather than after the bytes are
+    stored and a worker gets round to it. A file that declares nothing (WebM, or an MP4
+    whose `moov` we cannot find) returns None and is capped on size alone.
+    """
+    if container != 'iso':
+        return None
+    try:
+        file.seek(0, os.SEEK_END)
+        end = file.tell()
+        for box_type, payload, box_end in _iso_boxes(file, 0, end):
+            if box_type != b'moov':
+                continue
+            for inner_type, inner_start, inner_end in _iso_boxes(file, payload, box_end, 1):
+                if inner_type != b'mvhd':
+                    continue
+                file.seek(inner_start)
+                body = file.read(min(32, inner_end - inner_start))
+                if len(body) < 20:
+                    return None
+                version = body[0]
+                if version == 1:
+                    if len(body) < 32:
+                        return None
+                    timescale = int.from_bytes(body[20:24], 'big')
+                    duration = int.from_bytes(body[24:32], 'big')
+                else:
+                    timescale = int.from_bytes(body[12:16], 'big')
+                    duration = int.from_bytes(body[16:20], 'big')
+                if not timescale:
+                    return None
+                # 0xFFFFFFFF is "unknown" in a version-0 header.
+                if duration in (0, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
+                    return None
+                return round(duration / timescale, 3)
+        return None
+    except Exception:
+        logger.debug("could not read a declared duration", exc_info=True)
+        return None
+    finally:
+        try:
+            file.seek(0)
+        except Exception:
+            logger.debug("could not rewind the upload", exc_info=True)
+
+
+def process_uploaded_video(file, max_bytes=None, max_seconds=None) -> VideoFacts:
+    """Validate an uploaded video by its CONTENT. The one function video views use.
+
+    Unlike `process_uploaded_image` this does NOT re-encode: re-encoding video means a
+    transcoder, and the upload must not depend on one being installed. The original is
+    stored as it arrived, which is why the checks here are the whole guard:
+
+      * the container is sniffed from the magic bytes — an `.mp4` that is really a PHP
+        script, an HTML page or a JPEG is refused however it is labelled;
+      * the size is capped (`MEDIA_VIDEO_MAX_BYTES`), measured on the file, not on the
+        Content-Length a client can lie about;
+      * the duration is capped (`MEDIA_VIDEO_MAX_SECONDS`) when the container declares
+        one where it can be read without decoding.
+
+    The extension the file is STORED under comes from the detected container, never from
+    the client's filename — the same rule as images, and the reason `.php` uploads could
+    not reach the disk there.
+
+    Raises `ValidationError` with a stable `code`: `no_file`, `empty_file`,
+    `media_video_too_large`, `media_not_a_video`, `media_video_too_long`.
+    """
+    if file is None:
+        raise ValidationError(_("No file provided."), code="no_file")
+
+    size = getattr(file, 'size', None)
+    if not size:
+        raise ValidationError(_("Empty file not allowed."), code="empty_file")
+
+    if max_bytes is None:
+        max_bytes = getattr(settings, 'MEDIA_VIDEO_MAX_BYTES', 64 * 1024 * 1024)
+    if max_seconds is None:
+        max_seconds = getattr(settings, 'MEDIA_VIDEO_MAX_SECONDS', 90)
+
+    if size > max_bytes:
+        raise ValidationError(
+            _("This video is too large. The most that can be uploaded is %(mb)s MB.")
+            % {"mb": round(max_bytes / (1024 * 1024))},
+            code="media_video_too_large",
+        )
+
+    file.seek(0)
+    sniffed = sniff_video_container(file.read(VIDEO_SNIFF_BYTES))
+    file.seek(0)
+    if sniffed is None:
+        raise ValidationError(
+            _("This file is not a video. Upload an MP4 or a WebM."),
+            code="media_not_a_video",
+        )
+    container, extension = sniffed
+
+    duration = probe_declared_duration(file, container)
+    if duration is not None and max_seconds and duration > max_seconds:
+        raise ValidationError(
+            _("This video is too long. The most that can be uploaded is %(seconds)s "
+              "seconds.") % {"seconds": max_seconds},
+            code="media_video_too_long",
+        )
+
+    file.seek(0)
+    return VideoFacts(container, extension, duration, size)

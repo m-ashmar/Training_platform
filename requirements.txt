@@ -49,6 +49,12 @@ python-dotenv==1.0.1
 # Image Processing
 Pillow==11.0.0
 
+# Object storage. Media lives in Google Cloud Storage in production (the owner,
+# 2026-09-19: video lives on GCS) and on the filesystem in development and in the test
+# suite — MEDIA_BACKEND decides, and the GCS module is imported only when it says 'gcs',
+# so nothing here is loaded (and no network is touched) by a local run or by the gate.
+django-storages[google]==1.14.4
+
 # Date & Time
 python-dateutil==2.9.0.post0
 
