@@ -345,6 +345,8 @@ def audit_coverage() -> list[str]:
     This is what stops the registry rotting: a model added later that nobody registered
     shows up here instead of being quietly excluded from export, erasure and retention.
     """
+    import site
+    import sysconfig
     from pathlib import Path
 
     from django.apps import apps
@@ -359,9 +361,19 @@ def audit_coverage() -> list[str]:
     # whose code lives inside this repository is ours and is walked, so a new app is
     # covered by the act of adding it to INSTALLED_APPS; a third-party package lives
     # in site-packages and is not.
+    # "Inside the repository" is not enough on its own: the virtualenv lives at
+    # `<repo>/.venv`, so every installed package is also under BASE_DIR and allauth,
+    # DRF's authtoken and simplejwt's blacklist all read as ours. An app is ours when
+    # it is under the repository and NOT under any site-packages directory.
     root = str(Path(settings.BASE_DIR).resolve())
-    local = {config.label for config in apps.get_app_configs()
-             if str(Path(config.path).resolve()).startswith(root + "/")}
+    vendored = tuple(str(Path(path).resolve()) + "/"
+                     for path in {*sysconfig.get_paths().values(), *site.getsitepackages(),
+                                  site.getusersitepackages()} if path)
+    local = set()
+    for config in apps.get_app_configs():
+        path = str(Path(config.path).resolve())
+        if path.startswith(root + "/") and not path.startswith(vendored):
+            local.add(config.label)
     claimed = set(registry)
     missing = []
     for model in apps.get_models():

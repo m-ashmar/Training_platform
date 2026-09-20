@@ -1,6 +1,7 @@
 from django.db import transaction
 from rest_framework import serializers
 from django.conf import settings
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.contrib.auth import get_user_model
 from .models import (
@@ -813,7 +814,8 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
 
     **The progress row decides the day.** `date` is a copy of
     `user_exercise_progress.date` and nothing else: send it and it must match (400
-    `set_date_mismatch` on `date`), omit it and the server fills in that row's day
+    `set_date_mismatch` on `date`), omit it and the set is TODAY's — and must match the
+    row just the same, so an undated set cannot be backdated onto an older row
     rather than today. `routine/models.py ExerciseSetLog` says why the two must agree.
     """
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
@@ -934,13 +936,20 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         # were independent, and two readers believed different ones: `outcomes.day_work`
         # counts a set by THIS date, `refresh_routine_progress` measures the day by the
         # progress row's — so a mismatched date put one workout on two days and let a
-        # short day be completed by aiming a set at it. An omitted date is that row's
-        # day, not today (the model default pointed at today, which is wrong for every
-        # set logged after midnight or caught up the next morning).
+        # short day be completed by aiming a set at it.
+        #
+        # An OMITTED date means TODAY, and must then match the row like any other: it is
+        # not filled in from whatever day the row happens to carry. Inheriting the row's
+        # day silently backdates the set, and the coaching refusal is judged on that day
+        # — so a frozen client could log today's training by aiming an undated set at a
+        # progress row from a month they had paid for
+        # (`tests/test_coaching_freeze.py::test_an_undated_set_is_judged_on_the_day_it_is_stored`,
+        # the hole that test exists to keep shut). Catching up yesterday's workout is
+        # still possible: send the date, against yesterday's row.
         owner_date = getattr(progress, 'date', None)
         if progress is not None and owner_date is not None:
             if attrs.get('date') is None:
-                attrs['date'] = owner_date
+                attrs['date'] = timezone.localdate()
             elif attrs['date'] != owner_date:
                 raise serializers.ValidationError({'date': [serializers.ErrorDetail(
                     _("A set is logged on the day of the exercise it belongs to "

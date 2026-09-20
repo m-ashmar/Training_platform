@@ -130,9 +130,17 @@ def test_s003_a_set_dated_away_from_its_progress_row_is_refused(make_user, api):
     assert not ExerciseSetLog.objects.filter(user_exercise_progress=row).exists()
 
 
-def test_s003_an_omitted_date_is_the_progress_rows_day_not_today(make_user, api):
-    """The model default was `today`, which is wrong for every set caught up the next
-    morning: the day is the one its progress row is on."""
+def test_s003_an_omitted_date_is_today_and_cannot_be_backdated(make_user, api):
+    """An omitted date means TODAY, and must match its row like any other.
+
+    Inheriting the row's day instead would silently backdate the set — and the coaching
+    refusal is judged on that day, so a frozen client could log today's training by
+    aiming an undated set at a progress row from a month they had paid for. That is the
+    hole `tests/test_coaching_freeze.py::test_an_undated_set_is_judged_on_the_day_it_is_stored`
+    exists to keep shut, and it outranks the convenience: what S-003 is really about —
+    that one set never lands on two days — holds either way, because the mismatch is
+    refused rather than resolved. Catching up yesterday's workout still works; the app
+    sends the date, which every logging route already does."""
     from datetime import timedelta
 
     from routine.models import ExerciseSetLog, UserExerciseProgress
@@ -142,12 +150,18 @@ def test_s003_an_omitted_date_is_the_progress_rows_day_not_today(make_user, api)
     row = UserExerciseProgress.objects.create(user=client, exercise=exercise,
                                               date=trained, target_sets=3)
 
-    response = api(client).post("/api/routine/set-logs/", {
+    undated = api(client).post("/api/routine/set-logs/", {
         "user_exercise_progress": row.pk, "set_number": 1, "weight": 40, "reps": 8},
         content_type=JSON)
+    assert undated.status_code == 400, undated.content
+    assert not ExerciseSetLog.objects.filter(user_exercise_progress=row).exists()
 
-    assert response.status_code == 201, response.content
-    assert ExerciseSetLog.objects.get(pk=response.json()["id"]).date == trained
+    # Say which day it was, and it lands on that day — the two dates still agree.
+    dated = api(client).post("/api/routine/set-logs/", {
+        "user_exercise_progress": row.pk, "set_number": 1, "weight": 40, "reps": 8,
+        "date": trained.isoformat()}, content_type=JSON)
+    assert dated.status_code == 201, dated.content
+    assert ExerciseSetLog.objects.get(pk=dated.json()["id"]).date == trained
 
 
 def test_s003_the_model_refuses_it_too_whatever_wrote_the_row(make_user):
