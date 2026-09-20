@@ -513,6 +513,17 @@ def _legs(payment):
         metadata__original_payment_id=str(payment.id)).values_list("tx_type", flat=True))
 
 
+def _platform_balance():
+    """What the platform earned. A plan payment stays 100% with the platform whether or
+    not the client has a trainer (the owner, 2026-09-19; plan step 4), so these tests ask
+    the platform's revenue wallet where the money went — they used to ask the trainer's,
+    which is the forward that decision removed. What they are ABOUT is unchanged: that
+    the payout happens exactly once, however the retry arrives."""
+    from wallet.utils import get_platform_revenue_wallet
+
+    return get_platform_revenue_wallet().balance
+
+
 def _stub_transactions(monkeypatch, reference, amount="5000.00"):
     from subscription.gateways.shamcash import ShamCashGateway
 
@@ -566,14 +577,16 @@ def test_a_payout_that_failed_once_is_paid_by_the_retry(
 
     payment.refresh_from_db()
     assert _legs(payment) == ["topup", "transfer"], _legs(payment)
-    assert Wallet.objects.get(owner=trainer).balance == Decimal("5000.00")
+    assert _platform_balance() == Decimal("5000.00")
+    assert Wallet.objects.get(owner=trainer).balance == Decimal("0.00"), \
+        "a plan payment is not the trainer's"
     assert payment.payout_settled_at is not None
 
     # And a further retry pays nothing more.
     with django_capture_on_commit_callbacks(execute=True):
         assert _signed_webhook(reference, event_id=f"ev-{retry}").status_code == 200
     assert _legs(payment) == ["topup", "transfer"]
-    assert Wallet.objects.get(owner=trainer).balance == Decimal("5000.00")
+    assert _platform_balance() == Decimal("5000.00")
 
 
 def test_owed_payouts_are_swept(make_user, api, shamcash, payout_fails_once,
@@ -604,7 +617,8 @@ def test_owed_payouts_are_swept(make_user, api, shamcash, payout_fails_once,
     with django_capture_on_commit_callbacks(execute=True):
         assert settle_owed_payouts() == 1
     assert _legs(payment) == ["topup", "transfer"]
-    assert Wallet.objects.get(owner=trainer).balance == Decimal("5000.00")
+    assert _platform_balance() == Decimal("5000.00")
+    assert Wallet.objects.get(owner=trainer).balance == Decimal("0.00")
     with django_capture_on_commit_callbacks(execute=True):
         assert settle_owed_payouts() == 0
 
@@ -638,18 +652,25 @@ def test_payments_completed_before_the_payout_was_recorded_are_not_paid_again(ma
 
 def test_a_payment_with_no_trainer_owes_no_payout(make_user, api, shamcash,
                                                   django_capture_on_commit_callbacks):
-    """The sweep must not re-examine a client with no trainer for ever."""
+    """The sweep must not re-examine a client with no trainer for ever.
+
+    It is still recorded: a plan payment goes to the platform whether or not anyone
+    coaches the client (the owner, 2026-09-19; plan step 4), and writing nothing at all —
+    which is what this case used to do — left the platform's largest revenue line absent
+    from its own ledger."""
     from subscription.models import Payment
 
     plan = _plan("notrainer")
     user = make_user("c9pay_notrainer", phone_number="0933000006")
     c, sub = _subscribe(api, user, plan)
     reference = _checkout(c, sub)["reference"]
+    before = _platform_balance()
     with django_capture_on_commit_callbacks(execute=True):
         assert _signed_webhook(reference).status_code == 200
     payment = Payment.objects.get(gateway_transaction_reference=reference)
     assert payment.payout_settled_at is not None
-    assert _legs(payment) == []
+    assert _legs(payment) == ["topup", "transfer"]
+    assert _platform_balance() - before == payment.amount
 
 
 # ------------------------------------------------ the customer's own writes to the row
@@ -823,3 +844,77 @@ def test_routine_and_challenge_access_follow_the_plan(who, expected, make_user):
 
     for permission in (HasRoutineAccess(), HasChallengesAccess()):
         assert permission.has_permission(request, None) is expected, (who, permission)
+
+
+# ------------------------------------------------------- step 4: where a plan's money goes
+def test_a_coached_clients_plan_payment_goes_to_the_platform(make_user, api, shamcash,
+                                                             django_capture_on_commit_callbacks):
+    """The owner (2026-09-19): a plan payment stays 100% with the platform, whether or
+    not the client has a trainer. It used to move the WHOLE price to whoever coached the
+    client — no rate, no escrow, no agreed price — so the platform earned nothing from a
+    plan sold to a coached client and the trainer was paid for someone else's product."""
+    from subscription.models import Payment
+    from wallet.models import Wallet
+
+    plan = _plan("step4 platform")
+    client_user, trainer = _client_and_trainer(make_user, "step4_platform")
+    c, sub = _subscribe(api, client_user, plan)
+    reference = _checkout(c, sub)["reference"]
+    before = _platform_balance()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _signed_webhook(reference).status_code == 200
+
+    payment = Payment.objects.get(gateway_transaction_reference=reference)
+    assert _legs(payment) == ["topup", "transfer"]
+    assert _platform_balance() - before == payment.amount
+    assert Wallet.objects.get(owner=trainer).balance == Decimal("0.00")
+    # And nothing is left sitting in the client's wallet as spendable balance.
+    assert Wallet.objects.get(owner=client_user).balance == Decimal("0.00")
+
+
+def test_the_trainers_share_of_a_plan_is_a_setting_the_owner_can_raise(
+        make_user, api, shamcash, settings, django_capture_on_commit_callbacks):
+    """The forward is priced at nothing, not deleted: `SUBSCRIPTION_TRAINER_SHARE` is
+    kept so the owner can decide later to pay a trainer for a plan their client buys."""
+    from subscription.models import Payment
+    from wallet.models import Wallet
+
+    settings.SUBSCRIPTION_TRAINER_SHARE = Decimal("0.30")
+    plan = _plan("step4 share")
+    client_user, trainer = _client_and_trainer(make_user, "step4_share")
+    c, sub = _subscribe(api, client_user, plan)
+    reference = _checkout(c, sub)["reference"]
+    before = _platform_balance()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _signed_webhook(reference).status_code == 200
+
+    payment = Payment.objects.get(gateway_transaction_reference=reference)
+    assert Wallet.objects.get(owner=trainer).balance == (payment.amount * Decimal("0.30")
+                                                         ).quantize(Decimal("0.01"))
+    assert _platform_balance() - before == payment.amount - Wallet.objects.get(
+        owner=trainer).balance
+    assert Wallet.objects.get(owner=client_user).balance == Decimal("0.00"), \
+        "the two shares add up to the price"
+
+
+def test_a_refunded_plan_payment_takes_the_platforms_money_back(
+        make_user, api, shamcash, django_capture_on_commit_callbacks):
+    """Every leg reverses, including the new one: a refund must not leave the platform
+    holding money the customer got back from their card."""
+    from subscription.models import Payment
+    from wallet.signals import unwind_payment
+
+    plan = _plan("step4 refund")
+    client_user, trainer = _client_and_trainer(make_user, "step4_refund")
+    c, sub = _subscribe(api, client_user, plan)
+    reference = _checkout(c, sub)["reference"]
+    before = _platform_balance()
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _signed_webhook(reference).status_code == 200
+    payment = Payment.objects.get(gateway_transaction_reference=reference)
+    assert _platform_balance() - before == payment.amount
+
+    assert unwind_payment(payment) == 2
+    assert _platform_balance() == before

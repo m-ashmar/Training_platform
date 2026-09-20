@@ -1,5 +1,7 @@
 import logging
+from decimal import Decimal
 
+from django.conf import settings
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
@@ -10,6 +12,12 @@ from subscription.services.payment_service import payment_completed
 
 from .models import (Wallet, AgentProfile, Transaction, WalletAuditLog,
                      move_funds_atomic, ensure_agent_profile, wallet_for)
+from .utils import get_platform_revenue_wallet
+
+
+def _subscription_trainer_share() -> Decimal:
+    """How much of a plan payment a trainer is owed. Zero (the owner, 2026-09-19)."""
+    return Decimal(str(getattr(settings, "SUBSCRIPTION_TRAINER_SHARE", "0")))
 
 # The one branch written to make an un-clawed-back refund visible used to raise
 # NameError instead, which rolled the whole refund back: the payment stayed
@@ -34,9 +42,22 @@ def create_wallet_and_agent(sender, instance, created, **kwargs):
 
 @receiver(payment_completed)
 def handle_payment_completed(sender, payment, subscription=None, **kwargs):
-    """
-    On Payment completion, transfer funds from client wallet to trainer wallet
-    if the client has an assigned trainer. Idempotent via Transaction metadata.
+    """Record where a completed plan payment's money went: into the platform's revenue,
+    and to the trainer only for the share the owner has priced.
+
+    THE MONEY. A plan payment stays 100% with the platform, whether or not the client has
+    a trainer (the owner, 2026-09-19; plan step 4). This used to move the WHOLE amount to
+    whoever coached the client — no rate, no escrow, no relation to any agreed price — so
+    a client with a coach bought their plan for the platform and the platform earned
+    nothing from it. `SUBSCRIPTION_TRAINER_SHARE` is that share, and it is zero: the
+    forward is priced at nothing rather than deleted, so the owner can raise it later.
+
+    THE LEGS. Two, always, whether or not there is a trainer: a top-up that mints the
+    payment into the client's wallet (the money entered the system there) and a transfer
+    out of it — to the platform's revenue wallet, less the trainer's share when there is
+    one. Crediting the client and stopping would hand them the plan's price as spendable
+    balance; writing nothing at all, which is what a client with no trainer used to get,
+    leaves the platform's largest revenue line invisible in its own ledger.
 
     Listens to `payment_completed`, the signal `PaymentService` was written to emit and
     which had no receivers at all. It used to be a `post_save` with NO sender, so it ran
@@ -75,27 +96,31 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
             return
         payment = locked
 
-        # The trainer this client actually has a relationship with, not the pointer.
-        # Reading the pointer meant a subscription payment forwarded the FULL price to
-        # whoever the pointer named, outside the hold system entirely: no agreed rate, no
-        # escrow, no idempotency against the relation. `current_trainer` reads the approved
-        # relation, which is the platform's single source of truth for the bond.
-        trainer = client.current_trainer
-        if not trainer:
-            _mark_payout_settled(payment)
-            return
-
         if Transaction.objects.filter(
                 tx_type="transfer",
                 metadata__original_payment_id=str(payment.id)).exists():
             _mark_payout_settled(payment)
             return
 
+        # The trainer this client actually has a relationship with, not the pointer.
+        # Reading the pointer meant a subscription payment forwarded the FULL price to
+        # whoever the pointer named, outside the hold system entirely: no agreed rate, no
+        # escrow, no idempotency against the relation. `current_trainer` reads the approved
+        # relation, which is the platform's single source of truth for the bond. It is
+        # asked for at all only while a trainer is owed a share; at zero, the coach of a
+        # client who buys a plan is not part of the transaction.
+        share_rate = _subscription_trainer_share()
+        trainer = client.current_trainer if share_rate > 0 else None
+
         # In the payment's OWN currency. `get_or_create` with only `owner_type` left the
         # wallet on its hardcoded "USD" default whatever the plan was priced in.
         client_wallet = wallet_for(client, "client", payment.currency)
-        trainer_wallet = wallet_for(trainer, "trainer", payment.currency)
-        for w, who in ((client_wallet, "client"), (trainer_wallet, "trainer")):
+        platform_wallet = get_platform_revenue_wallet(payment.currency)
+        trainer_wallet = wallet_for(trainer, "trainer", payment.currency) if trainer else None
+        checked = [(client_wallet, "client"), (platform_wallet, "platform")]
+        if trainer_wallet is not None:
+            checked.append((trainer_wallet, "trainer"))
+        for w, who in checked:
             if w.currency != payment.currency:
                 # A wallet that already holds money in another currency. There is no FX
                 # here, so this is refused loudly rather than converted at 1:1 — and
@@ -116,8 +141,10 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
         # rolled back after the payment had committed, and nothing ever paid it again —
         # 13 lost payouts in 400 runs. `move_funds_atomic` re-locks these rows inside
         # this transaction, which costs nothing once they are held.
-        list(Wallet.objects.select_for_update()
-             .filter(pk__in={client_wallet.pk, trainer_wallet.pk}).order_by("pk"))
+        held = {client_wallet.pk, platform_wallet.pk}
+        if trainer_wallet is not None:
+            held.add(trainer_wallet.pk)
+        list(Wallet.objects.select_for_update().filter(pk__in=held).order_by("pk"))
 
         # A Payment means money entered the system, so the client's wallet is credited
         # first and the trainer is paid out of it.
@@ -142,20 +169,32 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
                 },
             )
 
-        move_funds_atomic(
-            client_wallet,
-            trainer_wallet,
-            payment.amount,
-            actor_id=client.id,
-            currency=payment.currency,
-            tx_type="transfer",
-            money_type=payment.money_type,
-            metadata={
-                "original_payment_id": str(payment.id),
-                "subscription_id": str(subscription.id),
-                "plan_id": subscription.plan_id,
-            },
-        )
+        # Out of the client's wallet again: the trainer's priced share, then everything
+        # left to the platform. `split` is the same arithmetic the coaching commission
+        # uses, so the two never disagree about a rounded half-unit.
+        from users.coaching import split
+
+        common = {
+            "original_payment_id": str(payment.id),
+            "subscription_id": str(subscription.id),
+            "plan_id": subscription.plan_id,
+        }
+        for_platform, for_trainer = split(payment.amount, Decimal("1") - share_rate)
+        if trainer_wallet is not None and for_trainer > 0:
+            move_funds_atomic(
+                client_wallet, trainer_wallet, for_trainer,
+                actor_id=client.id, currency=payment.currency, tx_type="transfer",
+                money_type=payment.money_type,
+                metadata={"purpose": "subscription_trainer_share",
+                          "rate": str(share_rate), **common},
+            )
+        if for_platform > 0:
+            move_funds_atomic(
+                client_wallet, platform_wallet, for_platform,
+                actor_id=client.id, currency=payment.currency, tx_type="transfer",
+                money_type=payment.money_type,
+                metadata={"purpose": "subscription_revenue", **common},
+            )
         _mark_payout_settled(payment)
 
 

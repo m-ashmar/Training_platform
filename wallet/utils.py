@@ -3,12 +3,19 @@ from .models import Wallet
 from django.conf import settings
 
 
-def _ledger_owner_wallet(email, username):
+def _ledger_owner_wallet(email, username, currency=None):
     """The wallet of a platform ledger owner: a row that holds money, not a person.
 
     Not a superuser and not an admin `user_type` (see `get_escrow_wallet`), disabled, no
     usable password.
+
+    `currency` goes through `wallet_for`, so the rule is the one every other wallet
+    follows: a wallet that has never held money takes the currency of the money that
+    first funds it, and one that has keeps its own — the caller refuses a mismatch
+    rather than converting at 1:1.
     """
+    from .models import wallet_for
+
     User = get_user_model()
     user, created = User.objects.get_or_create(
         email=email,
@@ -17,18 +24,20 @@ def _ledger_owner_wallet(email, username):
     if created:
         user.set_unusable_password()
         user.save(update_fields=['password'])
-    wallet, _ = Wallet.objects.get_or_create(owner=user, defaults={'owner_type': 'agent'})
-    return wallet
+    return wallet_for(user, 'agent', currency)
 
 
-def get_platform_revenue_wallet():
-    """Where the platform's commission on coaching lands (`users/coaching.py`).
+def get_platform_revenue_wallet(currency=None):
+    """Where the platform's money lands: the commission on coaching
+    (`users/coaching.py`) and the whole of every plan payment
+    (`wallet/signals.py:handle_payment_completed`).
 
     A wallet like escrow's until plan step 4 replaces both with named ledger accounts.
     """
     return _ledger_owner_wallet(
         getattr(settings, 'PLATFORM_REVENUE_EMAIL', 'platform_revenue@local'),
-        getattr(settings, 'PLATFORM_REVENUE_USERNAME', 'platform_revenue'))
+        getattr(settings, 'PLATFORM_REVENUE_USERNAME', 'platform_revenue'),
+        currency)
 
 
 def get_escrow_wallet():

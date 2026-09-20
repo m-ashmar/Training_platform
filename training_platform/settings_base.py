@@ -283,6 +283,13 @@ AGENT_APIKEY_ENC_KEY = get_env("AGENT_APIKEY_ENC_KEY", "")
 # COACHING_FROZEN_REMINDER_DAYS after the freeze, until a month is paid. See
 # users/coaching.py.
 COACHING_COMMISSION_RATE = _Decimal("0.20")
+# A PLATFORM PLAN is not coaching: it stays 100% with the platform whether or not the
+# client has a trainer (the owner, 2026-09-19). The share is kept as a setting, at zero,
+# so the owner can decide later to pay a trainer for a plan their client buys — it is not
+# deleted from the code, it is priced at nothing. Until then every plan payment lands in
+# the platform's revenue wallet and no trainer is paid for it. See
+# `wallet/signals.py:handle_payment_completed`.
+SUBSCRIPTION_TRAINER_SHARE = _Decimal("0")
 COACHING_PERIOD_DAYS = 30
 COACHING_RENEWAL_REMINDER_DAYS = 3
 COACHING_FROZEN_REMINDER_DAYS = (3, 7, 14, 30)
