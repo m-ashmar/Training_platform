@@ -82,6 +82,12 @@ def day_work(user, routine, date, plan) -> dict:
     for it are a single pool, filled into its rows in `order`, so nothing is counted
     twice and no row's prescription is lost.
 
+    `date` here is the set log's own column, which is a COPY of its progress row's day
+    and is held to it on write (`routine/models.py ExerciseSetLog`). The progress row
+    decides: this function and `refresh_routine_progress` used to read the two
+    independently, so a set written with a mismatched date was counted in one figure
+    and missing from the other.
+
     Returns `{routine_exercise_id: {'logged', 'reps', 'volume', 'from_logs', 'skipped'}}`.
     """
     from .models import ExerciseSetLog, UserExerciseProgress

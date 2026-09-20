@@ -212,7 +212,11 @@ class ExerciseCreateWithImageView(APIView):
     - difficulty_level (optional): beginner/intermediate/advanced/expert
     - image (optional): Main demonstration image file
     - media_photos (optional): Additional photo files (multiple)
-    - media_videos (optional): Video URLs (comma-separated)
+    - media_videos (optional): Video URLs (comma-separated). Each must be on an
+      allowed host (`settings.EXERCISE_MEDIA_ALLOWED_HOSTS`) — 400
+      `media_host_not_allowed` otherwise, the same rule
+      `exercises/{id}/add-media/` applies. 400 `media_url_invalid` for a
+      malformed one.
     - media_texts (optional): Additional text content (comma-separated)
     """
     permission_classes = [IsAuthenticated]
@@ -304,7 +308,19 @@ class ExerciseCreateWithImageView(APIView):
                 for i, url in enumerate(video_urls):
                     if not url_pattern.match(url):
                         return Response(
-                            {'error': f'Invalid video URL format: {url}'},
+                            {'error': f'Invalid video URL format: {url}',
+                             'code': 'media_url_invalid'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                    # The same host rule `add-media/` applies (S-017). It was written
+                    # for that route only, and this one creates exactly the same
+                    # `ExerciseMedia` video rows from exactly the same caller-supplied
+                    # URLs — so closing one door and not the other closes nothing.
+                    if not _media_host_allowed(url):
+                        return Response(
+                            {'error': _('That link is not on a host this app plays '
+                                        'media from. Upload the file instead.'),
+                             'code': 'media_host_not_allowed'},
                             status=status.HTTP_400_BAD_REQUEST
                         )
 
@@ -3308,10 +3324,68 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
 
+def _exercise_payload(request, exercise):
+    """One exercise, as `ExerciseSerializer` renders it everywhere else.
+
+    Two routes here built an exercise dict by hand from four columns, so anything
+    added to an exercise afterwards simply was not in their answer — `media_slots`,
+    `media_source` and `media_trainer_id` (the trainer media library) were already
+    missing, and the app read two different shapes for one object depending on which
+    route replied. `media_context.prepare` goes into the context for the same reason
+    the viewsets mix it in: it resolves whose demonstration this viewer sees without a
+    query per exercise.
+    """
+    from .media_context import prepare
+    from .serializers import ExerciseSerializer
+
+    context = {'request': request, **prepare(request, exercise)}
+    return ExerciseSerializer(exercise, context=context).data
+
+
+# WHERE an exercise's `video`/`photo` media may point. The list itself is
+# `settings_base.py` `EXERCISE_MEDIA_ALLOWED_HOSTS`.
+def _media_host_allowed(url) -> bool:
+    """Whether `url` points at a host this platform is willing to send clients to.
+
+    Any http(s) URL was accepted, so a coach could aim every one of their clients'
+    players at a host nobody here controls — a tracker, a paywall, a site that starts
+    serving something else next month — and the app would load it because the server
+    said it was the exercise's demonstration. The allow-list is exact hostnames, and
+    an entry beginning with a dot matches that domain and its subdomains.
+    """
+    from django.conf import settings
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ('http', 'https'):
+        return False
+    host = (parsed.hostname or '').lower()
+    if not host:
+        return False
+    for allowed in getattr(settings, 'EXERCISE_MEDIA_ALLOWED_HOSTS', ()) or ():
+        allowed = str(allowed).strip().lower().rstrip('.')
+        if not allowed:
+            continue
+        if allowed.startswith('.'):
+            if host == allowed[1:] or host.endswith(allowed):
+                return True
+        elif host == allowed:
+            return True
+    return False
+
+
 class ExerciseImageUploadView(APIView):
     """
     Dedicated endpoint for uploading exercise images.
     Accepts multipart/form-data with image file.
+
+    `POST` answers `{message, exercise}` where `exercise` is the full
+    `ExerciseSerializer` shape, and 500 `image_upload_failed` /
+    `image_removal_failed` when the file could not be stored or removed — never the
+    exception text.
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -3374,16 +3448,14 @@ class ExerciseImageUploadView(APIView):
             exercise.image.save(f"exercise.{img_ext}", safe_file, save=False)
             exercise.save()
 
-            # Return the updated exercise info
+            # The serializer, not a hand-rolled dict. This listed four fields by hand,
+            # so every field added to an exercise since was invisible here — the new
+            # `media_slots`, `media_source`, `media_trainer_id` and `media` among them —
+            # and the app got a different shape for the same object depending on which
+            # route answered. `image` is absolute, as it is everywhere else.
             return Response({
                 'message': _('Exercise image uploaded successfully'),
-                'exercise': {
-                    'id': exercise.id,
-                    'name': exercise.name,
-                    'description': exercise.description,
-                    'target_muscle': exercise.target_muscle,
-                    'image_url': exercise.image.url if exercise.image else None,
-                }
+                'exercise': _exercise_payload(request, exercise),
             }, status=status.HTTP_200_OK)
 
         except PASSTHROUGH_EXCEPTIONS:
@@ -3391,9 +3463,14 @@ class ExerciseImageUploadView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
-        except Exception as e:
+        except Exception:
+            # The exception TEXT used to be the response body. That is a stack trace's
+            # worth of internals — file paths, storage bucket names, SQL — handed to
+            # whoever posted the file. Logged with the traceback, answered with a code.
+            logger.exception("exercise image upload failed for %s", exercise_id)
             return Response(
-                {'error': f'Upload failed: {str(e)}'},
+                {'error': _('Could not save that image. Please try again.'),
+                 'code': 'image_upload_failed'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -3447,9 +3524,12 @@ class ExerciseImageUploadView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
-        except Exception as e:
+        except Exception:
+            # Same rule as `post`: never the exception text (S-006).
+            logger.exception("exercise image removal failed for %s", exercise_id)
             return Response(
-                {'error': f'Failed to remove exercise image: {str(e)}'},
+                {'error': _('Could not remove that image. Please try again.'),
+                 'code': 'image_removal_failed'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -3480,27 +3560,36 @@ class ExerciseAddMediaView(APIView):
 
     | Method | Answers |
     |---|---|
-    | `GET` | `200` `{exercise_id, exercise_name, media_count, media_items[]}` · `404` |
-    | `POST` | `201` created · `207` some items rejected (`errors[]`, `partial_success`) · `400` no `media_items` · `403` not the owner · `404` |
+    | `GET` | `200` `{exercise_id, exercise_name, media_count, media_items[], exercise{}}` · `404` |
+    | `POST` | `201` created · `207` some items rejected (`errors[]`, `errors_detail[]`, `partial_success`) · `400` no `media_items` · `403` not the owner · `404` |
     | `DELETE` | `200` all deleted · `207` some ids missed · `400` no `media_ids` · `403` not the owner · `404` |
+
+    `GET`'s `exercise` is the full `ExerciseSerializer` shape — the same object the
+    exercise list and detail answer, `media_slots` included. `exercise_id` and
+    `exercise_name` are kept beside it.
 
     Nothing here varies by build (`X-App-Channel`): it sells nothing and moves no money.
 
-    POST body — `media_type` and `content` are required per item; `video` and `photo`
-    content must start with `http://` or `https://`; an item that fails either check is
-    reported in `errors[]` and the rest are still created (207):
+    POST body — `media_type` and `content` are required per item. `video` and `photo`
+    content must be an `http(s)` URL **on an allowed host**
+    (`settings.EXERCISE_MEDIA_ALLOWED_HOSTS`: the platform's own media hosts, plus
+    whatever the deployment adds). An item that fails a check is reported and the rest
+    are still created (207). `errors[]` stays a list of English sentences; the `code`
+    to branch on is in `errors_detail[] = [{index, code, message}]`:
+    `media_fields_required`, `media_type_invalid`, `media_url_invalid`,
+    `media_host_not_allowed`, `media_write_failed`.
     {
         "media_items": [
             {
                 "media_type": "video",
-                "content": "https://youtube.com/watch?v=example",
+                "content": "https://storage.googleapis.com/yalla-gym/demo.mp4",
                 "title": "Exercise Tutorial",
                 "description": "Step-by-step guide",
                 "order": 1
             },
             {
                 "media_type": "photo",
-                "content": "https://example.com/exercise-photo.jpg",
+                "content": "https://storage.googleapis.com/yalla-gym/form.jpg",
                 "title": "Form Check",
                 "description": "Proper form demonstration",
                 "order": 2
@@ -3582,7 +3671,16 @@ class ExerciseAddMediaView(APIView):
             # Validate and create media items
             created_media = []
             errors = []
-            
+            #: The same refusals, with the `code` the app is supposed to branch on.
+            #: `errors[]` has always been bare English strings, and the contract is
+            #: additive — so the strings stay and the codes arrive beside them.
+            errors_detail = []
+
+            def refuse(index, code, message):
+                errors.append(f"Item {index+1}: {message}")
+                errors_detail.append({'index': index, 'code': code,
+                                      'message': str(message)})
+
             for i, item in enumerate(media_items):
                 try:
                     # Validate required fields
@@ -3590,19 +3688,34 @@ class ExerciseAddMediaView(APIView):
                     content = item.get('content')
                     
                     if not media_type or not content:
-                        errors.append(f"Item {i+1}: media_type and content are required")
+                        refuse(i, 'media_fields_required',
+                               _('media_type and content are required.'))
                         continue
                     
                     # Validate media type
                     valid_types = ['video', 'photo', 'text']
                     if media_type not in valid_types:
-                        errors.append(f"Item {i+1}: Invalid media_type. Must be one of {valid_types}")
+                        refuse(i, 'media_type_invalid',
+                               _('media_type must be one of: %(types)s.')
+                               % {'types': ', '.join(valid_types)})
                         continue
                     
                     # Validate content (basic URL validation for video/photo)
                     if media_type in ['video', 'photo']:
-                        if not content.startswith(('http://', 'https://')):
-                            errors.append(f"Item {i+1}: content must be a valid URL for {media_type}")
+                        if not str(content).startswith(('http://', 'https://')):
+                            refuse(i, 'media_url_invalid',
+                                   _('content must be an http(s) URL for %(kind)s.')
+                                   % {'kind': media_type})
+                            continue
+                        # WHOSE host. Any http(s) URL was accepted, so one coach could
+                        # point every client's player at a third party nobody here
+                        # controls (S-017). The allow-list is a setting; the project's
+                        # own media hosts are in it and anything else is a deliberate
+                        # decision, not a coach's.
+                        if not _media_host_allowed(content):
+                            refuse(i, 'media_host_not_allowed',
+                                   _('That link is not on a host this app plays media '
+                                     'from. Upload the file instead.'))
                             continue
                     
                     # Create media item
@@ -3624,8 +3737,12 @@ class ExerciseAddMediaView(APIView):
                         'order': media_record.order
                     })
                     
-                except Exception as e:
-                    errors.append(f"Item {i+1}: {str(e)}")
+                except Exception:
+                    # Never the exception text (S-006).
+                    logger.exception("adding media item %s to exercise %s failed",
+                                     i + 1, exercise_id)
+                    refuse(i, 'media_write_failed',
+                           _('Could not add that media. Please try again.'))
             
             # Return response
             response_data = {
@@ -3638,6 +3755,7 @@ class ExerciseAddMediaView(APIView):
             
             if errors:
                 response_data['errors'] = errors
+                response_data['errors_detail'] = errors_detail
                 response_data['partial_success'] = True
                 return Response(response_data, status=status.HTTP_207_MULTI_STATUS)
             else:
@@ -3648,9 +3766,12 @@ class ExerciseAddMediaView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
-        except Exception as e:
+        except Exception:
+            # Same rule as the image upload: never the exception text (S-006).
+            logger.exception("adding exercise media failed for %s", exercise_id)
             return Response(
-                {'error': f'Failed to add media: {str(e)}'},
+                {'error': _('Could not add that media. Please try again.'),
+                 'code': 'media_write_failed'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -3685,7 +3806,13 @@ class ExerciseAddMediaView(APIView):
                 'exercise_id': exercise.id,
                 'exercise_name': exercise.name,
                 'media_count': len(media_data),
-                'media_items': media_data
+                'media_items': media_data,
+                # The exercise itself, from the serializer rather than from two
+                # columns copied by hand: this route answered `exercise_name` and
+                # nothing else, so the trainer media library's `media_slots` — the
+                # field this endpoint is about — was invisible from it (S-031). The
+                # two legacy keys stay; the contract is additive.
+                'exercise': _exercise_payload(request, exercise),
             }, status=status.HTTP_200_OK)
 
         except PASSTHROUGH_EXCEPTIONS:
@@ -3693,9 +3820,12 @@ class ExerciseAddMediaView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
-        except Exception as e:
+        except Exception:
+            # Same rule as the image upload: never the exception text (S-006).
+            logger.exception("reading exercise media failed for %s", exercise_id)
             return Response(
-                {'error': f'Failed to get media: {str(e)}'},
+                {'error': _('Could not read that exercise\'s media. Please try again.'),
+                 'code': 'media_read_failed'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -3738,8 +3868,10 @@ class ExerciseAddMediaView(APIView):
                     deleted_count += 1
                 except ExerciseMedia.DoesNotExist:
                     errors.append(f"Media item {media_id} not found")
-                except Exception as e:
-                    errors.append(f"Failed to delete media {media_id}: {str(e)}")
+                except Exception:
+                    # Never the exception text (S-006): the id is what the caller sent.
+                    logger.exception("deleting exercise media %s failed", media_id)
+                    errors.append(f"Media item {media_id} could not be deleted")
             
             response_data = {
                 'message': f'Successfully deleted {deleted_count} media items from exercise "{exercise.name}"',
@@ -3760,9 +3892,12 @@ class ExerciseAddMediaView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
-        except Exception as e:
+        except Exception:
+            # Same rule as the image upload: never the exception text (S-006).
+            logger.exception("deleting exercise media failed for %s", exercise_id)
             return Response(
-                {'error': f'Failed to delete media: {str(e)}'},
+                {'error': _('Could not remove that media. Please try again.'),
+                 'code': 'media_delete_failed'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -3839,12 +3974,20 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         as the coach reads it. Trainers (their own approved clients) and admins; 403
         otherwise, 404 for no such client.
 
-        `{client: {...}, weekly_stats: {...}, exercise_progress: [...],
-        recent_sessions: [...], adherence: {...}, strength: {...}}`.
+        `{client: {...}, client_info: {...}, weekly_stats: {...}, strength: {...},
+        recent_activity: [...]}`.
 
-        `adherence` is this client's last 7 days against the plan — `sets`
-        (planned/logged/missed/done_percent), `days_closed`, `perfect_days`,
-        `short_days`, `last_break` and `approximate` (see `analytics/adherence/`).
+        `client` and `client_info` are the SAME object — `{id, name, joined, goal}` —
+        under two names. The docstring promised `client` and the code has always
+        answered `client_info`, so the app was built from a shape the server does not
+        send; the contract is additive (CLAUDE.md), so the promised name arrives beside
+        the shipped one rather than replacing it. Read either; `client` is the one to
+        build on.
+
+        `weekly_stats` is the last 7 days: `sessions_count`, `total_volume`, and this
+        client's week against the plan — `planned_sets`, `logged_sets`, `missed_sets`,
+        `set_completion_percent`, `perfect_days`, `short_days`, `skipped_days`,
+        `approximate` (the same numbers as `analytics/adherence/`).
         `strength` is `{headline, rising_count, tracked_count, top_movers, plateaus,
         progression, assumes_sets_done_percent}`, the same data as `analytics/strength/`
         for this client, cut to the five exercises that moved most (see that docstring
@@ -3852,8 +3995,11 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         of `top_movers` and `plateaus` also carries its own `progression`, and
         `strength.progression` is the same answers as a flat list, most-moved first.
 
-        Each entry of `recent_activity` carries `effort_rating`: 1 (easy) to 5 (all I
-        had), as the client rated that session, or null while unanswered.
+        `recent_activity` is the client's last `RECENT_ACTIVITY_DAYS` days of completed
+        sessions,
+        each `{id, date, duration, volume, routine_name, exercises, effort_rating}`.
+        `effort_rating` is 1 (easy) to 5 (all I had), as the client rated that session,
+        or null while unanswered.
 
         Identical on every build; no price and no claim.
         """
@@ -3957,13 +4103,20 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                      'effort_rating': session.effort_rating,
                  })
 
+             # One object, two names. The docstring has always promised `client` and
+             # this view has always answered `client_info`, so an app built from the
+             # contract read a key that was never sent. Additive: the promised name is
+             # added, the shipped one stays (CLAUDE.md — never remove a key the app
+             # may already read).
+             client_summary = {
+                 'id': client.id,
+                 'name': client.full_name or client.username,
+                 'joined': client.date_joined,
+                 'goal': getattr(client, 'client_goals', 'Not set')
+             }
              return Response({
-                 'client_info': {
-                     'id': client.id,
-                     'name': client.full_name or client.username,
-                     'joined': client.date_joined,
-                     'goal': getattr(client, 'client_goals', 'Not set')
-                 },
+                 'client': client_summary,
+                 'client_info': client_summary,
                  'strength': _client_strength(client),
                  'weekly_stats': {
                      'sessions_count': len(week_sessions),
@@ -4052,8 +4205,11 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         # queries on one page load.
         clients = list(clients)
         activity = RecentActivitySerializer.collect(clients)
+        # With the request: `client_info.profile_picture` is absolute here as it is
+        # everywhere else (the same shape bug as BACKEND_BUGS B-032, on the picture).
         recent_activity = [
-            RecentActivitySerializer(client, context={"activity": activity}).data
+            RecentActivitySerializer(
+                client, context={"activity": activity, "request": request}).data
             for client in clients
         ]
         

@@ -182,11 +182,29 @@ so parse ids client-side.
 | `progress_milestone` | `milestone` (e.g. `streak-7`, `sessions-100`) |
 | `custom` | `message_id`, `trainer_id` — a message from the user's trainer |
 | `chat_message` | `conversation_id`, `message_id` — a message in the trainer–client chat. Sent only when the recipient has opened that conversation since the last `chat_message` about it, so a burst of messages is one push |
+| `coaching_renewed` | `trainer_id` — a new month of coaching was charged from the wallet |
+| `coaching_renewal_soon` | `trainer_id` — the paid month ends in a few days |
+| `coaching_payment_due` | `trainer_id`, `status` (`frozen`) — the month ended unpaid, so the coaching is paused; repeated on each reminder step while it stays paused |
+| `coaching_ended` | `user_id` — the other person. The grace period ran out unpaid; sent to both |
+| `coaching_finished` | `user_id` — the other person. Coaching ended for a reason other than money; sent to both |
+| `subscription_expiring` | `subscription_id`, `ends_at` (ISO 8601) |
+| `subscription_expired` | `subscription_id`, `ended_at` (ISO 8601) |
+| `checkout_expired` | `payment_id` — the checkout was not completed in time |
+| `personal_record` | `exercise_id`, `set_log_id` — the set that beat the previous best |
+| `weekly_recap` | `week` (the ISO week key), `missed_sets` |
+| `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
 
 `title`/`body` arrive in the FCM `notification` block, already rendered in the
 recipient's language.
 
 Every registered event type is emitted; there are no placeholders to skip.
+
+This table is **gate-checked**: `tests/test_side_bugs_round2.py` diffs it against
+`notifications/channels/fcm.py` `EVENT_CLASS_REGISTRY`, the same way the route table
+below is diffed against the URLconf. It had drifted by eleven event types — every
+coaching notice, both subscription notices, the checkout notice and all three progress
+notices — so an app built from this document ignored pushes the server sends. A new
+`event_type` goes in this table in the same commit as its registry entry.
 
 **Reminder scheduling.** `session_reminder` fires at most once a day, and only for a
 client with a program they can start (an assigned routine whose coaching is not paused or

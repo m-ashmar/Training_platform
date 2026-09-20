@@ -3398,3 +3398,50 @@ msgstr "تحويل"
 #: wallet/views.py:252
 msgid "No such transaction"
 msgstr "لا توجد حركة بهذا الرقم"
+# The second side-bug pass (SIDE_BUGS.md S-002..S-031): one day per set, and the
+# exercise-media routes answering without handing the caller an exception.
+#: routine/models.py routine/serializers.py
+msgid ""
+"A set is logged on the day of the exercise it belongs to (%(day)s). Log it "
+"against that day's progress record."
+msgstr ""
+"تُسجَّل المجموعة في يوم التمرين الذي تتبع له (%(day)s). سجّلها على سجل تقدّم "
+"ذلك اليوم."
+
+#: routine/views.py
+msgid "Could not save that image. Please try again."
+msgstr "تعذّر حفظ الصورة. يرجى المحاولة مرة أخرى."
+
+#: routine/views.py
+msgid "Could not remove that image. Please try again."
+msgstr "تعذّر حذف الصورة. يرجى المحاولة مرة أخرى."
+
+#: routine/views.py
+msgid "Could not add that media. Please try again."
+msgstr "تعذّرت إضافة الوسائط. يرجى المحاولة مرة أخرى."
+
+#: routine/views.py
+msgid "Could not remove that media. Please try again."
+msgstr "تعذّر حذف الوسائط. يرجى المحاولة مرة أخرى."
+
+#: routine/views.py
+msgid "Could not read that exercise's media. Please try again."
+msgstr "تعذّرت قراءة وسائط هذا التمرين. يرجى المحاولة مرة أخرى."
+
+#: routine/views.py
+msgid "media_type and content are required."
+msgstr "الحقلان media_type و content مطلوبان."
+
+#: routine/views.py
+msgid "media_type must be one of: %(types)s."
+msgstr "يجب أن يكون media_type أحد التالي: %(types)s."
+
+#: routine/views.py
+msgid "content must be an http(s) URL for %(kind)s."
+msgstr "يجب أن يكون content رابط http(s) عند اختيار %(kind)s."
+
+#: routine/views.py
+msgid ""
+"That link is not on a host this app plays media from. Upload the file "
+"instead."
+msgstr "هذا الرابط ليس على مضيف يشغّل منه التطبيق الوسائط. ارفع الملف بدلاً من ذلك."

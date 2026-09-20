@@ -593,8 +593,16 @@ class CacheMiddleware(MiddlewareMixin):
                     backend = private_cache() if is_private else public_cache()
                     backend.set(cache_key, response_data, rule['ttl'])
                     logger.debug(f"Cached response for {request.path} into {'private' if is_private else 'public'} cache")
-                    # Inform CDN / proxies of dimensions that affect this response
-                    response['Vary'] = 'Accept-Language, Authorization, X-App-Channel, X-App-Version'
+                    # Inform CDN / proxies of dimensions that affect this response.
+                    # PATCHED, not assigned: a plain assignment threw away the `Vary`
+                    # already on the response — `Cookie` from the session middleware,
+                    # `Accept-Encoding` from gzip — on exactly the four cached routes,
+                    # so a proxy was free to serve one user's gzipped, session-scoped
+                    # variant to the next caller.
+                    from django.utils.cache import patch_vary_headers
+                    patch_vary_headers(response, (
+                        'Accept-Language', 'Authorization',
+                        'X-App-Channel', 'X-App-Version'))
             except (json.JSONDecodeError, AttributeError):
                 # Optional side effect: swallowing this silently is what made the
                 # surrounding failures invisible in logs. Control flow is unchanged.

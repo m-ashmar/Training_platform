@@ -965,6 +965,24 @@ LARGE_UPLOAD_PATHS = {
     '/api/v1/trainer/exercise-media/': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
 }
 
+# WHERE an exercise's video/photo media may point (routine/views.py
+# ExerciseAddMediaView). Any http(s) URL was accepted, so one coach could aim every
+# one of their clients' players at a host nobody here controls — a tracker, a paywall,
+# or a site that serves something else next month — and the app loaded it because the
+# server called it the exercise's demonstration.
+#
+# Exact hostnames, comma-separated; an entry beginning with a dot matches that domain
+# and its subdomains (`.example.com` allows `cdn.example.com`). The project's own
+# object storage is always in the list. Adding a third party — a video site, say — is
+# a product decision the owner makes here, never a coach's, and it is the only way in.
+EXERCISE_MEDIA_ALLOWED_HOSTS = tuple(
+    part.strip().lower()
+    for part in get_env('EXERCISE_MEDIA_ALLOWED_HOSTS', '').split(',')
+    if part.strip()
+) + ('storage.googleapis.com',) + (
+    (f'{GS_BUCKET_NAME}.storage.googleapis.com',) if GS_BUCKET_NAME else ()
+)
+
 # How many assets one trainer may hold on ONE exercise (mediakit/trainer_views.py).
 # Storage and egress are paid per byte and a library is per trainer PER EXERCISE, so
 # the bill is this number times every exercise times every coach. Replacing a filled
