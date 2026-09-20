@@ -20,6 +20,10 @@ Not for: work the current task owns, bugs the app session reports (that is
 
 | ID | Where | What | Impact | Sev | Found |
 |---|---|---|---|---|---|
+| S-036 | `routine/views.py:412` | `ExerciseCreateWithImageView.post`'s broad handler returns `f'Failed to create exercise: {str(e)}'` | Internal exception text reaches the client — the same defect as the just-closed S-006, in a class the pass did not cover | MEDIUM | fix round 2 |
+| S-037 | `routine/views.py:22` | `DetailedClientProgressSerializer` is imported and never used; its `get_client_info` is unreachable | Dead code that reads like the live path | MEDIUM | fix round 2 |
+| S-038 | `tests/security/phase7_write.py:38` | Posts `completed_sets`/`target_sets` to `user-exercise-progress/`, which are now correctly ignored | The script reads as proving a write is refused when nothing is being tested. Not pytest-collected | MEDIUM | fix round 2 |
+| S-039 | `routine/views.py:3684` | `add-media/`'s `errors[]` strings are untranslated English, beside the codes just added next to them | An Arabic user reads English in a 207 body | MEDIUM | fix round 2 |
 | S-029 | `routine/views.py:3123` · `routine/serializers.py:1376` | Two different classes both named `RoutineTemplateExerciseSerializer` (fields `exercise_details` vs `exercise`) | The router uses one and `RoutineTemplateSerializer` the other; the next edit lands in the wrong one | MEDIUM | trainer media |
 | S-030 | `routine/views.py:985` | `RoutineExerciseViewSet` has no `filterset_fields`, so a client cannot fetch one day of a routine by `?routine=&day=` | The day arrives only inside the whole-routine payload, though the template equivalent can be filtered | MEDIUM | trainer media |
 | S-032 | `routine/views.py:1618` · `WorkoutSessionViewSet` | `set-logs/my-progress/` and the session list return UNPAGINATED lists | A long history is one unbounded response | MEDIUM | trainer media |
