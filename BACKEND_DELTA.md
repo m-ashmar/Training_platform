@@ -34,8 +34,9 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 16 | Coaching by the month, commission on every month (owner decision 3) | L | DONE |
 | 17 | Templates: one template, a private personalised copy per client (owner decision 16) | M | DONE |
 | 18 | Renewal reminder 3 days ahead; unpaid or ended = frozen (read-only) (owner decision 17) | L | DONE |
-| 19 | Keep the missed work: planned vs done per day, reused in analytics (owner question, 2026-09-20) | L | PROPOSED — needs the owner's go |
+| 19 | Keep the missed work: planned vs done per day, wired into analytics (owner, 2026-09-20) | L | DONE |
 | 20 | Trainer pipeline gaps found while mapping it (2026-09-20) | M | LISTED |
+| 21 | Expected progress: strength trend, projection, coach early warning (owner, 2026-09-20) | XL | IN PROGRESS |
 
 ## 1. Capabilities endpoint and channel header
 
@@ -345,36 +346,89 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 
 ## 19. Keep the missed work (planned vs done)
 
-- **Today** (read-only investigation, 2026-09-20): the 409 `unlogged_sets` counts
-  `{prescribed, logged, unlogged}` and throws them away; `confirm_unlogged` stores only
-  `RoutineProgress.status = completed`, so a day closed short looks exactly like a perfect
-  day in streaks, completion, the roster and achievements. What IS kept: per-set logs
-  (`ExerciseSetLog` reps, weight), per exercise and date `UserExerciseProgress`
-  (`completed_sets`, `target_sets`, `skipped`, `total_repetitions`, `total_weight`), and
-  per day `RoutineProgress.exercises_completed / total_exercises` (only for sets logged in a
-  session). The prescription (`RoutineExercise`) is edited in place with no snapshot, so a
-  trainer's edit rewrites every past week. A second silent path also completes a day: the
-  recalc marks it completed once every exercise meets `target_sets` (which the app sends,
-  default 0, so one set can be enough).
-- **Proposal** (additive, one migration): a `routine.DayOutcome` snapshot per (user,
-  routine, day, date), written when a day is closed by any path (update_progress with or
-  without `confirm_unlogged`, bulk-complete, bulk-create, a session finished with a day,
-  the recalc's own completion) and by a nightly job for days opened and never closed:
-  planned sets/reps/volume frozen at closing vs logged, `confirmed_unlogged`, exercises
-  full/partial/untouched/skipped, `prescription_exact`, `reps_known`. Registered in
-  `training_platform/privacy/sources.py`. Frozen/unpaid days (`training_refusal`) are not
-  counted as missed. A backfill command marks old weeks approximate.
-- **Reads:** `GET /api/routine/analytics/adherence/?period=&user_id=` (days closed, perfect
-  days and streak, sets and reps missed, planned vs done volume where a weight was set),
-  additive `outcome` on routine-progress and the update_progress answer, `missed_sets` /
-  `perfect_days` on the trainer's roster, and the AI progress tool. Existing streaks keep
-  their meaning; the perfect-days streak is a new field.
-- **Honest "benefit" copy only:** share of planned sets/reps done, planned volume left
-  (only where the coach set a weight), minutes left (labelled an estimate), the trend vs
-  last week. Never calories, muscle, fat-loss or "faster results" claims.
-- **Owner decisions owed:** build it; whether a day closed short still counts in the
-  existing streak and achievements; whether a new set log must carry reps (today an
-  omitted rep count is stored as 10).
+- **Before:** the 409 `unlogged_sets` counted the missing sets and threw the numbers away;
+  `confirm_unlogged` stored only `RoutineProgress.status = 'completed'`, so a day closed
+  short was indistinguishable from a perfect one in streaks, completion, the roster and
+  the achievements. Reps were stored as 10 when the app sent none, so "reps missed" could
+  never be trusted.
+- **Built** (`routine/outcomes.py`, model `routine.DayOutcome`, migration `routine/0023`):
+  one row per (user, routine, day, date), written whenever a day closes — `update_progress`
+  (`completed` / `skipped` / `confirmed_unlogged`), `bulk-complete`, a session finished on
+  that day, the recalculation completing it by itself (`auto`), and the nightly sweep for a
+  day opened and never closed (`unclosed`, `routine.close_open_training_days`, beat 01:15;
+  days nobody was allowed to train are skipped). The plan is frozen at closing time, so a
+  coach's later edit never rewrites last week; sets synced afterwards still count.
+  Registered in `training_platform/privacy/sources.py`.
+- **The owner's rules (2026-09-20):**
+  - A day closed with sets missing, or skipped, does NOT count as a training day and
+    BREAKS the streak: `analytics/streaks/` counts only complete days and answers
+    `last_break` (date, routine, day, missed sets, reason). The achievements' workout
+    streak excludes the same dates (`achievements/engine.py`). Days closed before this
+    existed fall back to their status, with `approximate: true`.
+  - Reps must be entered: `POST set-logs/` and `set-logs/bulk-create/` answer 400
+    `reps_required`. `as_prescribed: true` fills in the coach's reps for that exercise on
+    that routine day (and the prescribed weight when none is sent); 400
+    `no_prescribed_reps` when the coach set none.
+- **Wired into:** `analytics/adherence/` (new route), the home week
+  (`v1/analytics/recent-progress/` — which also answered 500 to everyone until now: it
+  annotated `day` over `WorkoutSession.day`), `routine-progress` rows (`outcome`, one
+  subquery per page, no N+1), the update_progress answer, the trainer's
+  `client-progress/{id}/` and roster `this_week`, and the AI assistant's progress tool.
+- **Honest copy only:** share of planned sets and reps done, planned volume left where a
+  weight was prescribed, the trend against last week. Never calories, muscle, fat loss or
+  "faster results".
+- **Not built, owner's call:** step 2 of the projection idea below (item 21).
+
+## 21. Expected progress: trend, projection, and a coach who notices (the owner, 2026-09-20)
+
+The owner: "build expected enhancements in progress for the user based on his goal and
+enhancements in the body — read how his weight grows in chest while keeping the set volume
+and expect how stronger he will be there in two weeks", wired everywhere it matters,
+including the app, to make users happy and make them share it. Built on item 19: the day
+outcomes are what make a projection honest, because they say how much of the plan was
+actually done.
+
+### What it is
+
+| Step | What a person sees | Where it comes from |
+|---|---|---|
+| 1. Strength trend | "Chest press 60 kg x 8 -> 70 kg x 8 in 6 weeks, +16%", the date of each personal best, which exercises are rising, flat or slipping | `ExerciseSetLog`: the best set of each training day, an estimated one-rep max, the day's volume |
+| 2. Projection | "On this trend, in 2 weeks you are around 72-75 kg x 8 — if you keep finishing about 90% of your sets" | A robust trend over the last 8 weeks of weekly bests, a band from the residuals, conditioned on `DayOutcome` adherence |
+| 3. The coach notices | A ranked "needs attention" list with the numbers: adherence fell against their own 4-week average, no training for N days, strength slipping, coaching frozen, a program never started | `DayOutcome` + sessions + `users/coaching.py` state |
+
+### Improvements on top (mine, and why)
+
+- **Personal-record push** the moment someone beats their best on an exercise. The most
+  shareable moment in the app, and the data is already there.
+- **Weekly recap** to the client and **weekly digest** to the coach, Sunday evening: what
+  the week held, what is worth a look. This is what brings people back.
+- **A share block**: the trend endpoint returns a short bilingual headline the app can draw
+  on a card, so sharing needs no second backend pass.
+
+### Rules this is built under
+
+- No new tables if reads over a bounded window plus the existing private cache are enough.
+- Silent until there is enough data: a projection needs at least 3 training days of that
+  exercise spread over at least 2 weeks; otherwise `insufficient_data` with what is missing.
+- A range, never a single number, and never a scary one: a flat or downward trend reads as
+  "holding steady", with the missed sets named as the lever.
+- NO health-outcome claims (calories, weight, muscle, fat, "faster results"), no medical
+  advice, no price or purchase wording in any push. Arabic first, every string through
+  gettext. Identical on every build.
+- Deterministic maths (a weighted linear fit), not ML: testable, explainable to a client
+  and a coach, and honest about its own uncertainty.
+
+### App-level wiring (what each screen reads)
+
+| Screen | Reads |
+|---|---|
+| Home | `v1/analytics/recent-progress/`: `adherence` (item 19) plus a `strength` headline and its projection when there is one |
+| Progress / exercise detail | `analytics/strength/?exercise_id=` — the per-day series, the deltas, the personal best, the projection, the share headline |
+| Progress overview | `analytics/strength/` — top movers, plateaus, personal bests this period |
+| Coach: client | `trainer/client-progress/{id}/` — the same trend and adherence for that client |
+| Coach: roster | `trainer/client-progress/recent/` — per client: this week, trend arrow, risk flag |
+| Coach: needs attention | `trainer/client-progress/attention/` — the ranked list with reasons |
+| Notifications | `personal_record`, `weekly_recap`, `trainer_weekly_digest` |
 
 ## 20. Trainer pipeline gaps (found while mapping it, 2026-09-20)
 
@@ -436,6 +490,8 @@ only on Postgres), no backfill that invents data, no rename.
 | 16 | Templates | Reusable; each client gets a private, personalised copy | Item 17 |
 | 17 | When a month or plan ends | Remind 3 days before; after it ends the last diet plan and the routine stay visible and cannot be used; keep asking | Item 18 |
 | 9 | Grace before unpaid coaching ends | Replaced by decision 17: no grace, it freezes | Item 18 |
+| 24 | A day closed with sets missing | It must not count, and it breaks the streak, with the day pointed at (2026-09-20) | Item 19: `analytics/streaks/` `last_break`, achievements too |
+| 25 | Reps on a logged set | Must be entered; a button uses the coach's reps (2026-09-20) | Item 19: `reps_required`, `as_prescribed` |
 | 22 | A plan from an unanswered activity level | Refuse, and tell the client to choose it (2026-09-20) | 400 `activity_level_required`; trainer plans `client_activity_level_required` (BACKEND_BUGS B-027) |
 | 23 | A picture sent to `user/update/` | Refuse it (2026-09-20) | 400 `profile_picture_read_only` (BACKEND_BUGS B-026) |
 

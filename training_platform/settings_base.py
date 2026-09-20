@@ -426,6 +426,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'subscription.send_renewal_reminders',
         'schedule': crontab(hour=17, minute=35),
     },
+    # A training day opened and never closed still says what was left of it (the owner,
+    # 2026-09-20). Nightly, after midnight in Damascus, so "yesterday" is really over.
+    'close-open-training-days': {
+        'task': 'routine.close_open_training_days',
+        'schedule': crontab(hour=1, minute=15),
+    },
     # `age` follows `date_of_birth` (users/models.py). Saves keep it right; this moves
     # everyone whose birthday it is and nobody else writes to their row today.
     'refresh-ages-from-birth-dates': {

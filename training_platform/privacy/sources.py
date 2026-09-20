@@ -50,6 +50,9 @@ register(PersonalDataSource(
 register(PersonalDataSource(label="workout_sessions", model="routine.WorkoutSession", user_field="user"))
 register(PersonalDataSource(label="exercise_progress", model="routine.UserExerciseProgress", user_field="user"))
 register(PersonalDataSource(label="routine_progress", model="routine.RoutineProgress", user_field="user"))
+# What each training day planned against what was done (routine/outcomes.py). Deleted
+# with the person, like the progress rows it summarises.
+register(PersonalDataSource(label="day_outcomes", model="routine.DayOutcome", user_field="user"))
 
 # --- nutrition ----------------------------------------------------------------
 register(PersonalDataSource(label="diet_plans", model="diet.DietPlan", user_field="user"))

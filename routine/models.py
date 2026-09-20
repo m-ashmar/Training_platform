@@ -721,6 +721,92 @@ class RoutineProgress(models.Model):
         return (self.exercises_completed / self.total_exercises) * 100
 
 
+
+class DayOutcome(models.Model):
+    """What one training day planned and what was done — written when the day closes.
+
+    The owner (2026-09-20): keep the missed work instead of throwing it away, so the app
+    can say "18 of 24 sets", "5 days with nothing missed", and so a day closed short
+    breaks the streak instead of passing for a perfect one. See `routine/outcomes.py`,
+    which is the only writer; nothing else may edit these rows.
+
+    The plan columns are a snapshot frozen when the day closed, because the coach edits
+    `RoutineExercise` in place and an edit must not rewrite last week. The logged columns
+    follow later sets of the same date, like "a completed day stays completed".
+    """
+    VIA_CHOICES = [
+        ('completed', 'Closed by the client, nothing missing'),
+        ('confirmed_unlogged', 'Closed by the client after the unlogged-sets warning'),
+        ('skipped', 'Marked skipped by the client'),
+        ('bulk_complete', 'Logged a whole day at once'),
+        ('session', 'A workout session was finished on this day'),
+        ('auto', 'Every exercise reached its target, so the day completed itself'),
+        ('unclosed', 'Opened and never closed; recorded by the nightly sweep'),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name='day_outcomes')
+    #: PROTECT, like `RoutineProgress`: a routine with history is retired, never deleted.
+    routine = models.ForeignKey('Routine', on_delete=models.PROTECT,
+                                related_name='day_outcomes')
+    day = models.PositiveIntegerField(help_text="Day of the routine")
+    date = models.DateField(help_text="The calendar day that was trained")
+
+    via = models.CharField(max_length=20, choices=VIA_CHOICES)
+    #: The person was warned that sets were unlogged and closed the day anyway.
+    confirmed_unlogged = models.BooleanField(default=False)
+    #: Nothing missing: every prescribed set of the day is accounted for.
+    complete = models.BooleanField(default=False, db_index=True)
+
+    planned_sets = models.PositiveIntegerField(default=0)
+    logged_sets = models.PositiveIntegerField(default=0)
+    missed_sets = models.PositiveIntegerField(default=0)
+    #: Null when the coach prescribed no repetitions for any exercise of the day.
+    planned_reps = models.PositiveIntegerField(null=True, blank=True)
+    logged_reps = models.PositiveIntegerField(default=0)
+    #: False when part of the day came from "log a whole day", which records no reps.
+    reps_known = models.BooleanField(default=True)
+    #: Null unless the coach prescribed a working weight (and reps) for the day.
+    planned_volume_kg = models.FloatField(null=True, blank=True)
+    logged_volume_kg = models.FloatField(default=0)
+
+    exercises_planned = models.PositiveIntegerField(default=0)
+    exercises_full = models.PositiveIntegerField(default=0)
+    exercises_partial = models.PositiveIntegerField(default=0)
+    exercises_untouched = models.PositiveIntegerField(default=0)
+    exercises_skipped = models.PositiveIntegerField(default=0)
+
+    #: False for a day filled in afterwards by the backfill: the plan may have changed
+    #: since, so the week is shown as approximate.
+    prescription_exact = models.BooleanField(default=True)
+    prescription_at = models.DateTimeField(null=True, blank=True)
+    workout_session = models.ForeignKey('WorkoutSession', null=True, blank=True,
+                                        on_delete=models.SET_NULL,
+                                        related_name='day_outcomes')
+    #: One entry per prescribed exercise: planned and logged sets, reps, weight, skipped.
+    detail = models.JSONField(default=list, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Day Outcome"
+        verbose_name_plural = "Day Outcomes"
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'routine', 'day', 'date'],
+                                    name='one_outcome_per_training_day'),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-date'], name='dayoutcome_user_recent_idx'),
+        ]
+        # `id` tiebreaker: a single non-unique sort column is not a total order, so
+        # LIMIT/OFFSET paging repeats and hides rows.
+        ordering = ['-date', '-id']
+
+    def __str__(self):
+        return f"{self.user_id} {self.routine_id} day {self.day} on {self.date}"
+
+
 class WorkoutSession(models.Model):
     """
     Represents a user's workout session. Tracks start/end and status for real-time execution.
@@ -1061,10 +1147,19 @@ def refresh_routine_progress(instance, routine_scope=None, day_scope=None):
             else:
                 status = 'in_progress'
 
+            # A day already CLOSED follows its new sets, whatever verdict this pass
+            # reaches: that is how a day closed short becomes complete when the rest of
+            # it syncs. Asked only for days this person has work on, and it does nothing
+            # unless an outcome exists.
+            if progress_by_exercise:
+                from .outcomes import refresh_day_quietly
+                refresh_day_quietly(user, routine, day, progress_date)
+
             # Without a routine of record we cannot know the client opened THIS day, so
             # a partial count is not evidence of anything: a shared exercise made an
             # untrained day report `in_progress`. A fully-completed day is different —
-            # every exercise it schedules was trained today, which is the verdict.
+            # every exercise it schedules was trained today, which is the verdict. A day
+            # ALREADY closed is refreshed above either way: it is evidence of itself.
             if routine_scope is None and status != 'completed':
                 continue
 
@@ -1089,6 +1184,14 @@ def refresh_routine_progress(instance, routine_scope=None, day_scope=None):
                 }
             )
 
+            # A day can also complete itself here, with no call to update_progress and
+            # no warning: every exercise reached its target. Its outcome is kept like
+            # any other closed day (the owner, 2026-09-20), so the week's figures do not
+            # depend on which button finished the day.
+            if status == 'completed':
+                from .outcomes import record_day_quietly
+                record_day_quietly(user, routine, day, progress_date, via='auto')
+
 @_contextlib.contextmanager
 def suspend_progress_recalc():
     """
@@ -1107,11 +1210,18 @@ def suspend_progress_recalc():
         _recalc_state.suspended = prev
 
 
-def recalc_progress_for(progress):
-    """Run the recomputation explicitly (used after a suspended bulk write)."""
+def recalc_progress_for(progress, routine_scope=None, day_scope=None):
+    """Run the recomputation explicitly (used after a suspended bulk write).
+
+    `routine_scope` and `day_scope` name the routine and day the caller was training.
+    Without them the recomputation walks every routine holding the exercise, which is
+    what let one workout decide another routine's day (see `refresh_routine_progress`).
+    """
+    if not progress.set_logs.exists():
+        return
     update_routine_progress_on_set_log(
-        sender=ExerciseSetLog, instance=progress.set_logs.first(), created=False, _forced=True
-    ) if progress.set_logs.exists() else None
+        sender=ExerciseSetLog, instance=progress.set_logs.first(), created=False,
+        _forced=True, routine_scope=routine_scope, day_scope=day_scope)
 
 
 @receiver(post_save, sender=ExerciseSetLog)
@@ -1126,16 +1236,20 @@ def update_routine_progress_on_set_log(sender, instance, created, **kwargs):
     progress = instance.user_exercise_progress
     if not progress:
         return
+    routine_scope = kwargs.get('routine_scope')
+    day_scope = kwargs.get('day_scope')
         
     # Defer to after commit. post_save fires INSIDE the insert's transaction, so the
     # aggregate below could not see rows other writers had not yet committed — the row
     # lock alone still produced 400/450/300 where 600 was correct. Running after commit
     # means every recalc reads committed data, and the last one to take the lock sees
     # all of them.
-    transaction.on_commit(lambda pk=progress.pk: _recalc_locked(pk))
+    transaction.on_commit(lambda pk=progress.pk,
+                          routine_pk=getattr(routine_scope, 'pk', None), day=day_scope:
+                          _recalc_locked(pk, routine_pk, day))
 
 
-def _recalc_locked(progress_pk):
+def _recalc_locked(progress_pk, routine_pk=None, day_scope=None):
     """Recompute a UserExerciseProgress' derived totals in ONE atomic statement.
 
     Every earlier shape of this raced. A read-modify-write via `progress.save()` let
@@ -1179,7 +1293,8 @@ def _recalc_locked(progress_pk):
     # through `save()`, moved the number.
     refreshed = UserExerciseProgress.objects.filter(pk=progress_pk).first()
     if refreshed is not None:
-        refresh_routine_progress(refreshed)
+        routine_scope = Routine.objects.filter(pk=routine_pk).first() if routine_pk else None
+        refresh_routine_progress(refreshed, routine_scope=routine_scope, day_scope=day_scope)
 
 
 # --- M2M SIGNAL FOR AUTOMATIC ROUTINEPROGRESS CREATION ---

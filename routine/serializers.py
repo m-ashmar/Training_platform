@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from .models import (
     Routine, Exercise, RoutineExercise,ExerciseMedia,
     UserExerciseProgress, RoutineProgress, ExerciseSetLog, WorkoutSession,
-    RoutineTemplate, RoutineTemplateExercise
+    RoutineTemplate, RoutineTemplateExercise, DayOutcome
 )
 import logging
 from django.db.models import Sum, F
@@ -404,6 +404,34 @@ class UserExerciseProgressDetailSerializer(UserExerciseProgressSerializer):
 
 
 
+class DayOutcomeSerializer(serializers.ModelSerializer):
+    """What one training day planned against what was done (routine/outcomes.py).
+
+    Read-only everywhere: these rows are written when a day closes, never by a client.
+    """
+    missed_reps = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DayOutcome
+        fields = [
+            'id', 'routine', 'day', 'date', 'via', 'complete', 'confirmed_unlogged',
+            'planned_sets', 'logged_sets', 'missed_sets',
+            'planned_reps', 'logged_reps', 'missed_reps', 'reps_known',
+            'planned_volume_kg', 'logged_volume_kg',
+            'exercises_planned', 'exercises_full', 'exercises_partial',
+            'exercises_untouched', 'exercises_skipped',
+            'prescription_exact', 'detail',
+        ]
+        read_only_fields = fields
+
+    def get_missed_reps(self, obj):
+        """Null when the coach prescribed no reps, or when part of the day was logged a
+        whole day at a time and its reps are unknown."""
+        if obj.planned_reps is None or not obj.reps_known:
+            return None
+        return max(obj.planned_reps - (obj.logged_reps or 0), 0)
+
+
 class RoutineProgressSerializer(serializers.ModelSerializer):
     """
     Enhanced serializer with rich progress data.
@@ -421,14 +449,18 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
     completion_percentage = serializers.SerializerMethodField()
     exercises_summary = serializers.SerializerMethodField()
     next_suggested_action = serializers.SerializerMethodField()
-    
+    #: What this day planned against what was done, when the day has been closed
+    #: (the owner, 2026-09-20). Annotated by the viewset in ONE query for the whole
+    #: page; null on a day still open, or for a caller that did not annotate.
+    outcome = serializers.SerializerMethodField()
+
     class Meta:
         model = RoutineProgress
         fields = [
             'id', 'user', 'routine', 'routine_id', 'routine_name',
             'day', 'date', 'status', 'exercises_completed', 'total_exercises',
             'completion_percentage', 'exercises_summary', 
-            'next_suggested_action', 'updated_at'
+            'next_suggested_action', 'outcome', 'updated_at'
         ]
         #: DERIVED, not declared. These three were writable, and `perform_create` only
         #: checked that the routine was assigned to the caller — never that the numbers
@@ -438,6 +470,18 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
         #: HTTP calls. The signal in routine/models.py computes all three from the set
         #: logs; nothing else may.
         read_only_fields = ['status', 'exercises_completed', 'total_exercises']
+
+    def get_outcome(self, obj):
+        planned = getattr(obj, 'outcome_planned_sets', None)
+        if planned is None:
+            return None
+        return {
+            'complete': getattr(obj, 'outcome_complete', None),
+            'confirmed_unlogged': getattr(obj, 'outcome_confirmed_unlogged', None),
+            'planned_sets': planned,
+            'logged_sets': getattr(obj, 'outcome_logged_sets', 0),
+            'missed_sets': getattr(obj, 'outcome_missed_sets', 0),
+        }
 
     def get_completion_percentage(self, obj):
         if obj.total_exercises == 0:
@@ -539,10 +583,23 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     Serializer for exercise set logs.
     Input: user_exercise_progress (PK), workout_session (PK), set_number, weight, reps, date
     Output: Serialized ExerciseSetLog data for API responses with calculated volume
+
+    `reps` is required on a new set (the owner, 2026-09-20): an omitted rep count used
+    to be stored as ten, so "reps missed this week" could never be trusted. The app's
+    "as prescribed" button sends `as_prescribed: true` instead of a number, and the
+    server fills in the coach's reps for that exercise on that routine day — and the
+    prescribed weight too, when the coach set one and the app sent none. The prescription
+    is found through the set's session; without one, send `routine` and `day` (write-only,
+    used only to look it up). Field codes on `reps`: `reps_required`, `no_prescribed_reps`.
     """
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
     one_rep_max_estimate = serializers.SerializerMethodField()
+    #: "I did what the coach asked" — write-only, never stored.
+    as_prescribed = serializers.BooleanField(write_only=True, required=False, default=False)
+    routine = serializers.PrimaryKeyRelatedField(queryset=Routine.objects.all(),
+                                                 write_only=True, required=False)
+    day = serializers.IntegerField(write_only=True, required=False, min_value=1)
 
     def validate_user_exercise_progress(self, value):
         """
@@ -613,6 +670,10 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         """A set log belongs to ONE person: the session and the progress must agree."""
         attrs = super().validate(attrs)
+        # Write-only helpers: they find the coach's prescription and are never stored.
+        as_prescribed = attrs.pop('as_prescribed', False)
+        routine = attrs.pop('routine', None)
+        day = attrs.pop('day', None)
         if self.instance is not None:
             attrs.pop('client_uuid', None)      # the retry key is fixed once written
         progress = attrs.get('user_exercise_progress') or getattr(
@@ -624,7 +685,55 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 _("That session and that progress record belong to different users.")
             )
+
+        if self.instance is None and attrs.get('reps') is None:
+            if not as_prescribed:
+                # Stored as ten before, silently. Every "reps missed" figure reads these
+                # rows, so a guess is worse than a refusal (the owner, 2026-09-20).
+                raise serializers.ValidationError({'reps': [serializers.ErrorDetail(
+                    _("How many reps? Send `as_prescribed: true` to use your coach's "
+                      "number."), code='reps_required')]})
+            prescription = self._prescription(progress, session, routine, day)
+            if prescription is None or prescription.reps is None:
+                raise serializers.ValidationError({'reps': [serializers.ErrorDetail(
+                    _("Your coach did not set reps for this exercise; enter what you did."),
+                    code='no_prescribed_reps')]})
+            attrs['reps'] = prescription.reps
+            if attrs.get('weight') is None and prescription.weight is not None:
+                attrs['weight'] = prescription.weight
         return attrs
+
+    def _prescription(self, progress, session, routine, day):
+        """The coach's row for this exercise on this routine day, or None.
+
+        The session names the routine and the day; a set logged without one has to say
+        which day it belongs to, because `UserExerciseProgress` records neither. A
+        `routine` in the body is only honoured when the caller may train it — the field
+        is a plain id, and without this check "as prescribed" read any trainer's
+        prescribed reps and weight by enumeration.
+        """
+        if progress is None:
+            return None
+        if routine is not None and not self._may_read_plan(routine):
+            return None
+        routine = routine or getattr(session, 'routine', None)
+        day = day or getattr(session, 'day', None)
+        if routine is None or day is None:
+            return None
+        return (RoutineExercise.objects
+                .filter(routine=routine, day=day, exercise_id=progress.exercise_id)
+                .order_by('order', 'id').first())
+
+    def _may_read_plan(self, routine):
+        """Assigned to the caller, written by them, or an admin — the same rule
+        `set-logs/bulk-create/` applies to the routine it is given."""
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None or not user.is_authenticated:
+            return False
+        return bool(getattr(user, 'is_admin', False)
+                    or routine.created_by_id == user.id
+                    or routine.assigned_to.filter(pk=user.pk).exists())
 
     class Meta:
         model = ExerciseSetLog
@@ -634,6 +743,8 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
             'date', 'notes', 'rest_time', 'rpe',
             # The app's id for the set; a retried POST returns the first row (B-003).
             'client_uuid',
+            # Write-only: "as prescribed", and where to find the prescription.
+            'as_prescribed', 'routine', 'day',
         ]
         # The unique index decides, not a validator (see WorkoutSessionSerializer).
         extra_kwargs = {'client_uuid': {'validators': []}}
@@ -1403,7 +1514,8 @@ class RecentActivitySerializer(serializers.ModelSerializer):
         collected = {
             uid: {"last_session": None, "last_volume": 0, "last_exercises": 0,
                   "week_volume": 0, "week_sessions": 0,
-                  "week_total_days": 0, "week_completed_days": 0, "exercises": {}}
+                  "week_total_days": 0, "week_completed_days": 0, "exercises": {},
+                  "week_plan": {}}
             for uid in ids
         }
         if not ids:
@@ -1460,6 +1572,13 @@ class RecentActivitySerializer(serializers.ModelSerializer):
                               completed=Count('id', filter=Q(status='completed')))):
             collected[row['user_id']]["week_total_days"] = row['total']
             collected[row['user_id']]["week_completed_days"] = row['completed']
+
+        # This week against the plan: sets planned, logged and missed, and the days
+        # with nothing missing (the owner, 2026-09-20). One query for every client on
+        # the page, like everything else collected here.
+        from .outcomes import week_totals
+        for user_id, totals in week_totals(ids, week_ago, timezone.localdate()).items():
+            collected[user_id]["week_plan"] = totals
 
         # This week's exercise logs, for the per-exercise summary. Ordered the way the
         # per-user version ordered them, so the "top 5" are the same five.
@@ -1522,10 +1641,18 @@ class RecentActivitySerializer(serializers.ModelSerializer):
         total_days = entry["week_total_days"]
         completed_days = entry["week_completed_days"]
         completion_rate = round((completed_days / total_days * 100) if total_days > 0 else 0, 1)
+        plan = entry["week_plan"]
         return {
             'sessions': entry["week_sessions"],
             'total_volume': entry["week_volume"],
-            'completion_rate': completion_rate
+            'completion_rate': completion_rate,
+            # What the coach asked for against what was done. `completion_rate` counts
+            # DAYS by status and cannot see a day closed with sets missing; these can.
+            'planned_sets': plan.get('planned_sets', 0),
+            'logged_sets': plan.get('logged_sets', 0),
+            'missed_sets': plan.get('missed_sets', 0),
+            'set_completion_percent': plan.get('set_completion_percent'),
+            'perfect_days': plan.get('perfect_days', 0),
         }
 
     def get_recent_exercises(self, obj):

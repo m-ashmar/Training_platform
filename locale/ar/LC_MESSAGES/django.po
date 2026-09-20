@@ -2638,3 +2638,17 @@ msgstr "لم يختر هذا المتدرب مستوى نشاطه بعد. اطل
 #: users/views.py
 msgid "Upload the profile picture with /api/auth/user/profile-picture/."
 msgstr "ارفع صورة الملف الشخصي عبر /api/auth/user/profile-picture/."
+
+#: routine/serializers.py routine/views.py
+msgid ""
+"How many reps? Send `as_prescribed: true` to use your coach's number."
+msgstr "كم تكرارًا؟ أرسل `as_prescribed: true` لاستخدام رقم مدربك."
+
+#: routine/serializers.py routine/views.py
+msgid "Your coach did not set reps for this exercise; enter what you did."
+msgstr "لم يحدد مدربك عدد التكرارات لهذا التمرين؛ أدخل ما قمت به."
+
+#: routine/views.py
+#, python-format
+msgid "period must be one of: %(options)s"
+msgstr "يجب أن تكون الفترة إحدى القيم: %(options)s"

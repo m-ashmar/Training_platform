@@ -103,6 +103,33 @@ def get_overall_progress(user, days=30, **kwargs):
             "completed_days": routine_completion['completed'],
             "total_days": routine_completion['total'],
         },
+        # How much of the coach's plan was actually done over the same period, so the
+        # assistant answers "did I finish my sets" with numbers rather than "you trained
+        # 4 days" (the owner, 2026-09-20; routine/outcomes.py).
+        "plan_adherence": _plan_adherence(user, days),
+    }
+
+
+def _plan_adherence(user, days):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from routine.outcomes import adherence
+
+    today = timezone.localdate()
+    week = adherence(user, today - timedelta(days=days - 1), today, today=today)
+    return {
+        "days_closed": week['days_closed'],
+        "perfect_days": week['perfect_days'],
+        "short_days": week['short_days'],
+        "sets_planned": week['sets']['planned'],
+        "sets_logged": week['sets']['logged'],
+        "sets_missed": week['sets']['missed'],
+        "sets_done_pct": week['sets']['done_percent'],
+        "reps_missed": week['reps']['missed'],
+        "perfect_day_streak": week['perfect_streak']['current'],
+        "approximate": week['approximate'],
     }
 
 

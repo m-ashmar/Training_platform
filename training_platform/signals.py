@@ -104,6 +104,26 @@ def bust_recent_progress_cache(sender, instance, **kwargs):
         return
 
 
+@receiver(post_save, sender='routine.DayOutcome')
+def bust_recent_progress_cache_on_day_outcome(sender, instance, **kwargs):
+    """The home screen's week carries the adherence block, so closing a day must show
+    there at once — not up to 120 s later. Same guarded, deferred bust as above:
+    cache invalidation must never fail the training it describes."""
+    from django.db import transaction as _txn
+
+    def _bust():
+        try:
+            from training_platform.cache import private_cache
+            private_cache().delete(f"recent_progress:{instance.user_id}")
+        except Exception:
+            logger.warning(
+                "Could not bust recent_progress cache for user %s; it will expire on TTL",
+                instance.user_id, exc_info=True,
+            )
+
+    _txn.on_commit(_bust)
+
+
 # ---------------------------------------------------------------------------
 # Orphaned upload cleanup
 # ---------------------------------------------------------------------------

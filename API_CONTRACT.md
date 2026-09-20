@@ -472,9 +472,40 @@ omits `plan_price`, and `GET v1/gateways/` answers an empty list. Additive field
 
 ### Routines & Workouts
 
+**What each training day planned against what was done** (the owner, 2026-09-20). Closing
+a day writes one `DayOutcome`, whichever way it closed: `update_progress`
+(`completed` / `skipped`, and `confirmed_unlogged` when the person confirmed the
+`unlogged_sets` warning), `user-exercise-progress/bulk-complete/`, finishing a workout
+session on that day, the recalculation completing it by itself, or the nightly sweep for
+a day opened and never closed. The plan is frozen at that moment, so a later edit by the
+coach never rewrites last week; sets synced afterwards still count.
+
+- `POST routines/{id}/update_progress/` answers `outcome` (planned, logged and missed
+  sets and reps, `complete`, `confirmed_unlogged`).
+- `GET routine-progress/` carries `outcome` per day (null while the day is open).
+- `GET analytics/adherence/?period=week|month|year&user_id=` — the window's
+  `days_closed`, `perfect_days`, `short_days`, `skipped_days`, `sets`, `reps`,
+  `volume_kg`, `perfect_streak`, `last_break`, `approximate`, `by_day`. 400 `bad_period`.
+- `GET v1/analytics/recent-progress/` (the home week) carries the same block as
+  `adherence`.
+- `GET analytics/streaks/` counts only days with nothing missing: a day closed short or
+  skipped BREAKS the streak, and `last_break` names it (`date`, `routine_id`, `day`,
+  `missed_sets`, `reason`). Days closed before outcomes existed fall back to their status
+  and set `approximate`.
+- The trainer sees the same numbers: `trainer/client-progress/{id}/` `weekly_stats` and
+  `trainer/client-progress/recent/` `this_week` gain `planned_sets`, `logged_sets`,
+  `missed_sets`, `set_completion_percent`, `perfect_days`.
+
+**Reps are required** on a new set log (`POST set-logs/`, `set-logs/bulk-create/`): 400
+`reps_required` on the `reps` field. `as_prescribed: true` instead of a number uses the
+coach's reps for that exercise on that routine day (and their weight when none is sent);
+the prescription is found through the set's session, or from `routine` and `day` in the
+body. 400 `no_prescribed_reps` when the coach set none.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/routine/` | auth | `APIRootView` |
+| `GET` | `/api/routine/analytics/adherence/` | auth | `AnalyticsViewSet` |
 | `GET` | `/api/routine/analytics/admin_dashboard/` | auth | `AnalyticsViewSet` |
 | `GET` | `/api/routine/analytics/completion/` | auth | `AnalyticsViewSet` |
 | `GET` | `/api/routine/analytics/streaks/` | auth | `AnalyticsViewSet` |

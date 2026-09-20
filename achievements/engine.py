@@ -365,8 +365,11 @@ class AchievementEngine:
     MAX_STREAK_DAYS = 400
 
     @classmethod
-    def _streak_of(cls, user: CustomUser, kinds) -> int:
+    def _streak_of(cls, user: CustomUser, kinds, exclude=None) -> int:
         """Consecutive days, ending today, on which this user did one of `kinds`.
+
+        `exclude`: days that must not count however much was logged on them — the owner's
+        rule that a training day closed short breaks the streak.
 
         ONE query, and the client's own days. It was a `while True` issuing a query per
         consecutive day with no upper bound — a user with a long history paid one
@@ -395,6 +398,7 @@ class AchievementEngine:
         ).values_list("timestamp", flat=True)
         days = {(t.astimezone(zone) if zone else timezone.localtime(t)).date()
                 for t in stamps}
+        days -= set(exclude or ())
 
         streak, day = 0, today
         while day in days and streak < cls.MAX_STREAK_DAYS:
@@ -404,8 +408,19 @@ class AchievementEngine:
 
     @classmethod
     def _calculate_workout_streak(cls, user: CustomUser) -> int:
-        """Consecutive days with a workout."""
-        return cls._streak_of(user, activity_types.WORKOUT)
+        """Consecutive days with a workout that finished what it planned.
+
+        A day whose training day was closed with sets still unlogged, or skipped, does
+        not count and breaks the streak (the owner, 2026-09-20; routine/outcomes.py).
+        Training that belongs to no routine day, and a day on which another routine WAS
+        finished in full, still count.
+        """
+        from routine.outcomes import broken_dates
+        from training_platform.user_time import today_for
+
+        window_start = today_for(user) - timedelta(days=cls.MAX_STREAK_DAYS)
+        return cls._streak_of(user, activity_types.WORKOUT,
+                              exclude=broken_dates(user, since=window_start))
 
     @classmethod
     def _calculate_calorie_streak(cls, user: CustomUser) -> int:

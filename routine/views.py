@@ -96,7 +96,10 @@ class RecentActivityProgressView(APIView):
     GET /api/routine/v1/analytics/recent-progress/
 
     Returns the last 7 calendar days of the authenticated user's active workout
-    time (in seconds), including days with 0 duration.
+    time (in seconds), including days with 0 duration, plus `adherence`: the same week
+    measured against the coach's plan — sets planned, logged and missed, days with
+    nothing missing, the perfect-day streak and the day that broke it
+    (see `analytics/adherence/` for the full shape).
 
     Implementation details:
     - Duration is aggregated at DB level via TruncDate + Sum (no Python loops)
@@ -134,14 +137,18 @@ class RecentActivityProgressView(APIView):
                 end_time__isnull=False,       # guard against active/null sessions
                 start_time__gte=window_start,
             )
+            # NOT `day=`: `WorkoutSession.day` is the routine day, and annotating over a
+            # model field raises `ValueError: The annotation 'day' conflicts with a field
+            # on the model` — this endpoint, the home screen's week, answered 500 to every
+            # caller from the day that column was added.
             .annotate(
-                day=TruncDate('start_time'),
+                session_date=TruncDate('start_time'),
                 session_duration=ExpressionWrapper(
                     F('end_time') - F('start_time'),
                     output_field=DurationField()
                 )
             )
-            .values('day')
+            .values('session_date')
             .annotate(total_duration=Sum('session_duration'))
         )
 
@@ -149,7 +156,7 @@ class RecentActivityProgressView(APIView):
         results_map = {}
         for entry in qs:
             total_secs = entry['total_duration'].total_seconds() if entry['total_duration'] else 0
-            results_map[entry['day']] = int(total_secs)
+            results_map[entry['session_date']] = int(total_secs)
 
         # Deterministic 7-day output — always include every day, even zeros
         recent_progress = []
@@ -160,7 +167,17 @@ class RecentActivityProgressView(APIView):
                 "duration": results_map.get(day, 0)
             })
 
-        data = {"recent_progress": recent_progress}
+        # The same week, but as the plan: how much of what the coach asked for was
+        # actually done, how many days had nothing missing, and the day that broke the
+        # streak (the owner, 2026-09-20). One aggregate query; the cache is busted when
+        # a day closes (training_platform/signals.py).
+        from .outcomes import adherence
+
+        data = {
+            "recent_progress": recent_progress,
+            "adherence": adherence(request.user, window_start.date(), start_of_today.date(),
+                                   today=start_of_today.date()),
+        }
         private_cache().set(cache_key, data, 120)
         return Response(data)
 
@@ -807,6 +824,12 @@ class RoutineViewSet(viewsets.ModelViewSet):
         prescribed set of that day is unlogged today, `completed` answers
         409 `unlogged_sets` with `{prescribed, logged, unlogged}`, and the app sends the
         same request again with `confirm_unlogged: true` once the person has seen it.
+        Closing a day (`completed` or `skipped`) answers `outcome`: what the day planned
+        against what was done — `planned_sets`, `logged_sets`, `missed_sets`,
+        `planned_reps`, `logged_reps`, `complete`, `confirmed_unlogged` (the owner,
+        2026-09-20). A day closed with sets missing does not count as a training day and
+        breaks the streak; `analytics/adherence/` reads these rows.
+
         Other codes: 400 `bad_status`; 403 when the routine is not yours; 403
         `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`) while the coaching this
         routine came from is unpaid or over — readable, not trainable (the owner).
@@ -847,22 +870,38 @@ class RoutineViewSet(viewsets.ModelViewSet):
         if day_number not in valid_days:
             return Response({"error": _("Day %(day)s is not part of the routine.") % {"day": day}}, status=400)
 
-        if status == 'completed' and not _truthy(request.data.get('confirm_unlogged')):
-            counts = _day_set_counts(routine, user, day_number)
-            if counts['unlogged']:
-                return Response({
-                    'error': _('Some sets of this day are not logged yet.'),
-                    'code': 'unlogged_sets', **counts}, status=409)
+        confirmed = _truthy(request.data.get('confirm_unlogged'))
+        counts = _day_set_counts(routine, user, day_number) if status in ('completed', 'skipped') else None
+        if status == 'completed' and not confirmed and counts['unlogged']:
+            return Response({
+                'error': _('Some sets of this day are not logged yet.'),
+                'code': 'unlogged_sets', **counts}, status=409)
 
         try:
             updated_progress = routine.update_progress(user=user, day=day_number, status=status)
         except ValueError as e:
             return Response({"error": _("Invalid progress update.")}, status=400)
 
-        return Response(
-            {"message": _("Progress updated successfully."), "updated_progress": updated_progress},
-            status=200
-        )
+        # What the day planned against what was done, kept instead of thrown away (the
+        # owner, 2026-09-20). A day closed with sets missing is recorded as such, and it
+        # breaks the streak; the numbers come back in `outcome` for the screen that just
+        # closed it.
+        outcome = None
+        if counts is not None:
+            from .outcomes import record_day_quietly
+            via = ('skipped' if status == 'skipped'
+                   else 'confirmed_unlogged' if counts['unlogged'] else 'completed')
+            outcome = record_day_quietly(
+                user, routine, day_number, via=via,
+                # Only a completed day is ever warned: a skipped one saw nothing.
+                confirmed_unlogged=(status == 'completed' and bool(counts['unlogged'])))
+
+        body = {"message": _("Progress updated successfully."),
+                "updated_progress": updated_progress}
+        if outcome is not None:
+            from .serializers import DayOutcomeSerializer
+            body['outcome'] = DayOutcomeSerializer(outcome).data
+        return Response(body, status=200)
 
     @action(detail=False, methods=['get'])
     def my_clients_progress(self, request):
@@ -1003,6 +1042,10 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         """Filter progress based on user role with optimized queries."""
+        from django.db.models import OuterRef, Subquery
+
+        from .models import DayOutcome
+
         user = self.request.user
         
         # Optimize: add select_related for frequently accessed relations
@@ -1010,6 +1053,19 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
             'user', 'routine', 'routine__created_by'
         ).prefetch_related(
             'routine__routine_exercises__exercise'
+        )
+        # What the day planned against what was done, for the same (user, routine, day,
+        # date). Subqueries, not a per-row read: this list is paginated and a query per
+        # row is what every other annotation here exists to avoid.
+        outcome = DayOutcome.objects.filter(
+            user_id=OuterRef('user_id'), routine_id=OuterRef('routine_id'),
+            day=OuterRef('day'), date=OuterRef('date'))
+        base_qs = base_qs.annotate(
+            outcome_planned_sets=Subquery(outcome.values('planned_sets')[:1]),
+            outcome_logged_sets=Subquery(outcome.values('logged_sets')[:1]),
+            outcome_missed_sets=Subquery(outcome.values('missed_sets')[:1]),
+            outcome_complete=Subquery(outcome.values('complete')[:1]),
+            outcome_confirmed_unlogged=Subquery(outcome.values('confirmed_unlogged')[:1]),
         )
         
         if user.is_admin:
@@ -1048,37 +1104,19 @@ def _truthy(value) -> bool:
     return value is True or str(value).strip().lower() in ('1', 'true', 'yes')
 
 
-def _day_set_counts(routine, user, day) -> dict:
-    """Prescribed, logged and unlogged sets of one routine day, for today.
+def _day_set_counts(routine, user, day, date=None) -> dict:
+    """Prescribed, logged and unlogged sets of one routine day (today by default).
 
-    Logged means a set log today for one of the day's exercises, counted at most up to
-    what that exercise prescribes (a tenth set does not make up for a missing exercise).
+    One counting rule, in `routine/outcomes.py`: the warning before completing a day and
+    the outcome written when it closes must never disagree. The three keys this answers
+    are the contract of the 409 and do not change.
     """
-    from django.db.models import Count
+    from .outcomes import day_counts
 
-    from .models import UserExerciseProgress
+    counts = day_counts(routine, user, day, date=date)
+    return {'prescribed': counts['prescribed'], 'logged': counts['logged'],
+            'unlogged': counts['unlogged']}
 
-    today = timezone.localdate()
-    prescribed = {}
-    for exercise_id, sets in (routine.routine_exercises.filter(day=day)
-                              .values_list('exercise_id', 'sets')):
-        # An exercise with no set count still asks for one (a treadmill run).
-        prescribed[exercise_id] = prescribed.get(exercise_id, 0) + max(sets or 0, 1)
-    logged = dict(ExerciseSetLog.objects
-                  .filter(user_exercise_progress__user=user,
-                          user_exercise_progress__exercise_id__in=list(prescribed),
-                          date=today)
-                  .order_by().values('user_exercise_progress__exercise_id')
-                  .annotate(n=Count('id'))
-                  .values_list('user_exercise_progress__exercise_id', 'n'))
-    # "Log a whole day" (bulk-complete) records completed sets without set logs.
-    for exercise_id, done in (UserExerciseProgress.objects
-                              .filter(user=user, exercise_id__in=list(prescribed), date=today)
-                              .values_list('exercise_id', 'completed_sets')):
-        logged[exercise_id] = max(logged.get(exercise_id, 0), done or 0)
-    total = sum(prescribed.values())
-    done = sum(min(logged.get(e, 0), n) for e, n in prescribed.items())
-    return {'prescribed': total, 'logged': done, 'unlogged': total - done}
 
 def _require_can_train(user, routine, at=None):
     """403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when a client may see this routine but
@@ -1286,9 +1324,13 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='bulk-create')
     def bulk_create(self, request):
-        """
-        Bulk-create set logs for a user/routine/day.
-        Input: routine_id, day, date, sets, weight, reps
+        """POST /api/routine/set-logs/bulk-create/ — log a day's sets in one request.
+
+        Body: `routine_id`, `day`, `date`, `sets`, `weight`, and `reps` — required (the
+        owner, 2026-09-20), unless `as_prescribed: true` is sent instead, which uses the
+        coach's reps for each exercise of that day (and their weight when none is sent).
+        400 `reps_required`; an exercise whose coach set no reps is reported in `errors`
+        with `no_prescribed_reps`.
         403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`): the coaching this
         routine came from is unpaid or over — readable, not trainable (the owner).
         """
@@ -1302,12 +1344,20 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         # --- Real-world input validation -------------------------------------
         # Previously unvalidated: negative weight (-500 kg), 100000 reps, dates in
         # 2030 or 1900, and an uncapped `sets` (500 sets => 502 rows, ~11s request).
+        as_prescribed = _truthy(request.data.get('as_prescribed'))
         try:
             sets = int_param(request.data, 'sets', default=1, minimum=1, maximum=100)
             weight = float(request.data.get('weight', 0))
-            reps = int_param(request.data, 'reps', default=10, minimum=1, maximum=1000)
+            reps = int_param(request.data, 'reps', default=None, minimum=1, maximum=1000)
         except (TypeError, ValueError):
             return Response({'error': _('sets, weight and reps must be numeric.')},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if reps is None and not as_prescribed:
+            # Ten was filled in silently before, and every "reps missed" figure reads
+            # these rows (the owner, 2026-09-20).
+            return Response({'error': _("How many reps? Send `as_prescribed: true` to use "
+                                        "your coach's number."),
+                             'code': 'reps_required', 'field': 'reps'},
                             status=status.HTTP_400_BAD_REQUEST)
 
         if not (1 <= sets <= MAX_SETS_PER_REQUEST):
@@ -1318,7 +1368,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             return Response(
                 {'error': _('weight must be between 0 and %(max)d kg.') % {'max': MAX_WEIGHT_KG}},
                 status=status.HTTP_400_BAD_REQUEST)
-        if not (1 <= reps <= MAX_REPS_PER_SET):
+        if reps is not None and not (1 <= reps <= MAX_REPS_PER_SET):
             return Response(
                 {'error': _('reps must be between 1 and %(max)d.') % {'max': MAX_REPS_PER_SET}},
                 status=status.HTTP_400_BAD_REQUEST)
@@ -1381,6 +1431,21 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                 # 3x10 exercise complete, and that fed RoutineProgress, analytics,
                 # streaks and achievements. `routine/serializers.py` already reported the
                 # prescription here, so the two disagreed about the same number.
+                # "As prescribed": the coach's reps for THIS exercise, and their
+                # weight when the app sent none. Decided BEFORE anything is written:
+                # skipping afterwards left a progress row claiming sets with no set log
+                # behind it, which every adherence figure then counted as work done.
+                set_reps = reps if reps is not None else rex.reps
+                if set_reps is None:
+                    errors.append({'exercise': rex.exercise.name,
+                                   'error': _('Your coach did not set reps for this '
+                                              'exercise; enter what you did.'),
+                                   'code': 'no_prescribed_reps'})
+                    continue
+                set_weight = weight
+                if as_prescribed and not request.data.get('weight') and rex.weight is not None:
+                    set_weight = rex.weight
+
                 prescribed = rex.sets or 0
                 progress, _created = UserExerciseProgress.objects.get_or_create(
                     user=user,
@@ -1416,7 +1481,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                                 user_exercise_progress=progress,
                                 set_number=set_num,
                                 date=date,
-                                defaults={'weight': weight, 'reps': reps}
+                                defaults={'weight': set_weight, 'reps': set_reps}
                             )
                         results.append({'exercise': rex.exercise.name, 'set_number': set_num,
                                         'created': created, 'id': log.id})
@@ -1430,9 +1495,12 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                                            'error': _('Could not record this set.')})
 
         # Run the suppressed recomputation ONCE per affected progress row — outside
-        # the suspension block, otherwise it would be muted along with the rest.
+        # the suspension block, otherwise it would be muted along with the rest. Scoped
+        # to the routine and day this request names: unscoped, an exercise shared with
+        # another routine decided that routine's day too (B-011 fixed the same confusion
+        # for "log a whole day").
         for prog in touched_progress:
-            recalc_progress_for(prog)
+            recalc_progress_for(prog, routine_scope=routine, day_scope=day)
 
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
@@ -1534,17 +1602,17 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         _require_can_train(self.request.user, instance.routine, instance.start_time)
         serializer.save()
 
-    def partial_update(self, request, *args, **kwargs):
-        """
-        PATCH: Used by client to mark session as completed, etc.
-        Triggers notification on session completion.
+    def update(self, request, *args, **kwargs):
+        """PATCH or PUT: the client marks the session completed, and finishing it
+        notifies and records the day. `partial_update` delegates here, so a PUT that
+        finishes a session is treated exactly like a PATCH — it was not.
         """
         # Was it already finished BEFORE this request? The branch below keyed on
         # "the payload says completed", not on a transition, so a double-tapped finish
         # button congratulated the client twice, told the trainer twice, and queued the
         # milestone walk twice.
         was_completed = self.get_object().status == 'completed'
-        response = super().partial_update(request, *args, **kwargs)
+        response = super().update(request, *args, **kwargs)
         instance = self.get_object()
         # If session is marked as completed, notify trainer and client
         if (not was_completed and 'status' in request.data
@@ -1604,6 +1672,15 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
 
         _user_id = instance.user_id
         transaction.on_commit(lambda: _queue_milestones(_user_id))
+
+        # The day this workout belongs to is closed: keep what it planned against what
+        # was done (the owner, 2026-09-20). Dated by the session's own start, so a
+        # workout synced late is recorded on the day it happened.
+        if instance.routine_id and instance.day:
+            from .outcomes import record_day_quietly
+            record_day_quietly(instance.user, instance.routine, instance.day,
+                               timezone.localdate(instance.start_time), via='session',
+                               session=instance)
 
 
 def _queue_milestones(user_id):
@@ -1817,12 +1894,18 @@ class AnalyticsViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def streaks(self, request):
+        """GET /api/routine/analytics/streaks/?user_id= — the training-day streak.
+
+        A day counts only when nothing was missed (the owner, 2026-09-20): closing a day
+        with sets still unlogged, or skipping it, BREAKS the streak, and `last_break`
+        points at the day that broke it (`date`, `routine_id`, `day`, `missed_sets`,
+        `reason`: `sets_missed` | `skipped`). Days closed before this was recorded fall
+        back to their status, and `approximate` says so.
+
+        Answers `{user_id, current_streak, max_streak, last_training_date, last_break,
+        approximate}`.
         """
-        Get current and max streaks (consecutive days with completed sets) for a user.
-        Input: user_id (optional)
-        Output: JSON with current_streak, max_streak
-        """
-        from .models import RoutineProgress
+        from .outcomes import last_break, streak_from, training_dates
         from users.models import CustomUser
         user_id = request.query_params.get('user_id')
         user = request.user
@@ -1842,37 +1925,78 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # Streaks are computed over DISTINCT calendar training days, using the
         # real `date` field. It previously used `updated_at` (auto_now), so editing
         # an old record moved that workout to today.
-        training_days = sorted(set(
-            RoutineProgress.objects.filter(user=user, status='completed')
-            .values_list('date', flat=True)
-        ))
-
-        longest_streak = 0
-        run = 0
-        prev = None
-        for d in training_days:
-            if d is None:
-                continue
-            run = run + 1 if (prev is not None and (d - prev).days == 1) else 1
-            longest_streak = max(longest_streak, run)
-            prev = d
-
-        # "Current" must mean current: if the last training day is neither today
-        # nor yesterday the streak is broken and the answer is 0. Previously this
-        # returned the trailing historical run, so a user who stopped a month ago
-        # was still told they had an active streak.
-        today = timezone.localdate()
-        current_streak = 0
-        if training_days and training_days[-1] is not None:
-            if (today - training_days[-1]).days <= 1:
-                current_streak = run
-
+        # Days closed before outcomes were recorded have no row to judge: their status
+        # is all there is, and a day that was closed short back then still reads as
+        # completed. Those days keep counting, and the answer says it is approximate.
+        # `training_dates` is the one definition; `adherence` answers the same streak.
+        training_days, approximate = training_dates(user)
+        current_streak, longest_streak = streak_from(training_days)
+        ordered = sorted(training_days)
         return Response({
             'user_id': user.id,
             'current_streak': current_streak,
             'max_streak': longest_streak,
-            'last_training_date': training_days[-1] if training_days else None,
+            'last_training_date': ordered[-1] if ordered else None,
+            'last_break': last_break(user),
+            'approximate': approximate,
         })
+
+    @action(detail=False, methods=['get'])
+    def adherence(self, request):
+        """GET /api/routine/analytics/adherence/?period=week|month|year&user_id= — how
+        much of the plan was actually done (the owner, 2026-09-20).
+
+        Self, an approved client of yours, or admin (403 otherwise, 404 for no such
+        user). Answers `{from, to, days_closed, perfect_days, short_days, skipped_days,
+        sets: {planned, logged, missed, done_percent}, reps: {planned, logged, missed},
+        volume_kg: {planned, logged}, perfect_streak: {current, longest}, last_break,
+        approximate, by_day: [...]}`.
+
+        `reps` and `volume_kg` are null where the coach prescribed none, and reps are
+        left out of the totals for a day logged a whole day at a time (no set is
+        recorded, so its reps are unknown) — `approximate` is true when that happened or
+        when a day was filled in afterwards. Identical on every build.
+        """
+        from datetime import timedelta
+
+        from .outcomes import adherence
+        from .serializers import DayOutcomeSerializer
+        from users.models import CustomUser
+
+        user = request.user
+        user_id = request.query_params.get('user_id')
+        if user_id:
+            from .permissions import can_access_user_data
+            if not can_access_user_data(request.user, user_id):
+                return Response({'error': _('You do not have access to this user\'s data.')},
+                                status=status.HTTP_403_FORBIDDEN)
+            user = CustomUser.objects.filter(pk=user_id).first()
+            if user is None:
+                return Response({'error': _('User not found.')}, status=404)
+
+        period = (request.query_params.get('period') or 'week').lower()
+        spans = {'week': 7, 'month': 30, 'year': 365}
+        if period not in spans:
+            return Response({'error': _('period must be one of: %(options)s')
+                             % {'options': ', '.join(spans)}, 'code': 'bad_period'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        today = timezone.localdate()
+        start = today - timedelta(days=spans[period] - 1)
+
+        from .models import DayOutcome
+        body = adherence(user, start, today, today=today)
+        body['user_id'] = user.id
+        body['period'] = period
+        # Without `detail`: a year of days would otherwise carry every prescribed
+        # exercise of every day in one response. The per-day rows are on
+        # `routine-progress/`, which answers `outcome` per day.
+        days = DayOutcomeSerializer(
+            DayOutcome.objects.filter(user=user, date__gte=start, date__lte=today)
+            .order_by('date', 'id'), many=True).data
+        for row in days:
+            row.pop('detail', None)
+        body['by_day'] = days
+        return Response(body)
 
     @action(detail=False, methods=['get'])
     def trends(self, request):
@@ -1990,12 +2114,24 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # time a routine cycles, so a client training daily for a month scored a
         # streak of one to three. The analytics endpoint beside this one already
         # counted dates correctly and disagreed with it.
+        # And a day closed with sets still unlogged is not a training day at all (the
+        # owner, 2026-09-20), so those dates are dropped here too — the console must not
+        # contradict the client's own streak.
+        from .models import DayOutcome
+        from django.db.models import Count as _Count
+        broken = set()
+        for row in (DayOutcome.objects.filter(user__in=clients)
+                    .values('user_id', 'date')
+                    .annotate(complete=_Count('id', filter=Q(complete=True)))
+                    .filter(complete=0)):
+            broken.add((row['user_id'], row['date']))
+
         streak_lookup = {}
-        streak_rows = (RoutineProgress.objects
+        streak_rows = [row for row in (RoutineProgress.objects
                        .filter(user__in=clients, status='completed')
                        .values_list('user_id', 'date')
                        .order_by('user_id', 'date')
-                       .distinct())
+                       .distinct()) if row not in broken]
         previous_user = previous_date = None
         run = best = 0
         for user_id, day_date in streak_rows:
@@ -2638,6 +2774,11 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         if written:
             # One pass decides the whole day from every exercise's progress.
             refresh_routine_progress(written[-1], routine_scope=routine, day_scope=day)
+            # Logging a whole day closes it, so what it planned against what was done is
+            # kept (the owner, 2026-09-20). This path records no set logs, so the day's
+            # reps are not known and the week is shown as approximate.
+            from .outcomes import record_day_quietly
+            record_day_quietly(user, routine, day, date, via='bulk_complete')
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
 
@@ -3063,6 +3204,26 @@ class ExerciseAddMediaView(APIView):
             )
 
 
+def _week_adherence(client, days=7):
+    """The last week of one client's plan-vs-done, for the trainer's screens."""
+    from datetime import timedelta
+
+    from .outcomes import adherence
+
+    today = timezone.localdate()
+    week = adherence(client, today - timedelta(days=days - 1), today, today=today)
+    return {
+        'planned_sets': week['sets']['planned'],
+        'logged_sets': week['sets']['logged'],
+        'missed_sets': week['sets']['missed'],
+        'set_completion_percent': week['sets']['done_percent'],
+        'perfect_days': week['perfect_days'],
+        'short_days': week['short_days'],
+        'skipped_days': week['skipped_days'],
+        'approximate': week['approximate'],
+    }
+
+
 class TrainerClientProgressViewSet(viewsets.ViewSet):
     permission_classes = [IsTrainerOrAdmin]
 
@@ -3186,6 +3347,10 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                  'weekly_stats': {
                      'sessions_count': len(week_sessions),
                      'total_volume': week_volume,
+                     # How much of what this trainer asked for was actually done (the
+                     # owner, 2026-09-20): sessions and volume say the client trained,
+                     # not whether they finished the plan.
+                     **{k: v for k, v in _week_adherence(client).items()},
                  },
                  'recent_activity': formatted_sessions
              })
