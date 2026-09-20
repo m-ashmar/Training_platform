@@ -2684,3 +2684,80 @@ msgstr "تدرّب %(trained)s من %(clients)s متدربين. %(attention)s ب
 #: routine/views.py
 msgid "Exercise not found."
 msgstr "التمرين غير موجود."
+
+#: chat/serializers.py
+msgid "Write something first."
+msgstr "اكتب شيئًا أولًا."
+
+#: chat/services.py
+msgid "This conversation is not yours."
+msgstr "هذه المحادثة ليست لك."
+
+#: chat/services.py
+msgid "You can only delete your own messages."
+msgstr "يمكنك حذف رسائلك فقط."
+
+#: chat/services.py
+msgid "Not a valid UUID."
+msgstr "معرّف غير صالح."
+
+#: chat/services.py
+msgid "Not a number."
+msgstr "ليس رقمًا."
+
+#: chat/services.py
+msgid "Out of range."
+msgstr "خارج النطاق المسموح."
+
+#: chat/services.py
+msgid "Not a message id."
+msgstr "ليس معرّف رسالة."
+
+#: chat/exceptions.py
+msgid "You can only message the trainer or client you work with."
+msgstr "يمكنك مراسلة المدرب أو المتدرب الذي تعمل معه فقط."
+
+#: chat/exceptions.py
+msgid "You cannot send messages in this conversation."
+msgstr "لا يمكنك إرسال رسائل في هذه المحادثة."
+
+#: chat/exceptions.py
+msgid "This id belongs to another message."
+msgstr "هذا المعرّف يخص رسالة أخرى."
+
+#: chat/views.py
+msgid "Conversation not found."
+msgstr "المحادثة غير موجودة."
+
+#: chat/views.py
+msgid "Message not found."
+msgstr "الرسالة غير موجودة."
+
+#: chat/views.py
+msgid "Name exactly one of client_id or trainer_id."
+msgstr "حدّد client_id أو trainer_id، واحدًا منهما فقط."
+
+#: chat/consumers.py
+msgid "Send a JSON object."
+msgstr "أرسل كائن JSON."
+
+#: chat/consumers.py
+msgid "Unknown message type."
+msgstr "نوع رسالة غير معروف."
+
+#: chat/consumers.py
+msgid "Could not send that message."
+msgstr "تعذّر إرسال الرسالة."
+
+#: chat/consumers.py
+msgid "Could not mark that as read."
+msgstr "تعذّر تعليم المحادثة كمقروءة."
+
+#: notifications/domain/chat_events.py
+msgid "New message"
+msgstr "رسالة جديدة"
+
+#: notifications/domain/chat_events.py
+#, python-format
+msgid "%(sender)s: %(preview)s"
+msgstr "%(sender)s: %(preview)s"

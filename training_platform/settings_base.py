@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     "ai_assistant",
     "policy",
     "mediakit",
+    "chat",
 
     # Third-party
     "rest_framework",

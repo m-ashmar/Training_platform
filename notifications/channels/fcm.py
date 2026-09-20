@@ -50,6 +50,8 @@ EVENT_CLASS_REGISTRY = {
     # Platform plan (subscription/tasks.py send_renewal_reminders).
     'subscription_expiring': 'notifications.domain.subscription_events.SubscriptionExpiringEvent',
     'subscription_expired': 'notifications.domain.subscription_events.SubscriptionExpiredEvent',
+    # Trainer-client chat (chat/events.py). One nudge until the thread is opened.
+    'chat_message': 'notifications.domain.chat_events.ChatMessageEvent',
     # Progress (routine/strength.py, routine/tasks.py). Fact-only, no claims.
     'personal_record': 'notifications.domain.progress_events.PersonalRecordEvent',
     'weekly_recap': 'notifications.domain.progress_events.WeeklyRecapEvent',

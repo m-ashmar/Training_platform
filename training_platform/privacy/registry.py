@@ -350,7 +350,7 @@ def audit_coverage() -> list[str]:
 
     local = {"users", "wallet", "diet", "routine", "subscription", "social",
              "ai_assistant", "achievements", "analytics", "notifications", "challenges",
-             "policy"}
+             "policy", "chat"}
     claimed = set(registry)
     missing = []
     for model in apps.get_models():

@@ -181,6 +181,7 @@ so parse ids client-side.
 | `session_reminder` | `reason` (`scheduled` \| `drift`), plus `routine_id`+`day` when scheduled, or `days_since_last_workout` when drift |
 | `progress_milestone` | `milestone` (e.g. `streak-7`, `sessions-100`) |
 | `custom` | `message_id`, `trainer_id` — a message from the user's trainer |
+| `chat_message` | `conversation_id`, `message_id` — a message in the trainer–client chat. Sent only when the recipient has opened that conversation since the last `chat_message` about it, so a burst of messages is one push |
 
 `title`/`body` arrive in the FCM `notification` block, already rendered in the
 recipient's language.
@@ -329,6 +330,45 @@ per-address limits above have `code: "throttled"`.
 | `DELETE, POST` | `/api/auth/user/profile-picture/` | auth | `ProfilePictureUploadView` |
 | `GET, POST` | `/api/auth/user/update/` | auth | `UpdateUserDetailsView` |
 | `POST` | `/api/auth/verify-otp/` | public | `OTPVerificationView` |
+
+### Chat
+
+Text messages between a trainer and the client they coach — text only in this pass (no
+voice, image, video or program card). Exactly one conversation per pair. Nothing here
+differs by build.
+
+Reading and writing are decided separately (the owner, 2026-09-19). Being in the
+conversation is what lets you READ it, for ever; writing asks
+`chat.permissions.may_message`, and a coaching that is frozen, unpaid or ended refuses
+the send with the same `code` (and `trainer_id`) every training write answers with. The
+conversation row carries `can_send` and `refusal` so the app can explain a closed
+composer without posting first. A conversation that is not the caller's is **404**, never
+403.
+
+`POST .../messages/` may carry `client_uuid`, the app's own id for the message: the first
+send answers 201, a retry answers **200** with the same message, and an id already used
+by the other person in that thread answers 409 `idempotency_conflict`. `DELETE
+messages/{id}/` tombstones the sender's own message — the row stays in the thread with
+`deleted: true` and an empty `body`, and nothing is ever hard-deleted.
+
+Live: `ws://host/ws/chat/{conversation_id}/?token=<access JWT>`. Client frames
+`{"type": "message.send", body, client_uuid?}` and `{"type": "message.read"}`; server
+frames `message.new`, `message.read`, `message.deleted` and
+`{"type": "error", code, detail}`. A socket send runs the same checks and the same
+serializer as the REST route. Close codes: 4001 no usable token, 4004 not your
+conversation.
+
+Push: `chat_message`, keyed on the conversation, sent only when the recipient has opened
+that thread since the last time they were told about it — ten messages in a minute are
+one push.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/chat/conversations/` | auth | `ConversationListView` |
+| `POST` | `/api/v1/chat/conversations/start/` | auth | `ConversationStartView` |
+| `GET, POST` | `/api/v1/chat/conversations/{id}/messages/` | auth | `ConversationMessagesView` |
+| `POST` | `/api/v1/chat/conversations/{id}/read/` | auth | `ConversationReadView` |
+| `DELETE` | `/api/v1/chat/messages/{id}/` | auth | `MessageDeleteView` |
 
 ### Diet
 

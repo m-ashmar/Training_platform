@@ -23,7 +23,7 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 5 | Trainer proof stats | L | DONE |
 | 6 | Trainer matching with reasons (+ roster and profile endpoints) | L | DONE |
 | 7 | Per-trainer exercise media library | L | TODO (needs 2) |
-| 8 | Two-way chat: voice, image, video, program cards, report, block | XL | TODO = plan step 8 |
+| 8 | Two-way chat: voice, image, video, program cards, report, block | XL | TEXT DONE (`chat` app, branch `build/chat`); media, program cards, report/block TODO |
 | 9 | Server-driven home + day timeline | L | TODO (needs 2, 8 for voice) |
 | 10 | Note to the trainer on a request | S | DONE (with BACKEND_BUGS B-008) |
 | 11 | Effort rating 1-5, progression suggestion | L | TODO |
@@ -196,16 +196,25 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 
 ## 8. Two-way chat (plan step 8)
 
-- **Today:** one-way `POST /api/notifications/message-client/`, stored only as a
-  `Notification` (none when the client muted `custom`). No message model, no attachments,
-  no audio anywhere, no report/block, no throttle, deprecated echo-only `ws/social/`.
-- **Must change:** new app: `Conversation`, `Message` (text | voice | image | video |
-  program_update, `transcript`, `client_uuid` idempotency), `MessageAttachment` (media
-  pipeline, audio allow-list, inline audio serving), read state, `MessageReport`,
-  `UserBlock`; `message-client` also writes a `Message`; FCM `chat_message` event; a WS
-  consumer that re-checks auth per frame. Access from the approved relation only.
-- **Order:** models + privacy registration, text, image, voice, video, program cards,
-  report/block, live WS.
+- **Built (TEXT ONLY, branch `build/chat`, the owner 2026-09-20: "start with texting"):**
+  the `chat` app — `Conversation` (one per pair, unique constraint, `last_message_at`,
+  a `..._last_read_at` per side), `Message` (`body`, `client_uuid` idempotency scoped to
+  the conversation, `read_at`, `deleted_at` tombstone, never a hard delete). Five routes
+  under `/api/v1/chat/` (list, start, history, send, read, delete — see
+  `API_CONTRACT.md`), the live consumer at `ws/chat/<id>/` sharing
+  `training_platform.ws_auth`, and the FCM `chat_message` event
+  (`notifications/domain/chat_events.py`, `listeners/chat_listeners.py`). Both models
+  are in the privacy registry. Tests: `tests/test_chat.py`.
+- **The seam everything else plugs into:** `chat/permissions.py`. `may_message(sender,
+  recipient)` is the ONLY answer to "who may write", and `_blocked(sender, recipient)`
+  returns False today with the moderation app named as its future owner. A frozen,
+  unpaid or ended coaching keeps the thread READABLE and refuses the send with that
+  coaching code — the owner's never-delete rule, in the chat.
+- **Still to do:** attachments (`MessageAttachment`, media pipeline, audio allow-list,
+  inline audio serving, `transcript`), program cards, `MessageReport` + `UserBlock`
+  (wire into `_blocked`), a per-conversation send throttle, `message-client` also
+  writing a `Message`, and retiring the echo-only `ws/social/`. No `edited` flag yet.
+- **Order:** image, voice, video, program cards, report/block, throttle.
 
 ## 9. Server-driven home
 
