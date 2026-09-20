@@ -119,6 +119,12 @@ edit produces a false failure. After adding a migration, the gate is `--create-d
    `debug-checklist.md`, `api-contract-sync.md`, `deploy-pipeline.md` — read the one that
    matches the area before changing it. Skip `flutter-conventions.md` and
    `nextjs-conventions.md`.
+6. **Every subagent reads `.agents/skills/agent-briefing.md` first.** It is what the
+   parallel builds of 2026-09-20 paid for: the six gate tests that fail correct work, how
+   a worktree is set up and what it breaks, which four files every parallel build
+   collides in and how to resolve each (the `.mo` is binary — regenerate it, never merge
+   it), and the rules that outrank an agent's judgement. Put a new trap there, not in a
+   chat message.
 
 ## Output rules (apply to every response)
 
