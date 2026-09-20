@@ -5557,14 +5557,20 @@ def test_a_refund_takes_the_money_back_and_not_only_the_access(
         PaymentService.complete_payment(pay.id, {"amount": "10.00", "currency": "USD",
                                                  "status": "completed",
                                                  "transaction_id": "probe-1"})
-    tw = Wallet.objects.get(owner=trainer); cw = Wallet.objects.get(owner=client_user)
-    tw.refresh_from_db(); cw.refresh_from_db()
-    assert tw.balance == D("10.00")
+    # Since plan step 4 the payout goes to the PLATFORM, not the trainer: a plan payment
+    # stays 100% with the platform (the owner, 2026-09-19). What this test is about is
+    # unchanged — a refund must take the money back, not only the access.
+    from wallet.utils import get_platform_revenue_wallet
+    pw = get_platform_revenue_wallet(); cw = Wallet.objects.get(owner=client_user)
+    tw = Wallet.objects.get(owner=trainer)
+    pw.refresh_from_db(); cw.refresh_from_db(); tw.refresh_from_db()
+    assert pw.balance == D("10.00")
+    assert tw.balance == D("0.00"), "a plan payment is not the trainer's"
 
     with django_capture_on_commit_callbacks(execute=True):
         PaymentService.refund_payment(pay.id, reason="chargeback")
-    tw.refresh_from_db(); cw.refresh_from_db()
-    assert tw.balance == D("0.00"), "the trainer kept a refunded payout"
+    pw.refresh_from_db(); cw.refresh_from_db()
+    assert pw.balance == D("0.00"), "the platform kept a refunded payout"
     assert cw.balance == D("0.00"), "the minted credit was never taken back"
     assert Transaction.objects.filter(tx_type="reversal").count() == 2
 
@@ -6591,15 +6597,24 @@ def test_a_payment_pays_out_in_the_currency_it_was_charged_in(
     from subscription.services.payment_service import PaymentService
     from wallet.models import Wallet
 
+    from wallet.models import Transaction
+
+    # Read on the MINT leg and the client's own wallet. That leg is what the bug was
+    # about — `source=None`, so `move_funds_atomic` compared no currencies at all — and
+    # it is per client, where a shared destination wallet (the platform's, since plan
+    # step 4) can only ever hold one currency. What the destination does with a second
+    # currency is the next test's subject.
     for tag, currency in (("syp", "SYP"), ("usd", "USD")):
-        _client, trainer, pay = _c8_payment(make_user, tag, currency)
+        client_user, _trainer, pay = _c8_payment(make_user, tag, currency)
         with django_capture_on_commit_callbacks(execute=True):
             PaymentService.complete_payment(pay.id, {
                 "amount": "5000.00", "currency": currency, "status": "completed",
                 "transaction_id": f"gate-{tag}"})
-        wallet = Wallet.objects.get(owner=trainer)
+        wallet = Wallet.objects.get(owner=client_user)
         assert wallet.currency == currency, (currency, wallet.currency)
-        assert wallet.balance == _D("5000.00")
+        mint = Transaction.objects.get(tx_type="topup",
+                                       metadata__original_payment_id=str(pay.id))
+        assert mint.currency == currency and mint.amount == _D("5000.00")
 
 
 def test_a_funded_wallet_refuses_a_payment_in_another_currency(
@@ -6613,12 +6628,17 @@ def test_a_funded_wallet_refuses_a_payment_in_another_currency(
     from subscription.services.payment_service import PaymentService
     from wallet.models import Wallet
 
+    from wallet.utils import get_platform_revenue_wallet
+
     _client, trainer, pay = _c8_payment(make_user, "mix", "SYP")
     with django_capture_on_commit_callbacks(execute=True):
         PaymentService.complete_payment(pay.id, {
             "amount": "5000.00", "currency": "SYP", "status": "completed",
             "transaction_id": "gate-mix-1"})
-    wallet = Wallet.objects.get(owner=trainer)
+    # The platform's wallet since plan step 4; the rule under test is the wallet's, not
+    # the owner's — a funded wallet's currency is a fact and there is no FX here.
+    wallet = get_platform_revenue_wallet()
+    wallet.refresh_from_db()
     assert wallet.currency == "SYP" and wallet.balance == _D("5000.00")
 
     foreign = Payment.objects.create(subscription=pay.subscription, amount=_D("5000.00"),

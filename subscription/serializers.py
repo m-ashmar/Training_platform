@@ -126,8 +126,9 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
         # `id` and `status` in the response: the next step (POST /v1/gateways/) needs
         # the subscription id, and the create answered only {plan_id, auto_renew}, so
         # the app had to call /subscriptions/current/ to learn what it had just made.
+        # `auto_renew` is read-only here too (plan step 5): it is answered, never taken.
         fields = ['id', 'plan_id', 'auto_renew', 'status']
-        read_only_fields = ['id', 'status']
+        read_only_fields = ['id', 'status', 'auto_renew']
     
     def validate_plan_id(self, value):
         try:
@@ -150,17 +151,30 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 class SubscriptionUpdateSerializer(serializers.ModelSerializer):
-    """Serializer for updating subscriptions"""
-    
+    """What a customer may change about their own subscription: nothing, today.
+
+    `auto_renew` is READ-ONLY since plan step 5. Nothing charges a plan automatically —
+    `subscription.send_renewal_reminders` reminds "every subscriber, whatever
+    `auto_renew` says" — so the switch promised an automatic renewal that does not
+    exist, and a store build may not offer one at all. The key stays in every response
+    (the app reads it; removing it would break the contract), and a PATCH that carries
+    it answers 400 `auto_renew_read_only` rather than accepting the write and ignoring
+    it. The same shape as `profile_picture_read_only` (the owner, 2026-09-20).
+    """
+
     class Meta:
         model = Subscription
         fields = ['auto_renew', 'status']
-        read_only_fields = ['status']
-    
+        read_only_fields = ['status', 'auto_renew']
+
     def validate(self, data):
         # Only allow updating auto_renew for active subscriptions
         if self.instance and self.instance.status not in ['active', 'trial']:
             raise serializers.ValidationError(_("Cannot update inactive subscription"))
+        if 'auto_renew' in getattr(self, 'initial_data', {}) or {}:
+            raise serializers.ValidationError({'auto_renew': serializers.ErrorDetail(
+                _("Renewal is not automatic: nothing is charged without you. Cancelling "
+                  "is on the subscription itself."), code='auto_renew_read_only')})
         return data
 
 class SubscriptionCancelSerializer(serializers.Serializer):

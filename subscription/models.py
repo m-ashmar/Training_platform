@@ -23,7 +23,11 @@ PAYMENT_STATUS_TRANSITIONS = {
     'failed':     {'pending'},   # allow a fresh retry
     'cancelled':  set(),
     'refunded':   set(),
-    'expired':    set(),
+    # Money that turns up for a checkout we had written off is still money. The poller
+    # expires a checkout nobody finished so the customer can open a new one; if the
+    # gateway then confirms the old one, refusing it would mean a customer who paid and
+    # got nothing, and a webhook retrying for ever against a row that can never move.
+    'expired':    {'completed'},
 }
 
 #: A payment that can still turn into money. A subscription has at most ONE of these at

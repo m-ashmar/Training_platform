@@ -2684,3 +2684,21 @@ msgstr "تدرّب %(trained)s من %(clients)s متدربين. %(attention)s ب
 #: routine/views.py
 msgid "Exercise not found."
 msgstr "التمرين غير موجود."
+
+#: notifications/domain/subscription_events.py
+msgid "Your checkout expired"
+msgstr "انتهت صلاحية عملية الدفع"
+
+#: notifications/domain/subscription_events.py
+msgid ""
+"You did not finish your last checkout, so it was closed. You can start again "
+"whenever you like."
+msgstr ""
+"لم تُكمل عملية الدفع الأخيرة، لذلك أُغلقت. يمكنك البدء من جديد متى شئت."
+
+#: subscription/serializers.py
+msgid ""
+"Renewal is not automatic: nothing is charged without you. Cancelling is on "
+"the subscription itself."
+msgstr ""
+"التجديد ليس تلقائياً: لا يُخصم أي مبلغ من دونك. الإلغاء من الاشتراك نفسه."

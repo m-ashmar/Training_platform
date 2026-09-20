@@ -220,3 +220,128 @@ def send_renewal_reminders(now=None):
     logger.info("Subscription reminders: %s", counts)
     return counts
 
+
+
+@shared_task(
+    name="subscription.poll_open_payments",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+)
+@no_retry_on_timeout
+def poll_open_payments(now=None):
+    """Ask the gateway about checkouts nobody has told us about, and close the dead ones.
+
+    THE HOLE THIS FILLS. A checkout could only ever be resolved by the gateway's webhook
+    or by the customer pressing something (`PaymentReconcileView`). A webhook that never
+    arrives — a dropped delivery, an outage, a customer who closed the app — left the row
+    `pending` for ever. And `start_payment` hands the SAME open checkout back for the
+    same subscription, so that customer could never open a new one: one lost webhook and
+    they could not buy again at all.
+
+    WHAT IT DOES, every minute:
+      * leaves each checkout `PAYMENT_POLL_GRACE_SECONDS` to be told about the ordinary
+        way, so this never races the webhook it exists to back up;
+      * asks the gateway about the rest, oldest first, at most `PAYMENT_POLL_BATCH` a run
+        (it says so when the cap binds — a cap that binds silently is a queue nobody
+        sees), and completes or fails each one through `PaymentService`, which is the
+        only code that moves a payment's state;
+      * expires a checkout still unpaid `PAYMENT_CHECKOUT_TTL_MINUTES` after it opened,
+        so the customer can start again, and tells them it was closed. Money that turns
+        up for it afterwards is still honoured: `expired -> completed` is a legal
+        transition precisely so a late webhook is not refused.
+
+    Never trusts a bare status flag: `fetch_payment_status` matches amount, currency and
+    reference on the merchant account, and `complete_payment` verifies again.
+    """
+    from django.conf import settings
+    from django.utils import timezone
+
+    from notifications.models import UserNotificationPreference
+    from notifications.services import NotificationService
+
+    from .services.payment_gateways import PaymentGatewayError, PaymentGatewayService
+    from .models import OPEN_PAYMENT_STATUSES, Payment
+    from .services.payment_service import (InvalidPaymentTransition,
+                                           PaymentService, PaymentVerificationError)
+
+    now = now or timezone.now()
+    grace = int(getattr(settings, 'PAYMENT_POLL_GRACE_SECONDS', 20))
+    ttl = int(getattr(settings, 'PAYMENT_CHECKOUT_TTL_MINUTES', 60))
+    batch = int(getattr(settings, 'PAYMENT_POLL_BATCH', 100))
+
+    rows = list(Payment.objects
+                .filter(status__in=OPEN_PAYMENT_STATUSES,
+                        created_at__lte=now - timedelta(seconds=grace))
+                .exclude(gateway_transaction_reference='')
+                .exclude(gateway_transaction_reference__isnull=True)
+                .select_related('subscription__user')
+                .order_by('created_at')[:batch])
+
+    checked = completed = expired = failed = 0
+    for payment in rows:
+        checked += 1
+        result = None
+        try:
+            gateway = PaymentGatewayService(payment.payment_method)
+            result = gateway.fetch_payment_status(
+                payment.gateway_transaction_reference,
+                expected={'amount': payment.amount, 'currency': payment.currency},
+            )
+        except (PaymentGatewayError, Exception) as exc:   # noqa: BLE001
+            # One unreachable gateway must not stop the queue, and an unanswered
+            # checkout is left exactly as it was: the next run asks again.
+            logger.warning("poll: gateway lookup failed for payment %s: %s",
+                           payment.id, exc)
+            continue
+
+        state = str((result or {}).get('status', '')).lower()
+        if state in ('completed', 'success', 'succeeded', 'paid'):
+            try:
+                PaymentService.complete_payment(payment.id, result)
+                completed += 1
+            except (PaymentVerificationError, InvalidPaymentTransition) as exc:
+                logger.warning("poll: refused to complete payment %s: %s", payment.id, exc)
+            continue
+        if state in ('failed', 'declined', 'rejected'):
+            try:
+                PaymentService.fail_payment(payment.id, 'The gateway declined it')
+                failed += 1
+            except InvalidPaymentTransition as exc:
+                logger.warning("poll: could not fail payment %s: %s", payment.id, exc)
+            continue
+
+        if state == 'unknown':
+            # The merchant account could not be read. That is evidence of nothing, so
+            # nothing is closed on it: the next minute asks again.
+            continue
+        if payment.created_at > now - timedelta(minutes=ttl):
+            continue                      # young enough to still be being paid
+        try:
+            PaymentService.expire_payment(payment.id, 'Not completed within its window')
+        except InvalidPaymentTransition as exc:
+            logger.warning("poll: could not expire payment %s: %s", payment.id, exc)
+            continue
+        expired += 1
+        recipient = getattr(payment.subscription, 'user', None)
+        if recipient is None:
+            continue
+        if not UserNotificationPreference.is_channel_enabled(recipient, 'checkout_expired'):
+            continue
+        # The inbox row is always written; a muted type simply sends no push. Keyed on
+        # the payment, so a retry of this run cannot tell anyone twice.
+        NotificationService.create_and_send(
+            recipient=recipient, event_type="checkout_expired",
+            related_object_id=str(payment.id),
+            metadata={'context': {},
+                      'data': {'type': 'checkout_expired',
+                               'payment_id': str(payment.id)}})
+
+    if checked >= batch:
+        logger.warning("poll: hit the %s-row cap; the rest waits for the next minute",
+                       batch)
+    if completed or expired or failed:
+        logger.info("poll: %s checked, %s completed, %s expired, %s failed",
+                    checked, completed, expired, failed)
+    return {'checked': checked, 'completed': completed, 'expired': expired,
+            'failed': failed, 'capped': checked >= batch}

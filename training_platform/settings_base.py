@@ -297,6 +297,14 @@ COACHING_FROZEN_REMINDER_DAYS = (3, 7, 14, 30)
 # ends, then one on each day of SUBSCRIPTION_LAPSED_REMINDER_DAYS after it ended (0 is
 # the day it ends). Lapsed, the last diet plan stays readable and nothing can be used.
 # See subscription/tasks.py.
+# The checkout poller (subscription/tasks.py poll_open_payments). The grace is how long
+# the webhook has to arrive before anything else asks; the TTL is how long a checkout
+# nobody finished stays open, after which the customer can start a new one and a late
+# payment for the old one is still honoured (`expired -> completed`).
+PAYMENT_POLL_GRACE_SECONDS = 20
+PAYMENT_CHECKOUT_TTL_MINUTES = 60
+PAYMENT_POLL_BATCH = 100
+
 SUBSCRIPTION_RENEWAL_NOTICE_DAYS = 3
 SUBSCRIPTION_LAPSED_REMINDER_DAYS = (0, 3, 7, 14, 30)
 
@@ -425,6 +433,14 @@ CELERY_BEAT_SCHEDULE = {
     'renew-coaching-periods': {
         'task': 'users.renew_coaching_periods',
         'schedule': crontab(minute=25),
+    },
+    # A checkout the gateway never told us about. Every minute: the webhook gets first
+    # go (PAYMENT_POLL_GRACE_SECONDS), this backs it up, and a checkout nobody finished
+    # is closed after PAYMENT_CHECKOUT_TTL_MINUTES so the customer can start again.
+    # Without it one lost delivery left a customer unable to buy at all, for ever.
+    'poll-open-payments': {
+        'task': 'subscription.poll_open_payments',
+        'schedule': crontab(minute='*'),
     },
     # The platform plan: "ends soon" 3 days ahead, then "ended" on the cadence in
     # SUBSCRIPTION_LAPSED_REMINDER_DAYS (subscription/tasks.py). Daily at 17:00 UTC,

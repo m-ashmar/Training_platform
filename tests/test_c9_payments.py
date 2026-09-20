@@ -690,7 +690,12 @@ def _active_with_pending_renewal(make_user, tag):
     return user, sub, renewal
 
 
-@pytest.mark.parametrize("request_kind", ["cancel", "cancel_immediate", "patch_auto_renew"])
+# `patch_auto_renew` was a third case here until plan step 5 made `auto_renew`
+# read-only. The race it reproduced — a renewal clearing between the view's read and its
+# write — cannot happen through a request that never writes, and the simulation ran the
+# renewal inside the view's own transaction, which a refusal rolls back. The refusal has
+# its own test below; the lock path is still covered by both cancel cases, which do write.
+@pytest.mark.parametrize("request_kind", ["cancel", "cancel_immediate"])
 def test_turning_auto_renew_off_while_a_renewal_clears_keeps_the_paid_days(
         request_kind, make_user, api, monkeypatch):
     """`cancel` loaded the row with `get_object()` and no lock, then `subscription.save()`
@@ -713,8 +718,7 @@ def test_turning_auto_renew_off_while_a_renewal_clears_keeps_the_paid_days(
             "amount": "5000.00", "currency": "SYP", "status": "completed",
             "event_id": f"c9-lost-{request_kind}"})
 
-    target = (sub_serializers.SubscriptionUpdateSerializer if request_kind == "patch_auto_renew"
-              else sub_serializers.SubscriptionCancelSerializer)
+    target = sub_serializers.SubscriptionCancelSerializer
     real_validate = target.validate
 
     def validate_then_clear(self, data):
@@ -725,12 +729,8 @@ def test_turning_auto_renew_off_while_a_renewal_clears_keeps_the_paid_days(
     monkeypatch.setattr(target, "validate", validate_then_clear)
 
     c = api(user)
-    if request_kind == "patch_auto_renew":
-        resp = c.patch(f"/api/subscription/v1/subscriptions/{sub.id}/",
-                       data=json.dumps({"auto_renew": False}), content_type="application/json")
-    else:
-        resp = _post(c, f"/api/subscription/v1/subscriptions/{sub.id}/cancel/",
-                     {"reason": "c9", "immediate": request_kind == "cancel_immediate"})
+    resp = _post(c, f"/api/subscription/v1/subscriptions/{sub.id}/cancel/",
+                 {"reason": "c9", "immediate": request_kind == "cancel_immediate"})
     assert resp.status_code == 200, resp.content
 
     sub.refresh_from_db()
@@ -741,6 +741,28 @@ def test_turning_auto_renew_off_while_a_renewal_clears_keeps_the_paid_days(
     assert sub.auto_renew is False
     if request_kind == "cancel_immediate":
         assert sub.status == "cancelled"
+
+
+def test_auto_renew_is_answered_but_never_taken(make_user, api):
+    """Plan step 5. Nothing charges a plan automatically — `send_renewal_reminders`
+    reminds every subscriber "whatever `auto_renew` says" — so the switch promised a
+    renewal that does not exist, and a store build may not offer one at all. The key
+    stays in the response, because the app reads it; the write is refused rather than
+    accepted and dropped."""
+    user, sub, _renewal = _active_with_pending_renewal(make_user, "readonly_ar")
+    c = api(user)
+
+    read = c.get(f"/api/subscription/v1/subscriptions/{sub.id}/")
+    assert read.status_code == 200
+    assert "auto_renew" in read.json(), "the key is still answered"
+
+    refused = c.patch(f"/api/subscription/v1/subscriptions/{sub.id}/",
+                      data=json.dumps({"auto_renew": False}),
+                      content_type="application/json")
+    assert refused.status_code == 400, refused.content
+    assert refused.json()["field_errors"]["auto_renew"][0]["code"] == "auto_renew_read_only"
+    sub.refresh_from_db()
+    assert sub.auto_renew is True, "nothing was written"
 
 
 def test_a_renewal_clearing_does_not_turn_auto_renew_back_on(make_user, api):
@@ -918,3 +940,128 @@ def test_a_refunded_plan_payment_takes_the_platforms_money_back(
 
     assert unwind_payment(payment) == 2
     assert _platform_balance() == before
+
+
+# ------------------------------------------------- step 5: the checkout poller
+def _no_transactions(monkeypatch):
+    """The merchant account shows nothing: nobody has paid."""
+    from subscription.gateways.shamcash import ShamCashGateway
+
+    monkeypatch.setattr(ShamCashGateway, "_get", lambda self, path, params: {"data": []})
+
+
+def test_the_poller_completes_a_checkout_the_webhook_never_told_us_about(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    """A dropped webhook used to leave the row pending for ever — and `start_payment`
+    hands the same open checkout back, so that customer could never buy again."""
+    from subscription.models import Payment
+    from subscription.tasks import poll_open_payments
+
+    plan = _plan("poll done")
+    user = make_user("c9poll_done", phone_number="0933001001")
+    c, sub = _subscribe(api, user, plan)
+    reference = _checkout(c, sub)["reference"]
+    payment = Payment.objects.get(gateway_transaction_reference=reference)
+    Payment.objects.filter(pk=payment.pk).update(
+        created_at=timezone.now() - timedelta(minutes=2))
+
+    _stub_transactions(monkeypatch, reference)
+    with django_capture_on_commit_callbacks(execute=True):
+        result = poll_open_payments()
+
+    payment.refresh_from_db()
+    assert payment.status == "completed"
+    assert (result["completed"], result["expired"]) == (1, 0)
+    assert _legs(payment) == ["topup", "transfer"]
+
+
+def test_the_poller_leaves_a_fresh_checkout_to_the_webhook(make_user, api, shamcash,
+                                                           monkeypatch):
+    """It backs the webhook up; it does not race it."""
+    from subscription.models import Payment
+    from subscription.tasks import poll_open_payments
+
+    plan = _plan("poll fresh")
+    user = make_user("c9poll_fresh", phone_number="0933001002")
+    c, sub = _subscribe(api, user, plan)
+    reference = _checkout(c, sub)["reference"]
+    _stub_transactions(monkeypatch, reference)
+
+    assert poll_open_payments()["checked"] == 0
+    assert Payment.objects.get(gateway_transaction_reference=reference).status == "pending"
+
+
+def test_a_checkout_nobody_finished_is_closed_and_the_customer_told(
+        make_user, api, shamcash, monkeypatch):
+    """So they can start a new one: one open checkout at a time is the rule, and a
+    customer who walked away was locked out of buying for ever."""
+    from notifications.models import Notification
+    from subscription.models import Payment
+    from subscription.tasks import poll_open_payments
+
+    plan = _plan("poll expire")
+    user = make_user("c9poll_expire", phone_number="0933001003")
+    c, sub = _subscribe(api, user, plan)
+    reference = _checkout(c, sub)["reference"]
+    payment = Payment.objects.get(gateway_transaction_reference=reference)
+    Payment.objects.filter(pk=payment.pk).update(
+        created_at=timezone.now() - timedelta(hours=3))
+    _no_transactions(monkeypatch)
+
+    result = poll_open_payments()
+    payment.refresh_from_db()
+    assert payment.status == "expired"
+    assert result["expired"] == 1
+    notice = Notification.objects.get(recipient=user, event_type="checkout_expired")
+    assert notice.related_object_id == str(payment.id)
+    # And the customer can open a new checkout at once.
+    assert _checkout(c, sub)["reference"] != reference
+
+
+def test_money_that_arrives_for_an_expired_checkout_is_still_honoured(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    """Otherwise a customer pays and gets nothing, and the gateway retries for ever
+    against a row that can never move."""
+    from subscription.models import Payment
+    from subscription.tasks import poll_open_payments
+
+    plan = _plan("poll late")
+    user = make_user("c9poll_late", phone_number="0933001004")
+    c, sub = _subscribe(api, user, plan)
+    reference = _checkout(c, sub)["reference"]
+    payment = Payment.objects.get(gateway_transaction_reference=reference)
+    Payment.objects.filter(pk=payment.pk).update(
+        created_at=timezone.now() - timedelta(hours=3))
+    _no_transactions(monkeypatch)
+    poll_open_payments()
+    payment.refresh_from_db()
+    assert payment.status == "expired"
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _signed_webhook(reference).status_code == 200
+    payment.refresh_from_db()
+    assert payment.status == "completed", "late money is still money"
+
+
+def test_an_unreachable_gateway_leaves_every_checkout_as_it_was(make_user, api, shamcash,
+                                                                monkeypatch):
+    """One outage must not fail a queue or close a checkout somebody is paying."""
+    from subscription.models import Payment
+    from subscription.tasks import poll_open_payments
+
+    from subscription.gateways.shamcash import ShamCashGateway
+
+    plan = _plan("poll down")
+    user = make_user("c9poll_down", phone_number="0933001005")
+    c, sub = _subscribe(api, user, plan)
+    reference = _checkout(c, sub)["reference"]
+    Payment.objects.filter(gateway_transaction_reference=reference).update(
+        created_at=timezone.now() - timedelta(hours=3))
+
+    def boom(self, path, params):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(ShamCashGateway, "_get", boom)
+    result = poll_open_payments()
+    assert (result["completed"], result["expired"], result["failed"]) == (0, 0, 0)
+    assert Payment.objects.get(gateway_transaction_reference=reference).status == "pending"

@@ -33,3 +33,19 @@ class SubscriptionExpiredEvent(BaseDomainEvent):
     )
     recipient_id: int = 0
     subscription_id: int = 0
+
+
+@dataclass
+class CheckoutExpiredEvent(BaseDomainEvent):
+    """A checkout the customer opened and never finished, closed by the poller.
+
+    No amount, no link, no "pay now": a push reaches every build, and a store build may
+    not sell the plan in the app. It says what happened and nothing else.
+    """
+    template = NotificationTemplate(
+        title=_("Your checkout expired"),
+        body=_("You did not finish your last checkout, so it was closed. You can start "
+               "again whenever you like."),
+    )
+    recipient_id: int = 0
+    payment_id: str = ""

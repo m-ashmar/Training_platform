@@ -20,6 +20,7 @@ Not for: work the current task owns, bugs the app session reports (that is
 
 | ID | Where | What | Impact | Sev | Found |
 |---|---|---|---|---|---|
+| S-001 | `wallet/utils.py:24` `get_platform_revenue_wallet` | The platform's revenue wallet is ONE wallet, so it holds one currency for ever — the first payment decides it. A plan priced in the other currency is minted into the client's wallet, logged as an error and never moves on. | Only SYP is sold today (USD is legacy rows), so nobody is affected yet; the day a second currency is priced, its revenue sits in customers' wallets. | MEDIUM | step 4 |
 
 ## Closed
 

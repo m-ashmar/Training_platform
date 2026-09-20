@@ -117,7 +117,12 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
         client_wallet = wallet_for(client, "client", payment.currency)
         platform_wallet = get_platform_revenue_wallet(payment.currency)
         trainer_wallet = wallet_for(trainer, "trainer", payment.currency) if trainer else None
-        checked = [(client_wallet, "client"), (platform_wallet, "platform")]
+        # Only the wallets whose mismatch would make the MINT wrong are checked here.
+        # The platform's is checked at its own leg, below: it is one shared wallet, so a
+        # payment in a second currency must still be recorded as having entered the
+        # system — refusing it up here wrote no legs at all and lost the payment from
+        # the ledger entirely.
+        checked = [(client_wallet, "client")]
         if trainer_wallet is not None:
             checked.append((trainer_wallet, "trainer"))
         for w, who in checked:
@@ -180,6 +185,17 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
             "plan_id": subscription.plan_id,
         }
         for_platform, for_trainer = split(payment.amount, Decimal("1") - share_rate)
+        if for_platform > 0 and platform_wallet.currency != payment.currency:
+            # There is no FX here and there is not meant to be. The money is minted and
+            # recorded in its own currency and simply does not move on; an operator sees
+            # the error and the client's balance, rather than a 1:1 conversion nobody
+            # chose. `_mark_payout_settled` stops the sweep asking for ever.
+            logger.error(
+                "subscription revenue not moved for payment %s: the platform wallet "
+                "holds %s and the payment is %s",
+                payment.pk, platform_wallet.currency, payment.currency)
+            _mark_payout_settled(payment)
+            return
         if trainer_wallet is not None and for_trainer > 0:
             move_funds_atomic(
                 client_wallet, trainer_wallet, for_trainer,

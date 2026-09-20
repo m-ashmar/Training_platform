@@ -131,6 +131,11 @@ class ShamCashGateway(PaymentGateway):
         Verify by locating a matching transaction on the merchant account.
         Returns 'completed' only if a transaction matches amount + currency +
         reference within the lookback window. Never trusts a bare status flag.
+
+        Three answers, and the third one matters: 'completed' (a matching transaction
+        is on the account), 'pending' (the account was read and nothing matches — so
+        nobody has paid) and 'unknown' (the account could not be read at all, which is
+        evidence of nothing).
         """
         expected = expected or {}
         lookback_hours = int(self.config.get('reconcile_lookback_hours', 72))
@@ -144,8 +149,12 @@ class ShamCashGateway(PaymentGateway):
         try:
             envelope = self._get('/transactions', params)
         except Exception as e:
+            # 'unknown', not 'pending': a lookup that FAILED is not evidence that
+            # nobody paid. Answering 'pending' made an outage indistinguishable from an
+            # unpaid checkout, and the poller closes unpaid checkouts — so a few minutes
+            # of gateway trouble would have expired every checkout in flight.
             logger.warning(f"ShamCash status lookup failed for {reference}: {e}")
-            return {'status': 'pending', 'reference': reference}
+            return {'status': 'unknown', 'reference': reference, 'error': str(e)}
 
         txns = (envelope.get('data') or []) if isinstance(envelope, dict) else []
         exp_amount = None

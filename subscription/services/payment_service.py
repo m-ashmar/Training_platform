@@ -303,6 +303,29 @@ class PaymentService:
         return payment
 
     @classmethod
+    def expire_payment(cls, payment_id, reason: str = "") -> Payment:
+        """A checkout nobody finished. Legal from pending/processing/authorized.
+
+        `expired` has been a declared transition since the state machine was written and
+        nothing implemented it, so a customer who opened a checkout and walked away left
+        the row `pending` for ever — and `start_payment` hands the SAME open checkout
+        back for the same subscription, so that customer could never start a new one.
+        The poller (`subscription.tasks.poll_open_payments`) closes them.
+        """
+        with transaction.atomic():
+            payment = Payment.objects.select_for_update().get(id=payment_id)
+            if payment.status == 'expired':
+                return payment
+            if not payment.can_transition_to('expired'):
+                raise InvalidPaymentTransition(
+                    f"Payment {payment.id} cannot go {payment.status} -> expired")
+            payment.status = 'expired'
+            payment.gateway_error = (reason or 'The checkout expired')[:2000]
+            payment.save()
+            logger.info("Payment %s expired (%s)", payment.id, reason or 'timed out')
+        return payment
+
+    @classmethod
     def mark_processing(cls, payment_id) -> Payment:
         """Optional intermediate state once the gateway has accepted the request."""
         with transaction.atomic():

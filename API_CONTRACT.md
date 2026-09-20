@@ -496,6 +496,22 @@ coach never rewrites last week; sets synced afterwards still count.
   `trainer/client-progress/recent/` `this_week` gain `planned_sets`, `logged_sets`,
   `missed_sets`, `set_completion_percent`, `perfect_days`.
 
+**The checkout, and what closes it** (plan step 5, 2026-09-20).
+
+- `auto_renew` is READ-ONLY. It is still answered on every subscription (the app reads
+  it), and a `PATCH /api/subscription/v1/subscriptions/{id}/` that carries it answers
+  400 `auto_renew_read_only` — refused, not accepted and dropped. Nothing charges a plan
+  automatically; cancelling is on the subscription itself.
+- A checkout nobody finishes is CLOSED by the server after
+  `PAYMENT_CHECKOUT_TTL_MINUTES` (60) and the customer is told
+  (`checkout_expired`), so they can open a new one — a subscription has at most one open
+  checkout, and a lost webhook used to lock a customer out of buying for ever. Money that
+  arrives for a closed checkout is still honoured (`expired -> completed`).
+- The server polls the gateway every minute for checkouts it has not been told about
+  (`subscription.poll_open_payments`), after leaving the webhook
+  `PAYMENT_POLL_GRACE_SECONDS` to arrive first. The app does not need to poll; it may
+  still call `POST /api/subscription/v1/payments/{id}/reconcile/` when the customer asks.
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 

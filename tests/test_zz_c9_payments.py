@@ -219,12 +219,17 @@ def test_a_tap_while_the_renewal_commits_does_not_erase_the_paid_period(
     results = _on_threads([renewal_clears, tap], barrier=False)
     connections.close_all()
 
-    assert results == ["committed", 200], results
+    # The PATCH is refused since plan step 5 (`auto_renew` is read-only: nothing charges
+    # a plan automatically). The race is still the subject — a request arriving inside
+    # the renewal's window must not cost the days it just paid for, whether it goes on
+    # to write or to refuse.
+    expected = 400 if request_kind == "patch_auto_renew" else 200
+    assert results == ["committed", expected], results
     sub = Subscription.objects.get(pk=sub.pk)
     added = (sub.end_date - paid_until_before).total_seconds() / 86400
     assert Payment.objects.get(pk=renewal.pk).status == "completed"
     assert 29.99 < added < 30.01, f"the paid renewal added {added:.2f} days"
-    assert sub.auto_renew is False
+    assert sub.auto_renew is (request_kind == "patch_auto_renew")
 
 
 # ------------------------------------------------------------- the payout's lock order
