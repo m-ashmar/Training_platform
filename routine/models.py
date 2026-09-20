@@ -887,7 +887,20 @@ class WorkoutSession(models.Model):
 class ExerciseSetLog(RowValidationMixin, models.Model):
     """
     Detailed log of individual sets within an exercise session.
-    
+
+    **The progress row owns the date.** `UserExerciseProgress` is keyed
+    `(user, exercise, date)` — that key IS the training day — so a set belongs to the
+    day its progress row is on and `ExerciseSetLog.date` only ever repeats it.
+    `clean()` refuses a row whose `date` says otherwise (`set_date_mismatch`), because
+    the two dates were independent and two different readers believed different ones:
+    `routine/outcomes.py` `day_work` counts a set by the LOG's date while
+    `routine/models.py` `refresh_routine_progress` measures the day by the PROGRESS
+    row's. A set posted with a mismatched date therefore landed on one day in the
+    adherence figures and on another in the day's completion — one workout, two
+    contradictory histories, and a short day that could be closed by moving a set onto
+    it. The column stays for the indexes that read it; it is a copy, not a second
+    opinion.
+
     TODO: Add set validation and quality metrics
     TODO: Implement set progression tracking
     TODO: Add set-specific notes and feedback
@@ -921,6 +934,8 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
     # Notes
     notes = models.TextField(blank=True, help_text="Notes about this specific set")
     
+    #: A COPY of `user_exercise_progress.date`, which is the day this set was trained.
+    #: See the class docstring: `clean()` refuses any other value.
     date = models.DateField(default=timezone.localdate, null=True, blank=True, help_text="Date of the set")  # TODO: Backfill and make non-nullable if desired
     #: The app's own id for this set: a retried POST (the write landed, the answer was
     #: lost) returns the first row instead of logging the set twice (B-003).
@@ -945,6 +960,19 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
         """Validate set log data."""
         if self.rpe and (self.rpe < 1 or self.rpe > 10):
             raise ValidationError(_("RPE must be between 1 and 10"), code="rpe_out_of_range")
+        # One day per set. See the class docstring: the progress row decides, and a
+        # writer that disagrees is refused here rather than leaving the platform with
+        # two answers for the same workout. Checked on the id, so a row whose progress
+        # is not loaded costs one query and a row with no progress row (an old, free
+        # log) is left alone.
+        if self.user_exercise_progress_id and self.date is not None:
+            owner_date = self.user_exercise_progress.date
+            if owner_date is not None and owner_date != self.date:
+                raise ValidationError(
+                    {'date': ValidationError(
+                        _("A set is logged on the day of the exercise it belongs to "
+                          "(%(day)s). Log it against that day's progress record."),
+                        code="set_date_mismatch", params={'day': owner_date})})
 
     def save(self, *args, **kwargs):
         self.validate_row()

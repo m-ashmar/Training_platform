@@ -345,17 +345,23 @@ def audit_coverage() -> list[str]:
     This is what stops the registry rotting: a model added later that nobody registered
     shows up here instead of being quietly excluded from export, erasure and retention.
     """
+    from pathlib import Path
+
     from django.apps import apps
+    from django.conf import settings
     from django.db import models as M
 
-    # Every first-party app whose models the audit walks. An app left out of this set
-    # is silently exempt, and the audit then passes whether or not its models are
-    # registered — which is the rot this function exists to catch. `moderation` holds
-    # a person's complaints, who they have hidden and what they consented to, so it
-    # belongs here from its first migration.
-    local = {"users", "wallet", "diet", "routine", "subscription", "social",
-             "ai_assistant", "achievements", "analytics", "notifications", "challenges",
-             "policy", "chat", "moderation"}
+    # Every first-party app whose models the audit walks — DERIVED, not typed out. The
+    # list used to be a literal, and `mediakit` was never added to it: a model there
+    # holding a user FK would have been silently exempt from the "every personal-data
+    # model is registered" gate, which is precisely the rot this function exists to
+    # catch, and `MediaAsset` is registered only because someone remembered. An app
+    # whose code lives inside this repository is ours and is walked, so a new app is
+    # covered by the act of adding it to INSTALLED_APPS; a third-party package lives
+    # in site-packages and is not.
+    root = str(Path(settings.BASE_DIR).resolve())
+    local = {config.label for config in apps.get_app_configs()
+             if str(Path(config.path).resolve()).startswith(root + "/")}
     claimed = set(registry)
     missing = []
     for model in apps.get_models():

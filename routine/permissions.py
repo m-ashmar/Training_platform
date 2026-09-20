@@ -285,18 +285,25 @@ class IsSetLogCreatorOrTrainerOrAdmin(BasePermission):
 
 
 class IsSessionOwnerOrTrainerOrAdmin(BasePermission):
-    """
-    Custom permission for WorkoutSessionViewSet:
-    - Allow PATCH/PUT for the session's assigned user (client) and for trainers/admins
-    - Allow POST only for trainers/admins
-    - Allow GET for all authenticated users
+    """Who may read and change a WORKOUT SESSION that already exists.
+
+    - GET: the session's owner, their approved trainer, or an admin.
+    - PATCH/PUT/DELETE: the same three.
+
+    **This class does not decide POST.** `WorkoutSessionViewSet.get_permissions`
+    routes every POST to `IsRoutineOwnerOrAssigned` — a client starting their own
+    workout is the ordinary case, and what actually has to be checked is the routine.
+    Both methods here carried a POST branch refusing anyone who is not a trainer or
+    staff, and it had never run: it read like the rule and said the opposite of it, so
+    the next person to trust it would have concluded clients cannot start a workout.
+    Removed rather than corrected — the rule for a create belongs in the one class
+    that enforces it.
     """
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
             return request.user and request.user.is_authenticated
-        if request.method == 'POST':
-            return request.user.is_authenticated and (request.user.is_trainer or request.user.is_staff)
-        # PATCH/PUT allowed for trainers, admins, or session owner (checked in has_object_permission)
+        # PATCH/PUT/DELETE: who may change THIS session is an object question, settled
+        # in has_object_permission below.
         return request.user and request.user.is_authenticated
 
     def has_object_permission(self, request, view, obj):
@@ -309,8 +316,6 @@ class IsSessionOwnerOrTrainerOrAdmin(BasePermission):
             # A trainer may only modify sessions of their OWN approved clients.
             # Previously any trainer could modify any client's session.
             return can_access_user_data(request.user, obj.user_id)
-        if request.method == 'POST':
-            return request.user.is_authenticated and (request.user.is_trainer or request.user.is_staff)
         return False
 
 # ============================================================================

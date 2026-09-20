@@ -31,9 +31,16 @@ import pytest
 NOT_FOUND_BODY = {"error": "Exercise not found.", "detail": "Exercise not found.",
                   "code": "not_found"}
 
+# The host moved from `videos.test` to the platform's own object storage on
+# 2026-09-20: `add-media/` now refuses a video or photo URL that is not on
+# `settings.EXERCISE_MEDIA_ALLOWED_HOSTS` (SIDE_BUGS S-017 — any http(s) host was
+# accepted, so one coach could aim every client's player at a third party). This
+# file is about WHO may see and write media, not about where it is hosted, so the
+# shared payload uses an allowed host and every assertion here is unchanged.
 MEDIA_PAYLOAD = {
     "media_items": [
-        {"media_type": "video", "content": "https://videos.test/secret-cue.mp4",
+        {"media_type": "video",
+         "content": "https://storage.googleapis.com/yalla-gym/secret-cue.mp4",
          "title": "Coach cue", "description": "private", "order": 1},
     ]
 }

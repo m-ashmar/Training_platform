@@ -188,6 +188,25 @@ class ExerciseCreateWithImageSerializer(ExerciseMediaSlotsMixin,
         return safe_file
 
 
+def _absolute_picture(user, request):
+    """A profile picture as an ABSOLUTE url, the way every other endpoint answers it.
+
+    Two serializers here returned `profile_picture.url` raw, so the same field came
+    back as `/media/...` from the trainer's roster and as `https://.../media/...` from
+    `users/serializers.py`, `chat/serializers.py` and `users/trainer_directory.py` —
+    the app got two shapes for one field (BACKEND_BUGS B-032 was this exact bug on
+    `exercise.image`). Relative is still returned when no request is in context, which
+    is what `request.build_absolute_uri` cannot do anything about.
+    """
+    picture = getattr(user, 'profile_picture', None)
+    if not picture:
+        return None
+    url = picture.url
+    if request is not None and url.startswith('/'):
+        return request.build_absolute_uri(url)
+    return url
+
+
 class RoutineExerciseSerializer(serializers.ModelSerializer):
     """
     Serializer for routine exercises.
@@ -538,6 +557,16 @@ class UserExerciseProgressSerializer(serializers.ModelSerializer):
     achievements are all recomputed from the key. Re-checking the coaching refusal
     would have allowed the move whenever the client happened to be paid up, which is
     most of the time, and a client rewriting their own history was never about payment.
+
+    `completed_sets` and `target_sets` are DERIVED and read-only, the same rule
+    `RoutineProgressSerializer` states for its own three: a client cannot author their
+    own compliance. `completed_sets` is recomputed from the set logs
+    (`routine/models.py` `_recalc_locked`) and `target_sets` is the COACH'S
+    prescription, taken from `RoutineExercise.sets` by the routes that write training
+    (`set-logs/sync/`, `set-logs/bulk-create/`, `user-exercise-progress/bulk-complete/`).
+    Writable, a value sent here was either overwritten by the next recomputation or —
+    with no set log behind it — a claim that completed a day that was never trained.
+    Send the sets; the numbers follow.
     """
     exercise = serializers.PrimaryKeyRelatedField(queryset=Exercise.objects.all())
     user = serializers.PrimaryKeyRelatedField(read_only=True)
@@ -552,6 +581,11 @@ class UserExerciseProgressSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserExerciseProgress
         fields = ['id', 'user', 'exercise', 'date', 'completed_sets', 'target_sets', 'skipped']
+        #: DERIVED, not declared — see the class docstring. `completed_sets` comes from
+        #: the set logs and `target_sets` from the coach's prescription; both were
+        #: writable here while `RoutineProgressSerializer` had already locked exactly
+        #: this pair of numbers for exactly this reason.
+        read_only_fields = ['completed_sets', 'target_sets']
 
 
 class UserExerciseProgressDetailSerializer(UserExerciseProgressSerializer):
@@ -776,6 +810,11 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     written: changing one answers 400 `set_immutable` on that field, and re-sending the
     value the row already holds is a no-op. `as_prescribed` is a create-time
     convenience; an edit already carries the reps it is correcting.
+
+    **The progress row decides the day.** `date` is a copy of
+    `user_exercise_progress.date` and nothing else: send it and it must match (400
+    `set_date_mismatch` on `date`), omit it and the server fills in that row's day
+    rather than today. `routine/models.py ExerciseSetLog` says why the two must agree.
     """
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
@@ -889,6 +928,24 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 _("That session and that progress record belong to different users.")
             )
+
+        # ONE DAY PER SET. `UserExerciseProgress` is keyed `(user, exercise, date)`, so
+        # the progress row IS the training day and this column only repeats it. They
+        # were independent, and two readers believed different ones: `outcomes.day_work`
+        # counts a set by THIS date, `refresh_routine_progress` measures the day by the
+        # progress row's — so a mismatched date put one workout on two days and let a
+        # short day be completed by aiming a set at it. An omitted date is that row's
+        # day, not today (the model default pointed at today, which is wrong for every
+        # set logged after midnight or caught up the next morning).
+        owner_date = getattr(progress, 'date', None)
+        if progress is not None and owner_date is not None:
+            if attrs.get('date') is None:
+                attrs['date'] = owner_date
+            elif attrs['date'] != owner_date:
+                raise serializers.ValidationError({'date': [serializers.ErrorDetail(
+                    _("A set is logged on the day of the exercise it belongs to "
+                      "(%(day)s). Log it against that day's progress record.")
+                    % {'day': owner_date}, code='set_date_mismatch')]})
 
         if self.instance is None and attrs.get('reps') is None:
             if not as_prescribed:
@@ -1655,7 +1712,7 @@ class DetailedClientProgressSerializer(serializers.ModelSerializer):
             'id': client.id,
             'name': client.username,
             'full_name': client.full_name,
-            'profile_picture': client.profile_picture.url if client.profile_picture else None,
+            'profile_picture': _absolute_picture(client, self.context.get('request')),
             'last_workout': last_workout.end_time.date() if last_workout and last_workout.end_time else None,
             'total_workouts': total_workouts,
             'completion_rate': completion_rate
@@ -1744,6 +1801,9 @@ class RecentActivitySerializer(serializers.ModelSerializer):
     with `RecentActivitySerializer.collect(users)`. Without that context the serializer
     still works for a single user — it collects for that one user — so nothing that
     serialises one client had to change.
+
+    Pass `context["request"]` too: `client_info.profile_picture` is then absolute, the
+    way every other endpoint answers that field.
     """
     client_info = serializers.SerializerMethodField()
     last_session = serializers.SerializerMethodField()
@@ -1919,7 +1979,7 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             'id': obj.id,
             'name': obj.username,
             'full_name': obj.full_name,
-            'profile_picture': obj.profile_picture.url if obj.profile_picture else None
+            'profile_picture': _absolute_picture(obj, self.context.get('request'))
         }
 
     def get_last_session(self, obj):
