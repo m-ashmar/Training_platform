@@ -552,11 +552,65 @@ collected for it.
 - Weekly pushes: `weekly_recap` to the client and `trainer_weekly_digest` to the trainer,
   Sunday evening; a paused or ended coaching is left out of the recap.
 
-**Reps are required** on a new set log (`POST set-logs/`, `set-logs/bulk-create/`): 400
-`reps_required` on the `reps` field. `as_prescribed: true` instead of a number uses the
-coach's reps for that exercise on that routine day (and their weight when none is sent);
-the prescription is found through the set's session, or from `routine` and `day` in the
-body. 400 `no_prescribed_reps` when the coach set none.
+**Reps are required** on a new set log (`POST set-logs/`, `set-logs/bulk-create/`,
+`set-logs/sync/`): 400 `reps_required` on the `reps` field. `as_prescribed: true` instead
+of a number uses the coach's reps for that exercise on that routine day (and their weight
+when none is sent); the prescription is found through the set's session, or from `routine`
+and `day` in the body. 400 `no_prescribed_reps` when the coach set none.
+
+**How hard it felt, and what to change next** (BACKEND_DELTA item 11).
+
+- `WorkoutSession.effort_rating` — 1 (easy) to 5 (all I had), null while unanswered.
+  Sent on `POST workout-sessions/`, on the PATCH that completes one, or on any later
+  PATCH of `workout-sessions/{id}/`, so a client can rate a workout the next morning.
+  ONLY the person who trained may set it: a trainer or admin answering for them gets
+  400 `effort_not_yours` on the field, and outside 1-5 it is 400 `effort_out_of_range`
+  (the database carries the same bound). It is read back on the session, on
+  `workout-sessions/{id}/` and on each `recent_activity` row of
+  `trainer/client-progress/{id}/`.
+- `GET analytics/strength/?exercise_id=` gains `progression`, and the coach's
+  `trainer/client-progress/{id}/` `strength` gains it per exercise plus a flat
+  `progression` list. `{code, effort: {typical, rated_sessions}, adherence_percent,
+  direction, sessions, latest, next, needs}`. `code` is the closed set `add_weight`,
+  `add_reps`, `hold`, `deload`, `not_enough_data`; `next` is the one number it means
+  (`{weight_kg}` or `{reps}`), null for `hold` and `not_enough_data`; `needs` says what
+  is still missing and is null otherwise. The rule, one sentence per code, is in
+  `routine/progression.py`. It makes no health claim and is identical on every build.
+
+**Editing and deleting a set** (BACKEND_DELTA item 15). `PATCH` and `DELETE
+set-logs/{id}/` belong to the person whose set it is, and to an admin; a trainer reads a
+client's sets and no longer writes them — they did not lift them. Only `weight`, `reps`,
+`notes` and `rpe` may change: `user_exercise_progress`, `workout_session`, `set_number`
+and `date` answer 400 `set_immutable` on that field when changed (re-sending the same
+value is a no-op). Both are refused with 403 `coaching_frozen` / `coaching_unpaid` /
+`coaching_ended` while the coaching is unpaid or over, judged on the set's own date. A
+delete recomputes what the set was counted in — the exercise's completed sets, the day's
+`RoutineProgress`, and a closed day's `DayOutcome` — so deleting a set can turn a
+complete day short and break a streak.
+
+**A progress row cannot be moved.** `PATCH user-exercise-progress/{id}/` answers 400
+`progress_immutable` on `exercise` or `date`, and `PATCH routine-progress/{id}/` answers
+it on `routine`, `day` or `date`: the row IS that key, the authorisation was decided from
+it on create, and moving it rewrote a finished day's history. Re-sending the value a row
+already holds changes nothing and is allowed, so a PUT of the whole object still works.
+
+**Syncing what was logged offline** (BACKEND_DELTA item 14). `POST set-logs/sync/` takes
+`{"sets": [...]}` — at most 200 entries, 400 `batch_too_large` (carries `max`), 400
+`sets_required` for a body with no list. A phone with no signal has no server
+`UserExerciseProgress` id, so each entry names what it does know: `client_uuid`
+(required — the retry key), `exercise_id` (required), `date`, `set_number`, `weight`,
+`reps` (or `as_prescribed`), `routine_id`, `day`, `workout_session_id`, `notes`, `rpe`.
+The server resolves or creates the progress row from `(you, exercise, date)`. Idempotent
+per `client_uuid`, exactly as the single POST: a re-sent batch writes nothing and answers
+the same ids. Partial success — each entry answers `status` `created`, `duplicate` or
+`error` with a `code` (`bad_row`, `client_uuid_required`, `idempotency_conflict`,
+`bad_date`, `date_in_future`, `date_too_old`, `exercise_required`, `exercise_not_found`,
+`session_not_found`, `routine_not_found`, `reps_required`, `reps_out_of_range`,
+`no_prescribed_reps`, `weight_out_of_range`, `set_number_out_of_range`,
+`rpe_out_of_range`, `invalid_set`, or the coaching refusal with `trainer_id`) — and one
+bad row never fails the batch. The whole answer is `{results, count, created,
+duplicates, errors}`, and a set that beat everything before it carries
+`personal_record: true` and sends the push.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -576,6 +630,7 @@ body. 400 `no_prescribed_reps` when the coach set none.
 | `GET, POST` | `/api/routine/exercisesetlogs/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `POST` | `/api/routine/exercisesetlogs/bulk-create/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `GET` | `/api/routine/exercisesetlogs/my-progress/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
+| `POST` | `/api/routine/exercisesetlogs/sync/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/exercisesetlogs/{id}/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `GET, POST` | `/api/routine/routine-exercises/` | IsAdminOrOwnerOrReadOnly | `RoutineExerciseViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/routine-exercises/{id}/` | IsAdminOrOwnerOrReadOnly | `RoutineExerciseViewSet` |
@@ -593,6 +648,7 @@ body. 400 `no_prescribed_reps` when the coach set none.
 | `GET, POST` | `/api/routine/set-logs/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `POST` | `/api/routine/set-logs/bulk-create/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `GET` | `/api/routine/set-logs/my-progress/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
+| `POST` | `/api/routine/set-logs/sync/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/set-logs/{id}/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `GET` | `/api/routine/template-exercises/` | auth | `RoutineTemplateExerciseViewSet` |
 | `GET` | `/api/routine/template-exercises/{id}/` | auth | `RoutineTemplateExerciseViewSet` |

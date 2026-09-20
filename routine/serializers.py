@@ -50,6 +50,35 @@ class ExerciseSerializer(serializers.ModelSerializer):
     # `Meta.fields`, not a method field (BACKEND_BUGS B-036). DRF's ImageField already
     # answers an absolute URL when the request is in the context.
 
+    def validate_image(self, value):
+        """Sniff the content, cap the pixels, re-encode, and name the file after the
+        format that was actually found.
+
+        This is the serializer behind `POST`/`PATCH`/`PUT /api/routine/exercises/`, and
+        it was the last write path that stored an upload without the check — the
+        dedicated `exercises/{id}/image/` endpoint and `exercises/create-with-image/`
+        both call `process_uploaded_image` already. DRF's `ImageField` only asks Pillow
+        whether the bytes open: a GIF header with a PHP payload after it opens, and the
+        file was then stored under the CLIENT's filename, so a `.php` landed in media.
+        There is no pixel cap on that path either, and the stored bytes keep their EXIF
+        — a client's GPS coordinates travelling with an exercise photo.
+        """
+        if not value:
+            return value
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from training_platform.file_security import process_uploaded_image
+        import os as _os
+        try:
+            safe_file, ext = process_uploaded_image(value, max_bytes=5 * 1024 * 1024)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(
+                e.messages[0] if getattr(e, 'messages', None) else str(e))
+        # The DETECTED format decides the extension; only the stem of the client's name
+        # survives, so `shell.php.jpg` cannot come back out of storage as `shell.php`.
+        base = _os.path.splitext(getattr(value, 'name', 'exercise'))[0][:60] or 'exercise'
+        safe_file.name = f"{base}.{ext}"
+        return safe_file
+
     def get_thumbnail(self, obj):
         """Get first image/video thumbnail from media"""
         # optimization: iterate if prefetched
@@ -379,10 +408,55 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
             )
 
 
+def fixed_once_written(attrs, instance, fields, code, message):
+    """Refuse an update that MOVES a row to another key, and allow one that repeats it.
+
+    Every training row is identified by what it is about — whose exercise, which
+    routine, which day, which date — and the authorisation that let it be written was
+    decided from exactly those values on create. An update that changes one of them is
+    a create the server never authorised: the same row, now describing work on another
+    routine or another day. Re-sending the value a row already holds is what a PUT of
+    the whole object does, and it changes nothing, so it is allowed.
+
+    Raises 400 `<code>` on the field that was moved.
+    """
+    if instance is None:
+        return attrs
+    for field in fields:
+        if field not in attrs:
+            continue
+        current = getattr(instance, field, None)
+        if attrs[field] != current:
+            raise serializers.ValidationError(
+                {field: [serializers.ErrorDetail(message, code=code)]})
+        attrs.pop(field)
+    return attrs
+
+
 class UserExerciseProgressSerializer(serializers.ModelSerializer):
-    """Serializer for tracking user progress on individual exercises."""
+    """Serializer for tracking user progress on individual exercises.
+
+    `exercise` and `date` are FIXED once the row is written: a PATCH that changes
+    either answers 400 `progress_immutable` on that field, and re-sending the value the
+    row already has is a no-op (so a PUT of the whole object still works).
+
+    Read-only after create rather than re-running `perform_create`'s authorisation on
+    every update, because it is the smaller rule and the stronger one: the row is
+    keyed `(user, exercise, date)`, so moving either column is not an edit of this row
+    but a write of a different one — and the day outcomes, the streak and the
+    achievements are all recomputed from the key. Re-checking the coaching refusal
+    would have allowed the move whenever the client happened to be paid up, which is
+    most of the time, and a client rewriting their own history was never about payment.
+    """
     exercise = serializers.PrimaryKeyRelatedField(queryset=Exercise.objects.all())
     user = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        return fixed_once_written(
+            attrs, self.instance, ('exercise', 'date'), 'progress_immutable',
+            _("A progress record cannot be moved to another exercise or date. "
+              "Record the work on its own day."))
 
     class Meta:
         model = UserExerciseProgress
@@ -436,6 +510,14 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
     """
     Enhanced serializer with rich progress data.
     Provides completion percentage, exercise summary, and next action suggestions.
+
+    `routine`, `day` and `date` are FIXED once the row is written: a PATCH that changes
+    any of them answers 400 `progress_immutable` on that field, and re-sending the
+    value the row already holds is a no-op. The row IS that key — `perform_create`
+    checks the routine is the caller's and that the coaching may be trained on, and
+    `perform_update` re-checked `instance.routine`, so a PATCH could carry the row onto
+    a routine and a date nobody had authorised and rewrite a finished day's history.
+    Everything else here is derived from the set logs and already read-only.
     """
     user = serializers.StringRelatedField(read_only=True)
     routine_name = serializers.CharField(source='routine.name', read_only=True)
@@ -470,6 +552,12 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
         #: HTTP calls. The signal in routine/models.py computes all three from the set
         #: logs; nothing else may.
         read_only_fields = ['status', 'exercises_completed', 'total_exercises']
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        return fixed_once_written(
+            attrs, self.instance, ('routine', 'day', 'date'), 'progress_immutable',
+            _("A day's progress cannot be moved to another routine, day or date."))
 
     def get_outcome(self, obj):
         planned = getattr(obj, 'outcome_planned_sets', None)
@@ -591,6 +679,12 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     prescribed weight too, when the coach set one and the app sent none. The prescription
     is found through the set's session; without one, send `routine` and `day` (write-only,
     used only to look it up). Field codes on `reps`: `reps_required`, `no_prescribed_reps`.
+
+    On a PATCH only what was LIFTED may change — `weight`, `reps`, `notes`, `rpe`.
+    `user_exercise_progress`, `workout_session`, `set_number` and `date` are fixed once
+    written: changing one answers 400 `set_immutable` on that field, and re-sending the
+    value the row already holds is a no-op. `as_prescribed` is a create-time
+    convenience; an edit already carries the reps it is correcting.
     """
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
@@ -684,6 +778,17 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         day = attrs.pop('day', None)
         if self.instance is not None:
             attrs.pop('client_uuid', None)      # the retry key is fixed once written
+            # What the set IS — whose exercise, which session, which set of which day —
+            # is fixed with it. Only what was LIFTED may be corrected (weight, reps,
+            # notes, rpe). Otherwise an edit is a move: the same row re-pointed at
+            # another progress row or another date, which is how a client would carry
+            # today's work onto a day that was short and repair a broken streak.
+            attrs = fixed_once_written(
+                attrs, self.instance,
+                ('user_exercise_progress', 'workout_session', 'set_number', 'date'),
+                'set_immutable',
+                _("A logged set cannot be moved to another exercise, session, set "
+                  "number or date. Delete it and log it where it belongs."))
         progress = attrs.get('user_exercise_progress') or getattr(
             self.instance, 'user_exercise_progress', None)
         session = attrs.get('workout_session') or getattr(
@@ -998,17 +1103,60 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
     MAX_BACKDATE_DAYS = 30
     FUTURE_SKEW_SECONDS = 5 * 60
 
+    #: How hard it felt, as the person who trained judges it (BACKEND_DELTA item 11).
+    EFFORT_MIN, EFFORT_MAX = 1, 5
+    #: Declared, so the BOUND has one code. Built from the model field it carried the
+    #: validators' `max_value` / `min_value`, and the app branches on `code`: one rule
+    #: must not answer with two of them depending on which side it was broken.
+    effort_rating = serializers.IntegerField(required=False, allow_null=True)
+
     class Meta:
         model = WorkoutSession
         # `start_time` and `client_uuid` are written on create only (see `validate`).
         fields = ['id', 'user', 'routine', 'day', 'start_time', 'end_time', 'status',
-                  'duration', 'client_uuid']
+                  'duration', 'client_uuid', 'effort_rating']
         read_only_fields = ['id', 'user', 'duration']
         # No uniqueness VALIDATOR on the retry key: a retry racing its first attempt
         # would be told 400 "already exists" for a write that landed. The unique index
         # decides, and `_idempotent_create` answers its IntegrityError with the row.
         extra_kwargs = {'start_time': {'required': False},
                         'client_uuid': {'validators': []}}
+
+    def validate_effort_rating(self, value):
+        """1 to 5, and only from the person who trained (BACKEND_DELTA item 11).
+
+        Codes: `effort_out_of_range`, `effort_not_yours`. A trainer opening or
+        correcting a client's session may not answer for them — the whole point of the
+        number is that it is the client's own sense of how hard it was, and every
+        progression suggestion built on it would otherwise be the coach arguing with
+        their own guess. An admin is refused for the same reason.
+        """
+        if value is None:
+            return value
+        if not self.EFFORT_MIN <= value <= self.EFFORT_MAX:
+            raise serializers.ValidationError(
+                _("How hard it felt is a number from %(low)d to %(high)d.")
+                % {"low": self.EFFORT_MIN, "high": self.EFFORT_MAX},
+                code="effort_out_of_range")
+        request = self.context.get('request')
+        actor = getattr(request, 'user', None)
+        # On create the owner is decided in the view (`perform_create`): the caller,
+        # unless a trainer named a client in the body. On update it is the row's.
+        owner_id = self.instance.user_id if self.instance is not None else None
+        if owner_id is None and request is not None and hasattr(request.data, 'get'):
+            named = request.data.get('user')
+            try:
+                owner_id = None if named in (None, '') else int(named)
+            except (TypeError, ValueError):
+                owner_id = None     # a malformed `user` is the view's 400, not ours
+        if actor is None or not actor.is_authenticated:
+            raise serializers.ValidationError(_("Authentication required."),
+                                              code="effort_not_yours")
+        if owner_id is not None and owner_id != actor.id:
+            raise serializers.ValidationError(
+                _("Only the person who trained can say how hard it felt."),
+                code="effort_not_yours")
+        return value
 
     def validate_start_time(self, value):
         """An offline workout says when it began. Codes: `start_time_in_future`,
@@ -1278,9 +1426,13 @@ class WorkoutSessionDetailSerializer(serializers.ModelSerializer):
         model = WorkoutSession
         fields = [
             'id', 'routine_name', 'routine_id', 'start_time', 'end_time',
-            'status', 'duration_minutes', 'total_volume', 'intensity_score', 
-            'muscles_worked', 'exercises_completed'
+            'status', 'duration_minutes', 'total_volume', 'intensity_score',
+            'muscles_worked', 'exercises_completed',
+            # How hard it felt, 1-5, or null while unanswered (BACKEND_DELTA item 11).
+            # Read-only here: it is written on the session itself, by whoever trained.
+            'effort_rating',
         ]
+        read_only_fields = fields
     
     def _get_set_logs(self, obj):
         """Cache set logs to avoid duplicate queries across methods."""

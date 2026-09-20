@@ -64,6 +64,14 @@ MAX_SETS_PER_REQUEST = 50
 MAX_WEIGHT_KG = 1000
 MAX_REPS_PER_SET = 1000
 MAX_BACKLOG_DAYS = 365
+# One offline sync carries at most this many sets. A week away from signal is a few
+# dozen; 200 is generous and still a bounded amount of work for one request, which is
+# what the cap is for — `set-logs/sync/` writes a row and a progress row per entry.
+MAX_SYNC_SETS = 200
+# The highest set number a sync will accept. The same spirit as MAX_SETS_PER_REQUEST:
+# nobody performs a hundredth set of one exercise in a day, and an unbounded number
+# lets one row claim a prescription of any size.
+MAX_SET_NUMBER = 100
 
 
 class StandardResultsSetPagination(StandardPagination):
@@ -1268,6 +1276,210 @@ def _idempotent_create(view, request, model, owner_of, create):
             raise
         return answer
 
+def _sync_error(key, code, message, **extra):
+    """One refused row of a batch. The batch itself still succeeds."""
+    return {'client_uuid': str(key) if key else None, 'status': 'error',
+            'code': code, 'error': str(message), **extra}
+
+
+def _sync_number(raw, *, low, high, default=None):
+    """A number inside its bounds, or `None` when it is neither. `False` for a value
+    that is present and wrong, so the caller can tell "not sent" from "not allowed"."""
+    if raw is None or raw == '':
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return False
+    if not low <= value <= high:
+        return False
+    return value
+
+
+def _sync_one_set(request, row, key, known, today):
+    """Write one set of an offline batch. Returns `(answer, touched, log)`.
+
+    `answer` is always a row for the response — `created`, `duplicate` or an `error`
+    with its `code`. `touched` is `(progress, routine, day)` when a progress row needs
+    the recomputation afterwards, and `log` the new set when there is one.
+
+    Every rule the single POST applies, applied here: the retry key decides first (a
+    re-sent batch writes nothing), the exercise has to be one this caller may read,
+    reps are required unless the coach's are asked for, the date is bounded by
+    `MAX_BACKLOG_DAYS`, and the coaching refusal is the same 403 code — reported on the
+    row instead of thrown, because one frozen routine must not lose the other sets.
+    """
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    from .models import Routine, RoutineExercise, UserExerciseProgress
+    from .permissions import visible_exercises_for
+
+    user = request.user
+    if not isinstance(row, dict):
+        return _sync_error(None, 'bad_row', _('Each set must be an object.')), None, None
+    if key is None:
+        return _sync_error(None, 'client_uuid_required',
+                           _('Every set needs its own `client_uuid`, so a re-sent '
+                             'batch is not logged twice.')), None, None
+
+    # 1. The retry key. A set already written under this id is answered with that row
+    #    and nothing is written — the same contract as a retried single POST.
+    existing = known.get(key)
+    if existing is not None:
+        owner = (existing.user_exercise_progress.user_id
+                 if existing.user_exercise_progress_id else None)
+        if owner != user.id and not getattr(user, 'is_admin', False):
+            return _sync_error(key, 'idempotency_conflict',
+                               _('This id belongs to another record.')), None, None
+        return {'client_uuid': str(key), 'status': 'duplicate', 'id': existing.pk,
+                'set_number': existing.set_number,
+                'exercise_id': (existing.user_exercise_progress.exercise_id
+                                if existing.user_exercise_progress_id else None),
+                'personal_record': False}, None, None
+
+    # 2. The date. Bounded exactly as `bulk-create` bounds it.
+    parsed = parse_date(str(row.get('date'))) if row.get('date') else today
+    if parsed is None:
+        return _sync_error(key, 'bad_date',
+                           _('date must be in YYYY-MM-DD format.')), None, None
+    if parsed > today:
+        return _sync_error(key, 'date_in_future',
+                           _('Cannot log a workout in the future.')), None, None
+    if (today - parsed).days > MAX_BACKLOG_DAYS:
+        return _sync_error(key, 'date_too_old',
+                           _('Cannot log a workout more than %(d)d days in the past.')
+                           % {'d': MAX_BACKLOG_DAYS}), None, None
+
+    # 3. The exercise, under the one visibility rule. An exercise this caller may not
+    #    read is answered exactly like one that does not exist.
+    exercise_id = _int_or_none(row.get('exercise_id'))
+    if exercise_id is None:
+        return _sync_error(key, 'exercise_required',
+                           _('exercise_id is required.')), None, None
+    exercise = visible_exercises_for(user).filter(pk=exercise_id).first()
+    if exercise is None:
+        return _sync_error(key, 'exercise_not_found',
+                           _('Exercise not found.')), None, None
+
+    # 4. The session and the routine, when the phone knows them. A session that is not
+    #    this caller's is not named as somebody else's — it is simply not found.
+    session = None
+    if row.get('workout_session_id') is not None:
+        session = WorkoutSession.objects.filter(
+            pk=_int_or_none(row.get('workout_session_id')), user=user).first()
+        if session is None:
+            return _sync_error(key, 'session_not_found',
+                               _('Workout session not found.')), None, None
+    routine = getattr(session, 'routine', None)
+    day = getattr(session, 'day', None)
+    routine_id = _int_or_none(row.get('routine_id'))
+    if routine_id is not None:
+        routine = Routine.objects.filter(pk=routine_id).filter(
+            Q(assigned_to=user) | Q(created_by=user)).distinct().first()
+        if routine is None and not getattr(user, 'is_admin', False):
+            return _sync_error(key, 'routine_not_found',
+                               _('Routine not found.')), None, None
+        routine = routine or Routine.objects.filter(pk=routine_id).first()
+    day = _int_or_none(row.get('day')) or day
+
+    # 5. May this person train this, on that date?
+    try:
+        if routine is not None:
+            _require_can_train(user, routine, parsed)
+        else:
+            _require_can_train_exercise(user, exercise_id, parsed)
+    except APIException as refused:
+        codes = refused.get_codes()
+        detail = refused.detail if isinstance(refused.detail, dict) else {}
+        return _sync_error(key, codes if isinstance(codes, str) else 'not_allowed',
+                           detail.get('detail', _('You cannot train this right now.')),
+                           trainer_id=detail.get('trainer_id')), None, None
+
+    # 6. What was lifted. `reps` is required (the owner, 2026-09-20) unless the row
+    #    says `as_prescribed`, and then the coach's number for that day is used.
+    prescription = None
+    if routine is not None and day is not None:
+        prescription = (RoutineExercise.objects
+                        .filter(routine=routine, day=day, exercise_id=exercise_id)
+                        .order_by('order', 'id').first())
+    reps = _sync_number(row.get('reps'), low=1, high=MAX_REPS_PER_SET)
+    if reps is False:
+        return _sync_error(key, 'reps_out_of_range',
+                           _('reps must be between 1 and %(max)d.')
+                           % {'max': MAX_REPS_PER_SET}), None, None
+    if reps is None:
+        if not _truthy(row.get('as_prescribed')):
+            return _sync_error(key, 'reps_required',
+                               _("How many reps? Send `as_prescribed: true` to use "
+                                 "your coach's number.")), None, None
+        if prescription is None or prescription.reps is None:
+            return _sync_error(key, 'no_prescribed_reps',
+                               _('Your coach did not set reps for this exercise; '
+                                 'enter what you did.')), None, None
+        reps = prescription.reps
+    weight = _sync_number(row.get('weight'), low=0, high=MAX_WEIGHT_KG, default=None)
+    if weight is False:
+        return _sync_error(key, 'weight_out_of_range',
+                           _('weight must be between 0 and %(max)d kg.')
+                           % {'max': MAX_WEIGHT_KG}), None, None
+    if weight is None and prescription is not None and prescription.weight is not None \
+            and _truthy(row.get('as_prescribed')):
+        weight = prescription.weight
+    set_number = _sync_number(row.get('set_number'), low=1, high=MAX_SET_NUMBER)
+    if set_number is False:
+        return _sync_error(key, 'set_number_out_of_range',
+                           _('set_number must be between 1 and %(max)d.')
+                           % {'max': MAX_SET_NUMBER}), None, None
+    rpe = _sync_number(row.get('rpe'), low=1, high=10)
+    if rpe is False:
+        return _sync_error(key, 'rpe_out_of_range',
+                           _('RPE must be between 1 and 10.')), None, None
+
+    # 7. The progress row the phone could not know the id of. This is the whole point
+    #    of the endpoint: `(user, exercise, date)` is its key, so the server can
+    #    resolve it from what the phone DOES know.
+    prescribed = (prescription.sets or 0) if prescription is not None else 0
+    progress, created_progress = UserExerciseProgress.objects.get_or_create(
+        user=user, exercise=exercise, date=parsed,
+        defaults={'target_sets': prescribed})
+    # target_sets is the COACH'S prescription and nothing the caller sent, the same
+    # rule `bulk-create` states: taken from the request, `completed >= target` would
+    # be true by construction and the day would complete itself.
+    if not created_progress and prescribed and progress.target_sets != prescribed:
+        progress.target_sets = prescribed
+        progress.save(update_fields=['target_sets'])
+
+    try:
+        # Savepoint: this write is one row of a batch that keeps going. Without one,
+        # an IntegrityError aborts the enclosing transaction and every later set of
+        # the request fails with TransactionManagementError instead of being answered.
+        with transaction.atomic():
+            log = ExerciseSetLog.objects.create(
+                user_exercise_progress=progress, workout_session=session,
+                set_number=int(set_number) if set_number else None,
+                weight=weight, reps=int(reps), date=parsed,
+                notes=(row.get('notes') or ''), rpe=int(rpe) if rpe else None,
+                client_uuid=key)
+    except DjangoValidationError as invalid:
+        return _sync_error(key, 'invalid_set',
+                           (invalid.messages[0] if getattr(invalid, 'messages', None)
+                            else _('Could not record this set.'))), None, None
+    except IntegrityError:
+        # The same batch arriving twice at once: the unique index on `client_uuid` let
+        # one through, and the other answers with its row.
+        twin = ExerciseSetLog.objects.filter(client_uuid=key).first()
+        if twin is None:
+            raise
+        return {'client_uuid': str(key), 'status': 'duplicate', 'id': twin.pk,
+                'set_number': twin.set_number, 'exercise_id': exercise_id,
+                'personal_record': False}, None, None
+
+    return ({'client_uuid': str(key), 'status': 'created', 'id': log.pk,
+             'set_number': log.set_number, 'exercise_id': exercise_id,
+             'personal_record': False},
+            (progress, routine, day), log)
+
+
 class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     """
     ViewSet for logging individual exercise sets.
@@ -1284,6 +1496,17 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     A set that beats everything this person has logged for that exercise answers
     `personal_record: true` and sends them the `personal_record` push (the owner,
     2026-09-20). The first set of an exercise never counts as a record.
+
+    PATCH and DELETE belong to the PERSON WHOSE SET IT IS (BACKEND_DELTA item 15), and
+    to an admin; a trainer may read a client's sets and no longer edit or delete them —
+    they did not lift them. Anyone else gets 404, because the list is scoped. Only
+    `weight`, `reps`, `notes` and `rpe` may change: moving a set to another progress
+    row, session, set number or date answers 400 `set_immutable` on that field. Both
+    are refused with 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while
+    the coaching the set's routine came from is unpaid or over, judged on the set's own
+    date. A delete recomputes everything the set was counted in — the exercise's
+    completed sets, the day's `RoutineProgress`, and the `DayOutcome` of a day that was
+    already closed, which can turn a complete day short and break a streak.
     """
     queryset = ExerciseSetLog.objects.all()
     serializer_class = ExerciseSetLogSerializer
@@ -1351,6 +1574,46 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                 raise serializers.ValidationError({'detail': _('A set log for this progress, set number, and date already exists.')})
             raise
         _celebrate_personal_record(serializer.instance)
+
+    def perform_update(self, serializer):
+        """Correcting what was lifted is training, so it is refused exactly like
+        logging it: on the set's OWN date, through the routine it belongs to.
+
+        Judged before the write, and the date is the stored one — the serializer fixes
+        `date` once written, so an edit cannot move itself into a paid month.
+        """
+        self._refuse_if_frozen(serializer.instance)
+        serializer.save()
+        # The recomputation is the post_save receiver's, as it is on create: a
+        # corrected weight changes the volume the day counted, not how many sets it
+        # holds, and the receiver writes both from the set logs.
+
+    def perform_destroy(self, instance):
+        """Deleting a set is a training write too, and everything it was counted in is
+        recomputed — by the `post_delete` receiver in `routine/models.py`, which is the
+        one place that knows how (`_recalc_locked` -> `refresh_routine_progress` ->
+        `refresh_day_quietly`). Nothing is duplicated here."""
+        self._refuse_if_frozen(instance)
+        instance.delete()
+
+    def _refuse_if_frozen(self, instance):
+        """403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when the coaching
+        behind this set is unpaid or over.
+
+        Asked about the CALLER, as `perform_create` asks: the refusal is a rule about a
+        client and their coach, so an admin clearing up a bad row is not caught by a
+        client's unpaid month. The session names the routine when there is one; without
+        a session the exercise decides, and the set's own date is when it happened.
+        """
+        actor = self.request.user
+        session = instance.workout_session
+        if session is not None:
+            _require_can_train(actor, session.routine, session.start_time)
+            return
+        progress = instance.user_exercise_progress
+        if progress is not None:
+            _require_can_train_exercise(actor, progress.exercise_id,
+                                        instance.date or progress.date)
 
     @action(detail=False, methods=['get'], url_path='my-progress')
     def my_progress(self, request):
@@ -1592,6 +1855,128 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
+    @action(detail=False, methods=['post'], url_path='sync')
+    def sync(self, request):
+        """POST /api/routine/set-logs/sync/ — a phone that was offline hands over the
+        sets it recorded (BACKEND_DELTA item 14).
+
+        The single POST needs a server `UserExerciseProgress` id, which a phone with no
+        signal cannot have. Here the phone sends what it DOES know and the server
+        resolves or creates the progress row itself, from `(you, exercise, date)`.
+
+        Body: `{"sets": [ ... ]}`, at most 200 entries (400 `batch_too_large`, which
+        carries `max`), or the bare list. Each entry:
+
+            client_uuid         required — the app's own id for the set, the retry key
+            exercise_id         required
+            date                YYYY-MM-DD; today when omitted
+            set_number          1-100, optional
+            weight              kg, 0-1000, optional
+            reps                1-1000 — required, unless `as_prescribed: true`
+            as_prescribed       use the coach's reps (and weight) for that routine day
+            routine_id, day     which day this belongs to; also found from the session
+            workout_session_id  the session it was logged in, when there was one
+            notes, rpe          as on a single set (rpe 1-10)
+
+        IDEMPOTENT per `client_uuid`, exactly as the single POST is: re-sending the
+        same batch writes nothing and answers the same ids. PARTIAL SUCCESS: one bad
+        row never fails the batch. Every entry answers `status`:
+
+            created     `{client_uuid, status, id, set_number, exercise_id,
+                         personal_record}`
+            duplicate   the same, for the row the first send wrote
+            error       `{client_uuid, status, code, error}` — `bad_row`,
+                        `client_uuid_required`, `idempotency_conflict`, `bad_date`,
+                        `date_in_future`, `date_too_old`, `exercise_required`,
+                        `exercise_not_found`, `session_not_found`, `routine_not_found`,
+                        `reps_required`, `reps_out_of_range`, `no_prescribed_reps`,
+                        `weight_out_of_range`, `set_number_out_of_range`,
+                        `rpe_out_of_range`, `invalid_set`, or the coaching refusal
+                        `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
+                        `trainer_id`) — per row, because one frozen coaching must not
+                        throw away the sets that belong to another trainer's routine.
+
+        The whole-request answer is `{results, created, duplicates, errors, count}`.
+        400 `sets_required` when the body carries no list at all. The response's
+        `personal_record` is true on a set that beat everything logged before it, and
+        the `personal_record` push follows, as on every other logging route.
+
+        Identical on every build; sets are the client's own, so there is no `user_id`.
+        """
+        from .models import suspend_progress_recalc, recalc_progress_for
+
+        payload = request.data
+        rows = payload if isinstance(payload, list) else (
+            payload.get('sets') if hasattr(payload, 'get') else None)
+        if not isinstance(rows, list):
+            return Response({'error': _('Send `sets`: the list of sets to sync.'),
+                             'code': 'sets_required', 'field': 'sets'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(rows) > MAX_SYNC_SETS:
+            return Response({'error': _('A sync carries at most %(max)d sets.')
+                             % {'max': MAX_SYNC_SETS},
+                             'code': 'batch_too_large', 'max': MAX_SYNC_SETS},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        import uuid as _uuid
+
+        today = timezone.localdate()
+        # Every retry key of the batch read ONCE. A re-sent batch is the common case
+        # (the write landed, the answer was lost), and it must not cost a query a row
+        # to discover that it has nothing to do.
+        keys = {}
+        for index, row in enumerate(rows):
+            raw = row.get('client_uuid') if isinstance(row, dict) else None
+            try:
+                keys[index] = (None if raw in (None, '') else
+                               _uuid.UUID(int=raw) if isinstance(raw, int)
+                               and not isinstance(raw, bool) else _uuid.UUID(str(raw)))
+            except (ValueError, TypeError, AttributeError):
+                keys[index] = None          # malformed: answered `client_uuid_required`
+        known = {log.client_uuid: log for log in ExerciseSetLog.objects
+                 .filter(client_uuid__in=[k for k in keys.values() if k is not None])
+                 .select_related('user_exercise_progress')}
+
+        results, fresh = [], []
+        # `(progress_pk, routine_pk, day)`: the recomputation runs ONCE per progress
+        # row, not once per set — that is what `suspend_progress_recalc` is for, and
+        # the scope is what stops one exercise deciding another routine's day (B-011).
+        touched: dict = {}
+        with suspend_progress_recalc():
+            for index, row in enumerate(rows):
+                answer, touch, log = _sync_one_set(request, row, keys.get(index),
+                                                   known, today)
+                results.append(answer)
+                if log is not None:
+                    fresh.append(answer)
+                    # So a second row of the same batch, or a re-send that arrives
+                    # before the commit, sees it as written rather than writing again.
+                    known[log.client_uuid] = log
+                if touch is not None:
+                    progress, routine, day = touch
+                    touched[(progress.pk, getattr(routine, 'pk', None), day)] = touch
+
+        # Outside the suspension, or it would be muted along with the rest.
+        for progress, routine, day in touched.values():
+            recalc_progress_for(progress, routine_scope=routine, day_scope=day)
+
+        # The heaviest new set of each exercise is the only one that can be a record
+        # (`strength.is_personal_record`), the same as `bulk-create`.
+        for log in _heaviest_per_exercise(fresh):
+            _celebrate_personal_record(log)
+            for answer in fresh:
+                if answer['id'] == log.pk:
+                    answer['personal_record'] = bool(
+                        getattr(log, '_is_personal_record', False))
+
+        counts = {'created': 0, 'duplicate': 0, 'error': 0}
+        for answer in results:
+            counts[answer['status']] = counts.get(answer['status'], 0) + 1
+        return Response({'results': results, 'count': len(results),
+                         'created': counts['created'],
+                         'duplicates': counts['duplicate'],
+                         'errors': counts['error']})
+
 
 class WorkoutSessionViewSet(viewsets.ModelViewSet):
     """
@@ -1604,7 +1989,15 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     `coaching_unpaid` / `coaching_ended` with `trainer_id` (the owner, 2026-09-19). A
     session begun while
     paid can still be finished, and an offline one dated inside a paid month still syncs.
-    
+
+    `effort_rating` (1 easy — 5 all I had, null while unanswered) may be sent on create,
+    on the PATCH that completes the session, and on any later PATCH of the session
+    detail — a client often rates a workout the next morning. ONLY the person who
+    trained may set it (400 `effort_not_yours` on the field otherwise, including for
+    their trainer and for an admin), and it must be inside 1-5 (400
+    `effort_out_of_range`; the database carries the same bound as a check constraint).
+    It feeds `progression` on `analytics/strength/` and on the coach's client screen.
+
     Input: API requests with session data (POST), session updates (PATCH)
     Output: JSON responses with session data
     """
@@ -2103,8 +2496,18 @@ class AnalyticsViewSet(viewsets.ViewSet):
         `change_percent`, `best`, `latest`, `sessions` and its `projection`.
 
         With `exercise_id`: the same for one exercise plus `points` (one entry per
-        training day: `estimated_1rm`, `best_weight`, `best_reps`, `volume_kg`, `sets`)
-        and `share`, the headline a card can draw.
+        training day: `estimated_1rm`, `best_weight`, `best_reps`, `volume_kg`, `sets`),
+        `share` — the headline a card can draw — and `progression`.
+
+        `progression` is what to change next: `{code, effort: {typical,
+        rated_sessions}, adherence_percent, direction, sessions, latest, next, needs}`.
+        `code` is one of `add_weight`, `add_reps`, `hold`, `deload`,
+        `not_enough_data` — the closed set, and the rule behind each one is written out
+        in `routine/progression.py`. `next` carries the one number the suggestion means
+        (`{weight_kg}` or `{reps}`) and is null for `hold` and `not_enough_data`;
+        `needs` says what is still missing and is null otherwise. It reads the
+        `effort_rating` the client gave their recent sessions; without any rating the
+        answer is `not_enough_data`. No health claim, and identical on every build.
 
         `projection` is `{available: false, reason: "insufficient_data", needs: {...}}`
         until there are 3 training days of that exercise spread over 2 weeks. When it is
@@ -2161,6 +2564,13 @@ class AnalyticsViewSet(viewsets.ViewSet):
             body['projection'] = strength_module.projection(
                 user, exercise_id, until=today, series=series, adherence_percent=done_percent)
             body['share'] = strength_module.headline(body)
+            # What to change next, from the effort ratings this person gave their last
+            # sessions read together with the trend and how much of the plan was done
+            # (BACKEND_DELTA item 11). A code and its numbers; never a sentence.
+            from . import progression as progression_module
+            body['progression'] = progression_module.for_exercise(
+                user, exercise_id, trend_summary=body, adherence_percent=done_percent,
+                until=today)
             body['user_id'] = user.id
             body['adherence_percent'] = done_percent
             return Response(body)
@@ -3437,6 +3847,15 @@ def _client_strength(client, limit=5):
     done_percent = adherence(client, today - timedelta(days=27), today,
                              today=today)['sets']['done_percent']
     overview = strength_module.overview(client, limit=limit, adherence_percent=done_percent)
+    # What to change next, per exercise (BACKEND_DELTA item 11). The coach gets the
+    # same codes and the same numbers the client sees on `analytics/strength/`, so the
+    # two screens cannot disagree about what the training says. One extra query for
+    # every exercise together, not one each — this is the roster's neighbour screen.
+    from . import progression as progression_module
+    suggestions = progression_module.suggest_many(
+        client, overview['exercises'], adherence_percent=done_percent)
+    for row in overview['exercises']:
+        row['progression'] = suggestions.get(row['exercise_id'])
     return {
         'headline': strength_module.headline(
             overview['top_movers'][0] if overview['top_movers']
@@ -3445,6 +3864,9 @@ def _client_strength(client, limit=5):
         'tracked_count': overview['tracked_count'],
         'top_movers': overview['top_movers'],
         'plateaus': overview['plateaus'],
+        'progression': [suggestions[row['exercise_id']]
+                        for row in overview['exercises']
+                        if row['exercise_id'] in suggestions],
         'assumes_sets_done_percent': done_percent,
     }
 
@@ -3488,9 +3910,14 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         (planned/logged/missed/done_percent), `days_closed`, `perfect_days`,
         `short_days`, `last_break` and `approximate` (see `analytics/adherence/`).
         `strength` is `{headline, rising_count, tracked_count, top_movers, plateaus,
-        assumes_sets_done_percent}`, the same data as `analytics/strength/` for this
-        client, cut to the five exercises that moved most (see that docstring for the
-        shape of a `headline` and of a `projection`).
+        progression, assumes_sets_done_percent}`, the same data as `analytics/strength/`
+        for this client, cut to the five exercises that moved most (see that docstring
+        for the shape of a `headline`, a `projection` and a `progression`). Every row
+        of `top_movers` and `plateaus` also carries its own `progression`, and
+        `strength.progression` is the same answers as a flat list, most-moved first.
+
+        Each entry of `recent_activity` carries `effort_rating`: 1 (easy) to 5 (all I
+        had), as the client rated that session, or null while unanswered.
 
         Identical on every build; no price and no claim.
         """
@@ -3588,7 +4015,10 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                      'duration': session.duration,
                      'volume': session_volume,
                      'routine_name': session.routine.name if session.routine else "Custom Workout",
-                     'exercises': list(exercises_done)
+                     'exercises': list(exercises_done),
+                     # How hard the client said it was, or null (BACKEND_DELTA item 11).
+                     # Volume says what was moved; this says what it cost them.
+                     'effort_rating': session.effort_rating,
                  })
 
              return Response({
