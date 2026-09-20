@@ -85,12 +85,40 @@ def _strings(value) -> list[str]:
     return []
 
 
+def _focus_codes(goal_focus, specialities) -> list[str]:
+    """The rule itself, over two columns: the trainer's own choice, else what their
+    specialities say. Taken out of `trainer_focus` so a caller that only needs to COUNT
+    matches can ask without instantiating every trainer (`matches_for_goal`)."""
+    if goal_focus:
+        return list(goal_focus)
+    text = ' '.join(_strings(specialities)).lower()
+    return [code for code, words in FOCUS_KEYWORDS.items() if any(w in text for w in words)]
+
+
 def trainer_focus(trainer) -> list[str]:
     """The trainer's focus codes: their own choice, else read from their specialties."""
-    if trainer.trainer_goal_focus:
-        return list(trainer.trainer_goal_focus)
-    text = ' '.join(_strings(trainer.trainer_specializations)).lower()
-    return [code for code, words in FOCUS_KEYWORDS.items() if any(w in text for w in words)]
+    return _focus_codes(trainer.trainer_goal_focus, trainer.trainer_specializations)
+
+
+def matches_for_goal(client) -> int:
+    """How many available trainers suit this client's goal.
+
+    The number the first-day home says out loud ("we found you three trainers who suit
+    your goal"), so it must agree with the cards under it: the same candidate set
+    `match_trainers` scores — available, in the directory, not blocked either way — and
+    the same focus rule. Two small queries and no model instantiation: only two columns
+    are read, so nothing decrypts an injury list for a number.
+    """
+    from moderation.services import blocked_ids
+
+    goal = getattr(client, 'training_goal', '') or ''
+    if not goal:
+        return 0
+    rows = (directory_trainers().filter(trainer_is_available=True)
+            .exclude(id__in=blocked_ids(client))
+            .values_list('trainer_goal_focus', 'trainer_specializations'))
+    return sum(1 for goal_focus, specialities in rows
+               if goal in _focus_codes(goal_focus, specialities))
 
 
 def _absolute(request, url):

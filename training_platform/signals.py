@@ -88,6 +88,23 @@ def recent_progress_cache_keys(user_id) -> list:
     return [f"recent_progress:{user_id}:{code}" for code in sorted(codes)]
 
 
+def bust_home(user_id) -> None:
+    """Retire this person's cached home screens (`GET /api/v1/home`).
+
+    The home payload is keyed by build as well as by user and language — it must be,
+    because what a build may be shown differs — and the version in that key is whatever
+    the installed app sends, so the keys cannot be listed and deleted. Instead the key
+    carries a counter, and bumping it orphans every entry at once
+    (`home/views.py cache_key`). Same idea as `bump_cache_version`, per person.
+
+    Called from the receivers below, inside their guarded `on_commit` bust: like every
+    invalidation here it is an optimisation and must never fail the training it follows.
+    """
+    from home.views import bump_stamp
+
+    bump_stamp(user_id)
+
+
 @receiver(post_save, sender='routine.WorkoutSession')
 def bust_recent_progress_cache(sender, instance, **kwargs):
     """
@@ -107,6 +124,7 @@ def bust_recent_progress_cache(sender, instance, **kwargs):
             try:
                 from training_platform.cache import private_cache
                 private_cache().delete_many(recent_progress_cache_keys(instance.user_id))
+                bust_home(instance.user_id)
                 logger.info("Busted recent_progress cache for user %s", instance.user_id)
             except Exception:
                 logger.warning(
@@ -129,10 +147,41 @@ def bust_recent_progress_cache_on_day_outcome(sender, instance, **kwargs):
         try:
             from training_platform.cache import private_cache
             private_cache().delete_many(recent_progress_cache_keys(instance.user_id))
+            bust_home(instance.user_id)
         except Exception:
             logger.warning(
                 "Could not bust recent_progress cache for user %s; it will expire on TTL",
                 instance.user_id, exc_info=True,
+            )
+
+    _txn.on_commit(_bust)
+
+
+@receiver(post_save, sender='chat.Message')
+def bust_home_on_a_new_message(sender, instance, created, **kwargs):
+    """A coach's message is a home section (`trainer_message`), so it must not wait out
+    the home cache's two minutes. Only the home entry is retired — the week is not
+    about chat — and only for the CLIENT, whose screen carries the card.
+
+    Same guarded, deferred bust as above: a cache that cannot be reached must never
+    fail the message it describes."""
+    if not created:
+        return
+    from django.db import transaction as _txn
+
+    def _bust():
+        try:
+            from chat.models import Conversation
+
+            client_id = (Conversation.objects
+                         .filter(pk=instance.conversation_id)
+                         .values_list('client_id', flat=True).first())
+            if client_id:
+                bust_home(client_id)
+        except Exception:
+            logger.warning(
+                "Could not bust the home cache for conversation %s; it will expire on TTL",
+                instance.conversation_id, exc_info=True,
             )
 
     _txn.on_commit(_bust)

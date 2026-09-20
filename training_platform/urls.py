@@ -74,6 +74,10 @@ urlpatterns = [
     # `blocks/` and `ai-consent/` are platform-wide, not one feature's sub-resource.
     path('api/v1/', include('moderation.urls', namespace='moderation')),
 
+    # The server-driven home screen: an ordered list of typed sections, built from
+    # what every other area already answers. See home/views.py for the contract.
+    path('api/v1/', include('home.urls', namespace='home')),
+
     # Notification preferences (listing lives under /api/social/notifications/)
     path('api/notifications/', include('notifications.urls', namespace='notifications')),
 ]
