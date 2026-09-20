@@ -654,6 +654,16 @@ from mediakit.admin import MediaAssetAdmin  # noqa: E402
 from mediakit.models import MediaAsset  # noqa: E402
 admin_site.register(MediaAsset, MediaAssetAdmin)
 
+# Safety: the reports queue (filter by status and reason, open the target, dismiss or
+# record that action was taken), plus read-only views of who has blocked whom and who
+# has allowed the AI coach to read their data. Operator-only — see the permission
+# narrowing in moderation/admin.py, which is what keeps a bare `is_staff` account out.
+from moderation.admin import AIConsentAdmin, BlockAdmin, ReportAdmin  # noqa: E402
+from moderation.models import AIConsent, Block, Report  # noqa: E402
+admin_site.register(Report, ReportAdmin)
+admin_site.register(Block, BlockAdmin)
+admin_site.register(AIConsent, AIConsentAdmin)
+
 admin_site.register(UserActivity, UserActivityAdmin)
 admin_site.register(PerformanceMetric, PerformanceMetricAdmin)
 admin_site.register(UserSession)

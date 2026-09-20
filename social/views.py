@@ -29,6 +29,10 @@ from .serializers import (
 )
 
 from users.models import CustomUser
+# Blocking is enforced HERE, on the read, not by deleting anything: a block hides two
+# people from each other and must be undoable without losing either one's history.
+# `blocked_ids` is one query and returns both directions (moderation/services.py).
+from moderation.services import blocked_ids
 from .tasks import dispatch_notification
 import logging
 
@@ -50,9 +54,12 @@ class UserFollowViewSet(viewsets.ModelViewSet):
     permission_classes = [IsFollowParticipant]
     
     def get_queryset(self):
+        # Both columns are excluded: the row names two people, and a block has to
+        # remove it whichever side the blocked person is on.
+        hidden = blocked_ids(self.request.user)
         return UserFollow.objects.filter(
             Q(follower=self.request.user) | Q(following=self.request.user)
-        )
+        ).exclude(Q(follower_id__in=hidden) | Q(following_id__in=hidden))
     
     def perform_create(self, serializer):
         serializer.save(follower=self.request.user)
@@ -148,7 +155,7 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         """
         followers = UserFollow.objects.filter(
             following=request.user
-        ).select_related('follower')
+        ).exclude(follower_id__in=blocked_ids(request.user)).select_related('follower')
         
         # No `email`. `UserMinimalSerializer` deliberately dropped it (see
         # social/serializers.py) and these two hand-rolled dicts were never updated, so
@@ -175,7 +182,7 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         """
         following = UserFollow.objects.filter(
             follower=request.user
-        ).select_related('following')
+        ).exclude(following_id__in=blocked_ids(request.user)).select_related('following')
         
         # No `email`. `UserMinimalSerializer` deliberately dropped it (see
         # social/serializers.py) and these two hand-rolled dicts were never updated, so
@@ -206,6 +213,12 @@ def visible_posts_for(user):
     the post's VISIBILITY and not its hidden flag.
 
     An author still sees their own hidden post, so hiding is not a silent deletion.
+
+    Blocking is applied here too, and both ways: a post written by anyone this person
+    has blocked, or who has blocked them, is not in the result. One `.exclude` on the
+    one definition, so the post list, the feed, search, the detail route, the comment
+    queryset and the comment-create guard all inherit it — the same reason `is_hidden`
+    lives here rather than in five querysets that disagree.
     """
     return Post.objects.filter(
         (
@@ -213,7 +226,7 @@ def visible_posts_for(user):
             | Q(visibility='followers', author__followers__follower=user)
         ) & Q(is_hidden=False)
         | Q(author=user)
-    ).distinct()
+    ).exclude(author_id__in=blocked_ids(user)).distinct()
 
 
 class PostViewSet(viewsets.ModelViewSet):
@@ -451,6 +464,12 @@ class CommentViewSet(viewsets.ModelViewSet):
             # thread cannot be read through the comment endpoint.
             post__in=visible_posts_for(user),
             is_hidden=False,
+        ).exclude(
+            # Its OWN block filter, not only the one inherited through the post. The
+            # post clause hides a blocked person's posts; it does nothing about a
+            # blocked person's comments on YOUR post, which is where the harassment
+            # this feature exists for actually lands.
+            author_id__in=blocked_ids(user),
         ).distinct()
         
         # Handle post filtering
@@ -731,6 +750,12 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             challenge=challenge
         ).select_related('user').order_by('-current_value', 'joined_at', 'id')[:10]
 
+        # Blocked people are dropped from the board AFTER the rank is computed, so the
+        # ranks stay true — the reader sees 1, 2, 4 with a gap rather than someone else
+        # promoted into a place they did not earn. Excluding them from the query would
+        # have renumbered the whole board differently for every viewer, and the
+        # Champion badge keys on rank 1.
+        hidden = blocked_ids(request.user)
         leaderboard = [{
             'rank': idx + 1,
             'user': {
@@ -739,7 +764,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             },
             'current_value': p.current_value,
             'progress_percentage': p.progress_percentage
-        } for idx, p in enumerate(participants)]
+        } for idx, p in enumerate(participants) if p.user_id not in hidden]
         
         return Response({
             'challenge': challenge.title,
@@ -989,8 +1014,14 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         # `-created_at, -id`: the model declares that tiebreaker in `Meta.ordering` and
         # a view-level `.order_by()` overrides it. Without the id, a fan-out batch that
         # shares a timestamp made cursor pages repeat one row and skip another.
+        # A blocked person's like, comment or follow must not keep arriving as a
+        # notification — that is the one place a block is most obviously broken.
+        # `actor` is nullable (system notices have none) and `__in` never matches
+        # NULL, so those are untouched.
         qs = Notification.objects.select_related('actor', 'recipient').filter(
             recipient=self.request.user
+        ).exclude(
+            actor_id__in=blocked_ids(self.request.user)
         ).order_by('-created_at', '-id')
         
         # Optional filter by notification type
@@ -1049,8 +1080,11 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # All active users are potentially viewable; serializer limits fields
-        return CustomUser.objects.filter(is_active=True)
+        # All active users are potentially viewable; serializer limits fields.
+        # Except the ones this person has blocked and the ones who have blocked them:
+        # a profile that still opens is a block that did nothing.
+        return CustomUser.objects.filter(is_active=True).exclude(
+            id__in=blocked_ids(self.request.user))
 
     @action(detail=False, methods=['get'])
     def by_username(self, request):
@@ -1059,7 +1093,10 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         if not username:
             return Response({'error': _('username is required')}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            user = CustomUser.objects.get(username=username, is_active=True)
+            # Through `get_queryset()`, not `CustomUser.objects`: this route bypassed
+            # the viewset's queryset entirely, so a blocked person stayed reachable by
+            # name even once their profile page was gone.
+            user = self.get_queryset().get(username=username)
             serializer = self.get_serializer(user)
             return Response(serializer.data)
         except CustomUser.DoesNotExist:

@@ -1901,7 +1901,12 @@ def test_the_notification_list_does_not_query_per_notification(make_user, api):
         response = api(user).get("/api/social/notifications/")
     assert response.status_code == 200
     assert len(response.json()["results"]) == 20
-    assert len(ctx.captured_queries) <= 5, \
+    # 5 -> 6, deliberately, when blocking arrived: `NotificationViewSet.get_queryset`
+    # now calls `moderation.services.blocked_ids`, which is ONE query for the whole
+    # page — a blocked person's like, comment or follow must not keep arriving as a
+    # notification. The claim this test makes is unchanged: the cost does not grow
+    # with the number of rows, and 20 rows still must not cost 20 queries.
+    assert len(ctx.captured_queries) <= 6, \
         f"{len(ctx.captured_queries)} queries for a page of 20"
 
 

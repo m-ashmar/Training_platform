@@ -15,6 +15,7 @@ from rest_framework.views import APIView
 from django.db import transaction
 from django.utils.translation import gettext as _
 from subscription.permissions import HasAIAdviceAccess
+from moderation.permissions import HasAIConsent
 
 from .models import ChatSession, ChatMessage, AITrainingData, UserBehaviorEvent, UserInsight, UsageCost
 from .serializers import (
@@ -37,6 +38,21 @@ class ChatMessageCursorPagination(CursorPagination):
 
 logger = logging.getLogger(__name__)
 
+#: What every AI-coach route asks for, declared ONCE so a view added later cannot
+#: quietly skip a gate.
+#:
+#: The order is the contract. `HasAIAdviceAccess` first, so a lapsed or frozen
+#: subscriber is told `no_entitlement` — the refusal they can act on — even when they
+#: have also never been asked for AI consent. `HasAIConsent` then answers 403
+#: `ai_consent_required` until the person has allowed the AI coach to read their data
+#: (`POST /api/v1/ai-consent/`); the WebSocket, where the assistant actually answers,
+#: refuses with the same code from `services/chat_service.py`.
+#:
+#: `GDPRDataDeleteView` deliberately carries NEITHER: deleting what the assistant holds
+#: about you has to keep working after the plan lapses and after consent is withdrawn —
+#: withdrawing consent is the commonest reason to ask for the deletion.
+AI_PERMISSIONS = [permissions.IsAuthenticated, HasAIAdviceAccess, HasAIConsent]
+
 
 class ChatSessionListView(generics.ListAPIView):
     """
@@ -46,7 +62,7 @@ class ChatSessionListView(generics.ListAPIView):
     Supports ?page_size=N for custom page size.
     """
     serializer_class = ChatSessionSerializer
-    permission_classes = [permissions.IsAuthenticated, HasAIAdviceAccess]
+    permission_classes = AI_PERMISSIONS
     pagination_class = ChatMessageCursorPagination
 
     def get_queryset(self):
@@ -60,7 +76,7 @@ class ChatSessionDetailView(generics.RetrieveAPIView):
     Get a single session. (Messages are retrieved separately via paginated endpoint).
     """
     serializer_class = ChatSessionDetailSerializer
-    permission_classes = [permissions.IsAuthenticated, HasAIAdviceAccess]
+    permission_classes = AI_PERMISSIONS
     lookup_field = 'session_id'
 
     def get_queryset(self):
@@ -76,7 +92,7 @@ class ChatMessageListView(generics.ListAPIView):
     Orders newest first (for cursor consistency)
     """
     serializer_class = ChatMessageSerializer
-    permission_classes = [permissions.IsAuthenticated, HasAIAdviceAccess]
+    permission_classes = AI_PERMISSIONS
     pagination_class = ChatMessageCursorPagination
 
     def get_queryset(self):
@@ -93,7 +109,7 @@ class FeedbackView(APIView):
 
     Submit 👍/👎 feedback for a specific assistant message.
     """
-    permission_classes = [permissions.IsAuthenticated, HasAIAdviceAccess]
+    permission_classes = AI_PERMISSIONS
 
     def post(self, request):
         serializer = FeedbackSerializer(data=request.data)

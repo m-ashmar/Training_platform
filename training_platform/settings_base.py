@@ -69,6 +69,8 @@ INSTALLED_APPS = [
     "policy",
     "mediakit",
     "chat",
+    # Reporting, blocking, the moderation queue and AI consent (moderation/models.py).
+    "moderation",
 
     # Third-party
     "rest_framework",
