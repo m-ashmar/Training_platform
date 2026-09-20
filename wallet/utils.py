@@ -71,3 +71,47 @@ def get_escrow_wallet():
     return wallet
 
 
+
+
+# --------------------------------------------------------------------- account number
+#: The shape the TopUp screen shows and the client reads out loud to an agent:
+#: "YG-204-781" (`screens/07-money/TopUp.png`).
+ACCOUNT_NUMBER_PREFIX = "YG"
+
+
+def account_number_for(user) -> str:
+    """The client's own account number, as the agent types it into their app.
+
+    Derived from the user id rather than stored, so it exists for every account that
+    has ever existed, cannot drift from the row it names, and needs no migration and
+    no uniqueness constraint of its own. It is an ADDRESS, not a secret — the same
+    kind of thing as an IBAN: knowing it lets someone PUT money in, never take any
+    out, and the top-up itself is still signed by the agent's key and capped by their
+    limits.
+
+    Grouped in threes from the right and padded to six digits, so the shortest id is
+    "YG-000-007" and an id past a million simply grows the left group.
+    """
+    n = int(getattr(user, "id", user))
+    digits = f"{n:06d}"
+    head, tail = digits[:-3], digits[-3:]
+    return f"{ACCOUNT_NUMBER_PREFIX}-{head}-{tail}"
+
+
+def user_id_from_account_number(value: str) -> int | None:
+    """The user id inside an account number, or None when it is not one.
+
+    Accepts the number as the screen shows it and as anyone would retype it: any
+    case, spaces or dashes anywhere, prefix optional. Returns None rather than
+    guessing, so a caller can fall through to its other ways of naming a client.
+    """
+    if not value:
+        return None
+    text = str(value).strip().upper().replace(" ", "").replace("-", "")
+    if text.startswith(ACCOUNT_NUMBER_PREFIX):
+        text = text[len(ACCOUNT_NUMBER_PREFIX):]
+    elif not text.isdigit():
+        return None
+    if not text.isdigit() or not text:
+        return None
+    return int(text)

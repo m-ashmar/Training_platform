@@ -47,6 +47,10 @@ urlpatterns = [
     # Payment Reconcile (verified fallback for missed webhooks; non-safe)
     path('v1/payments/<uuid:payment_id>/reconcile/', views.PaymentReconcileView.as_view(), name='payment-reconcile'),
 
+    # The receipt for a completed payment: JSON, or ?format=pdf. A record of a payment
+    # already made, so it is answered on every channel (see PaymentReceiptView).
+    path('v1/payments/<uuid:payment_id>/receipt/', views.PaymentReceiptView.as_view(), name='payment-receipt'),
+
     # Webhook Endpoints (for payment gateway notifications)
     path('webhook/<str:gateway_name>/', views.PaymentWebhookView.as_view(), name='payment-webhook'),
 ] 

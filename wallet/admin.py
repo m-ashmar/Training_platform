@@ -120,9 +120,20 @@ class AgentProfileAdmin(admin.ModelAdmin):
     #: The spend ceiling, the kill-switch and the IP allowlist are deliberate operator
     #: controls and stay editable; which account the profile belongs to does not.
     readonly_fields = ("user", "wallet_type")
-    list_display = ("user", "wallet_type", "daily_limit", "monthly_limit", "status")
-    list_filter = ("wallet_type", "status")
-    search_fields = ("user__email", "user__username")
+    list_display = ("user", "display_name", "city", "is_listed", "wallet_type",
+                    "daily_limit", "monthly_limit", "status")
+    list_filter = ("wallet_type", "status", "is_listed", "city")
+    search_fields = ("user__email", "user__username", "display_name", "city", "area")
+    fieldsets = (
+        (None, {"fields": ("user", "wallet_type", "status")}),
+        ("Limits and access", {"fields": ("daily_limit", "monthly_limit", "ip_allowlist")}),
+        # What a client sees on the TopUp screen. `is_listed` is the switch, and it is
+        # off until the agent has agreed to be published: `public_phone` is the shop
+        # line they gave us for that, never the number they registered with.
+        ("Public listing (TopUp screen)", {
+            "fields": ("is_listed", "display_name", "city", "area", "opening_hours",
+                       "public_phone")}),
+    )
 
 
 @admin.register(AgentAPIKey)

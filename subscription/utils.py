@@ -4,6 +4,33 @@ from django.db import transaction
 from datetime import timedelta
 from .models import Subscription, SubscriptionPlan, Payment, SubscriptionUsage, SubscriptionFeature
 
+
+def checkout_ttl() -> timedelta:
+    """How long a checkout stays open before the server closes it."""
+    from django.conf import settings
+
+    return timedelta(minutes=int(getattr(settings, 'PAYMENT_CHECKOUT_TTL_MINUTES', 60)))
+
+
+def checkout_expires_at(payment):
+    """When this checkout closes, or None once it is no longer open.
+
+    The Pay screen counts down to it ("الرمز صالح لمدة 71:42:10"): the reference is
+    payable until the poller expires the checkout, and until now nothing told the app
+    when that was — `POST v1/gateways/` answered `expires_at` straight out of the
+    gateway's response, and the ShamCash adapter has never set that key, so the field
+    was null on every checkout ever opened and the countdown had no source.
+
+    Derived from the same two values `subscription.poll_open_payments` decides on, so
+    the screen and the server cannot disagree. A payment that is finished — completed,
+    failed, cancelled, expired, refunded — has no deadline left to show.
+    """
+    from .models import OPEN_PAYMENT_STATUSES
+
+    if payment.status not in OPEN_PAYMENT_STATUSES or payment.created_at is None:
+        return None
+    return payment.created_at + checkout_ttl()
+
 def create_trial_subscription(user, plan_id, trial_days=7):
     """
     Create a trial subscription for a user.

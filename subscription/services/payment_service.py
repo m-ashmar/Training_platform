@@ -124,6 +124,10 @@ class PaymentService:
                 payment.gateway_response = verified_data['gateway_data']
             if not payment.invoice_number:
                 payment.invoice_number = cls._generate_invoice_number()
+            # The date on the receipt. Written once, here, and never again — see the
+            # field's comment for why `updated_at` cannot answer this.
+            if payment.completed_at is None:
+                payment.completed_at = timezone.now()
 
             # --- Activate / extend the subscription, and record what that bought ---
             payment.covers_from, payment.covers_until = cls._activate_subscription(
@@ -142,6 +146,39 @@ class PaymentService:
         transaction.on_commit(lambda: payment_completed.send(
             sender=cls, payment=payment, subscription=payment.subscription))
         return payment
+
+    @classmethod
+    def ensure_invoice_number(cls, payment: Payment) -> str:
+        """The invoice number of a completed payment, minting it once if it has none.
+
+        A receipt has to carry a number that is STABLE (two reads of the same payment
+        are the same document) and NEVER REUSED. `complete_payment` mints one for every
+        payment it completes, so the only rows that reach here without one were
+        completed before the column existed — but a receipt endpoint that read
+        `payment.invoice_number` and generated a fallback of its own would be a second
+        generator, and two generators is how a number gets reused. There is one, the
+        private `_generate_invoice_number` below, and this is the only door to it
+        outside completion.
+
+        Idempotent and race-safe: the row is locked and re-read, so two concurrent
+        receipt requests for the same payment mint at most one number and both return
+        it. Refuses anything that is not completed — an unpaid checkout has no invoice.
+        The payment's STATE is not touched.
+        """
+        if payment.status != 'completed':
+            raise InvalidPaymentTransition(
+                f"Payment {payment.id} is {payment.status}, not completed: no invoice")
+        if payment.invoice_number:
+            return payment.invoice_number
+        with transaction.atomic():
+            locked = Payment.objects.select_for_update().get(id=payment.id)
+            if not locked.invoice_number:
+                locked.invoice_number = cls._generate_invoice_number()
+                locked.save(update_fields=['invoice_number', 'updated_at'])
+                logger.info("Minted invoice %s for payment %s completed before the "
+                            "column existed", locked.invoice_number, locked.id)
+            payment.invoice_number = locked.invoice_number
+        return payment.invoice_number
 
     @classmethod
     def redeliver_payout(cls, payment: Payment) -> bool:

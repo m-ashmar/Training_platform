@@ -46,6 +46,20 @@ drf-yasg==1.21.8
 # Used by manage.py and settings_local.py to load a local .env file.
 python-dotenv==1.0.1
 
+# PDF receipts (subscription/receipts.py). Every confirmed payment has a receipt, and
+# Arabic is the primary language it is written in — which takes three pieces, not one:
+#   fpdf2           the document itself. Pure Python, ~240 KB, no system libraries
+#                   (WeasyPrint needs cairo + pango in the image, reportlab is a much
+#                   larger C extension), and it embeds and subsets a TrueType font.
+#   arabic-reshaper letter joining forms. Without it the PDF shows detached letters.
+#   python-bidi     the Unicode bidirectional algorithm, so a mixed line such as
+#                   "Premium · 30 يوماً" comes out in the order a reader expects.
+# The font is Noto Naskh Arabic, in subscription/fonts/ under the OFL — see the module
+# docstring for why the app's own brand font cannot render this document.
+fpdf2==2.8.2
+arabic-reshaper==3.0.0
+python-bidi==0.6.6
+
 # Image Processing
 Pillow==11.0.0
 

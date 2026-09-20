@@ -75,9 +75,15 @@ class SubscriptionPlan(RowValidationMixin, models.Model):
         validators=[MinValueValidator(1, _("Duration must be at least 1 day"))]
     )
     is_active = models.BooleanField(default=True, db_index=True)
+    #: The plan the Plans screen badges "الأكثر اختياراً" (most chosen). An operator
+    #: sets it; the app must not hard-code which plan is highlighted, because the
+    #: catalogue is data (`screens/07-money/README.md`: "Plans and features come from
+    #: the API, never hard-coded"). More than one may carry it — the app decides what
+    #: to do with that; nothing here depends on it being unique.
+    is_featured = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     # Feature flags
     has_diet_access = models.BooleanField(default=False, db_index=True)
     has_routine_access = models.BooleanField(default=False, db_index=True)
@@ -366,6 +372,13 @@ class Payment(RowValidationMixin, models.Model):
     gateway_event_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     # Invoice number generated exactly once, when the payment completes.
     invoice_number = models.CharField(max_length=64, blank=True, null=True, db_index=True)
+
+    # When the money was confirmed — the DATE ON THE RECEIPT, and the only field that
+    # answers it. Stamped once by PaymentService and never written again, so a later
+    # refund (which does move `updated_at`) cannot change the date of a receipt already
+    # issued. NULL on rows completed before this column existed; `subscription.receipts`
+    # falls back to `updated_at` for those, which is the best evidence they carry.
+    completed_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     # The access this payment bought, stamped when it completes. A refund takes back
     # exactly this much. It used to take back `plan.duration_days` whenever any other

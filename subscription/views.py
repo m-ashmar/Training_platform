@@ -4,11 +4,13 @@ from rest_framework import viewsets, status, permissions, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.renderers import BaseRenderer, BrowsableAPIRenderer, JSONRenderer
 
 from training_platform.query_params import body_dict
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Prefetch
 from django.utils.translation import gettext as _
 from django.core.exceptions import ValidationError
 from django.http import Http404, HttpResponse
@@ -149,7 +151,13 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         """Optimized queryset with select_related and prefetch_related"""
         return Subscription.objects.filter(
             user=self.request.user
-        ).select_related('plan', 'user').prefetch_related('payments', 'usage')
+        ).select_related('plan', 'user').prefetch_related(
+            # ...__plan too: `PaymentSerializer.item` reads `payment.subscription.plan`
+            # for the "what was bought" line, which is two hops past a bare
+            # `prefetch_related('payments')` — two extra queries per payment row.
+            Prefetch('payments',
+                     queryset=Payment.objects.select_related('subscription__plan')),
+            'usage')
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -431,12 +439,76 @@ class SubscriptionUsageViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for subscription usage tracking"""
     serializer_class = SubscriptionUsageSerializer
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get_queryset(self):
         """Optimized queryset with select_related"""
         return SubscriptionUsage.objects.filter(
             subscription__user=self.request.user
         ).select_related('subscription', 'feature')
+
+    @action(detail=False, methods=['get'], url_path='today')
+    def today(self, request):
+        """`GET /api/subscription/v1/usage/today/` — "استهلاكك اليوم": what the
+        caller has used of each daily allowance, and out of how much.
+
+        The Subscription screen draws one bar per row. The list endpoint above cannot
+        serve it: it returns only allowances that have already been spent at least
+        once (no row exists until the first use), and it carries no allowance that is
+        not stored as a `SubscriptionUsage` row at all — the AI coach's daily messages
+        are counted in the rate-limit cache, not in that table.
+
+        Nothing here is a price or an offer, so it is answered identically on every
+        `X-App-Channel`. Purely a read: no usage row is created by opening the screen.
+
+        200::
+
+            {"quotas": [
+               {"feature": "daily_meals",  "used": 2,  "limit": 5,  "resets_at": ...},
+               {"feature": "ai_messages",  "used": 12, "limit": 50, "resets_at": ...}]}
+
+        `limit: 0` means unlimited. `daily_meals` is the diet plan builds the plan
+        allows in the client's own calendar day; `ai_messages` appears only for a plan
+        that includes the AI coach and is the SAME counter the WebSocket enforces
+        (`ai_assistant.consumers`), so the number on the screen is the number the user
+        will hit. A caller with no live subscription gets `{"quotas": []}` — an empty
+        screen, not an error: there is nothing to have used.
+        """
+        from datetime import datetime, time, timedelta
+
+        from django.conf import settings as dj_settings
+
+        from .quota import QuotaUnavailable, snapshot
+
+        quotas = []
+        try:
+            row = snapshot(request.user, 'daily_meals')
+        except QuotaUnavailable:
+            return Response({'quotas': []})
+        quotas.append({'feature': 'daily_meals', 'used': row['used'],
+                       'limit': row['limit'], 'resets_at': row['period_end']})
+
+        subscription = request.user.subscription
+        if subscription.has_ai_advice:
+            from training_platform.cache import ratelimit_cache
+
+            limit = getattr(dj_settings, 'AI_ASSISTANT_CONFIG', {}).get(
+                'MAX_MESSAGES_PER_DAY', 50)
+            # The consumer's own key, to the character: a screen that counted
+            # differently from the thing that refuses would be worse than no screen.
+            today = timezone.localdate()
+            used = 0
+            try:
+                used = int(ratelimit_cache().get(
+                    f"ai_chat_limit:{request.user.id}:{today.isoformat()}") or 0)
+            except Exception:
+                logger.warning("could not read the AI message counter for user %s",
+                               request.user.id, exc_info=True)
+            resets_at = timezone.make_aware(
+                datetime.combine(today + timedelta(days=1), time.min),
+                timezone.get_current_timezone())
+            quotas.append({'feature': 'ai_messages', 'used': used, 'limit': limit,
+                           'resets_at': resets_at})
+        return Response({'quotas': quotas})
 
 class SubscriptionManagementView(APIView):
     """Admin view for subscription management with comprehensive error handling"""
@@ -934,13 +1006,20 @@ class PaymentGatewayView(APIView):
                 logger.info(f"Payment initiated: {payment.id} via {gateway_name}")
 
             resp = payment.gateway_response or {}
+            from .utils import checkout_expires_at
+
             return Response({
                 'success': True,
                 'payment_id': str(payment.id),
                 'reference': payment.gateway_transaction_reference,
                 'payment_url': resp.get('payment_url'),
                 'instructions': resp.get('instructions'),
-                'expires_at': resp.get('expires_at')
+                # When the reference stops being payable — what the Pay screen counts
+                # down to. The gateway's own key first, for a hosted checkout that
+                # sets one; otherwise OUR window, which is the one the poller
+                # enforces. It used to be the gateway's key alone, and the ShamCash
+                # adapter has never set it, so this was null on every checkout.
+                'expires_at': resp.get('expires_at') or checkout_expires_at(payment),
             })
 
         except PaymentGatewayError as e:
@@ -976,6 +1055,8 @@ class PaymentStatusView(APIView):
         except Payment.DoesNotExist:
             return Response({'error': _('Payment not found')}, status=status.HTTP_404_NOT_FOUND)
 
+        from .utils import checkout_expires_at
+
         return Response({
             'success': True,
             'payment_id': str(payment.id),
@@ -986,6 +1067,10 @@ class PaymentStatusView(APIView):
             'invoice_number': payment.invoice_number,
             'created_at': payment.created_at,
             'updated_at': payment.updated_at,
+            # The Confirming screen polls here while it is open, and the Pay screen
+            # counts down to this. Null once the checkout is no longer open.
+            'expires_at': checkout_expires_at(payment),
+            'reference': payment.gateway_transaction_reference,
         })
 
 
@@ -1044,3 +1129,111 @@ class PaymentReconcileView(APIView):
             'status': payment.status,
             'invoice_number': payment.invoice_number,
         })
+
+
+class ReceiptPDFRenderer(BaseRenderer):
+    """Lets `?format=pdf` mean what it says.
+
+    DRF negotiates the response format BEFORE the handler runs, and a `format` it has
+    no renderer for is answered `404` from inside `initial()` — so a receipt view that
+    simply returned a PDF never got the chance to: every `?format=pdf` was a 404 that
+    looked like a missing payment. The bytes are already a PDF by the time they reach
+    here, so this renderer only declares that the format exists and hands them through.
+    """
+    media_type = 'application/pdf'
+    format = 'pdf'
+    charset = None
+    render_style = 'binary'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class PaymentReceiptView(APIView):
+    """`GET /api/subscription/v1/payments/{payment_id}/receipt/` — the receipt for one
+    completed payment.
+
+    Headers: `Authorization`, `Accept-Language` (the document is written in the active
+    language; Arabic is the primary one). **No `X-App-Channel` is required and none is
+    read.**
+
+    Which side of the store line this is on: a receipt is a RECORD OF A PAYMENT ALREADY
+    MADE, not a sale. It carries no price for anything not yet bought, no purchase
+    button, no payment instruction and no link to the web hub — only what the customer
+    already paid and when. `require_purchase_allowed` is therefore deliberately NOT
+    called here, and the answer is byte-identical on `apk`, `play`, `ios` and `web`:
+    spec §3 says of a store build "the user's plan status, expiry date and history may
+    be shown", and history without its receipts is not history. Behaviour depends on the
+    build in no way at all, which is the strongest form of rule zero.
+
+    `?format=pdf` returns the same receipt as an A5 PDF
+    (`Content-Type: application/pdf`, `Content-Disposition: attachment`), in Arabic when
+    Arabic is active. Anything else, including no query at all, returns JSON.
+
+    200 (JSON)::
+
+        {"receipt": {
+            "payment_id": "<uuid>",
+            "invoice_number": "INV-2026-0A1B2C3D4E5F",  stable; never reused
+            "issued_at": "2026-09-19T14:12:00Z",        when the money was confirmed
+            "status": "paid",
+            "item": {"plan_id", "plan_name", "plan_type", "duration_days",
+                     "money_type"},                     draw as "Premium · 30 يوماً"
+            "amount": "2500.00", "currency": "SYP",
+            "method": {"code": "shamcash", "name": "<translated>"},
+            "reference": "<the gateway's reference, or "">",
+            "covers": {"from": ..., "until": ...},      the access it bought
+            "payer": {"id", "name", "email"},
+            "platform": {"name", "legal_name", "contact_email", "website"},
+            "plan_duration_days": 30,
+            "pdf_url": "<this path>?format=pdf"}}
+
+    Errors (branch on `code`):
+
+    | HTTP | `code` | when |
+    |---|---|---|
+    | 404 | `not_found` | no such payment, or it belongs to someone else — the same answer either way, so the endpoint cannot be used to discover another customer's payment ids |
+    | 404 | `receipt_not_available` | the payment exists and is the caller's, but is not `completed`: a checkout nobody paid has no receipt |
+
+    Who may read it: the payer, and a superuser. A trainer is not a party to their
+    client's plan payment and gets `not_found`.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    #: `pdf` has to be a format DRF knows, or content negotiation refuses the request
+    #: before this view runs — see `ReceiptPDFRenderer`.
+    renderer_classes = [JSONRenderer, BrowsableAPIRenderer, ReceiptPDFRenderer]
+
+    def get(self, request, payment_id):
+        from .receipts import receipt_data, render_pdf
+
+        qs = Payment.objects.select_related('subscription', 'subscription__plan',
+                                            'subscription__user')
+        if not getattr(request.user, 'is_superuser', False):
+            qs = qs.filter(subscription__user=request.user)
+        try:
+            payment = qs.get(id=payment_id)
+        except (Payment.DoesNotExist, ValidationError, ValueError):
+            # Identical to "not yours": an id that exists must not answer differently
+            # from one that does not.
+            return Response({'error': _('Payment not found'), 'code': 'not_found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        if payment.status != 'completed':
+            return Response(
+                {'error': _('This payment is not complete, so it has no receipt yet.'),
+                 'code': 'receipt_not_available', 'status': payment.status},
+                status=status.HTTP_404_NOT_FOUND)
+
+        # One generator for invoice numbers, and it lives in PaymentService.
+        invoice_number = PaymentService.ensure_invoice_number(payment)
+        data = receipt_data(payment, invoice_number=invoice_number)
+
+        if request.query_params.get('format') == 'pdf':
+            pdf = render_pdf(data)
+            response = HttpResponse(pdf, content_type='application/pdf')
+            response['Content-Disposition'] = (
+                f'attachment; filename="{invoice_number or payment.id}.pdf"')
+            return response
+
+        data['pdf_url'] = request.build_absolute_uri(f'{request.path}?format=pdf')
+        return Response({'receipt': data})
