@@ -2360,10 +2360,6 @@ msgstr "انتهى التدريب بينك وبين %(name)s لأن الرسوم
 msgid "Only clients have coaching."
 msgstr "التدريب للمتدربين فقط."
 
-#: home/views.py
-msgid "Only clients have a home screen."
-msgstr "الشاشة الرئيسية للمتدربين فقط."
-
 #: users/views.py
 msgid "The note must be text."
 msgstr "يجب أن تكون الملاحظة نصاً."

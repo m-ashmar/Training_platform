@@ -416,29 +416,43 @@ plan without `daily_calories` answers 400 `client_activity_level_required`.
 
 ### Home (server-driven)
 
-The screen the app opens on. The server answers an ORDERED list of typed sections and the
-app renders what it is handed: it must cope with any subset, in any order, and skip a
-`type` it does not know. `{"as_of", "refresh_after_seconds", "sections": [{"type",
-"data"}]}`, and a section with nothing to say is left out rather than sent empty. The
-closed set of types is `greeting`, `notices`, `today`, `plan`, `week`, `strength`,
-`achievements`, `coach` — every `data` shape, every `code` and what differs by build are
+The screen the app opens on, and the fourth layer of the design canvas's build guide.
+The server answers an ORDERED list of typed sections and the app renders what it is
+handed: it must cope with any subset, in any order, and SKIP a `type` it does not know,
+which is what lets an old build survive a new section.
+
+`{"role", "as_of", "refresh_after_seconds", "sections": [{"type", "data"}]}`. A section
+is `{"type", "data"}` and nothing else, and one with nothing to say is left out rather
+than sent empty. `role` is the account's shell (`client`, `trainer`, `agent`, `admin` —
+`admin` is the operator); only the client shell is designed, so the other three get
+`"sections": []` today rather than a refusal.
+
+The closed set of types: `workout_hero`, `week_stats`, `nutrition_today`,
+`trainer_message`, `ai_advice`, `challenge_rank`, `find_trainer_hero`,
+`setup_checklist`, `featured_trainers`, `ready_programs`, `media_banner`. The two home
+artboards are two lists out of that one set — a client with no coach gets the first-day
+sections — and every `data` shape, every code and everything that differs by build is
 written out in the docstring of `home/views.py HomeView`, which is the contract.
 
-Nothing here is a rendered sentence: sections carry codes and numbers and the app writes
-the Arabic or the English. Nothing here carries a price, an amount or a web-hub link on
-any build. `notices` is the only section that may be urgent; its codes are
-`coaching_frozen`, `coaching_unpaid`, `coaching_ended`, `coaching_renews_soon`,
-`coaching_ending`, `subscription_ended`, `subscription_ending_soon`. The one behaviour
-that differs by build: the "find a coach" prompt (`coach` `{"state": "none"}`) is sent
-only to a build with `can_pay_coaching_in_app` — inviting someone to hire a trainer is a
-sale. `week` and `strength` are the same numbers, from the same cache entry, as
-`GET /api/routine/v1/analytics/recent-progress/`.
+Nothing here is a rendered sentence: sections carry codes and numbers (muscle keys,
+`cta.state`, meal states, a refusal code, an advice code) and the app writes the Arabic
+or the English. What differs by build, and by nothing else: `ready_programs` and
+`media_banner` are ABSENT on a build whose `can_show_prices` is off (`play`, `ios`, and
+a caller that declares no channel), and the `coaching_price` / `money_type` keys inside
+`featured_trainers` follow `can_show_coaching_prices` exactly as on
+`GET /api/v1/trainers/matches/`. Nothing else in the payload carries a price, an amount
+or a link to the web hub, on any build.
+
+`week_stats` and the streak are the same numbers, from the same cache entry, as
+`GET /api/routine/v1/analytics/recent-progress/`; `trainer_message` reads `chat/` and
+reports the same unread count as `GET /api/v1/chat/conversations/`; `ai_advice` appears
+only once the person has given AI consent (`/api/v1/ai-consent/`). The payload is cached
+per user, per build and per language for 120 s and retired at once when a workout
+completes, a day closes or a chat message arrives.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
-| `GET` | `/api/v1/home` | auth (client) | `HomeView` |
-
-403 `clients_only` for a trainer, agent or admin: they have their own screens.
+| `GET` | `/api/v1/home` | auth | `HomeView` |
 
 ### Notifications
 

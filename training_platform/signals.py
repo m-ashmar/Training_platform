@@ -157,6 +157,36 @@ def bust_recent_progress_cache_on_day_outcome(sender, instance, **kwargs):
     _txn.on_commit(_bust)
 
 
+@receiver(post_save, sender='chat.Message')
+def bust_home_on_a_new_message(sender, instance, created, **kwargs):
+    """A coach's message is a home section (`trainer_message`), so it must not wait out
+    the home cache's two minutes. Only the home entry is retired — the week is not
+    about chat — and only for the CLIENT, whose screen carries the card.
+
+    Same guarded, deferred bust as above: a cache that cannot be reached must never
+    fail the message it describes."""
+    if not created:
+        return
+    from django.db import transaction as _txn
+
+    def _bust():
+        try:
+            from chat.models import Conversation
+
+            client_id = (Conversation.objects
+                         .filter(pk=instance.conversation_id)
+                         .values_list('client_id', flat=True).first())
+            if client_id:
+                bust_home(client_id)
+        except Exception:
+            logger.warning(
+                "Could not bust the home cache for conversation %s; it will expire on TTL",
+                instance.conversation_id, exc_info=True,
+            )
+
+    _txn.on_commit(_bust)
+
+
 # ---------------------------------------------------------------------------
 # Orphaned upload cleanup
 # ---------------------------------------------------------------------------

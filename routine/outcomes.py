@@ -484,6 +484,22 @@ def adherence(user, start, end, today=None):
     }
 
 
+def volume_kg(user, start, end) -> float:
+    """The weight this person actually moved in a window, in kilograms. One aggregate.
+
+    The same figure `adherence` reports as `volume_kg.logged`, counted the same way —
+    only days whose reps are known, because a day logged whole carries no weight. It
+    exists on its own so the home screen can put last week beside this one for a change
+    figure without paying for a second full adherence block.
+    """
+    from .models import DayOutcome
+
+    total = (DayOutcome.objects
+             .filter(user=user, date__gte=start, date__lte=end, reps_known=True)
+             .aggregate(moved=Sum('logged_volume_kg'))['moved'])
+    return round(total or 0.0, 2)
+
+
 def week_totals(user_ids, start, end) -> dict:
     """`{user_id: {planned, logged, missed, perfect_days, days}}` for a list of clients,
     in one query. The trainer's roster shows a row per client, so this must not be a

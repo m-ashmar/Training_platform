@@ -24,7 +24,7 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 6 | Trainer matching with reasons (+ roster and profile endpoints) | L | DONE |
 | 7 | Per-trainer exercise media library | L | TODO (needs 2) |
 | 8 | Two-way chat: voice, image, video, program cards, report, block | XL | TEXT DONE (`chat` app, branch `build/chat`); media, program cards, report/block TODO |
-| 9 | Server-driven home + day timeline | L | TODO (needs 2, 8 for voice) |
+| 9 | Server-driven home + day timeline | L | Home DONE (2026-09-20); day timeline TODO |
 | 10 | Note to the trainer on a request | S | DONE (with BACKEND_BUGS B-008) |
 | 11 | Effort rating 1-5, progression suggestion | L | DONE (2026-09-20) |
 | 12 | Personal records (always 0 today) | M | `prs` DONE (BACKEND_BUGS B-013); records on the completion response TODO |
@@ -239,13 +239,30 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 
 ## 9. Server-driven home
 
-- **Today:** no home endpoint; each section's source exists separately (analytics
-  summary/streaks, diet progress and advice, notifications, challenges, public templates).
-- **Must change:** `GET /api/v1/home` returning `{sections: [{type, id, data}]}` from the
-  closed set in the build guide, each section built independently so a locked or failing
-  one is dropped, days in the user's `preferred_timezone`, `ready_programs` and
-  `media_banner` filtered by the capability flags. Optional `HomeSection` table for
-  operator ordering. `trainer_message` voice needs item 8.
+- **Built (2026-09-20):** `GET /api/v1/home` (`home/views.py`, whose docstring is the
+  contract; builders in `home/sections.py` and `home/first_day.py`). An ordered list of
+  `{type, data}` from the build guide's closed set — `workout_hero`, `week_stats`,
+  `nutrition_today`, `trainer_message`, `ai_advice`, `challenge_rank`,
+  `find_trainer_hero`, `setup_checklist`, `featured_trainers`, `ready_programs`,
+  `media_banner` — with `role` at the top level. Each section is built independently
+  and one with nothing to say is dropped. `ready_programs` and `media_banner` are left
+  out entirely on a build whose `can_show_prices` is off; the coaching fee inside
+  `featured_trainers` follows `can_show_coaching_prices`. Cached per user, per build
+  and per language for 120 s, retired by the same signals as the week plus a new chat
+  message. Query count asserted in `tests/test_home.py`.
+- **Decisions taken, and what they cost:** no `id` on a section (the list is ordered and
+  each type appears once); days are the SERVER's, not the account's `preferred_timezone`,
+  because every training date, meal date and outcome is stored that way; the week strip
+  starts on Saturday, as the artboard draws it; the routine day is counted from
+  `Routine.start_date` over `Routine.days`, there being no column that says which
+  calendar day is which routine day.
+- **Still to do:** the day timeline (the artboard interleaves the workout into the
+  meal list; `nutrition_today` carries meals only). `ready_programs` has no price, no
+  length in weeks, no equipment answer and no free-trial flag until routine products
+  land (payments plan step 10) — the section carries `trial: false` on every card so
+  the free card can join it additively. `trainer_message` carries `kind: "text"` until
+  attachments land (item 8), when `kind: "voice"` adds `audio_url`, `duration_seconds`
+  and `state`. No `HomeSection` table: ordering is `home/views.py SECTION_ORDER`.
 
 ## 10. Note to the trainer on a request
 

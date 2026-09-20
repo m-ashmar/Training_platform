@@ -1,17 +1,18 @@
-"""The home screen is decided by the server (BACKEND_DELTA item 9).
+"""The home screen is decided by the server (BACKEND_DELTA item 9, BuildGuide layer 4).
 
-`GET /api/v1/home` answers an ORDERED list of typed sections and the app renders what it
-is handed. What is protected here: a person with nothing still gets a usable screen, a
-full one gets every section in the documented order, a frozen coaching keeps its day
-visible and unstartable (the owner, 2026-09-19), a build that may not sell is never sent
-a section that sells, the cache separates builds and languages and dies when a day
-closes, and one home load costs a bounded number of queries.
+`GET /api/v1/home` answers an ORDERED list of typed sections from the design canvas's
+closed set, and the app renders what it is handed. What is protected here: a person
+with nothing still gets a usable screen, a full one gets every section in the
+documented order, a frozen coaching keeps its day visible and unstartable (the owner,
+2026-09-19), a build that may not sell never receives the two sections that sell, a
+role without a designed shell gets an empty list rather than someone else's screen,
+the cache separates builds and languages and dies when a day closes or a message
+arrives, and one home load costs a bounded number of queries.
 
 See home/views.py — its docstring is the contract.
 """
 import uuid
-from datetime import timedelta
-from unittest import mock
+from datetime import time, timedelta
 
 import pytest
 from django.utils import timezone
@@ -24,13 +25,16 @@ pytestmark = pytest.mark.django_db
 HOME = "/api/v1/home"
 JSON = "application/json"
 
-#: What one cold home load may cost. Measured, then rounded up a little: 15 queries for
-#: a client with nothing, 28 for one with a coach, a closed day, a plan and a badge, 34
-#: for the same person with six exercises and three days of history — the strength
-#: headline reads one query per exercise it ranks (`routine/recent.py STRENGTH_LIMIT`),
-#: which is the only part that grows and is bounded at six. A ceiling, not a target; the
-#: test beside it also grows the data and asserts the count does not follow.
-QUERY_CEILING = 36
+#: What one cold home load may cost. Measured on this fixture, then rounded up a
+#: little: 24 queries for a client with nothing, 29 for the first-day list (the trainer
+#: matcher is the expensive part), 38 for a full active client — coach, closed day,
+#: plan, meals, message, challenge and smart note — and 43 for that same person with
+#: six times the training, five more meals and five more messages. A ceiling, not a
+#: target: the test beside it also grows the data and asserts the count does not
+#: follow, which is the part that catches an N+1. The only thing that grows with data
+#: at all is the strength headline, one query per exercise it ranks, bounded at six
+#: (`routine/recent.py STRENGTH_LIMIT`).
+QUERY_CEILING = 48
 
 
 @pytest.fixture(autouse=True)
@@ -101,7 +105,8 @@ def _program(make_user, tag, *, trainer=None, client=None, exercises=1, sets=3, 
     routine = Routine.objects.create(name=f"home {tag}", created_by=trainer, days=days)
     rows = []
     for index in range(exercises):
-        exercise = Exercise.objects.create(name=f"home ex {tag} {index}", created_by=trainer)
+        exercise = Exercise.objects.create(name=f"home ex {tag} {index}",
+                                           created_by=trainer, target_muscle="Triceps")
         rows.append(RoutineExercise.objects.create(routine=routine, exercise=exercise, day=1,
                                                    order=index + 1, sets=sets, reps=reps,
                                                    weight=weight))
@@ -131,10 +136,10 @@ def _close_day(api, client, routine, *, day=1):
                             content_type=JSON)
 
 
-def _subscribe(client, tag, *, ends_in=timedelta(days=20), status="active"):
+def _subscribe(client, tag, *, ends_in=timedelta(days=20), status="active", ai=True):
     from subscription.models import Subscription
 
-    plan = _plan(f"home {tag}", has_diet_access=True)
+    plan = _plan(f"home {tag}", has_diet_access=True, has_ai_advice=ai)
     sub = Subscription.objects.create(user=client, plan=plan, status="active",
                                       source="shamcash")
     Subscription.objects.filter(pk=sub.pk).update(
@@ -143,40 +148,93 @@ def _subscribe(client, tag, *, ends_in=timedelta(days=20), status="active"):
     return Subscription.objects.get(pk=sub.pk)
 
 
-def _diet_day(client, *, calories=2000.0, eaten=800.0):
-    from diet.models import DailyProgress, DietPlan
+def _diet_day(client, *, calories=2300.0, eaten=1420.0, meals=2, days_back=6):
+    """A plan covering today, two meals, and a week of tracked days behind it."""
+    from diet.models import DailyProgress, DietPlan, Meal
 
     today = timezone.localdate()
     plan = DietPlan.objects.create(user=client, goal="Maintain", daily_calories=calories,
-                                   target_protein=150.0, target_carbs=200.0, target_fat=60.0,
-                                   start_date=today - timedelta(days=1),
+                                   target_protein=160.0, target_carbs=240.0, target_fat=70.0,
+                                   start_date=today - timedelta(days=days_back),
                                    end_date=today + timedelta(days=5), duration_weeks=1)
-    DailyProgress.objects.create(user=client, diet_plan=plan, date=today,
-                                 meals_completed=1, total_meals=4,
-                                 calories_consumed=eaten, protein_consumed=60.0,
-                                 carbs_consumed=80.0, fat_consumed=20.0,
-                                 target_calories=calories)
+    Meal.objects.create(diet_plan=plan, date=today, meal_type="Breakfast",
+                        name="Oats with milk", description="oats, milk, banana",
+                        scheduled_time=time(8, 0), is_completed=True)
+    Meal.objects.create(diet_plan=plan, date=today, meal_type="Dinner",
+                        name="Grilled chicken", description="chicken and freekeh",
+                        scheduled_time=time(23, 59))
+    for back in range(days_back + 1):
+        DailyProgress.objects.create(
+            user=client, diet_plan=plan, date=today - timedelta(days=back),
+            meals_completed=meals, total_meals=4,
+            calories_consumed=eaten, protein_consumed=96.0,
+            carbs_consumed=150.0, fat_consumed=41.0,
+            target_calories=calories, target_protein=160.0,
+            target_carbs=240.0, target_fat=70.0)
     return plan
 
 
-def _award(client, tag, *, read=False):
-    """An achievement earned, with the notification that makes it "new"."""
-    from achievements.models import Achievement, UserAchievement
-    from notifications.models import Notification
+def _consent(client):
+    from moderation.models import AIConsent
 
-    badge = Achievement.objects.create(key=f"home_{tag}", name=f"Home {tag}",
-                                       description="earned in a test", category="milestone",
-                                       points=25)
-    UserAchievement.objects.create(user=client, achievement=badge)
-    Notification.objects.create(recipient=client, event_type="achievement_awarded",
-                                related_object_id=f"achievements:{badge.pk}",
-                                is_read=read, event_id=uuid.uuid4(),
-                                deduplication_key=uuid.uuid4().hex)
-    return badge
+    return AIConsent.objects.create(user=client, granted_at=timezone.now(),
+                                    policy_version="1")
+
+
+def _message(trainer, client, body="Great week. Add 2.5 kg on the press today."):
+    from chat.models import Conversation, Message
+
+    thread, _created = Conversation.objects.get_or_create(trainer=trainer, client=client)
+    return Message.objects.create(conversation=thread, sender=trainer, body=body)
+
+
+def _challenge(client, tag, *, others=2, value=12.0):
+    """A running challenge this client is in, with `others` people ahead of them."""
+    from social.models import Challenge, ChallengeParticipation
+
+    now = timezone.now()
+    challenge = Challenge.objects.create(
+        title=f"home {tag}", description="a test challenge", challenge_type="workout_count",
+        creator=client, start_date=now - timedelta(days=2), end_date=now + timedelta(days=5),
+        status="active", target_value=20.0, unit="workouts", participants_count=others + 1)
+    ChallengeParticipation.objects.create(user=client, challenge=challenge,
+                                          current_value=value, progress_percentage=60.0)
+    for index in range(others):
+        rival = type(client).objects.create_user(
+            email=f"rival_{tag}_{index}@gate.test", username=f"rival_{tag}_{index}",
+            password="Xx!23456")
+        ChallengeParticipation.objects.create(user=rival, challenge=challenge,
+                                              current_value=value + index + 1)
+    return challenge
+
+
+def _banner():
+    from mediakit.models import MediaAsset
+    from mediakit.slots import APP_OWNER_ID, OwnerType
+
+    return MediaAsset.objects.create(
+        owner_type=OwnerType.APP, owner_id=APP_OWNER_ID, slot="app.banner",
+        original="mediakit/banner.jpg", file_1x="mediakit/banner_1x.webp",
+        file_2x="mediakit/banner_2x.webp", alt_ar="لافتة", alt_en="banner",
+        width=1440, height=617, processing_state="ready")
+
+
+def _public_template(trainer, tag):
+    from routine.models import Exercise, RoutineTemplate, RoutineTemplateExercise
+
+    template = RoutineTemplate.objects.create(
+        name=f"ready {tag}", description="a ready programme", goal="Strength",
+        days=3, created_by=trainer, is_public=True)
+    exercise = Exercise.objects.create(name=f"tmpl ex {tag}", created_by=trainer)
+    RoutineTemplateExercise.objects.create(template=template, exercise=exercise,
+                                           day=1, order=1, sets=3, reps=10)
+    return template
 
 
 def _freeze(relation, **ago):
     """The month ended and the hourly run could not charge the next one."""
+    from unittest import mock
+
     from users.coaching import renew
 
     first = _end_month(relation, **ago)
@@ -207,77 +265,86 @@ def test_a_client_with_nothing_gets_a_home_that_works(make_user, api):
 
     body = _home(api, person)
 
-    assert set(body) == {"as_of", "refresh_after_seconds", "sections"}
-    assert body["refresh_after_seconds"] == 120
+    assert set(body) == {"role", "as_of", "refresh_after_seconds", "sections"}
+    assert (body["role"], body["refresh_after_seconds"]) == ("client", 120)
     for section in body["sections"]:
         assert set(section) == {"type", "data"}, section
         assert section["data"], f"{section['type']} was sent empty"
-    # Who they are, and the way to find a coach. Nothing else has anything to say.
-    assert _types(body) == ["greeting", "coach"]
-    assert _data(body, "greeting")["streak"] == {"current": 0, "longest": 0}
-    assert "last_break" not in _data(body, "greeting")
-    assert _data(body, "coach") == {"state": "none"}
+    # The only thing the server can honestly say to someone with nothing.
+    assert _types(body) == ["setup_checklist"]
+    checklist = _data(body, "setup_checklist")
+    assert checklist["current"] == "profile"
+    assert [step["state"] for step in checklist["steps"]] == ["current", "todo", "todo"]
 
 
-def test_the_home_is_the_clients_screen(make_user, api):
-    trainer = make_user("home_trainer", user_type="trainer")
-    refused = api(trainer).get(HOME)
-    assert (refused.status_code, refused.json()["code"]) == (403, "clients_only")
+@pytest.mark.parametrize("role", ["trainer", "agent", "admin"])
+def test_a_role_without_a_designed_shell_gets_an_empty_list(make_user, api, role):
+    """Their shells are later batches; the endpoint is theirs and says so, rather than
+    refusing or handing them a client's screen."""
+    person = make_user(f"home_role_{role}", user_type=role)
+
+    body = _home(api, person)
+    assert (body["role"], body["sections"]) == (role, [])
     assert api().get(HOME).status_code == 401
-
-    # The one sentence this endpoint answers is translated, and compiled.
-    arabic = api(trainer).get(HOME, HTTP_ACCEPT_LANGUAGE="ar")
-    assert any("؀" <= ch <= "ۿ" for ch in arabic.json()["detail"]), arabic.content
 
 
 # ------------------------------------------------------------------ the full screen
 def test_a_full_client_gets_every_section_in_a_sensible_order(make_user, api,
                                                               django_capture_on_commit_callbacks):
     trainer, client, relation, routine, rows = _coached(make_user, api, "full")
-    _subscribe(client, "full", ends_in=timedelta(days=20))
+    _subscribe(client, "full")
     _diet_day(client)
-    _award(client, "full")
-    _log_sets(client, api, rows[0], 2)
+    _consent(client)
+    _message(trainer, client)
+    _challenge(client, "full")
+    _log_sets(client, api, rows[0], 3)          # the whole day, so it counts
     with django_capture_on_commit_callbacks(execute=True):
         assert _close_day(api, client, routine).status_code == 200
 
     body = _home(api, client)
 
-    assert _types(body) == ["greeting", "today", "plan", "week", "strength",
-                            "achievements", "coach"]
+    assert _types(body) == ["workout_hero", "trainer_message", "nutrition_today",
+                            "week_stats", "ai_advice", "challenge_rank"]
 
-    today = _data(body, "today")
-    assert (today["routine_id"], today["day"], today["state"]) == (routine.pk, 1, "prescribed")
-    assert today["sets"] == {"prescribed": 3, "logged": 2, "unlogged": 1}
-    assert today["exercises"]["planned"] == 1
-    assert (today["closed"], today["outcome"]["missed_sets"]) == (True, 1)
-    assert today["can_start"] is True and "refusal" not in today
-    assert "session" not in today
+    hero = _data(body, "workout_hero")
+    assert (hero["routine_id"], hero["week"], hero["day"], hero["days_in_cycle"]) == \
+        (routine.pk, 1, 1, 1)
+    assert hero["muscles"] == ["Triceps"]
+    assert hero["counts"] == {"exercises": 1, "sets": 3, "estimated_minutes": 60}
+    assert hero["sets"] == {"prescribed": 3, "logged": 3, "unlogged": 0}
+    assert (hero["outcome"]["complete"], hero["outcome"]["missed_sets"]) == (True, 0)
+    assert hero["cta"] == {"state": "continue"}
+    assert len(hero["week_strip"]) == 7
+    today = timezone.localdate().isoformat()
+    assert [day for day in hero["week_strip"] if day["date"] == today][0]["state"] == "today"
 
-    week = _data(body, "week")
-    assert len(week["days"]) == 7
-    assert week["adherence"]["sets"] == {"planned": 3, "logged": 2, "missed": 1,
-                                         "done_percent": 66.7}
-    # The same numbers as the endpoint the app already knows, from the same entry.
+    message = _data(body, "trainer_message")
+    assert (message["from"]["id"], message["from_coach"]) == (trainer.pk, True)
+    assert message["message"]["kind"] == "text"
+    assert message["unread_count"] == 1
+
+    nutrition = _data(body, "nutrition_today")
+    assert [meal["state"] for meal in nutrition["meals"]] == ["eaten", "upcoming"]
+    assert nutrition["meals"][0]["name"] == "Oats with milk"
+    assert nutrition["totals"]["targets"] == {"calories": 2300.0, "protein_g": 160.0,
+                                              "carbs_g": 240.0, "fat_g": 70.0}
+    assert nutrition["totals"]["eaten"]["calories"] == 1420.0
+    assert nutrition["readable_only"] is False
+
+    week = _data(body, "week_stats")
+    assert week["workouts"] == {"done": 1, "planned": 7}
+    assert week["streak"]["current"] == 1
+    # The same volume figure the week endpoint answers, from the same entry.
     endpoint = api(client).get("/api/routine/v1/analytics/recent-progress/").json()
-    assert (week["days"], week["adherence"]) == (endpoint["recent_progress"],
-                                                 endpoint["adherence"])
-    assert _data(body, "strength")["headline"] == endpoint["strength"]["headline"]
-    assert _data(body, "strength")["headline"]["kind"] != "no_data"
+    assert week["volume_kg"]["logged"] == endpoint["adherence"]["volume_kg"]["logged"]
 
-    plan = _data(body, "plan")
-    assert plan["targets"] == {"calories": 2000.0, "protein_g": 150.0,
-                               "carbs_g": 200.0, "fat_g": 60.0}
-    assert plan["eaten"]["calories"] == 800.0
-    assert (plan["meals"], plan["readable_only"]) == ({"completed": 1, "total": 4}, False)
+    advice = _data(body, "ai_advice")
+    assert advice["code"] == "protein_short"
+    assert advice["numbers"]["gap_g"] == 64.0 and advice["numbers"]["days_tracked"] == 7
+    assert advice["coach"] == {"available": True, "reason": None}
 
-    coach = _data(body, "coach")
-    assert (coach["state"], coach["trainer_id"], coach["status"]) == \
-        ("assigned", trainer.pk, "active")
-
-    earned = _data(body, "achievements")
-    assert (earned["count"], earned["items"][0]["points"]) == (1, 25)
-    assert earned["items"][0]["name"] == "Home full"
+    rank = _data(body, "challenge_rank")
+    assert (rank["rank"], rank["participants"]) == (3, 3)
 
 
 def test_a_rest_day_says_so_and_cannot_be_started(make_user, api):
@@ -289,20 +356,21 @@ def test_a_rest_day_says_so_and_cannot_be_started(make_user, api):
     Routine.objects.filter(pk=routine.pk).update(
         start_date=timezone.localdate() - timedelta(days=1))
 
-    today = _data(_home(api, client), "today")
-    assert (today["day"], today["state"], today["can_start"]) == (2, "rest", False)
-    assert "sets" not in today
+    hero = _data(_home(api, client), "workout_hero")
+    assert (hero["day"], hero["cta"]) == (2, {"state": "rest"})
+    assert "sets" not in hero
+    assert hero["counts"]["exercises"] == 0
 
 
-def test_an_open_session_is_shown_instead_of_a_way_to_start_another(make_user, api):
+def test_an_open_session_is_continued_not_started_again(make_user, api):
     trainer, client, routine, rows = _program(make_user, "open")
     started = api(client).post("/api/routine/workout-sessions/",
                                {"routine": routine.pk, "day": 1}, content_type=JSON)
     assert started.status_code in (200, 201), started.content
 
-    today = _data(_home(api, client), "today")
-    assert today["session"]["routine_id"] == routine.pk
-    assert today["can_start"] is False
+    hero = _data(_home(api, client), "workout_hero")
+    assert hero["session"]["routine_id"] == routine.pk
+    assert hero["cta"]["state"] == "continue" and hero["cta"]["session_id"]
 
 
 def test_a_session_nobody_ever_closed_does_not_block_tomorrow(make_user, api):
@@ -315,9 +383,9 @@ def test_a_session_nobody_ever_closed_does_not_block_tomorrow(make_user, api):
     WorkoutSession.objects.filter(pk=session.pk).update(
         start_time=timezone.now() - timedelta(hours=13))
 
-    today = _data(_home(api, client), "today")
-    assert "session" not in today
-    assert today["can_start"] is True
+    hero = _data(_home(api, client), "workout_hero")
+    assert "session" not in hero
+    assert hero["cta"] == {"state": "start"}
 
 
 # ----------------------------------------------------------------------- the freeze
@@ -327,44 +395,23 @@ def test_a_frozen_client_still_sees_the_day_and_cannot_start_it(make_user, api):
                                                         funds="100.00")
     _freeze(relation, ago=timedelta(minutes=1))
 
-    body = _home(api, client)
-
-    today = _data(body, "today")
-    assert today is not None, "a frozen coaching keeps the day visible"
-    assert (today["state"], today["refusal"], today["can_start"]) == \
-        ("prescribed", "coaching_frozen", False)
+    hero = _data(_home(api, client), "workout_hero")
+    assert hero is not None, "a frozen coaching keeps the day visible"
+    assert hero["cta"] == {"state": "refused", "refusal": "coaching_frozen"}
+    assert hero["sets"]["prescribed"] == 3, "and readable"
     # The refusal is the code the training writes answer, not a sentence to display.
     write = api(client).post("/api/routine/workout-sessions/",
                              {"routine": routine.pk, "day": 1}, content_type=JSON)
-    assert (write.status_code, write.json()["code"]) == (403, today["refusal"])
-
-    notices = _data(body, "notices")["items"]
-    frozen = [item for item in notices if item["code"] == "coaching_frozen"]
-    assert frozen and frozen[0]["urgent"] is True
-    assert frozen[0]["trainer_id"] == trainer.pk
-    assert _data(body, "coach")["status"] == "frozen"
+    assert (write.status_code, write.json()["code"]) == (403, hero["cta"]["refusal"])
 
 
-def test_a_lapsed_subscription_is_a_notice_and_the_plan_stays_readable(make_user, api):
+def test_a_lapsed_subscription_leaves_the_day_readable(make_user, api):
     trainer, client, routine, rows = _program(make_user, "lapsed")
     _subscribe(client, "lapsed", ends_in=-timedelta(hours=2), status="expired")
     _diet_day(client)
 
-    body = _home(api, client)
-
-    plan = _data(body, "plan")
-    assert plan is not None and plan["readable_only"] is True
-    codes = {item["code"]: item for item in _data(body, "notices")["items"]}
-    assert codes["subscription_ended"]["urgent"] is True
-
-
-def test_a_plan_about_to_end_is_the_three_day_reminder(make_user, api):
-    client = make_user("home_ending")
-    _subscribe(client, "ending", ends_in=timedelta(days=2))
-
-    codes = {item["code"]: item for item in _data(_home(api, client), "notices")["items"]}
-    assert codes["subscription_ending_soon"]["urgent"] is False
-    assert codes["subscription_ending_soon"]["days_left"] <= 3
+    nutrition = _data(_home(api, client), "nutrition_today")
+    assert nutrition is not None and nutrition["readable_only"] is True
 
 
 def test_a_client_with_no_diet_entitlement_loses_the_section_not_the_screen(make_user, api):
@@ -372,57 +419,109 @@ def test_a_client_with_no_diet_entitlement_loses_the_section_not_the_screen(make
     _diet_day(client)                      # a plan exists, but nothing paid for it
 
     body = _home(api, client)
-    assert _data(body, "plan") is None
-    assert "today" in _types(body), "the rest of the screen is unaffected"
+    assert _data(body, "nutrition_today") is None
+    assert "workout_hero" in _types(body), "the rest of the screen is unaffected"
+
+
+def test_no_smart_note_before_consent(make_user, api):
+    trainer, client, routine, rows = _program(make_user, "noconsent")
+    _subscribe(client, "noconsent")
+    _diet_day(client)
+
+    assert _data(_home(api, client), "ai_advice") is None
+    _consent(client)
+    from training_platform.cache import private_cache
+    private_cache().clear()
+    assert _data(_home(api, client), "ai_advice")["code"] == "protein_short"
 
 
 # ------------------------------------------------------------------------- the build
-@pytest.mark.parametrize("channel", ["play", "ios", ""])
-def test_a_store_build_is_sent_nothing_that_sells(make_user, api, channel,
-                                                  django_capture_on_commit_callbacks):
-    trainer, client, relation, routine, rows = _coached(make_user, api, f"sell{channel or 'none'}")
-    _subscribe(client, f"sell{channel or 'none'}")
-    _diet_day(client)
-    _log_sets(client, api, rows[0], 1)
+@pytest.mark.parametrize("channel,sells", [("apk", True), ("web", True),
+                                           ("play", False), ("ios", False), ("", False)])
+def test_the_two_selling_sections_reach_only_a_build_that_may_sell(make_user, api,
+                                                                   channel, sells):
+    """BuildGuide: "the media_banner and ready_programs sections are filtered by the
+    same flags". Left out entirely — not emptied, not stripped."""
+    trainer = make_user(f"hm_sell_t_{channel or 'none'}", user_type="trainer")
+    person = make_user(f"hm_sell_c_{channel or 'none'}")
+    _public_template(trainer, f"sell{channel or 'none'}")
+    _banner()
 
-    body = _home(api, client, HTTP_X_APP_CHANNEL=channel)
-
-    words = " ".join(_strings_and_keys(body)).lower()
-    for forbidden in ("price", "amount", "currency", "checkout", "money_type", "hub"):
-        assert forbidden not in words, (forbidden, body)
-
-
-@pytest.mark.parametrize("channel,prompted", [("apk", True), ("play", True),
-                                              ("ios", False), ("", False)])
-def test_only_a_build_that_may_pay_for_coaching_is_invited_to_hire_one(make_user, api,
-                                                                       channel, prompted):
-    """A prompt to find a trainer is a sale, and `ios` may not open a coaching checkout
-    today. It depends on the BUILD and on nothing else."""
-    person = make_user(f"home_hire_{channel or 'none'}")
-
-    body = _home(api, person, HTTP_X_APP_CHANNEL=channel)
-    assert (_data(body, "coach") == {"state": "none"}) is prompted
+    types = _types(_home(api, person, HTTP_X_APP_CHANNEL=channel))
+    assert ("ready_programs" in types) is sells, types
+    assert ("media_banner" in types) is sells, types
 
 
-def test_a_client_with_a_coach_sees_them_on_every_build(make_user, api):
-    trainer, client, relation, routine, rows = _coached(make_user, api, "everywhere")
+def test_a_build_that_may_show_no_fee_is_sent_no_price_at_all(make_user, api):
+    """`ios` and a caller that declares no build may show neither a plan price nor a
+    coaching fee, so nothing in the whole payload may carry one. (`play` MAY show a
+    coaching fee — that is the test below.)"""
+    trainer = make_user("hm_price_t", user_type="trainer",
+                        trainer_is_available=True, email_verified=True,
+                        trainer_hourly_rate="12000.00", trainer_goal_focus=["build_muscle"])
+    person = make_user("hm_price_c", training_goal="build_muscle")
+    _public_template(trainer, "price")
+    _banner()
 
-    for channel in ("apk", "play", "ios", ""):
-        coach = _data(_home(api, client, HTTP_X_APP_CHANNEL=channel), "coach")
-        assert coach["trainer_id"] == trainer.pk, channel
-        assert "coaching_price" not in coach and "price" not in coach
+    for channel in ("ios", ""):
+        body = _home(api, person, HTTP_X_APP_CHANNEL=channel)
+        words = " ".join(_strings_and_keys(body)).lower()
+        for forbidden in ("price", "money_type", "currency", "checkout", "hub"):
+            assert forbidden not in words, (channel, forbidden)
+
+
+def test_the_coaching_fee_follows_the_flag_that_governs_it(make_user, api):
+    """A coach is a person-to-person service: the section stays on every build and only
+    the fee comes and goes, by `can_show_coaching_prices`."""
+    trainer = make_user("hm_fee_t", user_type="trainer", trainer_is_available=True,
+                        email_verified=True, trainer_hourly_rate="12000.00",
+                        trainer_goal_focus=["build_muscle"])
+    person = make_user("hm_fee_c", training_goal="build_muscle")
+
+    shown = _data(_home(api, person, HTTP_X_APP_CHANNEL="play"), "featured_trainers")
+    hidden = _data(_home(api, person, HTTP_X_APP_CHANNEL="ios"), "featured_trainers")
+    assert shown["trainers"][0]["trainer"]["coaching_price"] == "12000.00"
+    assert "coaching_price" not in hidden["trainers"][0]["trainer"]
+    assert "money_type" not in hidden["trainers"][0]["trainer"]
+
+
+def test_the_first_day_hero_counts_the_trainers_who_suit_the_goal(make_user, api):
+    for index in range(2):
+        make_user(f"hm_match_{index}", user_type="trainer", trainer_is_available=True,
+                  email_verified=True, trainer_goal_focus=["build_muscle"])
+    make_user("hm_match_other", user_type="trainer", trainer_is_available=True,
+              email_verified=True, trainer_goal_focus=["fat_loss"])
+    person = make_user("hm_match_c", training_goal="build_muscle")
+
+    body = _home(api, person)
+    assert _data(body, "find_trainer_hero") == {"goal": "build_muscle", "matches": 2}
+    assert _types(body)[:2] == ["find_trainer_hero", "setup_checklist"]
+
+
+def test_a_client_with_a_coach_gets_no_first_day_list(make_user, api):
+    trainer, client, relation, routine, rows = _coached(make_user, api, "nofirstday")
+    _public_template(trainer, "nofirstday")
+    _banner()
+
+    types = _types(_home(api, client))
+    for first_day_section in ("find_trainer_hero", "setup_checklist",
+                              "featured_trainers", "ready_programs"):
+        assert first_day_section not in types, types
+    assert "media_banner" in types, "the banner is for everyone"
 
 
 # -------------------------------------------------------------------------- the cache
 def test_the_cache_does_not_leak_between_builds(make_user, api):
-    person = make_user("home_build_cache")
+    trainer = make_user("hm_leak_t", user_type="trainer")
+    person = make_user("hm_leak_c")
+    _public_template(trainer, "leak")
 
     warm = _home(api, person, HTTP_X_APP_CHANNEL="apk")
     store = _home(api, person, HTTP_X_APP_CHANNEL="ios")
 
-    assert _data(warm, "coach") == {"state": "none"}
-    assert _data(store, "coach") is None, "the apk answer was served to a store build"
-    assert _data(_home(api, person, HTTP_X_APP_CHANNEL="apk"), "coach") == {"state": "none"}
+    assert "ready_programs" in _types(warm)
+    assert "ready_programs" not in _types(store), "the apk answer reached a store build"
+    assert "ready_programs" in _types(_home(api, person, HTTP_X_APP_CHANNEL="apk"))
 
 
 def test_the_cache_does_not_leak_between_languages(make_user, api):
@@ -434,8 +533,8 @@ def test_the_cache_does_not_leak_between_languages(make_user, api):
     english = _home(api, client, HTTP_ACCEPT_LANGUAGE="en")
     arabic = _home(api, client, HTTP_ACCEPT_LANGUAGE="ar")
 
-    assert _data(english, "today")["routine_name"] == "home lang"
-    assert _data(arabic, "today")["routine_name"] == "قوة"
+    assert _data(english, "workout_hero")["routine_name"] == "home lang"
+    assert _data(arabic, "workout_hero")["routine_name"] == "قوة"
 
 
 def test_closing_a_day_shows_on_the_home_at_once(make_user, api,
@@ -444,16 +543,27 @@ def test_closing_a_day_shows_on_the_home_at_once(make_user, api,
     trainer, client, routine, rows = _program(make_user, "bust", sets=2)
     _log_sets(client, api, rows[0], 2)
 
-    before = _data(_home(api, client), "today")
-    assert before["closed"] is False
+    before = _data(_home(api, client), "workout_hero")
+    assert "outcome" not in before
 
     with django_capture_on_commit_callbacks(execute=True):
         assert _close_day(api, client, routine).status_code == 200
 
-    after = _data(_home(api, client), "today")
-    assert after["closed"] is True, "the home was served from a stale cache"
-    assert after["outcome"]["complete"] is True
-    assert _data(_home(api, client), "greeting")["streak"]["current"] == 1
+    after = _data(_home(api, client), "workout_hero")
+    assert after["outcome"]["complete"] is True, "the home was served from a stale cache"
+    assert _data(_home(api, client), "week_stats")["streak"]["current"] == 1
+
+
+def test_a_message_from_the_coach_shows_on_the_home_at_once(make_user, api,
+                                                            django_capture_on_commit_callbacks):
+    trainer, client, relation, routine, rows = _coached(make_user, api, "msgbust")
+    assert _data(_home(api, client), "trainer_message") is None
+
+    with django_capture_on_commit_callbacks(execute=True):
+        _message(trainer, client, body="Rest today.")
+
+    message = _data(_home(api, client), "trainer_message")
+    assert message is not None and message["message"]["body"] == "Rest today."
 
 
 def test_a_second_load_is_served_from_the_cache(make_user, api):
@@ -486,23 +596,31 @@ def test_one_home_costs_a_bounded_number_of_queries(make_user, api,
     trainer, small, relation, routine, rows = _coached(make_user, api, "cost_small")
     _subscribe(small, "cost_small")
     _diet_day(small)
-    _award(small, "cost_small")
+    _consent(small)
+    _message(trainer, small)
+    _challenge(small, "cost_small")
     _log_sets(small, api, rows[0], 2)
     with django_capture_on_commit_callbacks(execute=True):
         _close_day(api, small, routine)
     little = cost(small)
     assert little <= QUERY_CEILING, (little, QUERY_CEILING)
 
-    # The same person, with six times the training and three more days of it behind them.
-    _trainer, _client, big_routine, big_rows = _program(
+    # The same person, with six times the training, three more days of it, five more
+    # meals today and five more messages from their coach.
+    _t, _c, big_routine, big_rows = _program(
         make_user, "cost_big", trainer=trainer, client=small, exercises=6, sets=2)
     for row in big_rows:
         for day_ago in range(3):
             _log_sets(small, api, row, 2,
                       date=timezone.localdate() - timedelta(days=day_ago),
                       weight=20 + day_ago)
-    for day_ago in range(3):
-        _award(small, f"cost_big_{day_ago}")
+    from diet.models import DietPlan, Meal
+    plan = DietPlan.objects.filter(user=small).first()
+    for index in range(5):
+        Meal.objects.create(diet_plan=plan, date=timezone.localdate(), meal_type="Snack",
+                            name=f"snack {index}", scheduled_time=time(10, index))
+    for index in range(5):
+        _message(trainer, small, body=f"note {index}")
     big = cost(small)
 
     assert big <= little + 8, (little, big)
