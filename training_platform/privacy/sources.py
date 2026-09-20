@@ -242,6 +242,11 @@ register(PersonalDataSource(label="idempotency_keys", model="wallet.IdempotencyK
 # store that a policy change was made by a named person, and it holds no customer data.
 register(PersonalDataSource(label="capability_changes", model="policy.CapabilityChangeLog",
                             user_field="changed_by", on_erase="keep"))
+# Which operator published which skin. Same reasoning as the line above: it names an
+# operator, never a customer, and it is the evidence that a look the app shipped was
+# signed off by a person. Kept.
+register(PersonalDataSource(label="theme_changes", model="policy.ThemeChangeLog",
+                            user_field="changed_by", on_erase="keep"))
 
 # --- reachable only through another row ---------------------------------------
 # Everything below holds data about a person but does not point at them directly, so
