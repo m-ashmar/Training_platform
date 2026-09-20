@@ -460,6 +460,29 @@ and is listed to the coach as that, not as "slipping".
 | Coach: needs attention | `trainer/client-progress/attention/` — the ranked list with reasons |
 | Notifications | `personal_record`, `weekly_recap`, `trainer_weekly_digest` |
 
+### Reviewed and repaired (2026-09-20, commit 8e04eb2)
+
+Ten reviewers read items 19-21 with no memory of writing them. What they found and what
+the next session must not undo:
+
+| Was wrong | Now |
+|---|---|
+| The sweep closed only `in_progress` days, so a day where every exercise got some sets but none finished was never recorded | Swept when the day carries work; an untouched day is still never a miss |
+| Sets were counted as set-log ROWS (only `client_uuid` is unique) | Distinct set numbers, in `outcomes.day_work` AND in `UserExerciseProgress.completed_sets` |
+| A day skipped and later trained stayed incomplete for ever | `skipped` yields to a working reason once work exists |
+| A projection was drawn from points of any age | `STALE_AFTER_DAYS = 21`, else `reason: "stale"` |
+| A falling trend's floor was the declining forecast | The floor is the band below today |
+| `analytics/strength?exercise_id=` read any exercise | `visible_exercises_for`, plus "an exercise you trained is yours to read" |
+| `personal_best` excluded only the judged row | `pk__lt`: everything logged before it |
+| `refusals_for` and `training_refusal` disagreed after a client left and came back | Both read the APPROVED relation's months |
+| A 20-rep set set the one-rep max | `MAX_REPS_FOR_ESTIMATE` decides; long sets are work, not strength |
+
+Traps for the next session: the home cache key carries the language, so
+`training_platform/signals.recent_progress_cache_keys` is the only place that knows how to
+bust it. `accessible_user_ids` answers None for an admin — that means "everyone", not
+"nobody". A test that patches `training_refusal` is testing the patch; seed a
+`CoachingPeriod` with its `relation` set, the way `open_period` writes one.
+
 ## 20. Trainer pipeline gaps (found while mapping it, 2026-09-20)
 
 Security (sent to their own sessions): a client can move a routine-progress row to any
