@@ -430,9 +430,34 @@ Every picture fills a named slot and travels as `media: {"<slot>": {url_1x, url_
 focal: [x, y], brightness, alt_ar, alt_en}}`; an empty slot is absent. Trainer cards carry
 theirs; the app's own pictures are here. See `mediakit/slots.py` for the slot list.
 
+A **video** slot (`exercise.loop`, `exercise.cue`, `trainer.loop`, `trainer.intro`) fills
+the same place with a different set of keys: `{video_url, poster_url, hls_url,
+duration_seconds, width, height, state, alt_ar, alt_en}`. `state` is `pending` | `ready` |
+`failed` — `pending` means the video plays now and its poster frame is still being cut.
+`poster_url` and `hls_url` are ABSENT until they exist (`hls_url` needs a transcoder,
+which is not built yet). Every media URL is signed and expires after an hour
+(`MEDIA_SIGNED_URL_TTL`): use what the API just returned, never a stored copy.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/v1/content/media/` | public | `AppMediaView` |
+| `POST` | `/api/v1/content/media/video/` | auth (owner of the target, or admin) | `VideoUploadView` |
+| `GET` | `/api/v1/content/media/exercise/{id}/` | auth | `ExerciseMediaView` |
+
+`POST /api/v1/content/media/video/` is `multipart/form-data`: `file`, `slot`,
+`owner_type`, `owner_id`, optional `alt_ar`/`alt_en`. It is the one route whose body may
+exceed 15 MB (cap `MEDIA_VIDEO_MAX_BYTES`, 64 MB; duration cap `MEDIA_VIDEO_MAX_SECONDS`,
+90 s). The container is decided by the FILE'S BYTES, never by its name or its
+`Content-Type`: MP4/MOV and WebM only. Codes: `media_file_required`,
+`media_unknown_slot`, `media_unknown_owner`, `media_slot_is_not_video`,
+`media_not_a_video`, `media_video_too_large`, `media_video_too_long`, plus
+`payload_too_large` (413) from the body cap. Answers on both spellings, with and without
+the trailing slash, as `capabilities` does (B-035).
+
+`GET /api/v1/content/media/exercise/{id}/` answers `{exercise_id, media}` and obeys the
+exercise visibility rule exactly as `/api/routine/exercises/{id}/add-media/` does — an
+exercise the caller may not see answers `404 code="not_found"`, byte-identical to an id
+that does not exist. Video is not an exception to that rule.
 
 ### Trainers (design v2)
 

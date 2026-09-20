@@ -32,12 +32,25 @@ RUN DJANGO_SETTINGS_MODULE=training_platform.settings_build python manage.py col
 ENV DJANGO_SETTINGS_MODULE=training_platform.settings_production
 
 # Non-root user for security.
-# /data is where the Fly volume gets mounted (user-uploaded media). Create it and
-# hand it to appuser so uploads are writable after the volume attaches.
+#
+# There is deliberately NO `USER appuser` here, and this is the fix for "no upload can
+# be written on the deployed app": /data is a Fly VOLUME, mounted over this path at run
+# time, and a mount replaces the directory — the chown below applies to a directory the
+# volume then hides, while what the process actually meets is the volume's own root,
+# owned by root:root. Running as appuser from the image therefore meant EACCES on every
+# write under /data, including the multipart spool (FILE_UPLOAD_TEMP_DIR=/data/tmp), so
+# uploads failed before any view ran.
+#
+# The entrypoint starts as root, chowns the mount AFTER it exists, and then drops to
+# appuser for the actual process — so nothing the app does runs as root.
 RUN useradd -m appuser && mkdir -p /data/media /data/tmp && chown -R appuser /app /data
-USER appuser
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8000
 
-# Run migrations then start Daphne (ASGI for WebSockets)
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Run migrations then start Daphne (ASGI for WebSockets). fly.toml's [processes]
+# replaces this CMD per process group; the ENTRYPOINT above still runs for all of them.
 CMD ["sh", "-c", "python manage.py migrate --noinput && daphne -b 0.0.0.0 -p 8000 training_platform.asgi:application"]

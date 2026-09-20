@@ -8,6 +8,36 @@ crash with no indication of which one.
 ```bash
 fly volumes create training_data --region ams --size 1
 ```
+The volume is mounted at `/data` and is root-owned at that moment — the image's own
+`chown` ran at build time, against the directory the mount then hides. That is why no
+upload could be written on the deployed app, including the multipart spool.
+`docker-entrypoint.sh` chowns the mount at start and then drops to `appuser`; nothing
+needs doing here beyond creating the volume.
+
+## 1b. Create the media bucket and its service account (once)
+
+Media lives in Google Cloud Storage (the owner, 2026-09-19) — **production refuses to
+boot on the local filesystem backend**, because a Fly volume attaches to one machine
+while several serve traffic.
+
+```bash
+# In the Google Cloud project:
+gcloud storage buckets create gs://<bucket> --location=europe-west4 \
+    --uniform-bucket-level-access            # no public allUsers grant
+gcloud iam service-accounts create yalla-gym-media
+gcloud storage buckets add-iam-policy-binding gs://<bucket> \
+    --member=serviceAccount:yalla-gym-media@<project>.iam.gserviceaccount.com \
+    --role=roles/storage.objectAdmin         # read + write objects; NOT bucket admin
+gcloud iam service-accounts keys create key.json \
+    --iam-account=yalla-gym-media@<project>.iam.gserviceaccount.com
+```
+
+The **key itself** is what matters: a V4 signed URL is signed with the service account's
+private key, so an access token from a metadata server is not enough. Hand the JSON over
+as a secret in step 2 and delete the local copy.
+
+Set a lifecycle rule on the bucket if you want old originals expired; nothing in the app
+deletes them except a row's own deletion.
 
 ## 2. Set the secrets
 ```bash
@@ -23,6 +53,14 @@ fly secrets set \
   EMAIL_HOST_USER="..." EMAIL_HOST_PASSWORD="..." \
   JWT_PRIVATE_KEY="..." JWT_PUBLIC_KEY="..." \
   FIELD_ENCRYPTION_KEY="..."
+
+# Media. `MEDIA_BACKEND=gcs` is REQUIRED: boot refuses 'local' (and refuses an unset
+# value, which defaults to local). GS_PROJECT_ID is optional when the key carries it.
+fly secrets set \
+  MEDIA_BACKEND="gcs" \
+  GS_BUCKET_NAME="<bucket>" \
+  GS_PROJECT_ID="<gcp-project>" \
+  GS_CREDENTIALS_JSON="$(cat path/to/key.json)"
 
 # Push notifications. A PATH cannot be delivered to a Fly machine: `fly secrets set`
 # sets environment variables, and the service-account key is outside the repository and
@@ -91,6 +129,27 @@ positively clear, and an uncurated catalogue means those clients get no plan at 
 column, and `.name` then resolves to `''`. That once left 542 of 554 exercises blank
 through the API.
 
+## 5b. Prove the bucket actually works (first deploy only)
+
+The test suite runs on the filesystem backend and never touches the network, so the
+GCS path is exercised for the first time here. Do it before anyone uploads anything.
+
+```bash
+fly ssh console -C "python manage.py shell -c \"
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+from training_platform.media_storage import media_url
+name = default_storage.save('healthcheck/probe.txt', ContentFile(b'ok'))
+print(type(default_storage).__name__)          # SignedGoogleCloudStorage
+print(media_url(default_storage.open(name)))   # a URL with X-Goog-Signature=...
+default_storage.delete(name)\""
+```
+
+Three things have to be true: the class name is the GCS one (not `SignedMediaStorage` —
+that means `MEDIA_BACKEND` did not reach the process), the URL carries a signature (no
+signature means the credentials are an access token rather than a key), and fetching
+that URL returns the bytes while fetching it without the query string returns 403.
+
 ## 6. Confirm the background half is alive
 ```bash
 fly logs -a <app> | grep -i celery          # worker + beat came up
@@ -107,6 +166,14 @@ fly ssh console -C "python manage.py retry_failed_notifications --dry-run"
 | `ai_assistant.tasks.check_daily_cost` | hourly | the AI budget kill-switch's monitor |
 | `ai_assistant.tasks.close_idle_sessions` | 10 min | closes abandoned chat sessions |
 | `ai_assistant.tasks.compute_all_user_insights` | daily | user insight aggregation |
+| `mediakit.sweep_pending_videos` | hourly | finishes a video whose metadata task the worker lost; without it the asset stays `pending` for ever |
+
+**Optional, and a real decision:** the image does not install `ffmpeg`. Without it a
+video still uploads, plays and reaches `ready` — it just has no poster frame and no
+measured duration or dimensions. To turn posters on, add `ffmpeg` to the `apt-get
+install` line in the Dockerfile (about 250 MB) and redeploy; `mediakit.tasks` picks it
+up with no other change, and `mediakit.sweep_pending_videos` does not backfill posters
+for assets already marked `ready`.
 
 Verify after deploy — a beat entry naming an unregistered task is skipped silently:
 ```bash

@@ -17,7 +17,7 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | # | Item | Size | Status |
 |---|---|---|---|
 | 1 | Capabilities endpoint + `X-App-Channel` | - | DONE before this work (plan step 2) |
-| 2 | Media slots + operator console | XL | Images DONE; video, SVG, object storage TODO |
+| 2 | Media slots + operator console | XL | Images, object storage (GCS) and VIDEO DONE; HLS and SVG TODO |
 | 3 | Date of birth at sign-up, minimum age | M | DONE |
 | 4 | Onboarding fields: goal, place, days, injury areas | M | DONE |
 | 5 | Trainer proof stats | L | DONE |
@@ -74,23 +74,44 @@ contract, every user-facing string goes through gettext with an Arabic entry in
     are fixed once saved) and `Media slots > kits/` (each trainer's completeness).
   - `GET /api/v1/content/media`: the app's own slots (intro story, banner, empty states).
   - Trainer objects in `/api/v1/trainers/...` carry `media`.
+- **Built (2026-09-20, `build/storage`) — object storage and video:**
+  - `MEDIA_BACKEND` = `local` | `gcs`, chosen by the environment and by no code branch.
+    `gcs` is `training_platform/gcs_storage.py` (`django-storages[google]`, V4 signed
+    GET URLs, private objects, credentials through `get_secret`); `local` is the
+    filesystem, which `enforce_production_safety()` now REFUSES in production. One URL
+    function for both: `training_platform.media_storage.media_url()`.
+  - The `/data` permission bug is fixed: the volume is mounted over the path the image
+    chowned, so appuser met a root-owned mount and NO upload could be written at all —
+    not even the multipart spool. `docker-entrypoint.sh` chowns after the mount and
+    drops privileges; the image no longer sets `USER`.
+  - `MediaAsset` gained `poster`, `hls_url`, `duration_seconds` and `processing_state`
+    (migration `0002_media_video_fields`, additive, no backfill). A video slot
+    serializes as `{video_url, poster_url, hls_url, duration_seconds, width, height,
+    state, alt_*}`.
+  - `POST /api/v1/content/media/video/` (validates by CONTENT: container sniffed from
+    the bytes, 64 MB and 90 s caps) and `GET /api/v1/content/media/exercise/{id}/`,
+    both under the exercise library's own visibility rule. The 15 MB body cap has one
+    named exception, `settings.LARGE_UPLOAD_PATHS`.
+  - `mediakit.fill_video_metadata` fills the poster, duration and dimensions with
+    ffprobe/ffmpeg WHEN THEY EXIST and marks the asset `ready` either way (ffmpeg is
+    not in the image — an owner decision, see below); `mediakit.sweep_pending_videos`
+    (hourly) finishes anything whose task was lost.
+  - Still owed here: **the owner must create the bucket and the service account** and
+    set `MEDIA_BACKEND`, `GS_BUCKET_NAME`, `GS_PROJECT_ID`, `GS_CREDENTIALS_JSON`
+    (DEPLOY_CHECKLIST.md). Images stay in the same storage as video — there is no
+    per-slot backend. The operator console still uploads video through this API route
+    rather than a signed PUT straight to GCS; that matters only above the 64 MB cap.
 - **Still to do, in order:**
-  1. Videos live on Google Cloud Storage (owner, 2026-09-19): a GCS bucket behind
-     `django-storages[google]` for video slots, credentials from AWS Secrets Manager like
-     every other secret, uploaded by the operator console through a V4 signed PUT URL
-     straight to GCS (video cannot pass the 15 MB body cap), and served by signed GET
-     URLs. Needs from the owner: the bucket name and a service account with object
-     read/write on it. Images stay on the volume for now; the volume permission fix for
-     uploads (`/data` is root-owned at runtime) is still owed.
-  2. Video slots: transcode to HLS 360p/540p/720p + poster (GCP Transcoder API writing
-     back to the same bucket, or ffmpeg in a worker). Serialized as an additional
-     `hls_url` + `poster` in the same slot object.
-  3. `trainer.signature`: an SVG sanitiser (allow-list of elements and attributes).
-  4. `media` on `ExerciseSerializer` (with item 7), on routines/templates (`program.cover`,
+  1. Video slots: transcode to HLS 360p/540p/720p (GCP Transcoder API writing back to
+     the same bucket, or ffmpeg in a worker). `hls_url` exists and stays empty until
+     something writes a playlist name into it; the app plays `video_url` meanwhile. The
+     poster is already cut by `mediakit/tasks.py` wherever ffmpeg is installed.
+  2. `trainer.signature`: an SVG sanitiser (allow-list of elements and attributes).
+  3. `media` on `ExerciseSerializer` (with item 7), on routines/templates (`program.cover`,
      with routine products, plan step 10) and on meals via `Recipe` (`dish.top`). Each
      needs its list view to call `media_map` once, and cached routes to bump their version
      when a `MediaAsset` of that owner type changes (`training_platform/cache_config.py`).
-  5. Optional data migration of `profile_picture` -> `trainer.avatar` and `Exercise.image`
+  4. Optional data migration of `profile_picture` -> `trainer.avatar` and `Exercise.image`
      -> `exercise.poster` (the legacy fields stay).
 
 ## 3. Date of birth and minimum age

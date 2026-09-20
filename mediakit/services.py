@@ -9,28 +9,71 @@
 A slot with nothing in it is ABSENT from the object, never present with null URLs, so
 the app's `YgMedia` either draws the slot or draws its typographic fallback.
 
+A VIDEO slot carries a different set of keys in the same place — `video_url`,
+`poster_url`, `duration_seconds`, `state` — see `payload()`.
+
+Every URL is produced by `training_platform.media_storage.media_url()`: one function,
+both backends, always signed and always expiring. Nothing here builds a URL by hand.
+
 Lists must load media for the whole page at once (`media_map`), never per row.
 """
 from __future__ import annotations
 
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
 
+from training_platform.media_storage import media_url
+
 from .models import MediaAsset
 from .processing import process_upload
-from .slots import APP_OWNER_ID, OwnerType, required_keys, resolve
-
-
-def _absolute(url, request):
-    if request is not None and url and url.startswith("/"):
-        return request.build_absolute_uri(url)
-    return url
+from .slots import APP_OWNER_ID, VIDEO, OwnerType, required_keys, resolve
 
 
 def payload(asset: MediaAsset, request=None) -> dict:
+    """The one shape the API serves for a filled slot. Two kinds of slot, two shapes.
+
+    A video slot answers, instead of the still-image keys:
+
+        {"video_url": "<signed, expires>", "poster_url": "<signed>" (absent until the
+         worker cuts one), "hls_url": "..." (absent until a transcoder writes one),
+         "duration_seconds": 8.4 | null, "width": 1280, "height": 720,
+         "state": "pending" | "ready" | "failed", "alt_ar": "", "alt_en": ""}
+
+    `state` is what the app branches on: `pending` means it can play `video_url` now and
+    the poster is still coming. Every URL comes from `media_url()`, which signs it and
+    gives it an expiry — the app must use what the API just returned rather than storing
+    one, because a stored URL stops working within the hour.
+
+    The one exception is the app's own content (`app.*`): the same picture for every
+    viewer, fetched before sign-in, so `MEDIA_PUBLIC_APP_CONTENT` may serve it as a
+    plain cacheable URL. Media that belongs to a PERSON is never public.
+    """
+    public = (asset.owner_type == OwnerType.APP
+              and getattr(settings, "MEDIA_PUBLIC_APP_CONTENT", False))
+    if asset.kind == VIDEO:
+        out = {
+            "video_url": media_url(asset.original, request, public=public),
+            "duration_seconds": asset.duration_seconds,
+            "width": asset.width,
+            "height": asset.height,
+            "state": asset.processing_state,
+            "alt_ar": asset.alt_ar,
+            "alt_en": asset.alt_en,
+        }
+        # Absent, never null — the same rule an empty slot follows, so the app tests for
+        # a key rather than for a key that may or may not hold null.
+        if asset.poster:
+            out["poster_url"] = media_url(asset.poster, request, public=public)
+        if asset.hls_url:
+            # Served as stored: an HLS player fetches the segments itself and cannot ask
+            # us to sign them, so whatever writes this field writes a playable URL.
+            out["hls_url"] = asset.hls_url
+        return out
+
     return {
-        "url_1x": _absolute(asset.file_1x.url, request),
-        "url_2x": _absolute(asset.file_2x.url, request),
+        "url_1x": media_url(asset.file_1x, request, public=public),
+        "url_2x": media_url(asset.file_2x, request, public=public),
         "blur": asset.blur,
         "focal": [asset.focal_x, asset.focal_y],
         "brightness": asset.brightness,
