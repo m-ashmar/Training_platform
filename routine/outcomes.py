@@ -95,15 +95,24 @@ def day_work(user, routine, date, plan) -> dict:
 
     allowed = Q(workout_session__isnull=True) | Q(workout_session__routine_id=routine.pk)
     pools: dict[int, list] = {eid: [] for eid in exercise_ids}
-    for exercise_id, reps, weight in (ExerciseSetLog.objects
-                                      .filter(user_exercise_progress__user=user,
-                                              user_exercise_progress__exercise_id__in=exercise_ids,
-                                              date=date)
-                                      .filter(allowed)
-                                      .order_by('set_number', 'id')
-                                      .values_list('user_exercise_progress__exercise_id',
-                                                   'reps', 'weight')):
-        pools[exercise_id].append((reps or 0, weight or 0))
+    # One row per SET, not per row written. A set re-sent without the app's id writes a
+    # second row (only `client_uuid` is unique), and counting rows let three rows for
+    # two sets fill a three-set prescription: a short day read as complete.
+    numbered: dict = {}
+    for exercise_id, number, reps, weight in (ExerciseSetLog.objects
+                                              .filter(user_exercise_progress__user=user,
+                                                      user_exercise_progress__exercise_id__in=exercise_ids,
+                                                      date=date)
+                                              .filter(allowed)
+                                              .order_by('set_number', 'id')
+                                              .values_list('user_exercise_progress__exercise_id',
+                                                           'set_number', 'reps', 'weight')):
+        if number is None:
+            pools[exercise_id].append((reps or 0, weight or 0))
+            continue
+        numbered[(exercise_id, number)] = (reps or 0, weight or 0)
+    for (exercise_id, _number), row in sorted(numbered.items(), key=lambda item: item[0][1]):
+        pools[exercise_id].append(row)
 
     claims, skips = {}, {}
     for exercise_id, completed, skipped in (UserExerciseProgress.objects
@@ -265,7 +274,6 @@ def record_day(user, routine, day, date=None, *, via, confirmed_unlogged=False,
         'planned_reps': counts['planned_reps'],
         'planned_volume_kg': counts['planned_volume_kg'],
         'exercises_planned': counts['exercises_planned'],
-        'prescription_at': timezone.now(),
         'prescription_exact': prescription_exact,
     }
 
@@ -292,6 +300,12 @@ def record_day(user, routine, day, date=None, *, via, confirmed_unlogged=False,
     if _rank(via) < _rank(outcome.via):
         outcome.via = via
     outcome.confirmed_unlogged = outcome.confirmed_unlogged or bool(confirmed_unlogged)
+    # `skipped` outranks the working reasons, which is right while nothing was done and
+    # wrong the moment something is: a day marked skipped in the morning and trained in
+    # the evening would have stayed incomplete for ever, because `complete` refuses the
+    # label rather than the facts.
+    if outcome.via == 'skipped' and via != 'skipped' and outcome.logged_sets > 0:
+        outcome.via = via
     outcome.complete = outcome.missed_sets == 0 and outcome.via != 'skipped'
     if session is not None and outcome.workout_session_id is None:
         outcome.workout_session = session
@@ -381,8 +395,10 @@ def training_dates(user, since=None) -> tuple:
     from .models import DayOutcome, RoutineProgress
 
     start = _window_start(since)
-    broken = broken_dates(user, since=start)
-    dates = complete_dates(user, since=start) - broken
+    # `complete_dates` are dates with a complete outcome and `broken_dates` are dates
+    # with none, so the two are disjoint by construction: subtracting one from the other
+    # only cost a second scan of the same table.
+    dates = complete_dates(user, since=start)
     recorded = set(DayOutcome.objects.filter(user=user, date__gte=start)
                    .values_list('date', flat=True))
     legacy = {day for day in RoutineProgress.objects
@@ -509,8 +525,6 @@ def attention(trainer, client_ids, *, today=None, quiet_days=5):
                              client who always does 70% is steady, not slipping
       `missing_sets`         a lot of planned sets left this week
     """
-    from datetime import timedelta
-
     from .models import DayOutcome, Routine, WorkoutSession
 
     today = today or timezone.localdate()

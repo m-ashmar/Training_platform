@@ -233,7 +233,8 @@ def test_the_home_screen_and_the_adherence_route_show_the_plan(make_user, api):
     # The home payload is cached per user for 120 s and the test cache is shared
     # across the run: start from a clean one, as a real first request would.
     from training_platform.cache import private_cache
-    private_cache().delete(f"recent_progress:{client.pk}")
+    from training_platform.signals import recent_progress_cache_keys
+    private_cache().delete_many(recent_progress_cache_keys(client.pk))
 
     home = api(client).get("/api/routine/v1/analytics/recent-progress/").json()
     assert home["adherence"]["sets"] == {"planned": 3, "logged": 2, "missed": 1,
@@ -389,7 +390,9 @@ def test_the_sweep_leaves_a_frozen_coaching_alone(make_user, api):
     RoutineProgress.objects.create(user=client, routine=routine, day=1, date=yesterday,
                                    status="in_progress")
     with mock.patch("users.coaching.training_refusal", return_value="coaching_frozen"):
-        assert close_open_training_days() == {"closed": 0, "skipped": 1}
+        result = close_open_training_days()
+    assert (result["closed"], result["skipped"]) == (0, 1)
+    assert result["capped"] is False
     assert not DayOutcome.objects.filter(user=client).exists()
 
 
@@ -404,7 +407,8 @@ def test_the_home_week_answers_at_all(make_user, api):
     WorkoutSession.objects.create(user=client, routine=routine, day=1, status="completed",
                                   start_time=now - timedelta(hours=1), end_time=now)
     from training_platform.cache import private_cache
-    private_cache().delete(f"recent_progress:{client.pk}")
+    from training_platform.signals import recent_progress_cache_keys
+    private_cache().delete_many(recent_progress_cache_keys(client.pk))
 
     resp = api(client).get("/api/routine/v1/analytics/recent-progress/")
     assert resp.status_code == 200, resp.content
@@ -547,3 +551,133 @@ def test_the_two_screens_answer_the_same_streak(make_user, api):
     week = api(client).get("/api/routine/analytics/adherence/?period=week").json()
     assert streaks["current_streak"] == week["perfect_streak"]["current"] == 2
     assert streaks["approximate"] and week["approximate"]
+
+
+# ------------------------------------- what the review of 2026-09-20 found (round 2)
+def test_a_day_worked_but_never_finished_is_still_closed_by_the_sweep(make_user, api,
+                                                                      django_capture_on_commit_callbacks):
+    """Two of three sets on EVERY exercise finishes no exercise, so the day reads
+    `not_started` — and a sweep that looked only at `in_progress` left exactly that day
+    unrecorded: the missed sets vanished and the streak was never broken, which is the
+    whole point of the feature (the owner, 2026-09-20)."""
+    from routine.models import DayOutcome, RoutineProgress, WorkoutSession
+    from routine.tasks import close_open_training_days
+
+    trainer, client, routine, rows = _program(make_user, "worked_open", sets=3, exercises=2)
+    yesterday = timezone.localdate() - timedelta(days=1)
+    started = timezone.now() - timedelta(days=1)
+    # Through a session, the way the app logs a workout: the session names the routine
+    # and the day, which is what tells the recalculation whose day this is.
+    session = WorkoutSession.objects.create(user=client, routine=routine, day=1,
+                                            status="in_progress", start_time=started)
+    for row in rows:
+        _log_sets(client, api, routine, row, 2, date=yesterday, session=session.pk,
+                  commit=django_capture_on_commit_callbacks)
+    progress = RoutineProgress.objects.get(user=client, routine=routine, date=yesterday)
+    assert progress.status == "not_started", "no exercise reached its set count"
+
+    assert close_open_training_days()["closed"] == 1
+    outcome = DayOutcome.objects.get(user=client, routine=routine, date=yesterday)
+    assert (outcome.complete, outcome.logged_sets, outcome.planned_sets) == (False, 4, 6)
+    assert outcome.via == "unclosed"
+
+    streak = api(client).get("/api/routine/analytics/streaks/").json()
+    assert streak["last_break"] is not None
+    assert streak["last_break"]["date"] == yesterday.isoformat()
+
+
+def test_a_day_nobody_touched_is_not_turned_into_a_miss(make_user, api):
+    """The other half of the same rule: an empty day is not a short day."""
+    from routine.models import DayOutcome, RoutineProgress
+    from routine.tasks import close_open_training_days
+
+    trainer, client, routine, rows = _program(make_user, "untouched", sets=3, exercises=1)
+    yesterday = timezone.localdate() - timedelta(days=1)
+    RoutineProgress.objects.create(user=client, routine=routine, day=1, date=yesterday,
+                                   status="not_started", exercises_completed=0,
+                                   total_exercises=1)
+
+    assert close_open_training_days()["closed"] == 0
+    assert not DayOutcome.objects.filter(user=client, date=yesterday).exists()
+
+
+def test_the_same_set_sent_twice_does_not_fill_the_plan(make_user, api,
+                                                        django_capture_on_commit_callbacks):
+    """Only `client_uuid` is unique, so a set re-sent without it writes a second row.
+    Counting ROWS let three rows for two sets close a three-set day."""
+    from routine.models import DayOutcome, ExerciseSetLog, UserExerciseProgress
+
+    trainer, client, routine, rows = _program(make_user, "dupset", sets=3, exercises=1)
+    today = timezone.localdate()
+    _log_sets(client, api, routine, rows[0], 2, commit=django_capture_on_commit_callbacks)
+    progress = UserExerciseProgress.objects.get(user=client, exercise=rows[0].exercise,
+                                                date=today)
+    # The same set number again, heavier — a correction the app re-sent without its id.
+    with django_capture_on_commit_callbacks(execute=True):
+        again = api(client).post("/api/routine/set-logs/", {
+            "user_exercise_progress": progress.pk, "set_number": 1,
+            "weight": 40, "reps": 10, "date": today.isoformat()}, content_type=JSON)
+    assert again.status_code in (200, 201), again.content
+    assert ExerciseSetLog.objects.filter(user_exercise_progress=progress).count() == 3
+
+    closed = _close(api, client, routine)
+    assert closed.status_code == 200, closed.content
+    outcome = DayOutcome.objects.get(user=client, routine=routine, date=today)
+    assert outcome.logged_sets == 2, "three rows, two sets"
+    assert outcome.complete is False
+
+
+def test_a_day_skipped_and_then_trained_counts(make_user, api,
+                                               django_capture_on_commit_callbacks):
+    """`skipped` outranks the working reasons, which is right while nothing was done and
+    wrong the moment something is."""
+    from routine.models import DayOutcome
+
+    trainer, client, routine, rows = _program(make_user, "skipthentrain", sets=2, exercises=1)
+    _close(api, client, routine, status="skipped")
+    assert DayOutcome.objects.get(user=client, routine=routine).complete is False
+
+    _log_sets(client, api, routine, rows[0], 2, commit=django_capture_on_commit_callbacks)
+    outcome = DayOutcome.objects.get(user=client, routine=routine)
+    assert outcome.via != "skipped", "it was trained after all"
+    assert (outcome.complete, outcome.missed_sets) == (True, 0)
+
+
+def test_one_outcome_is_written_once_when_a_day_completes(make_user, api,
+                                                          django_capture_on_commit_callbacks):
+    """The refresh and the auto-record both wanted the same completing day."""
+    from unittest import mock
+
+    from routine.models import DayOutcome
+
+    trainer, client, routine, rows = _program(make_user, "onewrite", sets=2, exercises=1)
+    import routine.outcomes as outcomes_module
+    with mock.patch.object(outcomes_module, 'record_day',
+                           wraps=outcomes_module.record_day) as recorded:
+        _log_sets(client, api, routine, rows[0], 2, commit=django_capture_on_commit_callbacks)
+    assert recorded.call_count == 1, "the completing day was recorded twice"
+    assert DayOutcome.objects.filter(user=client, routine=routine).count() == 1
+
+
+def test_closing_a_day_shows_on_the_home_week_at_once(make_user, api,
+                                                      django_capture_on_commit_callbacks):
+    """The home week is cached for two minutes and the DayOutcome receiver exists to
+    clear it. The key carries the language, so a bust that forgot one served a stale
+    week to the other."""
+    from training_platform.cache import private_cache
+    from training_platform.signals import recent_progress_cache_keys
+
+    trainer, client, routine, rows = _program(make_user, "homebust", sets=2, exercises=1)
+    warm = api(client).get("/api/routine/v1/analytics/recent-progress/").json()
+    assert warm["adherence"]["sets"]["logged"] == 0
+    assert private_cache().get(recent_progress_cache_keys(client.pk)[0]) is not None \
+        or private_cache().get(f"recent_progress:{client.pk}:en") is not None
+
+    with django_capture_on_commit_callbacks(execute=True):
+        _log_sets(client, api, routine, rows[0], 2,
+                  commit=django_capture_on_commit_callbacks)
+    for key in recent_progress_cache_keys(client.pk):
+        assert private_cache().get(key) is None, f"{key} was left stale"
+
+    fresh = api(client).get("/api/routine/v1/analytics/recent-progress/").json()
+    assert fresh["adherence"]["sets"]["logged"] == 2

@@ -600,8 +600,13 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     personal_record = serializers.SerializerMethodField()
     #: "I did what the coach asked" — write-only, never stored.
     as_prescribed = serializers.BooleanField(write_only=True, required=False, default=False)
-    routine = serializers.PrimaryKeyRelatedField(queryset=Routine.objects.all(),
-                                                 write_only=True, required=False)
+    #: Which routine the prescription for `as_prescribed` comes from — a plain id,
+    #: resolved in `_prescription` under the same rule that decides whether it may be
+    #: read. A related field would have answered "no such routine" for an id that does
+    #: not exist and `no_prescribed_reps` for one that does but is not the caller's,
+    #: which tells a caller by enumeration which routine ids are real. Both now answer
+    #: `no_prescribed_reps`: no prescription this caller may read, for whatever reason.
+    routine = serializers.IntegerField(write_only=True, required=False, min_value=1)
     day = serializers.IntegerField(write_only=True, required=False, min_value=1)
 
     def validate_user_exercise_progress(self, value):
@@ -713,12 +718,15 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         which day it belongs to, because `UserExerciseProgress` records neither. A
         `routine` in the body is only honoured when the caller may train it — the field
         is a plain id, and without this check "as prescribed" read any trainer's
-        prescribed reps and weight by enumeration.
+        prescribed reps and weight by enumeration. An id that does not exist and one
+        that is not the caller's are the same answer here: no prescription.
         """
         if progress is None:
             return None
-        if routine is not None and not self._may_read_plan(routine):
-            return None
+        if routine is not None:
+            routine = Routine.objects.filter(pk=routine).first()
+            if routine is None or not self._may_read_plan(routine):
+                return None
         routine = routine or getattr(session, 'routine', None)
         day = day or getattr(session, 'day', None)
         if routine is None or day is None:
@@ -765,19 +773,15 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         return weight * reps
 
     def get_one_rep_max_estimate(self, obj):
+        """Brzycki's estimate for this set, in kilograms.
+
+        `routine.strength.one_rep_max` is the one implementation: the same number the
+        trend, the projection and the record all read. Copied out here, the two drifted
+        the moment either was touched.
         """
-        Estimate 1RM using Brzycki Formula: weight * (36 / (37 - reps))
-        Only valid for reps <= 10 roughly, but we return for all.
-        """
-        if not obj.weight or not obj.reps or obj.reps == 0:
-            return 0.0
-        # Brzycki divides by (37 - reps), so 37 reps is a division by zero and more
-        # than 37 is a NEGATIVE one-rep max. `MAX_REPS_PER_SET` is 1000, so both are
-        # reachable from a real set log. The formula is only meaningful to about ten
-        # reps anyway; past that, report the weight lifted rather than a fiction.
-        if obj.reps >= 36:
-            return round(float(obj.weight), 1)
-        return round(obj.weight * (36 / (37 - obj.reps)), 1)
+        from .strength import one_rep_max
+
+        return one_rep_max(obj.weight, obj.reps)
 
 
 
@@ -1591,21 +1595,33 @@ class RecentActivitySerializer(serializers.ModelSerializer):
         # Which way each client's lifting is going, from their own set logs
         # (routine/strength.py). The roster shows an arrow; the full trend is on the
         # client's own screen.
-        from .strength import TREND_WEEKS, one_rep_max
+        from .strength import MAX_REPS_FOR_ESTIMATE, TREND_WEEKS
         from .models import ExerciseSetLog as _SetLog
+        from django.db.models import ExpressionWrapper, FloatField, Max as _Max
         trend_window = timezone.localdate() - timedelta(weeks=TREND_WEEKS)
         # The client's own FIRST and LAST training day of each exercise in the window,
         # not two fixed halves: someone who started three weeks ago has no "earlier
         # half", and their progress would have read as nothing at all.
+        #
+        # The best estimate of each (client, exercise, DAY) is aggregated in Postgres:
+        # streaming eight weeks of every roster client's individual sets into Python was
+        # tens of thousands of rows for one page. Brzycki is the same formula
+        # `strength.one_rep_max` uses, and the same rep ceiling — a long set says more
+        # about endurance than about a one-rep max, and it must not swing a roster arrow.
+        estimate_expr = ExpressionWrapper(
+            F('weight') * 36.0 / (37.0 - F('reps')), output_field=FloatField())
         ends: dict = {}
-        for user_id, exercise_id, date, weight, reps in (
-                _SetLog.objects
-                .filter(user_exercise_progress__user_id__in=ids, date__gte=trend_window,
-                        weight__gt=0, reps__gt=0)
-                .values_list('user_exercise_progress__user_id',
-                             'user_exercise_progress__exercise_id', 'date',
-                             'weight', 'reps')):
-            estimate = one_rep_max(weight, reps)
+        for row in (_SetLog.objects
+                    .filter(user_exercise_progress__user_id__in=ids, date__gte=trend_window,
+                            weight__gt=0, reps__gt=0, reps__lte=MAX_REPS_FOR_ESTIMATE)
+                    .annotate(estimate=estimate_expr)
+                    .values('user_exercise_progress__user_id',
+                            'user_exercise_progress__exercise_id', 'date')
+                    .annotate(best=_Max('estimate'))
+                    .order_by()):
+            user_id = row['user_exercise_progress__user_id']
+            exercise_id = row['user_exercise_progress__exercise_id']
+            date, estimate = row['date'], round(row['best'], 1)
             entry = ends.setdefault((user_id, exercise_id),
                                     {'first_date': date, 'first': 0.0,
                                      'last_date': date, 'last': 0.0})

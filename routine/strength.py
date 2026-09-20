@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
-from django.db.models import F, Max, Q, Sum
+from django.db.models import Count, Max
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,12 @@ HORIZON_DAYS = 14
 #: least this many days. One heavy session is not a trend.
 MIN_POINTS = 3
 MIN_SPAN_DAYS = 14
+
+#: A line through weeks nobody trained is not a projection of anything. Past this many
+#: days without a set of that exercise the honest answer is that the trail went cold:
+#: the fit would otherwise carry the intercept forward over the gap and report it as
+#: "where you are now".
+STALE_AFTER_DAYS = 21
 
 #: A change smaller than this, per week, is not a direction — it is noise.
 FLAT_PERCENT_PER_WEEK = 0.5
@@ -79,17 +85,21 @@ def points(user, exercise_id, *, since=None, until=None) -> list[dict]:
     The best set of the day decides the day: the highest estimated one-rep max, and among
     equals the heavier weight. Sets with no weight or no reps (a run, a stretch, a day
     logged a whole day at a time) carry no strength information and are left out — they
-    are counted in adherence instead.
+    are counted in adherence instead, and so are sets longer than
+    `MAX_REPS_FOR_ESTIMATE`, which say more about endurance than about a one-rep max.
+    A day whose every set is that long produces no entry at all.
     """
     from .models import ExerciseSetLog
 
     until = until or timezone.localdate()
     since = since or until - timedelta(weeks=TREND_WEEKS)
     # A set re-sent without the app's id writes a second row (there is no unique key on
-    # the set number), so the day's numbered sets are collapsed to one each before
-    # anything is summed. Unnumbered sets all count.
-    seen: dict = {}
-    logs = []
+    # the set number), so a day's numbered sets are collapsed to ONE EACH — the heaviest
+    # wins — before anything is summed. Collapsing has to finish before the day is
+    # summed, not while it is read: a correction sent upwards used to update the "best
+    # so far" and be appended as well, and the day counted both rows.
+    best_by_set: dict = {}
+    unnumbered = []
     for date, number, weight, reps in (ExerciseSetLog.objects
                                        .filter(user_exercise_progress__user=user,
                                                user_exercise_progress__exercise_id=exercise_id,
@@ -97,26 +107,36 @@ def points(user, exercise_id, *, since=None, until=None) -> list[dict]:
                                                weight__gt=0, reps__gt=0)
                                        .order_by('date', 'set_number', 'id')
                                        .values_list('date', 'set_number', 'weight', 'reps')):
+        if number is None:
+            unnumbered.append((date, weight, reps))
+            continue
         key = (date, number)
-        if number is not None:
-            if key in seen and (weight, reps) <= seen[key]:
-                continue
-            seen[key] = (weight, reps)
-        logs.append((date, weight, reps))
+        kept = best_by_set.get(key)
+        if kept is None or (weight, reps) > (kept[1], kept[2]):
+            best_by_set[key] = (date, weight, reps)
+    logs = sorted([*best_by_set.values(), *unnumbered], key=lambda row: row[0])
 
     by_date: dict = {}
     for date, weight, reps in logs:
-        estimate = one_rep_max(weight, reps)
         entry = by_date.get(date)
-        if entry is None or (estimate, weight) > (entry['estimated_1rm'], entry['best_weight']):
-            entry = by_date.setdefault(date, {})
-            entry.update({'date': date, 'estimated_1rm': estimate,
-                          'best_weight': float(weight), 'best_reps': int(reps),
-                          'volume_kg': entry.get('volume_kg', 0.0), 'sets': entry.get('sets', 0)})
-        entry = by_date[date]
-        entry['volume_kg'] = round(entry.get('volume_kg', 0.0) + float(weight) * int(reps), 2)
-        entry['sets'] = entry.get('sets', 0) + 1
-    return [by_date[date] for date in sorted(by_date)]
+        if entry is None:
+            entry = by_date.setdefault(date, {'date': date, 'estimated_1rm': 0.0,
+                                              'best_weight': 0.0, 'best_reps': 0,
+                                              'volume_kg': 0.0, 'sets': 0})
+        # Every weighted set is the day's WORK; only a set inside the rep range Brzycki
+        # can speak about decides the day's STRENGTH. A twenty-rep set estimates a
+        # one-rep max of twice the bar — a number nobody lifted, and the whole screen,
+        # the projection included, would be built on it.
+        if int(reps) <= MAX_REPS_FOR_ESTIMATE:
+            estimate = one_rep_max(weight, reps)
+            if (estimate, float(weight)) > (entry['estimated_1rm'], entry['best_weight']):
+                entry.update({'estimated_1rm': estimate, 'best_weight': float(weight),
+                              'best_reps': int(reps)})
+        entry['volume_kg'] = round(entry['volume_kg'] + float(weight) * int(reps), 2)
+        entry['sets'] = entry['sets'] + 1
+    # A day of nothing but long sets carries no strength point: it is endurance work,
+    # counted in adherence, and it must not enter a line about getting stronger.
+    return [by_date[date] for date in sorted(by_date) if by_date[date]['estimated_1rm']]
 
 
 def _median(values) -> float:
@@ -182,22 +202,30 @@ def trend(user, exercise_id, *, until=None, series=None) -> dict:
     """Where this exercise stands and which way it is going.
 
     `change_percent` compares the first and the last training day in the window, so it is
-    a fact about what was lifted, not about the fitted line.
+    a fact about what was lifted, not about the fitted line. `best` is the heaviest set
+    of the window — the same meaning the record push uses; `personal_best()` is the
+    all-time one. `direction` is measured against the fitted level, so it always agrees
+    with the `direction` inside `projection`.
     """
     until = until or timezone.localdate()
     series = points(user, exercise_id, until=until) if series is None else series
     if not series:
+        # The same KEYS as a full answer, so the app has one model for this response and
+        # an empty state is an empty state, not a missing field.
         return {'exercise_id': exercise_id, 'points': [], 'direction': 'steady',
-                'sessions': 0, 'best': None, 'change_percent': None,
-                'latest_estimated_1rm': None}
+                'sessions': 0, 'best': None, 'latest': None, 'change_percent': None,
+                'per_week_kg': 0.0, 'latest_estimated_1rm': None}
     first, last = series[0], series[-1]
     change = None
     if first['estimated_1rm']:
         change = round(100 * (last['estimated_1rm'] - first['estimated_1rm'])
                        / first['estimated_1rm'], 1)
     weekly = _weekly_points(series, until)
-    slope = _fit(weekly)[0] if len(weekly) >= 2 else 0.0
-    best = max(series, key=lambda entry: (entry['estimated_1rm'], entry['best_weight']))
+    slope, level, _spread = _fit(weekly) if len(weekly) >= 2 else (0.0, last['estimated_1rm'], 0.0)
+    # Heaviest, not highest estimate — `personal_best`, `is_personal_record` and the
+    # record push all mean the heaviest set, and one product does not hold two meanings
+    # of its own word. Within the window; the all-time record is `personal_best`.
+    best = max(series, key=lambda entry: (entry['best_weight'], entry['estimated_1rm']))
     return {
         'exercise_id': exercise_id,
         'sessions': len(series),
@@ -208,7 +236,9 @@ def trend(user, exercise_id, *, until=None, series=None) -> dict:
         'best': {'date': best['date'], 'weight': best['best_weight'],
                  'reps': best['best_reps'], 'estimated_1rm': best['estimated_1rm']},
         'change_percent': change,
-        'direction': _direction(slope, last['estimated_1rm']),
+        # Measured against the FITTED level, the same baseline `projection` uses: one
+        # response must not carry two directions computed two ways.
+        'direction': _direction(slope, level or last['estimated_1rm']),
         'per_week_kg': round(slope, 2),
     }
 
@@ -231,6 +261,18 @@ def projection(user, exercise_id, *, until=None, series=None, adherence_percent=
                       'days': max(MIN_SPAN_DAYS - span, 0)},
             'sessions': len(series),
         }
+    # Enough training days, but none of them recent: the fit's value "at now" would be
+    # the line carried across the gap, and the app would show a number this person has
+    # never lifted and is not currently working towards.
+    quiet_days = (until - series[-1]['date']).days
+    if quiet_days > STALE_AFTER_DAYS:
+        return {
+            'available': False,
+            'reason': 'stale',
+            'needs': {'sessions': 1, 'days': 0},
+            'days_since_last': quiet_days,
+            'sessions': len(series),
+        }
 
     weekly = _weekly_points(series, until)
     slope, intercept, spread = _fit(weekly)
@@ -243,9 +285,11 @@ def projection(user, exercise_id, *, until=None, series=None, adherence_percent=
     low, high = middle - band, middle + band
     direction = _direction(slope, level)
     if direction != 'rising':
-        # Nothing is promised downwards: the honest statement is that it holds around
-        # where it is, and the missed sets are the part the person controls.
-        low, high = min(low, level - band), max(high, level)
+        # Nothing is projected downwards: the honest statement is that it holds around
+        # where it is, and the missed sets are the part the person controls. `min` here
+        # kept the declining forecast as the floor, which is the one thing this module
+        # says it never does.
+        low, high = level - band, max(high, level)
     confidence = 'low'
     if len(weekly) >= 5 and spread <= 0.03 * max(level, 1):
         confidence = 'high'
@@ -275,8 +319,6 @@ def personal_best(user, exercise_id, *, before=None):
     must not hold two definitions of its own word. `before` excludes the set being
     judged, so "is this a personal best?" asks about everything that came before it.
     """
-    from django.db.models import Max
-
     from .models import ExerciseSetLog
 
     rows = (ExerciseSetLog.objects
@@ -284,7 +326,10 @@ def personal_best(user, exercise_id, *, before=None):
                     user_exercise_progress__exercise_id=exercise_id,
                     weight__gt=0, reps__gt=0))
     if before is not None:
-        rows = rows.exclude(pk=before)
+        # Everything logged BEFORE this row, not "everything except this row": excluding
+        # only itself let two sets written in the same request judge each other, so a
+        # day logged all at once beat nothing — each set saw the other as the record.
+        rows = rows.filter(pk__lt=before)
     heaviest = rows.aggregate(weight=Max('weight'))['weight']
     if heaviest is None:
         return None
@@ -324,7 +369,7 @@ def recent_exercise_ids(user, *, since=None, limit=12) -> list[int]:
             .filter(user_exercise_progress__user=user, date__gte=since,
                     weight__gt=0, reps__gt=0)
             .values('user_exercise_progress__exercise_id')
-            .annotate(days=Max('date'), sets=Sum(1))
+            .annotate(sets=Count('id'))
             .order_by('-sets')[:limit])
     return [row['user_exercise_progress__exercise_id'] for row in rows]
 

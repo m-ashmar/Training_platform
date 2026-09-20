@@ -64,7 +64,9 @@ def test_a_projection_is_a_range_and_says_what_it_assumes(make_user, api):
     assert projection["low"] < projection["high"], "a range, never one number"
     assert projection["low"] >= projection["from_estimated_1rm"], "a rising trend"
     assert projection["confidence"] in ("low", "medium", "high")
-    assert "assumes_sets_done_percent" in projection
+    # The assumption is a NUMBER, and it is this client's own four weeks of plan
+    # adherence — "in projection" passed whatever the value was, null included.
+    assert projection["assumes_sets_done_percent"] == body["adherence_percent"]
 
 
 def test_too_little_training_says_so_instead_of_guessing(make_user, api):
@@ -285,10 +287,17 @@ def test_a_frozen_coaching_is_flagged_to_the_coach(make_user, api):
 
     from users.models import CoachingPeriod
 
+    from users.models import TrainerClientRelation
+
     trainer, client, routine, exercise = _coached(make_user, api, "frozenflag")
     now = timezone.now()
+    # Linked to the relation, the way `users.coaching.open_period` writes a month: the
+    # month belongs to a relation, and both `training_refusal` and `refusals_for` read
+    # the months of the APPROVED relation (a `number` restarts with each one).
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client)
     CoachingPeriod.objects.create(
-        trainer=trainer, client=client, number=1, price="100.00", commission_rate="0.20",
+        trainer=trainer, client=client, relation=relation,
+        number=1, price="100.00", commission_rate="0.20",
         status="settled", hold_reference=str(uuid.uuid4()),
         starts_at=now - timedelta(days=40), ends_at=now - timedelta(days=10),
         frozen_at=now - timedelta(days=10))
@@ -321,7 +330,8 @@ def test_the_home_week_carries_the_headline(make_user, api):
     client = make_user("sp_c_home")
     bench = _exercise(trainer, "sp home bench")
     _lift(client, bench, [50, 55, 60, 65])
-    private_cache().delete(f"recent_progress:{client.pk}")
+    from training_platform.signals import recent_progress_cache_keys
+    private_cache().delete_many(recent_progress_cache_keys(client.pk))
 
     body = api(client).get("/api/routine/v1/analytics/recent-progress/").json()
     assert body["strength"]["tracked_count"] == 1
@@ -358,17 +368,28 @@ def test_the_week_is_told_to_both_of_them(make_user, api):
 
 
 def test_a_paused_coaching_gets_no_recap(make_user, api):
-    from unittest import mock
+    """A real frozen month, not a patched rule: the recap reads the same coaching state
+    the training refusals do, so a mock here would only test the mock."""
+    import uuid
 
     from notifications.models import Notification
     from routine.outcomes import record_day
     from routine.tasks import send_weekly_progress
+    from users.models import CoachingPeriod, TrainerClientRelation
 
     trainer, client, routine, exercise = _coached(make_user, api, "weekfrozen", sets=2)
     record_day(client, routine, 1, timezone.localdate(), via='confirmed_unlogged',
                confirmed_unlogged=True)
-    with mock.patch("users.coaching.training_refusal", return_value="coaching_frozen"):
-        result = send_weekly_progress()
+    now = timezone.now()
+    CoachingPeriod.objects.create(
+        trainer=trainer, client=client,
+        relation=TrainerClientRelation.objects.get(trainer=trainer, client=client),
+        number=1, price="100.00", commission_rate="0.20", status="settled",
+        hold_reference=str(uuid.uuid4()),
+        starts_at=now - timedelta(days=40), ends_at=now - timedelta(days=10),
+        frozen_at=now - timedelta(days=10))
+
+    result = send_weekly_progress()
     assert result["clients"] == 0
     assert not Notification.objects.filter(recipient=client, event_type="weekly_recap").exists()
 
@@ -389,3 +410,180 @@ def test_the_weekly_texts_carry_no_price_and_no_claim():
                 text = f"{template.title} {template.body % context}"
             for forbidden in ("http", "SYP", "calorie", "سعرة", "muscle", "fat"):
                 assert forbidden not in text, (event_type, language, text)
+
+
+# ------------------------------------- what the review of 2026-09-20 found (round 2)
+def test_a_trail_gone_cold_is_not_projected_forward(make_user, api):
+    """Enough training days, none of them recent: the fit would carry its line across
+    the gap and report it as "where you are now" — a number nobody has lifted."""
+    trainer = make_user("sp_t_stale", user_type="trainer")
+    client = make_user("sp_c_stale")
+    squat = _exercise(trainer, "sp stale squat")
+    # Five weekly days that all ended five weeks ago.
+    _lift(client, squat, [60, 62, 64], today=timezone.localdate() - timedelta(days=35))
+
+    body = api(client).get(f"/api/routine/analytics/strength/?exercise_id={squat.pk}").json()
+    assert body["projection"]["available"] is False
+    assert body["projection"]["reason"] == "stale"
+    assert body["projection"]["days_since_last"] >= 35
+    assert body["share"]["kind"] in ("rising", "holding"), "the trend is still a fact"
+
+
+def test_a_trend_that_is_not_rising_is_never_projected_downwards(make_user, api):
+    """The module's own rule: nothing is promised downwards. The floor was the declining
+    forecast itself, which is the one thing it says it never shows."""
+    trainer = make_user("sp_t_easing", user_type="trainer")
+    client = make_user("sp_c_easing")
+    curl = _exercise(trainer, "sp easing curl")
+    _lift(client, curl, [60, 57, 54, 51, 48])          # five weeks, sliding down
+
+    body = api(client).get(f"/api/routine/analytics/strength/?exercise_id={curl.pk}").json()
+    projection = body["projection"]
+    assert projection["available"] is True
+    assert projection["direction"] == "easing"
+    level = projection["from_estimated_1rm"]
+    assert projection["high"] >= level, "it holds around where it is"
+    # The floor is the band below TODAY, never the declining forecast itself — which is
+    # what `min(low, level - band)` kept, two weeks of decline lower than this.
+    assert projection["per_week_kg"] < 0
+    assert projection["low"] > level + projection["per_week_kg"] * 2
+
+
+def test_an_exercise_never_trained_answers_the_same_shape(make_user, api):
+    """An empty state is an empty state, not a missing field: a Flutter model with a
+    required `latest` threw on this response."""
+    trainer = make_user("sp_t_shape", user_type="trainer")
+    client = make_user("sp_c_shape")
+    fly = _exercise(trainer, "sp shape fly")
+    fly.created_by = None                       # the shared catalogue: visible to all
+    fly.is_global = True
+    fly.save(update_fields=["created_by", "is_global"])
+
+    body = api(client).get(f"/api/routine/analytics/strength/?exercise_id={fly.pk}").json()
+    for key in ("latest", "best", "change_percent", "per_week_kg", "direction",
+                "sessions", "points", "projection", "share", "exercise_name"):
+        assert key in body, key
+    assert (body["latest"], body["best"], body["sessions"]) == (None, None, 0)
+    assert body["share"]["kind"] == "no_data"
+
+
+def test_another_trainers_private_exercise_is_not_readable_here(make_user, api):
+    """The rule 51ec960 established for add-media, on the endpoint added after it: an
+    exercise you may not see is answered exactly like an id that does not exist."""
+    mine = make_user("sp_t_vis_a", user_type="trainer")
+    theirs = make_user("sp_t_vis_b", user_type="trainer")
+    client = make_user("sp_c_vis")
+    secret = _exercise(theirs, "sp secret lift")
+
+    refused = api(client).get(f"/api/routine/analytics/strength/?exercise_id={secret.pk}")
+    assert refused.status_code == 404
+    assert refused.json()["code"] == "not_found", "the same answer as a missing id"
+    assert "secret" not in refused.content.decode().lower()
+
+    # Their own training is their own to read, whatever became of the routine.
+    _lift(client, secret, [30, 32, 34])
+    ok = api(client).get(f"/api/routine/analytics/strength/?exercise_id={secret.pk}")
+    assert ok.status_code == 200
+    assert ok.json()["sessions"] == 3
+
+
+def test_a_long_set_does_not_invent_a_one_rep_max(make_user, api):
+    """Brzycki at twenty reps estimates twice the bar. That number would drive the
+    trend, the projection and the whole screen."""
+    from routine.strength import points
+
+    trainer = make_user("sp_t_reps", user_type="trainer")
+    client = make_user("sp_c_reps")
+    ohp = _exercise(trainer, "sp endurance press")
+    _lift(client, ohp, [40], reps=25, sets=2)                 # endurance only
+    assert points(client, ohp.pk) == [], "no strength point from a set that long"
+
+    # The same day, two more sets inside the range Brzycki can speak about.
+    from routine.models import ExerciseSetLog, UserExerciseProgress
+    progress = UserExerciseProgress.objects.get(user=client, exercise=ohp,
+                                                date=timezone.localdate())
+    for number in (3, 4):
+        ExerciseSetLog.objects.create(user_exercise_progress=progress, set_number=number,
+                                      weight=40, reps=8, date=timezone.localdate())
+    series = points(client, ohp.pk)
+    assert len(series) == 1
+    assert series[0]["best_reps"] == 8, "the estimate comes from the short sets"
+    assert series[0]["sets"] == 4, "the long sets are still the day's work"
+
+
+def test_a_record_beaten_through_log_the_whole_day_is_celebrated(make_user, api,
+                                                                 django_capture_on_commit_callbacks):
+    """The route the app uses to log a whole day promised the flag and the push in the
+    ViewSet's own docstring, and only the single-set POST checked."""
+    from notifications.models import Notification
+
+    trainer, client, routine, exercise = _coached(make_user, api, "bulkpr", sets=2, reps=5)
+    _lift(client, exercise, [50], reps=5, sets=1,
+          today=timezone.localdate() - timedelta(days=7))
+
+    with django_capture_on_commit_callbacks(execute=True):
+        done = api(client).post("/api/routine/set-logs/bulk-create/", {
+            "routine_id": routine.pk, "day": 1, "date": timezone.localdate().isoformat(),
+            "sets": 2, "weight": 70, "reps": 5}, content_type=JSON)
+    assert done.status_code in (200, 201), done.content
+    body = done.json()
+    assert body["count"] == 2, body
+    assert [row["personal_record"] for row in body["results"]].count(True) == 1, \
+        "one record per exercise, the heaviest set"
+    notice = Notification.objects.get(recipient=client, event_type="personal_record")
+    assert notice.metadata["context"]["weight"] == "70"
+
+
+def test_the_coach_reads_the_projection_under_its_condition(make_user, api):
+    """Every projection on the coach's screen said it assumed nothing."""
+    trainer, client, routine, exercise = _coached(make_user, api, "coachassume")
+    _lift(client, exercise, [40, 44, 48, 52, 56])
+
+    body = api(trainer).get(f"/api/routine/trainer/client-progress/{client.pk}/").json()
+    mine = api(client).get("/api/routine/analytics/strength/").json()
+    # The coach reads the same condition the client does, not a blank one.
+    assert body["strength"]["assumes_sets_done_percent"] == mine["adherence_percent"]
+    movers = body["strength"]["top_movers"]
+    assert movers and movers[0]["projection"]["assumes_sets_done_percent"] == \
+        body["strength"]["assumes_sets_done_percent"]
+
+
+def test_an_admin_sees_the_whole_attention_roster(make_user, api):
+    """`accessible_user_ids` answers None for an admin, meaning "no restriction"; read
+    as "nobody" it showed an admin an empty list."""
+    trainer, client, routine, exercise = _coached(make_user, api, "adminatt")
+    admin = make_user("sp_admin_att", user_type="admin", is_staff=True)
+
+    body = api(admin).get("/api/routine/trainer/client-progress/attention/").json()
+    assert any(row["client_id"] == client.pk for row in body["clients"]), \
+        "an admin sees every client, not none"
+
+
+def test_the_assistant_answers_from_the_same_numbers_as_the_app(make_user, api,
+                                                                django_capture_on_commit_callbacks):
+    """One tool answer must not hold two truths: `routines.overall_completion_pct` was
+    the share of RoutineProgress rows marked completed over ALL history, so it read 100%
+    beside a plan adherence of 62% for the same weeks — and a day closed with sets
+    missing counted as finished (the owner, 2026-09-20)."""
+    from ai_assistant.tools.progress_tools import get_overall_progress
+
+    trainer, client, routine, exercise = _coached(make_user, api, "aitool", sets=4, reps=10)
+    # Two of four sets, then the day closed anyway: a short day.
+    from routine.models import UserExerciseProgress, ExerciseSetLog
+    today = timezone.localdate()
+    progress = UserExerciseProgress.objects.create(user=client, exercise=exercise,
+                                                   date=today, target_sets=4)
+    for number in (1, 2):
+        ExerciseSetLog.objects.create(user_exercise_progress=progress, set_number=number,
+                                      weight=30, reps=10, date=today)
+    with django_capture_on_commit_callbacks(execute=True):
+        api(client).post(f"/api/routine/routines/{routine.pk}/update_progress/",
+                         {"day": 1, "status": "completed", "confirm_unlogged": True},
+                         content_type=JSON)
+
+    answer = get_overall_progress(client, days=30)
+    assert answer["plan_adherence"]["sets_done_pct"] == 50.0
+    assert answer["routines"]["overall_completion_pct"] == 0.0, \
+        "a day closed short is not a finished day"
+    assert answer["routines"]["total_days"] == 1
+    assert answer["strength"]["tracked_exercises"] == 1

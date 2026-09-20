@@ -539,23 +539,33 @@ def refusals_for(trainer_id, client_ids, at=None) -> dict:
     if not ids:
         return {}
     start, end = _span(at)          # the same interval `training_refusal` judges
+    # The APPROVED relation's own months decide "the latest month", exactly as
+    # `_trainer_refusal` reads them (`relation.periods.order_by('-number')`). `number`
+    # restarts at 1 with each relation, so picking the highest number across a pair's
+    # whole history answered with the old relation's month 5 for a client who left and
+    # came back — the two functions then disagreed about the same client.
+    relations = dict(TrainerClientRelation.objects
+                     .filter(trainer_id=trainer_id, client_id__in=ids, status='approved')
+                     .values_list('client_id', 'pk'))
+    approved = set(relations)
     latest: dict = {}
     for row in (CoachingPeriod.objects
                 .filter(trainer_id=trainer_id, client_id__in=ids)
                 .order_by('client_id', 'number')
-                .values('client_id', 'status', 'frozen_at', 'starts_at', 'ends_at')):
+                .values('client_id', 'relation_id', 'status', 'frozen_at',
+                        'starts_at', 'ends_at')):
         client_id = row['client_id']
         entry = latest.setdefault(client_id, {'last': None, 'covers': False})
-        entry['last'] = row
+        if relations.get(client_id) is None or row['relation_id'] == relations[client_id]:
+            # No approved relation: any month is "the last" — the pair's history is all
+            # there is to judge, and every branch below then answers a refusal anyway.
+            entry['last'] = row
+        # A paid month covers the moment whichever relation it was bought under.
         if (row['status'] == 'settled' and row['starts_at'] and row['ends_at']
                 and row['starts_at'] < end
                 and (row['ends_at'] > start
                      or (row['frozen_at'] and row['frozen_at'] > start))):
             entry['covers'] = True
-
-    approved = set(TrainerClientRelation.objects
-                   .filter(trainer_id=trainer_id, client_id__in=ids, status='approved')
-                   .values_list('client_id', flat=True))
 
     answers = {}
     for client_id in ids:
@@ -564,6 +574,11 @@ def refusals_for(trainer_id, client_ids, at=None) -> dict:
             answers[client_id] = None               # never paid for: nothing to refuse
             continue
         last = entry['last']
+        if last is None:
+            # Coached now with no month under THIS relation: free, or sold as one fee —
+            # `_trainer_refusal` returns None for the same case.
+            answers[client_id] = None
+            continue
         if client_id in approved and last['status'] in ('held', 'settled') and not last['frozen_at']:
             answers[client_id] = None
         elif entry['covers']:

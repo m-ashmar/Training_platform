@@ -72,6 +72,10 @@ def send_async_notification(user_id, notif_type, message, related_object_id=None
 #: app may sync a workout up to 30 days late (routine/views.py MAX_BACKLOG_DAYS).
 SWEEP_WINDOW_DAYS = 30
 
+#: At most this many open days a run. A night that hits it says so and the next run
+#: takes the rest.
+SWEEP_MAX_DAYS = 500
+
 
 @shared_task(
     name="routine.close_open_training_days",
@@ -100,7 +104,7 @@ def close_open_training_days(before=None):
 
     from users.coaching import training_refusal
 
-    from .models import DayOutcome, RoutineProgress
+    from .models import DayOutcome, ExerciseSetLog, RoutineProgress
     from .outcomes import record_day_quietly
 
     before = before or timezone.localdate()
@@ -111,12 +115,25 @@ def close_open_training_days(before=None):
     recorded = DayOutcome.objects.filter(
         user_id=models.OuterRef('user_id'), routine_id=models.OuterRef('routine_id'),
         day=models.OuterRef('day'), date=models.OuterRef('date'))
+    # `in_progress` is not the whole of an unfinished day. A client who does two of
+    # three sets on EVERY exercise finishes none of them, so the row reads
+    # `not_started` (routine/models.py counts an exercise only at its full set count) —
+    # and a sweep that looked only at `in_progress` left exactly that day unrecorded:
+    # the missed sets vanished and the streak was never broken, which is the loss this
+    # feature exists to stop. A day nobody touched must still not become a miss, so a
+    # `not_started` row is swept only when it carries work.
+    worked = ExerciseSetLog.objects.filter(
+        user_exercise_progress__user_id=models.OuterRef('user_id'),
+        date=models.OuterRef('date'))
     open_days = (RoutineProgress.objects
-                 .filter(status='in_progress', date__lt=before, date__gte=window_start)
-                 .annotate(already=models.Exists(recorded))
+                 .filter(status__in=('in_progress', 'not_started'),
+                         date__lt=before, date__gte=window_start)
+                 .annotate(already=models.Exists(recorded), worked=models.Exists(worked))
                  .filter(already=False)
+                 .filter(models.Q(status='in_progress')
+                         | models.Q(exercises_completed__gt=0) | models.Q(worked=True))
                  .select_related('user', 'routine')
-                 .order_by('date', 'id')[:500])
+                 .order_by('date', 'id')[:SWEEP_MAX_DAYS])
 
     closed = skipped = 0
     for row in open_days:
@@ -130,7 +147,25 @@ def close_open_training_days(before=None):
             closed += 1
     if closed or skipped:
         logger.info("Closed %s open training days (%s skipped: not trainable)", closed, skipped)
-    return {'closed': closed, 'skipped': skipped}
+    capped = closed + skipped >= SWEEP_MAX_DAYS
+    if capped:
+        # Said out loud: the rest is picked up by the next run, and a cap that binds
+        # every night means the window or the cap is wrong.
+        logger.warning("Open-day sweep hit its %s-row cap; the remainder waits for the "
+                       "next run", SWEEP_MAX_DAYS)
+    return {'closed': closed, 'skipped': skipped, 'capped': capped}
+
+
+def _coaching_rosters() -> dict:
+    """`{trainer_id: [client_id, ...]}` for every approved coaching relation."""
+    from users.models import TrainerClientRelation
+
+    rosters: dict = {}
+    for trainer_id, client_id in (TrainerClientRelation.objects
+                                  .filter(status='approved')
+                                  .values_list('trainer_id', 'client_id')):
+        rosters.setdefault(trainer_id, []).append(client_id)
+    return rosters
 
 
 @shared_task(
@@ -163,11 +198,9 @@ def send_weekly_progress(now=None):
 
     from notifications.models import UserNotificationPreference
     from notifications.services import NotificationService
-    from users.coaching import training_refusal
-    from users.models import TrainerClientRelation
+    from users.coaching import refusals_for
 
-    from .models import Routine
-    from .outcomes import adherence, attention, week_totals
+    from .outcomes import attention, week_totals
 
     now = now or timezone.now()
     today = timezone.localdate(now)
@@ -180,14 +213,22 @@ def send_weekly_progress(now=None):
                    .only('id', 'preferred_language'))
     totals = week_totals([client.pk for client in clients], start, today)
     sent_clients = 0
+    # Who is frozen, ended or unpaid — per COACH, for the whole roster at once. Asking
+    # one arbitrary routine (the most recently updated one assigned to the client) let a
+    # client with two coaches be judged by the wrong one, and cost a handful of queries
+    # per client besides.
+    frozen: set = set()
+    for trainer_id, client_ids in _coaching_rosters().items():
+        for client_id, refusal in refusals_for(trainer_id, client_ids).items():
+            if refusal is not None:
+                frozen.add(client_id)
     for client in clients:
         week = totals.get(client.pk)
         if not week or not week.get('planned_sets'):
             continue
-        # A recap of a week nobody was allowed to train is not a recap.
-        routine = (Routine.objects.filter(assigned_to=client, is_active=True)
-                   .order_by('-updated_at').first())
-        if routine is not None and training_refusal(client, routine):
+        # The cheap refusals first: a recap of a week nobody was allowed to train is not
+        # a recap, and someone who turned this off is not asked for one.
+        if client.pk in frozen:
             continue
         if not UserNotificationPreference.is_channel_enabled(client, 'weekly_recap'):
             continue
@@ -202,19 +243,17 @@ def send_weekly_progress(now=None):
             sent_clients += 1
 
     # --- each trainer's roster -------------------------------------------------
-    rosters: dict = {}
-    for trainer_id, client_id in (TrainerClientRelation.objects
-                                  .filter(status='approved')
-                                  .values_list('trainer_id', 'client_id')):
-        rosters.setdefault(trainer_id, []).append(client_id)
+    rosters = _coaching_rosters()
     sent_trainers = 0
     for trainer in User.objects.filter(pk__in=rosters, is_active=True).only('id'):
+        # The opt-out decides before the work, not after it: a trainer who turned the
+        # digest off used to pay for a full roster scan every week to be skipped.
+        if not UserNotificationPreference.is_channel_enabled(trainer, 'trainer_weekly_digest'):
+            continue
         ids = rosters[trainer.pk]
         week = week_totals(ids, start, today)
         trained = sum(1 for client_id in ids if week.get(client_id, {}).get('logged_sets'))
         needs = attention(trainer, ids, today=today)
-        if not UserNotificationPreference.is_channel_enabled(trainer, 'trainer_weekly_digest'):
-            continue
         if NotificationService.create_and_send(
                 recipient=trainer, event_type="trainer_weekly_digest",
                 related_object_id=week_key,

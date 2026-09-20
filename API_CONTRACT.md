@@ -506,13 +506,26 @@ collected for it.
   `headline`.
 - A `projection` is a RANGE and only when there is enough behind it: 3 training days of
   that exercise over at least 2 weeks, else `{available: false, reason:
-  "insufficient_data", needs: {...}}`. When available: `from_estimated_1rm`, `low`,
-  `high`, `horizon_days` (14), `per_week_kg`, `confidence`, `assumes_sets_done_percent`.
-  It never claims a health outcome (no calories, weight, muscle or "faster results") and
-  is identical on every build.
+  "insufficient_data", needs: {...}}`; and nothing older than 3 weeks is projected
+  forward — a trail gone cold answers `{available: false, reason: "stale",
+  days_since_last}`. When available: `from_estimated_1rm`, `low`, `high`, `horizon_days`
+  (14), `per_week_kg`, `confidence`, `assumes_sets_done_percent`. It never projects a
+  decline (a falling trend "holds around where it is"), never claims a health outcome
+  (no calories, weight, muscle or "faster results"), and is identical on every build.
+- An exercise the person has never trained answers the same KEYS with empty values
+  (`latest`, `best` null, `sessions` 0, `share.kind` `no_data`) — never a missing field.
+  `best` is the heaviest set of the window, the same meaning the record push uses.
+- Sets longer than 12 reps are counted as work (adherence, `volume_kg`, `sets`) but do
+  not set a one-rep max: Brzycki says nothing useful past that, and a day of nothing but
+  long sets has no strength point.
+- `exercise_id` obeys the exercise visibility rule: another trainer's private exercise
+  answers 404 `not_found` with the same body as a missing id (the answer
+  `exercises/{id}/add-media/` gives). An exercise the person has actually trained is
+  always readable.
 - `POST set-logs/` answers `personal_record: true` for a set that beats everything logged
   before it for that exercise (null when reading a list), and sends the `personal_record`
-  push. The first set of an exercise is never a record.
+  push. The first set of an exercise is never a record. `POST set-logs/bulk-create/`
+  answers `personal_record` on each row of `results` and sends the same push.
 - The home week (`v1/analytics/recent-progress/`) carries `strength.headline`,
   `rising_count` and `tracked_count`.
 - The trainer sees it too: `trainer/client-progress/{id}/` gains `strength`, the roster's

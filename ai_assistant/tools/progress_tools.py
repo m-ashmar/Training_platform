@@ -16,7 +16,7 @@ def get_overall_progress(user, days=30, **kwargs):
     diet adherence, and routine completion.
     """
     from routine.models import (
-        WorkoutSession, UserExerciseProgress, RoutineProgress, Routine,
+        WorkoutSession, UserExerciseProgress, DayOutcome, Routine,
     )
     from diet.models import DailyProgress, DietPlan
 
@@ -77,12 +77,15 @@ def get_overall_progress(user, days=30, **kwargs):
         assigned_to=user, is_active=True,
     ).count()
 
-    routine_completion = RoutineProgress.objects.filter(
-        user=user,
-        routine__is_active=True,
+    # Days, inside the period the caller asked for, and judged the way the owner's rule
+    # judges them: a day closed with sets still missing is NOT a finished day
+    # (2026-09-20). Counting `status='completed'` over all of history put 100% beside a
+    # plan adherence of 62% in the same answer, and the assistant could quote either.
+    routine_completion = DayOutcome.objects.filter(
+        user=user, date__gte=since_date,
     ).aggregate(
         total=Count('id'),
-        completed=Count('id', filter=Q(status='completed')),
+        completed=Count('id', filter=Q(complete=True)),
     )
     routine_pct = (
         round((routine_completion['completed'] / routine_completion['total'] * 100), 1)
@@ -167,9 +170,14 @@ PROGRESS_TOOL_SCHEMAS = [
         "function": {
             "name": "get_overall_progress",
             "description": (
-                "Get a holistic fitness summary combining training consistency, "
-                "workout count, diet adherence, and routine completion percentage "
-                "over a specified period."
+                "Get a holistic fitness summary over a specified period: training "
+                "consistency and workout count, diet adherence, how many training days "
+                "were finished in full, how much of the coach's plan was actually done "
+                "(sets planned, logged and missed, perfect days, the day that broke the "
+                "streak), and which exercises are getting stronger, with a two-week "
+                "projected RANGE where there is enough training behind it. Use it for "
+                "'how am I doing', 'did I finish my sets', 'am I getting stronger' and "
+                "'what will I lift in two weeks'."
             ),
             "parameters": {
                 "type": "object",

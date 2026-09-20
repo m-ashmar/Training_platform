@@ -779,7 +779,6 @@ class DayOutcome(models.Model):
     #: False for a day filled in afterwards by the backfill: the plan may have changed
     #: since, so the week is shown as approximate.
     prescription_exact = models.BooleanField(default=True)
-    prescription_at = models.DateTimeField(null=True, blank=True)
     workout_session = models.ForeignKey('WorkoutSession', null=True, blank=True,
                                         on_delete=models.SET_NULL,
                                         related_name='day_outcomes')
@@ -1150,8 +1149,10 @@ def refresh_routine_progress(instance, routine_scope=None, day_scope=None):
             # A day already CLOSED follows its new sets, whatever verdict this pass
             # reaches: that is how a day closed short becomes complete when the rest of
             # it syncs. Asked only for days this person has work on, and it does nothing
-            # unless an outcome exists.
-            if progress_by_exercise:
+            # unless an outcome exists. A day this pass finds COMPLETE is recorded at the
+            # end of the loop instead — refreshing it here as well wrote the same row
+            # twice on every completing set.
+            if progress_by_exercise and status != 'completed':
                 from .outcomes import refresh_day_quietly
                 refresh_day_quietly(user, routine, day, progress_date)
 
@@ -1264,7 +1265,7 @@ def _recalc_locked(progress_pk, routine_pk=None, day_scope=None):
     database computes the aggregate at write time, under the row's own lock, so the
     last statement to execute reflects every committed set log.
     """
-    from django.db.models import Count, OuterRef, Subquery, Sum, Value
+    from django.db.models import Count, OuterRef, Q, Subquery, Sum, Value
     from django.db.models.functions import Coalesce
 
     logs = ExerciseSetLog.objects.filter(user_exercise_progress=OuterRef('pk'))
@@ -1279,7 +1280,14 @@ def _recalc_locked(progress_pk, routine_pk=None, day_scope=None):
         )
 
     UserExerciseProgress.objects.filter(pk=progress_pk).update(
-        completed_sets=agg(Count('id'), models.IntegerField()),
+        # DISTINCT set numbers, not rows: only `client_uuid` is unique, so a set
+        # re-sent without the app's id writes a second row, and counting rows let three
+        # rows for two sets satisfy a three-set prescription — the day then completed
+        # itself on work that was never done. A set with no number (an old row, a free
+        # log) has no identity to collapse, so each one counts once.
+        completed_sets=agg(Count('set_number', distinct=True)
+                           + Count('id', filter=Q(set_number__isnull=True)),
+                           models.IntegerField()),
         total_weight=agg(Sum('weight'), models.FloatField()),
         total_repetitions=agg(Sum('reps'), models.IntegerField()),
     )

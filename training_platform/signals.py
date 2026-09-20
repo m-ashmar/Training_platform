@@ -74,6 +74,20 @@ def blank_translation_is_absent_not_empty(sender, instance, **kwargs):
                 setattr(instance, name, None)
 
 
+def recent_progress_cache_keys(user_id) -> list:
+    """Every key the home week can be cached under for one person.
+
+    The payload carries translated exercise names, so the key carries the language
+    (routine/views.py `RecentActivityProgressView`). A bust that deleted one key left
+    the other language serving a week that had already changed.
+    """
+    from django.conf import settings
+
+    codes = {code for code, _name in getattr(settings, 'LANGUAGES', ())}
+    codes.add(getattr(settings, 'LANGUAGE_CODE', 'ar'))
+    return [f"recent_progress:{user_id}:{code}" for code in sorted(codes)]
+
+
 @receiver(post_save, sender='routine.WorkoutSession')
 def bust_recent_progress_cache(sender, instance, **kwargs):
     """
@@ -92,7 +106,7 @@ def bust_recent_progress_cache(sender, instance, **kwargs):
         def _bust():
             try:
                 from training_platform.cache import private_cache
-                private_cache().delete(f"recent_progress:{instance.user_id}")
+                private_cache().delete_many(recent_progress_cache_keys(instance.user_id))
                 logger.info("Busted recent_progress cache for user %s", instance.user_id)
             except Exception:
                 logger.warning(
@@ -114,7 +128,7 @@ def bust_recent_progress_cache_on_day_outcome(sender, instance, **kwargs):
     def _bust():
         try:
             from training_platform.cache import private_cache
-            private_cache().delete(f"recent_progress:{instance.user_id}")
+            private_cache().delete_many(recent_progress_cache_keys(instance.user_id))
         except Exception:
             logger.warning(
                 "Could not bust recent_progress cache for user %s; it will expire on TTL",

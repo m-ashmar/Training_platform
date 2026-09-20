@@ -24,7 +24,11 @@ import pytest
 # The view returns `{"error": ...}`; `normalize_error_envelope` fills in `detail` and
 # the `code` the app branches on. Pinned whole, because "the two 404s are
 # indistinguishable" is a claim about the bytes on the wire, not about the view's dict.
-NOT_FOUND_BODY = {"error": "Exercise not found", "detail": "Exercise not found",
+# The text is `_("Exercise not found.")` since 2026-09-20: every user-facing string
+# goes through gettext (CLAUDE.md), and this one is served to a client. The CODE is
+# what the app branches on and it is unchanged — and so is the point of this file, that
+# both 404s are the same bytes.
+NOT_FOUND_BODY = {"error": "Exercise not found.", "detail": "Exercise not found.",
                   "code": "not_found"}
 
 MEDIA_PAYLOAD = {
