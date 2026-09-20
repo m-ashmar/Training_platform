@@ -114,103 +114,20 @@ class RecentActivityProgressView(APIView):
     exercises are rising out of how many tracked (see `analytics/strength/`).
 
     Implementation details:
+    - The payload itself lives in `routine/recent.py`, because `GET /api/v1/home`
+      shows the same week and must not compute a second, disagreeing version of it
     - Duration is aggregated at DB level via TruncDate + Sum (no Python loops)
     - Day boundaries are computed in the server's local timezone (timezone-aware)
     - Only completed sessions with a valid end_time are counted
-    - Results are cached per-user in private_cache (Redis DB3) for 120s
-    - Cache is busted on WorkoutSession completion via post_save signal
+    - Results are cached per-user AND per-language in private_cache (Redis DB3) for 120s
+    - Cache is busted on WorkoutSession completion and on a day closing, via post_save
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from django.db.models import ExpressionWrapper, DurationField
-        from django.db.models.functions import TruncDate
-        # NOTE: the module is training_platform.cache — there is no cache_backends
-        # module. The wrong import raised ImportError on every request here.
-        from training_platform.cache import private_cache
-        from datetime import timedelta, date
+        from .recent import cached_recent_progress
 
-        # The language is part of the key: the payload now carries translated exercise
-        # names (the strength headline), and a cached Arabic answer was served to the
-        # same user's English session for two minutes.
-        cache_key = f"recent_progress:{request.user.id}:{get_language() or 'ar'}"
-        cached = private_cache().get(cache_key)
-        if cached is not None:
-            return Response(cached)
-
-        # Timezone-aware 7-day window aligned to local calendar days
-        now = timezone.localtime()
-        start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        window_start = start_of_today - timedelta(days=6)
-
-        # DB-level aggregation: push all computation to Postgres
-        qs = (
-            WorkoutSession.objects
-            .filter(
-                user=request.user,
-                status='completed',
-                end_time__isnull=False,       # guard against active/null sessions
-                start_time__gte=window_start,
-            )
-            # NOT `day=`: `WorkoutSession.day` is the routine day, and annotating over a
-            # model field raises `ValueError: The annotation 'day' conflicts with a field
-            # on the model` — this endpoint, the home screen's week, answered 500 to every
-            # caller from the day that column was added.
-            .annotate(
-                session_date=TruncDate('start_time'),
-                session_duration=ExpressionWrapper(
-                    F('end_time') - F('start_time'),
-                    output_field=DurationField()
-                )
-            )
-            .values('session_date')
-            .annotate(total_duration=Sum('session_duration'))
-        )
-
-        # Build a lookup map: date → total seconds
-        results_map = {}
-        for entry in qs:
-            total_secs = entry['total_duration'].total_seconds() if entry['total_duration'] else 0
-            results_map[entry['session_date']] = int(total_secs)
-
-        # Deterministic 7-day output — always include every day, even zeros
-        recent_progress = []
-        for i in range(7):
-            day: date = (window_start + timedelta(days=i)).date()
-            recent_progress.append({
-                "date": day.isoformat(),          # "2026-04-11" — clean, unambiguous
-                "duration": results_map.get(day, 0)
-            })
-
-        # The same week, but as the plan: how much of what the coach asked for was
-        # actually done, how many days had nothing missing, and the day that broke the
-        # streak (the owner, 2026-09-20). One aggregate query; the cache is busted when
-        # a day closes (training_platform/signals.py).
-        from .outcomes import adherence
-
-        from . import strength as strength_module
-
-        week = adherence(request.user, window_start.date(), start_of_today.date(),
-                         today=start_of_today.date())
-        # One line for the home card: the exercise that moved most, and where it is
-        # heading if there is enough to say (the owner, 2026-09-20). Numbers, not a
-        # sentence: the app writes it in the person's own language.
-        overview = strength_module.overview(request.user, until=start_of_today.date(),
-                                            limit=6,
-                                            adherence_percent=week['sets']['done_percent'])
-        data = {
-            "recent_progress": recent_progress,
-            "adherence": week,
-            "strength": {
-                "headline": strength_module.headline(
-                    overview['top_movers'][0] if overview['top_movers']
-                    else (overview['exercises'][0] if overview['exercises'] else None)),
-                "rising_count": overview['rising_count'],
-                "tracked_count": overview['tracked_count'],
-            },
-        }
-        private_cache().set(cache_key, data, 120)
-        return Response(data)
+        return Response(cached_recent_progress(request.user))
 
 
 def _int_or_none(value):

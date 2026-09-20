@@ -374,6 +374,32 @@ plan without `daily_calories` answers 400 `client_activity_level_required`.
 | `DELETE, POST, PUT` | `/api/diet/v1/trainer/meals/{meal_id}/` | auth, HasDietAccess | `TrainerMealView` |
 | `GET` | `/api/diet/v1/trainer/templates/` | auth, HasDietAccess | `TrainerTemplatesView` |
 
+### Home (server-driven)
+
+The screen the app opens on. The server answers an ORDERED list of typed sections and the
+app renders what it is handed: it must cope with any subset, in any order, and skip a
+`type` it does not know. `{"as_of", "refresh_after_seconds", "sections": [{"type",
+"data"}]}`, and a section with nothing to say is left out rather than sent empty. The
+closed set of types is `greeting`, `notices`, `today`, `plan`, `week`, `strength`,
+`achievements`, `coach` — every `data` shape, every `code` and what differs by build are
+written out in the docstring of `home/views.py HomeView`, which is the contract.
+
+Nothing here is a rendered sentence: sections carry codes and numbers and the app writes
+the Arabic or the English. Nothing here carries a price, an amount or a web-hub link on
+any build. `notices` is the only section that may be urgent; its codes are
+`coaching_frozen`, `coaching_unpaid`, `coaching_ended`, `coaching_renews_soon`,
+`coaching_ending`, `subscription_ended`, `subscription_ending_soon`. The one behaviour
+that differs by build: the "find a coach" prompt (`coach` `{"state": "none"}`) is sent
+only to a build with `can_pay_coaching_in_app` — inviting someone to hire a trainer is a
+sale. `week` and `strength` are the same numbers, from the same cache entry, as
+`GET /api/routine/v1/analytics/recent-progress/`.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/home` | auth (client) | `HomeView` |
+
+403 `clients_only` for a trainer, agent or admin: they have their own screens.
+
 ### Notifications
 
 | Method | Path | Auth | View |

@@ -88,6 +88,23 @@ def recent_progress_cache_keys(user_id) -> list:
     return [f"recent_progress:{user_id}:{code}" for code in sorted(codes)]
 
 
+def bust_home(user_id) -> None:
+    """Retire this person's cached home screens (`GET /api/v1/home`).
+
+    The home payload is keyed by build as well as by user and language — it must be,
+    because what a build may be shown differs — and the version in that key is whatever
+    the installed app sends, so the keys cannot be listed and deleted. Instead the key
+    carries a counter, and bumping it orphans every entry at once
+    (`home/views.py cache_key`). Same idea as `bump_cache_version`, per person.
+
+    Called from the receivers below, inside their guarded `on_commit` bust: like every
+    invalidation here it is an optimisation and must never fail the training it follows.
+    """
+    from home.views import bump_stamp
+
+    bump_stamp(user_id)
+
+
 @receiver(post_save, sender='routine.WorkoutSession')
 def bust_recent_progress_cache(sender, instance, **kwargs):
     """
@@ -107,6 +124,7 @@ def bust_recent_progress_cache(sender, instance, **kwargs):
             try:
                 from training_platform.cache import private_cache
                 private_cache().delete_many(recent_progress_cache_keys(instance.user_id))
+                bust_home(instance.user_id)
                 logger.info("Busted recent_progress cache for user %s", instance.user_id)
             except Exception:
                 logger.warning(
@@ -129,6 +147,7 @@ def bust_recent_progress_cache_on_day_outcome(sender, instance, **kwargs):
         try:
             from training_platform.cache import private_cache
             private_cache().delete_many(recent_progress_cache_keys(instance.user_id))
+            bust_home(instance.user_id)
         except Exception:
             logger.warning(
                 "Could not bust recent_progress cache for user %s; it will expire on TTL",

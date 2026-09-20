@@ -66,6 +66,10 @@ urlpatterns = [
     # The client's monthly coaching (users/coaching.py).
     path('api/v1/coaching/', include('users.urls_coaching', namespace='coaching')),
 
+    # The server-driven home screen: an ordered list of typed sections, built from
+    # what every other area already answers. See home/views.py for the contract.
+    path('api/v1/', include('home.urls', namespace='home')),
+
     # Notification preferences (listing lives under /api/social/notifications/)
     path('api/notifications/', include('notifications.urls', namespace='notifications')),
 ]
