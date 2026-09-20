@@ -1,6 +1,8 @@
 from django.urls import path
 from .views import (
+    AgentDirectoryView,
     WalletBalanceView,
+    WalletTransactionDetailView,
     WalletTransactionsView,
     AgentTopUpView,
     ClientTransferToTrainerView,
@@ -19,6 +21,12 @@ app_name = "wallet"
 urlpatterns = [
     path("balance/", WalletBalanceView.as_view(), name="balance"),
     path("transactions/", WalletTransactionsView.as_view(), name="transactions"),
+    # One row of the caller's own ledger, by its public reference. Same shape as a
+    # row of the list above.
+    path("transactions/<str:reference_id>/", WalletTransactionDetailView.as_view(),
+         name="transaction-detail"),
+    # The agents a client can hand cash to (the TopUp screen).
+    path("agents/", AgentDirectoryView.as_view(), name="agents"),
     path("agent/topup/", AgentTopUpView.as_view(), name="agent-topup"),
     # Both spellings are routed. This was the only wallet path declared without a
     # trailing slash, so a client following the convention of every neighbouring

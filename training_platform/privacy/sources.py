@@ -229,6 +229,10 @@ register(PersonalDataSource(label="ai_consent", model="moderation.AIConsent",
                             user_field="user", on_erase="delete"))
 
 # Financial and audit: KEPT under erasure. Deleting these would destroy the ledger.
+# `fields=None`, so the PUBLIC LISTING an agent agreed to — display_name, city, area,
+# opening_hours and public_phone (the shop line, never the number they registered
+# with) — travels with their own export and is kept under erasure like the rest of the
+# financial record. A new field on this model needs no change here; a new model does.
 register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", user_field="user", on_erase="keep"))
 # Each paid month of coaching: what was charged, the commission and the trainer's share.
 # Kept like the ledger rows it names.

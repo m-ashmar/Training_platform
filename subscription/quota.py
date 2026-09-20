@@ -242,3 +242,39 @@ def release(user, feature_name, amount: int = 1) -> None:
 
 def release_on_commit(user, feature_name, amount: int = 1) -> None:
     transaction.on_commit(lambda: release(user, feature_name, amount))
+
+
+def snapshot(user, feature_name, *, now=None) -> dict:
+    """What `feature_name` has cost this subscriber so far in the current window.
+
+    A READ. `_row_for` is `get_or_create`, which is right for a check that is about to
+    spend and wrong for the usage screen: a GET must not write a row, and a user who
+    opens the screen without ever using the feature must not end up with one.
+
+    Returns `{"feature", "used", "limit", "period_start", "period_end"}` with `limit`
+    of 0 meaning unlimited, and raises `QuotaUnavailable` when there is no live
+    subscription to measure — the caller decides whether that is an empty screen or a
+    denial.
+    """
+    from subscription.models import Subscription, SubscriptionUsage
+
+    try:
+        limit_field, granularity = FEATURES[feature_name]
+    except KeyError:
+        raise QuotaUnavailable(f"{feature_name!r} is not a declared quota feature")
+    try:
+        subscription = user.subscription
+    except (AttributeError, Subscription.DoesNotExist):
+        raise QuotaUnavailable("user has no subscription")
+    if not subscription.is_active:
+        raise QuotaUnavailable("subscription is not active")
+
+    now = now or timezone.now()
+    start, end = _period(subscription, granularity, now)
+    used = (SubscriptionUsage.objects
+            .filter(subscription=subscription, feature__name=feature_name,
+                    period_start=start)
+            .values_list("usage_count", flat=True).first()) or 0
+    return {"feature": feature_name, "used": used,
+            "limit": getattr(subscription.plan, limit_field, 0) or 0,
+            "period_start": start, "period_end": end}

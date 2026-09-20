@@ -35,8 +35,8 @@ class SubscriptionPlanSerializer(PlanPriceByChannelMixin, serializers.ModelSeria
     class Meta:
         model = SubscriptionPlan
         fields = [
-            'id', 'name', 'plan_type', 'description', 'price', 
-            'duration_days', 'is_active', 'has_diet_access', 
+            'id', 'name', 'plan_type', 'description', 'price', 'currency',
+            'duration_days', 'is_active', 'is_featured', 'has_diet_access',
             'has_routine_access', 'has_challenges_access', 
             'has_ai_advice', 'has_priority_support', 
             'max_meals_per_day', 'max_routines', 'created_at'
@@ -53,7 +53,18 @@ class SubscriptionFeatureSerializer(serializers.ModelSerializer):
 
 class PaymentSerializer(serializers.ModelSerializer):
     """Read-only serializer for payments. Business/state fields are never client-writable;
-    payment state is owned exclusively by PaymentService."""
+    payment state is owned exclusively by PaymentService.
+
+    The "مدفوعات سابقة" list on the Receipt screen draws one row per payment as
+    `item` ("Premium · 30 يوماً"), the date and the amount, with a receipt to open —
+    so this answers `item`, `completed_at`, `reference` and `receipt_available`
+    alongside the stored columns. All of them describe money ALREADY PAID, which is a
+    record and not a sale, so nothing here is removed on a store build.
+    """
+    item = serializers.SerializerMethodField()
+    receipt_available = serializers.SerializerMethodField()
+    reference = serializers.CharField(source='gateway_transaction_reference',
+                                      read_only=True, allow_null=True)
 
     class Meta:
         model = Payment
@@ -61,9 +72,22 @@ class PaymentSerializer(serializers.ModelSerializer):
             'id', 'subscription', 'amount', 'currency', 'status',
             'payment_method', 'transaction_id', 'payment_intent_id',
             'invoice_number', 'description', 'metadata', 'created_at',
-            'money_type',
+            'money_type', 'item', 'completed_at', 'reference',
+            'receipt_available',
         ]
         read_only_fields = fields
+
+    def get_item(self, obj):
+        """What was bought, in pieces — the app joins them with the language's own
+        separator rather than being handed a sentence it cannot lay out RTL."""
+        plan = obj.subscription.plan
+        return {'plan_id': plan.id, 'plan_name': plan.name,
+                'plan_type': plan.plan_type, 'duration_days': plan.duration_days}
+
+    def get_receipt_available(self, obj):
+        """Whether `payments/{id}/receipt/` will answer. Only a completed payment has
+        a receipt; the app hides the row's receipt icon for anything else."""
+        return obj.status == 'completed'
 
 class SubscriptionUsageSerializer(serializers.ModelSerializer):
     """Serializer for subscription usage tracking"""
@@ -216,9 +240,10 @@ class SubscriptionPlanListSerializer(PlanPriceByChannelMixin, serializers.ModelS
     class Meta:
         model = SubscriptionPlan
         fields = [
-            'id', 'name', 'plan_type', 'description', 'price',
-            'duration_days', 'has_diet_access', 'has_routine_access',
-            'has_challenges_access', 'has_ai_advice', 'has_priority_support'
+            'id', 'name', 'plan_type', 'description', 'price', 'currency',
+            'duration_days', 'is_featured', 'has_diet_access', 'has_routine_access',
+            'has_challenges_access', 'has_ai_advice', 'has_priority_support',
+            'max_meals_per_day', 'max_routines',
         ]
 
 class UserSubscriptionSummarySerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
@@ -229,9 +254,22 @@ class UserSubscriptionSummarySerializer(PlanPriceByChannelMixin, serializers.Mod
     banner) | 'inactive' (never entitled, e.g. a checkout never paid).
     `renewal_due`: true while active and ending within SUBSCRIPTION_RENEWAL_NOTICE_DAYS
     (3) — show the renewal reminder. Neither carries a price: the same on every build.
+
+    For the Subscription screen (`screens/07-money/Subscription.png`):
+    `plan_duration_days` is how long a renewal adds ("جدّد 30 يوماً", and the
+    denominator of the days-left gauge — `start_date` cannot serve as one, because a
+    renewal extends `end_date` and leaves `start_date` where it was);
+    `plan_currency` is the unit `plan_price` is in, so the app never hard-codes "ل.س";
+    `plan_features` is what the plan includes, which is what PaySuccess lists as
+    "ما فُتح لك الآن" and what the Paywall compares against. Only `plan_price` is
+    removed on a build that may not show prices — a duration, a currency code and a
+    feature list are not a price and are the same on every build.
     """
     plan_name = serializers.CharField(source='plan.name', read_only=True)
     plan_price = serializers.DecimalField(source='plan.price', max_digits=10, decimal_places=2, read_only=True)
+    plan_currency = serializers.CharField(source='plan.currency', read_only=True)
+    plan_duration_days = serializers.IntegerField(source='plan.duration_days', read_only=True)
+    plan_features = serializers.SerializerMethodField()
     is_active = serializers.ReadOnlyField()
     days_remaining = serializers.ReadOnlyField()
     access = serializers.ReadOnlyField()
@@ -242,10 +280,33 @@ class UserSubscriptionSummarySerializer(PlanPriceByChannelMixin, serializers.Mod
     class Meta:
         model = Subscription
         fields = [
-            'id', 'plan_name', 'plan_price', 'status', 'start_date',
+            'id', 'plan_name', 'plan_price', 'plan_currency',
+            'plan_duration_days', 'plan_features', 'status', 'start_date',
             'end_date', 'is_active', 'days_remaining', 'auto_renew', 'source',
             'access', 'renewal_due',
         ]
+
+    def get_plan_features(self, obj):
+        """What this plan includes — PaySuccess's "ما فُتح لك الآن" and what the
+        Paywall compares against.
+
+        Read from the subscription's own flag columns, which is where every
+        permission check reads them (`subscription/permissions.py`), so the screen
+        says what the server will actually allow. They are copies of the plan's:
+        `Subscription.save()` re-inherits all five on every save, so a per-subscriber
+        override does not survive one — see the note in `PAYMENTS_COMPLIANCE_PLAN.md`.
+        """
+        plan = obj.plan
+        return {
+            'diet': obj.has_diet_access,
+            'routines': obj.has_routine_access,
+            'challenges': obj.has_challenges_access,
+            'ai_advice': obj.has_ai_advice,
+            'priority_support': obj.has_priority_support,
+            # 0 means unlimited, as everywhere else in the quota code.
+            'max_meals_per_day': plan.max_meals_per_day,
+            'max_routines': plan.max_routines,
+        }
 
     def get_renewal_due(self, obj):
         from datetime import timedelta

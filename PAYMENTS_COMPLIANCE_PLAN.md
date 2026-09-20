@@ -19,7 +19,7 @@ and order live in `BACKEND_DELTA.md`, not here.
 | 2 | Capabilities endpoint, channel header, server-side refusal | DONE, 2 follow-ups | `policy/` app, `GET /api/v1/config/capabilities`, seeded per spec §4, change log, operator console. Left: (a) AI coach must decline "how do I pay" on `play`/`ios` — needs the channel on the WebSocket handshake; (b) `preferred_language`-independent: notification texts for `PLATFORM_SUB` states on store channels (arrives with step 5) |
 | 3 | Merge the unmerged payments fix | DONE | `c9-fix-payments` merged here; full suite on a fresh DB is the gate |
 | 4 | Double-entry ledger, commission settings + snapshot, remove the 100% forward | DONE | Coaching commission DONE with the monthly coaching (`users/coaching.py`, `BACKEND_DELTA.md` item 16): 20% of every month, rate copied onto each `CoachingPeriod`, to a platform revenue wallet. The 100% forward is GONE (2026-09-20): a plan payment is minted into the client's wallet and moved straight out to the platform's revenue wallet, whether or not anyone coaches them — `SUBSCRIPTION_TRAINER_SHARE` is kept at 0 so the owner can price a trainer's share later rather than the code having to grow one back. A client with no trainer used to get NO ledger rows at all, so the platform's largest revenue line was invisible in its own ledger; it is recorded now. Left for a later pass, neither blocking: the rates are settings rather than operator-editable rows, and escrow/revenue are still wallets rather than named ledger accounts |
-| 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | TODO | `preferred_language` is settable since BACKEND_BUGS B-005 (`POST /api/auth/user/update/`). Remove `auto_renew` from API/UI here — additively (keep the key, read-only): three tests PATCH it. Plan expiry notices EXIST (owner, 2026-09-19; `BACKEND_DELTA.md` item 18): `subscription_expiring` 3 days ahead and `subscription_expired` on days 0/3/7/14/30 from `subscription.send_renewal_reminders`, store-safe text, `access`/`renewal_due` on `subscriptions/current/`; extend these, never add parallel expiry notices |
+| 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | PART DONE | **Receipts + the money screens' fields: DONE on branch `build/money`, unmerged** (see below). Done earlier on this branch: the 60s poller (`subscription.poll_open_payments`), checkout TTL, idempotency, `auto_renew` read-only. STILL TODO: the six-state checkout-session model (`OPEN/MATCHING/NEEDS_REVIEW/CONFIRMED/REJECTED/EXPIRED`) with its event rows and the operator review queue, the notification matrix of spec §7 (including the receipt emailed on confirmation), and the saved-language fix. `preferred_language` is settable since BACKEND_BUGS B-005 (`POST /api/auth/user/update/`). Plan expiry notices EXIST (owner, 2026-09-19; `BACKEND_DELTA.md` item 18): `subscription_expiring` 3 days ahead and `subscription_expired` on days 0/3/7/14/30 from `subscription.send_renewal_reminders`, store-safe text, `access`/`renewal_due` on `subscriptions/current/`; extend these, never add parallel expiry notices |
 | 6 | Trainer verification, then withdrawals | TODO | |
 | 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | DONE (branch `build/moderation`, unmerged) | Date of birth + minimum age 14 was already done with the design-v2 work (`BACKEND_DELTA.md` item 3). B1/B2/B5 are the new `moderation/` app: `Report`, `Block`, `AIConsent`; `POST/GET /api/v1/reports/`, `reports/mine/`, `GET/POST/DELETE /api/v1/blocks/`, `GET/POST /api/v1/ai-consent/`; the queue at `/dj-admin/moderation/report/` (operator-only, two closing actions). Enforcement: `moderation.services.blocked_ids` filters posts, comments, follows, profiles, notifications, the challenge leaderboard, available-trainers and trainer matches; `is_blocked` refuses sending AND accepting a trainer request; `require_ai_consent`/`HasAIConsent` gate the AI coach on REST and in `chat_service.chat_stream`. Tests: `tests/test_moderation.py`. Left for step 8: the report/block hooks on the two-way chat |
 | 8 | Two-way trainer–client chat with report/block hooks | TODO | Makes the 1:1 coaching claim real-time in fact |
@@ -27,6 +27,41 @@ and order live in `BACKEND_DELTA.md`, not here.
 | 10 | Routine products | TODO | Refusal for `ROUTINE_PRODUCT` on store channels already exists in `policy/services.py` — call `require_purchase_allowed` first in the purchase endpoint. Make the buyer's copy with `routine/assignment.py` `routine_from_template` (the same private copy a trainer's generate writes); keep payment out of that function |
 | 11 | Web hub, deep links, APK hosting, `GET /api/v1/app/latest` | TODO | Next.js, separate deploy |
 | 12 | Demo seeding command, review notes, privacy + data inventory docs | TODO | `training_platform/privacy/registry.py` already lists every personal-data model — generate the inventory from it |
+
+## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
+
+The money screens are `yalla_gym/design/yalla-gym-design/screens/07-money/`. They are the
+specification; `tests/test_receipts.py` names the screen each assertion comes from.
+
+| What | Where |
+|---|---|
+| `GET subscription/v1/payments/{id}/receipt/`, and `?format=pdf` | `subscription/views.py` `PaymentReceiptView`, `subscription/receipts.py` |
+| Invoice numbers for rows completed before the column existed | `PaymentService.ensure_invoice_number` — the ONE generator, still in the service |
+| `Payment.completed_at` (the date on the receipt; `updated_at` moves on a refund) | migration `subscription/0013` |
+| Payment list rows: `item`, `completed_at`, `reference`, `receipt_available` | `PaymentSerializer` |
+| `subscriptions/current/`: `plan_duration_days`, `plan_currency`, `plan_features` | `UserSubscriptionSummarySerializer` |
+| `GET subscription/v1/usage/today/` (diet builds + AI messages, used/limit) | `SubscriptionUsageViewSet.today`, `subscription.quota.snapshot` |
+| Plans: `currency`, `is_featured` (the "الأكثر اختياراً" badge) | migration `subscription/0013`, both plan serializers |
+| Wallet: `held`, `held_for`, `account_number` ("YG-204-781"), and that number accepted as `client_identifier` | `WalletSerializer`, `wallet/utils.py`, `wallet/views.py` `_client_named` |
+| Activity rows: `kind`, `reason`, `direction`, `signed_amount`, `counterparty` | `wallet/activity.py` — the one place a ledger row is read as an activity |
+| `GET wallet/transactions/{reference_id}/`, `GET wallet/agents/` | `wallet/views.py`; agent listing fields in migration `wallet/0015` |
+
+**The PDF, and why three dependencies.** `fpdf2` + `arabic-reshaper` + `python-bidi`,
+with Noto Naskh Arabic in `subscription/fonts/` (OFL). A PDF draws glyphs in the order it
+is given, so Arabic needs letter joining AND the bidirectional algorithm applied before
+the text reaches the page — and then a font that HAS the presentation forms joining
+produces. Measured on this receipt's own strings: the app's brand font (Alexandria) is
+missing 14 of them and Cairo the same 14, so either would have rendered boxes. `fpdf2` is
+pure Python with no system libraries; WeasyPrint needs cairo and pango in the image.
+`tests/test_receipts.py` reads the text back out of the PDF's own `/ToUnicode` map and
+checks the font covers every character drawn, in both languages — "it returned a PDF"
+does not prove the Arabic is readable.
+
+**The store line, on everything in this slice.** A receipt of a payment already made is a
+RECORD, not a sale, so none of it calls `require_purchase_allowed`, none of it takes
+`X-App-Channel`, and two tests assert the response is byte-identical on `apk`, `play`,
+`ios` and `web` (spec §3: a store build may show plan status, expiry and history). Prices
+are the only thing still withheld: `plan_price` and `price`.
 
 ## How the channel policy works (read before touching payments)
 
@@ -75,7 +110,27 @@ is locked (spec §8); the numbers above are the defaults.
    declare itself the direct APK and be offered purchasing. Owner/mobile session: no
    default (empty → the server's strictest behaviour) and a release-mode check.
 2. Step 2 follow-up: the AI coach must decline "how do I pay" on `play`/`ios`.
-3. Step 7 left three decisions for the owner. (a) The AI policy version is a bare string
+3. **The money screens left five decisions** (the receipts slice, 2026-09-20). Each one
+   is a field a screen draws that the backend cannot answer honestly without an answer.
+   (a) `Plans.png` tells the client "مدربك يحصل على حصته من اشتراكك" — your trainer gets
+   a share of your subscription — and the owner's decision 2 sets
+   `SUBSCRIPTION_TRAINER_SHARE = 0`, so no trainer is paid anything for a plan. Either
+   the line goes or the share is priced; shipping both is a promise the ledger does not
+   keep. (b) The AI coach's daily allowance is ONE GLOBAL SETTING
+   (`AI_ASSISTANT_CONFIG['MAX_MESSAGES_PER_DAY'] = 50`) applied to every plan that has
+   `has_ai_advice`, while `Plans.png` prices three different allowances (Basic none,
+   Premium 50 a day, Professional "بلا حدود"). `usage/today/` answers 50 to everyone
+   until there is a per-plan field and the owner's numbers for it. (c) `Pay.png` counts
+   down 72 hours ("الرمز صالح لمدة 71:42:10") and `PAYMENT_CHECKOUT_TTL_MINUTES` is 60
+   MINUTES; `expires_at` now answers the server's real TTL, so the screen and the server
+   agree — but one of the two numbers is wrong and only the owner can say which. (d) The
+   receipt prints the platform's legal name (spec §7) from `PLATFORM_LEGAL_NAME`, which
+   is empty: the registered company name is owed, and spec §10 says take legal advice on
+   the entity first. (e) The account number a client reads out to an agent
+   ("YG-204-781") is DERIVED from the user id, so it is stable with no migration but is
+   enumerable. If the owner wants a code that cannot be guessed at, it becomes a stored
+   column and a data migration.
+4. Step 7 left three decisions for the owner. (a) The AI policy version is a bare string
    the app sends; nothing on the server declares the CURRENT version, so nothing can ask
    again after a policy change — a setting plus `policy_version_required` on
    `capabilities` would. (b) A report is anonymised, not deleted, when the reporter

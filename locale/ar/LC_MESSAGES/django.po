@@ -3035,3 +3035,141 @@ msgstr "جاهز"
 #: mediakit/models.py
 msgid "Failed"
 msgstr "فشل"
+
+#. The money screens (screens/07-money): the PDF receipt, the wallet's activity
+#. list, the agent directory. Arabic is the primary language of every one of them —
+#. a receipt that arrives in English for an Arabic customer is the gap the spec
+#. calls out (§7, "an Arabic user receives every push, email and receipt in Arabic").
+#: subscription/receipts.py:60
+msgid "ShamCash"
+msgstr "شام كاش"
+
+#: subscription/receipts.py:61
+msgid "Recorded by the platform"
+msgstr "مُسجَّلة من المنصة"
+
+#: subscription/receipts.py:62
+msgid "Syriatel Cash"
+msgstr "سيرياتيل كاش"
+
+#: subscription/receipts.py:63
+msgid "Al-Baraka Bank"
+msgstr "بنك البركة"
+
+#: subscription/receipts.py:64
+msgid "BEMO Bank"
+msgstr "بنك بيمو"
+
+#. The platform's trading name as it is printed on the receipt.
+#: subscription/receipts.py:85
+msgid "Yalla Gym"
+msgstr "يلا جيم"
+
+#: subscription/receipts.py:196
+msgid "Payment receipt"
+msgstr "إيصال دفع"
+
+#. The status stamp on a receipt: this money was received.
+#: subscription/receipts.py:202
+msgctxt "receipt status"
+msgid "Paid"
+msgstr "مدفوع"
+
+#: subscription/receipts.py:210
+msgid "Invoice number"
+msgstr "رقم الفاتورة"
+
+#: subscription/receipts.py:211
+msgid "Date"
+msgstr "التاريخ"
+
+#: subscription/receipts.py:212
+msgid "Item"
+msgstr "البند"
+
+#. "Premium · 30 days" — the unit after the number of days a plan runs for.
+#: subscription/receipts.py:213
+msgid "days"
+msgstr "يوماً"
+
+#: subscription/receipts.py:214
+msgid "Payment method"
+msgstr "طريقة الدفع"
+
+#: subscription/receipts.py:215
+msgid "Payment reference"
+msgstr "رمز الدفعة"
+
+#: subscription/receipts.py:216
+msgid "Customer"
+msgstr "العميل"
+
+#: subscription/receipts.py:227
+msgid "This receipt was issued electronically and needs no signature."
+msgstr "صدر هذا الإيصال إلكترونياً ولا يحتاج إلى توقيع."
+
+#: subscription/views.py:1090
+msgid "This payment is not complete, so it has no receipt yet."
+msgstr "هذه الدفعة لم تكتمل بعد، فلا إيصال لها."
+
+#. One row of "الحركات" on the Wallet screen. The app branches on `kind`, never on
+#. these words, so they can be reworded without breaking anything.
+#: wallet/activity.py:42
+msgid "Trainer fee held"
+msgstr "حجز رسوم المدرب"
+
+#: wallet/activity.py:43
+msgid "Trainer fee returned"
+msgstr "استرداد رسوم المدرب"
+
+#: wallet/activity.py:44
+msgid "Coaching fee"
+msgstr "رسوم تدريب"
+
+#: wallet/activity.py:45
+msgid "Platform commission"
+msgstr "عمولة المنصة"
+
+#: wallet/activity.py:46
+msgid "Your trainer's share of the plan"
+msgstr "حصة مدربك من الاشتراك"
+
+#: wallet/activity.py:47
+msgid "Plan payment"
+msgstr "دفع الاشتراك"
+
+#: wallet/activity.py:48
+msgid "Plan payment received"
+msgstr "وصول دفعة اشتراك"
+
+#: wallet/activity.py:49
+msgid "Cash top-up"
+msgstr "شحن نقدي"
+
+#: wallet/activity.py:50
+msgid "Sent to a trainer"
+msgstr "إرسال إلى مدرب"
+
+#: wallet/activity.py:51
+msgid "Transfer received"
+msgstr "تحويل وارد"
+
+#: wallet/activity.py:52
+msgid "Reversed"
+msgstr "حركة معكوسة"
+
+#: wallet/activity.py:53
+msgid "Adjustment"
+msgstr "تسوية"
+
+#: wallet/activity.py:54
+msgid "Top-up"
+msgstr "شحن"
+
+#: wallet/activity.py:55
+msgid "Transfer"
+msgstr "تحويل"
+
+#: wallet/views.py:252
+msgid "No such transaction"
+msgstr "لا توجد حركة بهذا الرقم"

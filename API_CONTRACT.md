@@ -640,6 +640,68 @@ coach never rewrites last week; sets synced afterwards still count.
   `PAYMENT_POLL_GRACE_SECONDS` to arrive first. The app does not need to poll; it may
   still call `POST /api/subscription/v1/payments/{id}/reconcile/` when the customer asks.
 
+**Receipts, and the money screens** (plan step 5, 2026-09-20 — `screens/07-money/`).
+
+Everything in this block is a RECORD OF MONEY THAT HAS ALREADY MOVED, not a sale: no
+price for something unbought, no purchase button, no payment instruction, no hub link.
+It therefore takes no `X-App-Channel`, is not gated by `require_purchase_allowed`, and
+answers **identically on `apk`, `play`, `ios` and `web`** — spec §3 lets a store build
+show plan status, expiry and history, and history without receipts is not history.
+
+- `GET /api/subscription/v1/payments/{id}/receipt/` — one completed payment, as data:
+  `{invoice_number, issued_at, status, item{plan_id, plan_name, plan_type,
+  duration_days, money_type}, amount, currency, method{code, name}, reference,
+  covers{from, until}, payer{id, name, email}, platform{name, legal_name,
+  contact_email, website}, pdf_url}`. The invoice number is minted once by
+  `PaymentService` and never reused, so two reads are the same document.
+  `?format=pdf` returns the same receipt as an A5 PDF, written in the language of
+  `Accept-Language`; Arabic is the primary one. Errors: `404 not_found` (no such
+  payment, or someone else's — the same answer either way) and
+  `404 receipt_not_available` (the payment is not `completed`). The payer and a
+  superuser, nobody else.
+- `GET /api/subscription/v1/payments/` rows gain `item` (what was bought, in pieces),
+  `completed_at`, `reference` and `receipt_available` — the "مدفوعات سابقة" list.
+- `GET /api/subscription/v1/usage/today/` — `{quotas: [{feature, used, limit,
+  resets_at}]}` for `daily_meals` and, on a plan with the AI coach, `ai_messages`
+  (the same counter the WebSocket enforces). `limit: 0` is unlimited; no subscription
+  is `{quotas: []}`, not an error. A pure read: it creates no usage row.
+- `subscriptions/current/` gains `plan_duration_days` (what a renewal adds, and the
+  denominator of the days-left gauge — `start_date` cannot serve, a renewal moves only
+  `end_date`), `plan_currency` and `plan_features` (`diet`, `routines`, `challenges`,
+  `ai_advice`, `priority_support`, `max_meals_per_day`, `max_routines`). Only
+  `plan_price` is withheld from a build that may not show prices.
+- The plan endpoints gain `currency` and `is_featured` (the "الأكثر اختياراً" badge an
+  operator sets). `price` is still withheld from `play`/`ios`; a currency code and a
+  badge are not prices.
+- `GET /api/wallet/balance/` gains `held` (money in escrow for a coaching month — out
+  of the balance, not spent), `held_for` `{trainer_id, trainer_name}` or null, and
+  `account_number` ("YG-204-781"), which is what the client reads out to an agent. The
+  agent top-up endpoints accept that number as `client_identifier`, alongside the user
+  id and the email.
+- `GET /api/wallet/transactions/` rows gain `kind`, `reason`, `direction` (`in`/`out`),
+  `signed_amount` and `counterparty` `{id, name, role}`. **Branch on `kind`, never on
+  `reason`** — `reason` is translated. `kind` is one of `trainer_fee_hold`,
+  `trainer_fee_refund`, `trainer_fee_payout`, `platform_commission`,
+  `plan_trainer_share`, `plan_payment`, `plan_credit`, `agent_topup`,
+  `trainer_transfer`, `transfer_received`, `reversal`, `adjustment`, `topup`,
+  `transfer`. The counterparty of a coaching row is the TRAINER, never the escrow
+  wallet the money passed through.
+- `GET /api/wallet/transactions/{reference_id}/` — one row, same shape.
+  `404 not_found` for a reference that is not the caller's.
+- `POST /api/subscription/v1/gateways/` and `GET
+  /api/subscription/v1/payments/{id}/status/` now answer a real `expires_at`: when the
+  reference stops being payable, which is what `Pay.png` counts down to. It was read
+  only from the gateway's own response, and the ShamCash adapter has never set that
+  key, so it was null on every checkout ever opened. Null once the checkout is no
+  longer open. `status/` also answers `reference`. **The countdown is
+  `PAYMENT_CHECKOUT_TTL_MINUTES` (60 minutes today) and the design draws 72 hours —
+  one of the two is wrong; see the plan's open decisions.**
+- `GET /api/wallet/agents/` — `{id, name, city, area, hours, phone}` per agent, for
+  "وكلاء قريبون" on the TopUp screen. Only agents an operator has listed and whose
+  account is active; `?city=` narrows it. Paying an agent in person is not an in-app
+  purchase (spec §4: "top-up is done with an agent in person, so there is nothing to
+  hide").
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 
@@ -844,6 +906,7 @@ duplicates, errors}`, and a set that beat everything before it carries
 | `GET, POST` | `/api/subscription/v1/gateways/` | auth | `PaymentGatewayView` |
 | `GET` | `/api/subscription/v1/payments/` | auth | `PaymentViewSet` |
 | `GET` | `/api/subscription/v1/payments/{id}/` | auth | `PaymentViewSet` |
+| `GET` | `/api/subscription/v1/payments/{payment_id}/receipt/` | auth | `PaymentReceiptView` |
 | `POST` | `/api/subscription/v1/payments/{payment_id}/reconcile/` | auth | `PaymentReconcileView` |
 | `GET` | `/api/subscription/v1/payments/{payment_id}/status/` | auth | `PaymentStatusView` |
 | `GET` | `/api/subscription/v1/plans/` | public | `SubscriptionPlanViewSet` |
@@ -856,6 +919,7 @@ duplicates, errors}`, and a set that beat everything before it carries
 | `POST` | `/api/subscription/v1/subscriptions/{id}/renew/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/subscriptions/{id}/usage/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/usage/` | auth | `SubscriptionUsageViewSet` |
+| `GET` | `/api/subscription/v1/usage/today/` | auth | `SubscriptionUsageViewSet` |
 | `GET` | `/api/subscription/v1/usage/{id}/` | auth | `SubscriptionUsageViewSet` |
 | `POST` | `/api/subscription/webhook/{gateway_name}/` | public | `PaymentWebhookView` |
 
@@ -871,9 +935,11 @@ duplicates, errors}`, and a set that beat everything before it carries
 | `GET` | `/api/wallet/agent/apikey/status/` | auth, IsAgent | `AgentApiKeyStatusView` |
 | `POST` | `/api/wallet/agent/topup/` | auth, IsAgent | `AgentTopUpView` |
 | `POST` | `/api/wallet/agent/topup/proxy` | auth, IsAgent | `AgentTopUpProxyView` |
+| `GET` | `/api/wallet/agents/` | auth | `AgentDirectoryView` |
 | `GET` | `/api/wallet/balance/` | auth | `WalletBalanceView` |
 | `POST` | `/api/wallet/client/transfer/` | auth | `ClientTransferToTrainerView` |
 | `GET` | `/api/wallet/transactions/` | auth | `WalletTransactionsView` |
+| `GET` | `/api/wallet/transactions/{reference_id}/` | auth | `WalletTransactionDetailView` |
 
 ### root
 

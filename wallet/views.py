@@ -5,6 +5,7 @@ from django.db.models import Sum, Q
 from django.conf import settings
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -21,6 +22,7 @@ from .serializers import (
     TransferRequestSerializer,
     ReversalRequestSerializer,
     AgentTopUpProxyRequestSerializer,
+    AgentListingSerializer,
 )
 from .permissions import IsAgent, IsAdmin
 from .security import (
@@ -123,7 +125,42 @@ def _idempotency_conflict(exc):
     )
 
 
+def _client_named(identifier) -> "User":
+    """The client an agent is topping up, however they named them.
+
+    Three spellings, all of them things an agent actually types: the account number
+    the client reads off the TopUp screen ("YG-204-781", in any case and with or
+    without its dashes), a bare user id, or an email address. The account number is
+    the one the screen shows, so it had to be accepted — before this, an agent who
+    typed what the client showed them got a 404 and the client was told to find their
+    email address instead.
+
+    Raises `Http404` for anything that names nobody, exactly as the two `get_object_or_404`
+    calls it replaces did, so the agent endpoints' behaviour on a bad identifier is
+    unchanged. The identifier is inside the signed message on the HMAC path, so
+    widening what it may say does not widen what an unauthenticated caller can do.
+    """
+    from .utils import user_id_from_account_number
+
+    user_id = user_id_from_account_number(identifier)
+    if user_id is not None:
+        return get_object_or_404(User, id=user_id)
+    return get_object_or_404(User, email=identifier)
+
+
 class WalletBalanceView(APIView):
+    """`GET /api/wallet/balance/` — the caller's own wallet.
+
+    Answers `{id, owner, owner_type, balance, currency, created_at, updated_at, held,
+    held_for, account_number}` (see `WalletSerializer`). `held` is money in escrow for
+    a coaching month — out of the balance, not spent — and `held_for` names the
+    trainer it is held for; both are `0.00`/null for anyone who is not a client with a
+    live hold. `account_number` is what the TopUp screen tells the client to give an
+    agent.
+
+    A read of what the caller already has, with no price and no way to buy anything,
+    so it takes no `X-App-Channel` and is identical on every build.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -161,12 +198,118 @@ class WalletTransactionsView(generics.ListAPIView):
             .order_by("-created_at", "-id")  # total order: -created_at alone repeats rows across pages
         )
 
+    def get_serializer_context(self):
+        """The reader's own wallet, so the serializer can say which way each row went.
+
+        `get_queryset` has already run by the time DRF builds the context for a list,
+        but not for a plain `get_serializer(...)`, so the wallet is resolved here
+        rather than read off `self._wallet`. `ledger_owner_ids` is looked up once per
+        response instead of once per row — escrow is the other side of every coaching
+        movement, so every row would otherwise ask.
+        """
+        from .activity import ledger_owner_ids
+
+        context = super().get_serializer_context()
+        wallet = getattr(self, "_wallet", None)
+        if wallet is None:
+            wallet, _created = Wallet.objects.get_or_create(
+                owner=self.request.user,
+                defaults={"owner_type": getattr(self.request.user, "user_type", "client")},
+            )
+            self._wallet = wallet
+        context["wallet"] = wallet
+        context["ledger_owner_ids"] = ledger_owner_ids()
+        return context
+
     def list(self, request, *args, **kwargs):
         response = super().list(request, *args, **kwargs)
         # Audit the access, not the row count: counting used to run a second COUNT
         # query over the whole ledger on every view.
         audit("wallet.transactions.view", request, {"wallet_id": self._wallet.id})
         return response
+
+
+class WalletTransactionDetailView(generics.RetrieveAPIView):
+    """`GET /api/wallet/transactions/{reference_id}/` — one row of the caller's ledger.
+
+    The same shape as a row of the list (`TransactionSerializer`), so the activity
+    detail sheet needs no second contract: `kind`, `reason`, `direction`,
+    `signed_amount`, `counterparty`, the amount and currency, `money_type`, the
+    reference and the raw `metadata`.
+
+    Looked up by `reference_id` — the ledger's own public identifier, which is what
+    every row, receipt and support conversation already quotes — and scoped to the
+    caller's wallet on both sides, so a reference belonging to someone else answers
+    `404 not_found`, byte-identical to one that does not exist.
+
+    A record of money that has already moved: no channel header, identical on every
+    build.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = TransactionSerializer
+    lookup_field = "reference_id"
+
+    def get_queryset(self):
+        wallet, _created = Wallet.objects.get_or_create(
+            owner=self.request.user,
+            defaults={"owner_type": getattr(self.request.user, "user_type", "client")},
+        )
+        self._wallet = wallet
+        return (
+            Transaction.objects
+            .filter(Q(source_wallet=wallet) | Q(destination_wallet=wallet))
+            .select_related("source_wallet__owner", "destination_wallet__owner")
+        )
+
+    def get_serializer_context(self):
+        from .activity import ledger_owner_ids
+
+        context = super().get_serializer_context()
+        context["wallet"] = getattr(self, "_wallet", None)
+        context["ledger_owner_ids"] = ledger_owner_ids()
+        return context
+
+    def retrieve(self, request, *args, **kwargs):
+        try:
+            response = super().retrieve(request, *args, **kwargs)
+        except Http404:
+            return Response({"error": _("No such transaction"), "code": "not_found"},
+                            status=status.HTTP_404_NOT_FOUND)
+        audit("wallet.transaction.view", request,
+              {"reference_id": kwargs.get("reference_id")})
+        return response
+
+
+class AgentDirectoryView(generics.ListAPIView):
+    """`GET /api/wallet/agents/` — the agents a client can hand cash to.
+
+    "وكلاء قريبون" on the TopUp screen. Answers the paginated envelope with
+    `{id, name, city, area, hours, phone}` per agent: the shop's name, the district,
+    the opening hours as the operator wrote them, and the line to call.
+
+    Only agents an operator has LISTED (`is_listed`) and whose account is `active`
+    appear; an agent who has not agreed to be published is not published, and one who
+    is suspended is not sent a customer. `?city=` filters, case-insensitively, to the
+    city heading the screen shows.
+
+    Paying an agent cash is not an in-app purchase of anything — it is how money gets
+    into a wallet in a country where cards do not work — and the spec says exactly
+    that of the store builds: "top-up is done with an agent in person, so there is
+    nothing to hide". So this takes no channel header and answers the same list on
+    every build. Authenticated: the directory is for customers, not for scraping.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = AgentListingSerializer
+
+    def get_queryset(self):
+        qs = (AgentProfile.objects
+              .filter(is_listed=True, status="active")
+              .select_related("user")
+              .order_by("city", "display_name", "id"))
+        city = self.request.query_params.get("city")
+        if city:
+            qs = qs.filter(city__iexact=city.strip())
+        return qs
 
 
 class AgentTopUpView(APIView):
@@ -223,10 +366,7 @@ class AgentTopUpView(APIView):
         # --- Pre-side-effect validation (runs BEFORE reserving the idempotency
         #     key, so a validation failure never permanently bricks retries) ---
         ident = serializer.validated_data["client_identifier"]
-        if ident.isdigit():
-            client = get_object_or_404(User, id=int(ident))
-        else:
-            client = get_object_or_404(User, email=ident)
+        client = _client_named(ident)
         if getattr(client, "user_type", None) != "client":
             return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -499,10 +639,7 @@ class AgentTopUpProxyView(APIView):
         idempotency_key = serializer.validated_data["idempotency_key"]
 
         # --- Pre-side-effect validation before reserving the idempotency key ---
-        if str(client_identifier).isdigit():
-            client = get_object_or_404(User, id=int(client_identifier))
-        else:
-            client = get_object_or_404(User, email=client_identifier)
+        client = _client_named(client_identifier)
         if getattr(client, "user_type", None) != "client":
             return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
 

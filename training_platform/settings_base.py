@@ -723,6 +723,22 @@ PLATFORM_REVENUE_EMAIL = get_env('PLATFORM_REVENUE_EMAIL', 'platform_revenue@loc
 PLATFORM_REVENUE_USERNAME = get_env('PLATFORM_REVENUE_USERNAME', 'platform_revenue')
 
 # ========================
+# Who the receipt says issued it (spec §7: invoice number, date, item, amount,
+# reference and THE PLATFORM'S LEGAL NAME). Read by subscription.receipts.
+#
+# PLATFORM_NAME is deliberately EMPTY by default: the trading name is a translated
+# string in the code, so the Arabic receipt reads "يلا جيم" and the English one
+# "Yalla Gym". A value here overrides both and is used verbatim, which is what a
+# deployment trading under another name wants. The legal name and the contact lines
+# are printed only when they are set — an unset one is left off the document rather
+# than printed blank, so nothing is invented for a company that is not registered yet.
+# ========================
+PLATFORM_NAME = get_env('PLATFORM_NAME', '')
+PLATFORM_LEGAL_NAME = get_env('PLATFORM_LEGAL_NAME', '')
+PLATFORM_CONTACT_EMAIL = get_env('PLATFORM_CONTACT_EMAIL', '')
+PLATFORM_WEBSITE = get_env('PLATFORM_WEBSITE', '')
+
+# ========================
 # Logging Configuration
 # ========================
 os.makedirs(BASE_DIR / 'logs', exist_ok=True)

@@ -267,7 +267,12 @@ def poll_open_payments(now=None):
 
     now = now or timezone.now()
     grace = int(getattr(settings, 'PAYMENT_POLL_GRACE_SECONDS', 20))
-    ttl = int(getattr(settings, 'PAYMENT_CHECKOUT_TTL_MINUTES', 60))
+    from .utils import checkout_ttl
+
+    # The same window `utils.checkout_expires_at` shows the customer. One definition:
+    # a screen that counts down to a different moment than the server closes on is a
+    # customer transferring money against a reference that has just died.
+    ttl_window = checkout_ttl()
     batch = int(getattr(settings, 'PAYMENT_POLL_BATCH', 100))
 
     rows = list(Payment.objects
@@ -315,7 +320,7 @@ def poll_open_payments(now=None):
             # The merchant account could not be read. That is evidence of nothing, so
             # nothing is closed on it: the next minute asks again.
             continue
-        if payment.created_at > now - timedelta(minutes=ttl):
+        if payment.created_at > now - ttl_window:
             continue                      # young enough to still be being paid
         try:
             PaymentService.expire_payment(payment.id, 'Not completed within its window')

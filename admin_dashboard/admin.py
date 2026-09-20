@@ -354,7 +354,8 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
     
     fieldsets = (
         ('Basic Information', {
-            'fields': ('name', 'plan_type', 'description', 'price', 'duration_days', 'is_active')
+            'fields': ('name', 'plan_type', 'description', 'price', 'duration_days',
+                       'is_active', 'is_featured')
         }),
         ('Features', {
             'fields': (

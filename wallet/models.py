@@ -30,6 +30,30 @@ class AgentProfile(models.Model):
     monthly_limit = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
     status = models.CharField(max_length=16, choices=AGENT_STATUS_CHOICES, default="active")
     ip_allowlist = models.JSONField(default=list, blank=True)
+
+    # --- The public listing: "وكلاء قريبون" on the TopUp screen -----------------
+    # A client with no balance has to find a human being holding cash, so the app
+    # shows a list of agents with the shop's name, the district and the opening hours,
+    # and a button to call. None of it is inferred from the account: an agent appears
+    # only when an operator has filled this in AND set `is_listed`, so an agent who
+    # has not agreed to be published is not published.
+    #
+    # `public_phone` is DELIBERATELY not `CustomUser.phone_number`. That number was
+    # given to register an account, not to be handed to every client in the country;
+    # this one is the shop line the agent asked us to publish. Personal data either
+    # way — `wallet.AgentProfile` is in the privacy registry with `fields=None`, so
+    # these travel with the agent's own export and are kept, like the rest of the
+    # financial record, when they erase their account.
+    display_name = models.CharField(max_length=120, blank=True, default="")
+    city = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    area = models.CharField(max_length=120, blank=True, default="")
+    #: Free text, in the operator's words ("9 ص إلى 9 م"). Not a pair of times: an
+    #: agent who closes for Friday prayers or opens twice a day cannot be described by
+    #: one, and a wrong structure is worse than a string the shop wrote itself.
+    opening_hours = models.CharField(max_length=120, blank=True, default="")
+    public_phone = models.CharField(max_length=32, blank=True, default="")
+    is_listed = models.BooleanField(default=False, db_index=True)
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

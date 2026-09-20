@@ -72,14 +72,16 @@ def extend_subscriptions(modeladmin, request, queryset):
 
 @admin.register(SubscriptionPlan)
 class SubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = ('name', 'plan_type', 'price', 'duration_days', 'is_active', 'has_diet_access', 'has_routine_access')
-    list_filter = ('plan_type', 'is_active', 'has_diet_access', 'has_routine_access')
+    list_display = ('name', 'plan_type', 'price', 'duration_days', 'is_active', 'is_featured', 'has_diet_access', 'has_routine_access')
+    list_filter = ('plan_type', 'is_active', 'is_featured', 'has_diet_access', 'has_routine_access')
     search_fields = ('name',)
     readonly_fields = ['created_at', 'updated_at']
     
     fieldsets = (
         ('Basic Information', {
-            'fields': ('name', 'plan_type', 'description', 'price', 'duration_days', 'is_active')
+            # `is_featured` is the "الأكثر اختياراً" badge on the Plans screen.
+            'fields': ('name', 'plan_type', 'description', 'price', 'duration_days',
+                       'is_active', 'is_featured')
         }),
         ('Features', {
             'fields': (
