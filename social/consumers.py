@@ -38,10 +38,21 @@ class SocialConsumer(AsyncWebsocketConsumer):
             )
 
     async def receive(self, text_data=None, bytes_data=None):
-        # TODO: Handle incoming messages (e.g., client pings, custom actions)
-        await self.send(
-            text_data=json.dumps({"type": "echo", "data": text_data})
-        )
+        """Accept and ignore. This socket has no client-to-server protocol.
+
+        Accept-and-ignore rather than a closed set of frames, because the closed set
+        is empty: this endpoint is the deprecated push channel (the real ones are FCM
+        and `chat.consumers.ChatConsumer`), every frame it sends is server-to-client,
+        and nothing in the app has ever had anything to say back. Adding a vocabulary
+        to a deprecated socket would be a reason to keep it.
+
+        It used to echo the frame verbatim, which made an authenticated account a
+        reflected-amplification surface: `training_platform/ws_limits.py` measured a
+        64 MB frame at 403 MB peak RSS against a 512 MB process, and the echo made the
+        server pay for the same bytes twice. The frame cap closes the size hole; this
+        closes the reflection.
+        """
+        return
 
     async def send_notification(self, event):
         # Example: send notification to client

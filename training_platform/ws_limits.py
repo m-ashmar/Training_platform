@@ -15,8 +15,10 @@ Measured against real Daphne with one authenticated client and one frame each:
 
 `fly.toml` gives the web process 512 MB, and one process group serves all HTTP and all
 WebSockets, so a single frame from any authenticated account takes the whole API down.
-`SocialConsumer` echoes the frame back, which doubles the peak: the attacker uploads
-once, the server pays twice.
+Those figures were measured while `SocialConsumer` still echoed the frame back, which
+doubled the peak: the attacker uploaded once and the server paid twice. That echo is
+gone (see the docstring on `SocialConsumer.receive`); the cap below is what bounds the
+first copy, and it is the half that had to be fixed here.
 
 The cap is applied as a CLASS attribute on Daphne's protocol, which is autobahn's own
 documented override point: `WebSocketProtocol._connectionMade` copies each config

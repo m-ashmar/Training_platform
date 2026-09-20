@@ -44,7 +44,30 @@ class AIChatConsumer(AsyncWebsocketConsumer):
       {"type": "token", "content": "partial text"}
       {"type": "tool_used", "name": "...", "display": "..."}
       {"type": "complete", "session_id": "uuid", "message_id": 123, "tools_used": [...]}
-      {"type": "error", "content": "...", "code": "rate_limit|auth|server"}
+      {"type": "feedback_saved", "content": "..."}
+      {"type": "rate_limit", "remaining": 49, "resets_at": "..."}
+      {"type": "error", "content": "...", "code": "..."}
+
+    Branch on `code`, never on `content` — `content` is translated. Every `code` this
+    socket can answer with, and nothing else:
+
+      auth                  no usable token, or the credential died mid-session (closes 4001)
+      invalid_input         not JSON, not an object, unknown `type`, bad `content`,
+                            bad `feedback`, missing `message_id`, empty message
+      message_too_long      over `AI_ASSISTANT_CONFIG['MAX_MESSAGE_CHARS']`
+      subscription_inactive entitlement lapsed since connect (closes 4003)
+      rate_limit            today's allowance is spent; carries `remaining` and `resets_at`
+      message_not_found     no assistant message of yours by that id (feedback); the
+                            same code `POST /api/ai/feedback/` answers 404 with
+      server                unhandled fault in this consumer
+
+    and, from `services/chat_service.py` while a turn runs: `ai_consent_required`,
+    `budget_exceeded`, `timeout`, `rate_limit_openai`, `config_error`, `connection`,
+    `server`.
+
+    A turn that ends on an `error` is NOT charged against the daily allowance
+    (`_reserve_rate_limit`), and the `rate_limit` frame that closes every turn carries
+    what is actually left.
     """
 
     def __init__(self, *args, **kwargs):
@@ -201,8 +224,9 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 await self.close(code=4003)
                 return
 
-            # Check rate limit
-            allowed, remaining, resets_at = await self._check_rate_limit()
+            # Take the slot BEFORE the turn runs — see `_reserve_rate_limit` for why
+            # the reservation cannot wait until there is an answer to charge for.
+            allowed, remaining, resets_at = await self._reserve_rate_limit()
             if not allowed:
                 await self.send(text_data=json.dumps({
                     "type": "error",
@@ -214,21 +238,17 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 return
 
             # Stream GPT response
+            answered = False
             try:
                 async for event in self.chat_service.chat_stream(
                     self.user, content, session_id,
                 ):
+                    # `complete` is the last event of a turn that produced a reply and
+                    # saved it; a turn that refuses or fails ends on an `error` event
+                    # instead, and that one is not the user's to pay for.
+                    if isinstance(event, dict) and event.get("type") == "complete":
+                        answered = True
                     await self.send(text_data=json.dumps(event, default=str))
-
-                # Decrement rate limit after successful response
-                await self._increment_rate_limit()
-
-                # Send remaining count
-                await self.send(text_data=json.dumps({
-                    "type": "rate_limit",
-                    "remaining": remaining - 1,
-                    "resets_at": resets_at,
-                }))
 
             except Exception as e:
                 logger.exception(f"Chat stream error: {e}")
@@ -237,6 +257,18 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                     "content": str(_("Something went wrong. Please try again.")),
                     "code": "server",
                 }))
+
+            if not answered:
+                remaining = await self._refund_rate_limit(remaining)
+
+            # `remaining` already excludes this turn: `_reserve_rate_limit` counts the
+            # reservation in. Sending `remaining - 1` here under-reported the user's
+            # allowance by one all the way to zero.
+            await self.send(text_data=json.dumps({
+                "type": "rate_limit",
+                "remaining": remaining,
+                "resets_at": resets_at,
+            }))
 
     async def _handle_feedback(self, data):
         """Process user feedback (👍/👎) for a message."""
@@ -269,9 +301,21 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 return
 
             success = await self._save_feedback(message_id, feedback)
+            if success:
+                await self.send(text_data=json.dumps({
+                    "type": "feedback_saved",
+                    "content": str(_("Thanks for the feedback!")),
+                }))
+                return
+            # `message_not_found` is the same code the REST twin answers with
+            # (`ai_assistant/views.py` `FeedbackView`), because it is the same
+            # condition: no assistant message of yours by that id. This was the one
+            # error frame in the consumer with no `code` at all, so the app had
+            # nothing to branch on and fell back to reading the sentence.
             await self.send(text_data=json.dumps({
-                "type": "feedback_saved" if success else "error",
-                "content": str(_("Thanks for the feedback!")) if success else str(_("Could not save feedback.")),
+                "type": "error",
+                "content": str(_("Could not save feedback.")),
+                "code": "message_not_found",
             }))
 
     # --- Authentication ---
@@ -322,8 +366,23 @@ class AIChatConsumer(AsyncWebsocketConsumer):
 
     # --- Rate Limiting ---
 
-    async def _check_rate_limit(self):
-        """Check if user has messages remaining today (increment-first to avoid race)."""
+    async def _reserve_rate_limit(self):
+        """Take one of today's slots, atomically. Returns (allowed, remaining, resets_at).
+
+        Reserve-then-refund, not check-then-charge. The counter is a single Redis
+        integer and `incr` is the only operation on it that two sockets cannot both
+        win: reading it, deciding, and writing it back lets two concurrent turns each
+        see the same "one left" and both go through — which is what
+        `tests/security/p9_lifecycle.py` probes with two sockets and a quota of one.
+
+        So the slot is taken up front and GIVEN BACK by `_refund_rate_limit` when the
+        turn produced no answer. Previously there was no refund, so a turn that only
+        ever yielded an error — a model timeout, a refused consent, the budget gate —
+        still spent the user's daily allowance: they paid for the assistant's failures.
+
+        `remaining` counts the reservation as already spent, so it is what the user has
+        left AFTER this turn.
+        """
         config = getattr(settings, 'AI_ASSISTANT_CONFIG', {})
         max_messages = config.get('MAX_MESSAGES_PER_DAY', 50)
         from training_platform.cache import ratelimit_cache
@@ -358,9 +417,26 @@ class AIChatConsumer(AsyncWebsocketConsumer):
         remaining = max_messages - current
         return True, remaining, resets_at
 
-    async def _increment_rate_limit(self):
-        """No-op: increment already done in _check_rate_limit."""
-        pass
+    async def _refund_rate_limit(self, remaining):
+        """Give back the slot a failed turn reserved. Returns the corrected `remaining`.
+
+        `decr` for the same reason `incr` takes it: the refund races the next
+        reservation on the same account, and only the atomic operation keeps both
+        correct. A key that has already expired at midnight is not recreated — the day
+        it belonged to is over and the counter has restarted at zero.
+        """
+        from training_platform.cache import ratelimit_cache
+
+        cache_key = f"ai_chat_limit:{self.user.id}:{timezone.localdate().isoformat()}"
+        try:
+            ratelimit_cache().decr(cache_key)
+        except Exception:
+            # The key expired, or Redis is unavailable. Refusing the user a refund is
+            # the safe direction to fail in, and it must not turn a failed turn into a
+            # closed socket.
+            logger.debug('could not refund an AI rate-limit slot', exc_info=True)
+            return remaining
+        return remaining + 1
 
     # --- Helpers ---
 

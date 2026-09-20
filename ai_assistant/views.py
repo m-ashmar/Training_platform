@@ -125,8 +125,14 @@ class FeedbackView(APIView):
                 role='assistant',
             )
         except ChatMessage.DoesNotExist:
+            # The socket's feedback frame answers the same `message_not_found` for the
+            # same condition, so the app has one branch for both surfaces. Untranslated
+            # and code-less before, which meant an Arabic user read English and the app
+            # had to match on the sentence.
             return Response(
-                {"error": "Message not found."},
+                {"error": _("Message not found."),
+                 "detail": _("Message not found."),
+                 "code": "message_not_found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
 

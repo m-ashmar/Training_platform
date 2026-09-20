@@ -239,14 +239,14 @@ class ChatService:
             except asyncio.TimeoutError:
                 yield {
                     "type": "error",
-                    "content": "I'm taking longer than usual. Please try again in a moment.",
+                    "content": str(_("I'm taking longer than usual. Please try again in a moment.")),
                     "code": "timeout",
                 }
                 return
             except openai.RateLimitError:
                 yield {
                     "type": "error",
-                    "content": "I'm experiencing high demand. Please try again in a few seconds.",
+                    "content": str(_("I'm experiencing high demand. Please try again in a few seconds.")),
                     "code": "rate_limit_openai",
                 }
                 return
@@ -254,14 +254,14 @@ class ChatService:
                 logger.critical("OpenAI API key is invalid or expired")
                 yield {
                     "type": "error",
-                    "content": "AI service is temporarily unavailable. Please contact support.",
+                    "content": str(_("AI service is temporarily unavailable. Please contact support.")),
                     "code": "config_error",
                 }
                 return
             except openai.APIConnectionError:
                 yield {
                     "type": "error",
-                    "content": "I'm temporarily unavailable. Please try again shortly.",
+                    "content": str(_("I'm temporarily unavailable. Please try again shortly.")),
                     "code": "connection",
                 }
                 return
@@ -269,7 +269,7 @@ class ChatService:
                 logger.exception(f"OpenAI API error: {e}")
                 yield {
                     "type": "error",
-                    "content": "Something went wrong. Please try again.",
+                    "content": str(_("Something went wrong. Please try again.")),
                     "code": "server",
                 }
                 return
