@@ -56,8 +56,11 @@ def test_every_model_has_a_total_order():
     """Single non-unique ordering is not a total order — paging repeated and hid rows."""
     from django.apps import apps
 
+    # `chat` joined the list when the app was added: both of its tables are paged
+    # (the conversation list, the thread) and neither sorts on a unique column alone.
     local = {"users", "wallet", "diet", "routine", "subscription", "social",
-             "ai_assistant", "achievements", "analytics", "notifications", "challenges"}
+             "ai_assistant", "achievements", "analytics", "notifications", "challenges",
+             "chat"}
     weak = []
     for m in apps.get_models():
         if m._meta.app_label not in local:

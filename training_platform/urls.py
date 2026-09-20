@@ -66,6 +66,10 @@ urlpatterns = [
     # The client's monthly coaching (users/coaching.py).
     path('api/v1/coaching/', include('users.urls_coaching', namespace='coaching')),
 
+    # Text messages between a trainer and their client. See chat/views.py; the live
+    # half is the WebSocket at ws/chat/<id>/ (chat/routing.py).
+    path('api/v1/chat/', include('chat.urls', namespace='chat')),
+
     # Notification preferences (listing lives under /api/social/notifications/)
     path('api/notifications/', include('notifications.urls', namespace='notifications')),
 ]

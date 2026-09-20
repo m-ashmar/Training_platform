@@ -13,6 +13,7 @@ from django.core.asgi import get_asgi_application
 from channels.auth import AuthMiddlewareStack
 import social.routing
 import ai_assistant.routing
+import chat.routing
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "training_platform.settings_production")
 
@@ -34,6 +35,7 @@ application = ProtocolTypeRouter({
             URLRouter(
                 social.routing.websocket_urlpatterns
                 + ai_assistant.routing.websocket_urlpatterns
+                + chat.routing.websocket_urlpatterns
             )
         )
     ),

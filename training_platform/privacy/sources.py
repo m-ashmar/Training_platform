@@ -85,6 +85,20 @@ register(PersonalDataSource(
     label="ai_training_data", model="ai_assistant.AITrainingData", user_field="user",
     retention_days=365, retention_field="retain_until", retention_is_deadline=True))
 
+# --- chat ---------------------------------------------------------------------
+# A private 1:1 thread is JOINT personal data: both people are in every row of it, so
+# an erasure takes the thread with the account rather than leaving the other side
+# reading half a conversation with a retired stranger. `Conversation` reaches its owner
+# by either side, and deleting it cascades to the messages; `Message` is registered
+# too so an export can hand someone what they wrote.
+register(PersonalDataSource(
+    label="conversations", model="chat.Conversation", user_field=("trainer", "client"),
+    fields=["id", "created_at", "last_message_at"], on_erase="delete"))
+register(PersonalDataSource(
+    label="messages_sent", model="chat.Message", user_field="sender",
+    fields=["id", "conversation", "body", "created_at", "read_at", "deleted_at"],
+    on_erase="delete"))
+
 # --- notifications ------------------------------------------------------------
 register(PersonalDataSource(
     label="notifications", model="notifications.Notification", user_field="recipient",
