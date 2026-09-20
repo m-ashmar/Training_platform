@@ -60,6 +60,10 @@ urlpatterns = [
     # Pictures the app itself shows (intro story, banners, empty states). Media for
     # trainers, exercises and programs travels inside those objects. See mediakit/.
     path('api/v1/content/', include('mediakit.urls', namespace='mediakit')),
+    # A coach's OWN demonstration of a shared exercise, so their client watches them
+    # rather than a stock clip. See mediakit/trainer_views.py; whose media a given
+    # viewer is shown is mediakit/resolution.py and nowhere else.
+    path('api/v1/trainer/', include('mediakit.urls_trainer', namespace='trainer_media')),
 
     # The design-v2 trainer screens: roster, profile, matches. See users/trainer_views.py.
     path('api/v1/trainers/', include('users.urls_v1', namespace='trainers')),

@@ -15,7 +15,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
-from .slots import OwnerType, resolve
+from .slots import OwnerType, resolve, slot_accepts
 
 
 def _upload_to(instance, filename):
@@ -28,9 +28,15 @@ def _upload_to(instance, filename):
 
 class MediaAsset(models.Model):
     owner_type = models.CharField(max_length=16, choices=OwnerType.CHOICES, db_index=True)
+    #: The row the media hangs on: the trainer, the exercise, the program, the dish —
+    #: or, for `trainer_exercise`, the EXERCISE, with the trainer in `person`. Two ids
+    #: are needed there and a generic owner has room for one, so the person column
+    #: carries the second half of the key.
     owner_id = models.PositiveBigIntegerField()
     slot = models.CharField(max_length=40)
-    #: The trainer, when the owner is one. Personal data: their photographs.
+    #: The person this row belongs to: the trainer themselves (`trainer`), or the
+    #: trainer who shot this demonstration of a shared exercise (`trainer_exercise`).
+    #: Personal data either way, and the registry finds a trainer's media through it.
     person = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True,
         related_name="media_assets")
@@ -87,13 +93,30 @@ class MediaAsset(models.Model):
         verbose_name = "Media slot"
         verbose_name_plural = "Media slots"
         constraints = [
-            models.UniqueConstraint(fields=["owner_type", "owner_id", "slot"],
-                                    name="one_asset_per_owner_slot"),
+            # One row per slot, for every owner that IS one row. `trainer_exercise` is
+            # two rows — a trainer AND an exercise — so it is carved out here and gets
+            # its own key below; without the carve-out the first coach to film the
+            # bench press would own `exercise.loop` for that exercise and no other
+            # coach could ever add theirs.
+            models.UniqueConstraint(
+                fields=["owner_type", "owner_id", "slot"],
+                condition=~models.Q(owner_type=OwnerType.TRAINER_EXERCISE),
+                name="one_asset_per_owner_slot"),
+            models.UniqueConstraint(
+                fields=["owner_type", "owner_id", "person", "slot"],
+                condition=models.Q(owner_type=OwnerType.TRAINER_EXERCISE),
+                name="one_trainer_asset_per_exercise_slot"),
+            # `person` is set for exactly the owner types that belong to a person, and
+            # for no others. This is what the privacy registry leans on: it finds a
+            # trainer's media through `person`, so a person-owned row that left the
+            # column null would survive an erasure. Widened from `trainer` alone
+            # rather than dropped — the rule is the same, the set of types grew.
             models.CheckConstraint(
-                condition=(models.Q(owner_type=OwnerType.TRAINER, person__isnull=False)
-                           | (~models.Q(owner_type=OwnerType.TRAINER)
+                condition=(models.Q(owner_type__in=sorted(OwnerType.PERSON_OWNED),
+                                    person__isnull=False)
+                           | (~models.Q(owner_type__in=sorted(OwnerType.PERSON_OWNED))
                               & models.Q(person__isnull=True))),
-                name="media_person_is_set_exactly_for_trainers"),
+                name="media_person_is_set_exactly_for_people"),
         ]
         indexes = [models.Index(fields=["owner_type", "owner_id"], name="media_owner_idx")]
 
@@ -108,9 +131,15 @@ class MediaAsset(models.Model):
 
     def clean(self):
         slot = resolve(self.slot)
-        if slot is None or slot.owner_type != self.owner_type:
+        if not slot_accepts(slot, self.owner_type):
             raise ValidationError({"slot": _("This slot does not belong to this kind of owner.")})
         if self.owner_type == OwnerType.TRAINER and self.person_id != self.owner_id:
             # Not keyed on `person`: no form edits it, and a form cannot show an error on a
             # field it does not have (Django raises instead).
             raise ValidationError(_("A trainer's media must name that trainer."))
+        if self.owner_type == OwnerType.TRAINER_EXERCISE and self.person_id is None:
+            # Here `owner_id` is the EXERCISE, so the trainer is only in `person` and
+            # the equality check above cannot stand in for this one. A row without it
+            # would be a demonstration belonging to nobody — invisible to the
+            # resolution rule and unreachable by erasure.
+            raise ValidationError(_("A trainer's demonstration must name that trainer."))

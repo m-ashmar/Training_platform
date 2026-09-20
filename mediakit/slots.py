@@ -18,6 +18,13 @@ stores the original and leaves the poster and the measurements to a worker
 `trainer.signature` (SVG) is still refused everywhere — it needs a sanitiser with an
 allow-list of elements and attributes (BACKEND_DELTA.md). HLS renditions are not built
 yet either; a video slot serves the original file and leaves `hls_url` empty.
+
+ONE key, TWO owners. The four `exercise.*` keys are filled by the shared catalogue row
+AND, under the same key, by a (trainer, exercise) pair — a coach's own demonstration of
+a catalogue move (`OwnerType.TRAINER_EXERCISE`, `Slot.also_owned_by`). The key does not
+change with the owner, because the app asks for `exercise.poster`; which owner's copy a
+given viewer is handed is decided in one place,
+`mediakit.resolution.resolve_exercise_media`.
 """
 from __future__ import annotations
 
@@ -29,14 +36,26 @@ IMAGE, VIDEO, SVG = "image", "video", "svg"
 
 class OwnerType:
     TRAINER = "trainer"      # a CustomUser with user_type='trainer'
-    EXERCISE = "exercise"    # routine.Exercise
+    EXERCISE = "exercise"    # routine.Exercise — the SHARED catalogue's own footage
     PROGRAM = "program"      # routine.Routine
     DISH = "dish"            # diet.Recipe
     APP = "app"              # the app itself: intro story, banners, empty states
+    #: One trainer's own demonstration OF a catalogue exercise. Two ids, not one:
+    #: `owner_id` is the exercise and `person` is the trainer, so a client sees THEIR
+    #: coach performing the move instead of a stock clip. The exercise row is shared
+    #: and never forked, which is what keeps everyone's progress on one exercise id.
+    TRAINER_EXERCISE = "trainer_exercise"   # 16 chars: the column's max_length
 
     CHOICES = [(TRAINER, "Trainer"), (EXERCISE, "Exercise"), (PROGRAM, "Program"),
-               (DISH, "Dish"), (APP, "App content")]
+               (DISH, "Dish"), (APP, "App content"),
+               (TRAINER_EXERCISE, "Trainer's exercise demo")]
     ALL = frozenset(v for v, _label in CHOICES)
+
+    #: The owner types whose rows belong to a PERSON, and therefore set `person` and
+    #: are reachable by the privacy registry. A database check constraint holds this
+    #: exact set (`media_person_is_set_exactly_for_people`), so adding a type here
+    #: without a migration is a write that the database refuses.
+    PERSON_OWNED = frozenset({TRAINER, TRAINER_EXERCISE})
 
 
 #: The id the single app-content owner is stored under.
@@ -61,12 +80,22 @@ class Slot:
     required: bool = False
     #: Graded black and white on upload. Food keeps its colour (owner, 2026-09-19).
     mono: bool = True
+    #: A SECOND owner type that fills these same keys. The per-trainer exercise
+    #: library is the exercise kit over again, keyed by (trainer, exercise) — and the
+    #: key must NOT change with the owner, because the app asks for `exercise.poster`
+    #: and has to be handed one whoever shot it (`mediakit/resolution.py` decides
+    #: whose). Read it through `slot_accepts`, never by comparing `owner_type`.
+    #: LAST in the field list on purpose: every `Slot(...)` below passes `width_1x`
+    #: positionally, so a new field anywhere earlier would silently land in it.
+    also_owned_by: frozenset = frozenset()
 
     @property
     def min_size(self) -> tuple[int, int]:
         width = self.width_1x * 2
         return width, round(width * self.ratio[1] / self.ratio[0])
 
+
+_TRAINER_TOO = frozenset({OwnerType.TRAINER_EXERCISE})
 
 SLOTS: dict[str, Slot] = {s.key: s for s in (
     # Trainer kit: every trainer, shot in one session.
@@ -78,12 +107,17 @@ SLOTS: dict[str, Slot] = {s.key: s for s in (
     Slot("trainer.loop", OwnerType.TRAINER, VIDEO, (4, 5)),
     Slot("trainer.intro", OwnerType.TRAINER, VIDEO, (16, 9)),
     Slot("trainer.signature", OwnerType.TRAINER, SVG, (3, 1)),
-    # Exercise kit. The per-trainer library (a client sees their own trainer perform
-    # each move) keys these by trainer as well; today they belong to the exercise row.
-    Slot("exercise.poster", OwnerType.EXERCISE, IMAGE, (16, 9), 640),
-    Slot("exercise.thumb", OwnerType.EXERCISE, IMAGE, (4, 5), 320),
-    Slot("exercise.loop", OwnerType.EXERCISE, VIDEO, (16, 9)),
-    Slot("exercise.cue", OwnerType.EXERCISE, VIDEO, (16, 9)),
+    # Exercise kit. Two owners fill these same four keys: the shared catalogue row
+    # (`exercise`), and a (trainer, exercise) pair (`trainer_exercise`) — the coach's
+    # own demonstration of a catalogue move. Whose a given client is shown is
+    # `mediakit.resolution.resolve_exercise_media`, and it is the only place that
+    # decides.
+    Slot("exercise.poster", OwnerType.EXERCISE, IMAGE, (16, 9), 640,
+         also_owned_by=_TRAINER_TOO),
+    Slot("exercise.thumb", OwnerType.EXERCISE, IMAGE, (4, 5), 320,
+         also_owned_by=_TRAINER_TOO),
+    Slot("exercise.loop", OwnerType.EXERCISE, VIDEO, (16, 9), also_owned_by=_TRAINER_TOO),
+    Slot("exercise.cue", OwnerType.EXERCISE, VIDEO, (16, 9), also_owned_by=_TRAINER_TOO),
     # Other kits. The guide gives dishes 4:5 and 1:1 and program covers 16:9 and 4:5:
     # one master is stored at the wider ratio and the app crops the other around the
     # focal point.
@@ -116,11 +150,24 @@ def resolve(key: str) -> Slot | None:
     return slot
 
 
+def slot_accepts(slot: Slot | None, owner_type: str) -> bool:
+    """May an owner of this type fill this slot?
+
+    The one test. `slot.owner_type == owner_type` was that test until the per-trainer
+    exercise library arrived, and it is now wrong in exactly one place: `exercise.*`
+    is filled both by the catalogue row and by a (trainer, exercise) pair, under the
+    SAME key. Comparing the attribute directly would refuse the second.
+    """
+    if slot is None:
+        return False
+    return owner_type == slot.owner_type or owner_type in slot.also_owned_by
+
+
 def slot_keys_for(owner_type: str) -> list[str]:
     """Every concrete key an owner of this type can fill, indexed families expanded."""
     keys = []
     for slot in SLOTS.values():
-        if slot.owner_type != owner_type:
+        if not slot_accepts(slot, owner_type):
             continue
         if slot.max_index:
             keys.extend(f"{slot.key}.{n}" for n in range(1, slot.max_index + 1))

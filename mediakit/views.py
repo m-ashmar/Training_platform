@@ -6,8 +6,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .services import app_media, media_for
-from .slots import VIDEO, OwnerType, resolve
+from .services import app_media
+from .slots import VIDEO, OwnerType, resolve, slot_accepts
 
 
 class AppMediaView(APIView):
@@ -59,6 +59,17 @@ class ExerciseMediaView(APIView):
     `exercise.loop` and `exercise.cue` (video), in the shape `mediakit/services.py`
     documents. An empty slot is absent.
 
+    **WHOSE media.** Not the catalogue's, necessarily. This goes through
+    `mediakit.resolution.resolve_exercise_media`, the platform's ONE answer to that
+    question — the author of the routine it was read out of, else a trainer the caller
+    has an approved relation with, else the shared catalogue — so the client watches
+    their own coach perform the move. The response carries `media_source`
+    (`routine_author` | `my_trainer` | `catalogue`, or `null` when there is no media
+    anywhere) and `media_trainer_id` (`null` for the catalogue), so the app can caption
+    it. Pass `?routine_id=` when the exercise was opened from inside a routine and the
+    first line of the rule should apply; a routine the caller cannot see is ignored
+    rather than refused, because it changes nothing they may not already read.
+
     **Visibility is the exercise's own, and video obeys exactly the same rule as the
     pictures.** The id is resolved through `routine.permissions.visible_exercises_for`:
     admin sees every exercise, a trainer their own plus the shared catalogue, a client
@@ -69,7 +80,7 @@ class ExerciseMediaView(APIView):
 
     | Method | Answers |
     |---|---|
-    | `GET` | `200` `{exercise_id, media: {...}}` · `401` not signed in · `404` |
+    | `GET` | `200` `{exercise_id, media, media_source, media_trainer_id}` · `401` · `404` |
 
     Nothing here varies by build (`X-App-Channel`): it sells nothing and moves no money.
     The URLs inside are signed and expire (`MEDIA_SIGNED_URL_TTL`, default one hour) —
@@ -78,12 +89,43 @@ class ExerciseMediaView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, exercise_id):
+        from .resolution import resolve_exercise_media
+
         exercise = _visible_exercise(request, exercise_id)
         if exercise is None:
             return Response({"error": _("Exercise not found.")},
                             status=status.HTTP_404_NOT_FOUND)
-        return Response({"exercise_id": exercise.id,
-                         "media": media_for(OwnerType.EXERCISE, exercise.id, request)})
+
+        answer = resolve_exercise_media(
+            request.user, [exercise.id], request=request,
+            routine_author_id=_routine_author(request))[exercise.id]
+        return Response({"exercise_id": exercise.id, **answer})
+
+
+def _routine_author(request):
+    """The `created_by` of `?routine_id=`, when the caller may read that routine.
+
+    Line (a) of the rule — "the coach who prescribed it is the one demonstrating it" —
+    needs to know which routine the exercise was opened from, and only the app knows.
+    Scoped to routines the caller is part of so the parameter cannot be used to ask
+    who wrote routine 41: an id they are not part of is simply ignored, and the answer
+    is the one they would have got without the parameter.
+    """
+    from routine.models import Routine
+
+    raw = request.query_params.get("routine_id")
+    if not raw:
+        return None
+    try:
+        routine_id = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    user = request.user
+    mine = Routine.objects.filter(pk=routine_id)
+    if not (getattr(user, "is_admin", False) or user.is_staff):
+        from django.db.models import Q
+        mine = mine.filter(Q(assigned_to=user) | Q(created_by=user))
+    return mine.values_list("created_by_id", flat=True).first()
 
 
 class VideoUploadView(APIView):
@@ -154,7 +196,8 @@ class VideoUploadView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
 
         slot = resolve(slot_key)
-        if slot is None or owner_type not in OwnerType.ALL or slot.owner_type != owner_type:
+        if (owner_type not in OwnerType.ALL
+                or not slot_accepts(slot, owner_type)):
             # Answered before the owner is looked up, so a wrong slot cannot be used to
             # ask whether an id exists.
             return Response({"error": _("This slot does not belong to this kind of owner."),
@@ -202,6 +245,18 @@ class VideoUploadView(APIView):
         """
         user = request.user
         is_admin = getattr(user, "is_admin", False) or user.is_staff
+
+        if owner_type == OwnerType.TRAINER_EXERCISE:
+            # A coach's own demonstration has ONE way in, and it is not this route:
+            # `/api/v1/trainer/exercise-media/`. That one knows whose library it is
+            # writing to and enforces the per-exercise cap; letting a second route
+            # write the same rows would put the cap in two places, which is the same
+            # as not having one. Refused for an admin too, for the same reason.
+            return Response(
+                {"error": _("Use /api/v1/trainer/exercise-media/ for your own "
+                            "demonstration of an exercise.")},
+                status=status.HTTP_403_FORBIDDEN)
+
         if is_admin:
             return None
 

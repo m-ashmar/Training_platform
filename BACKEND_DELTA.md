@@ -22,7 +22,7 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 4 | Onboarding fields: goal, place, days, injury areas | M | DONE |
 | 5 | Trainer proof stats | L | DONE |
 | 6 | Trainer matching with reasons (+ roster and profile endpoints) | L | DONE |
-| 7 | Per-trainer exercise media library | L | TODO (needs 2) |
+| 7 | Per-trainer exercise media library | L | DONE (2026-09-20, `build/trainer-media`) |
 | 8 | Two-way chat: voice, image, video, program cards, report, block | XL | TEXT DONE (`chat` app, branch `build/chat`); media, program cards, report/block TODO |
 | 9 | Server-driven home + day timeline | L | TODO (needs 2, 8 for voice) |
 | 10 | Note to the trainer on a request | S | DONE (with BACKEND_BUGS B-008) |
@@ -107,7 +107,8 @@ contract, every user-facing string goes through gettext with an Arabic entry in
      something writes a playlist name into it; the app plays `video_url` meanwhile. The
      poster is already cut by `mediakit/tasks.py` wherever ffmpeg is installed.
   2. `trainer.signature`: an SVG sanitiser (allow-list of elements and attributes).
-  3. `media` on `ExerciseSerializer` (with item 7), on routines/templates (`program.cover`,
+  3. ~~`media` on `ExerciseSerializer`~~ DONE as `media_slots` (item 7); still to do
+     on routines/templates (`program.cover`,
      with routine products, plan step 10) and on meals via `Recipe` (`dish.top`). Each
      needs its list view to call `media_map` once, and cached routes to bump their version
      when a `MediaAsset` of that owner type changes (`training_platform/cache_config.py`).
@@ -205,15 +206,55 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 
 ## 7. Per-trainer exercise media library
 
-- **Today:** `ExerciseMedia` has no owner; a trainer's own video needs a private copy of
-  the exercise, which forks progress. `ExerciseAddMediaView.get` returns media for any
-  exercise id to any user (IDOR, see below).
-- **Must change:** `MediaAsset` owner `trainer_exercise` keyed by (trainer, exercise), a
-  resolution rule (routine author inside a routine, else the approved trainer, else the
-  global asset), `media` + `media_source` on `ExerciseSerializer`, trainer library
-  endpoints under `/api/v1/trainer/exercise-media/`, cache-version bump for
-  `/api/routine/exercises/`.
-- **Order:** after item 2's video pipeline.
+- **Before:** `ExerciseMedia` had no owner; a trainer's own video needed a private copy
+  of the exercise, which forks progress. (`ExerciseAddMediaView.get` served any
+  exercise's media to any signed-in caller — fixed separately, 2026-09-20.)
+- **Built (2026-09-20, branch `build/trainer-media`):**
+  - `MediaAsset` owner type `trainer_exercise`: `owner_id` is the EXERCISE and `person`
+    is the trainer, so the exercise row stays shared and nothing is forked. Migration
+    `mediakit/0003_trainer_exercise_media` — additive, nothing backfilled.
+    `one_asset_per_owner_slot` became partial (it no longer covers this type, whose
+    owner id is shared between coaches); `one_trainer_asset_per_exercise_slot` is the
+    same rule with the trainer in the key; the person check constraint was WIDENED
+    (and renamed `media_person_is_set_exactly_for_people`) rather than dropped — the
+    privacy registry finds a trainer's media through `person`.
+  - One slot list, two owners: the four `exercise.*` keys are filled by the catalogue
+    row and by a (trainer, exercise) pair under the SAME key (`Slot.also_owned_by`,
+    `slots.slot_accepts`). The app asks for `exercise.poster` and must get one
+    whoever shot it.
+  - **The rule, in one function:** `mediakit/resolution.py`
+    `resolve_exercise_media` — (a) the author of THAT routine, (b) else a trainer the
+    viewer has an approved relation with, (c) else the catalogue. A WHOLE source wins,
+    not a slot at a time. A trainer sees their own over the catalogue. Batched: one
+    `MediaAsset` query for a whole day (`ExerciseMediaCache` +
+    `routine/media_context.py`, mixed into the six viewsets that nest
+    `ExerciseSerializer`).
+  - **Serving:** `ExerciseSerializer` gained `media_slots`, `media_source`
+    (`routine_author` | `my_trainer` | `catalogue` | null) and `media_trainer_id`.
+    NOT `media` — that name on an exercise is the legacy `ExerciseMedia` list every
+    shipped build reads, and the contract is additive (CLAUDE.md). This is a change
+    from what this item originally said; the mobile session reads `media_slots`.
+    `/api/v1/content/media/exercise/{id}/` goes through the rule too and takes
+    `?routine_id=`.
+  - **Endpoints:** `GET`/`POST /api/v1/trainer/exercise-media/` and
+    `DELETE /api/v1/trainer/exercise-media/{id}/` (`mediakit/trainer_views.py`).
+    Trainer, or admin naming `trainer_id`. Only exercises the caller may SEE; only
+    their own assets; the catalogue's media is unreachable from this route. Image or
+    video is decided by the slot and each reuses the existing pipeline — no second
+    validator. `POST /api/v1/content/media/video/` refuses
+    `owner_type=trainer_exercise` so the cap lives in one place.
+  - **Cost:** `MEDIA_TRAINER_EXERCISE_MAX_ASSETS` (3) per trainer per exercise,
+    `media_library_full`; replacing a filled slot is free. The storage build's size
+    and duration caps are reused as they are, and the route is the second entry in
+    `LARGE_UPLOAD_PATHS`.
+  - **Cache:** `mediakit.MediaAsset` -> `EXERCISE` in `MODEL_VERSION_KEYS`, so a
+    coach's upload is not hidden behind the five-minute cache on
+    `/api/routine/exercises/`. Blunt: a trainer-portrait upload bumps it too.
+  - Tests: `tests/test_trainer_exercise_media.py` (36).
+- **Owner decisions owed:** verification (no gate today — `trainer_is_verified` gates
+  nothing a trainer publishes, so this follows the rest of the platform); the cap of 3;
+  and whether a client should ever be able to ask for the catalogue's version of a move
+  when their coach's clip is unclear.
 
 ## 8. Two-way chat (plan step 8)
 

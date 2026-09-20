@@ -33,6 +33,10 @@ from .permissions import (
     # The one predicate for "this caller may read this exercise".
     visible_exercises_for,
 )
+# Resolves a whole page's exercise media in one go: whose demonstration each viewer
+# sees (mediakit/resolution.py). Without the mixin a nested ExerciseSerializer asks
+# per row.
+from .media_context import ExerciseMediaMixin
 import logging
 from .services import send_notification
 from django.utils import timezone
@@ -228,7 +232,7 @@ def _int_or_none(value):
         return None
 
 
-class ExerciseViewSet(viewsets.ModelViewSet):
+class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     """ViewSet for managing exercises."""
     queryset = Exercise.objects.all()
@@ -493,7 +497,7 @@ class ExerciseCreateWithImageView(APIView):
             )
 
 
-class RoutineViewSet(viewsets.ModelViewSet):
+class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     Enhanced ViewSet for managing routines with improved assignment logic.
     
@@ -977,7 +981,7 @@ class RoutineViewSet(viewsets.ModelViewSet):
         pass
 
 
-class RoutineExerciseViewSet(viewsets.ModelViewSet):
+class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing RoutineExercise objects.
     Only trainers (owners) and admins can create/update/delete. All users can read.
@@ -2792,7 +2796,7 @@ class IsTrainerOrReadOnly(IsAuthenticated):
         return getattr(obj, 'created_by_id', None) == request.user.id
 
 
-class RoutineTemplateViewSet(viewsets.ModelViewSet):
+class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     ViewSet for managing RoutineTemplates (CRUD, filter, share, generate routines).
     
@@ -3128,7 +3132,7 @@ class RoutineTemplateExerciseSerializer(serializers.ModelSerializer):
         fields = ['id', 'template', 'exercise', 'exercise_details', 'sets', 'reps', 'rest_time', 'day', 'order']
 
 
-class RoutineTemplateExerciseViewSet(viewsets.ReadOnlyModelViewSet):
+class RoutineTemplateExerciseViewSet(ExerciseMediaMixin, viewsets.ReadOnlyModelViewSet):
     """
     API endpoint for viewing RoutineTemplateExercise objects with pagination.
     ReadOnly since trainers usually manage these via the template or custom actions.
@@ -3170,7 +3174,7 @@ class ProgressExists(APIException):
         return self.default_code
 
 
-class UserExerciseProgressViewSet(viewsets.ModelViewSet):
+class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing UserExerciseProgress objects (per-user, per-exercise progress).
     Allows trainers, admins, and clients to create, view, and update their own progress records.
@@ -3208,13 +3212,18 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        # The detail serializer nests the whole exercise, and this queryset had
+        # neither the join nor the prefetch: every row cost a query for its exercise
+        # and another for that exercise's media. Twenty-five rows was fifty queries
+        # for one page.
+        base = self.queryset.select_related('exercise').prefetch_related('exercise__media')
         if user.is_admin:
-            return self.queryset.all()
+            return base.all()
         elif user.is_trainer:
             ids = accessible_user_ids(user)
-            return self.queryset if ids is None else self.queryset.filter(user_id__in=ids)
+            return base if ids is None else base.filter(user_id__in=ids)
         else:
-            return self.queryset.filter(user=user)
+            return base.filter(user=user)
 
     def perform_create(self, serializer):
         """400 `progress_exists` with the existing row's `id` when this exercise already
@@ -3254,18 +3263,28 @@ class UserExerciseProgressViewSet(viewsets.ModelViewSet):
         except ValueError:
             return Response({'error': _('Invalid date format. Use YYYY-MM-DD.')}, status=400)
             
-        queryset = self.get_queryset().filter(date=target_date).select_related('exercise').prefetch_related('set_logs')
-        
+        queryset = list(self.get_queryset().filter(date=target_date)
+                        .select_related('exercise')
+                        .prefetch_related('set_logs', 'exercise__media'))
+
         # Use the specific detailed serializer
+        from .media_context import prepare
         from .serializers import UserDailySummarySerializer
         # With the request, so `exercise.image` is absolute as it is everywhere else
         # (BACKEND_BUGS B-032): without it the same exercise came back as a relative
         # path here and a full URL from `routines/`.
-        serializer = UserDailySummarySerializer(queryset, many=True, context={'request': request})
-        
+        # And with the media context, so the day's exercises resolve whose
+        # demonstration the client sees in ONE query rather than one per exercise —
+        # this route builds its serializer by hand, so `ExerciseMediaMixin` on the
+        # viewset never sees it.
+        context = {'request': request, **prepare(request, queryset)}
+        serializer = UserDailySummarySerializer(queryset, many=True, context=context)
+
         return Response({
             'date': date_str,
-            'total_exercises': queryset.count(),
+            # `len`, not `queryset.count()`: the rows are already in memory, and the
+            # extra COUNT(*) was a second trip for a number we are holding.
+            'total_exercises': len(queryset),
             'exercises': serializer.data
         })
 

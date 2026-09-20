@@ -3035,3 +3035,32 @@ msgstr "جاهز"
 #: mediakit/models.py
 msgid "Failed"
 msgstr "فشل"
+
+# The per-trainer exercise library (BACKEND_DELTA item 7): a coach's own
+# demonstration of a shared exercise.
+#: mediakit/models.py
+msgid "A trainer's demonstration must name that trainer."
+msgstr "يجب أن يحمل عرض المدرب اسم ذلك المدرب."
+
+#: mediakit/trainer_views.py
+msgid "Name the exercise as `exercise_id`."
+msgstr "حدّد التمرين في الحقل `exercise_id`."
+
+#: mediakit/trainer_views.py
+msgid "Attach the file as `file`."
+msgstr "أرفق الملف في الحقل `file`."
+
+#: mediakit/trainer_views.py
+msgid ""
+"You already have %(limit)s clips on this exercise. Replace one instead."
+msgstr "لديك %(limit)s مقاطع على هذا التمرين. استبدل أحدها بدل الإضافة."
+
+#: mediakit/trainer_views.py
+msgid "Only a trainer has a library here."
+msgstr "المكتبة هنا للمدربين فقط."
+
+#: mediakit/views.py
+msgid ""
+"Use /api/v1/trainer/exercise-media/ for your own demonstration of an "
+"exercise."
+msgstr "استخدم /api/v1/trainer/exercise-media/ لعرضك الخاص للتمرين."
