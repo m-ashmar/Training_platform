@@ -591,6 +591,42 @@ omits `plan_price`, and `GET v1/gateways/` answers an empty list. Additive field
 `ROUTINE_PRODUCT`, `WALLET_MOVE`) and `source` on subscriptions (`shamcash`, `agent_wallet`,
 `operator_grant`, `trial`, reserved: `apple_iap`, `google_play`; blank until entitled).
 
+### Remote theme (a skin without a release)
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/config/theme/` | public | `ThemeView` |
+
+Keyed on `X-App-Channel` and `X-App-Version` and on nothing else — not the account, the
+country, the IP, the device's clock or an experiment bucket. Two users on one build get
+byte-identical bytes.
+
+Response: `{id, version, valid_until, tokens}`. `id` is the override's row id or `null`;
+`version` is a 16-character fingerprint that changes if and only if the answer does;
+`valid_until` is ISO 8601 or `null`; `tokens` maps a design-system token name to its new
+value and may be empty. **No override is a 200 with `"tokens": {}`, never a 404.**
+
+A token value is one of three shapes and nothing else: a colour is
+`{"dark": "#FF5A1F", "light": "#F5511A"}` (either key optional), a spacing or radius
+token is a pixel length as text (`"18px"`), a type style is a subset of `fontSize`,
+`lineHeight`, `fontWeight`, `letterSpacing`. Only colour, spacing, radius and typography
+tokens exist here — control sizes and shadows are not overridable, so nothing remote can
+shrink a tap target. A name or shape outside that is refused when the operator saves the
+row, along with any colour pair that would drop text under 4.5:1 contrast (3:1 for
+`ink-faint`, `line-strong` and `focus-ring`), so the app never has to validate a payload.
+
+A theme carries no copy and no links, by construction: there is no field in this response
+that holds a sentence or a URL. That is how the store rule — remote themes may not carry
+prices, purchase buttons or payment links into `play` or `ios` builds — is met.
+
+`ETag: "<version>"`, `Cache-Control: public, max-age=0, must-revalidate`,
+`Vary: X-App-Channel, X-App-Version`. Send the tag back as `If-None-Match` and the repeat
+fetch is `304 Not Modified` with no body.
+
+| `code` | Status | When |
+|---|---|---|
+| `app_channel_required` | 400 | No `X-App-Channel`, or one this server does not know |
+
 ### Privacy (GDPR)
 
 | Method | Path | Auth | View |

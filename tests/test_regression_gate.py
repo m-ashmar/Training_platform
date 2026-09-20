@@ -85,6 +85,11 @@ def test_anonymous_gets_no_5xx_and_reaches_only_public_endpoints(api):
                # What a build may show and sell. Public on purpose: the app asks at launch,
                # before anyone has signed in, and the answer never depends on who asks.
                "/api/v1/config/capabilities", "/api/v1/config/capabilities/",
+               # The remote theme, for the same reason and on the same terms: the app
+               # asks for its skin at launch, before sign-in, and the answer is computed
+               # from the channel and version headers alone. Both spellings, as
+               # capabilities does.
+               "/api/v1/config/theme", "/api/v1/config/theme/",
                # Design v2: the intro story plays and the trainer roster is browsed before
                # sign-in (the visitor shell). Neither runs authentication, and neither
                # answer depends on who asks. The media route answers both spellings, as

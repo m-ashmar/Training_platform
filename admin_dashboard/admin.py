@@ -648,6 +648,14 @@ from policy.models import CapabilityChangeLog, ChannelCapabilities  # noqa: E402
 admin_site.register(ChannelCapabilities, ChannelCapabilitiesAdmin)
 admin_site.register(CapabilityChangeLog, CapabilityChangeLogAdmin)
 
+# The remote theme: a skin the server hands a build (`GET /api/v1/config/theme`), and
+# the record of every edit. The form refuses a token the design system does not
+# declare and any colour pair that would make text unreadable.
+from policy.admin import ThemeChangeLogAdmin, ThemeOverrideAdmin  # noqa: E402
+from policy.models import ThemeChangeLog, ThemeOverride  # noqa: E402
+admin_site.register(ThemeOverride, ThemeOverrideAdmin)
+admin_site.register(ThemeChangeLog, ThemeChangeLogAdmin)
+
 # Media kit: every picture the app draws, by slot. `Media slots > kits/` lists each
 # trainer's completeness.
 from mediakit.admin import MediaAssetAdmin  # noqa: E402

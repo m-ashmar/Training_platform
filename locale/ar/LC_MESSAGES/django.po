@@ -3035,3 +3035,186 @@ msgstr "جاهز"
 #: mediakit/models.py
 msgid "Failed"
 msgstr "فشل"
+
+#: policy/models.py
+msgid "What the operator calls this skin. Never sent to the app."
+msgstr "الاسم الذي يستخدمه المشغّل لهذه الحلّة. لا يُرسل إلى التطبيق أبداً."
+
+#: policy/models.py
+msgid "Which builds this applies to, as a list, e.g. [\"apk\", \"play\"]."
+msgstr "النسخ التي تنطبق عليها، كقائمة، مثل [\"apk\", \"play\"]."
+
+#: policy/models.py
+msgid "Applies to builds at or above this version. 0.0.0 is every build."
+msgstr "تنطبق على النسخ من هذا الإصدار فما فوق. 0.0.0 تعني كل النسخ."
+
+#: policy/models.py
+msgid "Applies to builds at or below this version. Blank is no ceiling."
+msgstr "تنطبق على النسخ حتى هذا الإصدار. الفراغ يعني بلا حدّ أعلى."
+
+#: policy/models.py
+msgid "When the server starts serving it. Blank means already."
+msgstr "متى يبدأ الخادم بتقديمها. الفراغ يعني الآن."
+
+#: policy/models.py
+msgid ""
+"When the server stops. Blank means it does not expire. Sent to the app as "
+"valid_until so it can drop its cache by itself."
+msgstr ""
+"متى يتوقف الخادم. الفراغ يعني أنها لا تنتهي. تُرسل إلى التطبيق باسم "
+"valid_until ليتخلّص من نسخته المخزّنة بنفسه."
+
+#: policy/models.py
+msgid ""
+"Off until an operator turns it on, so a half-written row is never served."
+msgstr ""
+"مطفأة حتى يشغّلها المشغّل، كي لا يُقدَّم سطر لم يكتمل."
+
+#: policy/models.py
+msgid "When two rows match one build, the higher number wins."
+msgstr "عند تطابق سطرين مع نسخة واحدة، يفوز الرقم الأعلى."
+
+#: policy/models.py
+msgid "Token name to value, e.g. {\"ember\": {\"dark\": \"#FF5A1F\"}}."
+msgstr "اسم الرمز مقابل قيمته، مثل {\"ember\": {\"dark\": \"#FF5A1F\"}}."
+
+#: policy/models.py
+#, python-format
+msgid "Name at least one channel, from: %(channels)s."
+msgstr "اذكر قناة واحدة على الأقل، من: %(channels)s."
+
+#: policy/models.py
+#, python-format
+msgid ""
+"There is no channel called %(channel)s. The channels are %(channels)s."
+msgstr ""
+"لا توجد قناة باسم %(channel)s. القنوات هي %(channels)s."
+
+#: policy/models.py
+msgid "Use up to three dotted numbers, like 1.4.0"
+msgstr "استخدم حتى ثلاثة أرقام مفصولة بنقاط، مثل 1.4.0"
+
+#: policy/models.py
+msgid "The highest version cannot be below the lowest one."
+msgstr "لا يمكن أن يكون الإصدار الأعلى أدنى من الإصدار الأدنى."
+
+#: policy/models.py
+msgid "The end must come after the start."
+msgstr "يجب أن تأتي النهاية بعد البداية."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid ""
+"%(name)s takes a colour for each theme, like {\"dark\": \"#FF5A1F\", "
+"\"light\": \"#F5511A\"}."
+msgstr ""
+"%(name)s يأخذ لوناً لكل سمة، مثل {\"dark\": \"#FF5A1F\", "
+"\"light\": \"#F5511A\"}."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "%(name)s has no theme called %(theme)s. The themes are dark and light."
+msgstr "%(name)s لا يملك سمة باسم %(theme)s. السمتان هما dark و light."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "%(name)s takes a colour written as text, like \"#FF5A1F\"."
+msgstr "%(name)s يأخذ لوناً مكتوباً كنص، مثل \"#FF5A1F\"."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "%(name)s takes a hex colour or an rgba(...) value."
+msgstr "%(name)s يأخذ لوناً ست عشرياً أو قيمة rgba(...)."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid ""
+"%(name)s must be an opaque hex colour, like \"#FF5A1F\". A see-through value "
+"cannot be checked for readability."
+msgstr ""
+"%(name)s يجب أن يكون لوناً ست عشرياً غير شفاف، مثل \"#FF5A1F\". القيمة "
+"الشفافة لا يمكن التحقق من وضوح القراءة عليها."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "%(name)s takes a length in whole or half pixels, like \"16px\"."
+msgstr "%(name)s يأخذ طولاً بالبكسل الكامل أو النصفي، مثل \"16px\"."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "%(name)s must be between %(low)spx and %(high)spx."
+msgstr "%(name)s يجب أن يكون بين %(low)spx و %(high)spx."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "%(name)s takes one or more of %(props)s."
+msgstr "%(name)s يأخذ واحدة أو أكثر من %(props)s."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid ""
+"%(name)s has no property called %(prop)s. It takes one or more of %(props)s."
+msgstr ""
+"%(name)s لا يملك خاصية باسم %(prop)s. يأخذ واحدة أو أكثر من %(props)s."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "The fontWeight of %(name)s is a whole number."
+msgstr "قيمة fontWeight في %(name)s عدد صحيح."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "The fontWeight of %(name)s must be between %(low)s and %(high)s."
+msgstr "قيمة fontWeight في %(name)s يجب أن تكون بين %(low)s و %(high)s."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "The letterSpacing of %(name)s is written in em, like \"0.08em\"."
+msgstr "قيمة letterSpacing في %(name)s تُكتب بوحدة em، مثل \"0.08em\"."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid ""
+"The letterSpacing of %(name)s must be between %(low)sem and %(high)sem."
+msgstr ""
+"قيمة letterSpacing في %(name)s يجب أن تكون بين %(low)sem و %(high)sem."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid "%(name)s takes its sizes in pixels, like \"17px\"."
+msgstr "%(name)s يأخذ مقاساته بالبكسل، مثل \"17px\"."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid ""
+"The %(prop)s of %(name)s must be between %(low)spx and %(high)spx. Text too "
+"small to read is text that has been hidden."
+msgstr ""
+"قيمة %(prop)s في %(name)s يجب أن تكون بين %(low)spx و %(high)spx. النص الأصغر "
+"من أن يُقرأ نصٌّ مخفيّ."
+
+#: policy/theme_tokens.py
+msgid ""
+"A theme is a map of token name to value, like {\"ember\": {\"dark\": "
+"\"#FF5A1F\"}}."
+msgstr ""
+"السمة خريطة من اسم الرمز إلى قيمته، مثل {\"ember\": {\"dark\": "
+"\"#FF5A1F\"}}."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid ""
+"There is no token called %(name)s. A theme may only name colour, spacing, "
+"radius and typography tokens the design system declares."
+msgstr ""
+"لا يوجد رمز باسم %(name)s. لا يجوز للسمة أن تذكر إلا رموز الألوان والمسافات "
+"والانحناءات والخطوط التي يعلنها نظام التصميم."
+
+#: policy/theme_tokens.py
+#, python-format
+msgid ""
+"%(fg)s on %(bg)s in the %(theme)s theme is only %(ratio)s:1, under the "
+"%(minimum)s:1 this platform requires. The app would ship unreadable text."
+msgstr ""
+"التباين بين %(fg)s و %(bg)s في سمة %(theme)s هو %(ratio)s:1 فقط، أقل من "
+"%(minimum)s:1 التي تشترطها المنصّة. سيصدر التطبيق بنص غير مقروء."

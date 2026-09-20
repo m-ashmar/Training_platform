@@ -303,6 +303,26 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 - **Theme:** `GET /api/v1/config/theme` -> `{id, version, valid_until, tokens}`, chosen by
   channel and version only; `ThemeOverride` + change log; the server refuses token names
   outside `tokens.json` and text/background pairs under 4.5:1 so a bad edit cannot ship.
+- **Built (2026-09-20, branch `build/theme`):** `policy/theme_tokens.py` is a checked-in
+  copy of the design system's token NAMES and built-in values (`tokens.json` version 2 —
+  `yalla_gym/` is not in this repository, so the copy is kept in step by hand) plus the
+  WCAG contrast arithmetic; `policy/theme.py` resolves and caches; `policy/views.py`
+  `ThemeView` is the contract. Decisions taken here, for the next session:
+  - Only **colour, spacing, radius and typography** are overridable. The `size` group
+    (`tap-min`, `control-*`, `icon-md`) and `shadow` are deliberately NOT: a remote
+    `tap-min: 0px` would make a control unreachable while leaving it drawn.
+  - Values have a grammar (hex / `rgba()` / `NNpx` / `N.NNem` / weight 100–900), so a
+    theme cannot carry a word, a price or a URL into a `play` or `ios` build. That is the
+    BuildGuide store rule met by construction, and `tests/test_theme.py` asserts the shape.
+  - Contrast is enforced at SAVE on the MERGED palette (built-in + override, both themes),
+    4.5:1 for text and 3:1 for `ink-faint`, `line-strong` and `focus-ring` — the three the
+    design system itself puts at that floor. Aliases (`focus-ring`, `chart-1..3`) follow
+    their target. The shipped palette passes with margin; its tightest pair is
+    `ember-ink` on `surface-2` in the light theme, 4.89:1.
+  - `starts_at`/`ends_at` are the operator's schedule, resolved by the SERVER clock at
+    request time. That keeps "a Ramadan skin" inside "never depends on the date": the
+    date it depends on is the server's one clock, identical for every build on the
+    channel at that instant, never the user's, the device's or the country's.
 
 ## 14. Offline set logging
 
