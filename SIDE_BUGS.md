@@ -20,6 +20,8 @@ Not for: work the current task owns, bugs the app session reports (that is
 
 | ID | Where | What | Impact | Sev | Found |
 |---|---|---|---|---|---|
+| S-019 | `policy/exceptions.py:11,17` · `policy/models.py:53,62,64,100` | Every user- and operator-facing string in the policy app goes through gettext but has NO Arabic entry | `app_channel_required` and `not_available_on_channel` reach the app in English only, against "Arabic is the primary language" | HIGH | theme |
+| S-020 | `training_platform/middleware.py:597` | `response['Vary'] = '...'` ASSIGNS instead of calling `patch_vary_headers`, discarding any `Vary` already set (`Cookie` from the session middleware, `Accept-Encoding` from gzip) | On exactly the four cached routes, a proxy may serve one user's variant to another | HIGH | theme |
 | S-008 | `tests/security/*.py` (e.g. `privacy_rights.py:2`) | Every script hardcodes `sys.path.insert(0, '<the main checkout>')` | Run from a worktree it silently exercises the MAIN tree, so a branch's own code is never the thing under test | HIGH | chat |
 | S-009 | `API_CONTRACT.md` §4 push table | Missing 10 registered event types (`coaching_*`, `personal_record`, `subscription_*`, `weekly_recap`, `trainer_weekly_digest`) | The route table is gate-checked and this one is not, so it has drifted; the app session reads a short list | MEDIUM | chat |
 | S-010 | `.gitignore:17` | `.venv/` with a trailing slash does not match the `.venv` SYMLINK a worktree gets | A `git add -A` in a worktree would commit it | MEDIUM | chat |
