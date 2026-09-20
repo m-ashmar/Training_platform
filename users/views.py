@@ -1711,6 +1711,19 @@ class ClientRespondToTrainerInviteView(APIView):
     used to approve its own, and that was a takeover of any unassigned client.
 
     POST {"request_id": <id>, "action": "approve" | "reject"}
+
+    Refusals carry a `code` — branch on it, never on the message:
+
+      request_not_found         404  no pending invitation of yours by that id
+      request_predates_consent  409  sent before `initiated_by` existed; ask for a new one
+      wrong_party_to_answer     403  you sent this one; the trainer accepts it
+      request_already_answered  409  answered while you were answering it
+      trainer_unavailable       409  the trainer was deactivated in the meantime
+      user_blocked              403  one of you blocked the other after it was sent
+      refund_failed             409  the hold could not be returned; nothing changed
+
+    `trainer/respond-to-request/` answers with the same codes for the mirror cases, so
+    the app needs one branch for both sides.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1730,17 +1743,20 @@ class ClientRespondToTrainerInviteView(APIView):
             relation = TrainerClientRelation.objects.select_related('trainer').get(
                 id=request.data.get('request_id'), client=request.user, status='pending')
         except (TrainerClientRelation.DoesNotExist, ValueError, TypeError):
-            return Response({'error': _('Invitation not found or already processed')},
+            return Response({'error': _('Invitation not found or already processed'),
+                             'code': 'request_not_found'},
                             status=status.HTTP_404_NOT_FOUND)
 
         if relation.initiated_by == 'unknown':
             return Response(
                 {'error': _('This invitation predates the current consent flow. '
-                            'Ask your trainer to send it again.')},
+                            'Ask your trainer to send it again.'),
+                 'code': 'request_predates_consent'},
                 status=status.HTTP_409_CONFLICT)
         # Symmetric to the trainer side: you approve what the OTHER party asked for.
         if relation.initiated_by != 'trainer':
-            return Response({'error': _('You made this request. The trainer has to accept it.')},
+            return Response({'error': _('You made this request. The trainer has to accept it.'),
+                             'code': 'wrong_party_to_answer'},
                             status=status.HTTP_403_FORBIDDEN)
 
         trainer_id, trainer = relation.trainer_id, relation.trainer
@@ -1835,7 +1851,8 @@ def approve_trainer_relation(relation, actor):
             # Gone while we waited for the lock — a cancel, an unassign, or the other
             # party's erasure. `.get()` here raised DoesNotExist, which is not one of
             # the passthrough exceptions, so the client-side caller answered 500.
-            return Response({'error': _('Request not found or already processed')},
+            return Response({'error': _('Request not found or already processed'),
+                             'code': 'request_not_found'},
                             status=http.HTTP_404_NOT_FOUND), relation
         # The caller checked who asked on its unlocked copy, and consent depends on it:
         # you approve what the OTHER side asked for. A row declined and re-sent from the
@@ -1846,11 +1863,13 @@ def approve_trainer_relation(relation, actor):
         client, trainer = relation.client, relation.trainer
 
         if relation.status != 'pending' or relation.initiated_by != stale_initiator:
-            return Response({'error': _('This request has already been answered')},
+            return Response({'error': _('This request has already been answered'),
+                             'code': 'request_already_answered'},
                             status=http.HTTP_409_CONFLICT), relation
         # A trainer who has since been deactivated cannot be accepted weeks later.
         if not (trainer.is_active and trainer.is_trainer):
-            return Response({'error': _('That trainer is no longer available')},
+            return Response({'error': _('That trainer is no longer available'),
+                             'code': 'trainer_unavailable'},
                             status=http.HTTP_409_CONFLICT), relation
         # Nor can a request that was sent before one of them blocked the other be
         # accepted afterwards. Refusing only the SEND would make a block trivial to
@@ -1930,12 +1949,14 @@ def reject_trainer_relation(relation, actor):
                   .first())
         if locked is None:
             # Gone while we waited for the lock; see `approve_trainer_relation`.
-            return Response({'error': _('Request not found or already processed')},
+            return Response({'error': _('Request not found or already processed'),
+                             'code': 'request_not_found'},
                             status=http.HTTP_404_NOT_FOUND), relation
         stale_initiator = relation.initiated_by   # see `approve_trainer_relation`
         relation = locked
         if relation.status != 'pending' or relation.initiated_by != stale_initiator:
-            return Response({'error': _('This request has already been answered')},
+            return Response({'error': _('This request has already been answered'),
+                             'code': 'request_already_answered'},
                             status=http.HTTP_409_CONFLICT), relation
         if relation.hold_reference:
             try:
@@ -1944,7 +1965,8 @@ def reject_trainer_relation(relation, actor):
                 logger.error("Refund failed while declining relation %s: %s",
                              relation.id, exc)
                 return Response({'error': _('We could not return the held payment. '
-                                            'Nothing was changed; please try again.')},
+                                            'Nothing was changed; please try again.'),
+                                 'code': 'refund_failed'},
                                 status=http.HTTP_409_CONFLICT), relation
         relation.status = 'rejected'
         relation.responded_at = timezone.now()
@@ -1982,7 +2004,20 @@ class TrainerRespondToRequestView(APIView):
     - Sends notifications to clients
     - Updates relationship status
     - Proper validation and error handling
-    
+
+    POST {"request_id": <id>, "action": "approve" | "reject"}
+
+    Refusals carry a `code` — branch on it, never on the message. The same set as
+    `client/respond-to-invite/`, from the same two shared helpers:
+
+      request_not_found         404  no pending request of yours by that id
+      request_predates_consent  409  sent before `initiated_by` existed; ask for a new one
+      wrong_party_to_answer     403  you invited them; the client accepts it
+      request_already_answered  409  answered while you were answering it
+      trainer_unavailable       409  the trainer was deactivated in the meantime
+      user_blocked              403  one of you blocked the other after it was sent
+      refund_failed             409  the hold could not be returned; nothing changed
+
     TODO: Add approval/rejection reasons
     TODO: Implement request history tracking
     TODO: Add approval analytics
@@ -2031,12 +2066,14 @@ class TrainerRespondToRequestView(APIView):
             if relation.initiated_by == 'unknown':
                 return Response(
                     {'error': _('This request predates the current consent flow. '
-                                'Ask the client to send it again.')},
+                                'Ask the client to send it again.'),
+                     'code': 'request_predates_consent'},
                     status=status.HTTP_409_CONFLICT
                 )
             if relation.initiated_by != 'client':
                 return Response(
-                    {'error': _('You invited this client. They have to accept the invitation.')},
+                    {'error': _('You invited this client. They have to accept the invitation.'),
+                     'code': 'wrong_party_to_answer'},
                     status=status.HTTP_403_FORBIDDEN
                 )
 
@@ -2085,7 +2122,8 @@ class TrainerRespondToRequestView(APIView):
                 
         except TrainerClientRelation.DoesNotExist:
             return Response(
-                {'error': _('Request not found or already processed')}, 
+                {'error': _('Request not found or already processed'),
+                 'code': 'request_not_found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         except PASSTHROUGH_EXCEPTIONS:

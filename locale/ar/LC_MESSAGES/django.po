@@ -3218,3 +3218,18 @@ msgid ""
 msgstr ""
 "التباين بين %(fg)s و %(bg)s في سمة %(theme)s هو %(ratio)s:1 فقط، أقل من "
 "%(minimum)s:1 التي تشترطها المنصّة. سيصدر التطبيق بنص غير مقروء."
+#: ai_assistant/services/chat_service.py
+msgid "I'm taking longer than usual. Please try again in a moment."
+msgstr "أستغرق وقتًا أطول من المعتاد. يرجى المحاولة مرة أخرى بعد قليل."
+
+#: ai_assistant/services/chat_service.py
+msgid "I'm experiencing high demand. Please try again in a few seconds."
+msgstr "هناك ضغط كبير على الخدمة حاليًا. يرجى المحاولة مرة أخرى بعد ثوانٍ قليلة."
+
+#: ai_assistant/services/chat_service.py
+msgid "AI service is temporarily unavailable. Please contact support."
+msgstr "خدمة الذكاء الاصطناعي غير متاحة مؤقتًا. يرجى التواصل مع الدعم."
+
+#: ai_assistant/services/chat_service.py
+msgid "I'm temporarily unavailable. Please try again shortly."
+msgstr "الخدمة غير متاحة مؤقتًا. يرجى المحاولة مرة أخرى بعد قليل."

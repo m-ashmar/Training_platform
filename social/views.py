@@ -201,6 +201,28 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         })
 
 
+def subquery_count(rows, group_by):
+    """A per-row COUNT over `rows`, as ONE correlated subquery for the whole page.
+
+    Every count a viewer is shown has to agree with the rows that viewer can fetch,
+    and the rows they cannot fetch are a set (`blocked_ids`) that is the same for the
+    whole response. Evaluating that as a serializer method would be one query per row
+    of the page; as a subquery annotation it is part of the page's own query, whatever
+    the page size — which is the whole point of `blocked_ids` returning a set.
+
+    `Coalesce(..., 0)` because a subquery with no matching rows is NULL, not 0.
+    """
+    from django.db.models import Count, IntegerField, Subquery
+    from django.db.models.functions import Coalesce
+
+    return Coalesce(
+        Subquery(
+            rows.order_by().values(group_by)
+            .annotate(n=Count('pk', distinct=True)).values('n')[:1],
+            output_field=IntegerField()),
+        0)
+
+
 def visible_posts_for(user):
     """Every post `user` is allowed to see.
 
@@ -263,11 +285,26 @@ class PostViewSet(viewsets.ModelViewSet):
         
         # Optimize: Prefetch related data to avoid N+1
         from django.db.models import Exists, OuterRef
-        
+
         # Annotate whether user liked the post
         if user.is_authenticated:
             queryset = queryset.annotate(
                 is_liked_anno=Exists(PostLike.objects.filter(post=OuterRef('pk'), user=user))
+            )
+
+        # `likes_count` and `comments_count` are denormalised columns that count
+        # everyone, so after a block they promised rows the viewer's own like and
+        # comment lists no longer return. The serializer subtracts these two; they are
+        # annotated here so the correction costs the page one query, not one per post.
+        hidden = blocked_ids(user)
+        if hidden:
+            queryset = queryset.annotate(
+                hidden_likes=subquery_count(
+                    PostLike.objects.filter(post_id=OuterRef('pk'),
+                                            user_id__in=hidden), 'post_id'),
+                hidden_comments=subquery_count(
+                    Comment.objects.filter(post_id=OuterRef('pk'),
+                                           author_id__in=hidden), 'post_id'),
             )
 
         return queryset.select_related('author')
@@ -471,7 +508,18 @@ class CommentViewSet(viewsets.ModelViewSet):
             # this feature exists for actually lands.
             author_id__in=blocked_ids(user),
         ).distinct()
-        
+
+        # Same correction as the post list, for the same reason: `Comment.likes_count`
+        # is denormalised and counts a blocked person's like. One subquery for the
+        # page, not one query per comment.
+        hidden = blocked_ids(user)
+        if hidden:
+            queryset = queryset.annotate(
+                hidden_likes=subquery_count(
+                    CommentLike.objects.filter(comment_id=OuterRef('pk'),
+                                               user_id__in=hidden), 'comment_id'),
+            )
+
         # Handle post filtering
         post_id = self.request.query_params.get('post')
         if post_id:
@@ -1083,8 +1131,31 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         # All active users are potentially viewable; serializer limits fields.
         # Except the ones this person has blocked and the ones who have blocked them:
         # a profile that still opens is a block that did nothing.
-        return CustomUser.objects.filter(is_active=True).exclude(
-            id__in=blocked_ids(self.request.user))
+        user = self.request.user
+        hidden = blocked_ids(user)
+        queryset = CustomUser.objects.filter(is_active=True).exclude(id__in=hidden)
+
+        # The three counts, annotated for the whole page rather than counted per row.
+        # Unfiltered they contradicted the lists they summarise: a profile claiming 12
+        # followers next to a follower list of 11 tells the viewer the account they
+        # blocked is still following — which is the one thing the block had to stop.
+        return queryset.annotate(
+            # `is_following` ran an `.exists()` per row, which made the page's cost
+            # grow with the page and hid whether the counts below cost anything.
+            is_following_anno=Exists(
+                UserFollow.objects.filter(following_id=OuterRef('pk'),
+                                          follower=user)),
+            followers_count_anno=subquery_count(
+                UserFollow.objects.filter(following_id=OuterRef('pk')).exclude(
+                    follower_id__in=hidden), 'following_id'),
+            following_count_anno=subquery_count(
+                UserFollow.objects.filter(follower_id=OuterRef('pk')).exclude(
+                    following_id__in=hidden), 'follower_id'),
+            # Through the one definition of what this viewer may read, so the number
+            # cannot drift from `GET /api/social/posts/?author=<id>`.
+            posts_count_anno=subquery_count(
+                visible_posts_for(user).filter(author_id=OuterRef('pk')), 'author_id'),
+        )
 
     @action(detail=False, methods=['get'])
     def by_username(self, request):

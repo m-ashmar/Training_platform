@@ -259,6 +259,20 @@ per-address limits above have `code: "throttled"`.
 
 ### AI Assistant
 
+The assistant answers over the socket `ws://host/ws/ai/chat/?token=<JWT>`; these routes
+are the history and the housekeeping around it. Every socket `error` frame and every
+REST refusal carries a `code` — `ai_assistant/consumers.py` lists the socket's full set
+in its class docstring. Two worth naming here:
+
+| `code` | Where | When |
+|---|---|---|
+| `message_not_found` | `POST feedback/` (404) and the socket's `feedback` frame | No assistant message of yours by that id |
+| `ai_consent_required` | every `/api/ai/` route except `DELETE data/`, and the socket | The AI coach has not been allowed to read this person's data |
+
+A turn that ends in an `error` frame is **not** charged against the daily message
+allowance; each turn closes with `{"type": "rate_limit", "remaining", "resets_at"}`
+carrying what is actually left.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `DELETE` | `/api/ai/data/` | auth | `GDPRDataDeleteView` |
@@ -532,6 +546,20 @@ client is in (`trainer/unassign-client/` answers 409 `coaching_month_active`;
 `at_period_end: true` stops the renewal instead), and cannot delete the account while
 coaching anyone (`DELETE privacy/erase/` answers 409 `trainer_has_active_clients`).
 
+**Answering a coaching request.** `trainer/respond-to-request/` and
+`client/respond-to-invite/` both take `{request_id, action: "approve"|"reject"}` and
+refuse with the same codes, because both go through the same two helpers:
+
+| `code` | Status | When |
+|---|---|---|
+| `request_not_found` | 404 | No pending request or invitation of yours by that id |
+| `request_predates_consent` | 409 | Sent before `initiated_by` existed — ask for a new one |
+| `wrong_party_to_answer` | 403 | You sent this one; the other side accepts it |
+| `request_already_answered` | 409 | Answered while you were answering it |
+| `trainer_unavailable` | 409 | The trainer was deactivated in the meantime |
+| `user_blocked` | 403 | One of you blocked the other after it was sent |
+| `refund_failed` | 409 | The hold could not be returned; nothing was changed |
+
 Templates: a template is reused for any number of clients and every client gets a
 private copy (`templates/{id}/generate/`: `client_id`, or `client_ids` for several, or
 `assign: false` for an unassigned draft to personalise and then `assign_to_client`).
@@ -585,6 +613,12 @@ after it (same code on `trainer/respond-to-request/` and `client/respond-to-invi
 Blocking does not hide a challenge from either of them, but a blocked person is
 dropped from its leaderboard — with the ranks left as they were, so the board still
 reads 1, 2, 4.
+
+Every count agrees with the list it summarises, for the viewer reading it:
+`followers_count`, `following_count` and `posts_count` on a public profile, and
+`likes_count` and `comments_count` on a post and a comment, all exclude the rows a
+block hides. So two people looking at the same post can be shown different numbers,
+and neither number ever exceeds what that person can actually fetch.
 
 In the app's "report and block" flow, call `reports/` FIRST: what a blocked person
 wrote is no longer visible to the reporter, and therefore no longer reportable.

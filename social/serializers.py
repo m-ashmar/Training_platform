@@ -20,9 +20,31 @@ from users.models import CustomUser
 # Validates content + caps dimensions + re-encodes (strips EXIF/GPS).
 # Plain ImageField only checks that Pillow can parse the file.
 from training_platform.file_security import SecureImageField
+# One query, both directions (moderation/services.py). It imports no model at module
+# level, which is why it can be imported from here at all.
+from moderation.services import blocked_ids
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _hidden_from(serializer):
+    """The accounts this request's viewer may not see — resolved ONCE per response.
+
+    `blocked_ids` is a single query whatever the size of the page, but a serializer
+    method runs per ROW, so calling it there would be one query per row. DRF reuses one
+    child serializer instance for every row of a list, so the cache below lasts exactly
+    as long as the response and no longer.
+
+    This is the fallback path. A viewset that pages these objects annotates the counts
+    in its own query instead (`social/views.py`), and then no row reaches here.
+    """
+    cached = getattr(serializer, '_blocked_ids_cache', None)
+    if cached is None:
+        request = serializer.context.get('request')
+        cached = serializer._blocked_ids_cache = blocked_ids(
+            getattr(request, 'user', None))
+    return cached
 
 
 class UserMinimalSerializer(serializers.ModelSerializer):
@@ -56,16 +78,54 @@ class PublicUserProfileSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    # The three counts agree with the rows this viewer can actually fetch. They were
+    # unfiltered, so a profile said "12 followers" to someone whose follower list
+    # showed 11 — and the missing one was the account they had blocked, which is
+    # exactly the person a block is supposed to stop being told about.
+    #
+    # `PublicUserProfileViewSet` annotates all three in the page's own query; the
+    # fallbacks below keep the serializer correct anywhere else, at one query per row.
+
     def get_followers_count(self, obj):
-        return obj.followers.count()
+        annotated = getattr(obj, 'followers_count_anno', None)
+        if annotated is not None:
+            return annotated
+        return obj.followers.exclude(
+            follower_id__in=_hidden_from(self)).count()
 
     def get_following_count(self, obj):
-        return obj.following.count()
+        annotated = getattr(obj, 'following_count_anno', None)
+        if annotated is not None:
+            return annotated
+        return obj.following.exclude(
+            following_id__in=_hidden_from(self)).count()
 
     def get_posts_count(self, obj):
-        return getattr(obj, 'posts', None).count() if hasattr(obj, 'posts') else 0
+        annotated = getattr(obj, 'posts_count_anno', None)
+        if annotated is not None:
+            return annotated
+        if not hasattr(obj, 'posts'):
+            return 0
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None or not getattr(user, 'is_authenticated', False):
+            # `visible_posts_for` takes a real user (it asks who follows whom); for
+            # anyone else the visible set is the public, unhidden posts.
+            return obj.posts.filter(visibility='public', is_hidden=False).count()
+        # `visible_posts_for` is the ONE definition of what a viewer may read — the
+        # same one the post list, the feed and search use — so the number cannot drift
+        # from the list it describes. Imported here because `social.views` imports this
+        # module.
+        from .views import visible_posts_for
+
+        return visible_posts_for(user).filter(author_id=obj.pk).count()
 
     def get_is_following(self, obj):
+        # Prefers the EXISTS annotation the viewset adds for the whole page; the
+        # `.exists()` below is one query per row and only runs outside it.
+        annotated = getattr(obj, 'is_following_anno', None)
+        if annotated is not None:
+            return annotated
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
@@ -109,10 +169,13 @@ class PostSerializer(serializers.ModelSerializer):
 
     image = SecureImageField(required=False, allow_null=True, max_bytes=5 * 1024 * 1024)
     author = UserMinimalSerializer(read_only=True)
-    likes_count = serializers.ReadOnlyField()
-    comments_count = serializers.ReadOnlyField()
+    # Not `ReadOnlyField`: the stored column counts every like and comment there is,
+    # and a blocked person's are not rows this viewer can fetch. See
+    # `get_likes_count`.
+    likes_count = serializers.SerializerMethodField()
+    comments_count = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Post
         fields = [
@@ -123,12 +186,51 @@ class PostSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'author', 'created_at', 'updated_at']
     
+    def get_likes_count(self, obj):
+        """The stored counter, less the likes from accounts this viewer cannot see.
+
+        `likes_count` is denormalised and maintained with `F()` (social/views.py), so
+        it counts everyone. After a block it therefore exceeded the rows the viewer
+        could reach — a post showing "3 likes" whose like list has two entries tells
+        the viewer the blocked account is still there.
+
+        `PostViewSet` annotates `hidden_likes` for the whole page in its own query; the
+        fallback costs one query per row and only runs outside that viewset.
+        """
+        return max(0, (obj.likes_count or 0) - self._hidden_likes(obj))
+
+    def get_comments_count(self, obj):
+        """The stored counter, less the comments from accounts this viewer cannot see.
+
+        The comment list already excludes a blocked author (`CommentViewSet`), so
+        without this the badge on the post promised replies the thread never showed.
+        """
+        return max(0, (obj.comments_count or 0) - self._hidden_comments(obj))
+
+    def _hidden_likes(self, obj):
+        annotated = getattr(obj, 'hidden_likes', None)
+        if annotated is not None:
+            return annotated
+        hidden = _hidden_from(self)
+        if not hidden:
+            return 0
+        return PostLike.objects.filter(post=obj, user_id__in=hidden).count()
+
+    def _hidden_comments(self, obj):
+        annotated = getattr(obj, 'hidden_comments', None)
+        if annotated is not None:
+            return annotated
+        hidden = _hidden_from(self)
+        if not hidden:
+            return 0
+        return Comment.objects.filter(post=obj, author_id__in=hidden).count()
+
     def get_is_liked(self, obj):
         """Check if current user has liked this post"""
         # Prefer annotated field to avoid N+1 queries
         if hasattr(obj, 'is_liked_anno'):
             return obj.is_liked_anno
-            
+
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             return PostLike.objects.filter(
@@ -142,9 +244,11 @@ class CommentSerializer(serializers.ModelSerializer):
     """Serializer for post comments"""
     
     author = UserMinimalSerializer(read_only=True)
-    likes_count = serializers.ReadOnlyField()
+    # Same reason as `PostSerializer.likes_count`: the stored counter counts a blocked
+    # person's like, and the viewer cannot see it.
+    likes_count = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Comment
         fields = [
@@ -176,6 +280,19 @@ class CommentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {'parent_comment': _('Reply to a comment on the same post.')})
         return attrs
+
+    def get_likes_count(self, obj):
+        """The stored counter, less the likes from accounts this viewer cannot see.
+
+        `CommentViewSet` annotates `hidden_likes` for the whole page; the fallback is
+        one query per row and only runs outside that viewset.
+        """
+        hidden_likes = getattr(obj, 'hidden_likes', None)
+        if hidden_likes is None:
+            hidden = _hidden_from(self)
+            hidden_likes = (CommentLike.objects.filter(
+                comment=obj, user_id__in=hidden).count() if hidden else 0)
+        return max(0, (obj.likes_count or 0) - hidden_likes)
 
     def get_is_liked(self, obj):
         """Whether the current user has liked this comment.

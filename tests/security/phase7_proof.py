@@ -1,4 +1,4 @@
-import sys; sys.path.insert(0,"/Users/mac/Desktop/Git/t2/Training_platform")
+import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))  # THIS tree: a hardcoded checkout made a worktree run the main tree's code
 import os, django
 os.environ['DJANGO_SETTINGS_MODULE']='training_platform.settings_local'
 django.setup()
