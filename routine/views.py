@@ -99,7 +99,9 @@ class RecentActivityProgressView(APIView):
     time (in seconds), including days with 0 duration, plus `adherence`: the same week
     measured against the coach's plan — sets planned, logged and missed, days with
     nothing missing, the perfect-day streak and the day that broke it
-    (see `analytics/adherence/` for the full shape).
+    (see `analytics/adherence/` for the full shape) — and `strength`: the headline for
+    the exercise that moved most, with its projection when there is one, plus how many
+    exercises are rising out of how many tracked (see `analytics/strength/`).
 
     Implementation details:
     - Duration is aggregated at DB level via TruncDate + Sum (no Python loops)
@@ -173,10 +175,26 @@ class RecentActivityProgressView(APIView):
         # a day closes (training_platform/signals.py).
         from .outcomes import adherence
 
+        from . import strength as strength_module
+
+        week = adherence(request.user, window_start.date(), start_of_today.date(),
+                         today=start_of_today.date())
+        # One line for the home card: the exercise that moved most, and where it is
+        # heading if there is enough to say (the owner, 2026-09-20). Numbers, not a
+        # sentence: the app writes it in the person's own language.
+        overview = strength_module.overview(request.user, until=start_of_today.date(),
+                                            limit=6,
+                                            adherence_percent=week['sets']['done_percent'])
         data = {
             "recent_progress": recent_progress,
-            "adherence": adherence(request.user, window_start.date(), start_of_today.date(),
-                                   today=start_of_today.date()),
+            "adherence": week,
+            "strength": {
+                "headline": strength_module.headline(
+                    overview['top_movers'][0] if overview['top_movers']
+                    else (overview['exercises'][0] if overview['exercises'] else None)),
+                "rising_count": overview['rising_count'],
+                "tracked_count": overview['tracked_count'],
+            },
         }
         private_cache().set(cache_key, data, 120)
         return Response(data)
@@ -1118,6 +1136,37 @@ def _day_set_counts(routine, user, day, date=None) -> dict:
             'unlogged': counts['unlogged']}
 
 
+def _celebrate_personal_record(log):
+    """Tell someone the moment they beat their own best (the owner, 2026-09-20).
+
+    The heaviest set of a session is the only one that can claim it, the first set of an
+    exercise never can (there is nothing to beat), and the push is keyed on the set, so a
+    retry of the same set never celebrates twice. A failure here is logged: the set is
+    recorded either way — a missed cheer must not cost a workout.
+    """
+    from notifications.domain.dispatcher import emit_event
+    from notifications.domain.progress_events import PersonalRecordEvent
+
+    from .strength import is_personal_record
+
+    try:
+        if log is None:
+            return
+        record = is_personal_record(log)
+        log._is_personal_record = record        # the answer carries it, so the app cheers now
+        if not record:
+            return
+        progress = log.user_exercise_progress
+        event = PersonalRecordEvent(
+            recipient_id=progress.user_id, exercise_id=progress.exercise_id,
+            exercise_name=progress.exercise.name,
+            weight=f"{float(log.weight):g}", reps=int(log.reps), set_log_id=log.pk)
+        transaction.on_commit(lambda: emit_event(event))
+    except Exception:       # noqa: BLE001 — the set stands whatever happens here
+        logger.warning("could not check a personal record for set %s",
+                       getattr(log, 'pk', None), exc_info=True)
+
+
 def _require_can_train(user, routine, at=None):
     """403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when a client may see this routine but
     not train on it (the owner, 2026-09-19; users/coaching.py `training_refusal`)."""
@@ -1210,6 +1259,10 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     A client's new set answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
     `trainer_id`) while the coaching its routine came from is unpaid or over, unless the
     set is dated inside a paid month (training done offline while paid still syncs).
+
+    A set that beats everything this person has logged for that exercise answers
+    `personal_record: true` and sends them the `personal_record` push (the owner,
+    2026-09-20). The first set of an exercise never counts as a record.
     """
     queryset = ExerciseSetLog.objects.all()
     serializer_class = ExerciseSetLogSerializer
@@ -1276,6 +1329,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             if 'unique constraint' in str(e).lower():
                 raise serializers.ValidationError({'detail': _('A set log for this progress, set number, and date already exists.')})
             raise
+        _celebrate_personal_record(serializer.instance)
 
     @action(detail=False, methods=['get'], url_path='my-progress')
     def my_progress(self, request):
@@ -1996,6 +2050,78 @@ class AnalyticsViewSet(viewsets.ViewSet):
         for row in days:
             row.pop('detail', None)
         body['by_day'] = days
+        return Response(body)
+
+    @action(detail=False, methods=['get'])
+    def strength(self, request):
+        """GET /api/routine/analytics/strength/?exercise_id=&user_id= — how strong this
+        person is getting, and where that is heading (the owner, 2026-09-20).
+
+        Self, an approved client of yours, or admin (403 otherwise, 404 for no such
+        user). Read from sets already logged; nothing here is collected separately.
+
+        Without `exercise_id`: `{exercises: [...], top_movers, plateaus, rising_count,
+        tracked_count, headline, adherence_percent}` — one entry per exercise trained in
+        the last 8 weeks, each with `direction` (`rising` | `steady` | `easing`),
+        `change_percent`, `best`, `latest`, `sessions` and its `projection`.
+
+        With `exercise_id`: the same for one exercise plus `points` (one entry per
+        training day: `estimated_1rm`, `best_weight`, `best_reps`, `volume_kg`, `sets`)
+        and `share`, the headline a card can draw.
+
+        `projection` is `{available: false, reason: "insufficient_data", needs: {...}}`
+        until there are 3 training days of that exercise spread over 2 weeks. When it is
+        available it is a RANGE — `from_estimated_1rm`, `low`, `high`, `horizon_days`
+        (14), `confidence`, `per_week_kg`, `assumes_sets_done_percent` — never a single
+        number and never a promise. It says what the training says: no calories, no
+        weight, no muscle, no medical claim. Identical on every build.
+        """
+        from datetime import timedelta
+
+        from . import strength as strength_module
+        from .outcomes import adherence
+        from users.models import CustomUser
+
+        user = request.user
+        user_id = request.query_params.get('user_id')
+        if user_id:
+            from .permissions import can_access_user_data
+            if not can_access_user_data(request.user, user_id):
+                return Response({'error': _('You do not have access to this user\'s data.')},
+                                status=status.HTTP_403_FORBIDDEN)
+            user = CustomUser.objects.filter(pk=user_id).first()
+            if user is None:
+                return Response({'error': _('User not found.')}, status=404)
+
+        today = timezone.localdate()
+        # What the projection assumes: the share of PLANNED sets actually done over the
+        # last four weeks (routine/outcomes.py). It conditions the answer instead of
+        # decorating it — this is the part the person controls.
+        done_percent = adherence(user, today - timedelta(days=27), today,
+                                 today=today)['sets']['done_percent']
+
+        exercise_id = _int_or_none(request.query_params.get('exercise_id'))
+        if exercise_id:
+            from .models import Exercise
+            exercise = Exercise.objects.filter(pk=exercise_id).first()
+            if exercise is None:
+                return Response({'error': _('Exercise not found.')}, status=404)
+            series = strength_module.points(user, exercise_id, until=today)
+            body = strength_module.trend(user, exercise_id, until=today, series=series)
+            body['exercise_name'] = exercise.name
+            body['projection'] = strength_module.projection(
+                user, exercise_id, until=today, series=series, adherence_percent=done_percent)
+            body['share'] = strength_module.headline(body)
+            body['user_id'] = user.id
+            body['adherence_percent'] = done_percent
+            return Response(body)
+
+        body = strength_module.overview(user, until=today, adherence_percent=done_percent)
+        body['headline'] = strength_module.headline(
+            body['top_movers'][0] if body['top_movers']
+            else (body['exercises'][0] if body['exercises'] else None))
+        body['user_id'] = user.id
+        body['adherence_percent'] = done_percent
         return Response(body)
 
     @action(detail=False, methods=['get'])
@@ -3204,6 +3330,23 @@ class ExerciseAddMediaView(APIView):
             )
 
 
+def _client_strength(client, limit=5):
+    """The client's trend, as the coach needs it: which exercises are rising, which are
+    flat, and the headline for the one that moved most."""
+    from . import strength as strength_module
+
+    overview = strength_module.overview(client, limit=limit)
+    return {
+        'headline': strength_module.headline(
+            overview['top_movers'][0] if overview['top_movers']
+            else (overview['exercises'][0] if overview['exercises'] else None)),
+        'rising_count': overview['rising_count'],
+        'tracked_count': overview['tracked_count'],
+        'top_movers': overview['top_movers'],
+        'plateaus': overview['plateaus'],
+    }
+
+
 def _week_adherence(client, days=7):
     """The last week of one client's plan-vs-done, for the trainer's screens."""
     from datetime import timedelta
@@ -3344,6 +3487,7 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                      'joined': client.date_joined,
                      'goal': getattr(client, 'client_goals', 'Not set')
                  },
+                 'strength': _client_strength(client),
                  'weekly_stats': {
                      'sessions_count': len(week_sessions),
                      'total_volume': week_volume,
@@ -3360,6 +3504,36 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                 'error': 'Client not found.'},
                 status=status.HTTP_404_NOT_FOUND
             )
+    def attention(self, request):
+        """GET /api/routine/trainer/client-progress/attention/ — the clients who need a
+        look, most urgent first (the owner, 2026-09-20).
+
+        Trainers and admins (403 otherwise). One batch of queries for the whole roster.
+
+        `{trainer_id, count, clients: [{client_id, client_name, score, reasons,
+        last_trained, this_week, usual_set_completion_percent}]}`. Each reason carries
+        its numbers: `frozen`, `ended`, `unpaid`, `never_started`, `quiet` (+`days`),
+        `slipping` (+`this_week`, `usual` — measured against that client's own four-week
+        average, so a steady 70% is not an alarm), `missing_sets` (+`missed`,
+        `planned`). A client with nothing to report is left out. Identical on every
+        build; no price and no claim.
+        """
+        from .outcomes import attention as needs_attention
+        from users.models import CustomUser
+
+        if not (request.user.is_trainer or request.user.is_admin):
+            return Response({'error': _('This endpoint is only for trainers')},
+                            status=status.HTTP_403_FORBIDDEN)
+        ids = accessible_user_ids(request.user)
+        clients = list(CustomUser.objects.filter(id__in=ids or [], user_type='client')
+                       .only('id', 'first_name', 'last_name', 'username')[:200])
+        names = {client.pk: (f"{client.first_name or ''} {client.last_name or ''}".strip()
+                             or client.username) for client in clients}
+        rows = needs_attention(request.user, [client.pk for client in clients])
+        for row in rows:
+            row['client_name'] = names.get(row['client_id'])
+        return Response({'trainer_id': request.user.id, 'count': len(rows), 'clients': rows})
+
     @action(detail=False, methods=['get'], url_path='recent')
     def recent_progress(self, request):
         """

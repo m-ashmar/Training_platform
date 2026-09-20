@@ -36,7 +36,7 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 18 | Renewal reminder 3 days ahead; unpaid or ended = frozen (read-only) (owner decision 17) | L | DONE |
 | 19 | Keep the missed work: planned vs done per day, wired into analytics (owner, 2026-09-20) | L | DONE |
 | 20 | Trainer pipeline gaps found while mapping it (2026-09-20) | M | LISTED |
-| 21 | Expected progress: strength trend, projection, coach early warning (owner, 2026-09-20) | XL | IN PROGRESS |
+| 21 | Expected progress: strength trend, projection, coach early warning (owner, 2026-09-20) | XL | DONE |
 
 ## 1. Capabilities endpoint and channel header
 
@@ -404,6 +404,36 @@ actually done.
   the week held, what is worth a look. This is what brings people back.
 - **A share block**: the trend endpoint returns a short bilingual headline the app can draw
   on a card, so sharing needs no second backend pass.
+
+### Built (2026-09-20)
+
+`routine/strength.py` — no new table; everything reads `ExerciseSetLog` and the day
+outcomes of item 19.
+
+- `points()` one entry per training day of an exercise: the best set, its estimated
+  one-rep max (Brzycki, the one formula this repo has), and the day's volume. Sets
+  re-sent without the app's id are collapsed by set number, so a retry cannot inflate a
+  day; sets with no weight or reps (a run, a whole day logged at once) carry no strength
+  and are left out.
+- `trend()` direction (`rising` / `steady` / `easing`), change since the first day in the
+  window, the personal best, and the per-week movement.
+- `projection()` a Theil-Sen line (the median of pairwise slopes — one deload week cannot
+  steer it, which least squares would) over each week's MEDIAN training day, with a band
+  from the residuals' median absolute deviation and a floor of 2%. Silent until 3
+  training days spread over 2 weeks: `{available: false, reason: "insufficient_data",
+  needs: {...}}`. A flat or easing trend never projects a decline — the range holds
+  around where the person is.
+- `personal_best()` / `is_personal_record()` — heavier than every earlier set, the same
+  definition `analytics/summary`'s `prs` has always used. One product, one meaning.
+
+Wired into: `GET analytics/strength/` (overview and per exercise, with `share`), the home
+week (`strength.headline`), the trainer's client view (`strength`) and roster
+(`this_week.trend`, from each client's own first and last session), the new
+`trainer/client-progress/attention/`, and the AI assistant's progress tool. `POST
+set-logs/` answers `personal_record` and sends the push. Weekly, Sunday evening:
+`weekly_recap` to clients and `trainer_weekly_digest` to trainers
+(`routine.send_weekly_progress`). A client whose coaching is paused or over gets no recap
+and is listed to the coach as that, not as "slipping".
 
 ### Rules this is built under
 

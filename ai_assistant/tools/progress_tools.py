@@ -107,6 +107,32 @@ def get_overall_progress(user, days=30, **kwargs):
         # assistant answers "did I finish my sets" with numbers rather than "you trained
         # 4 days" (the owner, 2026-09-20; routine/outcomes.py).
         "plan_adherence": _plan_adherence(user, days),
+        # And which way the lifting is going, so "am I getting stronger?" is answered
+        # from the sets themselves (routine/strength.py). A projection is a RANGE and
+        # only appears when there is enough training behind it; never a promise, and
+        # never a claim about the body.
+        "strength": _strength(user),
+    }
+
+
+def _strength(user, limit=5):
+    from routine import strength as strength_module
+
+    overview = strength_module.overview(user, limit=limit)
+    return {
+        "tracked_exercises": overview['tracked_count'],
+        "rising_exercises": overview['rising_count'],
+        "top_movers": [
+            {"exercise": row.get('exercise_name'),
+             "change_percent": row.get('change_percent'),
+             "direction": row.get('direction'),
+             "best_kg": (row.get('best') or {}).get('weight'),
+             "projection": {k: v for k, v in (row.get('projection') or {}).items()
+                            if k in ('available', 'low', 'high', 'horizon_days',
+                                     'confidence', 'reason')}}
+            for row in overview['top_movers']
+        ],
+        "plateaus": [row.get('exercise_name') for row in overview['plateaus']],
     }
 
 

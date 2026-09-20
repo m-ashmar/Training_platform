@@ -31,7 +31,7 @@ import logging
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Max, Q, Sum
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -492,3 +492,119 @@ def week_totals(user_ids, start, end) -> dict:
                                        if planned else None),
         }
     return collected
+
+
+def attention(trainer, client_ids, *, today=None, quiet_days=5):
+    """Which of these clients need the coach's eye, most urgent first.
+
+    One batch of queries for the whole roster, never one per client: the roster screen
+    shows every client at once, and that is how the rest of this file is written.
+
+    Signals, each with the numbers behind it so the coach can judge rather than trust:
+      `frozen` / `ended`     the coaching is paused or over (users/coaching.py)
+      `never_started`        assigned a routine and has never closed a day
+      `quiet`                nothing trained for `quiet_days`
+      `slipping`             this week's share of planned sets is well below their own
+                             four-week average — measured against themselves, because a
+                             client who always does 70% is steady, not slipping
+      `missing_sets`         a lot of planned sets left this week
+    """
+    from datetime import timedelta
+
+    from .models import DayOutcome, Routine, WorkoutSession
+
+    today = today or timezone.localdate()
+    ids = list(client_ids)
+    if not ids:
+        return []
+    week_start = today - timedelta(days=6)
+    month_start = today - timedelta(days=27)
+
+    week = week_totals(ids, week_start, today)
+    month = week_totals(ids, month_start, today)
+    last_trained = dict(WorkoutSession.objects.filter(user_id__in=ids, status='completed')
+                        .values('user_id').annotate(last=Max('end_time'))
+                        .values_list('user_id', 'last'))
+    for user_id, last in (DayOutcome.objects.filter(user_id__in=ids)
+                          .values('user_id').annotate(last=Max('date'))
+                          .values_list('user_id', 'last')):
+        seen = last_trained.get(user_id)
+        seen_date = timezone.localdate(seen) if seen else None
+        if seen_date is None or (last and last > seen_date):
+            last_trained[user_id] = last
+    ever_closed = set(DayOutcome.objects.filter(user_id__in=ids)
+                      .values_list('user_id', flat=True).distinct())
+    assigned = {row['assigned_to'] for row in Routine.objects
+                .filter(assigned_to__in=ids, is_active=True)
+                .values('assigned_to')}
+
+    # One read for the whole roster: asking the coaching rule per client is a handful of
+    # queries each, which is what every batched read in this file exists to avoid.
+    from users.coaching import refusals_for
+    refusals = refusals_for(getattr(trainer, 'pk', trainer), ids, at=today)
+
+    rows = []
+    for user_id in ids:
+        this_week = week.get(user_id, {})
+        this_month = month.get(user_id, {})
+        share = this_week.get('set_completion_percent')
+        usual = this_month.get('set_completion_percent')
+        last = last_trained.get(user_id)
+        last_date = timezone.localdate(last) if hasattr(last, 'tzinfo') else last
+        quiet = (today - last_date).days if last_date else None
+
+        reasons, score = [], 0
+        refusal = refusals.get(user_id)
+        if refusal:
+            # A client the platform itself refuses is not "slipping": their own notices
+            # are asking them to pay, and stacking "quiet" on top would read as blame.
+            # The coach is told the state, and that is the whole story.
+            rows.append({
+                'client_id': user_id,
+                'score': 60 if refusal == 'coaching_frozen' else 40,
+                'reasons': [{'code': refusal.replace('coaching_', '')}],
+                'last_trained': last_date,
+                'this_week': {
+                    'planned_sets': this_week.get('planned_sets', 0),
+                    'logged_sets': this_week.get('logged_sets', 0),
+                    'missed_sets': this_week.get('missed_sets', 0),
+                    'set_completion_percent': share,
+                    'perfect_days': this_week.get('perfect_days', 0),
+                },
+                'usual_set_completion_percent': usual,
+            })
+            continue
+        if user_id in assigned and user_id not in ever_closed:
+            reasons.append({'code': 'never_started'})
+            score += 50
+        elif quiet is not None and quiet >= quiet_days:
+            reasons.append({'code': 'quiet', 'days': quiet})
+            score += min(10 + quiet * 4, 50)
+        elif quiet is None:
+            reasons.append({'code': 'quiet', 'days': None})
+            score += 30
+        if share is not None and usual is not None and usual - share >= 20:
+            reasons.append({'code': 'slipping', 'this_week': share, 'usual': usual})
+            score += 30
+        if this_week.get('missed_sets'):
+            reasons.append({'code': 'missing_sets', 'missed': this_week['missed_sets'],
+                            'planned': this_week.get('planned_sets', 0)})
+            score += min(this_week['missed_sets'], 20)
+        if not reasons:
+            continue
+        rows.append({
+            'client_id': user_id,
+            'score': score,
+            'reasons': reasons,
+            'last_trained': last_date,
+            'this_week': {
+                'planned_sets': this_week.get('planned_sets', 0),
+                'logged_sets': this_week.get('logged_sets', 0),
+                'missed_sets': this_week.get('missed_sets', 0),
+                'set_completion_percent': share,
+                'perfect_days': this_week.get('perfect_days', 0),
+            },
+            'usual_set_completion_percent': usual,
+        })
+    rows.sort(key=lambda row: (-row['score'], row['client_id']))
+    return rows

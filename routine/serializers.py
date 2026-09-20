@@ -595,6 +595,9 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
     one_rep_max_estimate = serializers.SerializerMethodField()
+    #: True when this set beat everything logged before it for that exercise, so the app
+    #: can celebrate at once; the push follows (the owner, 2026-09-20).
+    personal_record = serializers.SerializerMethodField()
     #: "I did what the coach asked" — write-only, never stored.
     as_prescribed = serializers.BooleanField(write_only=True, required=False, default=False)
     routine = serializers.PrimaryKeyRelatedField(queryset=Routine.objects.all(),
@@ -739,7 +742,7 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         model = ExerciseSetLog
         fields = [
             'id', 'user_exercise_progress', 'workout_session', 'set_number', 
-            'weight', 'reps', 'volume', 'one_rep_max_estimate', 
+            'weight', 'reps', 'volume', 'one_rep_max_estimate', 'personal_record',
             'date', 'notes', 'rest_time', 'rpe',
             # The app's id for the set; a retried POST returns the first row (B-003).
             'client_uuid',
@@ -749,6 +752,11 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         # The unique index decides, not a validator (see WorkoutSessionSerializer).
         extra_kwargs = {'client_uuid': {'validators': []}}
         # TODO: Add more fields as needed for analytics/reporting
+
+    def get_personal_record(self, obj):
+        """True or false for the set just written, null when reading a list: asking per
+        row would be a query per set."""
+        return getattr(obj, '_is_personal_record', None)
 
     def get_volume(self, obj):
         """Calculate volume for this set (weight × reps)"""
@@ -1580,6 +1588,43 @@ class RecentActivitySerializer(serializers.ModelSerializer):
         for user_id, totals in week_totals(ids, week_ago, timezone.localdate()).items():
             collected[user_id]["week_plan"] = totals
 
+        # Which way each client's lifting is going, from their own set logs
+        # (routine/strength.py). The roster shows an arrow; the full trend is on the
+        # client's own screen.
+        from .strength import TREND_WEEKS, one_rep_max
+        from .models import ExerciseSetLog as _SetLog
+        trend_window = timezone.localdate() - timedelta(weeks=TREND_WEEKS)
+        # The client's own FIRST and LAST training day of each exercise in the window,
+        # not two fixed halves: someone who started three weeks ago has no "earlier
+        # half", and their progress would have read as nothing at all.
+        ends: dict = {}
+        for user_id, exercise_id, date, weight, reps in (
+                _SetLog.objects
+                .filter(user_exercise_progress__user_id__in=ids, date__gte=trend_window,
+                        weight__gt=0, reps__gt=0)
+                .values_list('user_exercise_progress__user_id',
+                             'user_exercise_progress__exercise_id', 'date',
+                             'weight', 'reps')):
+            estimate = one_rep_max(weight, reps)
+            entry = ends.setdefault((user_id, exercise_id),
+                                    {'first_date': date, 'first': 0.0,
+                                     'last_date': date, 'last': 0.0})
+            if date < entry['first_date']:
+                entry.update(first_date=date, first=estimate)
+            elif date == entry['first_date']:
+                entry['first'] = max(entry['first'], estimate)
+            if date > entry['last_date']:
+                entry.update(last_date=date, last=estimate)
+            elif date == entry['last_date']:
+                entry['last'] = max(entry['last'], estimate)
+        for (user_id, _exercise_id), entry in ends.items():
+            if entry['first_date'] == entry['last_date'] or not entry['first']:
+                continue                    # one training day says nothing about a direction
+            counts = collected[user_id].setdefault(
+                "trend", {'rising': 0, 'easing': 0, 'steady': 0})
+            change = 100 * (entry['last'] - entry['first']) / entry['first']
+            counts['rising' if change > 2 else 'easing' if change < -2 else 'steady'] += 1
+
         # This week's exercise logs, for the per-exercise summary. Ordered the way the
         # per-user version ordered them, so the "top 5" are the same five.
         for log in (ExerciseSetLog.objects
@@ -1653,6 +1698,9 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             'missed_sets': plan.get('missed_sets', 0),
             'set_completion_percent': plan.get('set_completion_percent'),
             'perfect_days': plan.get('perfect_days', 0),
+            # Which way their lifting is going over the last eight weeks: how many
+            # exercises are rising, easing or flat (routine/strength.py).
+            'trend': entry.get("trend") or {'rising': 0, 'easing': 0, 'steady': 0},
         }
 
     def get_recent_exercises(self, obj):

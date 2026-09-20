@@ -496,6 +496,33 @@ coach never rewrites last week; sets synced afterwards still count.
   `trainer/client-progress/recent/` `this_week` gain `planned_sets`, `logged_sets`,
   `missed_sets`, `set_completion_percent`, `perfect_days`.
 
+**Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
+collected for it.
+
+- `GET analytics/strength/?exercise_id=&user_id=` — per exercise: `direction`
+  (`rising` | `steady` | `easing`), `change_percent`, `best`, `latest`, `sessions`, and a
+  `projection`. With `exercise_id`: the per-training-day `points` and a `share` headline.
+  Without it: `exercises`, `top_movers`, `plateaus`, `rising_count`, `tracked_count`,
+  `headline`.
+- A `projection` is a RANGE and only when there is enough behind it: 3 training days of
+  that exercise over at least 2 weeks, else `{available: false, reason:
+  "insufficient_data", needs: {...}}`. When available: `from_estimated_1rm`, `low`,
+  `high`, `horizon_days` (14), `per_week_kg`, `confidence`, `assumes_sets_done_percent`.
+  It never claims a health outcome (no calories, weight, muscle or "faster results") and
+  is identical on every build.
+- `POST set-logs/` answers `personal_record: true` for a set that beats everything logged
+  before it for that exercise (null when reading a list), and sends the `personal_record`
+  push. The first set of an exercise is never a record.
+- The home week (`v1/analytics/recent-progress/`) carries `strength.headline`,
+  `rising_count` and `tracked_count`.
+- The trainer sees it too: `trainer/client-progress/{id}/` gains `strength`, the roster's
+  `this_week` gains `trend` (`rising` / `easing` / `steady` counts), and
+  `trainer/client-progress/attention/` ranks the clients who need a look, each reason
+  carrying its numbers (`frozen`, `ended`, `unpaid`, `never_started`, `quiet`,
+  `slipping`, `missing_sets`).
+- Weekly pushes: `weekly_recap` to the client and `trainer_weekly_digest` to the trainer,
+  Sunday evening; a paused or ended coaching is left out of the recap.
+
 **Reps are required** on a new set log (`POST set-logs/`, `set-logs/bulk-create/`): 400
 `reps_required` on the `reps` field. `as_prescribed: true` instead of a number uses the
 coach's reps for that exercise on that routine day (and their weight when none is sent);
@@ -506,6 +533,7 @@ body. 400 `no_prescribed_reps` when the coach set none.
 |---|---|---|---|
 | `GET` | `/api/routine/` | auth | `APIRootView` |
 | `GET` | `/api/routine/analytics/adherence/` | auth | `AnalyticsViewSet` |
+| `GET` | `/api/routine/analytics/strength/` | auth | `AnalyticsViewSet` |
 | `GET` | `/api/routine/analytics/admin_dashboard/` | auth | `AnalyticsViewSet` |
 | `GET` | `/api/routine/analytics/completion/` | auth | `AnalyticsViewSet` |
 | `GET` | `/api/routine/analytics/streaks/` | auth | `AnalyticsViewSet` |
@@ -545,6 +573,7 @@ body. 400 `no_prescribed_reps` when the coach set none.
 | `DELETE, GET, PATCH, PUT` | `/api/routine/templates/{id}/` | IsTrainerOrReadOnly | `RoutineTemplateViewSet` |
 | `POST` | `/api/routine/templates/{id}/copy/` | IsTrainerOrReadOnly | `RoutineTemplateViewSet` |
 | `POST` | `/api/routine/templates/{id}/generate/` | IsTrainerOrReadOnly | `RoutineTemplateViewSet` |
+| `GET` | `/api/routine/trainer/client-progress/attention/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
 | `GET` | `/api/routine/trainer/client-progress/recent/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
 | `GET` | `/api/routine/trainer/client-progress/{client_id}/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
 | `GET, POST` | `/api/routine/user-exercise-progress/` | auth | `UserExerciseProgressViewSet` |

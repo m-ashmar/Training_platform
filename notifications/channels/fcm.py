@@ -50,6 +50,10 @@ EVENT_CLASS_REGISTRY = {
     # Platform plan (subscription/tasks.py send_renewal_reminders).
     'subscription_expiring': 'notifications.domain.subscription_events.SubscriptionExpiringEvent',
     'subscription_expired': 'notifications.domain.subscription_events.SubscriptionExpiredEvent',
+    # Progress (routine/strength.py, routine/tasks.py). Fact-only, no claims.
+    'personal_record': 'notifications.domain.progress_events.PersonalRecordEvent',
+    'weekly_recap': 'notifications.domain.progress_events.WeeklyRecapEvent',
+    'trainer_weekly_digest': 'notifications.domain.progress_events.TrainerWeeklyDigestEvent',
     # Routine events. These keys are the notif_type strings passed to
     # routine.services.send_notification(); routine.models.Notification was dropped
     # (migration 0013), so there is no model to match against any more.

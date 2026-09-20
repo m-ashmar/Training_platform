@@ -36,6 +36,7 @@ urlpatterns = [
     # Trainer client progress endpoints
     path('trainer/client-progress/<int:client_id>/', TrainerClientProgressViewSet.as_view({'get': 'client_progress'}), name='trainer-client-progress'),
     path('trainer/client-progress/recent/', TrainerClientProgressViewSet.as_view({'get': 'recent_progress'}), name='trainer-client-recent-progress'),
+    path('trainer/client-progress/attention/', TrainerClientProgressViewSet.as_view({'get': 'attention'}), name='trainer-client-attention'),
     # Recent activity progress (7-day workout duration chart)
     path('v1/analytics/recent-progress/', RecentActivityProgressView.as_view(), name='recent-activity-progress'),
     path('', include(router.urls)),  # Registers all ViewSets

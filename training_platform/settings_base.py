@@ -426,6 +426,13 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'subscription.send_renewal_reminders',
         'schedule': crontab(hour=17, minute=35),
     },
+    # The week, once a week (routine/tasks.py): each client's own recap and each
+    # trainer's digest of who trained and who needs a look. Sunday 17:00 UTC is Sunday
+    # evening in Damascus, when the week is done and the next one is being thought about.
+    'send-weekly-progress': {
+        'task': 'routine.send_weekly_progress',
+        'schedule': crontab(day_of_week=0, hour=17, minute=5),
+    },
     # A training day opened and never closed still says what was left of it (the owner,
     # 2026-09-20). Nightly, after midnight in Damascus, so "yesterday" is really over.
     'close-open-training-days': {

@@ -524,6 +524,59 @@ def _span(at):
     return moment, moment + timedelta(microseconds=1)
 
 
+def refusals_for(trainer_id, client_ids, at=None) -> dict:
+    """`{client_id: 'coaching_frozen' | 'coaching_unpaid' | 'coaching_ended' | None}` for
+    a whole roster, in two queries.
+
+    `training_refusal` costs a handful of queries per pair, which is fine for one write
+    and wrong for a screen that lists every client. Same rule, read in bulk: a pair with
+    no paid month at all is not affected, an approved relation whose latest month is held
+    or paid and not frozen may train, and everything else names why not.
+    """
+    from .models import CoachingPeriod, TrainerClientRelation
+
+    ids = list(client_ids)
+    if not ids:
+        return {}
+    start, end = _span(at)          # the same interval `training_refusal` judges
+    latest: dict = {}
+    for row in (CoachingPeriod.objects
+                .filter(trainer_id=trainer_id, client_id__in=ids)
+                .order_by('client_id', 'number')
+                .values('client_id', 'status', 'frozen_at', 'starts_at', 'ends_at')):
+        client_id = row['client_id']
+        entry = latest.setdefault(client_id, {'last': None, 'covers': False})
+        entry['last'] = row
+        if (row['status'] == 'settled' and row['starts_at'] and row['ends_at']
+                and row['starts_at'] < end
+                and (row['ends_at'] > start
+                     or (row['frozen_at'] and row['frozen_at'] > start))):
+            entry['covers'] = True
+
+    approved = set(TrainerClientRelation.objects
+                   .filter(trainer_id=trainer_id, client_id__in=ids, status='approved')
+                   .values_list('client_id', flat=True))
+
+    answers = {}
+    for client_id in ids:
+        entry = latest.get(client_id)
+        if entry is None:
+            answers[client_id] = None               # never paid for: nothing to refuse
+            continue
+        last = entry['last']
+        if client_id in approved and last['status'] in ('held', 'settled') and not last['frozen_at']:
+            answers[client_id] = None
+        elif entry['covers']:
+            answers[client_id] = None
+        elif client_id in approved and last['frozen_at']:
+            answers[client_id] = 'coaching_frozen'
+        elif client_id in approved and last['status'] == 'refunded':
+            answers[client_id] = 'coaching_unpaid'
+        else:
+            answers[client_id] = 'coaching_ended'
+    return answers
+
+
 def require_can_train(user, routine, at=None):
     """Raise the refusal `training_refusal` finds (403 `coaching_frozen` /
     `coaching_unpaid` / `coaching_ended`), naming the trainer. Call it after validation

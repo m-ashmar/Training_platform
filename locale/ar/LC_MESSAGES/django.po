@@ -2652,3 +2652,35 @@ msgstr "لم يحدد مدربك عدد التكرارات لهذا التمري
 #, python-format
 msgid "period must be one of: %(options)s"
 msgstr "يجب أن تكون الفترة إحدى القيم: %(options)s"
+
+#: notifications/domain/progress_events.py
+msgid "New personal best"
+msgstr "رقم شخصي جديد"
+
+#: notifications/domain/progress_events.py
+#, python-format
+msgid "%(exercise)s: %(weight)s kg x %(reps)s — your best yet."
+msgstr "%(exercise)s: %(weight)s كغ × %(reps)s — أفضل أداء لك حتى الآن."
+
+#: notifications/domain/progress_events.py
+msgid "Your week"
+msgstr "أسبوعك"
+
+#: notifications/domain/progress_events.py
+#, python-format
+msgid ""
+"%(logged)s of %(planned)s sets done, %(perfect)s day(s) with nothing missed."
+msgstr "أنجزت %(logged)s من %(planned)s مجموعة، و%(perfect)s يوم دون أي نقص."
+
+#: notifications/domain/progress_events.py
+msgid "Your clients this week"
+msgstr "متدربوك هذا الأسبوع"
+
+#: notifications/domain/progress_events.py
+#, python-format
+msgid "%(trained)s of %(clients)s clients trained. %(attention)s need a look."
+msgstr "تدرّب %(trained)s من %(clients)s متدربين. %(attention)s بحاجة إلى متابعة."
+
+#: routine/views.py
+msgid "Exercise not found."
+msgstr "التمرين غير موجود."

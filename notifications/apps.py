@@ -16,6 +16,7 @@ class NotificationsConfig(AppConfig):
         # that quietly sends nothing, and says so in a line production does not log.
         import notifications.listeners.social_listeners  # noqa: F401
         import notifications.listeners.trainer_client_listeners  # noqa: F401
+        import notifications.listeners.progress_listeners  # noqa: F401
 
         # Security Check: Initialize Firebase
         self._initialize_firebase()
