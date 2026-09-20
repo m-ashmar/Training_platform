@@ -847,9 +847,18 @@ class RequestSizeLimitMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
         self.max_bytes = getattr(settings, 'MAX_REQUEST_BODY_BYTES', 15 * 1024 * 1024)
+        # Named paths with their own, larger ceiling. Video does not fit under 15 MB and
+        # raising the cap for the whole API to suit one route would remove the guard
+        # everywhere. An exact path match, never a prefix: a prefix would hand the
+        # bigger ceiling to every route underneath it, including ones added later.
+        self.path_max_bytes = dict(getattr(settings, 'LARGE_UPLOAD_PATHS', {}) or {})
+
+    def _cap_for(self, request):
+        return self.path_max_bytes.get(request.path, self.max_bytes)
 
     def __call__(self, request):
         if request.method in ('POST', 'PUT', 'PATCH'):
+            max_bytes = self._cap_for(request)
             raw_length = request.META.get('CONTENT_LENGTH')
             try:
                 length = int(raw_length) if raw_length not in (None, '') else None
@@ -885,10 +894,10 @@ class RequestSizeLimitMiddleware:
                     status=411,
                 )
 
-            if length is not None and length > self.max_bytes:
+            if length is not None and length > max_bytes:
                 logger.warning(
                     "Rejected %s %s: body %d bytes exceeds cap %d",
-                    request.method, request.path, length, self.max_bytes,
+                    request.method, request.path, length, max_bytes,
                 )
                 # The documented envelope. This middleware is FIRST, so it short-circuits
                 # before `ErrorHandlingMiddleware` is ever entered and
@@ -896,7 +905,7 @@ class RequestSizeLimitMiddleware:
                 # JsonResponse, which that function skips anyway. A 413 carried no `code`
                 # and no `detail` while the contract says every error has both.
                 message = (f'Request body exceeds '
-                           f'{self.max_bytes // (1024 * 1024)} MB.')
+                           f'{max_bytes // (1024 * 1024)} MB.')
                 return JsonResponse(
                     {
                         'error': message,

@@ -235,9 +235,17 @@ def match_trainers(client, request, *, limit=3) -> list[dict]:
     their media kit is complete — moves the best-ranked complete kit to the top whenever
     any candidate has one.
     """
+    from moderation.services import blocked_ids
     from routine.models import Routine
 
-    candidates = list(directory_trainers().filter(trainer_is_available=True).order_by('id'))
+    # Nobody is matched with a person they have blocked, or who has blocked them.
+    # Here rather than in `directory_trainers()` because the roster and the trainer
+    # detail page are `AllowAny` and have no caller to compute a block list from;
+    # matching is the one candidate source that always has a signed-in client.
+    candidates = list(directory_trainers()
+                      .filter(trainer_is_available=True)
+                      .exclude(id__in=blocked_ids(client))
+                      .order_by('id'))
     if not candidates:
         return []
     ids = [t.pk for t in candidates]

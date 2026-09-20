@@ -85,6 +85,20 @@ register(PersonalDataSource(
     label="ai_training_data", model="ai_assistant.AITrainingData", user_field="user",
     retention_days=365, retention_field="retain_until", retention_is_deadline=True))
 
+# --- chat ---------------------------------------------------------------------
+# A private 1:1 thread is JOINT personal data: both people are in every row of it, so
+# an erasure takes the thread with the account rather than leaving the other side
+# reading half a conversation with a retired stranger. `Conversation` reaches its owner
+# by either side, and deleting it cascades to the messages; `Message` is registered
+# too so an export can hand someone what they wrote.
+register(PersonalDataSource(
+    label="conversations", model="chat.Conversation", user_field=("trainer", "client"),
+    fields=["id", "created_at", "last_message_at"], on_erase="delete"))
+register(PersonalDataSource(
+    label="messages_sent", model="chat.Message", user_field="sender",
+    fields=["id", "conversation", "body", "created_at", "read_at", "deleted_at"],
+    on_erase="delete"))
+
 # --- notifications ------------------------------------------------------------
 register(PersonalDataSource(
     label="notifications", model="notifications.Notification", user_field="recipient",
@@ -193,6 +207,26 @@ register(PersonalDataSource(label="otp_verifications", model="users.OTPVerificat
                             retention_days=1))
 register(PersonalDataSource(label="password_reset_tokens", model="users.PasswordResetToken", user_field="user",
                             retention_days=1))
+
+# --- safety: reports, blocks, AI consent (moderation/) -------------------------
+# A report is the platform's evidence that a complaint was made and answered — the
+# thing a store asks to see — so it is ANONYMISED rather than deleted when the
+# reporter erases their account: the row, its reason, its outcome and the operator's
+# note survive, and the reporter's own words go with them. `reporter` is CASCADE and
+# the account itself is only anonymised, so the row stays attached to an account that
+# no longer identifies anybody. Reports made AGAINST the person are untouched by
+# design: `target_id` is not a foreign key, so erasing an account does not erase the
+# complaints about it.
+register(PersonalDataSource(label="reports_made", model="moderation.Report",
+                            user_field="reporter", on_erase="anonymise",
+                            anonymise={"note": ""}))
+# Blocks are one person's private list and mean nothing once the account is gone.
+register(PersonalDataSource(label="blocks", model="moderation.Block",
+                            user_field=("blocker", "blocked"), on_erase="delete"))
+# Consent dies with the account: there is nothing left to process, and a consent row
+# for a retired account is a permission nobody can exercise.
+register(PersonalDataSource(label="ai_consent", model="moderation.AIConsent",
+                            user_field="user", on_erase="delete"))
 
 # Financial and audit: KEPT under erasure. Deleting these would destroy the ledger.
 register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", user_field="user", on_erase="keep"))

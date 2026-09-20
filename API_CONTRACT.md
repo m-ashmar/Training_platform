@@ -181,6 +181,7 @@ so parse ids client-side.
 | `session_reminder` | `reason` (`scheduled` \| `drift`), plus `routine_id`+`day` when scheduled, or `days_since_last_workout` when drift |
 | `progress_milestone` | `milestone` (e.g. `streak-7`, `sessions-100`) |
 | `custom` | `message_id`, `trainer_id` — a message from the user's trainer |
+| `chat_message` | `conversation_id`, `message_id` — a message in the trainer–client chat. Sent only when the recipient has opened that conversation since the last `chat_message` about it, so a burst of messages is one push |
 
 `title`/`body` arrive in the FCM `notification` block, already rendered in the
 recipient's language.
@@ -330,6 +331,45 @@ per-address limits above have `code: "throttled"`.
 | `GET, POST` | `/api/auth/user/update/` | auth | `UpdateUserDetailsView` |
 | `POST` | `/api/auth/verify-otp/` | public | `OTPVerificationView` |
 
+### Chat
+
+Text messages between a trainer and the client they coach — text only in this pass (no
+voice, image, video or program card). Exactly one conversation per pair. Nothing here
+differs by build.
+
+Reading and writing are decided separately (the owner, 2026-09-19). Being in the
+conversation is what lets you READ it, for ever; writing asks
+`chat.permissions.may_message`, and a coaching that is frozen, unpaid or ended refuses
+the send with the same `code` (and `trainer_id`) every training write answers with. The
+conversation row carries `can_send` and `refusal` so the app can explain a closed
+composer without posting first. A conversation that is not the caller's is **404**, never
+403.
+
+`POST .../messages/` may carry `client_uuid`, the app's own id for the message: the first
+send answers 201, a retry answers **200** with the same message, and an id already used
+by the other person in that thread answers 409 `idempotency_conflict`. `DELETE
+messages/{id}/` tombstones the sender's own message — the row stays in the thread with
+`deleted: true` and an empty `body`, and nothing is ever hard-deleted.
+
+Live: `ws://host/ws/chat/{conversation_id}/?token=<access JWT>`. Client frames
+`{"type": "message.send", body, client_uuid?}` and `{"type": "message.read"}`; server
+frames `message.new`, `message.read`, `message.deleted` and
+`{"type": "error", code, detail}`. A socket send runs the same checks and the same
+serializer as the REST route. Close codes: 4001 no usable token, 4004 not your
+conversation.
+
+Push: `chat_message`, keyed on the conversation, sent only when the recipient has opened
+that thread since the last time they were told about it — ten messages in a minute are
+one push.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/chat/conversations/` | auth | `ConversationListView` |
+| `POST` | `/api/v1/chat/conversations/start/` | auth | `ConversationStartView` |
+| `GET, POST` | `/api/v1/chat/conversations/{id}/messages/` | auth | `ConversationMessagesView` |
+| `POST` | `/api/v1/chat/conversations/{id}/read/` | auth | `ConversationReadView` |
+| `DELETE` | `/api/v1/chat/messages/{id}/` | auth | `MessageDeleteView` |
+
 ### Diet
 
 After the platform plan ends (the owner, 2026-09-19) the subscriber is **frozen**: the
@@ -416,9 +456,34 @@ Every picture fills a named slot and travels as `media: {"<slot>": {url_1x, url_
 focal: [x, y], brightness, alt_ar, alt_en}}`; an empty slot is absent. Trainer cards carry
 theirs; the app's own pictures are here. See `mediakit/slots.py` for the slot list.
 
+A **video** slot (`exercise.loop`, `exercise.cue`, `trainer.loop`, `trainer.intro`) fills
+the same place with a different set of keys: `{video_url, poster_url, hls_url,
+duration_seconds, width, height, state, alt_ar, alt_en}`. `state` is `pending` | `ready` |
+`failed` — `pending` means the video plays now and its poster frame is still being cut.
+`poster_url` and `hls_url` are ABSENT until they exist (`hls_url` needs a transcoder,
+which is not built yet). Every media URL is signed and expires after an hour
+(`MEDIA_SIGNED_URL_TTL`): use what the API just returned, never a stored copy.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/v1/content/media/` | public | `AppMediaView` |
+| `POST` | `/api/v1/content/media/video/` | auth (owner of the target, or admin) | `VideoUploadView` |
+| `GET` | `/api/v1/content/media/exercise/{id}/` | auth | `ExerciseMediaView` |
+
+`POST /api/v1/content/media/video/` is `multipart/form-data`: `file`, `slot`,
+`owner_type`, `owner_id`, optional `alt_ar`/`alt_en`. It is the one route whose body may
+exceed 15 MB (cap `MEDIA_VIDEO_MAX_BYTES`, 64 MB; duration cap `MEDIA_VIDEO_MAX_SECONDS`,
+90 s). The container is decided by the FILE'S BYTES, never by its name or its
+`Content-Type`: MP4/MOV and WebM only. Codes: `media_file_required`,
+`media_unknown_slot`, `media_unknown_owner`, `media_slot_is_not_video`,
+`media_not_a_video`, `media_video_too_large`, `media_video_too_long`, plus
+`payload_too_large` (413) from the body cap. Answers on both spellings, with and without
+the trailing slash, as `capabilities` does (B-035).
+
+`GET /api/v1/content/media/exercise/{id}/` answers `{exercise_id, media}` and obeys the
+exercise visibility rule exactly as `/api/routine/exercises/{id}/add-media/` does — an
+exercise the caller may not see answers `404 code="not_found"`, byte-identical to an id
+that does not exist. Video is not an exception to that rule.
 
 ### Trainers (design v2)
 
@@ -461,6 +526,69 @@ private copy (`templates/{id}/generate/`: `client_id`, or `client_ids` for sever
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/v1/coaching/current/` | auth (client) | `CurrentCoachingView` |
+
+### Safety: reporting, blocking, AI consent
+
+Identical on every `X-App-Channel` — a store reviewer tries these on the store build.
+All authenticated.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `POST` | `/api/v1/reports/` | auth | `ReportCreateView` |
+| `GET` | `/api/v1/reports/mine/` | auth | `MyReportsView` |
+| `GET, POST` | `/api/v1/blocks/` | auth | `BlockListCreateView` |
+| `DELETE` | `/api/v1/blocks/{user_id}/` | auth | `BlockDeleteView` |
+| `GET, POST` | `/api/v1/ai-consent/` | auth | `AIConsentView` |
+
+**Reporting.** `POST reports/` takes `{target_type, target_id, reason, note?}` and
+answers `201 {id, status}`. `target_type` is `user`, `chat_message`, `routine`,
+`diet_plan`, `exercise`, `social_post` or `comment`; `reason` is `spam`, `harassment`,
+`nudity`, `violence`, `scam`, `impersonation` or `other`; `note` is the reporter's own
+words, 1000 characters at most.
+
+| `code` | Status | When |
+|---|---|---|
+| `target_not_found` | 404 | No such target, **or** the reporter may not see it — one answer for both, so the route cannot be used to discover which private routines, plans and messages exist |
+| `cannot_report_yourself` | 403 | Your own account, or something you wrote. Content generated FOR you (your diet plan, the AI's replies) is not yours and stays reportable |
+| `already_reported` | 409 | You already have an open report on this target. Reportable again once it has been handled |
+
+`GET reports/mine/` pages `{id, target_type, target_id, reason, note, status,
+resolution_note, handled_at, created_at}`, newest first. `status` is `open`,
+`reviewing`, `actioned` or `dismissed`. Who handled it is never returned.
+
+**Blocking.** `POST blocks/` `{user_id}` → `201 {user_id, blocked: true}`, idempotent;
+`cannot_block_yourself` (400) and `user_not_found` (404). `DELETE blocks/{user_id}/` →
+204, also when there was no block. `GET blocks/` pages `{user_id, username,
+created_at}` — only the blocks this person MADE; one made against them is never
+disclosed.
+
+The effect is symmetric and immediate. Neither account appears in the other's post
+list, feed, post search, comment lists, follower and following lists, notifications,
+public profiles, the available-trainers list or trainer matches; neither can send the
+other a trainer request (`user_blocked`, 403, on `client/request-trainer/` and
+`trainer/assign-client/`), and a request sent before the block cannot be accepted
+after it (same code on `trainer/respond-to-request/` and `client/respond-to-invite/`).
+Blocking does not hide a challenge from either of them, but a blocked person is
+dropped from its leaderboard — with the ranks left as they were, so the board still
+reads 1, 2, 4.
+
+In the app's "report and block" flow, call `reports/` FIRST: what a blocked person
+wrote is no longer visible to the reporter, and therefore no longer reportable.
+
+**AI consent.** `GET ai-consent/` → `{granted, policy_version, granted_at,
+revoked_at}`; never asked reads as all-null with `granted: false`, which is how the
+app tells "not asked yet" from "said no" (`revoked_at` set). `POST ai-consent/`
+`{granted, policy_version}` returns the same body; `policy_version` is required when
+granting and ignored when revoking.
+
+Until it is granted, the AI coach refuses: `403 ai_consent_required` on every
+`/api/ai/` route except `DELETE /api/ai/data/` (deleting what the assistant holds has
+to work after consent is withdrawn — that is the commonest reason to ask), and over
+the WebSocket `ws/ai/chat/` the reply is
+`{"type": "error", "code": "ai_consent_required", "content": "..."}` with the socket
+left open, so the app can show the consent sheet and carry on in the same connection.
+Revoking takes effect on the very next message. On the REST routes the entitlement
+check runs first, so a lapsed subscriber is still told `no_entitlement`.
 
 ### Platform policy (what each build may show and sell)
 

@@ -18,6 +18,10 @@ from django.utils.translation import gettext as _
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from .models import CustomUser
+# Blocking: neither side may ask the other to coach them, be matched with them, or
+# see them listed. `moderation/services.py` imports no models at module level, so it
+# is safe to import here.
+from moderation.services import blocked_ids, is_blocked
 from rest_framework import viewsets, mixins
 from routine.permissions import IsTrainerOfApprovedClient
 from routine.serializers import ClientProfileViewSerializer
@@ -551,7 +555,18 @@ class AssignClientView(APIView):
                     status=status.HTTP_429_TOO_MANY_REQUESTS)
 
             client = CustomUser.objects.get(id=client_id, user_type='client')
-            
+
+            # The same rule as the client's own request, in the other direction: an
+            # invitation is a message to a person, and a blocked person does not
+            # receive messages. Answered identically whichever side made the block,
+            # so the refusal never reveals that one exists.
+            if is_blocked(request.user, client):
+                return Response(
+                    {'error': _('This is not available between these two accounts.'),
+                     'code': 'user_blocked'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
             # Check if relation already exists
             # An INVITATION the client must accept, not an assignment. This created a
             # pending row that the same trainer could then approve at
@@ -911,11 +926,15 @@ class AvailableTrainersView(APIView):
         from routine.views import StandardResultsSetPagination
         
         # Verified as well as enabled; see PublicTrainersListView.
+        # Blocked either way is not listed: a trainer this client cannot ask, and a
+        # trainer who has blocked them, are not "available" to them.
         trainers = CustomUser.objects.filter(
             user_type='trainer',
             trainer_is_available=True,
             is_active=True,
             email_verified=True,
+        ).exclude(
+            id__in=blocked_ids(request.user)
         ).annotate(
             client_count_anno=Count('clients')
         )
@@ -1257,6 +1276,16 @@ class ClientRequestTrainerView(APIView):
         try:
             from .models import TrainerClientRelation
             trainer = CustomUser.objects.get(id=trainer_id, user_type='trainer')
+            # Neither side can start a coaching relationship with someone they have
+            # blocked, or who has blocked them. First, before the wallet is touched
+            # and before any row is written: a block that only stops the reading half
+            # still lets the person it protects be contacted.
+            if is_blocked(request.user, trainer):
+                return Response(
+                    {'error': _('This is not available between these two accounts.'),
+                     'code': 'user_blocked'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
             # Asking a trainer who charges is agreeing to pay them, so it answers to what
             # this build may do (policy/services.py). A trainer who charges nothing can be
             # asked from any build. Outside the `try` below, which swallows everything.
@@ -1823,6 +1852,14 @@ def approve_trainer_relation(relation, actor):
         if not (trainer.is_active and trainer.is_trainer):
             return Response({'error': _('That trainer is no longer available')},
                             status=http.HTTP_409_CONFLICT), relation
+        # Nor can a request that was sent before one of them blocked the other be
+        # accepted afterwards. Refusing only the SEND would make a block trivial to
+        # walk around: send the request, wait to be blocked, accept anyway. The row
+        # stays pending and can be declined or cancelled in the ordinary way.
+        if is_blocked(trainer, client):
+            return Response({'error': _('This is not available between these two accounts.'),
+                             'code': 'user_blocked'},
+                            status=http.HTTP_403_FORBIDDEN), relation
 
         # FOR NO KEY UPDATE, which still serialises two approvals for this client but no
         # longer blocks FOR KEY SHARE. Every ledger row written with `actor=client`

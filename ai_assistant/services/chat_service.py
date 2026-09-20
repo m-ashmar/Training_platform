@@ -22,6 +22,9 @@ from ai_assistant.services.memory_service import MemoryService
 from ai_assistant.services.security import InputSanitizer
 from ai_assistant.services.data_collector import DataCollector
 from ai_assistant.services.cost_tracker import CostTracker
+# The one consent predicate. `moderation.services` imports no models at module level,
+# precisely so a service like this one can import it without pulling half the app in.
+from moderation.services import has_ai_consent
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,23 @@ class ChatService:
         content, flagged = self.sanitizer.sanitize(message)
         if not content:
             yield {"type": "error", "content": str(_("Message cannot be empty.")), "code": "invalid_input"}
+            return
+
+        # Consent gate — the AI coach reads this person's training, food, body
+        # metrics and injuries to answer (see `services/context_compiler.py`), and a
+        # store review asks that they agreed to that first. Here rather than in the
+        # consumer because THIS is the single place the assistant answers: a REST or
+        # Celery caller added later gets the same refusal without being told to.
+        # Before the session row is created and before any completion is requested, so
+        # a refused turn leaves nothing behind and costs nothing. Nothing caches it, so
+        # revoking takes effect on the very next message.
+        if not await database_sync_to_async(has_ai_consent)(user):
+            yield {
+                "type": "error",
+                "content": str(_("Allow the AI coach to use your data before asking "
+                                 "it anything.")),
+                "code": "ai_consent_required",
+            }
             return
 
         # 2. Budget gate — checked BEFORE any completion is requested. Cost used to be

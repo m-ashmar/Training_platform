@@ -68,6 +68,9 @@ INSTALLED_APPS = [
     "ai_assistant",
     "policy",
     "mediakit",
+    "chat",
+    # Reporting, blocking, the moderation queue and AI consent (moderation/models.py).
+    "moderation",
 
     # Third-party
     "rest_framework",
@@ -492,6 +495,14 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'notifications.drain_dead_letter_queue',
         'schedule': crontab(minute=20),
     },
+    # A video whose metadata task was lost (Celery is at-least-once: a worker that dies
+    # between the commit and the ack drops the message) would sit `pending` for ever —
+    # playable, but with no poster and marked as if something were still coming.
+    # Hourly; `fill_video_metadata` is idempotent, so a duplicate run is harmless.
+    'sweep-pending-videos': {
+        'task': 'mediakit.sweep_pending_videos',
+        'schedule': crontab(minute=40),
+    },
     # Turns is_liked / is_completed / actual_quantity_consumed — all collected and
     # previously read by nothing — into planner ranking weights.
     'refresh-food-weights': {
@@ -878,11 +889,69 @@ FILE_UPLOAD_TEMP_DIR = get_env('FILE_UPLOAD_TEMP_DIR', None) or None
 # SignedMediaStorage.url(), so every `.url` in every serializer is covered.
 MEDIA_URL_SIGNING = get_env('MEDIA_URL_SIGNING', 'True').lower() in ('1', 'true', 'yes')
 MEDIA_URL_TTL = int(get_env('MEDIA_URL_TTL', 24 * 3600))
+
+# ========================
+# Object storage
+# ========================
+# WHERE uploaded files live, chosen by the environment and by nothing else. There is no
+# code branch on "am I in production": a developer runs the filesystem backend, the
+# deploy sets MEDIA_BACKEND=gcs, and the same code paths run in both.
+#
+#   'local'  the filesystem (MEDIA_ROOT). Development and the test suite. In production
+#            it is a Fly volume, which attaches to ONE machine — so a second web machine
+#            serves 404 for everything the first one stored, and the volume is 1 GB.
+#            `enforce_production_safety()` refuses to boot on it.
+#   'gcs'    Google Cloud Storage (the owner, 2026-09-19: video lives on GCS).
+MEDIA_BACKEND = get_env('MEDIA_BACKEND', 'local').strip().lower()
+
+GS_BUCKET_NAME = get_env('GS_BUCKET_NAME', '')
+GS_PROJECT_ID = get_env('GS_PROJECT_ID', '')
+# The service account. Either the JSON of the key itself (a secret: it comes from
+# `fly secrets set` or AWS Secrets Manager through `get_secret`, NEVER from a literal
+# here or a file in the image), or a path for Application Default Credentials. The JSON
+# is read lazily in training_platform/gcs_storage.py, so nothing is fetched — and no
+# credential is needed — when MEDIA_BACKEND is 'local'.
+GS_CREDENTIALS_SECRET_NAME = get_env('GS_CREDENTIALS_SECRET_NAME', 'GS_CREDENTIALS_JSON')
+GS_LOCATION = get_env('GS_LOCATION', '')
+
+# How long a signed URL to a private object lives. Short: the app asks the API for an
+# object and gets a URL it uses immediately, so an hour is already generous, and a URL
+# that leaks stops working within it. The filesystem backend keeps MEDIA_URL_TTL above,
+# which is bucketed so the URL stays byte-identical and therefore cacheable.
+MEDIA_SIGNED_URL_TTL = int(get_env('MEDIA_SIGNED_URL_TTL', 3600))
+
+# The app's OWN pictures — the intro story, the banners, the empty states — are the same
+# for every viewer and are fetched before anyone signs in. Nothing is private about them,
+# and an expiring signature means no CDN or browser can cache one. With this on they are
+# served as plain public URLs instead. OFF by default because it only works if the bucket
+# actually grants public read on those objects; turning it on without that grant serves
+# 403s. Trainer, exercise, program and dish media are never public: they belong to people.
+MEDIA_PUBLIC_APP_CONTENT = get_env('MEDIA_PUBLIC_APP_CONTENT', 'False') == 'True'
+
+# Video (mediakit). Both caps are enforced on the BYTES, not on the filename or the
+# Content-Type header: `training_platform.file_security.process_uploaded_video`.
+MEDIA_VIDEO_MAX_BYTES = int(get_env('MEDIA_VIDEO_MAX_BYTES', 64 * 1024 * 1024))
+# A slot video is a demonstration loop or a short intro, not a lesson. The duration is
+# read from the container when it declares one, and by ffprobe afterwards.
+MEDIA_VIDEO_MAX_SECONDS = int(get_env('MEDIA_VIDEO_MAX_SECONDS', 90))
+
+# The body cap above (15 MB) exists to stop a large POST filling the volume before any
+# view runs, and no video fits under it. Rather than raise it for the whole API, ONE
+# path is allowed its own ceiling — the per-file content checks still run downstream.
+# + a megabyte of multipart overhead. Both spellings, because this middleware runs
+# before the one that would append the slash (mediakit/urls.py says why).
+LARGE_UPLOAD_PATHS = {
+    '/api/v1/content/media/video': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
+    '/api/v1/content/media/video/': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
+}
+
 STORAGES = {
     # Only signs when Django itself serves the files. With an external backend the
     # signature would be meaningless — that provider issues (and secures) its own URLs.
     'default': {'BACKEND': (
-        'django.core.files.storage.FileSystemStorage'
+        'training_platform.gcs_storage.SignedGoogleCloudStorage'
+        if MEDIA_BACKEND == 'gcs'
+        else 'django.core.files.storage.FileSystemStorage'
         if USE_EXTERNAL_MEDIA_STORAGE
         else 'training_platform.media_storage.SignedMediaStorage'
     )},

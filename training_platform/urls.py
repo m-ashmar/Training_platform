@@ -66,6 +66,14 @@ urlpatterns = [
     # The client's monthly coaching (users/coaching.py).
     path('api/v1/coaching/', include('users.urls_coaching', namespace='coaching')),
 
+    # Text messages between a trainer and their client. See chat/views.py; the live
+    # half is the WebSocket at ws/chat/<id>/ (chat/routing.py).
+    path('api/v1/chat/', include('chat.urls', namespace='chat')),
+    # Reporting, blocking and AI consent: the safety layer a store review asks for.
+    # Mounted at the version root, not under a prefix of its own — `reports/`,
+    # `blocks/` and `ai-consent/` are platform-wide, not one feature's sub-resource.
+    path('api/v1/', include('moderation.urls', namespace='moderation')),
+
     # The server-driven home screen: an ordered list of typed sections, built from
     # what every other area already answers. See home/views.py for the contract.
     path('api/v1/', include('home.urls', namespace='home')),
@@ -90,9 +98,12 @@ if settings.DEBUG:
 # NOTE: `static()` is deliberately NOT used here. It returns [] whenever DEBUG is
 # false, so it silently registers nothing in production and every upload 404s —
 # moving it out of the `if settings.DEBUG:` block above did not fix that.
-# When an external storage backend is configured (S3/R2), files are served by that
-# backend's own URLs and Django must not serve them locally.
-if not getattr(settings, 'USE_EXTERNAL_MEDIA_STORAGE', False):
+# When an external storage backend is configured (GCS, S3/R2), files are served by that
+# backend's own signed URLs and Django must not serve them locally — MEDIA_ROOT is empty
+# there, so this route could only ever answer 404 while still costing an app worker.
+_SERVES_ITS_OWN_URLS = (getattr(settings, 'USE_EXTERNAL_MEDIA_STORAGE', False)
+                        or getattr(settings, 'MEDIA_BACKEND', 'local') != 'local')
+if not _SERVES_ITS_OWN_URLS:
     urlpatterns += [
         re_path(
             r'^%s(?P<path>.*)$' % re.escape(settings.MEDIA_URL.lstrip('/')),

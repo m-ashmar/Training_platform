@@ -8,10 +8,16 @@ white, except food, which the owner keeps in colour).
 The source is the owner's Frontend Build Guide, section 5 "Media Kit". Changing a slot
 here is a contract change for the app — add slots, never rename one.
 
-Only still images are accepted today. Video slots (`*.loop`, `*.intro`, `*.cue`) need a
-transcoding pipeline (HLS at 360p/540p/720p) and the signature needs an SVG sanitiser;
-both are declared so the app and the console know they exist, and an upload to them is
-refused with `media_kind_not_supported_yet` until that work lands (BACKEND_DELTA.md).
+Two pipelines, one slot list. An IMAGE slot is filled by `services.store` (decode,
+grade, renditions — `processing.py`). A VIDEO slot (`*.loop`, `*.intro`, `*.cue`) is
+filled by `video.store_video`, which validates the container from the file's own bytes,
+stores the original and leaves the poster and the measurements to a worker
+(`tasks.py`). Sending a video slot through the image pipeline still answers
+`media_kind_not_supported_yet`: that pipeline genuinely cannot take one.
+
+`trainer.signature` (SVG) is still refused everywhere — it needs a sanitiser with an
+allow-list of elements and attributes (BACKEND_DELTA.md). HLS renditions are not built
+yet either; a video slot serves the original file and leaves `hls_url` empty.
 """
 from __future__ import annotations
 
