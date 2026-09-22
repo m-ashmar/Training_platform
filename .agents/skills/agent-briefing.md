@@ -37,6 +37,14 @@ Worktrees are how several agents build at once. The setup is done for you; what 
 
 - Run tests with a **unique** `DB_NAME` (`DB_NAME=tp_<yourname> .venv/bin/pytest …`), or you
   will drop another agent's database mid-run.
+- **Commit before you run anything long.** A watchdog kills an agent that shows no
+  progress for ten minutes, and a long test run looks exactly like no progress. A commit
+  survives that; a dirty worktree is only luck. Commit unfinished work, then run.
+- **Run only your own test file.** One Postgres serves every worktree: five agents each
+  running the wider suites at once starved all five until the watchdog cut them — an hour
+  lost, on 2026-09-21. The session that merges runs the whole gate, once, at the end.
+  If you need to know you have not broken a neighbour, say so in your report and let the
+  merge prove it.
 - The scratchpad is **shared**. Write logs to a filename nobody else would pick.
 - `.venv` in a worktree is a **symlink**. `.gitignore` now covers both spellings, but check
   `git status` before `git add -A` all the same.
