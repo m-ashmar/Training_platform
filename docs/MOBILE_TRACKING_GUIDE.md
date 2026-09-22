@@ -7,7 +7,7 @@ This guide details the exact API flow, payloads, and edge cases you must handle 
 ## The Core Concept
 A valid workout flow MUST follow these steps in chronological order:
 1. **Start Session**: Create a `WorkoutSession` object.
-2. **Log Sets incrementally**: Whenever the user finishes a specific set (or skips it), immediately POST that to `exercisesetlogs/` or `set-logs/` with the active `WorkoutSession` ID.
+2. **Log Sets incrementally**: Whenever the user finishes a specific set (or skips it), immediately POST that to `set-logs/` with the active `WorkoutSession` ID.
 3. **End Session**: PATCH the `WorkoutSession` object with `status="completed"`.
 
 > [!WARNING]
@@ -50,8 +50,8 @@ When the user taps "Start Workout", create a session. This locks in the server-s
 
 As the user completes exercises, send the data for **each individual set**. The server relies on this to calculate the **Total Volume** natively.
 
-**Endpoint:** `POST /api/routine/exercisesetlogs/`
-*(Note: You can safely use `/api/routine/set-logs/` as well. Both map to the exact same logic).*
+**Endpoint:** `POST /api/routine/set-logs/`
+*(The `exercisesetlogs/` alias this guide used to name was removed — SIDE_BUGS S-007. One viewset, one prefix.)*
 
 **Request Body:**
 ```json
@@ -155,4 +155,4 @@ To render the user's completed workouts and exact timelines:
 - `duration` (Convert the absolute seconds into a readable UI format like `45m 30s`).
 
 If you need to retrieve exactly what they did during that session, filter the set logs using the session ID:
-**Endpoint:** `GET /api/routine/exercisesetlogs/?workout_session=447`
+**Endpoint:** `GET /api/routine/set-logs/?workout_session=447`

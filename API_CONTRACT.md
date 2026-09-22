@@ -999,6 +999,34 @@ bad row never fails the batch. The whole answer is `{results, count, created,
 duplicates, errors}`, and a set that beat everything before it carries
 `personal_record: true` and sends the push.
 
+**`exercisesetlogs/` is gone.** `ExerciseSetLogViewSet` was registered under two
+prefixes and is now registered under `set-logs/` only, the spelling the app and the rest
+of this document use. This is a REMOVAL, not an additive change: every
+`/api/routine/exercisesetlogs/...` path — the list, `{id}/`, `bulk-create/`,
+`my-progress/`, `sync/` — now answers 404. Replace the prefix with `set-logs/`; nothing
+else about those endpoints changed. No shipped build calls either spelling.
+
+**`set-logs/my-progress/` is paginated.** It answered a BARE JSON ARRAY of every set the
+caller had ever logged, in both shapes. It now answers the project envelope
+`{count, next, previous, results}`, 25 a page, `?page_size=` up to 100 — `results` holds
+what the array used to hold, whether or not `group_by=exercise` is sent. A client
+reading the old shape must take `.results`. `workout-sessions/` answers the same
+envelope (it already did, from the project default) and now answers a bad `?page=` with
+400 naming the parameter instead of 404, like every other list.
+
+**One day of one routine.** `GET routine-exercises/?routine=<id>&day=<n>` — the same
+filters `template-exercises/?template=&day=` already had. The list stays scoped to
+routines you were assigned or wrote, so a filter can only narrow it.
+
+**A workout that is still running** is `active` AND begun within the last twelve hours
+(`routine/sessions.py`). Past that it was forgotten, not left running:
+`workout-sessions/?status=active` does not list it, home does not offer to continue it,
+and the nightly `routine.abandon_forgotten_sessions` writes `abandoned` on the row —
+a value the schema has always had and nothing ever wrote. The sets logged inside an
+abandoned session are untouched and still count everywhere they counted before; only
+the session stops claiming a workout is in progress. `end_time` stays null, because
+nobody knows when the person stopped.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/routine/` | auth | `APIRootView` |
@@ -1014,11 +1042,6 @@ duplicates, errors}`, and a set that beat everything before it carries
 | `DELETE, GET, POST` | `/api/routine/exercises/{exercise_id}/add-media/` | auth | `ExerciseAddMediaView` |
 | `DELETE, POST` | `/api/routine/exercises/{exercise_id}/image/` | auth | `ExerciseImageUploadView` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/exercises/{id}/` | IsAdminOrOwnerOrReadOnly | `ExerciseViewSet` |
-| `GET, POST` | `/api/routine/exercisesetlogs/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
-| `POST` | `/api/routine/exercisesetlogs/bulk-create/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
-| `GET` | `/api/routine/exercisesetlogs/my-progress/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
-| `POST` | `/api/routine/exercisesetlogs/sync/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
-| `DELETE, GET, PATCH, PUT` | `/api/routine/exercisesetlogs/{id}/` | IsSetLogCreatorOrTrainerOrAdmin | `ExerciseSetLogViewSet` |
 | `GET, POST` | `/api/routine/routine-exercises/` | IsAdminOrOwnerOrReadOnly | `RoutineExerciseViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/routine-exercises/{id}/` | IsAdminOrOwnerOrReadOnly | `RoutineExerciseViewSet` |
 | `GET, POST` | `/api/routine/routine-progress/` | (IsTrainerOrAdmin&IsClientOrAssignedTrainer) | `RoutineProgressViewSet` |

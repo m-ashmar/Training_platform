@@ -18,9 +18,16 @@ from .serializers import (
     RoutineExerciseSerializer, UserExerciseProgressSerializer, RoutineProgressSerializer,
     UserRoutineSerializer, ExerciseSetLogSerializer, TrainerRoutineSerializer,
     ClientProfileViewSerializer, WorkoutSessionSerializer, RoutineTemplateSerializer,
-    RoutineTemplateExerciseSerializer, ExerciseMediaSerializer,
-    DetailedClientProgressSerializer, RecentActivitySerializer, WorkoutSessionDetailSerializer
+    ExerciseMediaSerializer,
+    RecentActivitySerializer, WorkoutSessionDetailSerializer
 )
+# NOT imported here any more:
+#   `RoutineTemplateExerciseSerializer` — this module defined a SECOND class of that
+#   name further down, which simply rebound the import (SIDE_BUGS S-029). The one in
+#   this file is now `RoutineTemplateExerciseListSerializer`; the imported one is the
+#   nested writer `RoutineTemplateSerializer` uses and belongs only to serializers.py.
+#   `DetailedClientProgressSerializer` — imported and never used, and deleted with this
+#   line (SIDE_BUGS S-037).
 from .permissions import (
     IsAdminOrOwnerOrReadOnly, 
     IsTrainerOrAdmin,
@@ -218,6 +225,12 @@ class ExerciseCreateWithImageView(APIView):
       `exercises/{id}/add-media/` applies. 400 `media_url_invalid` for a
       malformed one.
     - media_texts (optional): Additional text content (comma-separated)
+
+    A fault nobody anticipated answers 500 `exercise_create_failed` with a translated
+    sentence and nothing else: the exception text used to BE the response body
+    (SIDE_BUGS S-036, the same defect closed in the two media views as S-006), which
+    hands whoever posted the form a stack trace's worth of internals — file paths,
+    storage bucket names, SQL. The traceback goes to the log.
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -422,10 +435,15 @@ class ExerciseCreateWithImageView(APIView):
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
             raise
-        except Exception as e:
-            logger.error(f"Error creating exercise with media: {str(e)}")
+        except Exception:
+            # The exception TEXT used to be the response body (S-036) — the same defect
+            # the two media views closed as S-006, in the class that pass did not
+            # cover. Logged with the traceback, answered with a code.
+            logger.exception("exercise create-with-image failed for user %s",
+                             getattr(request.user, 'pk', None))
             return Response(
-                {'error': f'Failed to create exercise: {str(e)}'},
+                {'error': _('Could not create that exercise. Please try again.'),
+                 'code': 'exercise_create_failed'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -918,6 +936,15 @@ class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing RoutineExercise objects.
     Only trainers (owners) and admins can create/update/delete. All users can read.
+
+    List filters: `?routine=<id>&day=<n>` — ONE day of one routine, which is how a
+    client's workout screen wants to read it. Without them the day arrived only inside
+    the whole-routine payload, though `template-exercises/` could already be filtered
+    the same way (SIDE_BUGS S-030). The filters narrow what `get_queryset` has already
+    scoped, so they cannot widen it: a routine that is neither yours nor assigned to
+    you answers an empty page, never somebody else's programme.
+
+    Paginated: `{count, next, previous, results}`, `?page_size=` up to 100.
     """
     queryset = RoutineExercise.objects.select_related(
         'routine', 'routine__created_by', 'exercise'
@@ -925,6 +952,8 @@ class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     serializer_class = RoutineExerciseSerializer
     permission_classes = [IsAdminOrOwnerOrReadOnly]
     pagination_class = StandardResultsSetPagination
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['routine', 'day']
 
     def get_queryset(self):
         """
@@ -1554,12 +1583,17 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='my-progress')
     def my_progress(self, request):
-        """
-        Returns aggregated progress for the authenticated client.
-        Optional query params:
-        - group_by=exercise: group/aggregate by exercise
-        - routine_id: filter by specific routine
-        Output: List of dicts with exercise/routine stats for charts/analytics
+        """GET /api/routine/set-logs/my-progress/ — the caller's own set logs, or their
+        totals per exercise.
+
+        Clients only (403 otherwise). Query params: `group_by=exercise` for one row per
+        exercise (`exercise`, `total_volume`, `sets_completed`, `average_weight`,
+        `average_reps`); `routine_id` to keep to one routine.
+
+        **Paginated** — `{count, next, previous, results}`, 25 a page, `?page_size=` up
+        to 100 (SIDE_BUGS S-032). It answered a bare JSON array holding every set the
+        person had ever logged: a year of training is one unbounded response, built by
+        serialising every row into memory first. Both shapes page the same way.
         """
         user = request.user
         if not user.is_authenticated or not user.is_client:
@@ -1570,7 +1604,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         if routine_id:
             qs = qs.filter(workout_session__routine_id=routine_id)
         if group_by == 'exercise':
-            # Aggregate per exercise
+            # Aggregate per exercise. Ordered by the grouping key, which is unique per
+            # row here, so the page boundaries are stable.
             data = (
                 qs.values('user_exercise_progress__exercise__name')
                 .annotate(
@@ -1581,6 +1616,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                 )
                 .order_by('user_exercise_progress__exercise__name')
             )
+            page = self.paginate_queryset(data)
+            rows = page if page is not None else data
             # Rename keys for frontend clarity
             result = [
                 {
@@ -1590,12 +1627,18 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                     'average_weight': round(d['average_weight'] or 0, 2),
                     'average_reps': round(d['average_reps'] or 0, 2),
                 }
-                for d in data
+                for d in rows
             ]
+            if page is not None:
+                return self.get_paginated_response(result)
             return Response(result)
-        else:
-            # Default: return all set logs for the client (optionally filtered by routine)
-            return Response(self.get_serializer(qs, many=True).data)
+        # Default: the client's set logs (optionally filtered by routine), a page at a
+        # time. `ExerciseSetLog.Meta.ordering` is ('set_number', 'id') — a total order,
+        # so LIMIT/OFFSET does not repeat or hide rows.
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(qs, many=True).data)
 
     @action(detail=False, methods=['post'], url_path='bulk-create')
     def bulk_create(self, request):
@@ -1935,6 +1978,16 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     `effort_out_of_range`; the database carries the same bound as a check constraint).
     It feeds `progression` on `analytics/strength/` and on the coach's client screen.
 
+    **A workout that is still running** is `active` AND begun within the last twelve
+    hours (`routine/sessions.py SESSION_MAX_SECONDS`). Past that it was forgotten, not
+    left running: `?status=active` does not list it, `home/` does not offer to continue
+    it, and the nightly `routine.abandon_forgotten_sessions` writes `abandoned` on the
+    row so the column agrees. Nothing happens to the sets logged inside it — they stay,
+    and stay counted (see that task's docstring). `?status=abandoned` lists the ones
+    the sweep has already reached.
+
+    The list is paginated: `{count, next, previous, results}`, `?page_size=` up to 100.
+
     Input: API requests with session data (POST), session updates (PATCH)
     Output: JSON responses with session data
     """
@@ -1945,6 +1998,10 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         'set_logs__user_exercise_progress__exercise'
     )
     serializer_class = WorkoutSessionSerializer
+    # Explicit, like every other list in this app: the project default paginates too,
+    # but this one answers a bad `?page=` with 404 where the rest answer 400 naming the
+    # parameter, so a client could not write one handler for a paging error (S-032).
+    pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['user', 'routine', 'status']
     
@@ -1964,8 +2021,18 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         from .permissions import accessible_user_ids
         allowed_ids = accessible_user_ids(self.request.user)
         if allowed_ids is None:  # admin
-            return self.queryset
-        return self.queryset.filter(user_id__in=allowed_ids)
+            base = self.queryset
+        else:
+            base = self.queryset.filter(user_id__in=allowed_ids)
+        # "Is a workout running" has one answer in this platform, and it is not
+        # `status='active'` on its own (SIDE_BUGS S-022): a row the client walked away
+        # from reads `active` until the nightly sweep reaches it. Asked for the running
+        # ones, answer the running ones. Only on the list — a detail GET carrying a
+        # stale `?status=` must not turn into a 404.
+        if self.action == 'list' and self.request.query_params.get('status') == 'active':
+            from .sessions import running
+            return running(base)
+        return base
 
     def create(self, request, *args, **kwargs):
         """POST: open a session. Body: `routine`, `day`, optional `client_uuid` (the
@@ -3053,11 +3120,17 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         return Response(self.get_serializer(templates, many=True).data)
 
 
-class RoutineTemplateExerciseSerializer(serializers.ModelSerializer):
+class RoutineTemplateExerciseListSerializer(serializers.ModelSerializer):
+    """What `template-exercises/` answers: the row, with its exercise both as an id and
+    expanded under `exercise_details`.
+
+    Named for its job (SIDE_BUGS S-029). It was called `RoutineTemplateExerciseSerializer`
+    — the name of a DIFFERENT class in `routine/serializers.py`, which nests the whole
+    exercise under `exercise` and takes `exercise_id` on write, and which this module
+    also imported. Two classes, one name, two shapes: the router used this one, the
+    nested `exercises` of a template used that one, and an edit meant for either could
+    land in the wrong file without anything failing.
     """
-    Serializer for routine template exercises. Uses the original model's fields.
-    """
-    from .serializers import ExerciseSerializer
     exercise_details = ExerciseSerializer(source='exercise', read_only=True)
 
     class Meta:
@@ -3071,7 +3144,7 @@ class RoutineTemplateExerciseViewSet(ExerciseMediaMixin, viewsets.ReadOnlyModelV
     ReadOnly since trainers usually manage these via the template or custom actions.
     """
     queryset = RoutineTemplateExercise.objects.select_related('exercise').prefetch_related('exercise__media')
-    serializer_class = RoutineTemplateExerciseSerializer
+    serializer_class = RoutineTemplateExerciseListSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
@@ -3574,8 +3647,10 @@ class ExerciseAddMediaView(APIView):
     content must be an `http(s)` URL **on an allowed host**
     (`settings.EXERCISE_MEDIA_ALLOWED_HOSTS`: the platform's own media hosts, plus
     whatever the deployment adds). An item that fails a check is reported and the rest
-    are still created (207). `errors[]` stays a list of English sentences; the `code`
-    to branch on is in `errors_detail[] = [{index, code, message}]`:
+    are still created (207). `errors[]` is one TRANSLATED sentence per rejected item —
+    Arabic for an Arabic client, the item number included (S-039) — and is for showing,
+    never for branching; the `code` to branch on is in
+    `errors_detail[] = [{index, code, message}]`:
     `media_fields_required`, `media_type_invalid`, `media_url_invalid`,
     `media_host_not_allowed`, `media_write_failed`.
     {
@@ -3605,7 +3680,9 @@ class ExerciseAddMediaView(APIView):
     }
 
     DELETE body — `{"media_ids": [1, 2]}`; ids belonging to another exercise are
-    reported in `errors[]`, never deleted.
+    reported in `errors[]` (translated too), never deleted. That list carries no
+    `code`: the DELETE has no `errors_detail[]`, so there is nothing to branch on here
+    beyond `deleted_count` and the 207.
     """
     permission_classes = [IsAuthenticated]
 
@@ -3672,12 +3749,17 @@ class ExerciseAddMediaView(APIView):
             created_media = []
             errors = []
             #: The same refusals, with the `code` the app is supposed to branch on.
-            #: `errors[]` has always been bare English strings, and the contract is
-            #: additive — so the strings stay and the codes arrive beside them.
+            #: The codes arrived beside the sentences rather than replacing them,
+            #: because the contract is additive.
             errors_detail = []
 
             def refuse(index, code, message):
-                errors.append(f"Item {index+1}: {message}")
+                # The whole sentence goes through gettext, the number included
+                # (SIDE_BUGS S-039). Only the reason was translated, so an Arabic
+                # client read `Item 2: ` in English in front of its own Arabic, and
+                # "Item" is the one word in the line a person actually has to parse.
+                errors.append(_('Item %(number)d: %(reason)s')
+                              % {'number': index + 1, 'reason': message})
                 errors_detail.append({'index': index, 'code': code,
                                       'message': str(message)})
 
@@ -3867,11 +3949,15 @@ class ExerciseAddMediaView(APIView):
                     media_item.delete()
                     deleted_count += 1
                 except ExerciseMedia.DoesNotExist:
-                    errors.append(f"Media item {media_id} not found")
+                    # Translated, like the POST's (SIDE_BUGS S-039): this is the other
+                    # 207 on this route and its `errors[]` were English too.
+                    errors.append(_('Media item %(id)s is not on this exercise.')
+                                  % {'id': media_id})
                 except Exception:
                     # Never the exception text (S-006): the id is what the caller sent.
                     logger.exception("deleting exercise media %s failed", media_id)
-                    errors.append(f"Media item {media_id} could not be deleted")
+                    errors.append(_('Media item %(id)s could not be removed.')
+                                  % {'id': media_id})
             
             response_data = {
                 'message': f'Successfully deleted {deleted_count} media items from exercise "{exercise.name}"',

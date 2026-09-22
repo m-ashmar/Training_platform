@@ -9,6 +9,7 @@ from .models import (
     UserExerciseProgress, RoutineProgress, ExerciseSetLog, WorkoutSession,
     RoutineTemplate, RoutineTemplateExercise, DayOutcome
 )
+from .sessions import SESSION_MAX_SECONDS
 import logging
 from django.db.models import Sum, F
 from users.models import CustomUser
@@ -1252,9 +1253,12 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
 class WorkoutSessionSerializer(serializers.ModelSerializer):
     duration = serializers.SerializerMethodField()
 
-    #: The longest a single session may be recorded as. Generous — an all-day event is
-    #: twelve hours — but finite, which is the point.
-    MAX_SESSION_SECONDS = 12 * 3600
+    #: The longest a single session may be recorded as. An ALIAS of the one rule in
+    #: `routine/sessions.py`: the number that bounds a recorded workout and the number
+    #: past which an open one is called forgotten are the same number, and they were
+    #: written out three times in three files (SIDE_BUGS S-022). The attribute stays
+    #: because the validators and `routine/views.py` read it off the class.
+    MAX_SESSION_SECONDS = SESSION_MAX_SECONDS
 
     #: How far back an offline workout may be dated, and the clock skew tolerated ahead.
     MAX_BACKDATE_DAYS = 30
@@ -1677,122 +1681,14 @@ class WorkoutSessionDetailSerializer(serializers.ModelSerializer):
         ))
 
 
-class DetailedClientProgressSerializer(serializers.ModelSerializer):
-    """Enhanced serializer for detailed client progress with session and exercise information."""
-    client_info = serializers.SerializerMethodField()
-    recent_sessions = serializers.SerializerMethodField()
-    progress_summary = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = RoutineProgress
-        fields = [
-            'id', 'client_info', 'recent_sessions', 'progress_summary'
-        ]
-    
-    def get_client_info(self, obj):
-        client = obj.user
-        # Get last workout date
-        last_workout = WorkoutSession.objects.filter(
-            user=client,
-            status='completed'
-        ).order_by('-end_time').first()
-        
-        # Get total workouts
-        total_workouts = WorkoutSession.objects.filter(
-            user=client,
-            status='completed'
-        ).count()
-        
-        # Calculate completion rate (last 30 days)
-        from django.utils import timezone
-        from datetime import timedelta
-        thirty_days_ago = timezone.localdate() - timedelta(days=30)
-        
-        recent_progress = RoutineProgress.objects.filter(
-            user=client,
-            updated_at__date__gte=thirty_days_ago
-        )
-        
-        total_days = recent_progress.count()
-        completed_days = recent_progress.filter(status='completed').count()
-        completion_rate = round((completed_days / total_days * 100) if total_days > 0 else 0, 1)
-        
-        return {
-            'id': client.id,
-            'name': client.username,
-            'full_name': client.full_name,
-            'profile_picture': _absolute_picture(client, self.context.get('request')),
-            'last_workout': last_workout.end_time.date() if last_workout and last_workout.end_time else None,
-            'total_workouts': total_workouts,
-            'completion_rate': completion_rate
-        }
-    
-    def get_recent_sessions(self, obj):
-        client = obj.user
-        # Get recent completed sessions (last 10)
-        recent_sessions = WorkoutSession.objects.filter(
-            user=client,
-            status='completed'
-        ).order_by('-end_time')[:10]
-        
-        return WorkoutSessionDetailSerializer(recent_sessions, many=True).data
-    
-    def get_progress_summary(self, obj):
-        client = obj.user
-        from django.utils import timezone
-        from datetime import timedelta
-        
-        # This week (last 7 days)
-        # SIX, not seven. Combined with the `__gte` below this window is inclusive on both
-        # ends, so `days=7` counted EIGHT calendar dates: the trainer's roster and the
-        # detailed progress screen both reported 8 sessions for a week in which the
-        # client trained 7 times, while `AnalyticsViewSet.summary` — which uses
-        # `days_in_period - 1` — reported 7 for the same data.
-        week_ago = timezone.localdate() - timedelta(days=6)
-        week_sessions = WorkoutSession.objects.filter(
-            user=client,
-            status='completed',
-            end_time__date__gte=week_ago
-        )
-        
-        week_volume = sum(
-            session.set_logs.aggregate(
-                total=Sum(F('weight') * F('reps'))
-            )['total'] or 0
-            for session in week_sessions
-        )
-        
-        # This month (last 30 days)
-        month_ago = timezone.localdate() - timedelta(days=30)
-        month_sessions = WorkoutSession.objects.filter(
-            user=client,
-            status='completed',
-            end_time__date__gte=month_ago
-        )
-        
-        month_volume = sum(
-            session.set_logs.aggregate(
-                total=Sum(F('weight') * F('reps'))
-            )['total'] or 0
-            for session in month_sessions
-        )
-        
-        return {
-            'this_week': {
-                'sessions': week_sessions.count(),
-                'total_volume': week_volume,
-                'exercises_completed': ExerciseSetLog.objects.filter(
-                    workout_session__in=week_sessions
-                ).values('user_exercise_progress__exercise').distinct().count()
-            },
-            'this_month': {
-                'sessions': month_sessions.count(),
-                'total_volume': month_volume,
-                'exercises_completed': ExerciseSetLog.objects.filter(
-                    workout_session__in=month_sessions
-                ).values('user_exercise_progress__exercise').distinct().count()
-            }
-        }
+# `DetailedClientProgressSerializer` was here and is gone (SIDE_BUGS S-037). It was
+# imported by `routine/views.py` and used by nothing: dead code that read like the
+# live path, so the next person reading `trainer/client-progress/{id}/` would have
+# found `get_client_info` here and believed it was what the endpoint answers. It is
+# not, and wiring it in would have been a breaking change for a worse shape -- the
+# endpoint answers `{client, client_info, weekly_stats, strength, recent_activity}`
+# built from ONE prefetched query, while this serializer keyed off a `RoutineProgress`
+# row and re-queried every session and set log per client.
 
 
 class RecentActivitySerializer(serializers.ModelSerializer):

@@ -33,14 +33,18 @@ from datetime import timedelta
 from django.utils import timezone
 from django.utils.translation import get_language
 
+from routine.sessions import SESSION_MAX_SECONDS, running as running_sessions
+
 #: Most routines of one person the "which routine am I on" search looks at. A client
 #: collects one private copy per program; the newest few are the only candidates, and
 #: the bound is what keeps this a single small query.
 ROUTINES_CONSIDERED = 5
 
-#: How long a workout session may still be called open, in seconds. The same cap the
-#: session serializer enforces on a finish (`routine/serializers.py MAX_SESSION_SECONDS`).
-LONGEST_SESSION = 12 * 3600
+#: How long a workout session may still be called open, in seconds. Home used to own
+#: this number; it is the platform's rule now and lives in `routine/sessions.py`, which
+#: the session endpoints and the nightly sweep read too (SIDE_BUGS S-022). Kept as a
+#: name because it reads better here than the import does.
+LONGEST_SESSION = SESSION_MAX_SECONDS
 
 #: The preview the coach's message is cut to. The same 200 the conversation list uses
 #: (`chat/serializers.py conversation_card`); a third number would be a third answer.
@@ -230,13 +234,12 @@ def workout_hero(person, routine, week, *, on_date, refusal) -> dict | None:
     closed = (DayOutcome.objects
               .filter(user=person, routine=routine, day=day, date=on_date)
               .values('complete', 'via', 'missed_sets').first())
-    # Nothing in this platform ever abandons a session left open (`WorkoutSession` has
-    # the status and no sweep writes it), and a session may not last longer than
-    # `LONGEST_SESSION`. Past that it was forgotten, not left running — without the
-    # bound one forgotten session would hold the CTA on "continue" for ever.
-    session = (WorkoutSession.objects
-               .filter(user=person, status='active',
-                       start_time__gte=timezone.now() - timedelta(seconds=LONGEST_SESSION))
+    # Which sessions are still running is `routine/sessions.py`'s answer, not this
+    # screen's: home invented the twelve-hour bound because nothing abandoned a
+    # forgotten session, and now the sweep writes `abandoned` on the same rule
+    # (SIDE_BUGS S-022). Read here rather than waited for, so a session forgotten since
+    # last night's sweep still does not hold the CTA on "continue".
+    session = (running_sessions(WorkoutSession.objects.filter(user=person))
                .order_by('-start_time', '-id')
                .values('id', 'routine_id', 'day', 'start_time').first())
 

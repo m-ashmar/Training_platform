@@ -388,8 +388,8 @@ contract, every user-facing string goes through gettext with an Arabic entry in
   first POST with it answers 201, a retry 200 with the same row, someone else's id 409
   `idempotency_conflict`. A session's `start_time` is writable on create (at most 30 days
   back), so a workout synced later keeps its clock; `end_time` is checked against it.
-- **Built (2026-09-20):** `POST /api/routine/set-logs/sync/` (and the
-  `exercisesetlogs/` alias). A batch of at most 200 entries, each naming what a phone
+- **Built (2026-09-20):** `POST /api/routine/set-logs/sync/` (the `exercisesetlogs/`
+  alias it also answered on was removed, SIDE_BUGS S-007). A batch of at most 200 entries, each naming what a phone
   with no signal knows — `client_uuid` (required, the retry key), `exercise_id`,
   `date`, `set_number`, `weight`, `reps` or `as_prescribed`, `routine_id`, `day`,
   `workout_session_id`, `notes`, `rpe` — and the server resolves or creates the

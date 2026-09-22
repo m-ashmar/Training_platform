@@ -265,3 +265,69 @@ def send_weekly_progress(now=None):
 
     logger.info("Weekly progress: %s clients, %s trainers", sent_clients, sent_trainers)
     return {'clients': sent_clients, 'trainers': sent_trainers, 'week': week_key}
+
+
+#: At most this many forgotten sessions a run. A night that hits it says so and the next
+#: run takes the rest; nothing user-facing waits on it, because every reader applies the
+#: read rule itself (`routine/sessions.py`).
+SESSION_SWEEP_MAX = 500
+
+
+@shared_task(
+    name="routine.abandon_forgotten_sessions",
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+def abandon_forgotten_sessions(now=None):
+    """Close the workouts nobody ever finished (SIDE_BUGS S-022).
+
+    `WorkoutSession.status` has carried an `abandoned` value since the model was
+    written and NOTHING ever wrote it, so a client who started a workout and closed the
+    app left a row reading `active` for ever. The window is the one in
+    `routine/sessions.py`: a session begun more than `SESSION_MAX_SECONDS` ago was
+    forgotten, not left running. That rule is applied on every read as well, so this
+    task is housekeeping — it makes the column agree with what the readers already
+    answer — and a night it does not run changes nobody's screen.
+
+    **What happens to the work: nothing.** A set belongs to its
+    `UserExerciseProgress`, which owns the day (`routine/models.py ExerciseSetLog`), and
+    every figure built on sets — the exercise's completed sets, the day's
+    `RoutineProgress`, its `DayOutcome`, adherence, volume, records — is computed from
+    those rows and never from a session's status. Abandoning a session only stops the
+    row claiming a workout is in progress; the sets logged inside it stay, stay counted,
+    and stay editable. The day itself is closed by `close_open_training_days`, which
+    runs ten minutes after this one and records what was left of it.
+
+    `end_time` is deliberately left NULL: we do not know when the person stopped, and
+    inventing a finish would put a fabricated duration into the activity chart. A
+    session with no end has no duration, exactly as before.
+
+    No lower bound on how far back it reaches, unlike `close_open_training_days`: that
+    sweep RECONSTRUCTS a day and must not measure a year-old one against today's plan,
+    while this one only stops a row lying about the present, which is right at any age.
+    `SESSION_SWEEP_MAX` is the bound instead, oldest first so a backlog drains.
+    """
+    from .models import WorkoutSession
+    from .sessions import forgotten
+
+    stale = list(forgotten(WorkoutSession.objects.all(), now=now)
+                 .order_by('start_time', 'id')
+                 .values_list('pk', flat=True)[:SESSION_SWEEP_MAX])
+    if not stale:
+        return {'abandoned': 0, 'capped': False}
+    # `status='active'` again in the UPDATE: a session finished between the SELECT and
+    # here is a completed workout, and this must not overwrite it.
+    abandoned = (WorkoutSession.objects
+                 .filter(pk__in=stale, status='active')
+                 .update(status='abandoned'))
+    logger.info("Abandoned %s forgotten workout sessions", abandoned)
+    capped = len(stale) >= SESSION_SWEEP_MAX
+    if capped:
+        # Said out loud: the rest is picked up by the next run, and a cap that binds
+        # every night means the cap is wrong.
+        logger.warning("Forgotten-session sweep hit its %s-row cap; the remainder waits "
+                       "for the next run", SESSION_SWEEP_MAX)
+    return {'abandoned': abandoned, 'capped': capped}
