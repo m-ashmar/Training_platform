@@ -291,6 +291,12 @@ A turn that ends in an `error` frame is **not** charged against the daily messag
 allowance; each turn closes with `{"type": "rate_limit", "remaining", "resets_at"}`
 carrying what is actually left.
 
+A `status` frame is `{"type": "status", "content", "code"}`. Render the `code`; the
+translated `content` is there for a build that predates it. The set, in the order a
+turn produces them: `connected` (on connect), `getting_ready`, then one per pass of the
+tool-calling loop — `thinking`, `checking_data`, `analyzing`, `looking_deeper`,
+`almost_done` (the last repeats if the loop runs longer).
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `DELETE` | `/api/ai/data/` | auth | `GDPRDataDeleteView` |
@@ -1058,6 +1064,22 @@ duplicates, errors}`, and a set that beat everything before it carries
 
 ### Social
 
+`POST challenges/{id}/leave/` removes the caller's participation, recounts
+`participants_count` and closes the gap in the standing. Codes: `left_challenge` (200),
+`not_participating` (400, you had not joined), `challenge_closed` (400, the challenge
+is over or was cancelled — a finished board does not change, and the Challenge Winner
+badge keys on `rank=1`). The same `challenge_closed` `join` already answers with.
+
+`ChallengeParticipation.rank` is now written for EVERY participant of a running
+challenge, including the ones at zero, ordered `-current_value`, then `joined_at`, then
+`id` — the order `challenges/{id}/leaderboard/` and the home card's `challenge_rank`
+already read. Places run 1..N with no gaps and no nulls, and they stop changing once
+the challenge ends.
+
+`comments_count` on a post is the number of comments THIS viewer can open: the stored
+counter less the ones hidden by moderation and the ones by accounts they have blocked.
+It therefore equals the row count of `GET comments/?post={id}` for the same viewer.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/social/` | auth | `APIRootView` |
@@ -1068,6 +1090,7 @@ duplicates, errors}`, and a set that beat everything before it carries
 | `DELETE, GET, PATCH, PUT` | `/api/social/challenges/{id}/` | IsOwnerOrReadOnly | `ChallengeViewSet` |
 | `POST` | `/api/social/challenges/{id}/join/` | IsOwnerOrReadOnly | `ChallengeViewSet` |
 | `GET` | `/api/social/challenges/{id}/leaderboard/` | IsOwnerOrReadOnly | `ChallengeViewSet` |
+| `POST` | `/api/social/challenges/{id}/leave/` | IsOwnerOrReadOnly | `ChallengeViewSet` |
 | `POST` | `/api/social/challenges/{id}/update_progress/` | IsOwnerOrReadOnly | `ChallengeViewSet` |
 | `GET, POST` | `/api/social/comments/` | IsOwnerOrReadOnly | `CommentViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/social/comments/{id}/` | IsOwnerOrReadOnly | `CommentViewSet` |

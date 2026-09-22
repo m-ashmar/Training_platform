@@ -15,6 +15,7 @@ import openai
 from channels.db import database_sync_to_async
 from django.conf import settings
 from django.utils.translation import gettext as _
+from django.utils.translation import gettext_lazy as _lazy
 
 from ai_assistant.tool_registry import ToolRegistry, TOOL_DISPLAY_NAMES
 from ai_assistant.services.context_compiler import ContextCompiler
@@ -27,6 +28,29 @@ from ai_assistant.services.cost_tracker import CostTracker
 from moderation.services import has_ai_consent
 
 logger = logging.getLogger(__name__)
+
+#: What the client is told while a turn is still working, one frame per pass of the
+#: tool-calling loop: a stable `code` and the sentence that goes with it.
+#:
+#: These were five bare English literals. Everything else this socket sends is
+#: translated, so an Arabic reader got their answer in Arabic with "Thinking..." and
+#: "Almost done..." in front of it. Both halves are sent, and the `code` is the half
+#: that matters: the rest of this platform answers a screen with codes and numbers and
+#: lets the app write the words (`home/sections.py`, `routine/strength.py headline`),
+#: because a status line the app owns can be phrased for its own layout, shortened, or
+#: animated, and it never depends on the server's idea of the reader's language. The
+#: `content` stays, translated, because a build already in a pocket reads that key and
+#: knows nothing about `code`.
+#:
+#: Lazy, not `gettext`: this table is built at import time and rendered per frame,
+#: inside the `LanguageContext` the consumer opens for the reader.
+ITERATION_STATUSES = (
+    ("thinking", _lazy("Thinking...")),
+    ("checking_data", _lazy("Checking your data...")),
+    ("analyzing", _lazy("Analyzing details...")),
+    ("looking_deeper", _lazy("Looking deeper...")),
+    ("almost_done", _lazy("Almost done...")),
+)
 
 
 class ChatService:
@@ -61,7 +85,7 @@ class ChatService:
         Async generator that yields WebSocket events for a chat turn.
 
         Events yielded:
-          {"type": "status", "content": "..."}
+          {"type": "status", "content": "...", "code": "..."}
           {"type": "tool_used", "name": "...", "display": "..."}
           {"type": "token", "content": "partial text"}
           {"type": "complete", "session_id": "...", "message_id": ..., "tools_used": [...]}
@@ -105,7 +129,8 @@ class ChatService:
             return
 
         # 3. Ensure insights exist (cold start)
-        yield {"type": "status", "content": str(_("Getting ready..."))}
+        yield {"type": "status", "content": str(_("Getting ready...")),
+               "code": "getting_ready"}
         await self._ensure_insights(user)
 
         # 3. Get or create session
@@ -141,7 +166,7 @@ class ChatService:
         # 7. Function calling loop
         for iteration in range(self.max_tool_calls + 1):
             try:
-                yield {"type": "status", "content": self._iteration_status(iteration)}
+                yield self._iteration_status(iteration)
 
                 response = await asyncio.wait_for(
                     self.client.chat.completions.create(
@@ -332,16 +357,16 @@ class ChatService:
             "tools_used": tools_display,
         }
 
-    def _iteration_status(self, iteration: int) -> str:
-        """Status messages for each iteration of the tool calling loop."""
-        statuses = [
-            "Thinking...",
-            "Checking your data...",
-            "Analyzing details...",
-            "Looking deeper...",
-            "Almost done...",
-        ]
-        return statuses[min(iteration, len(statuses) - 1)]
+    def _iteration_status(self, iteration: int) -> dict:
+        """The `status` frame for one pass of the tool-calling loop.
+
+        Returns the whole frame, not a string: the `code` is what the app branches on
+        and the translated `content` is what an older build displays. See
+        `ITERATION_STATUSES` for why both are sent. Past the last entry the frame
+        repeats, so a longer loop does not run off the end.
+        """
+        code, text = ITERATION_STATUSES[min(iteration, len(ITERATION_STATUSES) - 1)]
+        return {"type": "status", "content": str(text), "code": code}
 
     async def _execute_tool_safely(self, registry, func_name: str, args: dict) -> dict:
         """Execute a tool with timeout, return error dict on failure."""

@@ -40,7 +40,7 @@ class AIChatConsumer(AsyncWebsocketConsumer):
       {"type": "feedback", "message_id": 123, "feedback": "positive|negative"}
 
     Server → Client:
-      {"type": "status", "content": "..."}
+      {"type": "status", "content": "...", "code": "..."}
       {"type": "token", "content": "partial text"}
       {"type": "tool_used", "name": "...", "display": "..."}
       {"type": "complete", "session_id": "uuid", "message_id": 123, "tools_used": [...]}
@@ -64,6 +64,12 @@ class AIChatConsumer(AsyncWebsocketConsumer):
     and, from `services/chat_service.py` while a turn runs: `ai_consent_required`,
     `budget_exceeded`, `timeout`, `rate_limit_openai`, `config_error`, `connection`,
     `server`.
+
+    A `status` frame carries a `code` too, and the app writes its own words for it —
+    the sentence in `content` is translated and is there for a build that predates the
+    code. The full set: `connected` on connect, then `getting_ready` and, once per pass
+    of the tool-calling loop, `thinking`, `checking_data`, `analyzing`,
+    `looking_deeper`, `almost_done` (`services/chat_service.py ITERATION_STATUSES`).
 
     A turn that ends on an `error` is NOT charged against the daily allowance
     (`_reserve_rate_limit`), and the `rate_limit` frame that closes every turn carries
@@ -97,6 +103,7 @@ class AIChatConsumer(AsyncWebsocketConsumer):
             await self.send(text_data=json.dumps({
                 "type": "status",
                 "content": str(_("Connected to AI Assistant. How can I help you today?")),
+                "code": "connected",
             }))
 
     async def disconnect(self, close_code):
