@@ -4,6 +4,7 @@ Social Features Serializers
 Serializers for social models to handle API data conversion.
 """
 
+from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from .models import (
@@ -200,10 +201,15 @@ class PostSerializer(serializers.ModelSerializer):
         return max(0, (obj.likes_count or 0) - self._hidden_likes(obj))
 
     def get_comments_count(self, obj):
-        """The stored counter, less the comments from accounts this viewer cannot see.
+        """The stored counter, less every comment on this post the viewer cannot open.
 
-        The comment list already excludes a blocked author (`CommentViewSet`), so
-        without this the badge on the post promised replies the thread never showed.
+        Two kinds are unreadable and both used to be counted here. A comment by an
+        account this viewer has blocked, which `CommentViewSet` excludes; and a comment
+        a moderator hid (`is_hidden`), which `CommentViewSet` also excludes and which
+        nothing ever subtracts from the denormalised column — so a post whose only
+        reply had been hidden read "1 comment" and opened on an empty thread. The
+        number here is the number of rows `GET /api/social/comments/?post={id}` will
+        hand this viewer.
         """
         return max(0, (obj.comments_count or 0) - self._hidden_comments(obj))
 
@@ -217,13 +223,23 @@ class PostSerializer(serializers.ModelSerializer):
         return PostLike.objects.filter(post=obj, user_id__in=hidden).count()
 
     def _hidden_comments(self, obj):
+        """Comments on this post this viewer cannot open: hidden, or by a blocked author.
+
+        `PostViewSet` annotates this for the whole page in its own query and is the
+        only place `PostSerializer` is used with a queryset, so the fallback below runs
+        for a single instance — the 201 body of a create, whose counter is zero and
+        which therefore costs nothing.
+        """
         annotated = getattr(obj, 'hidden_comments', None)
         if annotated is not None:
             return annotated
-        hidden = _hidden_from(self)
-        if not hidden:
+        if not (obj.comments_count or 0):
             return 0
-        return Comment.objects.filter(post=obj, author_id__in=hidden).count()
+        unreadable = Q(is_hidden=True)
+        hidden = _hidden_from(self)
+        if hidden:
+            unreadable |= Q(author_id__in=hidden)
+        return Comment.objects.filter(post=obj).filter(unreadable).count()
 
     def get_is_liked(self, obj):
         """Check if current user has liked this post"""

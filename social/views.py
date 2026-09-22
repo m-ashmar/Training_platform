@@ -302,10 +302,28 @@ class PostViewSet(viewsets.ModelViewSet):
                 hidden_likes=subquery_count(
                     PostLike.objects.filter(post_id=OuterRef('pk'),
                                             user_id__in=hidden), 'post_id'),
-                hidden_comments=subquery_count(
-                    Comment.objects.filter(post_id=OuterRef('pk'),
-                                           author_id__in=hidden), 'post_id'),
             )
+
+        # The comment badge has a second way of over-reporting, and it does not need a
+        # block to happen: `CommentViewSet` serves `is_hidden=False` only, and nothing
+        # decrements `comments_count` when a moderator hides one. A post whose only
+        # reply was hidden still read "1 comment" and opened on an empty thread, for
+        # every viewer — this is the correction blocks alone never covered.
+        #
+        # ONE subquery for both exclusions rather than a second annotation beside
+        # `hidden_likes`: a blocked author's hidden comment is a single unreadable row
+        # and must be subtracted once, and two counts added together would subtract it
+        # twice. Annotated unconditionally, because moderation does not depend on who
+        # is looking — and it is still part of the page's own query, not a query per
+        # post.
+        unreadable = Q(is_hidden=True)
+        if hidden:
+            unreadable |= Q(author_id__in=hidden)
+        queryset = queryset.annotate(
+            hidden_comments=subquery_count(
+                Comment.objects.filter(post_id=OuterRef('pk')).filter(unreadable),
+                'post_id'),
+        )
 
         return queryset.select_related('author')
     
@@ -769,6 +787,10 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             Challenge.objects.filter(pk=challenge.pk).update(
                 participants_count=ChallengeParticipation.objects.filter(
                     challenge=challenge).count())
+            # Rank the newcomer now. Ranks used to be written only by
+            # `update_progress`, so anyone who joined and logged nothing kept
+            # `rank=NULL` — last place is a place, and the app reads the column.
+            self._update_challenge_rankings(challenge)
             self._invalidate_challenges_cache(request)
             return Response(
                 {'message': _('Successfully joined challenge')},
@@ -780,6 +802,64 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_200_OK
             )
     
+    @action(detail=True, methods=['post'])
+    def leave(self, request, pk=None):
+        """
+        Leave a challenge you joined
+
+        POST /api/social/challenges/{id}/leave/
+
+        Body: none. The participation of the CALLING user is the one removed, so there
+        is nothing to name.
+
+        `interaction_actions` has advertised this action since the permission class was
+        written, and the viewset never defined it: the route did not exist, so joining
+        a challenge was permanent and `participants_count` only ever grew. Leaving
+        deletes the participation row, recounts `participants_count` from the rows
+        (never `- 1` on a column that has drifted), and closes the gap the departure
+        leaves in the ranking.
+
+        Answers:
+          `200` `{"message", "code": "left_challenge"}`
+          `400` `{"error", "code": "not_participating"}` — you had not joined
+          `400` `{"error", "code": "challenge_closed"}` — the challenge is over or was
+                cancelled. A finished challenge is a record: its board, and the
+                Challenge Winner badge that keys on `rank=1`, do not change afterwards.
+          `404` — no such challenge
+
+        Nothing differs by build.
+        """
+        challenge = self.get_object()
+
+        # Same rule and the same `code` as `join`. Reused deliberately: it means the
+        # same thing to the reader ("this challenge is not running"), and a shipped
+        # code is never renamed.
+        if challenge.lifecycle_status in Challenge.TERMINAL_STATUSES:
+            return Response(
+                {'error': _('This challenge is not running.'), 'code': 'challenge_closed'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            # The same row `join` locks, so a join and a leave racing each other cannot
+            # both recount from the same stale snapshot.
+            locked = Challenge.objects.select_for_update().filter(
+                pk=challenge.pk).first() or challenge
+            deleted, _rows = ChallengeParticipation.objects.filter(
+                challenge=locked, user=request.user).delete()
+            if not deleted:
+                return Response(
+                    {'error': _('You are not participating in this challenge.'),
+                     'code': 'not_participating'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            Challenge.objects.filter(pk=locked.pk).update(
+                participants_count=ChallengeParticipation.objects.filter(
+                    challenge=locked).count())
+            self._update_challenge_rankings(locked)
+
+        self._invalidate_challenges_cache(request)
+        return Response({'message': _('You have left this challenge.'),
+                         'code': 'left_challenge'})
+
     @action(detail=True, methods=['get'])
     def leaderboard(self, request, pk=None):
         """
@@ -914,11 +994,20 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 participation.status = 'active'
                 participation.completed_at = None
         
-        participation.save()
-        
-        # Update rankings for all participants
-        self._update_challenge_rankings(challenge)
-        
+        # The row and the whole standing move together, under the CHALLENGE's lock.
+        # Two people logging progress at the same moment each computed the board from
+        # their own snapshot and wrote it, so the later writer could publish an order
+        # that never existed. Serialising on the one row every participant shares makes
+        # the recompute a single-writer operation; `join` already locks the same row
+        # for its capacity check, so the lock order is unchanged.
+        with transaction.atomic():
+            Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
+            participation.save()
+            places = self._update_challenge_rankings(challenge)
+        # The caller's own place, from the pass that just ran: `participation` is a
+        # stale copy the moment `bulk_update` writes, and the response quotes `rank`.
+        participation.rank = places.get(participation.pk, participation.rank)
+
         # Create notification for significant progress
         if current_value > old_value:
             progress_increase = current_value - old_value
@@ -948,15 +1037,66 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             }
         })
     
+    #: The one order the standing of a challenge is read in, anywhere in this product.
+    #: `GET challenges/{id}/leaderboard/` already sorts this way and the home card's
+    #: `challenge_rank` (`home/sections.py`) counts "how many are ahead of me" with
+    #: exactly these three clauses, so the stored column is written with them too
+    #: rather than inventing a third answer to one question. Highest value first; on a
+    #: tie the person who joined earlier is ahead, because joining is the only act
+    #: either of them has a timestamp for — `completed_at` exists only for someone who
+    #: reached the target, so it cannot order the field, and `-current_value` alone is
+    #: not an order at all (it is what made two tied scores swap places between runs).
+    #: `id` last so the order is TOTAL: no two rows can compare equal.
+    RANKING_ORDER = ('-current_value', 'joined_at', 'id')
+
+    #: Rows per UPDATE. `bulk_update` builds one CASE arm per row, so a challenge with
+    #: thousands of participants is split rather than sent as one enormous statement.
+    RANKING_BATCH = 500
+
     def _update_challenge_rankings(self, challenge):
-        """Update rankings for all participants in a challenge"""
-        participants = ChallengeParticipation.objects.filter(
-            challenge=challenge
-        ).order_by('-current_value')
-        
-        for rank, participation in enumerate(participants, 1):
-            participation.rank = rank
-            participation.save()
+        """Write `rank` for EVERY participant, in one pass, and return {id: rank}.
+
+        What was here wrote the column only from `update_progress`, ordered by
+        `-current_value` alone, with a full-row `save()` per participant. Three
+        consequences, and a badge on the end of them:
+
+        * someone who joined and never logged was never in the loop's effect at all —
+          their `rank` stayed NULL for the life of the challenge;
+        * `-current_value` is not a total order, so two tied participants were handed
+          places in whatever sequence Postgres returned them, and swapped between runs;
+        * `achievements/engine.py` `challenge_wins` counts participations with
+          `status='completed'` AND `rank=1`, so the "Challenge Winner" badge was
+          awarded off that ordering.
+
+        `RANKING_ORDER` is a total order and is the order the leaderboard and the home
+        card already read, so all three now agree. Every participant is ranked,
+        including the ones sitting at zero: places run 1..N with no gaps and no NULLs.
+        Only the rows whose place actually moved are written, in one `bulk_update`
+        (a `Case`/`When` UPDATE) instead of N `save()`s — a 200-person challenge costs
+        one SELECT and one UPDATE, not 200 full-row writes.
+
+        **A challenge that is over is not re-ranked.** `lifecycle_status` is terminal
+        once the end date has passed or someone closed the challenge; from that moment
+        the standing is a record, and the last ranks written while it was running are
+        the final ones. Without this, a late `leave` would quietly renumber a finished
+        board — and move the Challenge Winner badge.
+        """
+        rows = list(ChallengeParticipation.objects
+                    .filter(challenge=challenge)
+                    .only('id', 'rank')
+                    .order_by(*self.RANKING_ORDER))
+        if challenge.lifecycle_status in Challenge.TERMINAL_STATUSES:
+            return {row.pk: row.rank for row in rows}
+
+        moved = []
+        for place, row in enumerate(rows, 1):
+            if row.rank != place:
+                row.rank = place
+                moved.append(row)
+        if moved:
+            ChallengeParticipation.objects.bulk_update(
+                moved, ['rank'], batch_size=self.RANKING_BATCH)
+        return {row.pk: row.rank for row in rows}
 
 
 class AchievementViewSet(viewsets.ReadOnlyModelViewSet):

@@ -3464,3 +3464,34 @@ msgstr "عنصر الوسائط %(id)s ليس ضمن هذا التمرين."
 #, python-format
 msgid "Media item %(id)s could not be removed."
 msgstr "تعذّر حذف عنصر الوسائط %(id)s."
+#: social/views.py
+msgid "This challenge is not running."
+msgstr "هذا التحدي غير جارٍ حاليًا."
+
+#: social/views.py
+msgid "You have left this challenge."
+msgstr "لقد انسحبت من هذا التحدي."
+
+#: social/views.py
+msgid "You are not participating in this challenge."
+msgstr "أنت لست مشاركًا في هذا التحدي."
+
+#: ai_assistant/services/chat_service.py
+msgid "Thinking..."
+msgstr "جارٍ التفكير..."
+
+#: ai_assistant/services/chat_service.py
+msgid "Checking your data..."
+msgstr "جارٍ مراجعة بياناتك..."
+
+#: ai_assistant/services/chat_service.py
+msgid "Analyzing details..."
+msgstr "جارٍ تحليل التفاصيل..."
+
+#: ai_assistant/services/chat_service.py
+msgid "Looking deeper..."
+msgstr "جارٍ البحث بعمق أكبر..."
+
+#: ai_assistant/services/chat_service.py
+msgid "Almost done..."
+msgstr "أوشكت على الانتهاء..."
