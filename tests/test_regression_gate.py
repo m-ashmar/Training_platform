@@ -1871,6 +1871,12 @@ _GETTEXT_KEYWORDS = {
 _PO_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\",
                "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
 
+#: `{% trans "..." %}` / `{% translate '...' %}`. `blocktrans` puts the msgid in the
+#: tag's BODY, not in a quoted argument, so it is not read here — the test below
+#: refuses one outright rather than let it pass unchecked.
+_TRANS_TAG = re.compile(
+    r"""\{%\s*(?:trans|translate)\s+(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)')""")
+
 
 def _po_unescape(raw):
     out, i = [], 0
@@ -1944,21 +1950,15 @@ def _read_po(text):
     return entries
 
 
-def _first_party_msgids():
-    """`{msgid: "app/file.py:42"}` for every literal a first-party module translates.
+def _first_party_roots():
+    """`(repo root, the packages this project owns)`.
 
-    Parsed with `ast`, which resolves escapes and implicit concatenation exactly as the
-    interpreter does, so the string compared against the catalogue is the one gettext
-    will be handed at runtime. A `_(variable)` cannot be seen here — `makemessages`
-    cannot see one either, which is why the project writes literals.
-
-    First-party means every Python package in this checkout, not `INSTALLED_APPS`:
-    `home/` is a package of views included by the URLconf and is not an app, and a
-    future one would be missed the same way. `.venv` is skipped because it holds no
-    top-level `__init__.py` — and naming it would not help in a worktree, where it is
-    a symlink INSIDE the repo.
+    Every Python package in this checkout, not `INSTALLED_APPS`: `home/` is a package
+    of views included by the URLconf and is not an app, and a future one would be
+    missed the same way. `.venv` is skipped because it holds no top-level
+    `__init__.py` — and naming it would not help in a worktree, where it is a symlink
+    INSIDE the repo.
     """
-    import ast
     from pathlib import Path
 
     from django.conf import settings
@@ -1967,9 +1967,34 @@ def _first_party_msgids():
     not_ours = {"tests", "_excluded", "mobile", "flutter", "yalla_gym"}
 
     root = Path(settings.BASE_DIR).resolve()
-    roots = {child for child in root.iterdir()
-             if child.is_dir() and child.name not in not_ours
-             and (child / "__init__.py").exists()}
+    return root, {child for child in root.iterdir()
+                  if child.is_dir() and child.name not in not_ours
+                  and (child / "__init__.py").exists()}
+
+
+def _first_party_templates():
+    """Every template the renderer can reach, by Django's two loaders: `DIRS`
+    (BASE_DIR/templates) and each first-party package's own `templates/`. Deliberately
+    not a repo-wide glob — that walks into `.venv` and finds Django's own admin."""
+    root, roots = _first_party_roots()
+    templates = []
+    for template_root in sorted({root / "templates"} | {r / "templates" for r in roots}):
+        if template_root.is_dir():
+            templates += sorted(template_root.rglob("*.html"))
+    return root, templates
+
+
+def _first_party_msgids():
+    """`{msgid: "app/file.py:42"}` for every literal a first-party module translates.
+
+    Parsed with `ast`, which resolves escapes and implicit concatenation exactly as the
+    interpreter does, so the string compared against the catalogue is the one gettext
+    will be handed at runtime. A `_(variable)` cannot be seen here — `makemessages`
+    cannot see one either, which is why the project writes literals.
+    """
+    import ast
+
+    root, roots = _first_party_roots()
 
     def literal(node, index):
         args = node.args
@@ -1994,6 +2019,18 @@ def _first_party_msgids():
                     value = literal(node, index)
                     if value:
                         found.setdefault(value, f"{relative}:{node.lineno}")
+
+    # Templates too: the OTP and password-reset emails are the only user-facing strings
+    # this project renders outside Python, and they are the FIRST thing a new account
+    # reads.
+    for template in _first_party_templates()[1]:
+        relative = template.relative_to(root)
+        text = template.read_text(encoding="utf-8")
+        for match in _TRANS_TAG.finditer(text):
+            value = match.group("single") or match.group("double")
+            if value:
+                line = text.count("\n", 0, match.start()) + 1
+                found.setdefault(value, f"{relative}:{line}")
     return found
 
 
@@ -2019,10 +2056,13 @@ def test_every_first_party_msgid_reaches_the_arabic_catalogue():
     source_msgids = _first_party_msgids()
 
     translated = set()
+    singular_of = {}
     for entry in _read_po(Path("locale/ar/LC_MESSAGES/django.po").read_text(encoding="utf-8")):
         if not entry["msgstrs"] or not all(s.strip() for s in entry["msgstrs"]):
             continue
         translated.update(m for m in (entry["msgid"], entry["msgid_plural"]) if m)
+        if entry["msgid_plural"]:
+            singular_of[entry["msgid_plural"]] = entry["msgid"]
 
     absent = sorted((msgid, where) for msgid, where in source_msgids.items()
                     if msgid not in translated)
@@ -2031,12 +2071,34 @@ def test_every_first_party_msgid_reaches_the_arabic_catalogue():
         f"locale/ar/LC_MESSAGES/django.po, e.g. {absent[:3]}")
 
     with open("locale/ar/LC_MESSAGES/django.mo", "rb") as handle:
-        compiled = gettext_module.GNUTranslations(handle)._catalog
-    uncompiled = sorted((msgid, where) for msgid, where in source_msgids.items()
-                        if msgid not in compiled)
+        catalog = gettext_module.GNUTranslations(handle)._catalog
+    #: A .mo does not key every entry by its msgid. A plural entry is keyed
+    #: `(singular, n)` and its PLURAL msgid is not stored at all; a `pgettext` entry is
+    #: keyed `"context\x04msgid"`. Flatten both back to the msgid, then let a plural
+    #: msgid stand on its singular — otherwise this check reports entries that compiled
+    #: perfectly well.
+    compiled = set()
+    for key in catalog:
+        if isinstance(key, tuple):
+            compiled.add(key[0])
+        elif isinstance(key, str):
+            compiled.add(key.split("\x04")[-1])
+    uncompiled = sorted(
+        (msgid, where) for msgid, where in source_msgids.items()
+        if msgid not in compiled and singular_of.get(msgid) not in compiled)
     assert not uncompiled, (
         f"{len(uncompiled)} msgids are translated in django.po but missing from the "
         f"compiled django.mo — run msgfmt. e.g. {uncompiled[:3]}")
+
+    # `blocktrans` carries its msgid in the tag's body, which the scan above does not
+    # read. The project uses none, so refuse the first one rather than wave through a
+    # string this check silently cannot see.
+    root, templates = _first_party_templates()
+    blocktrans = [str(t.relative_to(root)) for t in templates
+                  if "blocktrans" in t.read_text(encoding="utf-8")]
+    assert not blocktrans, (
+        f"{blocktrans} use blocktrans, whose msgid this check cannot read — teach "
+        f"_first_party_msgids to read it before adding one")
 
 
 # ------------------------------------------------------------------------- volume

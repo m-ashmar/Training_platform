@@ -90,11 +90,12 @@ def test_a_store_builds_refusal_reaches_an_arabic_caller_in_arabic(make_user, ap
 def test_every_user_facing_string_in_policy_has_arabic():
     """The endpoint test above covers the two refusals; this covers the rest of the app,
     including the operator's help text, so a string added to `policy` without Arabic
-    fails here with the file that holds it named."""
-    import sys
+    fails here with the file that holds it named.
 
-    sys.path.insert(0, str(ROOT / "tests"))
-    from test_regression_gate import _first_party_msgids, _read_po
+    Borrows the gate's own two readers rather than re-implementing them, so the narrow
+    check and the repo-wide one can never disagree about what "translated" means.
+    """
+    from tests.test_regression_gate import _first_party_msgids, _read_po
 
     catalogue = (ROOT / "locale/ar/LC_MESSAGES/django.po").read_text(encoding="utf-8")
     translated = set()

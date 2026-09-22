@@ -28,7 +28,7 @@ After adding a migration, the run needs `--create-db` or it dies with `Duplicate
 | The privacy registry | A model holding personal data must be registered under `training_platform/privacy/` |
 | Every registered notification event is emitted | A key in `notifications/channels/fcm.py` `EVENT_CLASS_REGISTRY` needs an event class, **a listener**, and a LITERAL `event_type="..."` in non-test source. A test asserting `emit_event` was called does NOT prove delivery — assert the `Notification` row |
 | Beat entries resolve | Every `CELERY_BEAT_SCHEDULE` entry must name a real registered task |
-| The Arabic catalogue | Every msgid translated, none fuzzy. `msgfmt --check-format -o locale/ar/LC_MESSAGES/django.mo locale/ar/LC_MESSAGES/django.po` |
+| The Arabic catalogue | **Every string you pass to `_()` — and every `{% trans %}` — must be IN `django.po` with Arabic, and in the compiled `django.mo`.** Not "every entry already in the file": the gate used to check only those, so a string that never reached the catalogue was invisible and shipped in English (SIDE_BUGS S-019 — 152 of them). None fuzzy. Add the entry, then `msgfmt --check-format -o locale/ar/LC_MESSAGES/django.mo locale/ar/LC_MESSAGES/django.po` and commit the `.mo` |
 | One predicate decides what a trainer sees | A source scan forbids reading `assigned_trainer` directly — use the approved relation |
 
 ## Working in a worktree
