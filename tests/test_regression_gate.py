@@ -5977,7 +5977,10 @@ _MALFORMED_BODY_ROUTES = [
     "/api/auth/trainer/respond-to-request/",
     "/api/auth/trainer/unassign-client/",
     "/api/auth/verify-otp/",
-    "/api/routine/exercisesetlogs/bulk-create/",
+    # `/api/routine/exercisesetlogs/bulk-create/` was here as well: the same viewset
+    # under a second prefix, so the list probed one endpoint twice. The alias route was
+    # removed (SIDE_BUGS S-007) and a 404 proves nothing about a malformed body, so the
+    # entry goes with it. `set-logs/bulk-create/` is the endpoint, and it stays probed.
     "/api/routine/set-logs/bulk-create/",
     "/api/routine/user-exercise-progress/bulk-complete/",
     "/api/social/follows/follow_user/",

@@ -3445,3 +3445,22 @@ msgid ""
 "That link is not on a host this app plays media from. Upload the file "
 "instead."
 msgstr "هذا الرابط ليس على مضيف يشغّل منه التطبيق الوسائط. ارفع الملف بدلاً من ذلك."
+
+#: routine/views.py
+msgid "Could not create that exercise. Please try again."
+msgstr "تعذّر إنشاء التمرين. يرجى المحاولة مرة أخرى."
+
+#: routine/views.py
+#, python-format
+msgid "Item %(number)d: %(reason)s"
+msgstr "العنصر %(number)d: %(reason)s"
+
+#: routine/views.py
+#, python-format
+msgid "Media item %(id)s is not on this exercise."
+msgstr "عنصر الوسائط %(id)s ليس ضمن هذا التمرين."
+
+#: routine/views.py
+#, python-format
+msgid "Media item %(id)s could not be removed."
+msgstr "تعذّر حذف عنصر الوسائط %(id)s."

@@ -16,8 +16,15 @@ router = DefaultRouter()
 router.register(r'exercises', ExerciseViewSet, basename='exercise')
 router.register(r'routines', RoutineViewSet, basename='routine')
 router.register(r'routine-progress', RoutineProgressViewSet, basename='routine_progress')  # Fixed quote issue
+# ONE prefix for the set-log viewset (SIDE_BUGS S-007). It was registered here twice —
+# `set-logs/` and `exercisesetlogs/` — so every action it gained doubled the route
+# surface and had to be written into API_CONTRACT.md twice, and the two paths drifted
+# into two different documented endpoints for one viewset. The alias was added "for
+# mobile app backwards compatibility" with the abandoned `mobile/` and `flutter/`
+# attempts; the Flutter client in `yalla_gym/` calls neither spelling (it has no set-log
+# screen yet), so nothing that ships loses a route. Removing one is not an additive
+# change — see the commit message.
 router.register(r'set-logs', ExerciseSetLogViewSet, basename='set_logs')
-router.register(r'exercisesetlogs', ExerciseSetLogViewSet, basename='exercisesetlogs')  # Added for mobile app backwards compatibility
 router.register(r'routine-exercises', RoutineExerciseViewSet, basename='routineexercise')  # Added for full test coverage
 router.register(r'workout-sessions', WorkoutSessionViewSet, basename='workoutsession')  # Added for full test coverage
 router.register(r'analytics', AnalyticsViewSet, basename='analytics')

@@ -459,6 +459,15 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'routine.send_weekly_progress',
         'schedule': crontab(day_of_week=0, hour=17, minute=5),
     },
+    # A workout started and never finished stops claiming to be in progress
+    # (SIDE_BUGS S-022). Ten minutes before the day sweep below, so a day whose session
+    # was abandoned is recorded in the same night. Every reader already applies the
+    # twelve-hour rule itself (routine/sessions.py), so this is housekeeping: a night
+    # it does not run changes nobody's screen.
+    'abandon-forgotten-sessions': {
+        'task': 'routine.abandon_forgotten_sessions',
+        'schedule': crontab(hour=1, minute=5),
+    },
     # A training day opened and never closed still says what was left of it (the owner,
     # 2026-09-20). Nightly, after midnight in Damascus, so "yesterday" is really over.
     'close-open-training-days': {
