@@ -3445,3 +3445,7 @@ msgid ""
 "That link is not on a host this app plays media from. Upload the file "
 "instead."
 msgstr "هذا الرابط ليس على مضيف يشغّل منه التطبيق الوسائط. ارفع الملف بدلاً من ذلك."
+
+#: users/views.py
+msgid "action must be approve or reject"
+msgstr "يجب أن يكون الإجراء الموافقة أو الرفض"

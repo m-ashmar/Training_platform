@@ -418,6 +418,12 @@ No plan is generated from an activity level the client never chose (the owner,
 `activity_level_required` (`field: "activity_level"`) until it is written, and a trainer's
 plan without `daily_calories` answers 400 `client_activity_level_required`.
 
+`advice/latest/` is **not** an AI route, despite the `has_ai_advice` entitlement's
+name: the sentence is composed by `diet/tasks.py` from the client's goal, their plan's
+calorie target and their BMI, so it carries the diet guard and neither `HasAIAdviceAccess`
+nor the `ai_consent_required` guard. Everything the AI coach actually answers is under
+`/api/ai/` and carries both.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/diet/v1/advice/latest/` | auth, HasDietAccess | `DailyAdviceView` |
@@ -639,6 +645,8 @@ refuse with the same codes, because both go through the same two helpers:
 
 | `code` | Status | When |
 |---|---|---|
+| `request_id_required` | 400 | No `request_id` in the body (`trainer/respond-to-request/`; the client side answers `request_not_found` instead) |
+| `invalid_action` | 400 | `action` is neither `approve` nor `reject` |
 | `request_not_found` | 404 | No pending request or invitation of yours by that id |
 | `request_predates_consent` | 409 | Sent before `initiated_by` existed — ask for a new one |
 | `wrong_party_to_answer` | 403 | You sent this one; the other side accepts it |

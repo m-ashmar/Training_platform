@@ -1714,6 +1714,7 @@ class ClientRespondToTrainerInviteView(APIView):
 
     Refusals carry a `code` — branch on it, never on the message:
 
+      invalid_action            400  `action` is neither "approve" nor "reject"
       request_not_found         404  no pending invitation of yours by that id
       request_predates_consent  409  sent before `initiated_by` existed; ask for a new one
       wrong_party_to_answer     403  you sent this one; the trainer accepts it
@@ -1737,7 +1738,8 @@ class ClientRespondToTrainerInviteView(APIView):
         # AttributeError and a 500, on the path a client uses to accept a trainer.
         action = str(body_dict(request).get('action') or '').lower()
         if action not in ('approve', 'reject'):
-            return Response({'error': _('action must be approve or reject')},
+            return Response({'error': _('action must be approve or reject'),
+                             'code': 'invalid_action'},
                             status=status.HTTP_400_BAD_REQUEST)
         try:
             relation = TrainerClientRelation.objects.select_related('trainer').get(
@@ -2010,6 +2012,8 @@ class TrainerRespondToRequestView(APIView):
     Refusals carry a `code` — branch on it, never on the message. The same set as
     `client/respond-to-invite/`, from the same two shared helpers:
 
+      request_id_required       400  no `request_id` in the body
+      invalid_action            400  `action` is neither "approve" nor "reject"
       request_not_found         404  no pending request of yours by that id
       request_predates_consent  409  sent before `initiated_by` existed; ask for a new one
       wrong_party_to_answer     403  you invited them; the client accepts it
@@ -2038,13 +2042,14 @@ class TrainerRespondToRequestView(APIView):
         
         if not request_id:
             return Response(
-                {'error': _('request_id is required')}, 
+                {'error': _('request_id is required'), 'code': 'request_id_required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         if action not in ['approve', 'reject']:
             return Response(
-                {'error': _('action must be either "approve" or "reject"')}, 
+                {'error': _('action must be either "approve" or "reject"'),
+                 'code': 'invalid_action'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
