@@ -1398,7 +1398,10 @@ msgid ""
 "Thank you for registering with Training Platform! To complete your "
 "registration and activate your account, please use the verification code "
 "below:"
-msgstr "شكرًا لتسجيلك في منصة التدريب! لإكمال التسجيل وتفعيل حسابك، استخدم رمز التحقق أدناه:"
+msgstr ""
+"شكرًا لتسجيلك في منصة التدريب! لإكمال التسجيل وتفعيل حسابك، استخدم رمز التحقق "
+"أدناه:"
+
 #: templates/emails/otp_verification.html:105
 msgid "Enter this code in the verification page to activate your account."
 msgstr "أدخل هذا الرمز في صفحة التحقق لتفعيل حسابك."
@@ -1412,7 +1415,9 @@ msgstr "مهم:"
 msgid ""
 "This code will expire in 10 minutes. If you didn't request this code, please "
 "ignore this email."
-msgstr "تنتهي صلاحية هذا الرمز خلال 10 دقائق. إذا لم تطلب هذا الرمز، يُرجى تجاهل هذه الرسالة."
+msgstr ""
+"تنتهي صلاحية هذا الرمز خلال 10 دقائق. إذا لم تطلب هذا الرمز، يُرجى تجاهل هذه "
+"الرسالة."
 
 #: templates/emails/otp_verification.html:111
 msgid "If you didn't create an account with us, please disregard this email."
@@ -1451,13 +1456,16 @@ msgstr "أدخل هذا الرمز في التطبيق لإعادة تعيين �
 msgid ""
 "This code will expire in 10 minutes. If you didn't request a password reset, "
 "please ignore this email. Your password will remain unchanged."
-msgstr "تنتهي صلاحية هذا الرمز خلال 10 دقائق. إذا لم تطلب إعادة تعيين كلمة المرور، يُرجى تجاهل هذه الرسالة. ستبقى كلمة مرورك دون تغيير."
+msgstr ""
+"تنتهي صلاحية هذا الرمز خلال 10 دقائق. إذا لم تطلب إعادة تعيين كلمة المرور، "
+"يُرجى تجاهل هذه الرسالة. ستبقى كلمة مرورك دون تغيير."
 
 #: templates/emails/password_reset_otp.html:108
 msgid ""
 "If you didn't request this, someone may have entered your email by mistake. "
 "No action is needed."
 msgstr "الصفحة غير موجودة."
+
 #: training_platform/error_handlers.py:34
 msgid "Page not found."
 msgstr "الصفحة غير موجودة."
@@ -1743,7 +1751,8 @@ msgstr "يوجد مستخدم بهذا الاسم بالفعل."
 
 #: users/serializers.py:106 users/views.py:933
 msgid "Too many failed login attempts. Please try again in 15 minutes."
-msgstr "محاولات تسجيل دخول فاشلة كثيرة جداً. يرجى المحاولة مرة أخرى بعد 15 دقيقة."
+msgstr ""
+"محاولات تسجيل دخول فاشلة كثيرة جداً. يرجى المحاولة مرة أخرى بعد 15 دقيقة."
 
 #: users/serializers.py:114
 msgid "Unable to log in with provided credentials."
@@ -2037,7 +2046,9 @@ msgstr "لا توجد صورة للملف الشخصي لإزالتها"
 #: users/views.py:1704
 msgid ""
 "Too many password reset requests. Please wait 1 hour before trying again."
-msgstr "طلبات إعادة تعيين كلمة المرور كثيرة جداً. يرجى الانتظار ساعة واحدة قبل المحاولة مرة أخرى."
+msgstr ""
+"طلبات إعادة تعيين كلمة المرور كثيرة جداً. يرجى الانتظار ساعة واحدة قبل "
+"المحاولة مرة أخرى."
 
 #: users/views.py:1726
 msgid ""
@@ -2409,8 +2420,8 @@ msgstr "بعض مجموعات هذا اليوم لم تُسجَّل بعد."
 
 #: routine/views.py
 msgid ""
-"This routine already belongs to another client. Create a copy for this client "
-"instead."
+"This routine already belongs to another client. Create a copy for this "
+"client instead."
 msgstr "هذا البرنامج مخصص لمتدرب آخر. أنشئ نسخة لهذا المتدرب بدلاً منه."
 
 #: users/views.py
@@ -2418,7 +2429,9 @@ msgid "Coaching will end when the current month ends."
 msgstr "سينتهي التدريب بنهاية الشهر الحالي."
 
 #: users/views.py
-msgid "The client has a paid month running. You can end the coaching when it finishes."
+msgid ""
+"The client has a paid month running. You can end the coaching when it "
+"finishes."
 msgstr "لدى المتدرب شهر مدفوع جارٍ. يمكنك إنهاء التدريب عند انتهائه."
 
 #: notifications/domain/trainer_client_events.py
@@ -2495,7 +2508,8 @@ msgstr "البرنامج يخص متدرباً واحداً. انسخه لكل �
 msgid ""
 "Your coaching is paused until the next month is paid. You can still see your "
 "routine."
-msgstr "تدريبك متوقف حتى يُدفع الشهر التالي. لا يزال بإمكانك الاطلاع على برنامجك."
+msgstr ""
+"تدريبك متوقف حتى يُدفع الشهر التالي. لا يزال بإمكانك الاطلاع على برنامجك."
 
 #: users/exceptions.py
 msgid ""
@@ -2597,9 +2611,10 @@ msgstr "تم تعيين برنامج جديد لك: %(routine)s."
 
 #: users/exceptions.py
 msgid ""
-"Your coaching is on hold until support resolves its payment. You can still see "
-"your routine."
-msgstr "تدريبك معلّق حتى يعالج الدعم دفعته. لا يزال بإمكانك الاطلاع على برنامجك."
+"Your coaching is on hold until support resolves its payment. You can still "
+"see your routine."
+msgstr ""
+"تدريبك معلّق حتى يعالج الدعم دفعته. لا يزال بإمكانك الاطلاع على برنامجك."
 
 #: routine/views.py
 msgid "Too much at once: split the clients over more than one request."
@@ -2631,17 +2646,18 @@ msgstr "اختر مستوى نشاطك أولاً: سعراتك اليومية �
 
 #: diet/trainer_services.py
 msgid ""
-"This client has not chosen an activity level yet. Ask them to, or set the daily "
-"calories yourself."
-msgstr "لم يختر هذا المتدرب مستوى نشاطه بعد. اطلب منه ذلك، أو حدّد السعرات اليومية بنفسك."
+"This client has not chosen an activity level yet. Ask them to, or set the "
+"daily calories yourself."
+msgstr ""
+"لم يختر هذا المتدرب مستوى نشاطه بعد. اطلب منه ذلك، أو حدّد السعرات اليومية "
+"بنفسك."
 
 #: users/views.py
 msgid "Upload the profile picture with /api/auth/user/profile-picture/."
 msgstr "ارفع صورة الملف الشخصي عبر /api/auth/user/profile-picture/."
 
 #: routine/serializers.py routine/views.py
-msgid ""
-"How many reps? Send `as_prescribed: true` to use your coach's number."
+msgid "How many reps? Send `as_prescribed: true` to use your coach's number."
 msgstr "كم تكرارًا؟ أرسل `as_prescribed: true` لاستخدام رقم مدربك."
 
 #: routine/serializers.py routine/views.py
@@ -2679,7 +2695,8 @@ msgstr "متدربوك هذا الأسبوع"
 #: notifications/domain/progress_events.py
 #, python-format
 msgid "%(trained)s of %(clients)s clients trained. %(attention)s need a look."
-msgstr "تدرّب %(trained)s من %(clients)s متدربين. %(attention)s بحاجة إلى متابعة."
+msgstr ""
+"تدرّب %(trained)s من %(clients)s متدربين. %(attention)s بحاجة إلى متابعة."
 
 #: routine/views.py
 msgid "Exercise not found."
@@ -2693,8 +2710,7 @@ msgstr "انتهت صلاحية عملية الدفع"
 msgid ""
 "You did not finish your last checkout, so it was closed. You can start again "
 "whenever you like."
-msgstr ""
-"لم تُكمل عملية الدفع الأخيرة، لذلك أُغلقت. يمكنك البدء من جديد متى شئت."
+msgstr "لم تُكمل عملية الدفع الأخيرة، لذلك أُغلقت. يمكنك البدء من جديد متى شئت."
 
 #: subscription/serializers.py
 msgid ""
@@ -2702,15 +2718,14 @@ msgid ""
 "the subscription itself."
 msgstr ""
 "التجديد ليس تلقائياً: لا يُخصم أي مبلغ من دونك. الإلغاء من الاشتراك نفسه."
+
 # Added 2026-09-20: routine extras (BACKEND_DELTA items 11, 14, 15) and the
 # two security gaps closed with them.
-
 #: routine/serializers.py routine/views.py
 msgid ""
-"A progress record cannot be moved to another exercise or date. Record "
-"the work on its own day."
-msgstr ""
-"لا يمكن نقل سجلّ التقدّم إلى تمرين آخر أو تاريخ آخر. سجّل العمل في يومه."
+"A progress record cannot be moved to another exercise or date. Record the "
+"work on its own day."
+msgstr "لا يمكن نقل سجلّ التقدّم إلى تمرين آخر أو تاريخ آخر. سجّل العمل في يومه."
 
 #: routine/serializers.py
 msgid "A day's progress cannot be moved to another routine, day or date."
@@ -2718,11 +2733,11 @@ msgstr "لا يمكن نقل تقدّم اليوم إلى برنامج آخر أ
 
 #: routine/serializers.py
 msgid ""
-"A logged set cannot be moved to another exercise, session, set number "
-"or date. Delete it and log it where it belongs."
+"A logged set cannot be moved to another exercise, session, set number or "
+"date. Delete it and log it where it belongs."
 msgstr ""
-"لا يمكن نقل المجموعة المسجّلة إلى تمرين آخر أو جلسة أخرى أو رقم مجموعة "
-"آخر أو تاريخ آخر. احذفها وسجّلها في مكانها الصحيح."
+"لا يمكن نقل المجموعة المسجّلة إلى تمرين آخر أو جلسة أخرى أو رقم مجموعة آخر أو "
+"تاريخ آخر. احذفها وسجّلها في مكانها الصحيح."
 
 #: routine/serializers.py
 msgid "How hard it felt is a number from %(low)d to %(high)d."
@@ -2741,8 +2756,8 @@ msgid ""
 "Every set needs its own `client_uuid`, so a re-sent batch is not logged "
 "twice."
 msgstr ""
-"كل مجموعة تحتاج إلى `client_uuid` خاص بها، حتى لا تُسجَّل الدفعة مرّتين "
-"عند إعادة إرسالها."
+"كل مجموعة تحتاج إلى `client_uuid` خاص بها، حتى لا تُسجَّل الدفعة مرّتين عند "
+"إعادة إرسالها."
 
 #: routine/views.py
 msgid "exercise_id is required."
@@ -2771,6 +2786,7 @@ msgstr "أرسل `sets`: قائمة المجموعات المراد مزامنت
 #: routine/views.py
 msgid "A sync carries at most %(max)d sets."
 msgstr "تحمل عملية المزامنة الواحدة %(max)d مجموعة كحدّ أقصى."
+
 #: chat/serializers.py
 msgid "Write something first."
 msgstr "اكتب شيئًا أولًا."
@@ -2847,6 +2863,7 @@ msgstr "رسالة جديدة"
 #, python-format
 msgid "%(sender)s: %(preview)s"
 msgstr "%(sender)s: %(preview)s"
+
 #: moderation/models.py
 msgctxt "moderation"
 msgid "User"
@@ -2993,6 +3010,7 @@ msgstr "لا يوجد حساب بهذا المعرّف."
 #: moderation/serializers.py
 msgid "Say which version of the policy is being agreed to."
 msgstr "حدّد إصدار السياسة الذي تجري الموافقة عليه."
+
 #: training_platform/file_security.py
 msgid "This file is not a video. Upload an MP4 or a WebM."
 msgstr "هذا الملف ليس فيديو. ارفع ملف MP4 أو WebM."
@@ -3067,8 +3085,7 @@ msgstr ""
 #: policy/models.py
 msgid ""
 "Off until an operator turns it on, so a half-written row is never served."
-msgstr ""
-"مطفأة حتى يشغّلها المشغّل، كي لا يُقدَّم سطر لم يكتمل."
+msgstr "مطفأة حتى يشغّلها المشغّل، كي لا يُقدَّم سطر لم يكتمل."
 
 #: policy/models.py
 msgid "When two rows match one build, the higher number wins."
@@ -3085,10 +3102,8 @@ msgstr "اذكر قناة واحدة على الأقل، من: %(channels)s."
 
 #: policy/models.py
 #, python-format
-msgid ""
-"There is no channel called %(channel)s. The channels are %(channels)s."
-msgstr ""
-"لا توجد قناة باسم %(channel)s. القنوات هي %(channels)s."
+msgid "There is no channel called %(channel)s. The channels are %(channels)s."
+msgstr "لا توجد قناة باسم %(channel)s. القنوات هي %(channels)s."
 
 #: policy/models.py
 msgid "Use up to three dotted numbers, like 1.4.0"
@@ -3105,11 +3120,11 @@ msgstr "يجب أن تأتي النهاية بعد البداية."
 #: policy/theme_tokens.py
 #, python-format
 msgid ""
-"%(name)s takes a colour for each theme, like {\"dark\": \"#FF5A1F\", "
-"\"light\": \"#F5511A\"}."
+"%(name)s takes a colour for each theme, like {\"dark\": \"#FF5A1F\", \"light"
+"\": \"#F5511A\"}."
 msgstr ""
-"%(name)s يأخذ لوناً لكل سمة، مثل {\"dark\": \"#FF5A1F\", "
-"\"light\": \"#F5511A\"}."
+"%(name)s يأخذ لوناً لكل سمة، مثل {\"dark\": \"#FF5A1F\", \"light\": \"#F5511A"
+"\"}."
 
 #: policy/theme_tokens.py
 #, python-format
@@ -3132,8 +3147,8 @@ msgid ""
 "%(name)s must be an opaque hex colour, like \"#FF5A1F\". A see-through value "
 "cannot be checked for readability."
 msgstr ""
-"%(name)s يجب أن يكون لوناً ست عشرياً غير شفاف، مثل \"#FF5A1F\". القيمة "
-"الشفافة لا يمكن التحقق من وضوح القراءة عليها."
+"%(name)s يجب أن يكون لوناً ست عشرياً غير شفاف، مثل \"#FF5A1F\". القيمة الشفافة "
+"لا يمكن التحقق من وضوح القراءة عليها."
 
 #: policy/theme_tokens.py
 #, python-format
@@ -3154,8 +3169,7 @@ msgstr "%(name)s يأخذ واحدة أو أكثر من %(props)s."
 #, python-format
 msgid ""
 "%(name)s has no property called %(prop)s. It takes one or more of %(props)s."
-msgstr ""
-"%(name)s لا يملك خاصية باسم %(prop)s. يأخذ واحدة أو أكثر من %(props)s."
+msgstr "%(name)s لا يملك خاصية باسم %(prop)s. يأخذ واحدة أو أكثر من %(props)s."
 
 #: policy/theme_tokens.py
 #, python-format
@@ -3174,10 +3188,8 @@ msgstr "قيمة letterSpacing في %(name)s تُكتب بوحدة em، مثل \
 
 #: policy/theme_tokens.py
 #, python-format
-msgid ""
-"The letterSpacing of %(name)s must be between %(low)sem and %(high)sem."
-msgstr ""
-"قيمة letterSpacing في %(name)s يجب أن تكون بين %(low)sem و %(high)sem."
+msgid "The letterSpacing of %(name)s must be between %(low)sem and %(high)sem."
+msgstr "قيمة letterSpacing في %(name)s يجب أن تكون بين %(low)sem و %(high)sem."
 
 #: policy/theme_tokens.py
 #, python-format
@@ -3190,16 +3202,15 @@ msgid ""
 "The %(prop)s of %(name)s must be between %(low)spx and %(high)spx. Text too "
 "small to read is text that has been hidden."
 msgstr ""
-"قيمة %(prop)s في %(name)s يجب أن تكون بين %(low)spx و %(high)spx. النص الأصغر "
-"من أن يُقرأ نصٌّ مخفيّ."
+"قيمة %(prop)s في %(name)s يجب أن تكون بين %(low)spx و %(high)spx. النص "
+"الأصغر من أن يُقرأ نصٌّ مخفيّ."
 
 #: policy/theme_tokens.py
 msgid ""
 "A theme is a map of token name to value, like {\"ember\": {\"dark\": "
 "\"#FF5A1F\"}}."
 msgstr ""
-"السمة خريطة من اسم الرمز إلى قيمته، مثل {\"ember\": {\"dark\": "
-"\"#FF5A1F\"}}."
+"السمة خريطة من اسم الرمز إلى قيمته، مثل {\"ember\": {\"dark\": \"#FF5A1F\"}}."
 
 #: policy/theme_tokens.py
 #, python-format
@@ -3218,6 +3229,7 @@ msgid ""
 msgstr ""
 "التباين بين %(fg)s و %(bg)s في سمة %(theme)s هو %(ratio)s:1 فقط، أقل من "
 "%(minimum)s:1 التي تشترطها المنصّة. سيصدر التطبيق بنص غير مقروء."
+
 #: ai_assistant/services/chat_service.py
 msgid "I'm taking longer than usual. Please try again in a moment."
 msgstr "أستغرق وقتًا أطول من المعتاد. يرجى المحاولة مرة أخرى بعد قليل."
@@ -3233,6 +3245,7 @@ msgstr "خدمة الذكاء الاصطناعي غير متاحة مؤقتًا.
 #: ai_assistant/services/chat_service.py
 msgid "I'm temporarily unavailable. Please try again shortly."
 msgstr "الخدمة غير متاحة مؤقتًا. يرجى المحاولة مرة أخرى بعد قليل."
+
 # The per-trainer exercise library (BACKEND_DELTA item 7): a coach's own
 # demonstration of a shared exercise.
 #: mediakit/models.py
@@ -3248,8 +3261,7 @@ msgid "Attach the file as `file`."
 msgstr "أرفق الملف في الحقل `file`."
 
 #: mediakit/trainer_views.py
-msgid ""
-"You already have %(limit)s clips on this exercise. Replace one instead."
+msgid "You already have %(limit)s clips on this exercise. Replace one instead."
 msgstr "لديك %(limit)s مقاطع على هذا التمرين. استبدل أحدها بدل الإضافة."
 
 #: mediakit/trainer_views.py
@@ -3261,6 +3273,7 @@ msgid ""
 "Use /api/v1/trainer/exercise-media/ for your own demonstration of an "
 "exercise."
 msgstr "استخدم /api/v1/trainer/exercise-media/ لعرضك الخاص للتمرين."
+
 #. The money screens (screens/07-money): the PDF receipt, the wallet's activity
 #. list, the agent directory. Arabic is the primary language of every one of them —
 #. a receipt that arrives in English for an Arabic customer is the gap the spec
@@ -3398,6 +3411,7 @@ msgstr "تحويل"
 #: wallet/views.py:252
 msgid "No such transaction"
 msgstr "لا توجد حركة بهذا الرقم"
+
 # The second side-bug pass (SIDE_BUGS.md S-002..S-031): one day per set, and the
 # exercise-media routes answering without handing the caller an exception.
 #: routine/models.py routine/serializers.py
@@ -3405,8 +3419,8 @@ msgid ""
 "A set is logged on the day of the exercise it belongs to (%(day)s). Log it "
 "against that day's progress record."
 msgstr ""
-"تُسجَّل المجموعة في يوم التمرين الذي تتبع له (%(day)s). سجّلها على سجل تقدّم "
-"ذلك اليوم."
+"تُسجَّل المجموعة في يوم التمرين الذي تتبع له (%(day)s). سجّلها على سجل تقدّم ذلك "
+"اليوم."
 
 #: routine/views.py
 msgid "Could not save that image. Please try again."
@@ -3444,7 +3458,8 @@ msgstr "يجب أن يكون content رابط http(s) عند اختيار %(kind
 msgid ""
 "That link is not on a host this app plays media from. Upload the file "
 "instead."
-msgstr "هذا الرابط ليس على مضيف يشغّل منه التطبيق الوسائط. ارفع الملف بدلاً من ذلك."
+msgstr ""
+"هذا الرابط ليس على مضيف يشغّل منه التطبيق الوسائط. ارفع الملف بدلاً من ذلك."
 
 #: routine/views.py
 msgid "Could not create that exercise. Please try again."
@@ -3464,6 +3479,7 @@ msgstr "عنصر الوسائط %(id)s ليس ضمن هذا التمرين."
 #, python-format
 msgid "Media item %(id)s could not be removed."
 msgstr "تعذّر حذف عنصر الوسائط %(id)s."
+
 #: social/views.py
 msgid "This challenge is not running."
 msgstr "هذا التحدي غير جارٍ حاليًا."
@@ -3495,6 +3511,679 @@ msgstr "جارٍ البحث بعمق أكبر..."
 #: ai_assistant/services/chat_service.py
 msgid "Almost done..."
 msgstr "أوشكت على الانتهاء..."
+
 #: users/views.py
 msgid "action must be approve or reject"
 msgstr "يجب أن يكون الإجراء الموافقة أو الرفض"
+
+# SIDE_BUGS.md S-019: every msgid below reached an Arabic-speaking user in English,
+# because it went through gettext and then never reached this catalogue at all — the
+# gate only checked entries that WERE here. `policy` was the finding; the sweep that
+# followed it found 152 across ten first-party apps. The check that now keeps the
+# list at zero is tests/test_regression_gate.py
+# test_every_first_party_msgid_reaches_the_arabic_catalogue.
+#: ai_assistant/consumers.py
+msgid "Expected a JSON object."
+msgstr "المتوقّع كائن JSON."
+
+#: ai_assistant/consumers.py
+msgid "Your session has expired. Please sign in again."
+msgstr "انتهت صلاحية جلستك. يرجى تسجيل الدخول من جديد."
+
+#: ai_assistant/consumers.py
+msgid "`content` must be text."
+msgstr "يجب أن يكون `content` نصاً."
+
+#: ai_assistant/tools/diet_tools.py
+msgid "I need the date as YYYY-MM-DD."
+msgstr "أحتاج التاريخ بصيغة YYYY-MM-DD."
+
+#: ai_assistant/tools/diet_tools.py
+msgid "I need the number of days as a whole number."
+msgstr "أحتاج عدد الأيام كرقم صحيح."
+
+#: ai_assistant/tools/diet_tools.py
+msgid "This client has not tracked any days yet."
+msgstr "لم يسجّل هذا المتدرّب أي يوم بعد."
+
+#: analytics/serializers.py
+msgid "metadata must be JSON."
+msgstr "يجب أن تكون metadata بصيغة JSON."
+
+#: analytics/serializers.py
+#, python-format
+msgid "metadata is too large (%(size)d bytes; the limit is %(limit)d)."
+msgstr "حجم metadata كبير جداً (%(size)d بايت؛ الحدّ هو %(limit)d)."
+
+#: analytics/serializers.py
+#, python-format
+msgid "%(value)s is recorded by the server and cannot be logged by the app."
+msgstr "يسجّل الخادم %(value)s بنفسه، ولا يمكن للتطبيق تسجيلها."
+
+#: analytics/serializers.py
+#, python-format
+msgid "%(metric)s must be between %(low)s and %(high)s."
+msgstr "يجب أن تكون %(metric)s بين %(low)s و%(high)s."
+
+#: analytics/serializers.py
+#, python-format
+msgid "%(name)s must be between 0 and 100000."
+msgstr "يجب أن تكون %(name)s بين 0 و100000."
+
+#: analytics/serializers.py
+msgid "target_value must be greater than zero."
+msgstr "يجب أن تكون target_value أكبر من صفر."
+
+#: analytics/serializers.py
+msgid "A goal is completed by reaching its target, not by setting its status."
+msgstr "يكتمل الهدف ببلوغ قيمته المستهدفة، لا بتغيير حالته."
+
+#: analytics/serializers.py
+msgid "A completed goal cannot be reopened."
+msgstr "لا يمكن إعادة فتح هدف مكتمل."
+
+#: analytics/views.py
+msgid "new_value is required"
+msgstr "الحقل new_value مطلوب"
+
+#: analytics/views.py
+msgid "new_value must be a finite number"
+msgstr "يجب أن تكون new_value رقماً محدوداً"
+
+#: diet/models.py
+msgid ""
+"Nutrition is stored per 100 g. To set how big a portion is, use unit grams "
+"instead of the serving size."
+msgstr ""
+"تُخزَّن القيم الغذائية لكل 100 غرام. لتحديد حجم الحصة، استخدم وحدة الغرامات بدل "
+"حجم الحصة."
+
+#: diet/tasks.py
+#, python-format
+msgid ""
+"Aim for a moderate deficit of 300 to 500 calories a day. Your target is "
+"%(kcal)s calories."
+msgstr "استهدف عجزاً معتدلاً من 300 إلى 500 سعرة يومياً. هدفك %(kcal)s سعرة."
+
+#: diet/tasks.py
+#, python-format
+msgid "Eat %(kcal)s calories a day, with enough protein to build muscle."
+msgstr "تناول %(kcal)s سعرة يومياً، مع بروتين كافٍ لبناء العضلات."
+
+#: diet/tasks.py
+#, python-format
+msgid "Keep your intake at %(kcal)s calories a day to hold your weight."
+msgstr "حافظ على %(kcal)s سعرة يومياً للحفاظ على وزنك."
+
+#: diet/tasks.py
+msgid "More vegetables and lean protein would help."
+msgstr "سيساعدك المزيد من الخضار والبروتين قليل الدهون."
+
+#: diet/tasks.py
+msgid "Stay hydrated and maintain a balanced diet with regular meals."
+msgstr "اشرب ماءً كافياً وحافظ على نظام متوازن بوجبات منتظمة."
+
+#: diet/trainer_services.py
+msgid "duration_weeks must be a whole number"
+msgstr "يجب أن تكون duration_weeks رقماً صحيحاً"
+
+#: diet/trainer_services.py
+msgid "duration_weeks must be between 1 and 52"
+msgstr "يجب أن تكون duration_weeks بين 1 و52"
+
+#: diet/trainer_services.py
+#, python-format
+msgid "%(value)s is not a meal type"
+msgstr "%(value)s ليست نوع وجبة"
+
+#: diet/trainer_services.py
+#, python-format
+msgid "That date is outside the plan (%(a)s to %(b)s)"
+msgstr "هذا التاريخ خارج الخطة (%(a)s إلى %(b)s)"
+
+#: diet/trainer_services.py
+#, python-format
+msgid "A %(slot)s already exists for %(date)s in this plan"
+msgstr "توجد %(slot)s بالفعل في %(date)s ضمن هذه الخطة"
+
+#: diet/trainer_services.py
+msgid ""
+"That meal is in the past and records what the client ate. Change a future "
+"meal instead."
+msgstr "هذه الوجبة في الماضي وتسجّل ما أكله المتدرّب. عدّل وجبة قادمة بدلاً منها."
+
+#: diet/trainer_services.py
+#, python-format
+msgid "A %(slot)s already exists at that time on %(date)s"
+msgstr "توجد %(slot)s بالفعل في ذلك الوقت من %(date)s"
+
+#: diet/trainer_services.py
+msgid "This client is no longer assigned to you"
+msgstr "لم يعد هذا المتدرّب تابعاً لك"
+
+#: diet/trainer_services.py
+msgid "This plan has been replaced by a newer one and is no longer followed"
+msgstr "استُبدلت هذه الخطة بأخرى أحدث ولم تعد متّبعة"
+
+#: diet/trainer_services.py
+msgid "A meal needs at least one food"
+msgstr "تحتاج الوجبة إلى صنف واحد على الأقل"
+
+#: diet/trainer_services.py
+msgid "food_items must be a list"
+msgstr "يجب أن تكون food_items قائمة"
+
+#: diet/trainer_services.py
+msgid "Each food item must be an object"
+msgstr "يجب أن يكون كل صنف كائناً"
+
+#: diet/trainer_services.py
+msgid "Each food item needs a numeric food_id and quantity"
+msgstr "يحتاج كل صنف إلى food_id وكمية بقيمتين رقميتين"
+
+#: diet/trainer_services.py
+#, python-format
+msgid "Quantity for food %(id)s must be between %(lo)d and %(hi)d grams"
+msgstr "يجب أن تكون كمية الصنف %(id)s بين %(lo)d و%(hi)d غرام"
+
+#: diet/trainer_services.py
+#, python-format
+msgid "Food %(id)s appears twice in this meal"
+msgstr "الصنف %(id)s مكرّر في هذه الوجبة"
+
+#: diet/trainer_services.py
+#, python-format
+msgid "No such food: %(ids)s"
+msgstr "لا يوجد صنف بهذا الرقم: %(ids)s"
+
+#: diet/trainer_services.py
+#, python-format
+msgid "%(food)s contains %(allergens)s, which this client has declared"
+msgstr "يحتوي %(food)s على %(allergens)s، وهي مما صرّح به هذا المتدرّب"
+
+#: diet/trainer_services.py
+msgid "chosen for you by your trainer"
+msgstr "اختاره لك مدرّبك"
+
+#: diet/trainer_services.py
+msgid "actual_quantity must be a number"
+msgstr "يجب أن تكون actual_quantity رقماً"
+
+#: diet/trainer_services.py
+#, python-format
+msgid "actual_quantity must be between 0 and %(hi)d grams"
+msgstr "يجب أن تكون actual_quantity بين 0 و%(hi)d غرام"
+
+#: diet/views.py
+msgid "Failed to retrieve food items"
+msgstr "تعذّر جلب الأصناف الغذائية"
+
+#: diet/views.py
+msgid "Failed to retrieve food categories"
+msgstr "تعذّر جلب فئات الأصناف"
+
+#: diet/views.py
+msgid "Query parameter 'q' is required"
+msgstr "معامل البحث 'q' مطلوب"
+
+#: diet/views.py
+msgid "Failed to search food items"
+msgstr "تعذّر البحث في الأصناف الغذائية"
+
+#: diet/views.py
+msgid "This food is in several slots; pass from_meal and from_macro"
+msgstr "هذا الصنف موجود في أكثر من وجبة؛ أرسل from_meal وfrom_macro"
+
+#: diet/views.py
+msgid "Not found"
+msgstr "غير موجود"
+
+#: diet/views.py
+msgid "local_ratio must be a number from 0 to 1"
+msgstr "يجب أن تكون local_ratio رقماً من 0 إلى 1"
+
+#: diet/views.py
+msgid ""
+"Trainers cannot generate client plans here. Use trainer diet plan creation "
+"instead."
+msgstr ""
+"لا يستطيع المدرّبون توليد خطط المتدرّبين من هنا. استخدم إنشاء خطة غذائية "
+"للمدرّب بدلاً من ذلك."
+
+#: diet/views.py
+msgid "An active subscription is needed to generate a plan."
+msgstr "يلزم اشتراك فعّال لتوليد خطة."
+
+#: diet/views.py
+msgid "You have used your meal plan allowance for today."
+msgstr "استهلكت حصّتك من خطط الوجبات لهذا اليوم."
+
+#: diet/views.py
+msgid "Failed to start diet plan generation"
+msgstr "تعذّر بدء توليد الخطة الغذائية"
+
+#: diet/views.py
+msgid "Task not found"
+msgstr "المهمة غير موجودة"
+
+#: diet/views.py
+msgid "Plan generation failed. Please try again."
+msgstr "فشل توليد الخطة. يرجى المحاولة مرة أخرى."
+
+#: diet/views.py
+#, python-format
+msgid "This many calories cannot be served in %(m)d meals and %(s)d snacks."
+msgstr "لا يمكن توزيع هذا العدد من السعرات على %(m)d وجبات و%(s)d وجبات خفيفة."
+
+#: diet/views.py
+msgid "Incomplete profile for calorie calculation"
+msgstr "الملف الشخصي غير مكتمل لحساب السعرات"
+
+#: diet/views.py
+msgid "Your plan was created. Open it to see today's meals."
+msgstr "أُنشئت خطتك. افتحها لترى وجبات اليوم."
+
+#: diet/views.py
+msgid "We could not build one of your meals from the foods you allow."
+msgstr "تعذّر بناء إحدى وجباتك من الأصناف التي تسمح بها."
+
+#: diet/views.py
+msgid "You already have a plan covering those dates."
+msgstr "لديك خطة تغطّي هذه التواريخ بالفعل."
+
+#: diet/views.py
+msgid ""
+"Your food preferences changed while this plan was being built. Please "
+"generate it again."
+msgstr "تغيّرت تفضيلاتك الغذائية أثناء بناء هذه الخطة. يرجى توليدها من جديد."
+
+#: diet/views.py
+msgid "Your plan could not be saved. Please try again."
+msgstr "تعذّر حفظ خطتك. يرجى المحاولة مرة أخرى."
+
+#: diet/views.py
+msgid "Failed to retrieve daily advice"
+msgstr "تعذّر جلب نصيحة اليوم"
+
+#: diet/views.py
+msgid "Only trainers can access diet plan templates"
+msgstr "قوالب الخطط الغذائية متاحة للمدرّبين فقط"
+
+#: diet/views.py
+msgid "Failed to retrieve templates"
+msgstr "تعذّر جلب القوالب"
+
+#: diet/views.py
+msgid "Only trainers can create diet plans"
+msgstr "إنشاء الخطط الغذائية متاح للمدرّبين فقط"
+
+#: diet/views.py
+msgid "client_id, template_id, and start_date are required"
+msgstr "الحقول client_id وtemplate_id وstart_date مطلوبة"
+
+#: diet/views.py
+msgid "Invalid start_date format"
+msgstr "صيغة start_date غير صحيحة"
+
+#: diet/views.py
+msgid "Only trainers can access client diet plans"
+msgstr "خطط المتدرّبين الغذائية متاحة للمدرّبين فقط"
+
+#: diet/views.py
+msgid "client_id parameter is required"
+msgstr "المعامل client_id مطلوب"
+
+#: diet/views.py
+msgid "Only trainers can manage meals"
+msgstr "إدارة الوجبات متاحة للمدرّبين فقط"
+
+#: diet/views.py
+#, python-format
+msgid "At most %(n)d meals in one request"
+msgstr "%(n)d وجبات كحدّ أقصى في الطلب الواحد"
+
+#: diet/views.py
+msgid "Invalid target_date format"
+msgstr "صيغة target_date غير صحيحة"
+
+#: diet/views.py
+msgid "Invalid scheduled_time format. Use HH:MM."
+msgstr "صيغة scheduled_time غير صحيحة. استخدم HH:MM."
+
+#: diet/views.py
+msgid "Meals created successfully"
+msgstr "تم إنشاء الوجبات بنجاح"
+
+#: diet/views.py
+msgid "diet_plan_id, meal_type, target_date, and food_items are required"
+msgstr "الحقول diet_plan_id وmeal_type وtarget_date وfood_items مطلوبة"
+
+#: diet/views.py
+msgid "A meal id is required"
+msgstr "رقم الوجبة مطلوب"
+
+#: diet/views.py
+msgid "Only trainers can update meals"
+msgstr "تعديل الوجبات متاح للمدرّبين فقط"
+
+#: diet/views.py
+msgid "Only trainers can delete meals"
+msgstr "حذف الوجبات متاح للمدرّبين فقط"
+
+#: diet/views.py
+msgid "You can only view plans for your current clients"
+msgstr "يمكنك عرض خطط متدرّبيك الحاليين فقط"
+
+#: diet/views.py
+msgid "date must be YYYY-MM-DD"
+msgstr "يجب أن يكون date بصيغة YYYY-MM-DD"
+
+#: diet/views.py
+msgid "You can only view meals for your current clients"
+msgstr "يمكنك عرض وجبات متدرّبيك الحاليين فقط"
+
+#: diet/views.py
+msgid "Meal not found"
+msgstr "الوجبة غير موجودة"
+
+#: diet/views.py
+msgid "Only clients can access progress tracking"
+msgstr "تتبّع التقدّم متاح للمتدرّبين فقط"
+
+#: diet/views.py
+msgid "Only clients can complete meals"
+msgstr "إتمام الوجبات متاح للمتدرّبين فقط"
+
+#: diet/views.py
+msgid "This plan has been replaced. Refresh to see your current plan."
+msgstr "استُبدلت هذه الخطة. حدّث الصفحة لترى خطتك الحالية."
+
+#: diet/views.py
+msgid "component_id is required"
+msgstr "الحقل component_id مطلوب"
+
+#: diet/views.py
+msgid "Invalid action. Use 'complete_meal' or 'complete_component'"
+msgstr "إجراء غير صالح. استخدم 'complete_meal' أو 'complete_component'"
+
+#: diet/views.py
+msgid "start_date must be YYYY-MM-DD"
+msgstr "يجب أن يكون start_date بصيغة YYYY-MM-DD"
+
+#: diet/views.py
+msgid "Only clients can interact with meals"
+msgstr "التفاعل مع الوجبات متاح للمتدرّبين فقط"
+
+#: diet/views.py
+msgid "That food is not available to you"
+msgstr "هذا الصنف غير متاح لك"
+
+#: diet/views.py
+msgid "That food is already on this plate"
+msgstr "هذا الصنف موجود في هذا الطبق بالفعل"
+
+#: diet/views.py
+msgid "Swapped"
+msgstr "تم الاستبدال"
+
+#: diet/views.py
+msgid "is_liked is required"
+msgstr "الحقل is_liked مطلوب"
+
+#: diet/views.py
+msgid "Rated"
+msgstr "تم التقييم"
+
+#: diet/views.py
+msgid "kind must be viewed or accepted"
+msgstr "يجب أن تكون kind إمّا viewed أو accepted"
+
+#: diet/views.py
+msgid "Recorded"
+msgstr "تم التسجيل"
+
+#: diet/views.py
+msgid "meal_id and is_liked are required"
+msgstr "الحقلان meal_id وis_liked مطلوبان"
+
+#: diet/views.py
+msgid ""
+"Invalid action. Use swap_food, rate_component, event, complete_component or "
+"rate_meal"
+msgstr ""
+"إجراء غير صالح. استخدم swap_food أو rate_component أو event أو "
+"complete_component أو rate_meal"
+
+#: diet/views.py
+msgid "Only clients can access meal details"
+msgstr "تفاصيل الوجبة متاحة للمتدرّبين فقط"
+
+#: diet/views.py
+msgid "from must be YYYY-MM-DD"
+msgstr "يجب أن يكون from بصيغة YYYY-MM-DD"
+
+#: diet/views.py
+msgid "to must be YYYY-MM-DD"
+msgstr "يجب أن يكون to بصيغة YYYY-MM-DD"
+
+#: policy/exceptions.py
+msgid "This request must declare the app channel it comes from."
+msgstr "يجب أن يصرّح هذا الطلب بقناة التطبيق التي جاء منها."
+
+#: policy/exceptions.py
+msgid "This is not available in this version of the app."
+msgstr "هذا غير متاح في هذه النسخة من التطبيق."
+
+#: policy/models.py
+msgid ""
+"Applies to builds at or above this version, until a row with a higher "
+"version takes over. 0.0.0 is the channel's base row."
+msgstr ""
+"تنطبق على النسخ من هذا الإصدار فما فوق، حتى يحلّ محلّها سطر بإصدار أعلى. 0.0.0 "
+"هو السطر الأساسي للقناة."
+
+#: policy/models.py
+msgid "Prices of plans and routine products."
+msgstr "أسعار الخطط ومنتجات البرامج التدريبية."
+
+#: policy/models.py
+msgid "A trainer's own fee for one-to-one coaching."
+msgstr "أجر المدرّب نفسه على التدريب الفردي."
+
+#: policy/models.py
+msgid ""
+"A store build can never do this. It is fixed in code, not in this table."
+msgstr ""
+"لا يمكن لنسخة المتجر فعل هذا أبداً. هذا ثابت في الشيفرة، لا في هذا الجدول."
+
+#: routine/serializers.py
+#, python-format
+msgid "Weight must be between 0 and %(max)d kg."
+msgstr "يجب أن يكون الوزن بين 0 و%(max)d كغ."
+
+#: routine/serializers.py
+#, python-format
+msgid "Reps must be between 0 and %(max)d."
+msgstr "يجب أن يكون عدد التكرارات بين 0 و%(max)d."
+
+#: routine/serializers.py
+msgid "You cannot log sets against another user's session."
+msgstr "لا يمكنك تسجيل مجموعات على جلسة مستخدم آخر."
+
+#: routine/serializers.py
+msgid "That session and that progress record belong to different users."
+msgstr "تلك الجلسة وسجل التقدّم ذاك يخصّان مستخدمَين مختلفَين."
+
+#: routine/views.py
+msgid ""
+"Clients have recorded work against this exercise, so it cannot be deleted. "
+"Set is_active=false to retire it."
+msgstr ""
+"سجّل متدرّبون عملاً على هذا التمرين، لذا لا يمكن حذفه. اضبط is_active=false "
+"لإيقافه."
+
+#: routine/views.py
+msgid "Day must be a whole number."
+msgstr "يجب أن يكون اليوم رقماً صحيحاً."
+
+#: routine/views.py
+#, python-format
+msgid "status must be one of: %(options)s"
+msgstr "يجب أن تكون status إحدى التالي: %(options)s"
+
+#: routine/views.py
+msgid "period must be one of: week, month, year."
+msgstr "يجب أن تكون period إحدى التالي: week أو month أو year."
+
+#: routine/views.py
+msgid "period must be one of: day, week, month."
+msgstr "يجب أن تكون period إحدى التالي: day أو week أو month."
+
+#: social/serializers.py
+msgid "A comment cannot be moved."
+msgstr "لا يمكن نقل تعليق."
+
+#: social/serializers.py
+msgid "Reply to a comment on the same post."
+msgstr "ردّ على تعليق ضمن المنشور نفسه."
+
+#: social/serializers.py
+msgid "A challenge starts and ends by its dates; only closing it is a choice."
+msgstr "يبدأ التحدي وينتهي بتاريخيه؛ الإغلاق وحده قرار."
+
+#: social/views.py
+msgid "No such post."
+msgstr "لا يوجد منشور بهذا الرقم."
+
+#: social/views.py
+msgid "current_value cannot be negative"
+msgstr "لا يمكن أن تكون current_value سالبة"
+
+#: social/views.py
+msgid "current_value is implausibly large for this challenge"
+msgstr "قيمة current_value كبيرة بشكل غير معقول لهذا التحدي"
+
+#: subscription/views.py
+msgid "A renewal payment is already awaiting completion."
+msgstr "هناك دفعة تجديد بانتظار الإتمام بالفعل."
+
+#: subscription/views.py
+msgid "That payment method is not available right now."
+msgstr "طريقة الدفع هذه غير متاحة حالياً."
+
+#: training_platform/exception_handler.py training_platform/query_params.py
+msgid "Expected a JSON object, not a list."
+msgstr "المتوقّع كائن JSON، لا قائمة."
+
+#: training_platform/exception_handler.py training_platform/parsers.py
+msgid "Text may not contain null bytes."
+msgstr "لا يجوز أن يحتوي النص على بايتات صفرية."
+
+#: training_platform/file_security.py
+msgid "Empty file not allowed."
+msgstr "الملف الفارغ غير مسموح."
+
+#: training_platform/middleware.py
+msgid "Too many failed sign-in attempts. Try again in 15 minutes."
+msgstr "محاولات تسجيل دخول فاشلة كثيرة. حاول مرة أخرى بعد 15 دقيقة."
+
+#: training_platform/numbers.py
+msgid "Must be a finite number."
+msgstr "يجب أن يكون رقماً محدوداً."
+
+#: training_platform/pagination.py
+msgid "Must be at least 1."
+msgstr "يجب ألّا يقلّ عن 1."
+
+#: training_platform/privacy/views.py
+msgid ""
+"Your data could not be erased right now because a payment held for your "
+"trainer could not be returned. Nothing was changed; please try again later."
+msgstr ""
+"تعذّر حذف بياناتك الآن لأن مبلغاً محجوزاً لمدرّبك لم يُعَد. لم يتغيّر شيء؛ يرجى "
+"المحاولة لاحقاً."
+
+#: users/models.py
+#, python-format
+msgid "%(value)s is not a known timezone."
+msgstr "%(value)s ليست منطقة زمنية معروفة."
+
+#: users/views.py
+msgid "This account is not available. Contact support."
+msgstr "هذا الحساب غير متاح. تواصل مع الدعم."
+
+#: users/views.py
+msgid ""
+"You have too many invitations awaiting a reply. Wait for some to be answered "
+"before sending more."
+msgstr ""
+"لديك دعوات كثيرة بانتظار الردّ. انتظر الإجابة على بعضها قبل إرسال المزيد."
+
+#: users/views.py
+msgid "That client already has an outstanding request."
+msgstr "لدى هذا المتدرّب طلب معلّق بالفعل."
+
+#: users/views.py
+msgid ""
+"We could not return your held payment. Nothing was changed; please try again."
+msgstr "تعذّرت إعادة مبلغك المحجوز. لم يتغيّر شيء؛ يرجى المحاولة مرة أخرى."
+
+#: users/views.py
+msgid "That request is being processed. Try again shortly."
+msgstr "هذا الطلب قيد المعالجة. حاول مرة أخرى بعد قليل."
+
+#: users/views.py
+msgid "Invitation not found or already processed"
+msgstr "الدعوة غير موجودة أو تمت معالجتها بالفعل"
+
+#: users/views.py
+msgid ""
+"This invitation predates the current consent flow. Ask your trainer to send "
+"it again."
+msgstr ""
+"هذه الدعوة أقدم من آلية الموافقة الحالية. اطلب من مدرّبك إرسالها من جديد."
+
+#: users/views.py
+msgid "You made this request. The trainer has to accept it."
+msgstr "أنت من قدّم هذا الطلب. على المدرّب أن يقبله."
+
+#: users/views.py
+msgid "Invitation declined."
+msgstr "تم رفض الدعوة."
+
+#: users/views.py
+msgid "Invitation accepted."
+msgstr "تم قبول الدعوة."
+
+#: users/views.py
+msgid "This request has already been answered"
+msgstr "تمت الإجابة على هذا الطلب بالفعل"
+
+#: users/views.py
+msgid "That trainer is no longer available"
+msgstr "لم يعد هذا المدرّب متاحاً"
+
+#: users/views.py
+#, python-format
+msgid "The trainer charge could not be held: %(why)s"
+msgstr "تعذّر حجز أجر المدرّب: %(why)s"
+
+#: users/views.py
+msgid ""
+"We could not return the held payment. Nothing was changed; please try again."
+msgstr "تعذّرت إعادة المبلغ المحجوز. لم يتغيّر شيء؛ يرجى المحاولة مرة أخرى."
+
+#: users/views.py
+msgid ""
+"This request predates the current consent flow. Ask the client to send it "
+"again."
+msgstr ""
+"هذا الطلب أقدم من آلية الموافقة الحالية. اطلب من المتدرّب إرساله من جديد."
+
+#: users/views.py
+msgid "You invited this client. They have to accept the invitation."
+msgstr "أنت من دعا هذا المتدرّب. عليه هو أن يقبل الدعوة."
+
+#: wallet/views.py
+msgid "A reversal cannot itself be reversed"
+msgstr "لا يمكن عكس عملية عكس"

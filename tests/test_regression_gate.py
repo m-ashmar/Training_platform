@@ -1858,6 +1858,249 @@ def test_no_entry_in_the_arabic_catalogue_is_fuzzy():
     assert not fuzzy, f"{len(fuzzy)} fuzzy entries, e.g. {fuzzy[:3]}"
 
 
+#: The names a msgid can be written under, and which argument carries it. `_` is the
+#: project's spelling of `gettext`/`gettext_lazy`; the context and plural forms put the
+#: literal somewhere other than the first argument.
+_GETTEXT_KEYWORDS = {
+    "_": (0,), "gettext": (0,), "gettext_lazy": (0,), "gettext_noop": (0,),
+    "pgettext": (1,), "pgettext_lazy": (1,),
+    "ngettext": (0, 1), "ngettext_lazy": (0, 1),
+    "npgettext": (1, 2), "npgettext_lazy": (1, 2),
+}
+
+_PO_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\",
+               "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+#: `{% trans "..." %}` / `{% translate '...' %}`. `blocktrans` puts the msgid in the
+#: tag's BODY, not in a quoted argument, so it is not read here — the test below
+#: refuses one outright rather than let it pass unchecked.
+_TRANS_TAG = re.compile(
+    r"""\{%\s*(?:trans|translate)\s+(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)')""")
+
+
+def _po_unescape(raw):
+    out, i = [], 0
+    while i < len(raw):
+        if raw[i] == "\\" and i + 1 < len(raw):
+            out.append(_PO_ESCAPES.get(raw[i + 1], raw[i + 1]))
+            i += 2
+        else:
+            out.append(raw[i])
+            i += 1
+    return "".join(out)
+
+
+def _read_po(text):
+    """Every entry in a .po file, read LINE BY LINE.
+
+    Not a regex over blank-line-separated blocks. An entry ends at a blank line or at
+    the next entry's comment lines, and one entry in this catalogue had lost its blank
+    line — which made a block reader glue it to its neighbour and then report a msgid
+    that IS translated as missing. Each entry is
+    `{msgid, msgid_plural, msgstrs, flags}`.
+    """
+    import re
+
+    string = re.compile(r'"((?:[^"\\]|\\.)*)"')
+    entries, entry, field = [], None, None
+
+    def blank():
+        return {"msgid": "", "msgid_plural": "", "msgstrs": [], "flags": set()}
+
+    def flush():
+        nonlocal entry
+        if entry and (entry["msgid"] or entry["msgid_plural"]):
+            entries.append(entry)
+        entry = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush()
+            field = None
+            continue
+        if line.startswith("#"):
+            flush()
+            entry = entry or blank()
+            if line.startswith("#,"):
+                entry["flags"].update(f.strip() for f in line[2:].split(","))
+            field = None
+            continue
+        entry = entry or blank()
+        chunk = "".join(_po_unescape(m) for m in string.findall(line))
+        if line.startswith("msgid_plural"):
+            entry["msgid_plural"], field = chunk, "msgid_plural"
+        elif line.startswith("msgid"):
+            if entry["msgid"] or entry["msgstrs"]:
+                flush()
+                entry = blank()
+            entry["msgid"], field = chunk, "msgid"
+        elif line.startswith("msgctxt"):
+            field = "msgctxt"
+        elif line.startswith("msgstr"):
+            entry["msgstrs"].append(chunk)
+            field = "msgstr"
+        elif line.startswith('"') and field == "msgid":
+            entry["msgid"] += chunk
+        elif line.startswith('"') and field == "msgid_plural":
+            entry["msgid_plural"] += chunk
+        elif line.startswith('"') and field == "msgstr":
+            entry["msgstrs"][-1] += chunk
+    flush()
+    return entries
+
+
+def _first_party_roots():
+    """`(repo root, the packages this project owns)`.
+
+    Every Python package in this checkout, not `INSTALLED_APPS`: `home/` is a package
+    of views included by the URLconf and is not an app, and a future one would be
+    missed the same way. `.venv` is skipped because it holds no top-level
+    `__init__.py` — and naming it would not help in a worktree, where it is a symlink
+    INSIDE the repo.
+    """
+    from pathlib import Path
+
+    from django.conf import settings
+
+    #: `tests` is this suite; the other three are not part of the codebase (CLAUDE.md).
+    not_ours = {"tests", "_excluded", "mobile", "flutter", "yalla_gym"}
+
+    root = Path(settings.BASE_DIR).resolve()
+    return root, {child for child in root.iterdir()
+                  if child.is_dir() and child.name not in not_ours
+                  and (child / "__init__.py").exists()}
+
+
+def _first_party_templates():
+    """Every template the renderer can reach, by Django's two loaders: `DIRS`
+    (BASE_DIR/templates) and each first-party package's own `templates/`. Deliberately
+    not a repo-wide glob — that walks into `.venv` and finds Django's own admin."""
+    root, roots = _first_party_roots()
+    templates = []
+    for template_root in sorted({root / "templates"} | {r / "templates" for r in roots}):
+        if template_root.is_dir():
+            templates += sorted(template_root.rglob("*.html"))
+    return root, templates
+
+
+def _first_party_msgids():
+    """`{msgid: "app/file.py:42"}` for every literal a first-party module translates.
+
+    Parsed with `ast`, which resolves escapes and implicit concatenation exactly as the
+    interpreter does, so the string compared against the catalogue is the one gettext
+    will be handed at runtime. A `_(variable)` cannot be seen here — `makemessages`
+    cannot see one either, which is why the project writes literals.
+    """
+    import ast
+
+    root, roots = _first_party_roots()
+
+    def literal(node, index):
+        args = node.args
+        if len(args) > index and isinstance(args[index], ast.Constant):
+            value = args[index].value
+            return value if isinstance(value, str) and value else None
+        return None
+
+    found = {}
+    for app_root in sorted(roots):
+        for source in sorted(app_root.rglob("*.py")):
+            relative = source.relative_to(root)
+            if {"migrations", "tests"} & set(relative.parts):
+                continue
+            for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = (func.id if isinstance(func, ast.Name)
+                        else func.attr if isinstance(func, ast.Attribute) else None)
+                for index in _GETTEXT_KEYWORDS.get(name, ()):
+                    value = literal(node, index)
+                    if value:
+                        found.setdefault(value, f"{relative}:{node.lineno}")
+
+    # Templates too: the OTP and password-reset emails are the only user-facing strings
+    # this project renders outside Python, and they are the FIRST thing a new account
+    # reads.
+    for template in _first_party_templates()[1]:
+        relative = template.relative_to(root)
+        text = template.read_text(encoding="utf-8")
+        for match in _TRANS_TAG.finditer(text):
+            value = match.group("single") or match.group("double")
+            if value:
+                line = text.count("\n", 0, match.start()) + 1
+                found.setdefault(value, f"{relative}:{line}")
+    return found
+
+
+def test_every_first_party_msgid_reaches_the_arabic_catalogue():
+    """The two checks above only look at entries that ARE in the catalogue, so a msgid
+    that never reached it at all was invisible to the gate. `policy` — the app that
+    refuses a purchase on a store build — had none of its six strings translated, so
+    `app_channel_required` and `not_available_on_channel` answered an Arabic-speaking
+    user in English; the sweep that followed found 152 of them across ten first-party
+    apps (SIDE_BUGS S-019). Arabic is this platform's primary language: a literal handed
+    to gettext in this repo and missing here is a defect, not a to-do.
+
+    The compiled `.mo` is checked too, not just the `.po`, because that is the file the
+    server reads — a translation written and never compiled reaches the user in English
+    exactly as if it had never been written. After adding entries:
+
+        msgfmt --check-format -o locale/ar/LC_MESSAGES/django.mo \\
+                                 locale/ar/LC_MESSAGES/django.po
+    """
+    import gettext as gettext_module
+    from pathlib import Path
+
+    source_msgids = _first_party_msgids()
+
+    translated = set()
+    singular_of = {}
+    for entry in _read_po(Path("locale/ar/LC_MESSAGES/django.po").read_text(encoding="utf-8")):
+        if not entry["msgstrs"] or not all(s.strip() for s in entry["msgstrs"]):
+            continue
+        translated.update(m for m in (entry["msgid"], entry["msgid_plural"]) if m)
+        if entry["msgid_plural"]:
+            singular_of[entry["msgid_plural"]] = entry["msgid"]
+
+    absent = sorted((msgid, where) for msgid, where in source_msgids.items()
+                    if msgid not in translated)
+    assert not absent, (
+        f"{len(absent)} first-party msgids have no Arabic in "
+        f"locale/ar/LC_MESSAGES/django.po, e.g. {absent[:3]}")
+
+    with open("locale/ar/LC_MESSAGES/django.mo", "rb") as handle:
+        catalog = gettext_module.GNUTranslations(handle)._catalog
+    #: A .mo does not key every entry by its msgid. A plural entry is keyed
+    #: `(singular, n)` and its PLURAL msgid is not stored at all; a `pgettext` entry is
+    #: keyed `"context\x04msgid"`. Flatten both back to the msgid, then let a plural
+    #: msgid stand on its singular — otherwise this check reports entries that compiled
+    #: perfectly well.
+    compiled = set()
+    for key in catalog:
+        if isinstance(key, tuple):
+            compiled.add(key[0])
+        elif isinstance(key, str):
+            compiled.add(key.split("\x04")[-1])
+    uncompiled = sorted(
+        (msgid, where) for msgid, where in source_msgids.items()
+        if msgid not in compiled and singular_of.get(msgid) not in compiled)
+    assert not uncompiled, (
+        f"{len(uncompiled)} msgids are translated in django.po but missing from the "
+        f"compiled django.mo — run msgfmt. e.g. {uncompiled[:3]}")
+
+    # `blocktrans` carries its msgid in the tag's body, which the scan above does not
+    # read. The project uses none, so refuse the first one rather than wave through a
+    # string this check silently cannot see.
+    root, templates = _first_party_templates()
+    blocktrans = [str(t.relative_to(root)) for t in templates
+                  if "blocktrans" in t.read_text(encoding="utf-8")]
+    assert not blocktrans, (
+        f"{blocktrans} use blocktrans, whose msgid this check cannot read — teach "
+        f"_first_party_msgids to read it before adding one")
+
+
 # ------------------------------------------------------------------------- volume
 def test_the_achievement_list_does_not_query_per_achievement(make_user, api):
     """Three serializer method fields each queried per row — an EXISTS, a SELECT and a

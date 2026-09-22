@@ -368,14 +368,31 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
     
     @action(detail=False, methods=['get'])
     def current(self, request):
-        """Get current user's subscription with proper error handling"""
+        """The caller's own subscription, or a 404 the app can branch on.
+
+        `GET`, authenticated, no body. 200 is `UserSubscriptionSummarySerializer` —
+        `access` (`active | frozen | inactive`), `renewal_due`, `plan_duration_days`,
+        `plan_currency`, `plan_features`; `plan_price` is withheld from a build whose
+        `can_show_prices` is off.
+
+        Codes it can answer:
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 404 | `no_subscription` | this account has never had one — show the plans |
+        | 500 | `server_error` | unexpected fault |
+
+        The 404 used to carry `message` alone, so the app could not tell "never
+        subscribed" from any other 404 (SIDE_BUGS S-024). `message` is kept beside the
+        new `code` because it shipped; branch on `code`.
+        """
         try:
             subscription = request.user.subscription
             serializer = UserSubscriptionSummarySerializer(subscription, context={'request': request})
             return Response(serializer.data)
         except Subscription.DoesNotExist:
             return Response(
-                {'message': _('No active subscription')},
+                {'message': _('No active subscription'), 'code': 'no_subscription'},
                 status=status.HTTP_404_NOT_FOUND
             )
         except PASSTHROUGH_EXCEPTIONS:

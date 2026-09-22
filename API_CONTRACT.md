@@ -881,6 +881,9 @@ show plan status, expiry and history, and history without receipts is not histor
   `end_date`), `plan_currency` and `plan_features` (`diet`, `routines`, `challenges`,
   `ai_advice`, `priority_support`, `max_meals_per_day`, `max_routines`). Only
   `plan_price` is withheld from a build that may not show prices.
+- `subscriptions/current/` answers **404 `no_subscription`** when the account has never
+  had one — show the plans rather than an error. The body kept its `message`, which
+  shipped without a `code`; branch on the `code` (§2), never on the text.
 - The plan endpoints gain `currency` and `is_featured` (the "الأكثر اختياراً" badge an
   operator sets). `price` is still withheld from `play`/`ios`; a currency code and a
   badge are not prices.

@@ -35,10 +35,25 @@ print(f"  [{r.status_code}] UNRELATED trainerB PATCH victim's session -> {'BLOCK
 r=auth(trainerB).post('/api/routine/workout-sessions/',data=json.dumps({'user':victim.id,'routine':rt.id,'status':'active'}),content_type='application/json')
 print(f"  [{r.status_code}] UNRELATED trainerB CREATE session for victim -> {'BLOCKED' if r.status_code in (403,404,400) else '*** ALLOWED ***'}  {r.content[:80]}")
 
-r=auth(attacker).post('/api/routine/user-exercise-progress/',data=json.dumps({'user':victim.id,'exercise':ex.id,'date':str(date.today()),'completed_sets':1,'target_sets':1}),content_type='application/json')
-owner=None
+# Two separate claims in one request, so say which one each line proves.
+#
+# The POST used to carry `completed_sets`/`target_sets` and check only the owner, while
+# reading as though a refused write had been demonstrated. Those two fields are now
+# read-only on `UserExerciseProgressSerializer` — DRF drops a read-only field silently,
+# so the request is ACCEPTED and the values are ignored, and "201" proves nothing on its
+# own (SIDE_BUGS S-038). The probe now reads back what was stored and asserts the values
+# did not land, which is the thing that is actually true and the thing that can regress.
+r=auth(attacker).post('/api/routine/user-exercise-progress/',data=json.dumps({'user':victim.id,'exercise':ex.id,'date':str(date.today()),'completed_sets':7,'target_sets':9}),content_type='application/json')
+owner=None; stored=None
 if r.status_code in (200,201):
-    try: owner=UserExerciseProgress.objects.get(id=r.json()['id']).user_id
+    try:
+        row=UserExerciseProgress.objects.get(id=r.json()['id'])
+        owner=row.user_id; stored=(row.completed_sets,row.target_sets)
     except Exception: pass
 print(f"  [{r.status_code}] attacker CREATE progress with user=victim -> stored owner={owner} {'*** WRONG OWNER ***' if owner==victim.id else '(coerced to self / blocked)'}")
+print(f"  [{r.status_code}] attacker CREATE progress claiming completed_sets=7 target_sets=9 -> stored {stored} {'*** SELF-AUTHORED COMPLIANCE ***' if stored not in (None,(0,0)) else '(derived: ignored / blocked)'}")
 runner.teardown_databases(old)
+# After teardown, so a regression does not leave the probe's database behind — and as a
+# real assert, so the script exits non-zero instead of printing a verdict nobody reads.
+assert owner!=victim.id, "progress row was created under the victim's account"
+assert stored in (None,(0,0)), f"a client authored their own compliance: {stored}"
