@@ -24,7 +24,6 @@ Not for: work the current task owns, bugs the app session reports (that is
 <<<<<<< HEAD
 | S-033 | `social/serializers.py:191` | The corrected comment count still includes comments hidden by moderation; the denormalised column is never decremented on a hide | The badge over-reports after a moderator hides a comment | MEDIUM | fix round 1 |
 | S-034 | `ai_assistant/services/chat_service.py:335-344` | `_iteration_status` returns five bare English strings sent to the client as `status` frames | Same class as the S-012 defect just closed, but on the status path | MEDIUM | fix round 1 |
-| S-035 | `users/views.py:2016-2028, 1740` | `request_id is required` and `action must be either "approve" or "reject"` still carry no `code` | Left from the S-015 pass, which closed the other twelve sites | MEDIUM | fix round 1 |
 | S-019 | `policy/exceptions.py:11,17` · `policy/models.py:53,62,64,100` | Every user- and operator-facing string in the policy app goes through gettext but has NO Arabic entry | `app_channel_required` and `not_available_on_channel` reach the app in English only, against "Arabic is the primary language" | HIGH | theme |
 | S-021 | `social/views.py:903` `_update_challenge_rankings` | Ranks are written only from `update_progress`, with no tiebreaker, one full-row `save()` per participant | `ChallengeParticipation.rank` is NULL for anyone who joined and never logged and stale for everyone else; two equal scores swap between runs — and the "Challenge Winner" badge keys on `rank=1` | HIGH | home |
 =======
@@ -35,11 +34,16 @@ Not for: work the current task owns, bugs the app session reports (that is
 | S-035 | `users/views.py:2016-2028, 1740` | `request_id is required` and `action must be either "approve" or "reject"` still carry no `code` | Left from the S-015 pass, which closed the other twelve sites | MEDIUM | fix round 1 |
 | S-019 | `policy/exceptions.py:11,17` · `policy/models.py:53,62,64,100` | Every user- and operator-facing string in the policy app goes through gettext but has NO Arabic entry | `app_channel_required` and `not_available_on_channel` reach the app in English only, against "Arabic is the primary language" | HIGH | theme |
 | S-022 | `routine/models.py:833` (`WorkoutSession.status`) | Nothing ever writes `abandoned`: no sweep closes a session the client walked away from | A forgotten session stays `active` for ever, so every screen that asks "is a workout running" answers yes until someone edits the row. The home screen bounds it itself at 12 h (`home/sections.py LONGEST_SESSION`) rather than inherit it | MEDIUM | home |
+<<<<<<< HEAD
 >>>>>>> fix/social
 | S-023 | `diet/trainer_services.py:707,720` (`get_daily_progress`, `get_enhanced_daily_progress`) | A GET endpoint's service does `get_or_create` plus `SELECT … FOR UPDATE` plus `save()` on every read | Three read routes write and take a row lock per page view, and two readers of the same day serialise. Home reads `DailyProgress` directly to avoid it | MEDIUM | home |
 | S-024 | `subscription/views.py:370` `SubscriptionViewSet.current` | The 404 body is `{"message": …}` with no `code`, where §2 of the contract says the app branches on `code` | The app cannot tell "no subscription" from any other 404 | MEDIUM | home |
 | S-025 | `diet/views.py:1462` `DailyAdviceView` | The docstring says it requires AI-advice access; the code uses `HasDietAccess`, and nothing checks AI consent | The guard the moderation build added is not on the endpoint that serves advice; home checks consent itself | MEDIUM | home |
 | S-026 | `users/trainer_directory.py:173` `_score` / `_reason` | Every candidate's reasons are rendered in BOTH languages (two `translation.override`s and a catalogue lookup each, up to seven per trainer) before the top three are sliced | Wasted CPU per available trainer on `trainers/matches/` and on the first-day home — 0.1-0.5 ms each, so tens of ms at a few hundred trainers | MEDIUM | home |
+=======
+| S-024 | `subscription/views.py:370` `SubscriptionViewSet.current` | The 404 body is `{"message": …}` with no `code`, where §2 of the contract says the app branches on `code` | The app cannot tell "no subscription" from any other 404 | MEDIUM | home |
+| S-027 | `social/views.py:562` | `interaction_actions` names a `leave` action the viewset does not define | Nobody can leave a challenge, and `participants_count` is only ever recomputed on join | MEDIUM | home |
+>>>>>>> fix/people
 | S-018 | `training_platform/file_security.py:59` | The quarantine directory is always `MEDIA_ROOT/quarantine`, local | With object storage the evidence of a rejected upload lands on ephemeral disk (the worker has no volume) and is gone at the next restart; also an `os.makedirs` per validator | MEDIUM | storage |
 
 | S-001 | `wallet/utils.py:24` `get_platform_revenue_wallet` | The platform's revenue wallet is ONE wallet, so it holds one currency for ever — the first payment decides it. A plan priced in the other currency is minted into the client's wallet, logged as an error and never moves on. | Only SYP is sold today (USD is legacy rows), so nobody is affected yet; the day a second currency is priced, its revenue sits in customers' wallets. | MEDIUM | step 4 |
@@ -48,6 +52,7 @@ Not for: work the current task owns, bugs the app session reports (that is
 
 | ID | Where | What | Closed by |
 |---|---|---|---|
+<<<<<<< HEAD
 <<<<<<< HEAD
 | S-022 | `routine/models.py:833` (`WorkoutSession.status`) | Nothing ever writes `abandoned`: no sweep closes a session the client walked away from | fix(routine): close S-007, S-022, S-029, S-030, S-032, S-036, S-037 and S-039 |
 | S-032 | `routine/views.py:1618` · `WorkoutSessionViewSet` | `set-logs/my-progress/` and the session list return UNPAGINATED lists | fix(routine): close S-007, S-022, S-029, S-030, S-032, S-036, S-037 and S-039 |
@@ -69,6 +74,12 @@ Not for: work the current task owns, bugs the app session reports (that is
 | S-033 | `social/serializers.py:191` | The corrected comment count still includes comments hidden by moderation; the denormalised column is never decremented on a hide | fix(side-bugs): close S-021, S-027, S-033 and S-034 |
 | S-034 | `ai_assistant/services/chat_service.py:335-344` | `_iteration_status` returns five bare English strings sent to the client as `status` frames | fix(side-bugs): close S-021, S-027, S-033 and S-034 |
 >>>>>>> fix/social
+=======
+| S-023 | `diet/trainer_services.py:707,720` (`get_daily_progress`, `get_enhanced_daily_progress`) | A GET endpoint's service does `get_or_create` plus `SELECT … FOR UPDATE` plus `save()` on every read | fix(side-bugs): close S-023, S-025, S-026 and S-035 |
+| S-025 | `diet/views.py:1462` `DailyAdviceView` | The docstring says it requires AI-advice access; the code uses `HasDietAccess`, and nothing checks AI consent | fix(side-bugs): close S-023, S-025, S-026 and S-035 |
+| S-026 | `users/trainer_directory.py:173` `_score` / `_reason` | Every candidate's reasons are rendered in BOTH languages (two `translation.override`s and a catalogue lookup each, up to seven per trainer) before the top three are sliced | fix(side-bugs): close S-023, S-025, S-026 and S-035 |
+| S-035 | `users/views.py:2016-2028, 1740` | `request_id is required` and `action must be either "approve" or "reject"` still carry no `code` | fix(side-bugs): close S-023, S-025, S-026 and S-035 |
+>>>>>>> fix/people
 | S-008 | `tests/security/*.py` (e.g. `privacy_rights.py:2`) | Every script hardcodes `sys.path.insert(0, '<the main checkout>')` | fix(side-bugs): close S-008 and S-011–S-015 |
 | S-011 | `social/consumers.py:39` | `SocialConsumer.receive` echoes any frame back verbatim | fix(side-bugs): close S-008 and S-011–S-015 |
 | S-012 | `ai_assistant/consumers.py:272` · `views.py:112` · `services/chat_service.py:222-252` | Error paths with no `code` and bare untranslated literals, beside others that have both | fix(side-bugs): close S-008 and S-011–S-015 |

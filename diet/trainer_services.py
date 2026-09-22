@@ -680,14 +680,22 @@ class ClientProgressService:
         return meal
     
     def get_daily_progress(self, target_date: date = None) -> Dict[str, Any]:
-        """
-        Get daily progress for the client.
-        
+        """The day's figures for the client. READ ONLY — writes nothing, locks nothing.
+
+        Serves `GET /api/diet/v1/client/progress/`. It used to `get_or_create` a
+        `DailyProgress` row, take `SELECT … FOR UPDATE` on it and `save()` it, on a
+        GET: opening the screen wrote a row, and two readers of the same day queued
+        behind the lock (SIDE_BUGS S-023). The numbers now come from
+        `DailyProgress.figures_for`, which computes them on a detached instance. A
+        write path that needs the row to exist calls `_ensure_daily_progress`.
+
         Args:
             target_date: Target date (defaults to today)
-            
+
         Returns:
-            Dictionary with daily progress information
+            Dictionary with daily progress information. `has_active_plan: False` and
+            zeros when no plan covers the date; a day with nothing logged answers the
+            plan's targets with zero consumed, exactly as before.
         """
         if target_date is None:
             target_date = timezone.localdate()
@@ -703,22 +711,9 @@ class ClientProgressService:
                 'completion_percentage': 0
             }
         
-        # Get or create daily progress
-        daily_progress, created = DailyProgress.objects.get_or_create(
-            user=self.client,
-            diet_plan=active_plan,
-            date=target_date,
-            defaults={
-                'target_calories': active_plan.daily_calories,
-                'target_protein': active_plan.macro_targets()["protein"],
-                'target_carbs': active_plan.macro_targets()["carbs"],
-                'target_fat': active_plan.macro_targets()["fat"]
-            }
-        )
-        
-        # Update progress
-        daily_progress.update_progress()
-        
+        # The day's figures, computed and thrown away. Nothing is created or locked.
+        daily_progress = DailyProgress.figures_for(self.client, active_plan, target_date)
+
         return {
             'date': target_date,
             'has_active_plan': True,
@@ -820,12 +815,16 @@ class ClientProgressService:
                 'targets': target_payload(day_targets(meal.diet_plan, day), meal)}
     
     def get_enhanced_daily_progress(self, target_date: date = None) -> Dict[str, Any]:
-        """
-        Get enhanced daily progress with detailed meal and nutritional information.
-        
+        """The day's meals and figures in detail. READ ONLY — writes nothing, locks nothing.
+
+        Serves `GET /api/diet/v1/client/progress/enhanced/`. Same defect and same fix
+        as `get_daily_progress` (SIDE_BUGS S-023): it used to mint a `DailyProgress`
+        row and lock it on a GET. `DailyProgress.figures_for` computes the same
+        numbers without a row; `_ensure_daily_progress` is the write-path counterpart.
+
         Args:
             target_date: Target date (defaults to today)
-            
+
         Returns:
             Dictionary with enhanced daily progress information
         """
@@ -866,24 +865,9 @@ class ClientProgressService:
                 'completion_percentage': 0
             }
         
-        # Get or create daily progress
-        daily_progress, created = DailyProgress.objects.get_or_create(
-            user=self.client,
-            diet_plan=active_plan,
-            date=target_date,
-            defaults={
-                'target_calories': active_plan.daily_calories,
-                'target_protein': active_plan.macro_targets()["protein"],
-                'target_carbs': active_plan.macro_targets()["carbs"],
-                'target_fat': active_plan.macro_targets()["fat"]
-            }
-        )
-        
-        # Update progress (using optimized Aggregation)
-        # Pass the pre-fetched meals to update_progress to allow it to use them?
-        # Actually our new update_progress uses its own efficient query, so we just call it.
-        daily_progress.update_progress()
-        
+        # The day's figures, computed and thrown away. Nothing is created or locked.
+        daily_progress = DailyProgress.figures_for(self.client, active_plan, target_date)
+
         # Processing meals in-memory using prefetched data
         meals = active_plan.meals.all() # This uses the Prefetch from above!
         meals_data = []
@@ -1034,20 +1018,9 @@ class ClientProgressService:
         Meal.objects.filter(id=meal.id).update(is_completed=True)
         meal.is_completed = True # Update local instance for consistency
         
-        # Update daily progress efficiently
-        daily_progress, created = DailyProgress.objects.get_or_create(
-            user=self.client,
-            diet_plan=meal.diet_plan,
-            date=meal.date,
-            defaults={
-                'target_calories': meal.diet_plan.daily_calories,
-                'target_protein': meal.diet_plan.macro_targets()["protein"],
-                'target_carbs': meal.diet_plan.macro_targets()["carbs"],
-                'target_fat': meal.diet_plan.macro_targets()["fat"]
-            }
-        )
-        # Use new optimized method that doesn't iterate
-        daily_progress.update_progress()
+        # A write: the client just ate, so the day's row is created if it is not there
+        # yet and recomputed under its lock.
+        self._ensure_daily_progress(meal.diet_plan, meal.date)
         
         total_components = MealComponent.objects.filter(meal=meal).count()
         
@@ -1059,6 +1032,21 @@ class ClientProgressService:
             'meal_completion_percentage': 100.0
         }
     
+    def _ensure_daily_progress(self, diet_plan: DietPlan, on_date: date) -> DailyProgress:
+        """Create the day's `DailyProgress` row if it is missing, then recompute it.
+
+        THIS ONE WRITES, and takes the row's lock. Only a path that has just changed
+        what the client ate may call it — never a GET (SIDE_BUGS S-023). The read
+        counterpart is `DailyProgress.figures_for`, which computes the same numbers
+        without touching the table.
+        """
+        row, _created = DailyProgress.objects.get_or_create(
+            user=self.client, diet_plan=diet_plan, date=on_date)
+        # Targets are written by the recompute itself, from the plan, so they stay
+        # right when the plan's calories change.
+        row.update_progress()
+        return row
+
     def _get_active_diet_plan(self, on_date: date = None) -> Optional[DietPlan]:
         """The plan governing `on_date`, defaulting to today.
 

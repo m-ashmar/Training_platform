@@ -198,30 +198,47 @@ def _reason(code, render):
     return {'code': code, 'text': _in_both_languages(render)}
 
 
+def _rendered(reasons) -> list[dict]:
+    """Turn one trainer's deferred reasons into the shipped `{code, text}` shape.
+
+    Called for the few trainers that make the page, never for every candidate — which
+    is the whole point of `_score` handing back callables (SIDE_BUGS S-026).
+    """
+    return [_reason(code, render) for code, render in reasons]
+
+
 def _score(client, trainer, proof, program_days):
-    """(score, reasons) for one trainer. Reasons come out in the order they matter."""
+    """(score, reasons) for one trainer. Reasons come out in the order they matter.
+
+    The reasons are DEFERRED: each is `(code, render)`, and `render` is called later,
+    by `_rendered`, only for the trainers that survive the ranking. Building the text
+    here rendered every candidate's reasons in Arabic and in English — two
+    `translation.override` blocks and a catalogue lookup each, up to seven per trainer
+    — and then threw all but the top three away, on `trainers/matches/` and on the
+    first-day home (SIDE_BUGS S-026). Scoring itself touches no catalogue.
+    """
     score, reasons = 0, []
     goal = client.training_goal
     if goal and goal in trainer_focus(trainer):
         score += 40
-        reasons.append(_reason('goal_match', lambda: gettext(
+        reasons.append(('goal_match', lambda: gettext(
             'Specialises in your goal: %(goal)s') % {'goal': GOAL_LABELS[goal]}))
     shared = [a for a in (client.injury_areas or [])
               if a in AREA_LABELS and a in (trainer.trainer_injury_focus or [])]
     if shared:
         score += 20
-        reasons.append(_reason('injury_experience', lambda: gettext(
+        reasons.append(('injury_experience', lambda: gettext(
             'Experience with %(area)s injuries') % {'area': AREA_LABELS[shared[0]]}))
     place = client.training_place
     if place and place in (trainer.trainer_training_places or []):
         score += 10
-        reasons.append(_reason('training_place', lambda: (
+        reasons.append(('training_place', lambda: (
             pgettext('matching reason', 'Programs for training at the gym') if place == 'gym'
             else pgettext('matching reason', 'Programs for training at home'))))
     days = client.training_days_per_week
     if days and days in program_days:
         score += 8
-        reasons.append(_reason('program_days', lambda: ngettext(
+        reasons.append(('program_days', lambda: ngettext(
             'Writes %(days)s-day programs', 'Writes %(days)s-day programs', days)
             % {'days': days}))
     if proof['verified']:
@@ -231,19 +248,19 @@ def _score(client, trainer, proof, program_days):
         score += 10 if minutes <= 180 else 5 if minutes <= 720 else 0
         if minutes <= REASON_MAX_RESPONSE_MINUTES:
             hours = max(1, -(-minutes // 60))
-            reasons.append(_reason('fast_response', lambda: ngettext(
+            reasons.append(('fast_response', lambda: ngettext(
                 'Usually replies within %(hours)s hour',
                 'Usually replies within %(hours)s hours', hours) % {'hours': hours}))
     finished = proof['clients_completed_program']
     score += min(10, finished)
     if finished >= REASON_MIN_COMPLETIONS:
-        reasons.append(_reason('completed_programs', lambda: ngettext(
+        reasons.append(('completed_programs', lambda: ngettext(
             '%(count)s client finished their program',
             '%(count)s clients finished their program', finished) % {'count': finished}))
     years = trainer.trainer_experience_years or 0
     score += min(5, years // 2)
     if years >= REASON_MIN_YEARS:
-        reasons.append(_reason('experience', lambda: ngettext(
+        reasons.append(('experience', lambda: ngettext(
             '%(years)s year of experience', '%(years)s years of experience', years)
             % {'years': years}))
     return score, reasons[:MAX_REASONS]
@@ -294,7 +311,10 @@ def match_trainers(client, request, *, limit=3) -> list[dict]:
         first = next(i for i, row in enumerate(scored) if row[1].pk in kits)
         scored.insert(0, scored.pop(first))
 
+    # Score first, slice, THEN render: the two-language text is built only for the
+    # trainers on the page (SIDE_BUGS S-026).
     top = scored[:limit]
     cards = trainer_cards([t for _s, t, _r in top], request, proof=proof)
-    return [{'rank': i + 1, 'fit': _fit(i + 1, score), 'reasons': reasons, 'trainer': card}
+    return [{'rank': i + 1, 'fit': _fit(i + 1, score), 'reasons': _rendered(reasons),
+             'trainer': card}
             for i, ((score, _t, reasons), card) in enumerate(zip(top, cards))]

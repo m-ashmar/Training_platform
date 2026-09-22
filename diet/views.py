@@ -1455,9 +1455,29 @@ class GenerateDietPlanRuleBasedView(APIView):
 
 class DailyAdviceView(APIView):
     """
-    API endpoint to retrieve TODAY's daily advice for the authenticated user (today in
-    their `preferred_timezone`); `{"advice": null, "message"}` when there is none yet.
-    Requires active subscription with AI advice access.
+    `GET /api/diet/v1/advice/latest/` — TODAY's nutrition advice for the authenticated
+    user (today in their `preferred_timezone`); `{"advice": null, "message"}` when
+    there is none yet. No body, no parameters.
+
+    **Not AI.** This line used to promise the AI-advice entitlement, and it was wrong
+    twice (SIDE_BUGS S-025). The text is written by
+    `diet/tasks.py` `_generate_personalized_advice`: three gettext sentences chosen
+    from the client's fitness goal, their plan's `daily_calories` and their BMI,
+    rendered in their own language by the nightly sweep. No model is called and no
+    data leaves the platform, so the AI-coach guards do NOT apply here — neither
+    `HasAIAdviceAccess` (the `has_ai_advice` entitlement, which gates `/api/ai/`) nor
+    `moderation.permissions.HasAIConsent`. Asking for consent to read data that only
+    this server ever reads would be a consent sheet for nothing. `AI_PERMISSIONS` in
+    `ai_assistant/views.py` is the list for anything the AI coach actually answers.
+
+    What it does require is the **diet** feature, and plain `HasDietAccess` rather
+    than `HasDietAccessOrFrozenRead`: after the plan lapses a frozen subscriber may
+    still READ their last plan but gets no advice (the owner, 2026-09-19 — see
+    `subscription/permissions.py HasDietAccessOrFrozenRead`), so this answers 403
+    `no_entitlement` / `feature_not_in_plan` while frozen.
+
+    Refusals: 403 `no_entitlement`, `feature_not_in_plan`; 500 with no `code` is a
+    fault, not a refusal.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     

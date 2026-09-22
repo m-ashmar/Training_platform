@@ -1236,6 +1236,36 @@ class DailyProgress(models.Model):
             self._recompute(meals_qs)
 
     def _recompute(self, meals_qs=None):
+        """Recompute and PERSIST. Write paths only — it saves the row."""
+        self.compute_figures(meals_qs)
+        self.save()
+
+    @classmethod
+    def figures_for(cls, user, diet_plan, on_date):
+        """The day's figures, READ ONLY: never creates, never locks, never saves.
+
+        A read endpoint must not write. `get_or_create` + `update_progress()` minted a
+        row and took `SELECT … FOR UPDATE` on it every time a client opened their
+        progress screen, so two readers of the same day serialised behind each other
+        (SIDE_BUGS S-023). This answers the same numbers from the plan, its meals and
+        their components — two aggregates, no row of its own — on a detached instance
+        that is never saved. The stored row is created and kept fresh by the writes
+        that change it (`MealComponent.complete`, `ClientProgressService`), which is
+        the same rule `home/sections.py` already follows.
+
+        The returned instance is deliberately unsaved (`pk is None`): every caller
+        reads its fields and its `*_percentage` properties and throws it away.
+        """
+        row = cls(user=user, diet_plan=diet_plan, date=on_date)
+        row.compute_figures()
+        return row
+
+    def compute_figures(self, meals_qs=None):
+        """Fill in the day's counters and totals IN MEMORY. Saves nothing.
+
+        Split out of `_recompute` so a read path can have the numbers without the row
+        (see `figures_for`).
+        """
         from django.db.models import Count, F, FloatField, Q, Sum
         from django.db.models.functions import Coalesce
 
@@ -1303,12 +1333,15 @@ class DailyProgress(models.Model):
             self.completed_at = timezone.now()
         elif not self.is_day_completed:
             self.completed_at = None
-            
-        self.save()
 
 class DailyAdvice(models.Model):
-    """
-    Stores AI-generated daily dietary advice for a user.
+    """One day's nutrition advice for one client.
+
+    NOT AI-generated, whatever this docstring said before (SIDE_BUGS S-025). The only
+    writer is `diet/tasks.py` `generate_daily_advice`, and its text comes from
+    `_generate_personalized_advice`: gettext sentences picked from the client's goal,
+    their plan's calorie target and their BMI. Nothing here is a model's output, which
+    is why `DailyAdviceView` carries the diet guard and not the AI-coach ones.
     """
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE,
                              related_name='daily_advice')

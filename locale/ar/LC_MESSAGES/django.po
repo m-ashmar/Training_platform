@@ -3495,3 +3495,6 @@ msgstr "جارٍ البحث بعمق أكبر..."
 #: ai_assistant/services/chat_service.py
 msgid "Almost done..."
 msgstr "أوشكت على الانتهاء..."
+#: users/views.py
+msgid "action must be approve or reject"
+msgstr "يجب أن يكون الإجراء الموافقة أو الرفض"
