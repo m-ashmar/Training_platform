@@ -1858,6 +1858,187 @@ def test_no_entry_in_the_arabic_catalogue_is_fuzzy():
     assert not fuzzy, f"{len(fuzzy)} fuzzy entries, e.g. {fuzzy[:3]}"
 
 
+#: The names a msgid can be written under, and which argument carries it. `_` is the
+#: project's spelling of `gettext`/`gettext_lazy`; the context and plural forms put the
+#: literal somewhere other than the first argument.
+_GETTEXT_KEYWORDS = {
+    "_": (0,), "gettext": (0,), "gettext_lazy": (0,), "gettext_noop": (0,),
+    "pgettext": (1,), "pgettext_lazy": (1,),
+    "ngettext": (0, 1), "ngettext_lazy": (0, 1),
+    "npgettext": (1, 2), "npgettext_lazy": (1, 2),
+}
+
+_PO_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\",
+               "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+
+def _po_unescape(raw):
+    out, i = [], 0
+    while i < len(raw):
+        if raw[i] == "\\" and i + 1 < len(raw):
+            out.append(_PO_ESCAPES.get(raw[i + 1], raw[i + 1]))
+            i += 2
+        else:
+            out.append(raw[i])
+            i += 1
+    return "".join(out)
+
+
+def _read_po(text):
+    """Every entry in a .po file, read LINE BY LINE.
+
+    Not a regex over blank-line-separated blocks. An entry ends at a blank line or at
+    the next entry's comment lines, and one entry in this catalogue had lost its blank
+    line — which made a block reader glue it to its neighbour and then report a msgid
+    that IS translated as missing. Each entry is
+    `{msgid, msgid_plural, msgstrs, flags}`.
+    """
+    import re
+
+    string = re.compile(r'"((?:[^"\\]|\\.)*)"')
+    entries, entry, field = [], None, None
+
+    def blank():
+        return {"msgid": "", "msgid_plural": "", "msgstrs": [], "flags": set()}
+
+    def flush():
+        nonlocal entry
+        if entry and (entry["msgid"] or entry["msgid_plural"]):
+            entries.append(entry)
+        entry = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush()
+            field = None
+            continue
+        if line.startswith("#"):
+            flush()
+            entry = entry or blank()
+            if line.startswith("#,"):
+                entry["flags"].update(f.strip() for f in line[2:].split(","))
+            field = None
+            continue
+        entry = entry or blank()
+        chunk = "".join(_po_unescape(m) for m in string.findall(line))
+        if line.startswith("msgid_plural"):
+            entry["msgid_plural"], field = chunk, "msgid_plural"
+        elif line.startswith("msgid"):
+            if entry["msgid"] or entry["msgstrs"]:
+                flush()
+                entry = blank()
+            entry["msgid"], field = chunk, "msgid"
+        elif line.startswith("msgctxt"):
+            field = "msgctxt"
+        elif line.startswith("msgstr"):
+            entry["msgstrs"].append(chunk)
+            field = "msgstr"
+        elif line.startswith('"') and field == "msgid":
+            entry["msgid"] += chunk
+        elif line.startswith('"') and field == "msgid_plural":
+            entry["msgid_plural"] += chunk
+        elif line.startswith('"') and field == "msgstr":
+            entry["msgstrs"][-1] += chunk
+    flush()
+    return entries
+
+
+def _first_party_msgids():
+    """`{msgid: "app/file.py:42"}` for every literal a first-party module translates.
+
+    Parsed with `ast`, which resolves escapes and implicit concatenation exactly as the
+    interpreter does, so the string compared against the catalogue is the one gettext
+    will be handed at runtime. A `_(variable)` cannot be seen here — `makemessages`
+    cannot see one either, which is why the project writes literals.
+
+    First-party means every Python package in this checkout, not `INSTALLED_APPS`:
+    `home/` is a package of views included by the URLconf and is not an app, and a
+    future one would be missed the same way. `.venv` is skipped because it holds no
+    top-level `__init__.py` — and naming it would not help in a worktree, where it is
+    a symlink INSIDE the repo.
+    """
+    import ast
+    from pathlib import Path
+
+    from django.conf import settings
+
+    #: `tests` is this suite; the other three are not part of the codebase (CLAUDE.md).
+    not_ours = {"tests", "_excluded", "mobile", "flutter", "yalla_gym"}
+
+    root = Path(settings.BASE_DIR).resolve()
+    roots = {child for child in root.iterdir()
+             if child.is_dir() and child.name not in not_ours
+             and (child / "__init__.py").exists()}
+
+    def literal(node, index):
+        args = node.args
+        if len(args) > index and isinstance(args[index], ast.Constant):
+            value = args[index].value
+            return value if isinstance(value, str) and value else None
+        return None
+
+    found = {}
+    for app_root in sorted(roots):
+        for source in sorted(app_root.rglob("*.py")):
+            relative = source.relative_to(root)
+            if {"migrations", "tests"} & set(relative.parts):
+                continue
+            for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = (func.id if isinstance(func, ast.Name)
+                        else func.attr if isinstance(func, ast.Attribute) else None)
+                for index in _GETTEXT_KEYWORDS.get(name, ()):
+                    value = literal(node, index)
+                    if value:
+                        found.setdefault(value, f"{relative}:{node.lineno}")
+    return found
+
+
+def test_every_first_party_msgid_reaches_the_arabic_catalogue():
+    """The two checks above only look at entries that ARE in the catalogue, so a msgid
+    that never reached it at all was invisible to the gate. `policy` — the app that
+    refuses a purchase on a store build — had none of its six strings translated, so
+    `app_channel_required` and `not_available_on_channel` answered an Arabic-speaking
+    user in English; the sweep that followed found 152 of them across ten first-party
+    apps (SIDE_BUGS S-019). Arabic is this platform's primary language: a literal handed
+    to gettext in this repo and missing here is a defect, not a to-do.
+
+    The compiled `.mo` is checked too, not just the `.po`, because that is the file the
+    server reads — a translation written and never compiled reaches the user in English
+    exactly as if it had never been written. After adding entries:
+
+        msgfmt --check-format -o locale/ar/LC_MESSAGES/django.mo \\
+                                 locale/ar/LC_MESSAGES/django.po
+    """
+    import gettext as gettext_module
+    from pathlib import Path
+
+    source_msgids = _first_party_msgids()
+
+    translated = set()
+    for entry in _read_po(Path("locale/ar/LC_MESSAGES/django.po").read_text(encoding="utf-8")):
+        if not entry["msgstrs"] or not all(s.strip() for s in entry["msgstrs"]):
+            continue
+        translated.update(m for m in (entry["msgid"], entry["msgid_plural"]) if m)
+
+    absent = sorted((msgid, where) for msgid, where in source_msgids.items()
+                    if msgid not in translated)
+    assert not absent, (
+        f"{len(absent)} first-party msgids have no Arabic in "
+        f"locale/ar/LC_MESSAGES/django.po, e.g. {absent[:3]}")
+
+    with open("locale/ar/LC_MESSAGES/django.mo", "rb") as handle:
+        compiled = gettext_module.GNUTranslations(handle)._catalog
+    uncompiled = sorted((msgid, where) for msgid, where in source_msgids.items()
+                        if msgid not in compiled)
+    assert not uncompiled, (
+        f"{len(uncompiled)} msgids are translated in django.po but missing from the "
+        f"compiled django.mo — run msgfmt. e.g. {uncompiled[:3]}")
+
+
 # ------------------------------------------------------------------------- volume
 def test_the_achievement_list_does_not_query_per_achievement(make_user, api):
     """Three serializer method fields each queried per row — an EXISTS, a SELECT and a

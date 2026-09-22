@@ -11,7 +11,9 @@ import hashlib
 import logging
 from PIL import Image, ImageSequence
 from django.core.exceptions import ValidationError
+from django.core.files.base import ContentFile
 from django.conf import settings
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from typing import Dict, Any
@@ -54,10 +56,6 @@ class FileSecurityValidator:
         '.exe', '.bat', '.cmd', '.com', '.pif', '.scr', '.vbs', '.js',
         '.jar', '.app', '.deb', '.pkg', '.dmg', '.php', '.asp', '.jsp'
     ]
-    
-    def __init__(self):
-        self.quarantine_dir = os.path.join(settings.MEDIA_ROOT, 'quarantine')
-        os.makedirs(self.quarantine_dir, exist_ok=True)
     
     def validate_file(self, file, file_type='image', scan_content=True) -> Dict[str, Any]:
         """
@@ -316,6 +314,39 @@ class FileSecurityValidator:
     #: bytes, the header and the payload marker that caused the rejection.
     QUARANTINE_SAMPLE_BYTES = 64 * 1024
 
+    @staticmethod
+    def quarantine_location() -> str:
+        """The prefix a sample is stored under, from `settings.QUARANTINE_LOCATION`."""
+        return str(getattr(settings, 'QUARANTINE_LOCATION', 'quarantine')).strip('/')
+
+    @staticmethod
+    def quarantine_storage():
+        """WHERE a rejected upload's sample is kept: the default media storage.
+
+        It used to be `MEDIA_ROOT/quarantine`, opened with the built-in `open()`. That
+        was the local disk and nothing else, which stopped being an answer the day
+        `MEDIA_BACKEND=gcs` went live: the web container's filesystem is ephemeral, and
+        the Celery worker — which runs the same validators on the same uploads — has no
+        volume at all, so the evidence of every refused upload was gone at the next
+        restart or simply written into a scratch layer nobody can reach.
+
+        Going through the storage API rather than adding a second local path is the
+        honest fix, because the storage already IS the durable, shared place this
+        deployment writes bytes to, and it is the same object in the worker as in the
+        web process. On the filesystem backend it resolves to `MEDIA_ROOT/<prefix>`, so
+        development and the test suite behave exactly as before — and `save()` creates
+        the directory itself, which is why there is no longer an `os.makedirs` running
+        once per validator instance.
+
+        Nothing hands out a URL to these objects, and the bucket grants no public read
+        (`gcs_storage.SignedGoogleCloudStorage`: uniform access, `default_acl=None`), so
+        a quarantined sample is not reachable by anyone who has not been given bucket
+        credentials.
+        """
+        from django.core.files.storage import default_storage
+
+        return default_storage
+
     def _quarantine_file(self, file):
         """Keep a bounded sample of a rejected file, for a bounded time."""
         try:
@@ -329,54 +360,67 @@ class FileSecurityValidator:
             # this was not reachable over HTTP — but any non-HTTP caller of
             # `validate_file()` could set `.name` and write outside the directory.
             safe_name = self.sanitize_filename(file.name)
-            quarantine_path = os.path.join(
-                self.quarantine_dir,
-                f"quarantine_{safe_name}_{int(time.time())}"
-            )
+            name = (f"{self.quarantine_location()}/"
+                    f"quarantine_{safe_name}_{int(time.time())}")
 
             file.seek(0)
-            written = 0
-            with open(quarantine_path, 'wb') as qfile:
-                for chunk in file.chunks():
-                    remaining = self.QUARANTINE_SAMPLE_BYTES - written
-                    if remaining <= 0:
-                        break
-                    qfile.write(chunk[:remaining])
-                    written += min(len(chunk), remaining)
+            sample = file.read(self.QUARANTINE_SAMPLE_BYTES)
+            file.seek(0)
+            stored = self.quarantine_storage().save(name, ContentFile(sample))
 
             logger.warning("File quarantined: %s (%d bytes sampled)",
-                           quarantine_path, written)
+                           stored, len(sample))
 
         except Exception as e:
             logger.error(f"Failed to quarantine file: {e}")
 
     def _evict_quarantine(self):
         """Drop quarantined samples that are too old, then the oldest until under cap."""
+        storage = self.quarantine_storage()
+        prefix = self.quarantine_location()
         try:
-            entries = []
-            total = 0
-            now = time.time()
-            for name in os.listdir(self.quarantine_dir):
-                path = os.path.join(self.quarantine_dir, name)
-                if not os.path.isfile(path):
-                    continue
-                stat = os.stat(path)
-                if now - stat.st_mtime > self.QUARANTINE_MAX_AGE_SECONDS:
-                    os.remove(path)
-                    continue
-                entries.append((stat.st_mtime, stat.st_size, path))
-                total += stat.st_size
-
-            entries.sort()
-            while total > self.QUARANTINE_MAX_BYTES and entries:
-                _mtime, size, path = entries.pop(0)
-                os.remove(path)
-                total -= size
-        except FileNotFoundError:
-            pass
+            _dirs, names = storage.listdir(prefix)
+        except (FileNotFoundError, NotADirectoryError):
+            # Nothing has been quarantined yet. Not an error, and not worth a log line.
+            return
         except Exception:
             logger.debug("quarantine eviction failed", exc_info=True)
-    
+            return
+
+        entries = []
+        total = 0
+        now = timezone.now()
+        for name in names:
+            path = f"{prefix}/{name}"
+            try:
+                modified = storage.get_modified_time(path)
+                size = storage.size(path)
+            except Exception:
+                # A sample another process evicted between listdir and stat.
+                continue
+            if timezone.is_naive(modified):
+                # FileSystemStorage returns naive times when USE_TZ is off.
+                modified = timezone.make_aware(modified, timezone.get_default_timezone())
+            if (now - modified).total_seconds() > self.QUARANTINE_MAX_AGE_SECONDS:
+                self._drop_quarantined(storage, path)
+                continue
+            entries.append((modified, size, path))
+            total += size
+
+        entries.sort(key=lambda entry: entry[0])
+        while total > self.QUARANTINE_MAX_BYTES and entries:
+            _modified, size, path = entries.pop(0)
+            self._drop_quarantined(storage, path)
+            total -= size
+
+    @staticmethod
+    def _drop_quarantined(storage, path):
+        try:
+            storage.delete(path)
+        except Exception:
+            logger.debug("could not drop quarantined sample %s", path, exc_info=True)
+
+
     def sanitize_filename(self, filename: str) -> str:
         """
         Sanitize filename to prevent path traversal and other attacks

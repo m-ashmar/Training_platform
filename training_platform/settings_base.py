@@ -983,6 +983,17 @@ EXERCISE_MEDIA_ALLOWED_HOSTS = tuple(
     (f'{GS_BUCKET_NAME}.storage.googleapis.com',) if GS_BUCKET_NAME else ()
 )
 
+# WHERE the evidence of a REFUSED upload is kept (training_platform.file_security).
+# A prefix, not a path: the sample is written through the DEFAULT media storage below,
+# so it lands wherever media lands — `MEDIA_ROOT/<prefix>` on the filesystem backend and
+# a private prefix inside the same bucket when MEDIA_BACKEND=gcs. It was hardcoded to
+# `MEDIA_ROOT/quarantine` (SIDE_BUGS S-018), which since object storage went live meant
+# the container's ephemeral disk — and the Celery worker, which validates uploads too,
+# has no volume at all, so the proof of what an account sent us died at the next restart.
+# Objects under this prefix are PRIVATE: nothing ever hands out a URL to one, and the
+# bucket grants no public read. Keep it out of any prefix served as public app content.
+QUARANTINE_LOCATION = get_env('QUARANTINE_LOCATION', 'quarantine').strip('/')
+
 # How many assets one trainer may hold on ONE exercise (mediakit/trainer_views.py).
 # Storage and egress are paid per byte and a library is per trainer PER EXERCISE, so
 # the bill is this number times every exercise times every coach. Replacing a filled
