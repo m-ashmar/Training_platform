@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     AgentDirectoryView,
     WalletBalanceView,
+    WalletCurrencyView,
     WalletTransactionDetailView,
     WalletTransactionsView,
     AgentTopUpView,
@@ -20,6 +21,9 @@ app_name = "wallet"
 
 urlpatterns = [
     path("balance/", WalletBalanceView.as_view(), name="balance"),
+    # The ONE currency this person trades in: read it, and set it while the
+    # wallet is still untouched (the owner, 2026-09-21).
+    path("currency/", WalletCurrencyView.as_view(), name="currency"),
     path("transactions/", WalletTransactionsView.as_view(), name="transactions"),
     # One row of the caller's own ledger, by its public reference. Same shape as a
     # row of the list above.

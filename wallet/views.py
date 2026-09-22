@@ -36,7 +36,7 @@ from .throttles import ChargingRateThrottle
 import uuid
 from policy.money import MoneyType
 from policy.services import require_purchase_allowed
-from training_platform.query_params import int_param
+from training_platform.query_params import body_dict, int_param
 from wallet import idempotency
 
 
@@ -167,6 +167,76 @@ class WalletBalanceView(APIView):
         wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": getattr(request.user, "user_type", "client")})
         audit("wallet.balance.view", request, {"wallet_id": wallet.id})
         return Response(WalletSerializer(wallet).data)
+
+
+class WalletCurrencyView(APIView):
+    """`GET`/`PUT /api/wallet/currency/` — the ONE currency this person trades in.
+
+    The owner (2026-09-21): a person chooses Syrian pounds or US dollars and is held to
+    it — "we force him to it" — and every service is then priced and charged to them in
+    that currency, whatever the operator priced it in. There is no second field for
+    this: the person's currency IS `Wallet.currency`, so the app reads it here or from
+    `GET /api/wallet/balance/`, which answers the same three keys.
+
+    GET answers `{currency, currency_locked, currency_options}`.
+
+    PUT takes `{"currency": "SYP"|"USD"}` and answers the same three keys with 200.
+    It is allowed only while the wallet is untouched — no balance and not one ledger
+    leg. After that the currency is a fact every transaction already written depends
+    on, and changing it would re-denominate them: the answer is 409 with
+    `code: "currency_locked"`. Moving an account that already holds money is an
+    exchange of the whole balance at a recorded rate, which the owner has not asked
+    for.
+
+    Codes: `currency_required` (400), `currency_unsupported` (400),
+    `currency_locked` (409).
+
+    A statement of what the caller holds, with no price and nothing to buy, so it
+    takes no `X-App-Channel` and is identical on every build.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import wallet_is_untouched
+
+        wallet, _created = Wallet.objects.get_or_create(
+            owner=request.user,
+            defaults={"owner_type": getattr(request.user, "user_type", "client")})
+        return Response(self._body(wallet, wallet_is_untouched(wallet)))
+
+    def put(self, request):
+        from .currencies import CURRENCY_CODES
+        from .models import CurrencyLocked, set_currency_for
+
+        wanted = (body_dict(request).get("currency") or "").upper()
+        if not wanted:
+            return Response({"error": _("Choose a currency."),
+                             "code": "currency_required"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            wallet = set_currency_for(request.user, wanted,
+                                      getattr(request.user, "user_type", "client"))
+        except CurrencyLocked as exc:
+            return Response({"error": _("Your currency cannot be changed once your "
+                                        "wallet has been used."),
+                             "code": exc.code, "currency": exc.currency},
+                            status=status.HTTP_409_CONFLICT)
+        except ValueError:
+            return Response({"error": _("That currency is not available."),
+                             "code": "currency_unsupported",
+                             "currency_options": list(CURRENCY_CODES)},
+                            status=status.HTTP_400_BAD_REQUEST)
+        audit("wallet.currency.set", request,
+              {"wallet_id": wallet.id, "currency": wallet.currency})
+        return Response(self._body(wallet, True))
+
+    @staticmethod
+    def _body(wallet, unlocked):
+        from .currencies import CURRENCY_CODES
+
+        return {"currency": wallet.currency,
+                "currency_locked": not unlocked,
+                "currency_options": list(CURRENCY_CODES)}
 
 
 class WalletTransactionsView(generics.ListAPIView):

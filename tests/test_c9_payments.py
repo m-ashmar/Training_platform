@@ -521,7 +521,10 @@ def _platform_balance():
     the payout happens exactly once, however the retry arrives."""
     from wallet.utils import get_platform_revenue_wallet
 
-    return get_platform_revenue_wallet().balance
+    # The platform holds one ledger wallet PER CURRENCY since the owner made both
+    # first class (2026-09-21; SIDE_BUGS S-001), so the helper names the one it
+    # means. Every test in this file trades in the platform's base currency.
+    return get_platform_revenue_wallet("SYP").balance
 
 
 def _stub_transactions(monkeypatch, reference, amount="5000.00"):

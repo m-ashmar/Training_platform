@@ -65,19 +65,52 @@ class TrainerHasActiveClients(Exception):
         self.count = count
 
 
-def _wallet_for(user, owner_type):
-    from wallet.models import Wallet
-    wallet, _created = Wallet.objects.get_or_create(
-        owner=user, defaults={"owner_type": owner_type})
-    return wallet
+def _wallet_for(user, owner_type, currency=None):
+    """This person's wallet, in the currency the money is arriving in.
+
+    Delegates to `wallet.models.wallet_for` rather than a bare `get_or_create`: that
+    left a brand-new wallet on the platform's BASE currency whatever the money was, so
+    a trainer signing up to be paid in dollars got a pound wallet the first payout then
+    refused. A wallet that has already held money keeps its own currency, which is the
+    person's and is not ours to change (`wallet.models.set_currency_for`).
+    """
+    from wallet.models import wallet_for
+
+    return wallet_for(user, owner_type, currency)
 
 
 def price_of(relation) -> Decimal:
-    """What this pair agreed to. Falls back to the trainer's rate only when the row
-    predates `agreed_rate`, never to a rate raised after the client asked."""
+    """What this pair agreed to, as the PRICE OF RECORD: the trainer's number, in the
+    trainer's own currency.
+
+    Falls back to the trainer's rate only when the row predates `agreed_rate`, never to
+    a rate raised after the client asked. What the CLIENT is charged is this converted
+    into the client's currency — `charge_for_client`, because a person pays in one
+    currency and it is theirs (the owner, 2026-09-21).
+    """
     if relation.agreed_rate is not None:
         return Decimal(relation.agreed_rate)
     return Decimal(getattr(relation.trainer, 'trainer_hourly_rate', None) or 0)
+
+
+def charge_for_client(relation):
+    """`(amount, currency, rate_row)`: what this client pays for one month, in theirs.
+
+    The trainer prices their coaching in the currency they trade in; the client pays in
+    the currency THEY trade in. Same rule as a plan (`subscription.pricing.charge_for`)
+    and the same single conversion boundary underneath, so the two can never disagree
+    about a rate or a rounding.
+
+    Raises `wallet.exchange.ExchangeRateUnavailable` when the two differ and the
+    operator's rate is missing or stale. A pair who already share a currency converts
+    nothing and is never stopped by a stale rate.
+    """
+    from subscription.pricing import charge_for
+    from wallet import currency_for
+
+    priced = charge_for(price_of(relation), currency_for(relation.trainer),
+                        currency_for(relation.client))
+    return priced.amount, priced.currency, priced.rate
 
 
 def take_hold(relation, actor) -> None:
@@ -91,18 +124,31 @@ def take_hold(relation, actor) -> None:
     from wallet.models import move_funds_atomic
     from wallet.utils import get_escrow_wallet
 
+    from wallet.exchange import ExchangeRateUnavailable
+
     if relation.hold_reference:
         return  # already held for this pair
-    amount = price_of(relation)
+    if price_of(relation) <= 0:
+        return
+    try:
+        # In the CLIENT's currency: they pay in the one currency they trade in,
+        # whatever the trainer prices in. Refused rather than guessed when the two
+        # differ and the operator's rate is missing or stale — the code travels on the
+        # exception so the view can answer it.
+        amount, currency, _rate = charge_for_client(relation)
+    except ExchangeRateUnavailable as exc:
+        failure = HoldFailed(str(exc))
+        failure.code = exc.code
+        raise failure from exc
     if amount <= 0:
         return
 
-    client_wallet = _wallet_for(relation.client, "client")
+    client_wallet = _wallet_for(relation.client, "client", currency)
     if client_wallet.balance < amount:
         raise HoldFailed("Insufficient client wallet balance for the trainer charge")
     try:
         tx = move_funds_atomic(
-            client_wallet, get_escrow_wallet(), amount,
+            client_wallet, get_escrow_wallet(currency), amount, currency=currency,
             actor_id=getattr(actor, 'id', None), tx_type='transfer',
             money_type=MoneyType.COACHING_1TO1,
             metadata={'purpose': 'trainer_request_hold',
@@ -198,15 +244,21 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose, *, pay_o
                 relation.hold_reference = ''
                 return tx
 
-            escrow = get_escrow_wallet()
+            # The escrow that actually holds THIS money: one ledger wallet per
+            # currency since SIDE_BUGS S-001, resolved by the currency of the hold row
+            # rather than by a default that used to be whichever came first.
+            escrow = get_escrow_wallet(held.currency)
             if escrow.balance < held.amount:
                 # Do NOT clear the reference: the money is still owed, and the row is
                 # the only record of who it belongs to.
                 logger.error("Escrow cannot cover hold %s (%s)", locked.hold_reference, purpose)
                 raise HoldFailed("escrow cannot cover this hold")
 
+            # Back to the client, in the currency they were charged in. Their wallet
+            # holds it by construction — it is where the hold came from.
             tx = move_funds_atomic(
-                escrow, _wallet_for(destination_owner(locked), owner_type), held.amount,
+                escrow, _wallet_for(destination_owner(locked), owner_type, held.currency),
+                held.amount, currency=held.currency,
                 actor_id=getattr(actor, 'id', None), tx_type='transfer',
                 money_type=MoneyType.COACHING_1TO1,
                 metadata={'purpose': purpose,

@@ -942,6 +942,14 @@ class CoachingPeriod(models.Model):
     #: 1 for the first month of this relation, then 2, 3, ...
     number = models.PositiveIntegerField()
     price = models.DecimalField(max_digits=12, decimal_places=2)
+    #: The unit of `price`, `commission` and `trainer_share`: the CLIENT's currency,
+    #: which is what was charged (the owner, 2026-09-21 — a person pays in the one
+    #: currency they trade in, whatever the trainer prices in). A price without a
+    #: currency is not a price, and the payout needs it twice: to find the escrow
+    #: wallet holding this month and the platform wallet its commission belongs in,
+    #: both of which are per currency (`wallet.utils`). Copied off the hold's own
+    #: ledger row when the month is opened, never read back from a setting.
+    currency = models.CharField(max_length=8, default='SYP')
     commission_rate = models.DecimalField(max_digits=5, decimal_places=4)
     commission = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     trainer_share = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)

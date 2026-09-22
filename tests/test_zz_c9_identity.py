@@ -78,7 +78,7 @@ def _open_holds_equal_escrow(escrow_before):
         "hold_reference", flat=True)
     held = Transaction.objects.filter(reference_id__in=list(refs)).aggregate(
         s=Sum("amount"))["s"] or Decimal("0")
-    return get_escrow_wallet().balance - escrow_before, held
+    return get_escrow_wallet("SYP").balance - escrow_before, held
 
 
 # ----------------------------------------------------------- approve vs reject
@@ -100,7 +100,7 @@ def test_a_reject_that_read_before_an_approve_committed_cannot_undo_it(make_user
     trainer.trainer_hourly_rate = Decimal("100.00")
     trainer.save()
     _fund(client_user, "1000.00")
-    escrow_before = get_escrow_wallet().balance
+    escrow_before = get_escrow_wallet("SYP").balance
 
     if side == "trainer":
         assert c_api.post("/api/auth/client/request-trainer/", {"trainer_id": trainer.id},
@@ -236,9 +236,12 @@ def test_a_settlement_and_the_same_clients_transfer_do_not_deadlock(make_user, m
     wallets_held, relation_held = threading.Event(), threading.Event()
     real_escrow = wallet_utils.get_escrow_wallet
 
-    def escrow_after_signalling():
+    def escrow_after_signalling(currency):
+        # Takes the currency the real helper now takes: the platform holds one ledger
+        # wallet PER CURRENCY (SIDE_BUGS S-001), so a stub with the old signature would
+        # fail on the call rather than on the race this test is about.
         relation_held.set()      # _move_hold holds its relation lock
-        return real_escrow()
+        return real_escrow(currency)
 
     def move_the_hold():
         assert wallets_held.wait(WAIT)

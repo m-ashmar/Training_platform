@@ -3445,3 +3445,29 @@ msgid ""
 "That link is not on a host this app plays media from. Upload the file "
 "instead."
 msgstr "هذا الرابط ليس على مضيف يشغّل منه التطبيق الوسائط. ارفع الملف بدلاً من ذلك."
+
+# Two currencies, both sold, with an operator-set rate between them
+# (the owner, 2026-09-21).
+#: wallet/exchange.py
+msgid "Paying in this currency is not available right now."
+msgstr "الدفع بهذه العملة غير متاح حالياً."
+
+#: wallet/views.py
+msgid "Choose a currency."
+msgstr "اختر عملة."
+
+#: wallet/views.py
+msgid "Your currency cannot be changed once your wallet has been used."
+msgstr "لا يمكن تغيير عملتك بعد استخدام محفظتك."
+
+#: wallet/views.py
+msgid "That currency is not available."
+msgstr "هذه العملة غير متاحة."
+
+#: subscription/receipts.py
+msgid "Price"
+msgstr "السعر"
+
+#: subscription/receipts.py
+msgid "Exchange rate"
+msgstr "سعر الصرف"

@@ -8,6 +8,8 @@ from decimal import Decimal
 
 from policy.money import MoneyType
 
+from .currencies import SUPPORTED_CURRENCIES
+
 
 def generate_reference_id():
     return str(uuid.uuid4())
@@ -103,7 +105,13 @@ class AgentAPIKey(models.Model):
 
 
 def _platform_currency():
-    """The platform's currency, read per row rather than frozen at import.
+    """The platform's BASE currency, read per row rather than frozen at import.
+
+    Not "the platform's only currency": Yalla Gym sells in SYP and in USD, both first
+    class (the owner, 2026-09-21; `wallet.currencies`). This is what a row gets when
+    nothing has said which money it is yet — a wallet nobody has funded, a ledger row
+    written outside `move_funds_atomic`. Everything that MOVES money names its currency
+    and never falls back here.
 
     A callable, not `settings.PLATFORM_CURRENCY` evaluated at class-definition time:
     a module-level read is captured once when the class is first loaded, so it would
@@ -112,6 +120,83 @@ def _platform_currency():
     from django.conf import settings
 
     return getattr(settings, "PLATFORM_CURRENCY", "SYP")
+
+
+class ExchangeRate(models.Model):
+    """What one currency is worth in the other, as an operator set it. APPEND-ONLY.
+
+    The owner (2026-09-21): "let's link usd to syp, like 1 usd = x sp, and we link this
+    to admin dashboard so admin set the rate". So `rate` is read `1 <base> = rate
+    <quote>` — one pair, one direction (`wallet.currencies.RATE_BASE/RATE_QUOTE`), one
+    number for a person to maintain.
+
+    A NEW RATE IS A NEW ROW. Nothing edits one and nothing deletes one, enforced here
+    and by the admin. The reason is not tidiness: every past purchase's meaning depends
+    on the rate that was live when it happened, and the Syrian pound moves — that is
+    the whole reason this is operator-set rather than a constant. Editing yesterday's
+    row would silently re-value yesterday's money. `CoachingPeriod.commission_rate` is
+    the same pattern: copied onto the thing it priced, never read back from today.
+
+    "The rate now" is the newest row whose `effective_from` has passed (`current`), so
+    an operator can queue a rate for a date without it taking effect early, and a row
+    written by mistake is corrected by appending a better one.
+
+    Staleness is in `wallet.exchange`, not here: this model records what was set and
+    when, and the policy about how old is too old belongs with the conversion.
+    """
+    base = models.CharField(max_length=3, choices=SUPPORTED_CURRENCIES)
+    quote = models.CharField(max_length=3, choices=SUPPORTED_CURRENCIES)
+    #: How many `quote` one `base` buys. Room for 12 whole digits: SYP per USD is in the
+    #: thousands today and this column must outlive several more zeros.
+    rate = models.DecimalField(max_digits=18, decimal_places=6,
+                               validators=[MinValueValidator(Decimal('0.000001'))])
+    #: When this rate starts applying. Defaults to now; an operator may date it ahead.
+    effective_from = models.DateTimeField(default=timezone.now, db_index=True)
+    #: NULL when it did not come from a signed-in operator: a migration, a command, a
+    #: shell. Same rule as `policy.CapabilityChangeLog.changed_by`.
+    set_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True,
+                               on_delete=models.SET_NULL, related_name="exchange_rates")
+    note = models.CharField(max_length=200, blank=True, default="",
+                            help_text="Why this rate, in the operator's words.")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-effective_from", "-id"]
+        verbose_name = "Exchange rate"
+        verbose_name_plural = "Exchange rates"
+        indexes = [models.Index(fields=["base", "quote", "-effective_from", "-id"],
+                                name="fx_pair_latest_idx")]
+        constraints = [
+            models.CheckConstraint(condition=Q(rate__gt=0), name="fx_rate_positive"),
+            # A pair must be two DIFFERENT currencies. A row saying 1 USD = 2 USD is
+            # not a rate, and it would be picked up by `current` as if it were.
+            models.CheckConstraint(condition=~Q(base=models.F("quote")),
+                                   name="fx_pair_is_two_currencies"),
+        ]
+
+    def __str__(self):
+        return f"1 {self.base} = {self.rate} {self.quote} from {self.effective_from:%Y-%m-%d %H:%M}"
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise PermissionError(
+                "ExchangeRate is append-only: set a new rate instead of editing this one, "
+                "or every transaction priced at it changes meaning.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("ExchangeRate is append-only and cannot be deleted.")
+
+    @classmethod
+    def current(cls, base: str, quote: str, at=None):
+        """The rate in force for `base`/`quote` at `at` (default: now), or None.
+
+        The newest row whose `effective_from` has passed — NOT the newest row, so a rate
+        dated into the future is queued rather than live.
+        """
+        at = at or timezone.now()
+        return (cls.objects.filter(base=base, quote=quote, effective_from__lte=at)
+                .order_by("-effective_from", "-id").first())
 
 
 class Wallet(models.Model):
@@ -124,11 +209,29 @@ class Wallet(models.Model):
     owner = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="wallet")
     owner_type = models.CharField(max_length=16, choices=OWNER_TYPES)
     balance = models.DecimalField(max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
-    #: The platform's one currency, from settings — never a hardcoded literal. This
-    #: read `default="USD"` while every plan and payment is SYP, and nothing anywhere
-    #: set it from the plan, so a 5,000 SYP payment minted 5,000 "USD" into the wallet
-    #: and paid the trainer that. See settings_base.PLATFORM_CURRENCY.
+    #: Which of the platform's two currencies this wallet holds (`wallet.currencies`:
+    #: SYP and USD, both sold). ONE per wallet, for ever — and, because a person has
+    #: one wallet, THIS IS THE PERSON'S CURRENCY, the one they chose and are held to
+    #: (`currency_for`, `set_currency_for`). A wallet that has never held money takes
+    #: the currency of the money that first funds it (`wallet_for`) and keeps it
+    #: thereafter; a price in the other currency is converted into this one at
+    #: purchase, never credited here in its own unit.
+    #:
+    #: The default is the platform's base currency from settings — never a hardcoded
+    #: literal. It read `default="USD"` while every plan and payment was SYP, and
+    #: nothing anywhere set it from the plan, so a 5,000 SYP payment minted 5,000 "USD"
+    #: into the wallet and paid the trainer that. See settings_base.PLATFORM_CURRENCY.
     currency = models.CharField(max_length=8, default=_platform_currency)
+    #: When the PERSON chose this currency, as opposed to inheriting the platform's
+    #: base. Set only by `set_currency_for`.
+    #:
+    #: The distinction is load-bearing. `wallet_for` lets an untouched wallet take the
+    #: currency of the money that first funds it, which is right for a wallet nobody
+    #: has expressed a wish about — but a trainer who chose to be paid in dollars and
+    #: has not been paid yet has an untouched wallet too, and that rule would have
+    #: flipped them to pounds on their first payout, silently, at 1:1. A chosen
+    #: currency is never changed by arriving money: the money is converted or refused.
+    currency_chosen_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -188,7 +291,17 @@ class Transaction(models.Model):
     source_wallet = models.ForeignKey(Wallet, on_delete=models.SET_NULL, null=True, blank=True, related_name="outgoing_transactions")
     destination_wallet = models.ForeignKey(Wallet, on_delete=models.SET_NULL, null=True, blank=True, related_name="incoming_transactions")
     amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
-    currency = models.CharField(max_length=8, default="USD")
+    #: The unit of `amount`. `move_funds_atomic` — which writes every row in normal
+    #: operation — takes it from the wallets the money moved between, after refusing a
+    #: movement whose sides disagree, so it is never guessed there.
+    #:
+    #: The DEFAULT is the platform's base currency, the same callable `Wallet.currency`
+    #: uses. It was the literal `"USD"` while every plan and payment was SYP: the exact
+    #: hardcoding whose twin on `Wallet.currency` minted 5,000 SYP into a wallet
+    #: labelled USD. A literal here is a loaded gun — it means a row written outside the
+    #: ledger helper (a fixture, a shell, the next writer's new code path) is stamped
+    #: with a currency nobody chose.
+    currency = models.CharField(max_length=8, default=_platform_currency)
     #: Which of the four kinds of money this row moved (`policy.money`). The store rules
     #: attach to the kind, not to the endpoint: a plan payment's legs are PLATFORM_SUB, a
     #: coaching hold and its release are COACHING_1TO1, and a plain top-up or transfer is
@@ -197,6 +310,28 @@ class Transaction(models.Model):
     #: that does not.
     money_type = models.CharField(max_length=16, choices=MoneyType.choices,
                                   default=MoneyType.WALLET_MOVE, db_index=True)
+    #: THE RATE THIS ROW WAS PRICED AT, when a currency was crossed to write it.
+    #:
+    #: NULL for the ordinary row, which never crosses: both wallets hold the same
+    #: currency and no rate was consulted. Set on BOTH legs of an exchange
+    #: (`exchange_funds_atomic`), which is the only place money changes unit.
+    #:
+    #: A snapshot, not a lookup. `ExchangeRate` is append-only and this is PROTECT, so
+    #: the row it names cannot be edited or deleted and what this leg was worth is
+    #: fixed for ever — a rate set tomorrow cannot re-value it, and a refund reverses
+    #: at what was actually paid rather than at today's number.
+    exchange_rate = models.ForeignKey('ExchangeRate', null=True, blank=True,
+                                      on_delete=models.PROTECT, related_name='legs')
+    #: The same number, copied. The FK is the authority; this is what an operator or an
+    #: export reads without a join, and it is the evidence if the row is ever restored
+    #: into a database that has lost the rate table.
+    exchange_rate_value = models.DecimalField(max_digits=18, decimal_places=6,
+                                              null=True, blank=True)
+    #: Ties the two legs of one exchange together. Both legs carry the SAME value,
+    #: which is the debit leg's `reference_id`, so "what did this exchange do" is one
+    #: indexed query and neither half can be read as a movement on its own.
+    exchange_reference = models.CharField(max_length=36, blank=True, default="",
+                                          db_index=True)
     metadata = models.JSONField(default=dict, blank=True)
     #: The transaction this one reverses, when it is a reversal. A OneToOne, so the
     #: DATABASE says a transfer can be reversed at most once.
@@ -339,17 +474,28 @@ class AlreadyReversed(Exception):
 def wallet_for(owner, owner_type: str, currency: str | None = None) -> "Wallet":
     """The owner's wallet, in the currency the money is actually arriving in.
 
-    `SubscriptionPlan` supports SYP and USD, and `Wallet.currency` was a hardcoded
-    `default="USD"` that nothing ever set from the plan. Since the currency guard in
-    `move_funds_atomic` only ran when there were two wallets, the mint leg of a payment
-    never checked at all: a 5,000 SYP subscription credited a wallet labelled USD at 1:1
-    and paid the trainer 5,000 "USD". The ledger reconciled the whole way, because the
-    arithmetic was right and only the unit was wrong.
+    The platform sells in SYP and in USD, both first class (`wallet.currencies`), and
+    `Wallet.currency` was a hardcoded `default="USD"` that nothing ever set from the
+    plan. Since the currency guard in `move_funds_atomic` only ran when there were two
+    wallets, the mint leg of a payment never checked at all: a 5,000 SYP subscription
+    credited a wallet labelled USD at 1:1 and paid the trainer 5,000 "USD". The ledger
+    reconciled the whole way, because the arithmetic was right and only the unit was
+    wrong.
 
-    A wallet that has never held money has no currency of its own yet, so the first
-    payment to fund it decides. Once it holds a balance or has a single transaction leg,
-    its currency is a fact: a payment in a different one is refused by the caller rather
-    than silently converted, because this system has no FX rate and is not meant to.
+    A PERSON has one wallet. A wallet that has never held money AND whose owner has not
+    chosen (`currency_chosen_at`) has no currency of its own yet, so the first payment
+    to fund it decides; a currency the person picked is never overwritten by arriving
+    money, which is converted or refused instead. Once it holds a balance or has a
+    single transaction leg, its currency is a fact: money in a different one is refused
+    by the caller rather than dropped in at 1:1. It is not stuck outside, though — a
+    price of record in the other currency is CONVERTED into this wallet's currency at
+    purchase, once, at the operator's rate (`subscription.pricing`), so the wallet only
+    ever sees its own unit. That is the whole of the two-currency rule for a person:
+    they trade in one of them, whichever they chose before the first money arrived.
+
+    The PLATFORM's own ledger wallets are the exception, and they get it by having one
+    owner per currency rather than by bending this rule: see
+    `wallet.utils._ledger_owner_wallet`.
     """
     from django.db import transaction as _transaction
 
@@ -362,21 +508,102 @@ def wallet_for(owner, owner_type: str, currency: str | None = None) -> "Wallet":
         if created or not currency or wallet.currency == currency:
             return wallet
 
-        untouched = (wallet.balance == 0 and not Transaction.objects.filter(
-            Q(source_wallet=wallet) | Q(destination_wallet=wallet)).exists())
-        if untouched:
+        if wallet.currency_chosen_at is None and wallet_is_untouched(wallet):
             wallet.currency = currency
             wallet.save(update_fields=["currency"])
+        return wallet
+
+
+def wallet_is_untouched(wallet) -> bool:
+    """True while this wallet's currency is still a choice rather than a fact.
+
+    No balance and not one ledger leg on either side. The moment either is false the
+    currency is history that other rows depend on, and changing it would re-denominate
+    every transaction already written against it.
+    """
+    return bool(wallet.balance == 0 and not Transaction.objects.filter(
+        Q(source_wallet=wallet) | Q(destination_wallet=wallet)).exists())
+
+
+class CurrencyLocked(Exception):
+    """This person's currency is already decided by money they have moved."""
+
+    code = "currency_locked"
+
+    def __init__(self, currency):
+        self.currency = currency
+        super().__init__(f"this account already trades in {currency}")
+
+
+def currency_for(user) -> str:
+    """THE PERSON'S CURRENCY. It is their wallet's, and there is no other answer.
+
+    The owner (2026-09-21): a person picks SYP or USD and "we force him to it" — every
+    price they see and every charge they pay is in that one currency, for every service.
+    Rather than invent a second field beside `Wallet.currency` that could disagree with
+    it, the wallet IS the answer: it already holds exactly this rule (one currency, set
+    by the first money in, a fact thereafter), and a ledger whose unit came from
+    somewhere else is the whole family of bugs this file is scar tissue for.
+
+    A person with no wallet row yet reads as the platform's base currency, which is what
+    they will get the moment one is made for them.
+    """
+    row = Wallet.objects.filter(owner=user).values_list("currency", flat=True).first()
+    return row or _platform_currency()
+
+
+def set_currency_for(user, currency: str, owner_type: str | None = None) -> "Wallet":
+    """Set the currency this person trades in, while that is still theirs to choose.
+
+    Raises `CurrencyLocked` once the wallet holds a balance or has a single ledger leg,
+    and `ValueError` for a currency the platform does not trade in. Moving an account
+    that already holds money to the other currency would be an exchange of the whole
+    balance at a recorded rate — a different act, with a different audit trail, and the
+    owner has not asked for it.
+    """
+    from django.db import transaction as _transaction
+
+    from .currencies import CURRENCY_CODES, is_supported
+
+    if not is_supported(currency):
+        raise ValueError(f"{currency!r} is not one of {CURRENCY_CODES}")
+    with _transaction.atomic():
+        wallet, created = Wallet.objects.select_for_update().get_or_create(
+            owner=user,
+            defaults={"owner_type": owner_type or getattr(user, "user_type", "client"),
+                      "currency": currency,
+                      "currency_chosen_at": timezone.now()})
+        if created:
+            return wallet
+        if not wallet_is_untouched(wallet):
+            # Already decided by money that has moved. Re-choosing the SAME currency is
+            # still refused rather than silently accepted: it is the same question, and
+            # answering it "yes" once the wallet is locked would tell the app the switch
+            # is available when it is not.
+            raise CurrencyLocked(wallet.currency)
+        wallet.currency = currency
+        wallet.currency_chosen_at = timezone.now()
+        wallet.save(update_fields=["currency", "currency_chosen_at"])
         return wallet
 
 
 def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
                       actor_id=None, tx_type="transfer", metadata=None, reverses=None,
                       currency: str | None = None,
-                      money_type: str | None = None) -> Transaction:
+                      money_type: str | None = None,
+                      exchange_rate=None, exchange_reference: str = "") -> Transaction:
     """
     Atomically move funds between wallets. If source is None, it's a credit (e.g., top-up).
     If destination is None, it's a debit. Creates a Transaction record on success.
+
+    ONE CURRENCY PER MOVEMENT, ALWAYS. Every wallet involved, and `currency` when the
+    caller names it, must agree; the row is written in that currency. NOTHING is
+    converted here and nothing ever will be — a rate belongs to a decision someone made
+    (`wallet.exchange`), not to the bottom of the ledger, and a conversion hidden at
+    this depth is indistinguishable from a 1:1 transfer at the call site. Money that
+    genuinely crosses goes through `exchange_funds_atomic`, which calls this twice and
+    stamps both legs with the rate row it used; `exchange_rate`/`exchange_reference` are
+    how it does that and are not for anyone else to pass.
 
     `money_type` says which kind of money this is (`policy.money.MoneyType`). A reversal
     that names none takes the kind of the transaction it reverses; anything else that
@@ -397,13 +624,23 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
     # wallet labelled USD at 1:1 and the trainer was paid that. `currency` is optional so
     # existing internal callers keep working, but when it is given it is authoritative.
     wallets = [w for w in (source, destination) if w]
+    if not wallets:
+        # Neither minted nor spent: a row with no wallet on either side moves nothing,
+        # belongs to no ledger and has no currency to take. It used to be written, with
+        # the literal "USD" stamped on it.
+        raise ValueError("a movement needs a wallet on at least one side")
     currencies = {w.currency for w in wallets}
     if currency:
         currencies.add(currency)
     if len(currencies) > 1:
-        # No FX rate exists in this system; moving the raw amount between different
-        # currencies would silently transfer at 1:1.
+        # Two different units. Converting here would transfer at 1:1, which is the bug
+        # this guard exists for; converting at the operator's rate here would hide an
+        # exchange inside something every caller reads as a transfer. Both are wrong:
+        # `exchange_funds_atomic` is where a currency is crossed, deliberately and in
+        # two legs.
         raise ValueError(f"Currency mismatch: {sorted(currencies)}")
+    # Exactly one, and it is the money's own: never a literal, never a setting.
+    (row_currency,) = currencies
 
     with transaction.atomic():
         # The actor's user row BEFORE any wallet, in the mode the ledger row's foreign
@@ -471,13 +708,92 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
             source_wallet=src,
             destination_wallet=dst,
             amount=amount,
-            currency=(destination.currency if destination else (source.currency if source else "USD")),
+            currency=row_currency,
             money_type=money_type,
+            exchange_rate=exchange_rate,
+            exchange_rate_value=getattr(exchange_rate, "rate", None),
+            exchange_reference=exchange_reference,
             metadata=metadata,
             reverses=reverses,
         )
 
     return tx
+
+
+def exchange_funds_atomic(source: Wallet, destination: Wallet, amount, *, amount_in: str,
+                          actor_id=None, metadata=None, money_type: str | None = None,
+                          at=None) -> tuple[Transaction, Transaction]:
+    """Move money from a wallet in one currency to a wallet in another, as an EXCHANGE.
+
+    Returns `(debit_leg, credit_leg)`. Two rows, never one:
+
+        debit   source      -> nothing      amount_out  in source.currency
+        credit  nothing     -> destination  amount_in   in destination.currency
+
+    Both carry the same `exchange_reference` (the debit's `reference_id`) and the same
+    `ExchangeRate` row, so the pair reads as one act and neither half can be mistaken
+    for a plain transfer. A single row cannot express this: `Transaction.amount` has one
+    `currency`, and the two sides are genuinely different numbers of different things.
+
+    `amount` is in `amount_in`, which must be the currency of ONE of the two wallets;
+    the other side is derived by `wallet.exchange.convert_at_the_operators_rate`. Which
+    side is authoritative matters, and the caller knows: a coaching payout owes the
+    trainer a figure in the trainer's currency, so that is the given side and the debit
+    from escrow is derived.
+
+    Raises `NoExchangeRate` / `StaleExchangeRate` (both carry a `code`) rather than
+    guessing, and `ValueError` if the two wallets are in fact the same currency — that
+    is `move_funds_atomic`, and calling this instead would write two rows where one
+    belongs.
+
+    Lock order is unchanged: each leg re-locks its wallets in ascending id inside one
+    outer transaction, so a caller that already holds both (every one of them does —
+    see `users/coaching.py lock_wallets`) pays nothing for it.
+    """
+    from .exchange import convert_at_the_operators_rate
+
+    if source.currency == destination.currency:
+        raise ValueError("an exchange needs two currencies; use move_funds_atomic")
+    if amount_in not in (source.currency, destination.currency):
+        raise ValueError(
+            f"{amount_in!r} is neither wallet's currency "
+            f"({source.currency}, {destination.currency})")
+
+    if amount_in == destination.currency:
+        credited = Decimal(amount)
+        debited, rate_row = convert_at_the_operators_rate(
+            credited, destination.currency, source.currency, at=at)
+    else:
+        debited = Decimal(amount)
+        credited, rate_row = convert_at_the_operators_rate(
+            debited, source.currency, destination.currency, at=at)
+    if debited <= 0 or credited <= 0:
+        # Rounding took one side to nothing. Moving the other anyway would destroy
+        # value in one direction and mint it in the other.
+        raise ValueError(
+            f"this exchange rounds to nothing: {debited} {source.currency} / "
+            f"{credited} {destination.currency}")
+
+    common = dict(metadata or {})
+    with transaction.atomic():
+        debit = move_funds_atomic(
+            source, None, debited, actor_id=actor_id, tx_type="transfer",
+            currency=source.currency, money_type=money_type, exchange_rate=rate_row,
+            metadata={**common, "exchange": "out",
+                      "exchange_to": destination.currency,
+                      "exchange_to_amount": str(credited)})
+        # The debit's reference names the pair, so the link exists before the credit
+        # is written and a partial read can never find a credit with no debit.
+        Transaction.objects.filter(pk=debit.pk).update(exchange_reference=debit.reference_id)
+        debit.exchange_reference = debit.reference_id
+        credit = move_funds_atomic(
+            None, destination, credited, actor_id=actor_id, tx_type="transfer",
+            currency=destination.currency, money_type=money_type, exchange_rate=rate_row,
+            exchange_reference=debit.reference_id,
+            metadata={**common, "exchange": "in",
+                      "exchange_from": source.currency,
+                      "exchange_from_amount": str(debited)})
+    return debit, credit
 
 
 def ensure_agent_profile(user) -> "AgentProfile":

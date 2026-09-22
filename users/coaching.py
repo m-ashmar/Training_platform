@@ -79,6 +79,15 @@ def split(price: Decimal, rate: Decimal) -> tuple[Decimal, Decimal]:
     return commission, Decimal(price) - commission
 
 
+def _converted(amount: Decimal, from_currency: str, to_currency: str):
+    """`amount` in `to_currency`, at the operator's rate. One call, so the coaching
+    payout and the plan checkout can never disagree about a rate or a rounding."""
+    from subscription.pricing import charge_for
+
+    priced = charge_for(amount, from_currency, to_currency)
+    return priced.amount, priced.rate
+
+
 def lock_wallets(actor_id, wallets) -> dict:
     """The actor's user row, then every wallet in ascending id. Returns {id: wallet}."""
     from wallet.models import Wallet
@@ -104,7 +113,12 @@ def open_period(relation, hold_tx):
     last = relation.periods.aggregate(n=Max('number'))['n'] or 0
     return CoachingPeriod.objects.create(
         trainer_id=relation.trainer_id, client_id=relation.client_id, relation=relation,
-        number=last + 1, price=hold_tx.amount, commission_rate=commission_rate(),
+        # The month's price AND its unit, both read off the money that was actually
+        # held. A price without a currency is not a price, and the payout has to know
+        # which escrow holds this month and which platform wallet its commission goes
+        # to — both are per currency (`wallet.utils`).
+        number=last + 1, price=hold_tx.amount, currency=hold_tx.currency,
+        commission_rate=commission_rate(),
         hold_reference=hold_tx.reference_id)
 
 
@@ -120,9 +134,16 @@ def pay_out(period, *, actor_id, starts_at, trainer_purpose):
 
     from .trainer_relations import HoldFailed, _wallet_for
 
-    escrow = get_escrow_wallet()
-    trainer_wallet = _wallet_for(period.trainer, 'trainer')
-    platform = get_platform_revenue_wallet()
+    from wallet.exchange import ExchangeRateUnavailable
+    from wallet.models import exchange_funds_atomic
+
+    # EVERYTHING IN THE MONTH'S OWN CURRENCY, which is the client's: that is what was
+    # charged and what escrow is holding. One ledger wallet per currency
+    # (SIDE_BUGS S-001), resolved by the money rather than by a default.
+    money = period.currency
+    escrow = get_escrow_wallet(money)
+    trainer_wallet = _wallet_for(period.trainer, 'trainer', money)
+    platform = get_platform_revenue_wallet(money)
     locked = lock_wallets(actor_id, [escrow, trainer_wallet, platform])
     if locked[escrow.pk].balance < period.price:
         logger.error("Escrow cannot cover coaching period %s", period.pk)
@@ -134,12 +155,39 @@ def pay_out(period, *, actor_id, starts_at, trainer_purpose):
               'month': period.number}
     payout = fee = None
     if share > 0:
-        payout = move_funds_atomic(escrow, trainer_wallet, share, actor_id=actor_id,
-                                   tx_type='transfer', money_type=MoneyType.COACHING_1TO1,
-                                   metadata={'purpose': trainer_purpose, **common})
+        if trainer_wallet.currency == money:
+            payout = move_funds_atomic(escrow, trainer_wallet, share, actor_id=actor_id,
+                                       currency=money, tx_type='transfer',
+                                       money_type=MoneyType.COACHING_1TO1,
+                                       metadata={'purpose': trainer_purpose, **common})
+        else:
+            # THE ONE PLACE COACHING MONEY CROSSES A CURRENCY. The client paid in
+            # theirs and the trainer is owed in theirs; escrow cannot hold both, and a
+            # person's wallet cannot change unit. So this is an explicit exchange: a
+            # debit out of escrow in the month's currency and a credit into the
+            # trainer's in theirs, both stamped with the rate row used, so a refund
+            # and an audit read what was actually done rather than today's number.
+            # The trainer's side is the given one — what they are owed is the figure
+            # in their currency — and the debit from escrow is derived from it.
+            owed, _rate = _converted(share, money, trainer_wallet.currency)
+            try:
+                _debit, payout = exchange_funds_atomic(
+                    escrow, trainer_wallet, owed, amount_in=trainer_wallet.currency,
+                    actor_id=actor_id, money_type=MoneyType.COACHING_1TO1,
+                    metadata={'purpose': trainer_purpose, **common})
+            except ExchangeRateUnavailable as exc:
+                logger.error("Coaching period %s cannot be paid out: %s", period.pk, exc)
+                failure = HoldFailed(str(exc))
+                failure.code = exc.code
+                raise failure from exc
     if commission > 0:
+        # The platform's cut stays in the currency the month was sold in. It is the
+        # platform's own money in its own books; converting it would be an exchange
+        # nobody asked for, and it would put a rate between a commission and the price
+        # it is a percentage of.
         fee = move_funds_atomic(escrow, platform, commission, actor_id=actor_id,
-                                tx_type='transfer', money_type=MoneyType.COACHING_1TO1,
+                                currency=money, tx_type='transfer',
+                                money_type=MoneyType.COACHING_1TO1,
                                 metadata={'purpose': 'coaching_commission',
                                           'rate': str(period.commission_rate), **common})
     period.status = 'settled'
@@ -237,7 +285,7 @@ def renew(relation_id, now=None) -> str:
         # The month's own price, never the trainer's current rate.
         price = last.price
 
-        client_wallet = _wallet_for(relation.client, 'client')
+        client_wallet = _wallet_for(relation.client, 'client', last.currency)
         trainer_name = relation.trainer.full_name or relation.trainer.username
         # Decided on an unlocked read: nothing below the freeze takes a wallet, and a
         # top-up that lands meanwhile is charged on the next run; the paying branch
@@ -263,13 +311,18 @@ def renew(relation_id, now=None) -> str:
             transaction.on_commit(lambda: emit_event(event))
             return 'frozen' if step == 0 else 'reminded'
 
-        escrow = get_escrow_wallet()
+        # The month renews at the price of the month before it, which is already in
+        # the client's currency — no conversion, and so no way for a stale rate to
+        # freeze a coaching that has been running happily.
+        money = last.currency
+        escrow = get_escrow_wallet(money)
         locked = lock_wallets(None, [client_wallet, escrow,
                                      _wallet_for(relation.trainer, 'trainer'),
-                                     get_platform_revenue_wallet()])
+                                     get_platform_revenue_wallet(money)])
         if locked[client_wallet.pk].balance < price:
             return 'due'    # spent between the read and the lock; the next run decides
         hold = move_funds_atomic(client_wallet, escrow, price, actor_id=None,
+                                 currency=money,
                                  tx_type='transfer', money_type=MoneyType.COACHING_1TO1,
                                  metadata={'purpose': 'coaching_renewal_charge',
                                            'trainer_id': relation.trainer_id,

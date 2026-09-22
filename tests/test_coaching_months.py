@@ -40,14 +40,18 @@ def _balance(user):
     return wallet.balance if wallet else Decimal("0.00")
 
 
-def _platform():
+# The platform holds one ledger wallet PER CURRENCY since the owner made both first
+# class (2026-09-21; SIDE_BUGS S-001), so these helpers name the one they mean. Every
+# pair in this file trades in the platform's base currency; the cross-currency journeys
+# are in tests/test_two_currencies.py.
+def _platform(currency="SYP"):
     from wallet.utils import get_platform_revenue_wallet
-    return get_platform_revenue_wallet().balance
+    return get_platform_revenue_wallet(currency).balance
 
 
-def _escrow():
+def _escrow(currency="SYP"):
     from wallet.utils import get_escrow_wallet
-    return get_escrow_wallet().balance
+    return get_escrow_wallet(currency).balance
 
 
 def _accepted(make_user, api, tag, *, rate="100.00", funds="1000.00"):

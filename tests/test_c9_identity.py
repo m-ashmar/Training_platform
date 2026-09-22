@@ -45,7 +45,11 @@ def _expire_codes(user):
 
 def _escrow_balance():
     from wallet.utils import get_escrow_wallet
-    return get_escrow_wallet().balance
+
+    # The platform holds one ledger wallet PER CURRENCY since the owner made both
+    # first class (2026-09-21; SIDE_BUGS S-001), so the helper names the one it
+    # means. Every test in this file trades in the platform's base currency.
+    return get_escrow_wallet("SYP").balance
 
 
 def _approved_pair_with_hold(make_user, tag, rate="80.00", funds="100.00"):
@@ -191,7 +195,7 @@ def test_signups_stranded_in_the_old_shape_can_ask_for_a_code(api, make_user):
     signed_in = old_shape("c9_old_banned", last_login=tz.now())
     staff = old_shape("c9_old_staff", is_staff=True)
     erased = old_shape("c9_old_erased", email="retired+1-abc@invalid.local")
-    ledger_owner = get_escrow_wallet().owner
+    ledger_owner = get_escrow_wallet("SYP").owner
 
     migration.pending_signups_are_enabled(apps, None)
 
@@ -231,7 +235,7 @@ def test_a_disabled_account_that_never_verified_stays_disabled(api):
     user.refresh_from_db()
     assert user.is_active is False, "verifying the address lifted a moderator's block"
 
-    escrow_owner = get_escrow_wallet().owner
+    escrow_owner = get_escrow_wallet("SYP").owner
     before = OTPVerification.objects.filter(user=escrow_owner).count()
     r = api().post("/api/auth/resend-otp/", {"email": escrow_owner.email},
                    content_type="application/json")
@@ -340,7 +344,7 @@ def test_an_erasure_that_cannot_return_the_money_erases_nothing(seeded_catalogue
 
     trainer, client_user, t_api, c_api, relation, _escrow_before = \
         _approved_pair_with_hold(make_user, "c9-erase-short")
-    Wallet.objects.filter(pk=get_escrow_wallet().pk).update(balance=Decimal("0.00"))
+    Wallet.objects.filter(pk=get_escrow_wallet("SYP").pk).update(balance=Decimal("0.00"))
 
     r = c_api.delete("/api/privacy/erase/?confirm=ERASE")
     assert r.status_code == 409, r.content
@@ -365,7 +369,7 @@ def test_a_hold_an_admin_already_reversed_is_never_moved_again(seeded_catalogue,
     # Other clients' holds sitting in the same escrow wallet, so a second payout out of
     # it would succeed rather than being stopped by an empty balance.
     others = Decimal("500.00")
-    Wallet.objects.filter(pk=get_escrow_wallet().pk).update(balance=_escrow_balance() + others)
+    Wallet.objects.filter(pk=get_escrow_wallet("SYP").pk).update(balance=_escrow_balance() + others)
 
     admin = make_user("c9-rev-admin", user_type="admin")
     r = api(admin).post("/api/wallet/admin/reversal/",

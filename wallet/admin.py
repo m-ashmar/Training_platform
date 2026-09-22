@@ -1,10 +1,13 @@
 from django.contrib import admin, messages
+from django.utils import timezone
+from django.utils.html import format_html
 from django.db.models import Count
 from .models import (
     Wallet,
     Transaction,
     AgentProfile,
     AgentAPIKey,
+    ExchangeRate,
     WalletAuditLog,
     IdempotencyKey,
 )
@@ -196,3 +199,82 @@ class IdempotencyKeyAdmin(LedgerReadOnlyAdmin):
     search_fields = ("key", "created_by__email")
 
 
+
+
+@admin.register(ExchangeRate)
+class ExchangeRateAdmin(admin.ModelAdmin):
+    """The operator's page for the USD/SYP rate: set a new one, read the history.
+
+    THE OWNER SETS THE RATE (2026-09-21): "1 usd = x sp", from here. Three things this
+    page has to get right, all of them about the fact that a rate is history and not a
+    setting:
+
+    * **Adding is the only edit.** A rate row is append-only in the model and here:
+      nothing is changeable, nothing is deletable, and bulk delete is removed because
+      `QuerySet.delete()` skips the model's `delete()`. Editing yesterday's rate would
+      re-value every purchase struck at it.
+    * **Who and when are recorded**, like `policy.CapabilityChangeLog`: `set_by` is
+      stamped from the signed-in operator and the whole table IS the change log, so
+      there is no second one to keep in step.
+    * **The age is on the page.** A rate nobody has refreshed is a money bug that looks
+      like nothing at all, so the list shows how old the live one is and says loudly
+      when it is past `EXCHANGE_RATE_MAX_AGE_DAYS` — the point at which cross-currency
+      selling stops (`wallet.exchange`). Same-currency selling is unaffected, and the
+      warning says so rather than implying the platform is down.
+    """
+    list_display = ("pair", "rate", "effective_from", "status", "set_by", "note",
+                    "created_at")
+    list_filter = ("base", "quote")
+    ordering = ("-effective_from", "-id")
+    fields = ("base", "quote", "rate", "effective_from", "note")
+    readonly_fields = ()
+
+    @admin.display(description="Pair")
+    def pair(self, obj):
+        return f"1 {obj.base} = ? {obj.quote}"
+
+    @admin.display(description="Status")
+    def status(self, obj):
+        """Live / superseded / queued, and how old the live one is."""
+        from .exchange import max_age_days, rate_age_days
+        from .models import ExchangeRate as _Rate
+
+        current = _Rate.current(obj.base, obj.quote)
+        if current is None or obj.effective_from > timezone.now():
+            return format_html('<span style="color:#888">queued</span>')
+        if current.pk != obj.pk:
+            return format_html('<span style="color:#888">superseded</span>')
+        age = rate_age_days(obj) or 0
+        if age > max_age_days():
+            return format_html(
+                '<b style="color:#b00">LIVE — {} days old, past the {}-day limit: '
+                'cross-currency purchases are refused until a new rate is set '
+                '(same-currency sales are unaffected)</b>',
+                f"{age:.1f}", max_age_days())
+        return format_html('<b style="color:#070">live — {} days old</b>', f"{age:.1f}")
+
+    def get_readonly_fields(self, request, obj=None):
+        # Every field, once the row exists: append-only means the form may create and
+        # may never change.
+        if obj is not None:
+            return ("base", "quote", "rate", "effective_from", "set_by", "note",
+                    "created_at")
+        return ()
+
+    def save_model(self, request, obj, form, change):
+        if change:   # defence in depth; the model raises too
+            raise PermissionError("ExchangeRate is append-only: add a new rate.")
+        obj.set_by = request.user
+        obj.save()
+
+    def has_change_permission(self, request, obj=None):
+        # False for a ROW, true for the changelist, which is how Django asks.
+        return obj is None and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        actions.pop("delete_selected", None)
+        return actions

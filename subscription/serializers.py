@@ -21,17 +21,55 @@ class PlanPriceByChannelMixin:
     price_fields = ('price',)
 
     def to_representation(self, instance):
-        data = super().to_representation(instance)
         request = self.context.get('request')
+        data = self.add_price_fields(super().to_representation(instance),
+                                     instance, request)
+        # LAST, after any price a subclass added. It used to be the whole method, so a
+        # subclass that converts the price into the reader's currency would have handed
+        # the number straight back to a build that may not show one.
         if request is not None and not can_show_price(request, MoneyType.PLATFORM_SUB):
             for name in self.price_fields:
                 data.pop(name, None)
         return data
 
+    def add_price_fields(self, data, instance, request):
+        """Hook: a subclass adds or rewrites its price fields here, not in
+        `to_representation`, so the channel rule always gets the last word."""
+        return data
+
 
 class SubscriptionPlanSerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
-    """Serializer for subscription plans"""
-    
+    """A plan, priced in the READER'S currency and in no other.
+
+    ONE NUMBER, ONE CURRENCY. The owner (2026-09-21): a person picks SYP or USD and
+    every price they see is in it. So `price` and `currency` here are not the columns —
+    they are the plan's price of record converted into the reader's own currency
+    (`wallet.currency_for`, which is their wallet's) at the operator's live rate. The
+    app must never convert anything itself and must never show two numbers; if it had
+    both it would eventually show the wrong one.
+
+    Fields, on top of the plan's own:
+
+    | Field | Means |
+    |---|---|
+    | `price`, `currency` | what this reader would pay, in their currency |
+    | `price_converted` | true when a rate was applied to get there |
+    | `exchange_rate` | the rate used, as a string, or null |
+    | `price_of_record`, `price_of_record_currency` | what the operator priced it at, ONLY when converted — so a receipt and a support call can say what was sold |
+
+    With no request in the context the caller is server-side code (the operator
+    console, a task) and the columns are answered as they stand, unconverted.
+
+    A stale rate does not blank the catalogue: the reader is shown the price of record
+    marked `price_converted: false`, and the PURCHASE refuses with
+    `exchange_rate_stale` when they tap Buy (`subscription/views.py`). Browsing is not
+    selling.
+
+    `price` is still removed entirely for a build that may not show a price
+    (`PlanPriceByChannelMixin`), and so are the four fields beside it — they are the
+    same number said differently.
+    """
+
     class Meta:
         model = SubscriptionPlan
         fields = [
@@ -42,6 +80,27 @@ class SubscriptionPlanSerializer(PlanPriceByChannelMixin, serializers.ModelSeria
             'max_meals_per_day', 'max_routines', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
+
+    #: Removed together with `price` on a build that may not show one: they are all
+    #: the same number, and leaving the converted copy behind would defeat the point.
+    price_fields = ('price', 'currency', 'price_converted', 'exchange_rate',
+                    'price_of_record', 'price_of_record_currency')
+
+    def add_price_fields(self, data, instance, request):
+        user = getattr(request, 'user', None)
+        if request is not None and user is not None and user.is_authenticated:
+            from wallet import currency_for
+
+            from .pricing import price_for
+
+            priced = price_for(instance.price, instance.currency, currency_for(user))
+            data.update(priced.as_payload())
+        else:
+            # Anonymous, or server-side: nobody to price it for. The columns as they
+            # stand, and the extra fields present and empty so the shape never varies.
+            data.update({'price_converted': False, 'exchange_rate': None,
+                         'price_of_record': None, 'price_of_record_currency': None})
+        return data
 
 class SubscriptionFeatureSerializer(serializers.ModelSerializer):
     """Serializer for subscription features"""

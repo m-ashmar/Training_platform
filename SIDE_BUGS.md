@@ -41,12 +41,13 @@ Not for: work the current task owns, bugs the app session reports (that is
 | S-018 | `training_platform/file_security.py:59` | The quarantine directory is always `MEDIA_ROOT/quarantine`, local | With object storage the evidence of a rejected upload lands on ephemeral disk (the worker has no volume) and is gone at the next restart; also an `os.makedirs` per validator | MEDIUM | storage |
 
 | S-007 | `routine/urls.py:19` | `ExerciseSetLogViewSet` is registered under TWO prefixes (`set-logs/`, `exercisesetlogs/`) | Every new action doubles the route surface and every contract row is written twice | MEDIUM | routine extras |
-| S-001 | `wallet/utils.py:24` `get_platform_revenue_wallet` | The platform's revenue wallet is ONE wallet, so it holds one currency for ever — the first payment decides it. A plan priced in the other currency is minted into the client's wallet, logged as an error and never moves on. | Only SYP is sold today (USD is legacy rows), so nobody is affected yet; the day a second currency is priced, its revenue sits in customers' wallets. | MEDIUM | step 4 |
 
 ## Closed
 
 | ID | Where | What | Closed by |
 |---|---|---|---|
+| S-001 | `wallet/utils.py:24` `get_platform_revenue_wallet` · `:43` `get_escrow_wallet` | The platform's revenue wallet is ONE wallet, so it holds one currency for ever — the first payment decides it. A plan priced in the other currency is minted into the client's wallet, logged as an error and never moves on. ESCROW has the same shape, and worse: a coaching month in the second currency could not even be held. | fix(currency): two currencies, both sold, with an operator-set rate between them |
+| S-040 | `wallet/models.py:191` and `:474` | `Transaction.currency` defaulted to the literal `"USD"`, and `move_funds_atomic` fell back to the same literal — the exact hardcoding whose twin on `Wallet.currency` minted 5,000 SYP into a wallet labelled USD. Re-filed: the money build wrote it as S-020, the renumber moved it to S-037, and the second side-bug merge dropped the row. | fix(currency): two currencies, both sold, with an operator-set rate between them |
 | S-008 | `tests/security/*.py` (e.g. `privacy_rights.py:2`) | Every script hardcodes `sys.path.insert(0, '<the main checkout>')` | fix(side-bugs): close S-008 and S-011–S-015 |
 | S-011 | `social/consumers.py:39` | `SocialConsumer.receive` echoes any frame back verbatim | fix(side-bugs): close S-008 and S-011–S-015 |
 | S-012 | `ai_assistant/consumers.py:272` · `views.py:112` · `services/chat_service.py:222-252` | Error paths with no `code` and bare untranslated literals, beside others that have both | fix(side-bugs): close S-008 and S-011–S-015 |

@@ -246,6 +246,11 @@ register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", 
 register(PersonalDataSource(label="coaching_periods", model="users.CoachingPeriod",
                             user_field=("trainer", "client"), on_erase="keep"))
 register(PersonalDataSource(label="transactions", model="wallet.Transaction", user_field="actor", on_erase="keep"))
+# Which operator set which USD/SYP rate, and when. Names an operator, never a customer,
+# and it is the evidence that every converted purchase was struck at a rate a named
+# person chose. Kept — the row is append-only and past money depends on it.
+register(PersonalDataSource(label="exchange_rates", model="wallet.ExchangeRate",
+                            user_field="set_by", on_erase="keep"))
 register(PersonalDataSource(label="wallet_audit_log", model="wallet.WalletAuditLog", user_field="actor", on_erase="keep"))
 register(PersonalDataSource(label="idempotency_keys", model="wallet.IdempotencyKey", user_field="created_by",
                             on_erase="keep", retention_days=30))

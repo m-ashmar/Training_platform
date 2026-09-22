@@ -56,6 +56,10 @@ from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 from wallet.throttles import ChargingRateThrottle
 from policy.money import MoneyType
 from policy.services import flags_for_request, require_purchase_allowed
+from wallet import currency_for as wallet_currency_for
+from wallet.exchange import ExchangeRateUnavailable, refusal_body
+
+from .pricing import charge_for
 
 
 def _checkout_opener(request, subscription, gateway_name, gateway_service):
@@ -332,6 +336,12 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                         # of handing out transfer instructions to an empty account.
                         lambda: PaymentGatewayManager.get_service_for_initiation(gateway_name)),
                 )
+            except ExchangeRateUnavailable as exc:
+                # The plan is priced in the other currency and the operator's rate is
+                # missing or stale, so there is no honest number to renew at. Refused
+                # with its own `code` rather than charged at yesterday's pound.
+                logger.warning("Renewal for subscription %s refused: %s", subscription.id, exc)
+                return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
             except PaymentGatewayError as e:
                 logger.warning("Renewal for subscription %s not initiated: %s", subscription.id, e)
                 return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
@@ -929,16 +939,40 @@ class PaymentGatewayView(APIView):
 
             # --- The price is the plan's price. Full stop. ---
             plan = subscription.plan
-            amount = plan.price
-            currency = plan.currency
 
-            if amount <= 0:
+            if plan.price <= 0:
                 # A free plan has nothing to charge; sending it to a gateway would
-                # only fail the minimum-amount check with a confusing message.
+                # only fail the minimum-amount check with a confusing message. Decided
+                # on the price of record, BEFORE any conversion: nothing times a rate
+                # is still nothing, and a free plan must not be refused because the
+                # operator's rate is stale.
                 return Response(
                     {'error': _('This plan does not require a payment')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+
+            # WHAT THIS BUYER PAYS, in the one currency this buyer trades in (the
+            # owner, 2026-09-21). The plan keeps the price of record the operator set;
+            # a buyer who holds the other currency is charged it converted at the
+            # operator's live rate, and `PaymentService` snapshots that rate onto the
+            # payment. A buyer already in the plan's currency converts nothing and
+            # consults no rate, so a stale rate cannot stop a same-currency sale.
+            #
+            # Computed HERE as well as inside the service so the quoted-price check
+            # below compares against the number the app actually displayed, and so a
+            # missing or stale rate is a clean 409 with a `code` rather than a 500 out
+            # of the service.
+            try:
+                priced = charge_for(plan.price, plan.currency,
+                                    wallet_currency_for(request.user))
+            except ExchangeRateUnavailable as exc:
+                # `exchange_rate_missing` / `exchange_rate_stale`. The app branches on
+                # the code; the text never changes.
+                logger.warning("Checkout refused for subscription %s: %s",
+                               subscription.id, exc)
+                return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+            amount = priced.amount
+            currency = priced.currency
 
             # --- Optional client confirmation of the price it displayed ---
             quoted_amount = request.data.get('amount')
