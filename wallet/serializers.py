@@ -22,12 +22,33 @@ class WalletSerializer(serializers.ModelSerializer):
     held = serializers.SerializerMethodField()
     held_for = serializers.SerializerMethodField()
     account_number = serializers.SerializerMethodField()
+    currency_locked = serializers.SerializerMethodField()
+    currency_options = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallet
         fields = ["id", "owner", "owner_type", "balance", "currency", "created_at",
-                  "updated_at", "held", "held_for", "account_number"]
+                  "updated_at", "held", "held_for", "account_number",
+                  "currency_locked", "currency_options"]
         read_only_fields = fields
+
+    def get_currency_locked(self, obj):
+        """True once this person's currency is decided by money that has moved.
+
+        `currency` IS the person's currency (the owner, 2026-09-21: they pick one and
+        every price and charge is in it). While this is false the app may offer the
+        choice; once it is true the choice is gone and `PUT /api/wallet/currency/`
+        answers `currency_locked`.
+        """
+        from .models import wallet_is_untouched
+
+        return not wallet_is_untouched(obj)
+
+    def get_currency_options(self, obj):
+        """The currencies this person could pick. The app must not hardcode the list."""
+        from .currencies import CURRENCY_CODES
+
+        return list(CURRENCY_CODES)
 
     def _hold(self, obj):
         """The client's live coaching hold as `(amount, relation)`, or `(0, None)`.

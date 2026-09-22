@@ -4187,3 +4187,29 @@ msgstr "أنت من دعا هذا المتدرّب. عليه هو أن يقبل 
 #: wallet/views.py
 msgid "A reversal cannot itself be reversed"
 msgstr "لا يمكن عكس عملية عكس"
+
+# Two currencies, both sold, with an operator-set rate between them
+# (the owner, 2026-09-21).
+#: wallet/exchange.py
+msgid "Paying in this currency is not available right now."
+msgstr "الدفع بهذه العملة غير متاح حالياً."
+
+#: wallet/views.py
+msgid "Choose a currency."
+msgstr "اختر عملة."
+
+#: wallet/views.py
+msgid "Your currency cannot be changed once your wallet has been used."
+msgstr "لا يمكن تغيير عملتك بعد استخدام محفظتك."
+
+#: wallet/views.py
+msgid "That currency is not available."
+msgstr "هذه العملة غير متاحة."
+
+#: subscription/receipts.py
+msgid "Price"
+msgstr "السعر"
+
+#: subscription/receipts.py
+msgid "Exchange rate"
+msgstr "سعر الصرف"

@@ -215,8 +215,23 @@ from django.utils.translation import gettext_lazy as _
 #: forty cents. The ledger reconciled perfectly the whole way, which is why it survived
 #: every internal check: the arithmetic was right and the unit was wrong.
 #:
-#: There is no FX in this system and there is not meant to be. One currency, named once.
+#: THE BASE CURRENCY, not the only one. The platform sells in SYP and USD, both first
+#: class (the owner, 2026-09-21; `wallet.currencies`). This is what a row gets when
+#: nothing has said which money it is yet: a wallet nobody has funded or chosen a
+#: currency for, a ledger row written outside `move_funds_atomic`. Everything that
+#: MOVES money names its currency and never falls back here.
+#:
+#: Changing this does NOT re-denominate anything. Existing wallets keep the currency
+#: they hold, and the platform's own ledger owners are addressed by currency
+#: (`wallet.utils._ledger_owner_wallet`), so nothing is reinterpreted underneath.
 PLATFORM_CURRENCY = get_env("PLATFORM_CURRENCY", "SYP")
+
+#: How old the operator's USD/SYP rate may be before a CONVERSION is refused
+#: (`wallet.exchange`). A same-currency purchase never consults the rate, so a stale
+#: one can never stop a pound-priced plan being sold to a pound wallet. Seven days is
+#: a chosen default and wants the owner's confirmation: long enough that a quiet week
+#: does not stop sales, short enough that nobody sells dollars at a fortnight-old pound.
+EXCHANGE_RATE_MAX_AGE_DAYS = int(get_env("EXCHANGE_RATE_MAX_AGE_DAYS", "7"))
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -723,7 +738,14 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 # ========================
-# Platform Escrow
+# Platform Escrow and revenue
+#
+# These four are the BASE of an address, not an address. The platform holds one ledger
+# wallet PER CURRENCY, so `wallet.utils._ledger_address` derives
+# `platform_escrow_syp@local`, `platform_escrow_usd@local` and the revenue pair from
+# them. One wallet for both currencies was SIDE_BUGS S-001: the first payment ever
+# taken decided the platform's currency for ever, and revenue in the other one sat in
+# customers' balances.
 # ========================
 PLATFORM_ESCROW_EMAIL = get_env('PLATFORM_ESCROW_EMAIL', 'platform_escrow@local')
 PLATFORM_ESCROW_USERNAME = get_env('PLATFORM_ESCROW_USERNAME', 'platform_escrow')

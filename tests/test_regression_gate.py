@@ -5817,7 +5817,12 @@ def test_a_refund_takes_the_money_back_and_not_only_the_access(
     # stays 100% with the platform (the owner, 2026-09-19). What this test is about is
     # unchanged — a refund must take the money back, not only the access.
     from wallet.utils import get_platform_revenue_wallet
-    pw = get_platform_revenue_wallet(); cw = Wallet.objects.get(owner=client_user)
+    # The platform's wallet FOR THIS PAYMENT'S CURRENCY. It used to be one wallet for
+    # the whole platform, which is SIDE_BUGS S-001: the first payment ever taken
+    # decided its currency for ever. This plan is priced in USD, so the money lands in
+    # the USD one. What the test is about is unchanged — a refund must take the money
+    # back, not only the access.
+    pw = get_platform_revenue_wallet(pay.currency); cw = Wallet.objects.get(owner=client_user)
     tw = Wallet.objects.get(owner=trainer)
     pw.refresh_from_db(); cw.refresh_from_db(); tw.refresh_from_db()
     assert pw.balance == D("10.00")
@@ -6894,9 +6899,12 @@ def test_a_funded_wallet_refuses_a_payment_in_another_currency(
         PaymentService.complete_payment(pay.id, {
             "amount": "5000.00", "currency": "SYP", "status": "completed",
             "transaction_id": "gate-mix-1"})
-    # The platform's wallet since plan step 4; the rule under test is the wallet's, not
-    # the owner's — a funded wallet's currency is a fact and there is no FX here.
-    wallet = get_platform_revenue_wallet()
+    # The platform's SYP wallet, since plan step 4. The rule under test is the
+    # PERSON's: a wallet that has held money has a currency that is a fact, so the
+    # second payment (USD, into a client whose wallet is now SYP) writes no leg at all.
+    # Where a second currency's money DOES go — the platform's USD ledger wallet, one
+    # per currency since SIDE_BUGS S-001 — is tests/test_two_currencies.py.
+    wallet = get_platform_revenue_wallet("SYP")
     wallet.refresh_from_db()
     assert wallet.currency == "SYP" and wallet.balance == _D("5000.00")
 

@@ -47,6 +47,8 @@ from django.utils.translation import gettext as _
 from django.utils.translation import gettext_lazy
 from django.utils.translation import pgettext
 
+from wallet.currencies import RATE_BASE, RATE_QUOTE
+
 #: The one font the document is drawn with. See the module docstring.
 FONT_PATH = Path(__file__).resolve().parent / "fonts" / "NotoNaskhArabic-Regular.ttf"
 
@@ -109,11 +111,40 @@ def issued_at(payment):
     return payment.completed_at or payment.updated_at
 
 
+def exchange_of(payment) -> dict | None:
+    """What this charge was converted from, and at what rate — or None.
+
+    Read entirely from the payment's own columns. A receipt that recomputed the rate
+    would say something different every time the operator set a new one.
+    """
+    if not payment.exchange_rate_value or not payment.price_currency:
+        return None
+    if payment.price_currency == payment.currency:
+        return None
+    return {
+        "price_of_record": str(payment.price_amount),
+        "price_of_record_currency": payment.price_currency,
+        "rate": str(payment.exchange_rate_value),
+        # Written out, so nobody has to know which way round the pair is stored.
+        "rate_text": f"1 {payment.price_currency} = {payment.exchange_rate_value} "
+                     f"{payment.currency}"
+        if payment.price_currency == RATE_BASE else
+        f"1 {RATE_BASE} = {payment.exchange_rate_value} {RATE_QUOTE}",
+    }
+
+
 def receipt_data(payment, *, invoice_number: str | None = None) -> dict:
     """The receipt for one completed payment, as data. The app draws it.
 
     `invoice_number` is passed in by the caller that minted it, so the value on the
     JSON and the value on the PDF are one read of one row.
+
+    `amount`/`currency` are WHAT WAS CHARGED, in the currency the payer trades in.
+    When the plan was priced in the other one, `exchange` says so: the price of record,
+    its currency, and the rate this charge was struck at — read off the payment's own
+    snapshot (`Payment.exchange_rate_value`), never from today's rate. The pound moves,
+    and a receipt reprinted next month must still say what happened this month.
+    `exchange` is None for a same-currency purchase, which is most of them.
     """
     plan = payment.subscription.plan
     payer = payment.subscription.user
@@ -125,6 +156,7 @@ def receipt_data(payment, *, invoice_number: str | None = None) -> dict:
         "item": item_of(payment),
         "amount": str(payment.amount),
         "currency": payment.currency,
+        "exchange": exchange_of(payment),
         "method": {"code": payment.payment_method,
                    "name": method_name(payment.payment_method)},
         "reference": payment.gateway_transaction_reference or "",
@@ -211,6 +243,10 @@ def render_pdf(data: dict, *, compress: bool = True) -> bytes:
 
     item = data["item"]
     issued = timezone.localtime(data["issued_at"]) if data["issued_at"] else None
+    # A converted purchase says so ON THE DOCUMENT. A customer who sees a pound figure
+    # for a plan they know is priced in dollars must be able to read why, and at what
+    # rate, without asking anyone.
+    fx = data.get("exchange")
     rows = [
         (_("Invoice number"), data["invoice_number"] or ""),
         (_("Date"), issued.strftime("%Y-%m-%d %H:%M") if issued else ""),
@@ -220,6 +256,11 @@ def render_pdf(data: dict, *, compress: bool = True) -> bytes:
         (_("Payment reference"), data["reference"]),
         (_("Customer"), data["payer"]["name"]),
     ]
+    if fx:
+        rows[3:3] = [
+            (_("Price"), _money(fx["price_of_record"], fx["price_of_record_currency"])),
+            (_("Exchange rate"), fx["rate_text"]),
+        ]
     for label, value in rows:
         if not str(value):
             continue

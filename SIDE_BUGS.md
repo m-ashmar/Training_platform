@@ -21,6 +21,7 @@ Not for: work the current task owns, bugs the app session reports (that is
 | ID | Where | What | Impact | Sev | Found |
 |---|---|---|---|---|---|
 <<<<<<< HEAD
+<<<<<<< HEAD
 | S-038 | `tests/security/phase7_write.py:38` | Posts `completed_sets`/`target_sets` to `user-exercise-progress/`, which are now correctly ignored | The script reads as proving a write is refused when nothing is being tested. Not pytest-collected | MEDIUM | fix round 2 |
 <<<<<<< HEAD
 | S-033 | `social/serializers.py:191` | The corrected comment count still includes comments hidden by moderation; the denormalised column is never decremented on a hide | The badge over-reports after a moderator hides a comment | MEDIUM | fix round 1 |
@@ -29,6 +30,9 @@ Not for: work the current task owns, bugs the app session reports (that is
 | S-021 | `social/views.py:903` `_update_challenge_rankings` | Ranks are written only from `update_progress`, with no tiebreaker, one full-row `save()` per participant | `ChallengeParticipation.rank` is NULL for anyone who joined and never logged and stale for everyone else; two equal scores swap between runs — and the "Challenge Winner" badge keys on `rank=1` | HIGH | home |
 =======
 =======
+=======
+| S-041 | `users/views.py:848, 869, 971, 994, 1810, 2186, 2193` · `users/trainer_directory.py:152` | A trainer's rate is shown to a client as a bare number, in the TRAINER's currency and with no unit beside it — `_shown_coaching_price` converts nothing and the card carries no `coaching_currency` | The owner's rule (2026-09-21) is that every price a person sees is in their own currency. A pound client reading a dollar trainer's `100.00` will read it as pounds and be charged 1,300,000. The MONEY is right (`take_hold` converts); only the display is wrong. `GET /v1/coaching/status/` is already fixed; these eight are lists, so the fix is one batched wallet query per page, not a lookup per row (cf. S-026) | HIGH | currency |
+>>>>>>> fix/currency
 | S-036 | `routine/views.py:412` | `ExerciseCreateWithImageView.post`'s broad handler returns `f'Failed to create exercise: {str(e)}'` | Internal exception text reaches the client — the same defect as the just-closed S-006, in a class the pass did not cover | MEDIUM | fix round 2 |
 | S-037 | `routine/views.py:22` | `DetailedClientProgressSerializer` is imported and never used; its `get_client_info` is unreachable | Dead code that reads like the live path | MEDIUM | fix round 2 |
 >>>>>>> fix/policy
@@ -57,12 +61,17 @@ Not for: work the current task owns, bugs the app session reports (that is
 =======
 >>>>>>> fix/policy
 
+<<<<<<< HEAD
 | S-001 | `wallet/utils.py:24` `get_platform_revenue_wallet` | The platform's revenue wallet is ONE wallet, so it holds one currency for ever — the first payment decides it. A plan priced in the other currency is minted into the client's wallet, logged as an error and never moves on. | Only SYP is sold today (USD is legacy rows), so nobody is affected yet; the day a second currency is priced, its revenue sits in customers' wallets. | MEDIUM | step 4 |
+=======
+| S-007 | `routine/urls.py:19` | `ExerciseSetLogViewSet` is registered under TWO prefixes (`set-logs/`, `exercisesetlogs/`) | Every new action doubles the route surface and every contract row is written twice | MEDIUM | routine extras |
+>>>>>>> fix/currency
 
 ## Closed
 
 | ID | Where | What | Closed by |
 |---|---|---|---|
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
@@ -101,6 +110,10 @@ Not for: work the current task owns, bugs the app session reports (that is
 | S-018 | `training_platform/file_security.py:59` | The quarantine directory is always `MEDIA_ROOT/quarantine`, local | fix(side-bugs): close S-018, S-019, S-024 and S-038 |
 | S-038 | `tests/security/phase7_write.py:38` | Posts `completed_sets`/`target_sets` to `user-exercise-progress/`, which are now correctly ignored | fix(side-bugs): close S-018, S-019, S-024 and S-038 |
 >>>>>>> fix/policy
+=======
+| S-001 | `wallet/utils.py:24` `get_platform_revenue_wallet` · `:43` `get_escrow_wallet` | The platform's revenue wallet is ONE wallet, so it holds one currency for ever — the first payment decides it. A plan priced in the other currency is minted into the client's wallet, logged as an error and never moves on. ESCROW has the same shape, and worse: a coaching month in the second currency could not even be held. | fix(currency): two currencies, both sold, with an operator-set rate between them |
+| S-040 | `wallet/models.py:191` and `:474` | `Transaction.currency` defaulted to the literal `"USD"`, and `move_funds_atomic` fell back to the same literal — the exact hardcoding whose twin on `Wallet.currency` minted 5,000 SYP into a wallet labelled USD. Re-filed: the money build wrote it as S-020, the renumber moved it to S-037, and the second side-bug merge dropped the row. | fix(currency): two currencies, both sold, with an operator-set rate between them |
+>>>>>>> fix/currency
 | S-008 | `tests/security/*.py` (e.g. `privacy_rights.py:2`) | Every script hardcodes `sys.path.insert(0, '<the main checkout>')` | fix(side-bugs): close S-008 and S-011–S-015 |
 | S-011 | `social/consumers.py:39` | `SocialConsumer.receive` echoes any frame back verbatim | fix(side-bugs): close S-008 and S-011–S-015 |
 | S-012 | `ai_assistant/consumers.py:272` · `views.py:112` · `services/chat_service.py:222-252` | Error paths with no `code` and bare untranslated literals, beside others that have both | fix(side-bugs): close S-008 and S-011–S-015 |

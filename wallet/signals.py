@@ -45,6 +45,14 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
     """Record where a completed plan payment's money went: into the platform's revenue,
     and to the trainer only for the share the owner has priced.
 
+    ONE CURRENCY, END TO END. The payment was already converted into the buyer's own
+    currency when the checkout was opened (`subscription.pricing.charge_for`), so
+    `payment.currency` IS the client's wallet's currency and nothing here converts
+    anything: the money is minted in it, and it lands in the platform's ledger wallet
+    for THAT currency (`get_platform_revenue_wallet(payment.currency)` — one per
+    currency since SIDE_BUGS S-001, which is why revenue in the second currency no
+    longer sits in customers' balances).
+
     THE MONEY. A plan payment stays 100% with the platform, whether or not the client has
     a trainer (the owner, 2026-09-19; plan step 4). This used to move the WHOLE amount to
     whoever coached the client — no rate, no escrow, no relation to any agreed price — so
@@ -115,13 +123,20 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
         # In the payment's OWN currency. `get_or_create` with only `owner_type` left the
         # wallet on its hardcoded "USD" default whatever the plan was priced in.
         client_wallet = wallet_for(client, "client", payment.currency)
+        # The platform's ledger wallet FOR THIS CURRENCY. It used to be one wallet for
+        # the whole platform, so the first payment ever taken decided its currency and
+        # a payment in the other one was minted into the client's wallet, logged as an
+        # error and left there — the platform's revenue sitting in a customer's balance
+        # (SIDE_BUGS S-001). There is nothing left to refuse here: the wallet is
+        # resolved BY the currency, so it always matches.
         platform_wallet = get_platform_revenue_wallet(payment.currency)
         trainer_wallet = wallet_for(trainer, "trainer", payment.currency) if trainer else None
-        # Only the wallets whose mismatch would make the MINT wrong are checked here.
-        # The platform's is checked at its own leg, below: it is one shared wallet, so a
-        # payment in a second currency must still be recorded as having entered the
-        # system — refusing it up here wrote no legs at all and lost the payment from
-        # the ledger entirely.
+        # The client's and the trainer's wallets are a PERSON's, one currency each and
+        # not addressable per currency, so those two can still disagree with the
+        # payment and are checked. The client's should not: the checkout charged them
+        # in their own currency. A mismatch here means their wallet changed under the
+        # payment, and minting the wrong unit into it is exactly the bug this guard
+        # exists for.
         checked = [(client_wallet, "client")]
         if trainer_wallet is not None:
             checked.append((trainer_wallet, "trainer"))
@@ -185,17 +200,6 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
             "plan_id": subscription.plan_id,
         }
         for_platform, for_trainer = split(payment.amount, Decimal("1") - share_rate)
-        if for_platform > 0 and platform_wallet.currency != payment.currency:
-            # There is no FX here and there is not meant to be. The money is minted and
-            # recorded in its own currency and simply does not move on; an operator sees
-            # the error and the client's balance, rather than a 1:1 conversion nobody
-            # chose. `_mark_payout_settled` stops the sweep asking for ever.
-            logger.error(
-                "subscription revenue not moved for payment %s: the platform wallet "
-                "holds %s and the payment is %s",
-                payment.pk, platform_wallet.currency, payment.currency)
-            _mark_payout_settled(payment)
-            return
         if trainer_wallet is not None and for_trainer > 0:
             move_funds_atomic(
                 client_wallet, trainer_wallet, for_trainer,

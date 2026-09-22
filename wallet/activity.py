@@ -104,13 +104,16 @@ def ledger_owner_ids() -> set[int]:
     They are owned by real user rows (disabled, no password) so the ledger can hold a
     balance against them, which means the naive "show the other wallet's owner" would
     put `platform_escrow` on the client's screen as the person they paid.
+
+    ONE PER CURRENCY since the owner made both currencies first class (2026-09-21), so
+    the addresses come from `wallet.utils.ledger_owner_emails` rather than from the two
+    base settings — those name no row any more.
     """
-    from django.conf import settings
     from django.contrib.auth import get_user_model
 
-    emails = [getattr(settings, 'PLATFORM_ESCROW_EMAIL', 'platform_escrow@local'),
-              getattr(settings, 'PLATFORM_REVENUE_EMAIL', 'platform_revenue@local')]
-    return set(get_user_model().objects.filter(email__in=emails)
+    from .utils import ledger_owner_emails
+
+    return set(get_user_model().objects.filter(email__in=ledger_owner_emails())
                .values_list('id', flat=True))
 
 

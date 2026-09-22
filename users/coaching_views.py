@@ -40,8 +40,16 @@ class CurrentCoachingView(APIView):
                                                    the shape does not change)
             "ending": bool,                        the trainer stops when this month ends
                                                    (`period.ends_at`); nothing renews
-            "coaching_price", "money_type"}}       ONLY on a build that may show a
-                                                   coaching fee (not `ios` today)
+            "coaching_price", "coaching_currency",
+            "money_type"}}                         ONLY on a build that may show a
+                                                   coaching fee (not `ios` today).
+                                                   The price is ALWAYS in the client's
+                                                   own currency, which is what they are
+                                                   charged in; `coaching_currency` is
+                                                   that currency, so the app never
+                                                   hard-codes a unit. Null together
+                                                   when the rate needed to quote it is
+                                                   missing or stale.
 
     `payment_due` is no longer sent: an unpaid month freezes instead of ending after a
     grace (the owner, 2026-09-19). A frozen coaching is charged by the hourly run as soon
@@ -60,7 +68,7 @@ class CurrentCoachingView(APIView):
         from policy.services import can_show_price
 
         from .models import TrainerClientRelation
-        from .trainer_relations import price_of
+        from .trainer_relations import charge_for_client
 
         client = request.user
         if not client.is_client:
@@ -71,8 +79,31 @@ class CurrentCoachingView(APIView):
             return Response({'coaching': None})
         body = coaching_status(relation)
         if can_show_price(request, MoneyType.COACHING_1TO1):
-            # What the next month costs: the latest month's price, which is what renews.
+            # What the next month costs, IN THE CLIENT'S OWN CURRENCY — which is what
+            # they will be charged in (the owner, 2026-09-21: a person pays in the one
+            # currency they trade in, whatever the trainer prices in).
+            #
+            # A month that has already been charged says so itself: `CoachingPeriod`
+            # carries the price AND its unit, copied off the money that actually moved,
+            # so a later rate change cannot re-quote a coaching already running. Before
+            # the first month there is nothing charged yet, so the trainer's price of
+            # record is converted at today's rate — and if that conversion cannot be
+            # priced (no rate, or a stale one) the price is omitted rather than shown
+            # in the trainer's currency, which the client would read as their own.
             latest = relation.periods.order_by('-number').first()
-            body['coaching_price'] = str(latest.price if latest else price_of(relation))
-            body['money_type'] = MoneyType.COACHING_1TO1.value
+            if latest is not None:
+                body['coaching_price'] = str(latest.price)
+                body['coaching_currency'] = latest.currency
+                body['money_type'] = MoneyType.COACHING_1TO1.value
+            else:
+                from wallet.exchange import ExchangeRateUnavailable
+
+                try:
+                    amount, currency, _rate = charge_for_client(relation)
+                except ExchangeRateUnavailable:
+                    body['coaching_price'] = body['coaching_currency'] = None
+                else:
+                    body['coaching_price'] = str(amount)
+                    body['coaching_currency'] = currency
+                body['money_type'] = MoneyType.COACHING_1TO1.value
         return Response({'coaching': body})

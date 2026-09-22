@@ -50,10 +50,24 @@ cache key, so a bump instantly orphans every stale entry with no key scanning.
 # The remaining four are gated on identity and role alone, both of which are in the key or
 # fixed for the life of the token.
 CACHEABLE_ROUTES = {
-    # ---- Global catalog, no entitlement: identical for every viewer -> shared entry ----
-    "/api/subscription/v1/plans/":    {"scope": "public",  "model": "SUBSCRIPTIONPLAN", "ttl": 600},
-
     # ---- User-scoped: queryset depends on the caller -> per-user entry in DB3 ----
+    # The plan catalogue WAS `public`, one shared entry, because the rows were the same
+    # for everyone and only the BUILD changed the response (which is in the key). It is
+    # not any more: since the owner made both currencies first class (2026-09-21) every
+    # price is converted into the READER'S own currency (`subscription.serializers
+    # .PlanPriceInReadersCurrency`), so a shared entry serves one person's pounds to the
+    # next person's dollars. Measured by the price-list test in
+    # tests/test_two_currencies.py, which asks for the list as a pound reader and then
+    # as a dollar reader and got the pound answer twice.
+    #
+    # Private is enough here and nothing more is needed: the currency is a property of
+    # the user, the user id is in the key, and a person's currency cannot change once
+    # their wallet has been used. While it still can, the wallet is empty and they have
+    # bought nothing — a stale catalogue for up to the TTL costs them a price shown in
+    # the currency they just left, and the checkout charges in the new one regardless.
+    "/api/subscription/v1/plans/":    {"scope": "private", "model": "SUBSCRIPTIONPLAN", "ttl": 600},
+
+
     # /api/routine/exercises/ returns different rows per role (global exercises, the
     # caller's own, their trainer's, ones in their assigned routines) — it MUST be
     # private or one user's catalog would be served to another.

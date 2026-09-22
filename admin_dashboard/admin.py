@@ -657,6 +657,15 @@ from policy.models import ThemeChangeLog, ThemeOverride  # noqa: E402
 admin_site.register(ThemeOverride, ThemeOverrideAdmin)
 admin_site.register(ThemeChangeLog, ThemeChangeLogAdmin)
 
+# The exchange rate an operator maintains: "1 usd = x sp" (the owner, 2026-09-21).
+# Append-only — a new rate is a new row, because every purchase struck at the old one
+# depends on it. The list says which row is live and how old it is; past
+# EXCHANGE_RATE_MAX_AGE_DAYS a cross-currency purchase is refused until someone sets a
+# new one, and same-currency selling carries on regardless.
+from wallet.admin import ExchangeRateAdmin  # noqa: E402
+from wallet.models import ExchangeRate  # noqa: E402
+admin_site.register(ExchangeRate, ExchangeRateAdmin)
+
 # Media kit: every picture the app draws, by slot. `Media slots > kits/` lists each
 # trainer's completeness.
 from mediakit.admin import MediaAssetAdmin  # noqa: E402

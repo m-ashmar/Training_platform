@@ -466,12 +466,36 @@ class PaymentService:
         payment = candidates[0] if candidates else Payment(subscription=subscription,
                                                            status='pending')
         payment.subscription = subscription
-        # The plan's price and the plan's own currency. A row nobody has been asked to
-        # pay yet carries no promise, so it follows the plan as it is now. Hardcoding
-        # 'USD' here made every renewal unclearable: plans are priced in SYP, ShamCash
-        # reports SYP, and _verify_amount_and_currency rejected the mismatch on arrival.
-        payment.amount = plan.price
-        payment.currency = plan.currency
+        # THE PLAN'S PRICE, CHARGED IN THE BUYER'S CURRENCY.
+        #
+        # A row nobody has been asked to pay yet carries no promise, so it follows the
+        # plan as it is now. Hardcoding 'USD' here made every renewal unclearable: plans
+        # are priced in SYP, ShamCash reports SYP, and `_verify_amount_and_currency`
+        # rejected the mismatch on arrival.
+        #
+        # The owner (2026-09-21): a person trades in ONE currency, theirs, and every
+        # service is buyable in either. So the plan keeps the price of record the
+        # operator set, and what this buyer is charged is that price converted into
+        # their own currency at the operator's live rate — snapshotted here, because a
+        # refund reverses at what was paid and a receipt has to be able to say so.
+        # A buyer already in the plan's currency converts nothing and consults no rate,
+        # which is why a stale rate cannot stop a same-currency sale.
+        #
+        # `charge_for` raises `ExchangeRateUnavailable` (with a `code`) when the price
+        # has to cross and the rate is missing or stale. It is deliberately NOT caught:
+        # opening a checkout at an unconverted number would charge dollars to a pound
+        # wallet. `subscription/views.py` turns it into a refusal the app can read.
+        from wallet import currency_for as _currency_for
+
+        from ..pricing import charge_for
+
+        priced = charge_for(plan.price, plan.currency, _currency_for(subscription.user))
+        payment.amount = priced.amount
+        payment.currency = priced.currency
+        payment.price_amount = priced.price_amount
+        payment.price_currency = priced.price_currency
+        payment.exchange_rate = priced.rate
+        payment.exchange_rate_value = getattr(priced.rate, "rate", None)
         metadata = dict(payment.metadata or {})
         if kind == 'renewal':
             metadata['kind'] = 'renewal'

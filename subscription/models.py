@@ -10,6 +10,7 @@ from django.utils.translation import gettext_lazy as _
 from decimal import Decimal
 from training_platform.model_validation import RowValidationMixin
 from policy.money import EntitlementSource, MoneyType
+from wallet.currencies import SUPPORTED_CURRENCIES as _SUPPORTED_CURRENCIES
 
 
 # Payment lifecycle state machine. The ONLY code allowed to move a payment
@@ -34,12 +35,13 @@ PAYMENT_STATUS_TRANSITIONS = {
 #: a time: it is the checkout, whichever button opened it. See PaymentService.start_payment.
 OPEN_PAYMENT_STATUSES = ('pending', 'processing', 'authorized')
 
-# Currencies the platform can price and charge in. ShamCash settles in SYP; USD exists
-# only for historical rows written before plans carried a currency of their own.
-SUPPORTED_CURRENCIES = [
-    ('SYP', 'Syrian Pound'),
-    ('USD', 'US Dollar'),
-]
+# Currencies the platform prices and charges in. BOTH are sold (the owner, 2026-09-21):
+# Syrian pounds and US dollars, and nothing else, with no FX between them ever. The list
+# lives in `wallet.currencies` because the ledger has to agree with the catalogue about
+# it down to the letter — a plan priced in one and a wallet labelled the other is the
+# shape of every currency bug this codebase has had. Re-exported under the name the
+# migrations already deconstruct.
+SUPPORTED_CURRENCIES = _SUPPORTED_CURRENCIES
 
 
 class SubscriptionPlan(RowValidationMixin, models.Model):
@@ -332,14 +334,42 @@ class Payment(RowValidationMixin, models.Model):
         decimal_places=2,
         validators=[MinValueValidator(Decimal("0"), _("Amount cannot be negative"))]
     )
-    # Inherited from the plan at creation; never chosen by a caller and never by the
-    # client. `choices` is enforced because Payment.save() runs validate_row().
+    # THE CURRENCY THE BUYER WAS CHARGED IN, which is the buyer's own — their wallet's
+    # (`wallet.currency_for`). The owner (2026-09-21): a person picks SYP or USD and
+    # every charge they pay is in it, whatever the thing they are buying is priced in.
+    # Never chosen by a caller and never by the client. `choices` is enforced because
+    # Payment.save() runs validate_row().
     currency = models.CharField(
         max_length=3,
         choices=SUPPORTED_CURRENCIES,
         default='SYP',
         db_index=True,
     )
+
+    # --- what the plan actually costs, and how that became `amount`/`currency` -------
+    # THE PRICE OF RECORD: the number and the unit the operator priced the plan in,
+    # copied here when the checkout opened. When the buyer trades in the same currency
+    # these simply repeat `amount`/`currency`. When they do not, `amount` is this price
+    # converted at `exchange_rate`, and these three are the only evidence of what was
+    # sold and at what rate — which is what the receipt states and what a refund
+    # reverses at. Read them, never today's rate: the pound moves, and re-valuing a
+    # past purchase from the current row would hand a customer back a different number
+    # than they paid.
+    #
+    # NULL on rows written before the platform sold in two currencies; for those the
+    # price of record is `amount`/`currency`, because nothing was ever converted.
+    price_amount = models.DecimalField(max_digits=10, decimal_places=2,
+                                       null=True, blank=True)
+    price_currency = models.CharField(max_length=3, choices=SUPPORTED_CURRENCIES,
+                                      blank=True, default='')
+    #: The append-only rate row this charge was priced at, or NULL when nothing was
+    #: converted. PROTECT, so the row can never be edited or deleted out from under it.
+    exchange_rate = models.ForeignKey('wallet.ExchangeRate', null=True, blank=True,
+                                      on_delete=models.PROTECT,
+                                      related_name='payments')
+    #: The same number, copied, so a receipt and an export read it without a join.
+    exchange_rate_value = models.DecimalField(max_digits=18, decimal_places=6,
+                                              null=True, blank=True)
     status = models.CharField(
         max_length=20, 
         choices=PAYMENT_STATUS, 
@@ -390,7 +420,8 @@ class Payment(RowValidationMixin, models.Model):
     covers_until = models.DateTimeField(null=True, blank=True)
 
     # When the trainer payout for this payment was resolved: paid, or found not owed
-    # (no trainer, a wallet already holding another currency). NULL on a completed
+    # (no trainer, or a person's wallet that holds a currency other than the one this
+    # payment was charged in). NULL on a completed
     # payment means the payout is still OWED. The payout runs on commit, after the
     # payment row already says 'completed', and every retry used to decide "done" from
     # that status — so one transient fault in the receiver (a deadlock, a dropped

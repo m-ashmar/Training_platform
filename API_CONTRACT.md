@@ -902,6 +902,41 @@ show plan status, expiry and history, and history without receipts is not histor
   wallet the money passed through.
 - `GET /api/wallet/transactions/{reference_id}/` — one row, same shape.
   `404 not_found` for a reference that is not the caller's.
+
+#### Two currencies (2026-09-21)
+
+The platform trades in **SYP and USD**, both first class, with an exchange rate an
+operator maintains in the console. Four things the app needs:
+
+- **A person has ONE currency and it is their wallet's.** `GET`/`PUT
+  `/api/wallet/currency/` is the only place it lives: `{currency, currency_locked,
+  currency_options}`. `GET /api/wallet/balance/` answers the same three keys beside the
+  balance, so a screen that already reads the balance needs no second call. `PUT`
+  `{"currency": "SYP"|"USD"}` is allowed only while the wallet is untouched — no
+  balance and not one ledger leg; after that it is `409 currency_locked`. Other codes:
+  `400 currency_required`, `400 currency_unsupported`.
+- **Every price the app is shown is already in the reader's currency.** The plan
+  endpoints' `price`/`currency` are the plan's price of record converted for this
+  reader, with `price_converted` (bool), `exchange_rate` (string or null) and — only
+  when converted — `price_of_record` and `price_of_record_currency`. **The app must
+  never convert anything itself and must never show two numbers.** All six are withheld
+  together from a build that may not show prices.
+- **A checkout refuses rather than guesses.** `POST
+  /api/subscription/v1/gateways/` and `POST /api/subscription/v1/subscriptions/{id}/renew/`
+  answer `409` with
+  `code: "exchange_rate_stale"` or `"exchange_rate_missing"` when the plan is priced in
+  the other currency and the operator's rate is missing or too old. A SAME-currency
+  purchase never consults the rate and is never refused for this.
+- **A coaching price is in the client's currency too.** `GET /api/v1/coaching/status/`
+  gains `coaching_currency` beside `coaching_price`; the price is what the client will
+  actually be charged, and both are null together when the rate needed to quote it is
+  missing or stale. STILL THE PRICE OF RECORD, in the TRAINER's currency and with no
+  unit beside it: `trainer_hourly_rate` on the trainer lists and `coaching_price` on a
+  trainer card — see the gap noted in `SIDE_BUGS.md`.
+- **A receipt says what was converted.** `GET
+  /api/subscription/v1/payments/{id}/receipt/` gains `exchange`: `null`, or
+  `{price_of_record, price_of_record_currency, rate, rate_text}` read off the payment's
+  own snapshot — never today's rate.
 - `POST /api/subscription/v1/gateways/` and `GET
   /api/subscription/v1/payments/{id}/status/` now answer a real `expires_at`: when the
   reference stops being payable, which is what `Pay.png` counts down to. It was read
@@ -1192,6 +1227,8 @@ It therefore equals the row count of `GET comments/?post={id}` for the same view
 | `GET` | `/api/wallet/agents/` | auth | `AgentDirectoryView` |
 | `GET` | `/api/wallet/balance/` | auth | `WalletBalanceView` |
 | `POST` | `/api/wallet/client/transfer/` | auth | `ClientTransferToTrainerView` |
+| `GET` | `/api/wallet/currency/` | auth | `WalletCurrencyView` |
+| `PUT` | `/api/wallet/currency/` | auth | `WalletCurrencyView` |
 | `GET` | `/api/wallet/transactions/` | auth | `WalletTransactionsView` |
 | `GET` | `/api/wallet/transactions/{reference_id}/` | auth | `WalletTransactionDetailView` |
 
