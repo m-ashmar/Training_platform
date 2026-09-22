@@ -38,7 +38,59 @@ class PlanPriceByChannelMixin:
         return data
 
 
-class SubscriptionPlanSerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
+class PlanPriceInReadersCurrency:
+    """Rewrites a plan's price into the currency the reader trades in.
+
+    ONE NUMBER, ONE CURRENCY (the owner, 2026-09-21): a person picks SYP or USD and
+    every price they see is in it. The plan keeps the price of record the operator set;
+    this converts it for THIS reader at the operator's live rate
+    (`subscription.pricing.price_for`), and says so.
+
+    A mixin rather than a method on one serializer because the catalogue is served by
+    three classes — the detail serializer, the LIST serializer (`get_serializer_class`
+    swaps it in for `action == 'list'`, which is the one the app actually reads) and the
+    subscription summary. Putting the conversion on one of them is how two of the three
+    kept answering dollars to a pound reader.
+
+    A stale rate does not blank the catalogue: `price_for` falls back to the price of
+    record marked `price_converted: false`, and the PURCHASE refuses with
+    `exchange_rate_stale` when they tap Buy. Browsing is not selling.
+    """
+
+    #: `currency` stays on a build that may not show prices: a currency CODE is not a
+    #: price, and `API_CONTRACT.md` promises it on every build. Everything that carries
+    #: a number goes.
+    price_fields = ('price', 'price_converted', 'exchange_rate',
+                    'price_of_record', 'price_of_record_currency')
+
+    #: Which fields on THIS serializer hold the amount and the unit.
+    amount_field, currency_field = 'price', 'currency'
+
+    def add_price_fields(self, data, instance, request):
+        from .pricing import price_for
+
+        user = getattr(request, 'user', None)
+        blank = {'price_converted': False, 'exchange_rate': None,
+                 'price_of_record': None, 'price_of_record_currency': None}
+        if request is None or user is None or not user.is_authenticated:
+            # Anonymous, or server-side code (the console, a task): nobody to price it
+            # for. The columns as they stand, and the extra keys present and empty so
+            # the shape never varies between callers.
+            data.update(blank)
+            return data
+
+        from wallet import currency_for
+
+        priced = price_for(instance.price, instance.currency, currency_for(user))
+        payload = priced.as_payload()
+        data[self.amount_field] = payload.pop('price')
+        data[self.currency_field] = payload.pop('currency')
+        data.update(payload)
+        return data
+
+
+class SubscriptionPlanSerializer(PlanPriceInReadersCurrency, PlanPriceByChannelMixin,
+                                 serializers.ModelSerializer):
     """A plan, priced in the READER'S currency and in no other.
 
     ONE NUMBER, ONE CURRENCY. The owner (2026-09-21): a person picks SYP or USD and
@@ -81,26 +133,6 @@ class SubscriptionPlanSerializer(PlanPriceByChannelMixin, serializers.ModelSeria
         ]
         read_only_fields = ['id', 'created_at']
 
-    #: Removed together with `price` on a build that may not show one: they are all
-    #: the same number, and leaving the converted copy behind would defeat the point.
-    price_fields = ('price', 'currency', 'price_converted', 'exchange_rate',
-                    'price_of_record', 'price_of_record_currency')
-
-    def add_price_fields(self, data, instance, request):
-        user = getattr(request, 'user', None)
-        if request is not None and user is not None and user.is_authenticated:
-            from wallet import currency_for
-
-            from .pricing import price_for
-
-            priced = price_for(instance.price, instance.currency, currency_for(user))
-            data.update(priced.as_payload())
-        else:
-            # Anonymous, or server-side: nobody to price it for. The columns as they
-            # stand, and the extra fields present and empty so the shape never varies.
-            data.update({'price_converted': False, 'exchange_rate': None,
-                         'price_of_record': None, 'price_of_record_currency': None})
-        return data
 
 class SubscriptionFeatureSerializer(serializers.ModelSerializer):
     """Serializer for subscription features"""
@@ -293,8 +325,15 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(_("Invalid subscription"))
         return value
 
-class SubscriptionPlanListSerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
-    """Simplified serializer for listing subscription plans"""
+class SubscriptionPlanListSerializer(PlanPriceInReadersCurrency, PlanPriceByChannelMixin,
+                                     serializers.ModelSerializer):
+    """The plan LIST — the one the Plans screen actually reads.
+
+    Same contract as `SubscriptionPlanSerializer`: `price`/`currency` are already in the
+    reader's currency, with `price_converted`, `exchange_rate` and (only when converted)
+    `price_of_record` and `price_of_record_currency` beside them. The app must never
+    convert anything itself and must never show two numbers.
+    """
     
     class Meta:
         model = SubscriptionPlan
@@ -305,7 +344,9 @@ class SubscriptionPlanListSerializer(PlanPriceByChannelMixin, serializers.ModelS
             'max_meals_per_day', 'max_routines',
         ]
 
-class UserSubscriptionSummarySerializer(PlanPriceByChannelMixin, serializers.ModelSerializer):
+class UserSubscriptionSummarySerializer(PlanPriceInReadersCurrency,
+                                        PlanPriceByChannelMixin,
+                                        serializers.ModelSerializer):
     """Summary serializer for user's current subscription.
 
     `access`: 'active' | 'frozen' (it ended after entitling you: your diet plans stay
@@ -334,7 +375,15 @@ class UserSubscriptionSummarySerializer(PlanPriceByChannelMixin, serializers.Mod
     access = serializers.ReadOnlyField()
     renewal_due = serializers.SerializerMethodField()
 
-    price_fields = ('plan_price',)
+    #: This serializer's plan price lives under a different pair of names, and the
+    #: renewal it describes will be charged in the reader's currency like any other
+    #: purchase — so it is shown in that currency too, rather than in the operator's.
+    price_fields = ('plan_price', 'price_converted', 'exchange_rate',
+                    'price_of_record', 'price_of_record_currency')
+    amount_field, currency_field = 'plan_price', 'plan_currency'
+
+    def add_price_fields(self, data, instance, request):
+        return super().add_price_fields(data, instance.plan, request)
 
     class Meta:
         model = Subscription

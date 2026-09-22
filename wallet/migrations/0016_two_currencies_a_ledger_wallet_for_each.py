@@ -87,17 +87,35 @@ def name_the_ledger_owners_by_currency(apps, schema_editor):
 
 
 def name_the_ledger_owners_without_a_currency(apps, schema_editor):
+    """Put back the bare address the old code knows how to find.
+
+    Symmetric with the forward: whatever currency the one ledger owner holds, it is the
+    one that goes back to `platform_escrow@local`. If a SECOND currency's owner has
+    since appeared — money the old code cannot address at all — the one matching
+    `settings.PLATFORM_CURRENCY` is restored and the other is left exactly where it is,
+    with its balance. That is a wallet the old code cannot see, not a wallet that lost
+    its money; rolling forward again adopts it.
+    """
     CustomUser = apps.get_model("users", "CustomUser")
     from django.conf import settings as s
 
+    from wallet.currencies import CURRENCY_CODES
+
     base_currency = getattr(s, "PLATFORM_CURRENCY", "SYP")
     for base_email, base_username in _bases():
-        email, username = _address(base_email, base_username, base_currency)
-        owner = CustomUser.objects.filter(email=email).first()
-        if owner is None or CustomUser.objects.filter(email=base_email).exists():
+        if CustomUser.objects.filter(email=base_email).exists():
+            continue    # already reversed, or never migrated
+        found = {}
+        for code in CURRENCY_CODES:
+            email, _username = _address(base_email, base_username, code)
+            owner = CustomUser.objects.filter(email=email).first()
+            if owner is not None:
+                found[code] = owner
+        if not found:
             continue
-        CustomUser.objects.filter(pk=owner.pk).update(email=base_email,
-                                                      username=base_username)
+        code = base_currency if base_currency in found else next(iter(found))
+        CustomUser.objects.filter(pk=found[code].pk).update(email=base_email,
+                                                            username=base_username)
 
 
 class Migration(migrations.Migration):

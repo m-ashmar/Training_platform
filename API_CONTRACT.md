@@ -905,10 +905,17 @@ operator maintains in the console. Four things the app needs:
   never convert anything itself and must never show two numbers.** All six are withheld
   together from a build that may not show prices.
 - **A checkout refuses rather than guesses.** `POST
-  /api/subscription/v1/payments/initiate/` and the renew action answer `409` with
+  /api/subscription/v1/gateways/` and `POST /api/subscription/v1/subscriptions/{id}/renew/`
+  answer `409` with
   `code: "exchange_rate_stale"` or `"exchange_rate_missing"` when the plan is priced in
   the other currency and the operator's rate is missing or too old. A SAME-currency
   purchase never consults the rate and is never refused for this.
+- **A coaching price is in the client's currency too.** `GET /api/v1/coaching/status/`
+  gains `coaching_currency` beside `coaching_price`; the price is what the client will
+  actually be charged, and both are null together when the rate needed to quote it is
+  missing or stale. STILL THE PRICE OF RECORD, in the TRAINER's currency and with no
+  unit beside it: `trainer_hourly_rate` on the trainer lists and `coaching_price` on a
+  trainer card — see the gap noted in `SIDE_BUGS.md`.
 - **A receipt says what was converted.** `GET
   /api/subscription/v1/payments/{id}/receipt/` gains `exchange`: `null`, or
   `{price_of_record, price_of_record_currency, rate, rate_text}` read off the payment's

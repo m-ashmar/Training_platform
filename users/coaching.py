@@ -79,15 +79,6 @@ def split(price: Decimal, rate: Decimal) -> tuple[Decimal, Decimal]:
     return commission, Decimal(price) - commission
 
 
-def _converted(amount: Decimal, from_currency: str, to_currency: str):
-    """`amount` in `to_currency`, at the operator's rate. One call, so the coaching
-    payout and the plan checkout can never disagree about a rate or a rounding."""
-    from subscription.pricing import charge_for
-
-    priced = charge_for(amount, from_currency, to_currency)
-    return priced.amount, priced.rate
-
-
 def lock_wallets(actor_id, wallets) -> dict:
     """The actor's user row, then every wallet in ascending id. Returns {id: wallet}."""
     from wallet.models import Wallet
@@ -167,12 +158,15 @@ def pay_out(period, *, actor_id, starts_at, trainer_purpose):
             # debit out of escrow in the month's currency and a credit into the
             # trainer's in theirs, both stamped with the rate row used, so a refund
             # and an audit read what was actually done rather than today's number.
-            # The trainer's side is the given one — what they are owed is the figure
-            # in their currency — and the debit from escrow is derived from it.
-            owed, _rate = _converted(share, money, trainer_wallet.currency)
+            # THE ESCROW SIDE IS THE GIVEN ONE: exactly `share` leaves escrow, and
+            # what the trainer receives is derived from it. The other way round —
+            # converting the trainer's figure and debiting whatever that came back as
+            # — leaves a rounded remainder in a shared escrow wallet on every month,
+            # so `commission + share` would stop adding up to `price` and the month
+            # would no longer reconcile against the money that actually moved.
             try:
                 _debit, payout = exchange_funds_atomic(
-                    escrow, trainer_wallet, owed, amount_in=trainer_wallet.currency,
+                    escrow, trainer_wallet, share, amount_in=money,
                     actor_id=actor_id, money_type=MoneyType.COACHING_1TO1,
                     metadata={'purpose': trainer_purpose, **common})
             except ExchangeRateUnavailable as exc:

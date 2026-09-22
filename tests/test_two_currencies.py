@@ -391,7 +391,8 @@ def test_the_checkout_endpoint_refuses_a_stale_conversion_with_its_code(
     buyer = _person(make_user, "stale-api", "SYP")
     sub = _subscription(buyer, _plan("stale-api", "10.00", "USD"))
 
-    answer = api(buyer).post("/api/subscription/v1/payments/initiate/",
+    # `POST /api/subscription/v1/gateways/` IS the checkout (`PaymentGatewayView`).
+    answer = api(buyer).post("/api/subscription/v1/gateways/",
                              {"gateway": "shamcash", "subscription_id": str(sub.id)},
                              content_type=JSON)
     assert answer.status_code == 409, answer.content
