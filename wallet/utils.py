@@ -62,14 +62,7 @@ def _ledger_owner_wallet(base_email, base_username, currency):
             f"ledger wallet for it")
 
     email, username = _ledger_address(base_email, base_username, currency)
-    User = get_user_model()
-    user, created = User.objects.get_or_create(
-        email=email,
-        defaults={'username': username, 'user_type': 'agent', 'is_staff': False,
-                  'is_superuser': False, 'is_active': False, 'phone_number': '0000000000'})
-    if created:
-        user.set_unusable_password()
-        user.save(update_fields=['password'])
+    user = _ledger_owner(email, username)
 
     wallet, _created = Wallet.objects.get_or_create(
         owner=user, defaults={'owner_type': 'agent', 'currency': currency})
@@ -77,6 +70,61 @@ def _ledger_owner_wallet(base_email, base_username, currency):
         raise UnsupportedCurrency(
             f"the ledger wallet at {email} holds {wallet.currency}, not {currency}")
     return wallet
+
+
+def _ledger_owner(email, username):
+    """The disabled user row that owns a ledger wallet, found by its ADDRESS.
+
+    The address is what every lookup uses (`ledger_owner_emails`, and this function);
+    the username is only a label. It used to be `get_or_create(email=...,
+    defaults={'username': ...})`, and registration accepted any username, so a person
+    who signed up as `platform_escrow_usd` made that create raise IntegrityError: every
+    coaching hold in dollars failed and every dollar plan payout stayed owed for ever
+    (SIDE_BUGS S-086). Registration now refuses the prefix (`is_reserved_username`);
+    this is the backstop for a name taken before that, or by an operator by hand: the
+    row is created under a suffixed username rather than not at all.
+    """
+    import uuid
+
+    from django.db import IntegrityError, transaction
+
+    User = get_user_model()
+    existing = User.objects.filter(email=email).first()
+    if existing is not None:
+        return existing
+    for attempt in range(3):
+        name = username if attempt == 0 else f"{username}_{uuid.uuid4().hex[:8]}"
+        if User.objects.filter(username=name).exists():
+            continue
+        try:
+            with transaction.atomic():
+                user = User.objects.create(
+                    email=email, username=name, user_type='agent', is_staff=False,
+                    is_superuser=False, is_active=False, phone_number='0000000000')
+                user.set_unusable_password()
+                user.save(update_fields=['password'])
+                return user
+        except IntegrityError:
+            # A concurrent first use created the same address: that row is the one.
+            existing = User.objects.filter(email=email).first()
+            if existing is not None:
+                return existing
+    raise UnsupportedCurrency(f"could not create the ledger owner {email}")
+
+
+def reserved_username_prefixes() -> tuple[str, ...]:
+    """The username bases of the platform's ledger owners, lower-cased."""
+    return tuple(base.lower() for base in (
+        getattr(settings, 'PLATFORM_ESCROW_USERNAME', 'platform_escrow'),
+        getattr(settings, 'PLATFORM_REVENUE_USERNAME', 'platform_revenue')))
+
+
+def is_reserved_username(username) -> bool:
+    """True for a name a person must not register: the ledger owners' own, in any
+    currency and any case (`platform_escrow_usd`, `Platform_Revenue_SYP`, ...)."""
+    name = (username or '').strip().lower()
+    return any(name == base or name.startswith(f"{base}_")
+               for base in reserved_username_prefixes())
 
 
 def get_platform_revenue_wallet(currency):

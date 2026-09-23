@@ -4213,3 +4213,37 @@ msgstr "السعر"
 #: subscription/receipts.py
 msgid "Exchange rate"
 msgstr "سعر الصرف"
+
+# Money in two currencies: top-ups, transfers, coaching holds (SIDE_BUGS S-059,
+# S-085, S-159, S-160, S-161).
+#: wallet/views.py
+msgid "This client's wallet is in a different currency."
+msgstr "محفظة هذا العميل بعملة مختلفة."
+
+#: wallet/views.py
+msgid "Your currency cannot be changed while a payment or a coaching request is open."
+msgstr "لا يمكن تغيير عملتك أثناء وجود دفعة أو طلب تدريب مفتوح."
+
+#: wallet/views.py
+msgid "You and this trainer use different currencies."
+msgstr "أنت وهذا المدرب تستخدمان عملتين مختلفتين."
+
+#: wallet/views.py
+msgid "Insufficient wallet balance."
+msgstr "رصيد المحفظة غير كافٍ."
+
+#: wallet/views.py
+msgid "This is one half of a currency exchange and cannot be reversed on its own."
+msgstr "هذه العملية نصف عملية تحويل بين عملتين ولا يمكن عكسها وحدها."
+
+#: users/views.py
+msgid "The client's wallet does not cover the first month of coaching."
+msgstr "رصيد محفظة العميل لا يغطي الشهر الأول من التدريب."
+
+#: users/views.py
+msgid "The trainer charge could not be held in this currency."
+msgstr "تعذّر حجز رسوم المدرب بهذه العملة."
+
+#: users/views.py
+msgid "The trainer charge could not be held. Please try again."
+msgstr "تعذّر حجز رسوم المدرب. يرجى المحاولة مرة أخرى."

@@ -660,6 +660,16 @@ refuse with the same codes, because both go through the same two helpers:
 | `trainer_unavailable` | 409 | The trainer was deactivated in the meantime |
 | `user_blocked` | 403 | One of you blocked the other after it was sent |
 | `refund_failed` | 409 | The hold could not be returned; nothing was changed |
+| `insufficient_balance` | 402 | Approving: the client's wallet does not cover month 1 (in the client's currency) |
+| `exchange_rate_stale` / `exchange_rate_missing` | 409 | Approving: the trainer prices in the other currency and the operator's rate is too old / was never set — the same body a checkout answers |
+| `currency_mismatch` | 409 | Approving: the charge could not be moved in the client's currency |
+| `hold_failed` | 402 | Approving: anything else; nothing was changed, try again. The 402 used to carry no `code` and the internal reason in `error` (SIDE_BUGS S-085) |
+
+`client/request-trainer/` checks the client's wallet against month 1 IN THE CLIENT'S
+CURRENCY (converted from the trainer's at the operator's rate): its 402
+`insufficient_balance` carries `required`, `balance` and `currency`, and it answers 409
+`exchange_rate_stale` / `exchange_rate_missing` when the trainer prices in the other
+currency and the rate cannot convert it (SIDE_BUGS S-084).
 
 Templates: a template is reused for any number of clients and every client gets a
 private copy (`templates/{id}/generate/`: `client_id`, or `client_ids` for several, or
@@ -930,9 +940,41 @@ operator maintains in the console. Four things the app needs:
 - **A coaching price is in the client's currency too.** `GET /api/v1/coaching/status/`
   gains `coaching_currency` beside `coaching_price`; the price is what the client will
   actually be charged, and both are null together when the rate needed to quote it is
-  missing or stale. STILL THE PRICE OF RECORD, in the TRAINER's currency and with no
-  unit beside it: `trainer_hourly_rate` on the trainer lists and `coaching_price` on a
-  trainer card — see the gap noted in `SIDE_BUGS.md`.
+  missing or stale.
+- **Every trainer price on a list carries its unit, in the reader's currency**
+  (SIDE_BUGS S-041). `trainer_hourly_rate` on `trainers/public/`,
+  `client/available-trainers/` and `client/request-status/` gains `coaching_currency`;
+  `agreed_rate` on `client/request-status/` and `client/trainer-invites/` gains
+  `agreed_currency`; a v2 trainer card (`v1/trainers/`, `v1/trainers/{id}/`, matches,
+  the first-day home) gains `coaching_currency` beside `coaching_price`. For a
+  signed-in reader the number is converted into THEIR currency; for nobody signed in
+  (`v1/trainers/`, `trainers/public/` without a token) it is the trainer's price of
+  record; and when the operator's rate cannot convert it, it is the price of record
+  too — the currency key always names the unit, so read them together. The legacy
+  lists keep sending JSON numbers; the card keeps its string. Null (legacy) or absent
+  (card) together on a build that may not show a coaching fee.
+- **A top-up names its currency.** `POST wallet/agent/topup/` and `.../topup/proxy`
+  REQUIRE `currency` (`SYP` | `USD`, the currency of the cash); the signed message of
+  `agent/topup/` is `client_identifier|amount|timestamp|idempotency_key|currency`. The
+  answer gains `currency`. A client who trades in the other currency is `409
+  currency_mismatch` with `client_currency` and `topup_currency` (arriving money never
+  chooses a person's currency). The agent's caps are per currency: `daily_limit` /
+  `monthly_limit` cap pounds, `daily_limit_usd` / `monthly_limit_usd` cap dollars, and
+  `0` means none (SIDE_BUGS S-059).
+- **A transfer converts nothing.** `POST wallet/client/transfer/` between two people in
+  different currencies is `409 currency_mismatch` with `client_currency` and
+  `trainer_currency`; a short wallet is `402 insufficient_balance` with `currency`
+  (it was a bare 400; SIDE_BUGS S-160).
+- **`PUT /api/wallet/currency/`** is also refused, `409
+  currency_locked_open_checkout` with `currency`, while money priced in the current
+  currency is on its way: a plan checkout still open or completed and not yet paid
+  out, a coaching request or invitation still pending, or a coaching hold (SIDE_BUGS
+  S-159).
+- **Support.** `POST wallet/admin/reversal/` refuses one leg of a currency exchange,
+  `409 exchange_leg` with `exchange_reference` (SIDE_BUGS S-161).
+  `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
+  (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
+  top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).
 - **A receipt says what was converted.** `GET
   /api/subscription/v1/payments/{id}/receipt/` gains `exchange`: `null`, or
   `{price_of_record, price_of_record_currency, rate, rate_text}` read off the payment's

@@ -83,6 +83,12 @@ def name_the_ledger_owners_by_currency(apps, schema_editor):
         email, username = _address(base_email, base_username, currency)
         if CustomUser.objects.filter(email=email).exclude(pk=owner.pk).exists():
             continue    # already migrated, or an operator made it by hand
+        if CustomUser.objects.filter(username=username).exclude(pk=owner.pk).exists():
+            # A PERSON registered this username before it was reserved (SIDE_BUGS
+            # S-086). The address is what finds a ledger owner; the username is only a
+            # label, so the owner keeps its old one rather than aborting the deploy.
+            CustomUser.objects.filter(pk=owner.pk).update(email=email)
+            continue
         CustomUser.objects.filter(pk=owner.pk).update(email=email, username=username)
 
 

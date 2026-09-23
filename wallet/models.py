@@ -28,8 +28,18 @@ class AgentProfile(models.Model):
 
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="agent_profile")
     wallet_type = models.CharField(max_length=16, choices=AGENT_WALLET_TYPES, default="prepaid")
+    #: The caps on an agent's top-ups, ONE PAIR PER CURRENCY (`limits_for`). These two
+    #: predate the second currency and have always capped Syrian pounds: every wallet
+    #: they were minted into was SYP. `0` means "no top-ups in this currency", never
+    #: "unlimited" — the caps fail closed (`wallet.views._topup_limit_error`).
     daily_limit = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
     monthly_limit = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
+    #: The same caps in US dollars. They were one number for both currencies, so a cap
+    #: an operator set in pounds allowed the same NUMBER of dollars — about 13,000 times
+    #: the value (SIDE_BUGS S-059). Zero until an operator sets them, so an agent tops up
+    #: no dollars until someone has decided how many.
+    daily_limit_usd = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
+    monthly_limit_usd = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
     status = models.CharField(max_length=16, choices=AGENT_STATUS_CHOICES, default="active")
     ip_allowlist = models.JSONField(default=list, blank=True)
 
@@ -61,6 +71,18 @@ class AgentProfile(models.Model):
 
     def __str__(self):
         return f"AgentProfile({self.user_id}, {self.wallet_type}, {self.status})"
+
+    #: currency -> the (daily, monthly) columns that cap top-ups in it.
+    LIMIT_FIELDS = {"SYP": ("daily_limit", "monthly_limit"),
+                    "USD": ("daily_limit_usd", "monthly_limit_usd")}
+
+    def limits_for(self, currency):
+        """`(daily, monthly)` caps for top-ups in `currency`, or None for a currency
+        this agent has no caps for — which the caller refuses, never treats as open."""
+        fields = self.LIMIT_FIELDS.get(currency)
+        if fields is None:
+            return None
+        return tuple(getattr(self, name) for name in fields)
 
     class Meta:
         # Deterministic total order. Without it Postgres returns rows in whatever order it
@@ -496,6 +518,15 @@ def wallet_for(owner, owner_type: str, currency: str | None = None) -> "Wallet":
     The PLATFORM's own ledger wallets are the exception, and they get it by having one
     owner per currency rather than by bending this rule: see
     `wallet.utils._ledger_owner_wallet`.
+
+    A TRAINER's wallet is never passed a currency here by the coaching code (SIDE_BUGS
+    S-058): a trainer's `trainer_hourly_rate` and every `agreed_rate` are read in the
+    trainer's currency, so letting a client's month choose it re-priced the trainer by
+    four orders of magnitude. The payout converts instead (`users/coaching.pay_out`).
+
+    The rewrite happens under a row lock, and "untouched" is decided on the LOCKED row
+    (SIDE_BUGS S-158). Decided on the unlocked read, a first credit that committed in
+    between was relabelled with the new currency at 1:1.
     """
     from django.db import transaction as _transaction
 
@@ -508,7 +539,9 @@ def wallet_for(owner, owner_type: str, currency: str | None = None) -> "Wallet":
         if created or not currency or wallet.currency == currency:
             return wallet
 
-        if wallet.currency_chosen_at is None and wallet_is_untouched(wallet):
+        wallet = Wallet.objects.select_for_update().get(pk=wallet.pk)
+        if (wallet.currency != currency and wallet.currency_chosen_at is None
+                and wallet_is_untouched(wallet)):
             wallet.currency = currency
             wallet.save(update_fields=["currency"])
         return wallet
@@ -533,6 +566,65 @@ class CurrencyLocked(Exception):
     def __init__(self, currency):
         self.currency = currency
         super().__init__(f"this account already trades in {currency}")
+
+
+class CurrencyChangeBlocked(Exception):
+    """The wallet is untouched, but money priced in its currency is on its way.
+
+    A checkout still open (or completed and not yet paid out), or a coaching request
+    or hold, was priced in the person's current currency. Switching now made the
+    payout find a wallet in the other currency and record the payment as settled with
+    no ledger leg at all (SIDE_BUGS S-159).
+    """
+
+    code = "currency_locked_open_checkout"
+
+    def __init__(self, currency):
+        self.currency = currency
+        super().__init__(f"money priced in {currency} is still on its way")
+
+
+class CurrencyMismatch(ValueError):
+    """Two sides of one movement are in different currencies. A `ValueError`, so every
+    caller that already refuses a bad movement keeps doing so; the `code` is for the
+    ones that answer the app."""
+
+    code = "currency_mismatch"
+
+    def __init__(self, currencies):
+        self.currencies = sorted(currencies)
+        super().__init__(f"Currency mismatch: {self.currencies}")
+
+
+class InsufficientBalance(ValueError):
+    """The source wallet does not hold the amount. A `ValueError`, like the above."""
+
+    code = "insufficient_balance"
+
+    def __init__(self):
+        super().__init__("Insufficient balance")
+
+
+def money_on_its_way(user) -> bool:
+    """True while something priced in this person's currency has not landed yet.
+
+    A plan checkout still open, or completed with its payout still owed; a coaching
+    request or invitation still pending (its `agreed_rate` was quoted against this
+    currency), or a coaching hold not yet paid out. See `CurrencyChangeBlocked`.
+    """
+    from django.db.models import Q as _Q
+
+    from subscription.models import OPEN_PAYMENT_STATUSES, Payment
+    from users.models import TrainerClientRelation
+
+    if Payment.objects.filter(
+            _Q(status__in=OPEN_PAYMENT_STATUSES)
+            | _Q(status="completed", payout_settled_at__isnull=True),
+            subscription__user=user).exists():
+        return True
+    return TrainerClientRelation.objects.filter(
+        _Q(trainer=user) | _Q(client=user)).filter(
+        _Q(status="pending") | ~_Q(hold_reference="")).exists()
 
 
 def currency_for(user) -> str:
@@ -560,6 +652,10 @@ def set_currency_for(user, currency: str, owner_type: str | None = None) -> "Wal
     that already holds money to the other currency would be an exchange of the whole
     balance at a recorded rate — a different act, with a different audit trail, and the
     owner has not asked for it.
+
+    Raises `CurrencyChangeBlocked` while money priced in the current currency is still
+    on its way (`money_on_its_way`), even though the wallet is untouched. Asking for
+    the currency it already has is not a change and is answered as before.
     """
     from django.db import transaction as _transaction
 
@@ -581,6 +677,8 @@ def set_currency_for(user, currency: str, owner_type: str | None = None) -> "Wal
             # answering it "yes" once the wallet is locked would tell the app the switch
             # is available when it is not.
             raise CurrencyLocked(wallet.currency)
+        if wallet.currency != currency and money_on_its_way(user):
+            raise CurrencyChangeBlocked(wallet.currency)
         wallet.currency = currency
         wallet.currency_chosen_at = timezone.now()
         wallet.save(update_fields=["currency", "currency_chosen_at"])
@@ -638,7 +736,7 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
         # exchange inside something every caller reads as a transfer. Both are wrong:
         # `exchange_funds_atomic` is where a currency is crossed, deliberately and in
         # two legs.
-        raise ValueError(f"Currency mismatch: {sorted(currencies)}")
+        raise CurrencyMismatch(currencies)
     # Exactly one, and it is the money's own: never a literal, never a setting.
     (row_currency,) = currencies
 
@@ -670,6 +768,13 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
             w.id: w
             for w in Wallet.objects.select_for_update().filter(id__in=wallet_ids).order_by("id")
         }
+        # The check above read the CALLER's objects, which may be stale: an untouched
+        # wallet whose currency `wallet_for` or `set_currency_for` rewrote after the
+        # caller read it would otherwise take this row in the old unit at 1:1
+        # (SIDE_BUGS S-158). The locked rows are the truth, and nothing can change
+        # them now until this transaction ends.
+        if {w.currency for w in locked.values()} | {row_currency} != {row_currency}:
+            raise CurrencyMismatch({w.currency for w in locked.values()} | {row_currency})
 
         # BEFORE the balances are touched. Locking the original and re-reading it here
         # is what stops two callers both finding it un-reversed; the OneToOne on
@@ -689,7 +794,7 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
         if source:
             src = locked[source.id]
             if src.balance < amount:
-                raise ValueError("Insufficient balance")
+                raise InsufficientBalance()
             src.balance = src.balance - amount
             src.save(update_fields=["balance", "updated_at"])
         else:
@@ -802,6 +907,11 @@ def ensure_agent_profile(user) -> "AgentProfile":
 
     New agents are provisioned with AGENT_DEFAULT_DAILY_LIMIT / MONTHLY_LIMIT
     from settings (fail-closed caps), never with 0 (which means "no top-ups").
+
+    Those two are the SYP caps. The USD caps come from
+    AGENT_DEFAULT_DAILY_LIMIT_USD / AGENT_DEFAULT_MONTHLY_LIMIT_USD, which nobody has
+    set yet: until the owner names a number they are 0, and an agent tops up no dollars
+    (SIDE_BUGS S-059 — a cap in pounds used to allow the same number of dollars).
     """
     profile, _created = AgentProfile.objects.get_or_create(
         user=user,
@@ -810,6 +920,10 @@ def ensure_agent_profile(user) -> "AgentProfile":
             "status": "active",
             "daily_limit": settings.AGENT_DEFAULT_DAILY_LIMIT,
             "monthly_limit": settings.AGENT_DEFAULT_MONTHLY_LIMIT,
+            "daily_limit_usd": Decimal(str(getattr(
+                settings, "AGENT_DEFAULT_DAILY_LIMIT_USD", "0"))),
+            "monthly_limit_usd": Decimal(str(getattr(
+                settings, "AGENT_DEFAULT_MONTHLY_LIMIT_USD", "0"))),
         },
     )
     return profile

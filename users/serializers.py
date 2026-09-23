@@ -175,6 +175,17 @@ class CustomRegisterSerializer(RegisterSerializer):
     def validate_date_of_birth(self, value):
         return check_date_of_birth(value)
 
+    def validate_username(self, value):
+        # The platform's ledger owners (`platform_escrow_usd`, ...) are created on first
+        # use under these names; a person holding one first broke every hold and plan
+        # payout in that currency (SIDE_BUGS S-086). Answered as `username_taken`: to
+        # the person, it is.
+        from wallet.utils import is_reserved_username
+        if is_reserved_username(value):
+            raise serializers.ValidationError(
+                _("A user with that username already exists."), code='username_taken')
+        return super().validate_username(value)
+
     def validate_phone_number(self, value):
         # Stored with Western digits: `\d` also matched Arabic-Indic digits, so
         # "+٩٦٣..." was kept as typed and matched nothing later (B-015).

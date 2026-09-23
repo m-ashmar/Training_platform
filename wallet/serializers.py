@@ -239,15 +239,30 @@ class AgentProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = AgentProfile
         fields = [
-            "id", "user", "wallet_type", "daily_limit", "monthly_limit", "status", "ip_allowlist",
+            "id", "user", "wallet_type", "daily_limit", "monthly_limit", "daily_limit_usd",
+            "monthly_limit_usd", "status", "ip_allowlist",
             "created_at", "updated_at"
         ]
         read_only_fields = ["created_at", "updated_at", "user"]
 
 
+def _topup_currency_field():
+    """The currency of the cash an agent took. REQUIRED, and one the platform trades in.
+
+    A top-up carried no currency, so the typed number was minted in whatever the
+    client's wallet held — 500,000 pounds of cash became 500,000 dollars in a wallet
+    that had chosen dollars (SIDE_BUGS S-059). There is no default: cash does not come
+    labelled, and guessing is the bug.
+    """
+    from .currencies import CURRENCY_CODES
+
+    return serializers.ChoiceField(choices=list(CURRENCY_CODES))
+
+
 class TopUpRequestSerializer(serializers.Serializer):
     client_identifier = serializers.CharField()  # id or email
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=_MIN_AMOUNT)
+    currency = _topup_currency_field()
     idempotency_key = serializers.CharField()
     #: Signed AND checked for freshness. The view used to check the header's copy and
     #: sign the body's, which made them independent and the replay window unbounded.
@@ -273,6 +288,7 @@ class ReversalRequestSerializer(serializers.Serializer):
 class AgentTopUpProxyRequestSerializer(serializers.Serializer):
     client_identifier = serializers.CharField()
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=_MIN_AMOUNT)
+    currency = _topup_currency_field()
     idempotency_key = serializers.CharField()
 
 

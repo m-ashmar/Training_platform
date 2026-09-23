@@ -95,12 +95,29 @@ def lock_wallets(actor_id, wallets) -> dict:
     return {w.pk: w for w in Wallet.objects.select_for_update().filter(pk__in=ids).order_by('pk')}
 
 
-def open_period(relation, hold_tx):
-    """Record month N for money just moved client -> escrow. Caller holds the relation."""
+def open_period(relation, hold_tx, *, priced=None, inherit=None):
+    """Record month N for money just moved client -> escrow. Caller holds the relation.
+
+    The price of record and the rate that turned it into `price` are copied on
+    (SIDE_BUGS S-151): from `priced` (a `subscription.pricing.Priced`) when this month
+    was just priced, or from `inherit` — the month before — for a renewal, which is
+    charged at that month's client-currency price and so at its conversion.
+    """
     from django.db.models import Max
 
     from .models import CoachingPeriod
 
+    snapshot = {}
+    if priced is not None:
+        snapshot = {'price_amount': priced.price_amount,
+                    'price_currency': priced.price_currency,
+                    'exchange_rate': priced.rate,
+                    'exchange_rate_value': getattr(priced.rate, 'rate', None)}
+    elif inherit is not None:
+        snapshot = {'price_amount': inherit.price_amount,
+                    'price_currency': inherit.price_currency,
+                    'exchange_rate_id': inherit.exchange_rate_id,
+                    'exchange_rate_value': inherit.exchange_rate_value}
     last = relation.periods.aggregate(n=Max('number'))['n'] or 0
     return CoachingPeriod.objects.create(
         trainer_id=relation.trainer_id, client_id=relation.client_id, relation=relation,
@@ -110,15 +127,28 @@ def open_period(relation, hold_tx):
         # to — both are per currency (`wallet.utils`).
         number=last + 1, price=hold_tx.amount, currency=hold_tx.currency,
         commission_rate=commission_rate(),
-        hold_reference=hold_tx.reference_id)
+        hold_reference=hold_tx.reference_id, **snapshot)
 
 
 def pay_out(period, *, actor_id, starts_at, trainer_purpose):
     """Escrow -> trainer and escrow -> platform for `period`, which starts at `starts_at`.
 
     Inside the caller's transaction, with the relation and the period locked. Returns the
-    trainer's ledger row (the commission's when the trainer's share is nothing). Raises
-    `HoldFailed` when escrow cannot cover the month, leaving everything as it was.
+    trainer's ledger row (the commission's when the trainer's share is nothing, or when
+    the share is owed). Raises `HoldFailed` when escrow cannot cover the month, leaving
+    everything as it was.
+
+    The trainer is paid in THEIR currency, never in the month's: their wallet is read
+    without a currency (SIDE_BUGS S-058). Passing the month's let an untouched trainer
+    wallet take the client's currency on the first payout, after which the trainer's
+    rate — a bare number in their wallet's currency — was read in the other unit.
+
+    A share that has to cross a currency when the operator's rate is missing or stale
+    stays in escrow, OWED (`payout_owed_since`), and the month is still paid and
+    started (SIDE_BUGS S-082): the client's charge is in their own currency and the
+    commission stays in it too, so neither depends on the rate, and refusing them froze
+    month 1 at 'held' and rolled back every renewal while the coaching kept running.
+    `settle_owed_payouts` pays the share once the rate is fresh.
     """
     from wallet.models import move_funds_atomic
     from wallet.utils import get_escrow_wallet, get_platform_revenue_wallet
@@ -133,7 +163,8 @@ def pay_out(period, *, actor_id, starts_at, trainer_purpose):
     # (SIDE_BUGS S-001), resolved by the money rather than by a default.
     money = period.currency
     escrow = get_escrow_wallet(money)
-    trainer_wallet = _wallet_for(period.trainer, 'trainer', money)
+    # No currency: arriving money never chooses the trainer's (see the docstring).
+    trainer_wallet = _wallet_for(period.trainer, 'trainer')
     platform = get_platform_revenue_wallet(money)
     locked = lock_wallets(actor_id, [escrow, trainer_wallet, platform])
     if locked[escrow.pk].balance < period.price:
@@ -145,6 +176,7 @@ def pay_out(period, *, actor_id, starts_at, trainer_purpose):
               'trainer_id': period.trainer_id, 'client_id': period.client_id,
               'month': period.number}
     payout = fee = None
+    owed = False
     if share > 0:
         if trainer_wallet.currency == money:
             payout = move_funds_atomic(escrow, trainer_wallet, share, actor_id=actor_id,
@@ -170,10 +202,11 @@ def pay_out(period, *, actor_id, starts_at, trainer_purpose):
                     actor_id=actor_id, money_type=MoneyType.COACHING_1TO1,
                     metadata={'purpose': trainer_purpose, **common})
             except ExchangeRateUnavailable as exc:
-                logger.error("Coaching period %s cannot be paid out: %s", period.pk, exc)
-                failure = HoldFailed(str(exc))
-                failure.code = exc.code
-                raise failure from exc
+                # Nothing moved: the rate is looked up before either leg. The share
+                # stays in escrow, owed, and the month goes ahead (see the docstring).
+                logger.error("Coaching period %s: trainer's share owed until the rate "
+                             "is fresh: %s", period.pk, exc)
+                owed = True
     if commission > 0:
         # The platform's cut stays in the currency the month was sold in. It is the
         # platform's own money in its own books; converting it would be an exchange
@@ -189,9 +222,77 @@ def pay_out(period, *, actor_id, starts_at, trainer_purpose):
     period.payout_reference = payout.reference_id if payout else ''
     period.commission_reference = fee.reference_id if fee else ''
     period.starts_at, period.ends_at = starts_at, starts_at + period_length()
+    period.payout_owed_since = timezone.now() if owed else None
     period.save(update_fields=['status', 'commission', 'trainer_share', 'payout_reference',
-                               'commission_reference', 'starts_at', 'ends_at', 'updated_at'])
+                               'commission_reference', 'starts_at', 'ends_at',
+                               'payout_owed_since', 'updated_at'])
     return payout or fee
+
+
+def settle_owed_payouts(now=None) -> dict:
+    """Pay every trainer's share that `pay_out` left owed in escrow, now that it can be.
+
+    One period at a time, each in its own transaction with the period row locked
+    first and then the two wallets (the order everything else uses after the relation;
+    this touches no relation). Stops at the first rate refusal: the rate is the same
+    for all of them, so the rest would be refused too and are tried next hour. Returns
+    `{'paid': n, 'failed': [period ids]}`.
+    """
+    from wallet.exchange import ExchangeRateUnavailable
+    from wallet.models import exchange_funds_atomic, move_funds_atomic
+    from wallet.utils import get_escrow_wallet
+
+    from .models import CoachingPeriod
+    from .trainer_relations import _wallet_for
+
+    paid, failed = 0, []
+    ids = list(CoachingPeriod.objects.filter(payout_owed_since__isnull=False)
+               .order_by('payout_owed_since', 'pk').values_list('pk', flat=True))
+    for period_id in ids:
+        try:
+            with transaction.atomic():
+                period = (CoachingPeriod.objects.select_for_update(of=('self',))
+                          .select_related('trainer')
+                          .filter(pk=period_id, payout_owed_since__isnull=False).first())
+                if period is None:
+                    continue
+                money, share = period.currency, period.trainer_share or Decimal('0')
+                escrow = get_escrow_wallet(money)
+                trainer_wallet = _wallet_for(period.trainer, 'trainer')
+                locked = lock_wallets(None, [escrow, trainer_wallet])
+                if share <= 0:
+                    payout = None
+                elif locked[escrow.pk].balance < share:
+                    logger.error("Escrow cannot cover the owed share of period %s", period.pk)
+                    failed.append(period.pk)
+                    continue
+                else:
+                    common = {'period_id': period.pk, 'hold_reference': period.hold_reference,
+                              'trainer_id': period.trainer_id, 'client_id': period.client_id,
+                              'month': period.number, 'purpose': 'coaching_payout',
+                              'owed_since': period.payout_owed_since.isoformat()}
+                    trainer_wallet = locked[trainer_wallet.pk]
+                    if trainer_wallet.currency == money:
+                        payout = move_funds_atomic(
+                            escrow, trainer_wallet, share, actor_id=None, currency=money,
+                            tx_type='transfer', money_type=MoneyType.COACHING_1TO1,
+                            metadata=common)
+                    else:
+                        _debit, payout = exchange_funds_atomic(
+                            escrow, trainer_wallet, share, amount_in=money, actor_id=None,
+                            money_type=MoneyType.COACHING_1TO1, metadata=common)
+                period.payout_reference = payout.reference_id if payout else ''
+                period.payout_owed_since = None
+                period.save(update_fields=['payout_reference', 'payout_owed_since',
+                                           'updated_at'])
+                paid += 1
+        except ExchangeRateUnavailable as exc:
+            logger.warning("Owed coaching payouts wait for a fresh rate: %s", exc)
+            break
+        except Exception:
+            logger.exception("Owed coaching payout failed for period %s", period_id)
+            failed.append(period_id)
+    return {'paid': paid, 'failed': failed}
 
 
 # ------------------------------------------------------------------------ renewal
@@ -306,8 +407,10 @@ def renew(relation_id, now=None) -> str:
             return 'frozen' if step == 0 else 'reminded'
 
         # The month renews at the price of the month before it, which is already in
-        # the client's currency — no conversion, and so no way for a stale rate to
-        # freeze a coaching that has been running happily.
+        # the client's currency, so the CHARGE converts nothing. The trainer's share
+        # may still cross a currency on the way out; if the rate is stale then, the
+        # share is left owed in escrow and the month renews anyway (`pay_out`), so a
+        # stale rate never freezes — or silently extends — a running coaching.
         money = last.currency
         escrow = get_escrow_wallet(money)
         locked = lock_wallets(None, [client_wallet, escrow,
@@ -323,7 +426,7 @@ def renew(relation_id, now=None) -> str:
                                            'client_id': relation.client_id,
                                            'relation_id': relation.pk,
                                            'month': last.number + 1})
-        period = open_period(relation, hold)
+        period = open_period(relation, hold, inherit=last)
         # On time, the new month starts where the last ended (a missed hourly run is
         # caught up month by month). After a freeze it starts when it is paid: the days
         # spent paused were not coached.
@@ -429,9 +532,17 @@ def renew_due(now=None, *, max_months=12) -> dict:
 
     One relation's failure does not stop the others; failures are counted and the
     caller (the beat task) raises so the run is retried — every step is idempotent.
+
+    First, every trainer's share left owed by a stale rate is paid if the rate now
+    allows it (`settle_owed_payouts`); `trainer_payouts_settled` is counted when any
+    was. An owed share that still cannot be paid is not a failure of this run: it waits
+    for the operator's rate and is retried every hour.
     """
     counts: dict[str, int] = {}
     failed = []
+    owed = settle_owed_payouts(now)
+    if owed['paid']:
+        counts['trainer_payouts_settled'] = owed['paid']
     for relation_id in due_relation_ids(now):
         for _month in range(max_months):
             try:

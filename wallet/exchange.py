@@ -12,6 +12,11 @@ WHAT MAY CALL `convert_at_the_operators_rate`, and nothing else may:
 | `subscription/pricing.py` | the purchase: a price of record in one currency charged to a buyer who holds the other, and the same price shown to that reader |
 | `wallet/models.py exchange_funds_atomic` | the only movement of money that crosses currencies, in two legs |
 
+`price_list_converter`, below, is the same conversion for a price LIST shown to one
+reader (trainer cards, coaching requests): the batch form of `price_for`, reading the
+rate once per list. It charges nothing, and it shares `_convert_at` with the function
+above so a list and a purchase can never disagree about a rate or a rounding.
+
 `tests/test_two_currencies.py` scans the source and fails a third caller. This is not
 bureaucracy: a conversion scattered across views is how a rate gets applied twice, or
 applied and then not snapshotted, and neither shows up as an error — only as money.
@@ -146,8 +151,16 @@ def convert_at_the_operators_rate(amount, from_currency: str, to_currency: str, 
     for code in (from_currency, to_currency):
         if not is_supported(code):
             raise NoExchangeRate(f"{code!r} is not a currency this platform trades in")
+    return _convert_at(amount, from_currency, to_currency, current_rate(at=at), at=at)
 
-    row = current_rate(at=at)
+
+def _convert_at(amount: Decimal, from_currency: str, to_currency: str, row, *, at=None):
+    """The body of `convert_at_the_operators_rate` for a rate row already looked up.
+
+    Private to this module: the refusal (missing, stale) and the arithmetic are the
+    same whether the row was read for one price or for a whole price list
+    (`price_list_converter`), so they are written once.
+    """
     if row is None:
         raise NoExchangeRate(
             f"no operator has set a {RATE_BASE}/{RATE_QUOTE} rate, so "
@@ -166,6 +179,41 @@ def convert_at_the_operators_rate(amount, from_currency: str, to_currency: str, 
     else:  # pragma: no cover — unreachable while the platform trades one pair
         raise NoExchangeRate(f"no rate links {from_currency} to {to_currency}")
     return converted.quantize(CENT, rounding=ROUND_HALF_UP), row
+
+
+def price_list_converter(reader_currency, *, at=None):
+    """`convert(amount, currency) -> (amount, currency)` for a whole LIST shown to one
+    reader, reading the operator's rate at most once.
+
+    A price list converting row by row asked for the rate once per row — a page of
+    trainer cards was a query per card (SIDE_BUGS S-041, cf. S-026). Same rules as
+    `subscription.pricing.price_for`, which is the one-price version: a price already
+    in the reader's currency is only rounded; one that cannot be converted (no rate, a
+    stale one) comes back AS ITS PRICE OF RECORD, in its own currency, so the caller
+    always shows the unit beside the number and the list never blanks. The purchase
+    itself still refuses with its code. `reader_currency` None (nobody signed in):
+    every price is its price of record. `amount` None stays None.
+    """
+    row_cache = []
+
+    def convert(amount, currency):
+        if amount is None:
+            return None, currency
+        amount = Decimal(amount)
+        if not reader_currency or not currency or currency == reader_currency:
+            return amount.quantize(CENT, rounding=ROUND_HALF_UP), currency or reader_currency
+        if not (is_supported(currency) and is_supported(reader_currency)):
+            return amount, currency
+        if not row_cache:
+            row_cache.append(current_rate(at=at))
+        try:
+            converted, _row = _convert_at(amount, currency, reader_currency, row_cache[0],
+                                          at=at)
+        except ExchangeRateUnavailable:
+            return amount, currency
+        return converted, reader_currency
+
+    return convert
 
 
 #: What a refusal says to a person, once, in one place. The app branches on the `code`
