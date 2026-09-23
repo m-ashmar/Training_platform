@@ -277,8 +277,27 @@ def workout_hero(person, routine, week, *, on_date, refusal) -> dict | None:
     return data
 
 
+def _in_program(routine, date) -> bool:
+    """Is `date` inside the routine's own window?
+
+    The strip and the "planned" tile both counted days by cycle arithmetic alone, so a
+    program that starts on a Wednesday marked the Saturday to Tuesday before it as
+    planned training that nobody ever planned — and counted them in `workouts.planned`
+    (BACKEND_BUGS B-045). Outside the window there is no plan: those days are `rest`
+    and are not counted. An open end (`end_date` null) runs on.
+    """
+    if routine.start_date and date < routine.start_date:
+        return False
+    if routine.end_date and date > routine.end_date:
+        return False
+    return True
+
+
 def _week_strip(person, routine, on_date, week) -> list:
     """Saturday to Friday, one entry a day: `done`, `today`, `rest` or `planned`.
+
+    A day before the routine starts or after it ends is `rest`: the program asks for no
+    work there (`_in_program`).
 
     `done` is a day finished with nothing missing — the platform's own definition of a
     training day (`routine/outcomes.complete_dates`), the one the streak counts. The
@@ -292,7 +311,7 @@ def _week_strip(person, routine, on_date, week) -> list:
             state = 'today'
         elif date in finished:
             state = 'done'
-        elif day_of(routine, date) not in working_days:
+        elif not _in_program(routine, date) or day_of(routine, date) not in working_days:
             state = 'rest'
         else:
             state = 'planned'
@@ -367,7 +386,8 @@ def week_stats(person, routine, week, week_payload, *, on_date) -> dict | None:
     planned_days = None
     if routine is not None:
         planned_days = sum(1 for offset in range(7)
-                           if day_of(routine, start + timedelta(days=offset))
+                           if _in_program(routine, start + timedelta(days=offset))
+                           and day_of(routine, start + timedelta(days=offset))
                            in week['working_days'])
     done_days = len([date for date in week['finished'] if start <= date <= on_date])
 
@@ -646,16 +666,26 @@ def challenge_rank(person) -> dict | None:
                          joined_at=OuterRef('joined_at'), id__lt=OuterRef('id')))
              .order_by().values('challenge_id').annotate(n=Count('id')).values('n'))
 
+    standing = (ChallengeParticipation.objects
+                .filter(challenge_id=OuterRef('challenge_id'))
+                .exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
+                .order_by().values('challenge_id').annotate(n=Count('id')).values('n'))
+
     row = (ChallengeParticipation.objects
            .filter(user=person)
            .exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
            .filter(~Q(challenge__status__in=Challenge.TERMINAL_STATUSES),
                    challenge__start_date__lte=now, challenge__end_date__gte=now,
                    challenge__is_hidden=False)
-           .annotate(ahead=Coalesce(Subquery(ahead, output_field=IntegerField()), Value(0)))
+           .annotate(ahead=Coalesce(Subquery(ahead, output_field=IntegerField()), Value(0)),
+                     # Counted by the SAME rule as `ahead`: the denormalised
+                     # `Challenge.participants_count` could say "rank 4 of 58" while
+                     # the ordering held a different number (BACKEND_BUGS B-046).
+                     standing=Coalesce(Subquery(standing, output_field=IntegerField()),
+                                       Value(0)))
            # `ahead` is named here on purpose: a `values()` after an `annotate()`
            # returns only the columns it lists, annotations included.
-           .values('ahead', 'challenge_id', 'current_value', 'progress_percentage',
+           .values('ahead', 'standing', 'challenge_id', 'current_value', 'progress_percentage',
                    'challenge__end_date', 'challenge__unit', 'challenge__target_value',
                    'challenge__participants_count',
                    'challenge__title_ar', 'challenge__title_en')
@@ -670,7 +700,7 @@ def challenge_rank(person) -> dict | None:
         'challenge_id': row['challenge_id'],
         'title': title,
         'rank': row['ahead'] + 1,
-        'participants': row['challenge__participants_count'],
+        'participants': row['standing'],
         'value': row['current_value'],
         'target': row['challenge__target_value'],
         'unit': row['challenge__unit'],

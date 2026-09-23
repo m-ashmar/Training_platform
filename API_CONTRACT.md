@@ -414,6 +414,11 @@ conversation row carries `can_send` and `refusal` so the app can explain a close
 composer without posting first. A conversation that is not the caller's is **404**, never
 403.
 
+Every message carries `kind` — `"text"` is the only value today, on REST and on the
+socket's `message.new` (the same serializer). Voice and images will add values and their
+own fields beside `body`; switch on `kind`, and draw an unknown one as a placeholder
+rather than guessing from which fields are present (BACKEND_BUGS B-042).
+
 `refusal` / the send's 403 `code`, in the order they are decided: `no_relation` (never an
 approved pair and never a paid month), `blocked` (either of the two blocked the other —
 `moderation`; the thread stays readable), `coaching_ended` (the relation is gone — ending
@@ -517,7 +522,12 @@ which is what lets an old build survive a new section.
 
 `{"role", "as_of", "refresh_after_seconds", "sections": [{"type", "data"}]}`. A section
 is `{"type", "data"}` and nothing else, and one with nothing to say is left out rather
-than sent empty. `role` is the account's shell (`client`, `trainer`, `agent`, `admin` —
+than sent empty. `refresh_after_seconds` is how long until the page may change: 120 on a
+freshly built page, and the time LEFT (1-120, counted from `as_of`) on one served from
+the cache (BACKEND_BUGS B-043). In the `workout_hero` week strip a day before the
+routine starts or after it ends is `rest` and is not counted in `week_stats.workouts
+.planned` (B-045); `counts.estimated_minutes` is null when the coach set no duration
+(B-044); `challenge_rank.participants` is counted by the same rule as `rank` (B-046). `role` is the account's shell (`client`, `trainer`, `agent`, `admin` —
 `admin` is the operator); only the client shell is designed, so the other three get
 `"sections": []` today rather than a refusal.
 
