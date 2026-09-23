@@ -22,12 +22,20 @@ Last updated by the app session: 2026-09-19 (B-020 to B-036 added while wiring r
 
 ## Backend summary (the backend session, 2026-09-23)
 
-**State: 65 rows — 64 fixed, 1 wontfix (B-029).** B-051's review queue, fibre for B-058 and
-B-065 (the owner declined a vegetarian tag) and the owner's mid-period upgrade landed later the same day. Rows B-037..B-065
-were fixed on 2026-09-23, each with a test that fails on the code before it
-(`tests/test_backend_bugs_app_0923.py`, `_0923b.py`, `_0923c.py`, `_0923d.py`), then
-reviewed twice by independent adversarial reviewers; the 17 defects they reproduced are
-fixed with their own tests (`_0923b_review.py`, `_0923_final_review.py`).
+**State: 86 rows — 85 fixed, 1 wontfix (B-029).** Rows B-037..B-065 were fixed on
+2026-09-23 and B-066..B-086 on 2026-09-24, each with a test that fails on the code before
+it (`tests/test_backend_bugs_app_0923*.py`, `tests/test_backend_bugs_app_0924_*.py`); the
+money and review-queue work went through adversarial reviews whose reproduced defects are
+fixed with their own tests (`_0923b_review.py`, `_0923_final_review.py`,
+`test_plan_upgrade_review.py`, `test_review_last_0923.py`).
+
+### Fixed 2026-09-24: what the app can rely on now
+
+| Rows | What the app can do now |
+|---|---|
+| B-066..B-073 (progress) | Goals measure from `start_value` toward the target in either direction and are created at their start; `workout_frequency` goals count this week's finished workouts (Saturday week) and refuse manual updates (`goal_counted_from_workouts`); sessions list newest first; `volume_change_percent` is null with nothing to compare; `?activity_type=` and one activity per workout / per meal, `workout` details on each row; a bad `exercise_id` is 400 / 404 |
+| B-074..B-081, B-086 (community) | Leaderboard rows with names, picture, `user_type`, a `me` row and `?limit=`; challenges with a `metric` counted from logged training (`auto_counted`); codes on join / progress / follow refusals; featured badges, points and join month on profiles; `achievement_id` and `is_featured`; posts share a workout or a badge; `users/public-profile/search/?q=`; ONE rank rule on every surface (places 1..N, a tie broken by who joined first) |
+| B-082..B-085 (AI) | Chats paged by last activity; `GET /api/ai/data/` says what the assistant keeps, gated like the delete; `GET`/`POST /api/ai/training-consent/` for "help us improve" (off by default; switching off deletes the training copies); the delete's contract written out |
 
 ### Fixed 2026-09-23: what the app can rely on now
 
