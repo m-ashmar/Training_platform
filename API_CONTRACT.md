@@ -264,6 +264,16 @@ per-address limits above have `code: "throttled"`.
 
 ### Achievements
 
+`GET leaderboard/?limit=` (1..50, default 10) orders ties on points by user id, so a
+place is stable between requests. An account the caller has blocked, or that blocked
+the caller, is left out of `leaderboard` after the ranks are counted — the other rows
+keep their true `rank`, the list can be shorter than `limit`, the same rule as a
+challenge leaderboard.
+
+The Challenge Winner and Champion badges (`challenge_wins`) count a first place only in
+a challenge that is OVER — closed as completed, or past its end date and not cancelled
+— and the check runs when the challenge closes. Being first while it runs earns nothing.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/achievements/` | auth | `AchievementViewSet` |
@@ -492,7 +502,15 @@ or a link to the web hub, on any build.
 reports the same unread count as `GET /api/v1/chat/conversations/`; `ai_advice` appears
 only once the person has given AI consent (`/api/v1/ai-consent/`). The payload is cached
 per user, per build and per language for 120 s and retired at once when a workout
-completes, a day closes or a chat message arrives.
+session is started, changed or finished, a day closes, a chat message arrives or is
+taken back, the client reads the thread, a block is made or lifted, or the client's
+coaching relation changes.
+
+Additive in `workout_hero`: an open session begun while the coaching was paid answers
+`cta: {"state": "continue", "session_id"}` after the coaching freezes, because the
+server still accepts its sets and its finish (judged at the session's start). Additive
+in `trainer_message`: `message.deleted` (bool). A newest message its sender took back
+keeps the card with `body: ""` and `deleted: true`, as the conversation list shows it.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -711,6 +729,9 @@ public profiles, the available-trainers list or trainer matches; neither can sen
 other a trainer request (`user_blocked`, 403, on `client/request-trainer/` and
 `trainer/assign-client/`), and a request sent before the block cannot be accepted
 after it (same code on `trainer/respond-to-request/` and `client/respond-to-invite/`).
+Neither can follow the other: `user_blocked` (403) on `POST /api/social/follows/` and
+`POST /api/social/follows/follow_user/`, with no push sent. A follow made before the
+block is kept, hidden from both, and shows again when the block is lifted.
 Blocking does not hide a challenge from either of them, but a blocked person is
 dropped from its leaderboard — with the ranks left as they were, so the board still
 reads 1, 2, 4.
@@ -1143,7 +1164,21 @@ badge keys on `rank=1`). The same `challenge_closed` `join` already answers with
 challenge, including the ones at zero, ordered `-current_value`, then `joined_at`, then
 `id` — the order `challenges/{id}/leaderboard/` and the home card's `challenge_rank`
 already read. Places run 1..N with no gaps and no nulls, and they stop changing once
-the challenge ends.
+the challenge ends. The one exception: a participation whose `status` is `dropped`
+holds no place — its `rank` is null, it is not listed on `leaderboard/`, and it is not
+counted ahead of anyone on the home card — so the person behind it moves up.
+
+`DELETE comments/{id}/` takes the comment, and every reply under it, off the post's
+stored `comments_count`.
+
+`POST follows/` and `POST follows/follow_user/` answer 403 `user_blocked` when either
+person has blocked the other.
+
+`achievements/`, `achievements/{id}/` and `achievements/user_achievements/` read the
+`achievements` app — the badges the engine actually awards, with the ids
+`/api/achievements/` uses — in the same response shape as before. They read tables
+nothing wrote, so `user_achievements/` was always empty. A secret badge is listed only
+to someone who has earned it.
 
 `comments_count` on a post is the number of comments THIS viewer can open: the stored
 counter less the ones hidden by moderation and the ones by accounts they have blocked.

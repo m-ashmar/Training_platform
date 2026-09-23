@@ -153,7 +153,10 @@ class HomeView(APIView):
         `coaching_frozen`, `coaching_unpaid`, `coaching_ended` — the same 403 `code`
         every training write on this routine answers (`users/coaching.py`). The owner's
         rule: a frozen or ended coaching keeps the day READABLE and unstartable, so the
-        section stays and only the button changes. Which day of the routine today is,
+        section stays and only the button changes. One exception, the server's own: a
+        session opened while the coaching was paid may still be logged and finished
+        after it freezes (those writes are judged at the session's start), so such a
+        session answers `continue` with its `session_id`, not `refused`. Which day of the routine today is,
         is counted from `Routine.start_date` over `Routine.days`.
 
     ``find_trainer_hero`` — the first day. Only for a client with no coach, and only
@@ -184,7 +187,12 @@ class HomeView(APIView):
          "from": {"id": 4, "first_name": "Rami", "last_name": "Haddad",
                   "profile_picture": "https://…" | null},
          "from_coach": true,                  false when the last word was the client's
-         "message": {"id": 91, "kind": "text", "body": "…", "sent_at": "..."}}
+         "message": {"id": 91, "kind": "text", "body": "…", "deleted": false,
+                     "sent_at": "..."}}
+
+        A newest message its sender took back keeps the card: `body` is `""` and
+        `deleted` is `true`, the tombstone `GET /api/v1/chat/conversations/` shows for
+        the same thread, and `unread_count` still counts the messages before it.
 
         `kind` is `text` on every message in this build — chat is text only
         (`chat/models.py`). A voice note arrives as an attachment (BACKEND_DELTA item
@@ -313,9 +321,12 @@ class HomeView(APIView):
     One build of the screen is a bounded batch of queries with no N+1
     (`tests/test_home.py` asserts the number and that it does not follow the data), and
     the result is cached per user, per build and per language for 120 s (private cache,
-    DB3). The entry is retired the moment a workout completes, a day closes or a chat
-    message arrives (`training_platform/signals.py`). Everything else — a meal ticked,
-    a badge earned, a subscription lapsing — shows within the 120 s.
+    DB3). The entry is retired the moment a workout session is started, changed or
+    finished, a day closes, a chat message arrives or is taken back, the client reads
+    the thread, a block is made or lifted between the client and anyone, or the
+    client's coaching relation changes (`training_platform/signals.py`). Everything
+    else — a meal ticked, a badge earned, a subscription lapsing — shows within the
+    120 s.
 
     Days are the SERVER's calendar days (`Asia/Damascus`), not the account's
     `preferred_timezone`: every training date, meal date and outcome in this platform

@@ -33,18 +33,17 @@ from datetime import timedelta
 from django.utils import timezone
 from django.utils.translation import get_language
 
-from routine.sessions import SESSION_MAX_SECONDS, running as running_sessions
+from routine.sessions import running as running_sessions
 
 #: Most routines of one person the "which routine am I on" search looks at. A client
 #: collects one private copy per program; the newest few are the only candidates, and
 #: the bound is what keeps this a single small query.
 ROUTINES_CONSIDERED = 5
 
-#: How long a workout session may still be called open, in seconds. Home used to own
-#: this number; it is the platform's rule now and lives in `routine/sessions.py`, which
-#: the session endpoints and the nightly sweep read too (SIDE_BUGS S-022). Kept as a
-#: name because it reads better here than the import does.
-LONGEST_SESSION = SESSION_MAX_SECONDS
+# How long a workout session may still be called open is the platform's rule, not
+# this screen's: `routine/sessions.py` owns it, and home asks `running()` rather than
+# holding the number (SIDE_BUGS S-022). The `LONGEST_SESSION` alias that stood here was
+# read by nothing once the query moved there, so it went (SIDE_BUGS S-098).
 
 #: The preview the coach's message is cut to. The same 200 the conversation list uses
 #: (`chat/serializers.py conversation_card`); a third number would be a third answer.
@@ -259,7 +258,7 @@ def workout_hero(person, routine, week, *, on_date, refusal) -> dict | None:
             'estimated_minutes': routine.estimated_duration,
         },
         'week_strip': _week_strip(person, routine, on_date, week),
-        'cta': _cta(refusal, plan, counts, session, on_date, routine),
+        'cta': _cta(refusal, plan, counts, session, on_date, routine, person=person),
     }
     if counts is not None:
         data['sets'] = {'prescribed': counts['prescribed'], 'logged': counts['logged'],
@@ -302,9 +301,21 @@ def _week_strip(person, routine, on_date, week) -> list:
     return strip
 
 
-def _cta(refusal, plan, counts, session, on_date, routine) -> dict:
-    """What the one button on the hero does: `start`, `continue`, `rest` or `refused`."""
+def _cta(refusal, plan, counts, session, on_date, routine, *, person=None) -> dict:
+    """What the one button on the hero does: `start`, `continue`, `rest` or `refused`.
+
+    An open session the server still lets this person finish is `continue`, even when
+    the coaching has since frozen or ended. The set logs and the finishing PATCH of a
+    session are judged at the session's own start (`routine/views.py`
+    `WorkoutSessionViewSet.perform_update`, the set-log paths): a workout begun while
+    the month was paid may be finished after it freezes. Answering `refused` there
+    showed a dead button over a workout the client may legally complete, and left it
+    for the abandoned-session sweep (SIDE_BUGS S-099). Asked only when both a refusal
+    and an open session exist, so the ordinary home pays nothing for it.
+    """
     if refusal:
+        if session is not None and _session_may_finish(person, routine, session):
+            return {'state': 'continue', 'session_id': session['id']}
         # Readable, never startable (the owner, 2026-09-19). The code is the same 403
         # `code` every training write on this routine answers.
         return {'state': 'refused', 'refusal': refusal}
@@ -317,6 +328,26 @@ def _cta(refusal, plan, counts, session, on_date, routine) -> dict:
     if counts and counts['logged']:
         return {'state': 'continue'}
     return {'state': 'start'}
+
+
+def _session_may_finish(person, routine, session) -> bool:
+    """Whether the training writes would still accept this open session's sets and its
+    finish: `training_refusal` for the session's own routine, at its `start_time` — the
+    question those writes ask (`users/coaching.py`). The session may belong to another
+    routine than the one on the hero; that routine is read, one small query."""
+    from routine.models import Routine
+    from users.coaching import training_refusal
+
+    if person is None:
+        return False
+    routine_id = session.get('routine_id')
+    if routine is not None and routine_id == routine.pk:
+        own = routine
+    elif routine_id is None:
+        own = None
+    else:
+        own = Routine.objects.filter(pk=routine_id).only('id', 'created_by_id').first()
+    return training_refusal(person, own, at=session['start_time']) is None
 
 
 def week_stats(person, routine, week, week_payload, *, on_date) -> dict | None:
@@ -368,7 +399,9 @@ def trainer_message(person, relation, *, request) -> dict | None:
     uses.
 
     Left out when there is no coach, no conversation, no message, or when the pair is
-    blocked (`moderation/`). Chat is TEXT ONLY in this build (`chat/models.py`: "no
+    blocked (`moderation/`). NOT left out when the newest message was taken back by its
+    sender: the card then carries `body: ""` and `deleted: true`, the tombstone the
+    conversation list shows for the same thread. Chat is TEXT ONLY in this build (`chat/models.py`: "no
     voice, no image, no video"), so `kind` is always `text` today; a voice note arrives
     as a `MessageAttachment` (BACKEND_DELTA item 8) and will add `audio_url`,
     `duration_seconds` and `state` beside `kind: "voice"` without moving anything the
@@ -397,8 +430,14 @@ def trainer_message(person, relation, *, request) -> dict | None:
         return None
     last = (Message.objects.filter(pk=thread['last_message_id'])
             .values('id', 'sender_id', 'body', 'created_at', 'deleted_at').first())
-    if last is None or last['deleted_at'] is not None:
+    if last is None:
         return None
+    # A newest message its sender took back is a TOMBSTONE, not "no message": the card
+    # stays, with no text and `deleted: true`, exactly as the conversation list shows
+    # the same thread (`chat/serializers.py conversation_card`). Dropping the card here
+    # hid unread messages from the coach that the chat list still counted
+    # (SIDE_BUGS S-100).
+    deleted = last['deleted_at'] is not None
 
     return {
         'conversation_id': thread['id'],
@@ -408,7 +447,8 @@ def trainer_message(person, relation, *, request) -> dict | None:
         'message': {
             'id': last['id'],
             'kind': 'text',
-            'body': last['body'][:MESSAGE_PREVIEW_CHARS],
+            'body': '' if deleted else last['body'][:MESSAGE_PREVIEW_CHARS],
+            'deleted': deleted,
             'sent_at': last['created_at'],
         },
     }
@@ -576,7 +616,8 @@ def challenge_rank(person) -> dict | None:
     The challenge ending soonest of the ones they have joined and not dropped, and
     their place in it — counted as "how many are ahead of me" with the SAME tiebreaker
     `GET /api/social/challenges/{id}/leaderboard/` uses (`-current_value`, then
-    `joined_at`, then `id`), so the card and the leaderboard cannot disagree.
+    `joined_at`, then `id`), over the same field (nobody who dropped out), so the card
+    and the leaderboard cannot disagree.
 
     `ChallengeParticipation.rank` is NOT read: it is only ever written by
     `update_progress` (`social/views.py`), so it is null for anyone who has joined and
@@ -591,8 +632,13 @@ def challenge_rank(person) -> dict | None:
     from social.models import Challenge, ChallengeParticipation
 
     now = timezone.now()
+    # Someone who dropped out holds no place, on this card as on the leaderboard and
+    # in the stored `rank` (`ChallengeParticipation.NOT_IN_STANDING`, SIDE_BUGS S-045):
+    # the viewer's own dropped row was left out below and a dropped RIVAL was still
+    # counted ahead of them here.
     ahead = (ChallengeParticipation.objects
              .filter(challenge_id=OuterRef('challenge_id'))
+             .exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
              .filter(Q(current_value__gt=OuterRef('current_value'))
                      | Q(current_value=OuterRef('current_value'),
                          joined_at__lt=OuterRef('joined_at'))
@@ -602,7 +648,7 @@ def challenge_rank(person) -> dict | None:
 
     row = (ChallengeParticipation.objects
            .filter(user=person)
-           .exclude(status='dropped')
+           .exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
            .filter(~Q(challenge__status__in=Challenge.TERMINAL_STATUSES),
                    challenge__start_date__lte=now, challenge__end_date__gte=now)
            .annotate(ahead=Coalesce(Subquery(ahead, output_field=IntegerField()), Value(0)))

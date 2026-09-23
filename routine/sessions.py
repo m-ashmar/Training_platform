@@ -32,7 +32,7 @@ from django.utils import timezone
 #:
 #: The same number bounds a session's recorded length on a finish
 #: (`routine/serializers.py` `WorkoutSessionSerializer.MAX_SESSION_SECONDS`, which is an
-#: alias of this) and is what `home/sections.py LONGEST_SESSION` now points at.
+#: alias of this); home reads it through `running()` below.
 SESSION_MAX_SECONDS = 12 * 3600
 
 

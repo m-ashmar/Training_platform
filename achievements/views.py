@@ -188,37 +188,52 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         GET /api/achievements/leaderboard/?limit=10
         
         Returns top achievers ranked by total points.
+
+        `limit` 1..50 (default 10). Ties on points are ordered by user id, so a place
+        does not change between two requests over the same data. An account the caller
+        has blocked, or that has blocked the caller, is left out of `leaderboard`
+        AFTER the ranks are counted: the other rows keep their true `rank` and the
+        list can be shorter than `limit`. Nothing differs by build.
         """
         limit = int_param(request.query_params, 'limit', default=10, minimum=1, maximum=50)
-        
-        # Aggregate points per user
+
         from django.db.models import Sum as DjSum
+        from moderation.services import blocked_ids
         from users.models import CustomUser
-        
-        leaders = UserAchievement.objects.values('user').annotate(
-            total_points=DjSum('achievement__points'),
-            total_achievements=Count('id')
-        ).order_by('-total_points')[:limit]
-        
-        # Enrich with user data
+
+        # ONE query for the board. It was an aggregate and then a
+        # `CustomUser.objects.get` per row — up to 50 more queries a request — ordered
+        # by `-total_points` alone, which is not an order: two people tied on points
+        # swapped places between requests. `user` breaks the tie (SIDE_BUGS S-088).
+        leaders = (UserAchievement.objects
+                   .values('user', 'user__username', 'user__profile_picture')
+                   .annotate(total_points=DjSum('achievement__points'),
+                             total_achievements=Count('id'))
+                   .order_by('-total_points', 'user')[:limit])
+
+        # Blocked people are dropped AFTER the rank is counted, the rule the challenge
+        # leaderboard follows (`social/views.py`): ranks stay true and the reader sees
+        # a gap, rather than someone promoted into a place they did not earn. They were
+        # not dropped at all, so a blocked account's name and photo still reached the
+        # person who had blocked it.
+        hidden = blocked_ids(request.user)
+        storage = CustomUser._meta.get_field('profile_picture').storage
         leaderboard = []
         for idx, entry in enumerate(leaders, 1):
-            try:
-                user = CustomUser.objects.get(id=entry['user'])
-                leaderboard.append({
-                    'rank': idx,
-                    'user_id': user.id,
-                    'username': user.username,
-                    'total_points': entry['total_points'] or 0,
-                    'total_achievements': entry['total_achievements'],
-                    'profile_picture_url': (
-                        request.build_absolute_uri(user.profile_picture.url)
-                        if user.profile_picture else None
-                    )
-                })
-            except CustomUser.DoesNotExist:
+            if entry['user'] in hidden:
                 continue
-        
+            picture = entry['user__profile_picture']
+            leaderboard.append({
+                'rank': idx,
+                'user_id': entry['user'],
+                'username': entry['user__username'],
+                'total_points': entry['total_points'] or 0,
+                'total_achievements': entry['total_achievements'],
+                'profile_picture_url': (
+                    request.build_absolute_uri(storage.url(picture)) if picture else None
+                ),
+            })
+
         # Find current user's rank
         user_rank = None
         user_stats = None
