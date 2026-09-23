@@ -13,7 +13,7 @@ from django.utils import timezone
 from django.utils.translation import gettext as _
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
-from .events import broadcast, notify_new_message
+from .events import broadcast, forget_preview, notify_new_message
 from .exceptions import IdempotencyConflict, MessagingRefused
 from .models import Conversation, Message
 from .permissions import may_message, pair_of
@@ -164,7 +164,8 @@ def tombstone(message, actor):
 
     Only the sender (403 `not_your_message`), and taking back a message that is already
     gone changes nothing and answers the same tombstone — a retry of a delete is not an
-    error.
+    error. The recipient's inbox stops quoting it too (`forget_preview`); the listener
+    that writes the inbox row checks the tombstone as well, for a push still queued.
     """
     if message.sender_id != actor.pk:
         raise PermissionDenied(_('You can only delete your own messages.'),
@@ -175,6 +176,7 @@ def tombstone(message, actor):
         broadcast(message.conversation_id, 'message.deleted',
                   {'conversation': message.conversation_id, 'message': message.pk,
                    'deleted_at': message.deleted_at.isoformat()})
+        forget_preview(message)
     return message
 
 

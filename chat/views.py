@@ -92,19 +92,22 @@ class ConversationStartView(APIView):
 
     400 `invalid_body` when neither id is given, or both.
     404 `not_found` when the other person is not an APPROVED trainer or client of the
-    caller — the same answer as for a user id that does not exist, so this cannot be
-    used to find out who is on the platform.
+    caller and never had a paid coaching month with them, or when either of the two
+    has blocked the other — the same answer as for a user id that does not exist, so
+    this cannot be used to find out who is on the platform or that a block exists.
 
     Opening a thread is allowed while the coaching is frozen, unpaid or ended: the
     conversation is readable for ever, and the row says `can_send: false` with the
-    reason. Only SENDING is refused.
+    reason. Only SENDING is refused. An ENDED coaching deletes the relation, so "ended"
+    is read from the pair's paid months (`CoachingPeriod`): such a pair opens its thread
+    and reads `refusal: "coaching_ended"`.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         from rest_framework.exceptions import ValidationError
 
-        from .permissions import approved_partner_ids, pair_of
+        from .permissions import may_open_thread
 
         data = request.data if hasattr(request.data, 'get') else {}
         client_id, trainer_id = data.get('client_id'), data.get('trainer_id')
@@ -118,10 +121,10 @@ class ConversationStartView(APIView):
                 pk=int(client_id if client_id is not None else trainer_id)).first()
         except (TypeError, ValueError):
             other = None
-        pair = pair_of(request.user, other)
-        # One answer for "no such person", "not your client" and "wrong kind of
-        # account": an id the caller may not chat with tells them nothing else.
-        if pair is None or other.pk not in approved_partner_ids(request.user):
+        pair = may_open_thread(request.user, other)
+        # One answer for "no such person", "not your client", "wrong kind of account"
+        # and "blocked": an id the caller may not chat with tells them nothing else.
+        if pair is None:
             raise NotFound(_('Conversation not found.'), code='not_found')
 
         conversation = services.open_conversation(*pair)
@@ -155,10 +158,13 @@ class ConversationMessagesView(APIView):
     400 `validation_error` (an empty or whitespace-only body: `blank_message`),
     `invalid_client_uuid`.
     409 `idempotency_conflict` — that id is already the other person's message here.
-    403 `no_relation` — the two are not an approved trainer and client (any more).
+    403 `no_relation` — the two are not an approved trainer and client, and never had a
+    paid coaching month.
+    403 `blocked` — either of the two has blocked the other. The thread stays readable.
     403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`) —
     the coaching cannot be used; the thread stays readable. Same codes, same shape, as
-    every training write.
+    every training write. `coaching_ended` is also the answer once the relation is gone
+    for a pair that paid for coaching.
     """
     permission_classes = [IsAuthenticated]
 
@@ -204,7 +210,9 @@ class MessageDeleteView(APIView):
 
     The row is NOT removed: it keeps its place in the thread with `deleted: true` and an
     empty `body`, because the other person's history is not the sender's to renumber.
-    The text stays in the column and no endpoint ever serves it again.
+    The text stays in the column and no endpoint ever serves it again — including the
+    recipient's notification inbox: the `chat_message` push quoting it loses its preview
+    (`chat.events.forget_preview`). A push already on the phone cannot be taken back.
 
     200 with the tombstoned message (not 204: the app replaces the row it is showing).
     Deleting a message that is already deleted answers the same thing.
