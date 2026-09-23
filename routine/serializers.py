@@ -818,6 +818,12 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     `set_date_mismatch` on `date`), omit it and the set is TODAY's — and must match the
     row just the same, so an undated set cannot be backdated onto an older row
     rather than today. `routine/models.py ExerciseSetLog` says why the two must agree.
+    That is about a NEW set: an edit keeps the date the set was stored with, so a set
+    from any earlier day can be corrected (SIDE_BUGS S-068).
+
+    `reps` is 1-1000 on every route (S-115). A TRAINER may not create a set on a
+    client's progress row or session: 403 `set_not_yours` (S-114, see
+    `ExerciseSetLogViewSet.perform_create`).
     """
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
@@ -871,11 +877,16 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         return value
 
     def validate_reps(self, value):
+        """1 to MAX_REPS, the bound `bulk-create` and `sync` apply (SIDE_BUGS S-115).
+        Zero was accepted here, and a set of no repetitions counted toward the
+        exercise's completed sets and the day's logged sets, so a day could complete
+        itself on sets where nothing was lifted — against the owner's rule that reps
+        are required (2026-09-20)."""
         if value is None:
             return value
-        if value < 0 or value > self.MAX_REPS:
+        if value < 1 or value > self.MAX_REPS:
             raise serializers.ValidationError(
-                _("Reps must be between 0 and %(max)d.") % {"max": self.MAX_REPS})
+                _("reps must be between 1 and %(max)d.") % {"max": self.MAX_REPS})
         return value
 
     def validate_workout_session(self, value):
@@ -947,8 +958,14 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         # (`tests/test_coaching_freeze.py::test_an_undated_set_is_judged_on_the_day_it_is_stored`,
         # the hole that test exists to keep shut). Catching up yesterday's workout is
         # still possible: send the date, against yesterday's row.
+        #
+        # ON CREATE ONLY (SIDE_BUGS S-068). On an update `date` is fixed once written
+        # (`fixed_once_written` above refuses a changed one and drops a re-sent one), so
+        # an omitted date there means "leave it", not "today": filling in today made
+        # every correction of a set from any earlier day fail with `set_date_mismatch`.
+        # The model's `clean()` still holds the stored row to its progress row's day.
         owner_date = getattr(progress, 'date', None)
-        if progress is not None and owner_date is not None:
+        if self.instance is None and progress is not None and owner_date is not None:
             if attrs.get('date') is None:
                 attrs['date'] = timezone.localdate()
             elif attrs['date'] != owner_date:
@@ -1264,6 +1281,9 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
     MAX_BACKDATE_DAYS = 30
     FUTURE_SKEW_SECONDS = 5 * 60
 
+    #: A session in one of these is over, and its `status` no longer changes (S-122).
+    FINAL_STATUSES = ('completed', 'abandoned')
+
     #: How hard it felt, as the person who trained judges it (BACKEND_DELTA item 11).
     EFFORT_MIN, EFFORT_MAX = 1, 5
     #: Declared, so the BOUND has one code. Built from the model field it carried the
@@ -1344,6 +1364,19 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
             # Fixed once written: the start is the record, and the id is the retry key.
             attrs.pop('start_time', None)
             attrs.pop('client_uuid', None)
+            # `status` only moves forward (SIDE_BUGS S-122): `active` -> `completed` or
+            # `abandoned`, and both of those are final. It was freely writable, so a
+            # completed session toggled to `active` and back ran everything finishing
+            # it does a second time (the client and the coach were told twice, the
+            # milestones queued twice), and an abandoned one "finished" days later was
+            # stamped a twelve-hour workout the nightly sweep had deliberately left
+            # without an end. Re-sending the status the row holds changes nothing.
+            wanted = attrs.get('status')
+            if wanted is not None and wanted != self.instance.status \
+                    and self.instance.status in self.FINAL_STATUSES:
+                raise serializers.ValidationError({'status': [serializers.ErrorDetail(
+                    _("A finished or abandoned workout cannot be reopened or finished "
+                      "again."), code='session_status_final')]})
             # Moving a session to another day or routine is checked like opening one:
             # PATCH {"day": 9} stored a day whose sets move no progress. A status-only
             # PATCH is not checked, so a session begun before a routine was retired can
@@ -1431,12 +1464,21 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
         raise serializers.ValidationError("That routine is not assigned to you.")
     
     def get_duration(self, obj):
+        """Seconds: from start to end once the session has an end; the time so far
+        while it is RUNNING (`active` and begun inside `SESSION_MAX_SECONDS`, the one
+        rule in `routine/sessions.py`); otherwise null.
+
+        Every session without an end answered "now minus start", so an abandoned or a
+        forgotten workout reported lasting days, a number that grew for ever — while
+        `routine.abandon_forgotten_sessions` promises such a session has no duration
+        (SIDE_BUGS S-116)."""
+        from django.utils import timezone
+
+        from .sessions import cutoff
+
         if obj.start_time and obj.end_time:
-            # Return duration in seconds
             return int((obj.end_time - obj.start_time).total_seconds())
-        elif obj.start_time:
-            # If session is still active, return duration so far in seconds
-            from django.utils import timezone
+        if obj.start_time and obj.status == 'active' and obj.start_time >= cutoff():
             return int((timezone.now() - obj.start_time).total_seconds())
         return None
 

@@ -1463,16 +1463,24 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     `personal_record: true` and sends them the `personal_record` push (the owner,
     2026-09-20). The first set of an exercise never counts as a record.
 
-    PATCH and DELETE belong to the PERSON WHOSE SET IT IS (BACKEND_DELTA item 15), and
-    to an admin; a trainer may read a client's sets and no longer edit or delete them —
-    they did not lift them. Anyone else gets 404, because the list is scoped. Only
+    POST, PATCH and DELETE belong to the PERSON WHOSE SET IT IS (BACKEND_DELTA item 15),
+    and to an admin; a trainer may read a client's sets and no longer create, edit or
+    delete them — they did not lift them. A trainer's POST naming a client's progress
+    row or session answers 403 `set_not_yours` (SIDE_BUGS S-114), and the coaching
+    refusal on a create is judged for the set's owner, never for the coach. `reps` is
+    1-1000 (400 on `reps`), the bound every logging route applies (S-115). Anyone
+    else gets 404, because the list is scoped. Only
     `weight`, `reps`, `notes` and `rpe` may change: moving a set to another progress
     row, session, set number or date answers 400 `set_immutable` on that field. Both
     are refused with 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while
     the coaching the set's routine came from is unpaid or over, judged on the set's own
     date. A delete recomputes everything the set was counted in — the exercise's
     completed sets, the day's `RoutineProgress`, and the `DayOutcome` of a day that was
-    already closed, which can turn a complete day short and break a streak.
+    already closed, which can turn a complete day short and break a streak. A day that
+    completed ITSELF from its sets (outcome `via` `auto`, `session`, `bulk_complete`)
+    moves back from `completed` when they are deleted; a day the person closed by hand
+    (`completed`, `confirmed_unlogged`, or `routine-progress/` with no outcome) stays
+    completed, and only its outcome turns short (SIDE_BUGS S-110).
     """
     queryset = ExerciseSetLog.objects.all()
     serializer_class = ExerciseSetLogSerializer
@@ -1526,10 +1534,32 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         data = serializer.validated_data
         session = data.get('workout_session')
         progress = data.get('user_exercise_progress')
+        # WHOSE set this is, and who may write it (SIDE_BUGS S-114). The serializer lets
+        # an approved trainer NAME a client's progress row or session — that is the
+        # read rule — and a trainer then logged sets the client never lifted: filling
+        # in short days, completing them, repairing a streak, raising the adherence the
+        # coach is judged by, and pushing `personal_record` to the client for it. The
+        # same reason a trainer may not edit or delete a client's set (they did not
+        # lift it) refuses the create: 403 `set_not_yours`. An admin keeps the write,
+        # as for edits. Whether a coach should ever log for a client is the owner's
+        # call; until then this fails closed.
+        actor = self.request.user
+        owner_id = (progress.user_id if progress is not None
+                    else session.user_id if session is not None else actor.id)
+        is_admin = actor.is_staff or getattr(actor, 'is_admin', False)
+        if owner_id != actor.id and not is_admin:
+            raise PermissionDenied(
+                _("Only the person who trained can log a set. A coach reads a "
+                  "client's sets and does not write them."), code='set_not_yours')
+        # The coaching refusal is a rule about the CLIENT and their coach, so it is
+        # asked about the set's owner (the caller, once the check above has run) — it
+        # was asked about the trainer, who is never refused, so a frozen coaching could
+        # still be logged into. An admin is asked about as themselves, as
+        # `_refuse_if_frozen` asks.
         if session is not None:
-            _require_can_train(self.request.user, session.routine, session.start_time)
+            _require_can_train(actor, session.routine, session.start_time)
         elif progress is not None:
-            _require_can_train_exercise(self.request.user, progress.exercise_id,
+            _require_can_train_exercise(actor, progress.exercise_id,
                                         data.get('date') or timezone.localdate())
         try:
             serializer.save()
@@ -1964,6 +1994,22 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     A client opens sessions on routines assigned to them; a trainer may open one for an
     approved client (`user` in the body). The owner PATCHes their session.
 
+    **PATCH, PUT and DELETE belong to the person who trained, and to an admin**
+    (SIDE_BUGS S-067). A trainer reads a client's sessions and answers 403 on every
+    write to one — the same rule as a client's sets, which a session holds: deleting
+    it deletes every set logged in it, and finishing it closes the client's day.
+    DELETE removes the session and the sets logged in it, and recomputes everything
+    those sets were counted in, exactly as deleting each set would; it is refused with
+    403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while the coaching is
+    unpaid or over, judged at the session's start.
+
+    **`status` only moves forward** (SIDE_BUGS S-122): `active` may become `completed`
+    or `abandoned`; `completed` and `abandoned` are final, and a PATCH that changes
+    either answers 400 `session_status_final` on `status` (re-sending the status the
+    row already holds is a no-op, so a PUT of the whole object still works). Reopening
+    a finished workout re-ran everything finishing it does — the client and the coach
+    were told twice — and finishing an abandoned one invented a twelve-hour workout.
+
     While the coaching a routine came from is unpaid (frozen) or over, the routine stays
     readable and opening or editing a session on it answers 403 `coaching_frozen` /
     `coaching_unpaid` / `coaching_ended` with `trainer_id` (the owner, 2026-09-19). A
@@ -2086,6 +2132,19 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         instance = serializer.instance
         _require_can_train(self.request.user, instance.routine, instance.start_time)
         serializer.save()
+
+    def perform_destroy(self, instance):
+        """Deleting a workout deletes the sets logged in it (the foreign key cascades),
+        so it is refused exactly as deleting those sets is: only the owner or an admin
+        reaches here (`IsSessionOwnerOrTrainerOrAdmin`), and a frozen or ended coaching
+        refuses it, judged at the session's start (SIDE_BUGS S-067). Asked about the
+        CALLER, as `ExerciseSetLogViewSet._refuse_if_frozen` asks: an admin clearing up a
+        bad row is not caught by a client's unpaid month.
+
+        Each deleted set is recomputed by the `post_delete` receiver in
+        `routine/models.py`, which runs for a cascade too; nothing is duplicated here."""
+        _require_can_train(self.request.user, instance.routine, instance.start_time)
+        instance.delete()
 
     def update(self, request, *args, **kwargs):
         """PATCH or PUT: the client marks the session completed, and finishing it

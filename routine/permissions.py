@@ -288,7 +288,12 @@ class IsSessionOwnerOrTrainerOrAdmin(BasePermission):
     """Who may read and change a WORKOUT SESSION that already exists.
 
     - GET: the session's owner, their approved trainer, or an admin.
-    - PATCH/PUT/DELETE: the same three.
+    - PATCH/PUT/DELETE: the session's OWNER and an admin — never their trainer
+      (SIDE_BUGS S-067). The rule for a set is that a trainer may no longer edit or
+      delete a client's set because they did not lift it, and a session is the sets
+      inside it: DELETE cascades to every set logged in it, so a trainer who could
+      delete the session could delete the sets the set rule refuses them, and a PATCH
+      let them finish (close) a client's day. The trainer still READS everything.
 
     **This class does not decide POST.** `WorkoutSessionViewSet.get_permissions`
     routes every POST to `IsRoutineOwnerOrAssigned` — a client starting their own
@@ -313,9 +318,15 @@ class IsSessionOwnerOrTrainerOrAdmin(BasePermission):
         if request.method in SAFE_METHODS:
             return can_access_user_data(request.user, obj.user_id)
         if request.method in ['PATCH', 'PUT', 'DELETE']:
-            # A trainer may only modify sessions of their OWN approved clients.
-            # Previously any trainer could modify any client's session.
-            return can_access_user_data(request.user, obj.user_id)
+            # The person who trained, or an admin (the operator of last resort, as for
+            # sets). An approved trainer used to pass here through
+            # `can_access_user_data` — see the class docstring for what that allowed.
+            user = request.user
+            if not (user and user.is_authenticated):
+                return False
+            if user.is_staff or getattr(user, 'is_admin', False):
+                return True
+            return obj.user_id == user.id
         return False
 
 # ============================================================================
