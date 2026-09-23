@@ -22,7 +22,10 @@ from PIL import Image, ImageOps, ImageStat
 from .slots import IMAGE, RATIO_TOLERANCE, Slot
 
 #: Formats an operator may upload. GIF is not a photograph and has no place in a kit.
-ACCEPTED_FORMATS = frozenset({"JPEG", "PNG", "WEBP"})
+#: `MPO` is a JPEG: Pillow's name for one whose MPF segment carries a second image (a
+#: phone's depth or gain map). Its first image is decoded like any JPEG, and every
+#: output below is re-encoded from that one frame (SIDE_BUGS S-143).
+ACCEPTED_FORMATS = frozenset({"JPEG", "MPO", "PNG", "WEBP"})
 
 #: Width of the blur preview. Twenty pixels of WebP is a few hundred bytes, which is
 #: what lets the app paint something the instant a card scrolls into view.
@@ -55,6 +58,15 @@ def process_upload(upload, slot: Slot) -> ProcessedImage:
     """
     if slot.kind != IMAGE:
         _refuse(_("This slot does not accept uploads yet."), "media_kind_not_supported_yet")
+
+    # A format the kit never takes is refused from the HEADER, before the guard below
+    # decodes anything: the guard re-encodes an animated GIF frame by frame, and doing
+    # that only to refuse the file afterwards spent a request's memory for nothing
+    # (SIDE_BUGS S-079). A file Pillow cannot even open is left to the guard, which
+    # answers it with its own code.
+    declared = _header_format(upload)
+    if declared is not None and declared not in ACCEPTED_FORMATS:
+        _refuse(_("Upload a JPEG, PNG or WebP image."), "media_unsupported_format")
 
     # The platform's one upload guard: magic bytes, MIME, size, pixel and dimension
     # caps, a decode. Its re-encoded output is not used — it has already discarded the
@@ -110,6 +122,21 @@ def process_upload(upload, slot: Slot) -> ProcessedImage:
         width=width,
         height=height,
     )
+
+
+def _header_format(upload):
+    """The format Pillow reads from the file's header, or None if it cannot open it.
+
+    `Image.open` is lazy: it parses the header and decodes no pixels.
+    """
+    upload.seek(0)
+    try:
+        with Image.open(upload) as probe:
+            return (probe.format or "").upper() or None
+    except Exception:
+        return None
+    finally:
+        upload.seek(0)
 
 
 def _resize(img, width):

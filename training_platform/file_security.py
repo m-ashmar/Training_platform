@@ -127,13 +127,13 @@ class FileSecurityValidator:
     def _validate_file_existence(self, file):
         """Check if file exists and is readable"""
         if not file:
-            raise ValidationError(_("No file provided"), code="no_file")
+            raise ValidationError(_("No file provided."), code="no_file")
         
         if not hasattr(file, 'read'):
             raise ValidationError(_("Invalid file object"), code="invalid_file_object")
         
         if file.size == 0:
-            raise ValidationError(_("Empty file not allowed"), code="empty_file")
+            raise ValidationError(_("Empty file not allowed."), code="empty_file")
     
     def _validate_file_size(self, file, file_type):
         """Validate file size based on type"""
@@ -194,26 +194,27 @@ class FileSecurityValidator:
             )
     
     def _validate_image_content(self, file):
-        """Validate image content and structure"""
+        """Validate image content and structure.
+
+        No pixel-size cap here. There was one — 4096 px per side, code
+        `image_too_large` — and because it ran BEFORE `process_uploaded_image`, that
+        function's own caps (`MAX_IMAGE_DIMENSION`, `MAX_IMAGE_PIXELS`) and the codes the
+        upload views document for them (`image_dimensions_too_large`,
+        `image_too_many_pixels`) could never fire, while an ordinary 24 MP phone photo
+        (5712x4284) was refused (SIDE_BUGS S-140). The size of a decoded image is decided
+        in ONE place, by the function that decodes it.
+        """
         try:
             file.seek(0)
             with Image.open(file) as img:
                 # Verify image can be loaded
                 img.verify()
-                
+
                 # Check image dimensions
                 file.seek(0)
                 img = Image.open(file)
                 width, height = img.size
-                
-                # Maximum dimensions check
-                max_dimension = 4096  # 4K resolution
-                if width > max_dimension or height > max_dimension:
-                    raise ValidationError(
-                        _("Image dimensions exceed maximum allowed."),
-                        code="image_too_large",
-                    )
-                
+
                 # Check for reasonable aspect ratio
                 aspect_ratio = max(width, height) / min(width, height)
                 if aspect_ratio > 10:  # Very unusual aspect ratio
@@ -313,6 +314,17 @@ class FileSecurityValidator:
     #: let a person see WHAT was sent, and the first few kilobytes carry the magic
     #: bytes, the header and the payload marker that caused the rejection.
     QUARANTINE_SAMPLE_BYTES = 64 * 1024
+    #: How many samples may be kept, whatever their size: as many as the byte cap holds
+    #: at full size. An empty or one-byte upload barely counts toward the byte cap, so
+    #: without a count a few thousand of them sat there for the full seven days and
+    #: every eviction pass had to walk all of them (SIDE_BUGS S-141).
+    QUARANTINE_MAX_ENTRIES = QUARANTINE_MAX_BYTES // QUARANTINE_SAMPLE_BYTES
+    #: At most one eviction pass per this many seconds, across every process. The pass
+    #: used to run on EVERY rejected upload — so once the prefix held thousands of
+    #: samples, each later rejection, an honest user's included, paid for thousands of
+    #: storage calls synchronously inside its request.
+    QUARANTINE_EVICT_EVERY_SECONDS = 60
+    _QUARANTINE_EVICT_LOCK = "file_security:quarantine:evict"
 
     @staticmethod
     def quarantine_location() -> str:
@@ -353,7 +365,8 @@ class FileSecurityValidator:
             if not (hasattr(file, 'name') and file.name):
                 return
 
-            self._evict_quarantine()
+            if self._quarantine_eviction_due():
+                self._evict_quarantine()
 
             # `sanitize_filename`, which this class ships and did not use here. Django's
             # multipart parser strips path separators before the file object arrives, so
@@ -374,12 +387,67 @@ class FileSecurityValidator:
         except Exception as e:
             logger.error(f"Failed to quarantine file: {e}")
 
+    @classmethod
+    def _quarantine_eviction_due(cls) -> bool:
+        """True for ONE caller per `QUARANTINE_EVICT_EVERY_SECONDS`, across processes.
+
+        `cache.add` is atomic on the shared cache: the first caller in a window sets the
+        key and runs the pass, everyone else skips it. If the cache itself is down the
+        pass is skipped rather than run on every request — the samples are bounded in
+        time as well as in size, and the next caller after the cache returns evicts.
+        """
+        from django.core.cache import cache
+
+        try:
+            return bool(cache.add(cls._QUARANTINE_EVICT_LOCK, 1,
+                                  timeout=cls.QUARANTINE_EVICT_EVERY_SECONDS))
+        except Exception:
+            logger.debug("quarantine eviction lock unavailable", exc_info=True)
+            return False
+
+    @staticmethod
+    def _quarantine_listing(storage, prefix):
+        """`[(path, modified, size)]` for every sample directly under `prefix`.
+
+        On object storage this is ONE paginated listing: the bucket answers each
+        object's size and time in the listing itself. It used to be `listdir` and then a
+        `size()` and a `get_modified_time()` per sample, and on GCS each of those is its
+        own HTTP request (`storages.backends.gcloud`: `_get_blob` per call). The
+        filesystem backend has no listing with metadata, and a `stat` is a syscall, so it
+        keeps the storage API.
+        """
+        bucket = getattr(storage, "bucket", None)
+        list_blobs = getattr(bucket, "list_blobs", None) if bucket is not None else None
+        if callable(list_blobs):
+            full = storage._normalize_name(prefix).rstrip("/") + "/"
+            out = []
+            for blob in list_blobs(prefix=full, delimiter="/"):
+                leaf = blob.name[len(full):] if blob.name.startswith(full) else ""
+                if not leaf:
+                    continue
+                out.append((f"{prefix}/{leaf}", blob.updated, int(blob.size or 0)))
+            return out
+
+        _dirs, names = storage.listdir(prefix)
+        out = []
+        for name in names:
+            path = f"{prefix}/{name}"
+            try:
+                out.append((path, storage.get_modified_time(path), storage.size(path)))
+            except Exception:
+                # A sample another process evicted between listdir and stat.
+                continue
+        return out
+
     def _evict_quarantine(self):
-        """Drop quarantined samples that are too old, then the oldest until under cap."""
+        """Drop samples that are too old, then the oldest until under BOTH caps.
+
+        Throttled by `_quarantine_eviction_due`: callers ask that first.
+        """
         storage = self.quarantine_storage()
         prefix = self.quarantine_location()
         try:
-            _dirs, names = storage.listdir(prefix)
+            listing = self._quarantine_listing(storage, prefix)
         except (FileNotFoundError, NotADirectoryError):
             # Nothing has been quarantined yet. Not an error, and not worth a log line.
             return
@@ -390,15 +458,10 @@ class FileSecurityValidator:
         entries = []
         total = 0
         now = timezone.now()
-        for name in names:
-            path = f"{prefix}/{name}"
-            try:
-                modified = storage.get_modified_time(path)
-                size = storage.size(path)
-            except Exception:
-                # A sample another process evicted between listdir and stat.
-                continue
-            if timezone.is_naive(modified):
+        for path, modified, size in listing:
+            if modified is None:
+                modified = now
+            elif timezone.is_naive(modified):
                 # FileSystemStorage returns naive times when USE_TZ is off.
                 modified = timezone.make_aware(modified, timezone.get_default_timezone())
             if (now - modified).total_seconds() > self.QUARANTINE_MAX_AGE_SECONDS:
@@ -408,7 +471,8 @@ class FileSecurityValidator:
             total += size
 
         entries.sort(key=lambda entry: entry[0])
-        while total > self.QUARANTINE_MAX_BYTES and entries:
+        while entries and (total > self.QUARANTINE_MAX_BYTES
+                           or len(entries) > self.QUARANTINE_MAX_ENTRIES):
             _modified, size, path = entries.pop(0)
             self._drop_quarantined(storage, path)
             total -= size
@@ -452,79 +516,6 @@ class FileSecurityValidator:
         return filename
 
 
-class SecureFileUploadMixin:
-    """
-    Mixin for models with file upload fields to add security validation
-    """
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.file_validator = FileSecurityValidator()
-    
-    def clean_file_field(self, field_name, file_type='image'):
-        """
-        Clean method for file fields with security validation
-        """
-        file = getattr(self, field_name)
-        if file:
-            validation_result = self.file_validator.validate_file(file, file_type)
-            if not validation_result['is_valid']:
-                raise ValidationError(_("Invalid file."), code="invalid_file")
-    
-    def save(self, *args, **kwargs):
-        """
-        Override save to perform file validation
-        """
-        # Validate all file fields before saving
-        for field in self._meta.fields:
-            if hasattr(field, 'upload_to'):  # File/Image field
-                file_type = 'image' if 'image' in field.name.lower() else 'document'
-                self.clean_file_field(field.name, file_type)
-        
-        super().save(*args, **kwargs)
-
-
-# Helper functions for use in views and forms
-def validate_uploaded_image(file):
-    """
-    Standalone function to validate uploaded images
-    """
-    validator = FileSecurityValidator()
-    return validator.validate_file(file, 'image')
-
-
-def validate_uploaded_document(file):
-    """
-    Standalone function to validate uploaded documents
-    """
-    validator = FileSecurityValidator()
-    return validator.validate_file(file, 'document')
-
-
-def secure_file_upload_path(instance, filename, subfolder='uploads'):
-    """
-    Generate secure upload path with sanitized filename
-    """
-    validator = FileSecurityValidator()
-    safe_filename = validator.sanitize_filename(filename)
-    
-    # Add timestamp to prevent collisions
-    import time
-    timestamp = int(time.time())
-    name, ext = os.path.splitext(safe_filename)
-    safe_filename = f"{name}_{timestamp}{ext}"
-    
-    # Organize by user and date
-    if hasattr(instance, 'user'):
-        user_id = instance.user.id
-    else:
-        user_id = 'unknown'
-    
-    from datetime import datetime
-    date_folder = datetime.now().strftime('%Y/%m')
-    
-    return os.path.join(subfolder, str(user_id), date_folder, safe_filename) 
-
 # ============================================================================
 # Single entry point used by every upload view
 # ============================================================================
@@ -541,6 +532,23 @@ FORMAT_TO_EXTENSION = {
     'GIF': 'gif',
     'WEBP': 'webp',
 }
+
+#: Formats Pillow names differently from what the file IS. A JPEG whose MPF segment
+#: holds more than one image — a phone's depth map or HDR gain map, a camera's
+#: preview — is opened as `MPO` (PIL/JpegImagePlugin), while libmagic rightly calls it
+#: `image/jpeg`. Its first image is an ordinary JPEG, and that is what is stored: the
+#: re-encode below writes one frame, so the secondary images go the way of the EXIF.
+#: Refusing it as `unsupported_format` refused genuine phone photos on every image
+#: route (SIDE_BUGS S-143, the same class of bug as B-002).
+FORMAT_ALIASES = {'MPO': 'JPEG'}
+
+#: How many frames an animated GIF may hold. Every frame is decoded to the FULL canvas
+#: and kept until the animation is written back out, so the frame count multiplies the
+#: memory a single request takes; the pixel budget below bounds that for large
+#: canvases, and this bounds the per-frame overhead of a small canvas repeated tens of
+#: thousands of times (SIDE_BUGS S-079). 300 frames is ten seconds at 30 fps — a
+#: sticker or a short loop — and, at the pixel budget, a 480x270 animation.
+MAX_ANIMATION_FRAMES = 300
 
 
 def process_uploaded_image(file, max_bytes=None):
@@ -583,6 +591,9 @@ def process_uploaded_image(file, max_bytes=None):
         probe = Image.open(file)
         width, height = probe.size
         fmt = (probe.format or '').upper()
+        fmt = FORMAT_ALIASES.get(fmt, fmt)
+        # Counting frames reads each frame's header and decodes no pixels.
+        n_frames = int(getattr(probe, 'n_frames', 1) or 1) if fmt == 'GIF' else 1
     except Exception:
         raise ValidationError(_("File is not a readable image."), code="unreadable_image")
 
@@ -598,6 +609,15 @@ def process_uploaded_image(file, max_bytes=None):
         )
     if width * height > MAX_IMAGE_PIXELS:
         raise ValidationError(_("Image has too many pixels."), code="image_too_many_pixels")
+    # An animation is decoded frame by frame onto the whole canvas, so what it costs is
+    # frames x canvas, not one canvas. A few-KB GIF of 100 tiny frames on a 4096x4096
+    # canvas held ~1.6 GB before this: one request, one OOM-killed container. It gets
+    # the same pixel budget a still image does, and the same code.
+    if n_frames > MAX_ANIMATION_FRAMES:
+        raise ValidationError(_("This animation has too many frames."),
+                              code="image_too_many_pixels")
+    if n_frames * width * height > MAX_IMAGE_PIXELS:
+        raise ValidationError(_("Image has too many pixels."), code="image_too_many_pixels")
 
     # Re-encode. This strips EXIF/GPS and any appended payload (polyglots), because
     # only decoded pixel data is written back out.
@@ -612,7 +632,6 @@ def process_uploaded_image(file, max_bytes=None):
     # Animation parameters live in `img.info`, which is cleared just below, so read
     # them first. Without save_all, Pillow writes only the first frame and a user's
     # animated GIF is silently replaced by a still image.
-    n_frames = getattr(img, 'n_frames', 1)
     is_animated = fmt == 'GIF' and n_frames > 1
     if is_animated:
         gif_duration = img.info.get('duration', 100)
@@ -639,22 +658,6 @@ def process_uploaded_image(file, max_bytes=None):
     out.seek(0)
 
     return ContentFile(out.read()), FORMAT_TO_EXTENSION[fmt]
-
-
-def delete_file_field(instance, field_name):
-    """
-    Delete the file backing `instance.<field_name>` from storage.
-
-    Django deliberately does NOT remove files when a row is deleted, so every
-    deleted user/exercise previously left its image on disk forever.
-    """
-    f = getattr(instance, field_name, None)
-    if not f:
-        return
-    try:
-        f.delete(save=False)
-    except Exception as exc:  # storage may already be gone; never block deletion
-        logger.warning("Could not delete %s for %s: %s", field_name, instance, exc)
 
 
 class SecureImageField(serializers.ImageField):
@@ -705,8 +708,6 @@ _ISO_BRANDS = {
     b'qt  ': 'mov',
 }
 
-VIDEO_CONTENT_TYPES = {'mp4': 'video/mp4', 'mov': 'video/quicktime', 'webm': 'video/webm'}
-
 #: How much of the head is enough to identify a container.
 VIDEO_SNIFF_BYTES = 32
 
@@ -719,12 +720,11 @@ class VideoFacts:
     applies, and the metadata task fills the duration with ffprobe afterwards.
     """
 
-    __slots__ = ('container', 'extension', 'content_type', 'duration_seconds', 'size')
+    __slots__ = ('container', 'extension', 'duration_seconds', 'size')
 
     def __init__(self, container, extension, duration_seconds, size):
         self.container = container
         self.extension = extension
-        self.content_type = VIDEO_CONTENT_TYPES.get(extension, 'application/octet-stream')
         self.duration_seconds = duration_seconds
         self.size = size
 
@@ -752,14 +752,32 @@ def sniff_video_container(head: bytes):
     return None
 
 
+#: How many boxes one level of an ISO BMFF file may hold before the walk gives up. A
+#: real MP4 or MOV has a handful at the top (`ftyp`, `moov`, `mdat`, `free`, and a
+#: `moof`/`mdat` pair per fragment of a fragmented file); 64 MB of eight-byte boxes is
+#: eight million, and walking them one seek and one read at a time burned tens of
+#: seconds of CPU inside the upload request (SIDE_BUGS S-144).
+MAX_ISO_BOXES_PER_LEVEL = 10_000
+
+
+class _TooManyBoxes(Exception):
+    """The walk hit `MAX_ISO_BOXES_PER_LEVEL`: nothing a real video looks like."""
+
+
 def _iso_boxes(fp, start, end, depth=0):
     """Yield `(type, payload_start, payload_end)` for the boxes between two offsets.
 
     Depth-limited and size-checked: a crafted file can declare a box that contains
-    itself, or one of length 0, and walking that naively never terminates.
+    itself, or one of length 0, and walking that naively never terminates. Count-limited
+    too: a file of millions of tiny boxes terminates, but not soon enough to matter
+    (`MAX_ISO_BOXES_PER_LEVEL`, raises `_TooManyBoxes`).
     """
     offset = start
+    walked = 0
     while offset + 8 <= end and depth < 4:
+        walked += 1
+        if walked > MAX_ISO_BOXES_PER_LEVEL:
+            raise _TooManyBoxes()
         fp.seek(offset)
         header = fp.read(8)
         if len(header) < 8:
@@ -790,7 +808,9 @@ def probe_declared_duration(file, container) -> float | None:
     ISO BMFF keeps it in `moov/mvhd` as `duration / timescale`. We read that so an
     oversize-in-TIME upload is refused at the door rather than after the bytes are
     stored and a worker gets round to it. A file that declares nothing (WebM, or an MP4
-    whose `moov` we cannot find) returns None and is capped on size alone.
+    whose `moov` we cannot find) returns None and is capped on size alone — and so does
+    one with more than `MAX_ISO_BOXES_PER_LEVEL` boxes before its `moov`: the walk stops
+    there rather than spend the request's CPU on it.
     """
     if container != 'iso':
         return None
@@ -822,6 +842,10 @@ def probe_declared_duration(file, container) -> float | None:
                 if duration in (0, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
                     return None
                 return round(duration / timescale, 3)
+        return None
+    except _TooManyBoxes:
+        logger.info("video declares more than %d boxes on one level; duration not read",
+                    MAX_ISO_BOXES_PER_LEVEL)
         return None
     except Exception:
         logger.debug("could not read a declared duration", exc_info=True)
