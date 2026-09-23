@@ -865,7 +865,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                 # Only a completed day is ever warned: a skipped one saw nothing.
                 confirmed_unlogged=(status == 'completed' and bool(counts['unlogged'])))
 
-        body = {"message": _("Progress updated successfully."),
+        body = {"message": _("Progress updated successfully"),
                 "updated_progress": updated_progress}
         if outcome is not None:
             from .serializers import DayOutcomeSerializer
@@ -1386,7 +1386,7 @@ def _sync_one_set(request, row, key, known, today):
     weight = _sync_number(row.get('weight'), low=0, high=MAX_WEIGHT_KG, default=None)
     if weight is False:
         return _sync_error(key, 'weight_out_of_range',
-                           _('weight must be between 0 and %(max)d kg.')
+                           _('Weight must be between 0 and %(max)d kg.')
                            % {'max': MAX_WEIGHT_KG}), None, None
     if weight is None and prescription is not None and prescription.weight is not None \
             and _truthy(row.get('as_prescribed')):
@@ -1399,7 +1399,7 @@ def _sync_one_set(request, row, key, known, today):
     rpe = _sync_number(row.get('rpe'), low=1, high=10)
     if rpe is False:
         return _sync_error(key, 'rpe_out_of_range',
-                           _('RPE must be between 1 and 10.')), None, None
+                           _('RPE must be between 1 and 10')), None, None
 
     # 7. The progress row the phone could not know the id of. This is the whole point
     #    of the endpoint: `(user, exercise, date)` is its key, so the server can
@@ -1684,7 +1684,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST)
         if not (0 <= weight <= MAX_WEIGHT_KG):
             return Response(
-                {'error': _('weight must be between 0 and %(max)d kg.') % {'max': MAX_WEIGHT_KG}},
+                {'error': _('Weight must be between 0 and %(max)d kg.') % {'max': MAX_WEIGHT_KG}},
                 status=status.HTTP_400_BAD_REQUEST)
         if reps is not None and not (1 <= reps <= MAX_REPS_PER_SET):
             return Response(
@@ -2405,7 +2405,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
             try:
                 user = CustomUser.objects.get(pk=user_id)
             except CustomUser.DoesNotExist:
-                return Response({'error': _('User not found.')}, status=404)
+                return Response({'error': _('User not found')}, status=404)
 
         # Streaks are computed over DISTINCT calendar training days, using the
         # real `date` field. It previously used `updated_at` (auto_now), so editing
@@ -2457,7 +2457,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
                                 status=status.HTTP_403_FORBIDDEN)
             user = CustomUser.objects.filter(pk=user_id).first()
             if user is None:
-                return Response({'error': _('User not found.')}, status=404)
+                return Response({'error': _('User not found')}, status=404)
 
         period = (request.query_params.get('period') or 'week').lower()
         spans = {'week': 7, 'month': 30, 'year': 365}
@@ -2535,7 +2535,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
                                 status=status.HTTP_403_FORBIDDEN)
             user = CustomUser.objects.filter(pk=user_id).first()
             if user is None:
-                return Response({'error': _('User not found.')}, status=404)
+                return Response({'error': _('User not found')}, status=404)
 
         today = timezone.localdate()
         # What the projection assumes: the share of PLANNED sets actually done over the
@@ -3423,11 +3423,13 @@ def _media_host_allowed(url) -> bool:
     Any http(s) URL was accepted, so a coach could aim every one of their clients'
     players at a host nobody here controls — a tracker, a paywall, a site that starts
     serving something else next month — and the app would load it because the server
-    said it was the exercise's demonstration. The allow-list is exact hostnames, and
-    an entry beginning with a dot matches that domain and its subdomains.
+    said it was the exercise's demonstration. The allow-list is exact hostnames, an
+    entry beginning with a dot matches that domain and its subdomains, and an entry
+    `host/prefix` matches that host only under `/prefix/` — the project's bucket on the
+    host every GCS bucket shares (S-081).
     """
     from django.conf import settings
-    from urllib.parse import urlparse
+    from urllib.parse import unquote, urlparse
 
     try:
         parsed = urlparse(url)
@@ -3441,6 +3443,17 @@ def _media_host_allowed(url) -> bool:
     for allowed in getattr(settings, 'EXERCISE_MEDIA_ALLOWED_HOSTS', ()) or ():
         allowed = str(allowed).strip().lower().rstrip('.')
         if not allowed:
+            continue
+        if '/' in allowed:
+            # `host/prefix`: one bucket on a host every bucket shares (S-081). A client
+            # normalises `..`, `%2e%2e` and `\` before it fetches, so a path that would
+            # step out of the prefix is refused rather than compared.
+            allowed_host, _slash, prefix = allowed.partition('/')
+            path = unquote(parsed.path or '')
+            segments = path.replace('\\', '/').split('/')
+            if host == allowed_host and path.startswith(f"/{prefix.strip('/')}/") \
+                    and '..' not in segments and '.' not in segments:
+                return True
             continue
         if allowed.startswith('.'):
             if host == allowed[1:] or host.endswith(allowed):

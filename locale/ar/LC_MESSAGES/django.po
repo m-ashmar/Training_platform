@@ -4213,3 +4213,12 @@ msgstr "السعر"
 #: subscription/receipts.py
 msgid "Exchange rate"
 msgstr "سعر الصرف"
+
+#: training_platform/file_security.py
+msgid "This animation has too many frames."
+msgstr "تحتوي هذه الصورة المتحركة على عدد كبير جدًا من الإطارات."
+
+#: mediakit/services.py
+#, python-format
+msgid "The description is too long: at most %(max)s characters."
+msgstr "الوصف طويل جدًا: الحد الأقصى %(max)s حرفًا."

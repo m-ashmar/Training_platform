@@ -46,6 +46,15 @@ MEDIA_PAYLOAD = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _our_bucket_is_allowed(settings):
+    """The bucket `MEDIA_PAYLOAD` lives in is the project's own. Since SIDE_BUGS S-081 the
+    allow-list names the project's BUCKET (`storage.googleapis.com/<GS_BUCKET_NAME>`),
+    never the bare shared host every GCS bucket answers on, and this suite runs with no
+    bucket configured — so the bucket is named here, as a deployment would name it."""
+    settings.EXERCISE_MEDIA_ALLOWED_HOSTS = ("storage.googleapis.com/yalla-gym",)
+
+
 def url(exercise):
     return f"/api/routine/exercises/{getattr(exercise, 'id', exercise)}/add-media/"
 

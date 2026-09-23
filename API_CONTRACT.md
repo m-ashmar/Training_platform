@@ -528,14 +528,21 @@ which is not built yet). Every media URL is signed and expires after an hour
 | `POST` | `/api/v1/content/media/video/` | auth (owner of the target, or admin) | `VideoUploadView` |
 | `GET` | `/api/v1/content/media/exercise/{id}/` | auth | `ExerciseMediaView` |
 
+`GET /api/v1/content/media/` differs by BUILD in one slot: `app.banner` (the operator's
+promotional 21:9 picture) is served only when the build's `can_show_prices` flag is on —
+`apk` and `web` by default, never `play` or `ios`, never a request with no
+`X-App-Channel` — the same rule home applies to the same asset. Elsewhere it is absent,
+exactly like an empty slot. The response carries `Vary: X-App-Channel, X-App-Version`.
+
 `POST /api/v1/content/media/video/` is `multipart/form-data`: `file`, `slot`,
 `owner_type`, `owner_id`, optional `alt_ar`/`alt_en`. It is the one route whose body may
 exceed 15 MB (cap `MEDIA_VIDEO_MAX_BYTES`, 64 MB; duration cap `MEDIA_VIDEO_MAX_SECONDS`,
 90 s). The container is decided by the FILE'S BYTES, never by its name or its
 `Content-Type`: MP4/MOV and WebM only. Codes: `media_file_required`,
 `media_unknown_slot`, `media_unknown_owner`, `media_slot_is_not_video`,
-`media_not_a_video`, `media_video_too_large`, `media_video_too_long`, plus
-`payload_too_large` (413) from the body cap. Answers on both spellings, with and without
+`media_not_a_video`, `media_video_too_large`, `media_video_too_long`,
+`media_alt_too_long` (`alt_ar`/`alt_en` over 200 characters, refused before anything is
+stored), plus `payload_too_large` (413) from the body cap. Answers on both spellings, with and without
 the trailing slash, as `capabilities` does (B-035).
 
 `GET /api/v1/content/media/exercise/{id}/` answers
@@ -557,7 +564,10 @@ footage hangs beside it as a `trainer_exercise` asset keyed by (trainer, exercis
 `mediakit.resolution.resolve_exercise_media`, and in this order:
 
 1. the media the author of THAT routine put on that exercise — the coach who
-   prescribed it is the one demonstrating it;
+   prescribed it is the one demonstrating it. This line is for the client the routine
+   was prescribed to, its author and an operator; a trainer reading a routine another
+   coach wrote (a new coach reading their client's old programme) skips it, so one
+   coach's private footage never reaches another;
 2. failing that, the media of any trainer the viewer has an approved relation with;
 3. failing that, the shared catalogue's own media.
 
@@ -604,7 +614,8 @@ Codes: `media_exercise_id_required`, `media_file_required`, `media_unknown_slot`
 `media_library_full` (the per-exercise cap, `MEDIA_TRAINER_EXERCISE_MAX_ASSETS`,
 3), `media_kind_not_supported_yet`, plus every code the image and video pipelines
 already answer (`media_not_a_video`, `media_video_too_large`, `media_video_too_long`,
-`media_wrong_ratio`, `media_too_small`, `media_unsupported_format`), `not_a_trainer`
+`media_wrong_ratio`, `media_too_small`, `media_unsupported_format`,
+`media_alt_too_long`), `not_a_trainer`
 (403) and `not_found` (404). A catalogue asset, another coach's asset, an asset on an
 exercise the caller may not see and an id that does not exist all answer the same 404,
 byte for byte.

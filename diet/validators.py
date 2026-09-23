@@ -97,7 +97,7 @@ class DietInputValidator:
         
         if duration_days < 1:
             raise ValidationError(
-                _("Duration must be at least 1 day."), code="duration_too_short"
+                _("Duration must be at least 1 day"), code="duration_too_short"
             )
         
         if duration_days > 30:
