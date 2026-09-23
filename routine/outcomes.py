@@ -193,6 +193,15 @@ def day_counts(routine, user, day, date=None, plan=None) -> dict:
         done = work[row['routine_exercise_id']]
         planned_sets += row['sets']
         logged_sets += done['logged']
+        # What was LIFTED counts whatever the coach prescribed: a client who puts 50 kg
+        # on an exercise the coach set no weight for still moved 50 kg a rep. This sat
+        # inside the "weight was prescribed" branch, so the most common routine — sets
+        # and reps, weight left to the client — recorded every day as 0 kg, and the home
+        # week and adherence said 0.0 while analytics/strength counted the same sets
+        # (BACKEND_BUGS B-037). The PLANNED volume below still exists only where the
+        # coach prescribed both reps and weight: there is no plan to measure against
+        # otherwise, which is why it is null rather than zero.
+        logged_volume += done['volume']
         if row['reps'] is not None:
             has_reps = True
             planned_reps += row['sets'] * row['reps']
@@ -202,7 +211,6 @@ def day_counts(routine, user, day, date=None, plan=None) -> dict:
             if row['weight'] is not None:
                 has_weight = True
                 planned_volume += row['sets'] * row['reps'] * row['weight']
-                logged_volume += done['volume']
         if done['logged'] > done['from_logs']:
             # Counted from "log a whole day", which records no reps at all.
             reps_known = False

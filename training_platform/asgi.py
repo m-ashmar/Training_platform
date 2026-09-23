@@ -8,14 +8,26 @@ https://docs.djangoproject.com/en/5.1/howto/deployment/asgi/
 """
 
 import os
-from channels.routing import ProtocolTypeRouter, URLRouter
-from django.core.asgi import get_asgi_application
-from channels.auth import AuthMiddlewareStack
-import social.routing
-import ai_assistant.routing
-import chat.routing
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "training_platform.settings_production")
+
+# The Django application FIRST, then anything that can import a model. This is
+# Django's documented order, and it is load-bearing: `get_asgi_application()` is what
+# runs `django.setup()`. The routing modules were imported above it, and `chat.routing`
+# reaches `chat.models` at import time, so from the day chat landed the production
+# command (`daphne … training_platform.asgi:application`, Dockerfile and fly.toml)
+# exited with `AppRegistryNotReady` before serving anything (BACKEND_BUGS B-038).
+# `runserver` hid it by setting Django up before importing this module.
+from django.core.asgi import get_asgi_application  # noqa: E402
+
+django_asgi_app = get_asgi_application()
+
+from channels.auth import AuthMiddlewareStack  # noqa: E402
+from channels.routing import ProtocolTypeRouter, URLRouter  # noqa: E402
+
+import ai_assistant.routing  # noqa: E402
+import chat.routing  # noqa: E402
+import social.routing  # noqa: E402
 
 # Cap inbound frame size before Daphne builds its factory. See ws_limits for the
 # measurements: one 128 MB frame from any authenticated account was enough to OOM the
@@ -27,7 +39,7 @@ from training_platform.ws_limits import (  # noqa: E402
 apply_websocket_limits()
 
 application = ProtocolTypeRouter({
-    "http": get_asgi_application(),
+    "http": django_asgi_app,
     # Origin-checked for browsers, open for native clients that send no Origin at all.
     # See SameSiteOriginValidator for why Channels' own validator cannot be used here.
     "websocket": SameSiteOriginValidator(

@@ -10,6 +10,10 @@ from rest_framework import serializers
 from .models import MAX_BODY_CHARS, Conversation, Message
 
 
+#: The one kind a message can be today (see `MessageSerializer`).
+MESSAGE_KIND_TEXT = 'text'
+
+
 class MessageSerializer(serializers.ModelSerializer):
     """One message.
 
@@ -21,24 +25,35 @@ class MessageSerializer(serializers.ModelSerializer):
     A tombstoned message keeps its place in the thread and loses its text: `deleted` is
     true and `body` is empty, whoever is reading. The column still holds what was
     written — the row is a record, not a display — and no endpoint serves it.
+
+    `kind` says what the message IS, so the app can switch on it before any other kind
+    exists: `"text"` is the only value today. Voice notes and images are a later pass
+    (the owner, 2026-09-20: texting first); when they land they add values here and
+    their own fields beside `body`, and a build that only knows `"text"` draws the
+    rest as a placeholder rather than guessing from which fields happen to be present
+    (BACKEND_BUGS B-042 — the home card already carried a `kind`; the thread did not).
     """
     body = serializers.CharField(max_length=MAX_BODY_CHARS, allow_blank=False,
                                  trim_whitespace=False)
     deleted = serializers.SerializerMethodField()
+    kind = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
-        fields = ['id', 'conversation', 'sender', 'body', 'client_uuid',
+        fields = ['id', 'conversation', 'sender', 'kind', 'body', 'client_uuid',
                   'created_at', 'read_at', 'deleted_at', 'deleted']
         # `client_uuid` is read-only HERE and written by `chat.services.send_message`:
         # the id is the key of an idempotent replay, not a field, and the replay has to
         # run before validation — a retry of a message sent while the coaching was
         # still paid must be ANSWERED, not refused.
-        read_only_fields = ['id', 'conversation', 'sender', 'client_uuid',
+        read_only_fields = ['id', 'conversation', 'sender', 'kind', 'client_uuid',
                             'created_at', 'read_at', 'deleted_at', 'deleted']
 
     def get_deleted(self, obj):
         return obj.deleted_at is not None
+
+    def get_kind(self, obj):
+        return MESSAGE_KIND_TEXT
 
     def validate_body(self, value):
         if not value.strip():

@@ -119,9 +119,10 @@ class HomeView(APIView):
 
         {"role": "client",                    the account's shell: client | trainer |
                                               agent | admin (admin is the operator)
-         "as_of": "2026-09-20T18:04:11Z",     when this payload was built; up to
-                                              `refresh_after_seconds` old on a cache hit
-         "refresh_after_seconds": 120,        do not ask again sooner than this
+         "as_of": "2026-09-20T18:04:11Z",     when this payload was built
+         "refresh_after_seconds": 120,        do not ask again sooner than this; on a
+                                              page served from the cache it is the
+                                              time LEFT (1-120), not a fresh 120
          "sections": [{"type": "...", "data": {...}}, ...]}
 
     A section object is `{"type", "data"}` and nothing else. A section with nothing to
@@ -145,7 +146,10 @@ class HomeView(APIView):
          "counts": {"exercises": 6, "sets": 21, "estimated_minutes": 60},
                                               `estimated_minutes` is the ROUTINE's
                                               estimate, the only one the schema holds:
-                                              there is no per-day duration column yet
+                                              there is no per-day duration column yet.
+                                              It is NULL when the coach set none (the
+                                              column is optional) — hide the stat then;
+                                              it is never 0 for "unknown".
          "sets": {"prescribed": 21, "logged": 18, "unlogged": 3},   not on a rest day
          "exercises": {"planned": 6, "full": 3, "partial": 1,
                        "untouched": 2, "skipped": 0},               not on a rest day
@@ -370,7 +374,7 @@ class HomeView(APIView):
         except Exception:
             cached = None
         if cached is not None:
-            return Response(cached)
+            return Response(_with_time_left(cached))
 
         payload = self.build(request, person, channel=channel)
         try:
@@ -437,3 +441,19 @@ class HomeView(APIView):
         answer['sections'] = [{'type': name, 'data': built[name]}
                               for name in SECTION_ORDER if built.get(name)]
         return answer
+
+
+def _with_time_left(payload: dict) -> dict:
+    """The cached page, with `refresh_after_seconds` counted from when it was BUILT.
+
+    It used to say `CACHE_SECONDS` on every answer, so a page served from a cache entry
+    already 119 seconds old told the app to wait another 120 — up to four minutes
+    between the change and the screen (BACKEND_BUGS B-043). The entry itself is not
+    touched: this copy only corrects the one number that describes it.
+    """
+    built = payload.get('as_of')
+    if not hasattr(built, 'tzinfo'):
+        return payload
+    age = (timezone.now() - built).total_seconds()
+    left = max(1, int(CACHE_SECONDS - age))
+    return {**payload, 'refresh_after_seconds': left}
