@@ -305,6 +305,16 @@ class TrainerDietPlanService:
                 meal.scheduled_time = scheduled_time
             if description is not None:
                 meal.description = description
+                # The engine stores an Arabic description beside the English one
+                # (`translations['ar']['description']`, read as `description_ar`). It
+                # described the dish as the engine wrote it; left in place, an edit was
+                # invisible to an Arabic reader. Dropped, `description_ar` falls back to
+                # the text written here.
+                translations = dict(meal.translations or {})
+                arabic = dict(translations.get('ar') or {})
+                if arabic.pop('description', None) is not None:
+                    translations['ar'] = arabic
+                    meal.translations = translations
             if components is not None:
                 name, name_ar, reason, reason_ar = self._meal_names(meal.meal_type, components)
                 meal.name, meal.name_ar = name[:160], name_ar[:160]

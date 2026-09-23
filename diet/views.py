@@ -148,14 +148,16 @@ def _id(value, field: str) -> int:
     code = f"bad_{field}"
     if isinstance(value, bool):
         raise BadInput(f"{field} must be an id", code)
+    # OverflowError too: JSON `1e400` parses to infinity (`int()` overflows) and a
+    # 400-digit integer overflows `float()`. Uncaught, both answered 500.
     try:
         out = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise BadInput(f"{field} must be an id", code)
     try:
         if float(value) != out:
             raise BadInput(f"{field} must be a whole number", code)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise BadInput(f"{field} must be an id", code)
     if out <= 0:
         raise BadInput(f"{field} must be an id", code)
@@ -3319,7 +3321,7 @@ class MyDietPlansView(APIView):
     client's request; no person and no external model) or `TRAINER` (written by a coach)
     — and `author`, `{id, name}` of the coach who wrote it (`name` their full name, else
     their username), or null for an ENGINE plan, and for a TRAINER plan whose coach's
-    account no longer exists.
+    account no longer exists or is closed (erased or deactivated).
 
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
@@ -3341,7 +3343,7 @@ class MyDietPlansView(APIView):
                            'created_at', 'template_id', 'allergen_report',
                            'generation_strategy', 'created_by__id',
                            'created_by__first_name', 'created_by__last_name',
-                           'created_by__username')
+                           'created_by__username', 'created_by__is_active')
                      .order_by('-start_date', '-created_at'))
 
             # Paginate the queryset first before building dicts
@@ -3378,9 +3380,13 @@ class MyDietPlansView(APIView):
                     # Who wrote it, as the model records it (BACKEND_BUGS B-064): the
                     # Generate screen warns "your coach Rami wrote your current plan".
                     'generation_strategy': p.generation_strategy,
+                    # Null once the coach's account is closed: erasure keeps the row
+                    # (is_active off, the username replaced by `retired_<pk>_...`), so
+                    # the name would read as that placeholder.
                     'author': ({'id': p.created_by.id,
                                 'name': p.created_by.full_name or p.created_by.username}
-                               if p.created_by_id and p.created_by is not None else None),
+                               if p.created_by_id and p.created_by is not None
+                               and p.created_by.is_active else None),
                 })
 
             if page is not None:

@@ -649,7 +649,7 @@ class PaymentService:
         money is real). One rule decides the plan then, when a payment clears
         (`clearing`, the payment being completed) and when one is refunded:
 
-        * Among the completed payments whose period has not ended, plus `clearing`, the
+        * Among this run's completed payments whose period has not ended, plus `clearing`, the
           plan with the highest price of record (`_price_of_record`). Keeping the
           cheaper one would take from a customer what they paid for; the periods stack
           either way. A tie keeps the plan the row is on.
@@ -662,9 +662,12 @@ class PaymentService:
         The caller holds the subscription lock.
         """
         now = timezone.now()
-        running = list(Payment.objects
-                       .filter(subscription=subscription, status='completed',
-                               covers_until__gt=now)
+        # This RUN's payments only (`Subscription.current_run_payments`): an immediate
+        # cancel leaves its payment `completed` with `covers_until` still ahead, and
+        # counting it let a Premium month the customer gave up move a Basic renewal
+        # back onto Premium.
+        running = list(subscription.current_run_payments()
+                       .filter(covers_until__gt=now)
                        .select_related('subscription__plan')
                        .order_by('-completed_at', '-id'))
         if clearing is not None:

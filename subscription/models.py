@@ -299,22 +299,36 @@ class Subscription(RowValidationMixin, models.Model):
             return 'active'
         return 'frozen' if self.is_frozen else 'inactive'
 
-    def last_paid_plan(self):
-        """The plan the most recent completed payment bought, or None if none cleared.
+    def current_run_payments(self):
+        """The completed payments that paid for THIS run of cover.
 
-        What a FROZEN row may still read follows what was paid for, not what the row is
-        on now: `change-plan` moves an unpaid row onto another plan and takes that
-        plan's five flags, so choosing a plan without diet — buying nothing — took the
-        frozen diet read away (`HasDietAccessOrFrozenRead`).
+        A run starts when money clears with nothing running: activation moves
+        `start_date` to that moment (`PaymentService._activate_subscription`), so a
+        period that began before `start_date` belongs to cover that already ran out or
+        was given up — an immediate cancel keeps its payment `completed`, with its old
+        `covers_until` still in the future. The refund's own rule
+        (`PaymentService._cover_to_take_back`) draws the same line.
         """
-        last = (self.payments.filter(status='completed')
-                .order_by('-completed_at', '-id').first())
-        if last is None:
-            return None
-        plan_id = last.plan_bought()['plan_id']
-        if plan_id == self.plan_id:
-            return self.plan
-        return SubscriptionPlan.objects.filter(pk=plan_id).first()
+        payments = self.payments.filter(status='completed')
+        if self.start_date:
+            payments = payments.filter(covers_from__gte=self.start_date)
+        return payments
+
+    def last_run_plans(self):
+        """Every plan the payments of the last run bought (`current_run_payments`).
+
+        What a FROZEN row may still read follows what was paid for, not the plan the
+        row is on now: `change-plan` moves an unpaid row onto another plan and its five
+        flags, and choosing a plan without diet — buying nothing — took the frozen diet
+        read away (`HasDietAccessOrFrozenRead`). All of the run's plans, not the most
+        recent payment's: a late transfer for Basic that cleared inside a Premium run is
+        the most recent payment, and Premium is still what that run was on.
+        """
+        ids = {p.plan_bought()['plan_id']
+               for p in self.current_run_payments().select_related('subscription__plan')}
+        if not ids:
+            return []
+        return list(SubscriptionPlan.objects.filter(pk__in=ids))
 
     @property
     def is_trial(self):
