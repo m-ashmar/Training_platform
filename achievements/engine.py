@@ -299,10 +299,28 @@ class AchievementEngine:
                 return ChallengeParticipation.objects.filter(user=user).count()
             
             elif criteria_type == 'challenge_wins':
+                # A WIN, not a lead. `rank` is rewritten on every `update_progress`,
+                # `join` and `leave` while a challenge runs, so counting `rank=1`
+                # without asking whether the challenge is over awarded the Challenge
+                # Winner badge to whoever happened to be first when any check ran —
+                # and a badge is never taken back (SIDE_BUGS S-044). A challenge is over
+                # when someone closed it as completed, or when its end date has passed
+                # and it was not cancelled: `Challenge.lifecycle_status` as a query.
+                # From that moment the standing is frozen (`_update_challenge_rankings`
+                # does not re-rank a finished board), so the count cannot move again.
+                # The check that awards it runs when the challenge closes
+                # (`social/tasks.py award_challenge_winners`).
+                from django.db.models import Q
+                from social.models import Challenge
+
+                ended = (Q(challenge__status='completed')
+                         | (Q(challenge__end_date__lt=timezone.now())
+                            & ~Q(challenge__status__in=Challenge.TERMINAL_STATUSES)))
                 return ChallengeParticipation.objects.filter(
-                    user=user, 
+                    ended,
+                    user=user,
                     status='completed',
-                    rank=1
+                    rank=1,
                 ).count()
             
             # Goal metrics

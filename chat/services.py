@@ -148,6 +148,9 @@ def mark_read(conversation, reader):
         setattr(conversation, field, now)
         (Message.objects.filter(conversation=conversation, read_at__isnull=True)
          .exclude(sender=reader).update(read_at=now))
+        # `.update()` fires no signal, and the home card carries this unread count.
+        from training_platform.signals import bust_home_for_a_read
+        bust_home_for_a_read(conversation, reader.pk)
     broadcast(conversation.pk, 'message.read',
               {'conversation': conversation.pk, 'reader': reader.pk,
                'read_at': now.isoformat()})

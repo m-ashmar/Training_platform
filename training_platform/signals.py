@@ -105,6 +105,31 @@ def bust_home(user_id) -> None:
     bump_stamp(user_id)
 
 
+def bust_home_on_commit(*user_ids) -> None:
+    """Retire these people's home screens once the surrounding write commits.
+
+    Deferred so a rolled-back write retires nothing and a reader cannot rebuild the
+    screen from the state the write is about to replace; guarded because a cache that
+    cannot be reached must never fail the write it describes. Ids that are None are
+    skipped, and each person is bumped once.
+    """
+    from django.db import transaction as _txn
+
+    wanted = sorted({pk for pk in user_ids if pk})
+    if not wanted:
+        return
+
+    def _bust():
+        for pk in wanted:
+            try:
+                bust_home(pk)
+            except Exception:
+                logger.warning("Could not bust the home cache for user %s; it will "
+                               "expire on TTL", pk, exc_info=True)
+
+    _txn.on_commit(_bust)
+
+
 @receiver(post_save, sender='routine.WorkoutSession')
 def bust_recent_progress_cache(sender, instance, **kwargs):
     """
@@ -112,8 +137,17 @@ def bust_recent_progress_cache(sender, instance, **kwargs):
     WorkoutSession transitions to 'completed'. This ensures the dashboard
     chart reflects completed workouts immediately after the next request,
     rather than waiting up to 120s for TTL expiry.
+
+    The HOME entry is retired on EVERY save of a session, not only a finish: the hero's
+    button reads the open session (`home/sections.py workout_hero`). Retiring it only on
+    completion left `cta: start` with no `session` on the screen for up to 120 s after
+    a session was opened, and a second tap opened a second concurrent session
+    (SIDE_BUGS S-149).
     """
-    if instance.status == 'completed' and instance.end_time is not None:
+    if instance.status != 'completed' or instance.end_time is None:
+        # Started, paused, abandoned: only the home screen moved.
+        bust_home_on_commit(instance.user_id)
+    else:
         # Guarded + deferred: this used to run inline and unprotected, so a Redis
         # outage raised straight out of the user's `save()` and they could not
         # complete a workout at all. Cache invalidation is an optimisation; it must
@@ -157,16 +191,24 @@ def bust_recent_progress_cache_on_day_outcome(sender, instance, **kwargs):
     _txn.on_commit(_bust)
 
 
+@receiver(post_delete, sender='routine.WorkoutSession')
+def bust_home_on_a_deleted_session(sender, instance, **kwargs):
+    """A deleted session is no longer the open one the hero offers to continue."""
+    bust_home_on_commit(instance.user_id)
+
+
 @receiver(post_save, sender='chat.Message')
 def bust_home_on_a_new_message(sender, instance, created, **kwargs):
     """A coach's message is a home section (`trainer_message`), so it must not wait out
     the home cache's two minutes. Only the home entry is retired — the week is not
     about chat — and only for the CLIENT, whose screen carries the card.
 
+    Every save, not only a create: taking a message back is a save of `deleted_at`
+    (`chat/services.py tombstone`), and the card must stop quoting it at once rather
+    than for up to 120 s (SIDE_BUGS S-149).
+
     Same guarded, deferred bust as above: a cache that cannot be reached must never
     fail the message it describes."""
-    if not created:
-        return
     from django.db import transaction as _txn
 
     def _bust():
@@ -185,6 +227,36 @@ def bust_home_on_a_new_message(sender, instance, created, **kwargs):
             )
 
     _txn.on_commit(_bust)
+
+
+def bust_home_for_a_read(conversation, reader_id) -> None:
+    """The client read their coach's thread: the card's `unread_count` changed.
+
+    Called by `chat/services.py mark_read`, which stamps the read with a queryset
+    `.update()` — no model signal fires for that, so there is nothing to receive.
+    Only the client's screen carries the card; a trainer reading changes nothing on it.
+    """
+    client_id = getattr(conversation, 'client_id', None)
+    if client_id and client_id == reader_id:
+        bust_home_on_commit(client_id)
+
+
+@receiver(post_save, sender='moderation.Block')
+@receiver(post_delete, sender='moderation.Block')
+def bust_home_on_a_block(sender, instance, **kwargs):
+    """A block hides the coach's message card (`home/sections.py trainer_message`), and
+    lifting it brings the card back. Both people's screens are retired: either of them
+    may be the client (SIDE_BUGS S-149)."""
+    bust_home_on_commit(instance.blocker_id, instance.blocked_id)
+
+
+@receiver(post_save, sender='users.TrainerClientRelation')
+@receiver(post_delete, sender='users.TrainerClientRelation')
+def bust_home_on_a_relation_change(sender, instance, **kwargs):
+    """Whether the client has a coach decides which list home answers (the coached
+    sections or the first-day ones) and whose message card it carries, so a relation
+    approved, ended or removed must not wait out the 120 s (SIDE_BUGS S-149)."""
+    bust_home_on_commit(instance.client_id)
 
 
 # ---------------------------------------------------------------------------

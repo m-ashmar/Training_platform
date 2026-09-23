@@ -150,9 +150,53 @@ def advance_challenge_phases():
     The API reads the phase from the dates; the admin reads the column. Without this
     they disagree from the moment a challenge starts.
     """
+    from django.utils import timezone
+
     from .models import Challenge
 
-    started, ended = Challenge.advance_stored_phases()
+    now = timezone.now()
+    # The challenges this run closes, read BEFORE the UPDATE closes them: their winners
+    # are checked for the Challenge Winner badge below, which counts only a challenge
+    # that is over (SIDE_BUGS S-044). The same predicate `advance_stored_phases` ends.
+    closing = list(Challenge.objects
+                   .filter(status__in=('upcoming', 'active'), end_date__lt=now)
+                   .values_list('pk', flat=True))
+    started, ended = Challenge.advance_stored_phases(now=now)
     if started or ended:
         logger.info("challenges started: %s, ended: %s", started, ended)
+    award_challenge_winners(closing)
     return f"started={started} ended={ended}"
+
+
+def award_challenge_winners(challenge_ids) -> int:
+    """Run the badge check for whoever finished first in each of these challenges.
+
+    `challenge_wins` (`achievements/engine.py`) counts a first place only once the
+    challenge is over, so the check has to run when it closes — the hourly phase task
+    above, or a person closing it (`ChallengeViewSet.perform_update`). Nothing else
+    re-runs a winner's check at that moment: the badge was otherwise earned only if
+    some unrelated event happened to trigger one later.
+
+    The winner is the participation with `rank=1` that reached the target
+    (`status='completed'`), the definition the metric counts. Returns how many were
+    checked. Never raises: a badge is a reward, and must not fail the close.
+    """
+    ids = [pk for pk in challenge_ids or () if pk is not None]
+    if not ids:
+        return 0
+    from .models import ChallengeParticipation
+
+    checked = 0
+    for row in (ChallengeParticipation.objects
+                .filter(challenge_id__in=ids, rank=1, status='completed')
+                .select_related('user').order_by('challenge_id', 'id')):
+        try:
+            from achievements.engine import trigger_achievement_check
+
+            trigger_achievement_check(row.user, 'challenge_completed',
+                                      challenge_id=row.challenge_id)
+            checked += 1
+        except Exception:
+            logger.warning("could not check the winner of challenge %s",
+                           row.challenge_id, exc_info=True)
+    return checked

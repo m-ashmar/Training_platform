@@ -128,9 +128,15 @@ def test_s022_one_rule_decides_how_long_a_workout_may_run(make_user, api):
     been a third. They are one constant now, and home reads the shared predicate."""
     import home.sections as sections
     from routine.serializers import WorkoutSessionSerializer
-    from routine.sessions import SESSION_MAX_SECONDS
+    from routine.sessions import SESSION_MAX_SECONDS, running
 
-    assert sections.LONGEST_SESSION is SESSION_MAX_SECONDS
+    # A deliberate change (SIDE_BUGS S-098), not an assertion bent to fit: this pinned
+    # `sections.LONGEST_SESSION`, an alias home kept of the shared constant after its
+    # own query moved to `routine.sessions.running`, and which nothing then read. The
+    # alias is gone; what this test protects — home holds no second copy of the rule —
+    # is asserted directly instead, beside the source check below.
+    assert not hasattr(sections, "LONGEST_SESSION"), "home kept a second name for the rule"
+    assert sections.running_sessions is running, "home asks the shared predicate"
     assert WorkoutSessionSerializer.MAX_SESSION_SECONDS is SESSION_MAX_SECONDS
     # Not merely equal numbers written out twice: the source says so.
     source = (REPO_ROOT / "home" / "sections.py").read_text()

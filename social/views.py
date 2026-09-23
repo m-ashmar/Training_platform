@@ -19,7 +19,7 @@ from django.core.cache import cache
 
 from .models import (
     UserFollow, Post, PostLike, Comment, CommentLike, Challenge,
-    ChallengeParticipation, Achievement, UserAchievement
+    ChallengeParticipation,
 )
 from .permissions import IsOwnerOrReadOnly, IsFollowParticipant
 from .serializers import (
@@ -42,17 +42,40 @@ logger = logging.getLogger(__name__)
 IsAuthenticated = permissions.IsAuthenticated
 
 
+def refuse_a_blocked_follow(follower, target):
+    """Raise 403 `user_blocked` when either of the two has blocked the other.
+
+    Both follow paths create a row AND, on `follow_user`, push "X started following
+    you" to the target's lock screen. Neither asked about blocks, so the person someone
+    had blocked could still follow them and reach them with a push — the inbox hides
+    the row, but FCM had already delivered it — and the follow they never accepted
+    came back into view the moment the block was lifted. The answer is the same in
+    both directions and says nothing about which side blocked whom
+    (`moderation/exceptions.py UserIsBlocked`).
+    """
+    from moderation.exceptions import UserIsBlocked
+    from moderation.services import is_blocked
+
+    if is_blocked(follower, target):
+        raise UserIsBlocked()
+
+
 class UserFollowViewSet(viewsets.ModelViewSet):
     """
     API endpoints for user following system
-    
+
     Permissions:
     - Users can follow/unfollow others
     - Users can view their followers/following
+
+    `POST /api/social/follows/` body `{"following_id": <user id>}` and
+    `POST follow_user/` body `{"user_id": <user id>}` both answer 403 `user_blocked`
+    when either person has blocked the other — the same code and wording whichever
+    side made the block. Unfollowing is never refused. Nothing differs by build.
     """
     serializer_class = UserFollowSerializer
     permission_classes = [IsFollowParticipant]
-    
+
     def get_queryset(self):
         # Both columns are excluded: the row names two people, and a block has to
         # remove it whichever side the blocked person is on.
@@ -60,30 +83,37 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         return UserFollow.objects.filter(
             Q(follower=self.request.user) | Q(following=self.request.user)
         ).exclude(Q(follower_id__in=hidden) | Q(following_id__in=hidden))
-    
+
     def perform_create(self, serializer):
+        refuse_a_blocked_follow(self.request.user,
+                                serializer.validated_data.get('following'))
         serializer.save(follower=self.request.user)
-    
+
     @action(detail=False, methods=['post'])
     def follow_user(self, request):
         """
         Follow a user
-        
+
         POST /api/social/follows/follow_user/
         {
             "user_id": 123
         }
+
+        201 followed · 200 already following · 400 following yourself ·
+        403 `user_blocked` (either of you has blocked the other) · 404 no such user.
         """
         user_id = request.data.get('user_id')
         try:
             user_to_follow = CustomUser.objects.get(id=user_id)
-            
+
             if user_to_follow == request.user:
                 return Response(
-                    {'error': _('Cannot follow yourself')}, 
+                    {'error': _('Cannot follow yourself')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
+            refuse_a_blocked_follow(request.user, user_to_follow)
+
             follow, created = UserFollow.objects.get_or_create(
                 follower=request.user,
                 following=user_to_follow
@@ -588,6 +618,33 @@ class CommentViewSet(viewsets.ModelViewSet):
                 comment_text=comment.content
             ))
     
+    def perform_destroy(self, instance):
+        """Delete the comment and take it off its post's `comments_count`.
+
+        `perform_create` adds one to the counter and nothing ever took one off, so a
+        deleted comment stayed on the badge for good — the post read "1 comment" and
+        opened on an empty thread. S-033 corrected the badge for hidden and blocked
+        rows, which are still in the table; a deleted row is not, so it has to leave
+        the counter here.
+
+        A reply is deleted with its parent (`parent_comment` cascades), so the counter
+        drops by every Comment row the delete removed, not by one. `F()` on the row, as
+        the create does, so two deletes on one post cannot lose each other's work; and
+        floored at zero, because the column is `CHECK (comments_count >= 0)` and a
+        counter that had already drifted must not turn a delete into a 500.
+        """
+        from django.db.models import IntegerField, Value
+        from django.db.models.functions import Greatest
+
+        post_id = instance.post_id
+        with transaction.atomic():
+            _total, per_model = instance.delete()
+            removed = per_model.get(Comment._meta.label, 0)
+            if removed:
+                Post.objects.filter(pk=post_id).update(
+                    comments_count=Greatest(F('comments_count') - Value(removed),
+                                            Value(0), output_field=IntegerField()))
+
     @action(detail=True, methods=['post'])
     def like(self, request, pk=None):
         """
@@ -744,7 +801,23 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)
         self._invalidate_challenges_cache(self.request)
-    
+
+    def perform_update(self, serializer):
+        """Save, and when this edit is what closed the challenge, check its winner.
+
+        The Challenge Winner badge counts a first place only once the challenge is over
+        (`achievements/engine.py challenge_wins`, SIDE_BUGS S-044). The hourly phase
+        task checks the winners of the challenges the clock closes; a creator closing
+        one early (`status: "completed"`, or an end date moved into the past) closes it
+        here, so the check is queued here too — on commit, after the close is visible.
+        """
+        was_over = serializer.instance.lifecycle_status == 'completed'
+        challenge = serializer.save()
+        if not was_over and challenge.lifecycle_status == 'completed':
+            from .tasks import award_challenge_winners
+
+            transaction.on_commit(lambda: award_challenge_winners([challenge.pk]))
+
     @action(detail=True, methods=['post'])
     def join(self, request, pk=None):
         """
@@ -876,8 +949,13 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         # return got rank 1 — and rank 1 is what the Challenge Winner and Champion
         # badges key on. `-current_value, joined_at, id` breaks the tie by who got there
         # first. `select_related` because `p.user.username` was a query per row.
+        #
+        # Someone who dropped out holds no place (`NOT_IN_STANDING`, SIDE_BUGS S-045):
+        # the stored `rank` and the home card's count leave them out too.
         participants = ChallengeParticipation.objects.filter(
             challenge=challenge
+        ).exclude(
+            status__in=ChallengeParticipation.NOT_IN_STANDING
         ).select_related('user').order_by('-current_value', 'joined_at', 'id')[:10]
 
         # Blocked people are dropped from the board AFTER the rank is computed, so the
@@ -1071,8 +1149,10 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           awarded off that ordering.
 
         `RANKING_ORDER` is a total order and is the order the leaderboard and the home
-        card already read, so all three now agree. Every participant is ranked,
-        including the ones sitting at zero: places run 1..N with no gaps and no NULLs.
+        card already read, so all three now agree. Every participant still in the
+        standing is ranked, including the ones sitting at zero: places run 1..N with no
+        gaps. The one NULL is someone who dropped out (`NOT_IN_STANDING`): they hold no
+        place, so the person behind them moves up.
         Only the rows whose place actually moved are written, in one `bulk_update`
         (a `Case`/`When` UPDATE) instead of N `save()`s — a 200-person challenge costs
         one SELECT and one UPDATE, not 200 full-row writes.
@@ -1085,15 +1165,23 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         """
         rows = list(ChallengeParticipation.objects
                     .filter(challenge=challenge)
-                    .only('id', 'rank')
+                    .only('id', 'rank', 'status')
                     .order_by(*self.RANKING_ORDER))
         if challenge.lifecycle_status in Challenge.TERMINAL_STATUSES:
             return {row.pk: row.rank for row in rows}
 
+        # A participant who dropped out holds no place and is written NULL; everyone
+        # else is placed 1..N among themselves (`NOT_IN_STANDING`, SIDE_BUGS S-045).
         moved = []
-        for place, row in enumerate(rows, 1):
-            if row.rank != place:
-                row.rank = place
+        place = 0
+        for row in rows:
+            if row.status in ChallengeParticipation.NOT_IN_STANDING:
+                wanted = None
+            else:
+                place += 1
+                wanted = place
+            if row.rank != wanted:
+                row.rank = wanted
                 moved.append(row)
         if moved:
             ChallengeParticipation.objects.bulk_update(
@@ -1102,26 +1190,54 @@ class ChallengeViewSet(viewsets.ModelViewSet):
 
 
 class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    API endpoints for achievements (read-only)
+    """The badges, and the ones the caller has earned — read from the `achievements` app.
+
+    GET /api/social/achievements/                     every active badge (paginated)
+    GET /api/social/achievements/{id}/                one badge
+    GET /api/social/achievements/user_achievements/   the caller's earned badges:
+        {"achievements": [{"achievement": {id, name, description, category, points,
+                                           icon, badge_color, is_rare},
+                           "earned_at", "progress_data"}],
+         "total_points": int}
+
+    Auth required; no body, no special headers; nothing differs by build. No `code`
+    beyond the platform's generic ones (401, 404 for an unknown or secret id).
+
+    These three routes used to read `social.Achievement` / `social.UserAchievement`,
+    which nothing live writes — the badge engine is `achievements/engine.py` and it
+    awards `achievements.UserAchievement` — so `user_achievements/` answered an empty
+    list and 0 points to everyone, for ever (SIDE_BUGS S-127). They now read the same tables
+    `GET /api/achievements/my/` does, in the same response shape as before; the ids are
+    therefore the `achievements` app's ids, the ones `/api/achievements/` uses.
+
+    A secret badge is listed only to someone who has earned it, the rule
+    `/api/achievements/` applies: the list used to hand every secret badge and its
+    criteria to anyone who asked.
     """
     serializer_class = AchievementSerializer
     permission_classes = [IsAuthenticated]
-    
+
     def get_queryset(self):
-        return Achievement.objects.filter(is_active=True)
-    
+        from achievements.models import Achievement as Badge
+        from achievements.models import UserAchievement as Earned
+
+        earned = Earned.objects.filter(user=self.request.user).values('achievement_id')
+        return (Badge.objects.filter(is_active=True)
+                .filter(Q(is_secret=False) | Q(pk__in=earned)))
+
     @action(detail=False, methods=['get'])
     def user_achievements(self, request):
         """
         Get user's earned achievements
-        
+
         GET /api/social/achievements/user_achievements/
         """
-        user_achievements = UserAchievement.objects.filter(
+        from achievements.models import UserAchievement as Earned
+
+        user_achievements = list(Earned.objects.filter(
             user=request.user
-        ).select_related('achievement')
-        
+        ).select_related('achievement').order_by('-earned_at', '-id'))
+
         data = [{
             'achievement': {
                 'id': ua.achievement.id,
@@ -1136,7 +1252,7 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
             'earned_at': ua.earned_at,
             'progress_data': ua.progress_data
         } for ua in user_achievements]
-        
+
         return Response({
             'achievements': data,
             'total_points': sum(ua.achievement.points for ua in user_achievements)

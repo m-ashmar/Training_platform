@@ -9,9 +9,12 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from .models import (
     UserFollow, Post, PostLike, Comment, CommentLike,
-    Challenge, ChallengeParticipation, Achievement,
-    UserAchievement
+    Challenge, ChallengeParticipation,
 )
+# The badges `/api/social/achievements/` serves are the `achievements` app's — the ONE
+# badge system this platform awards (`achievements/engine.py`). `social.Achievement` and
+# `social.UserAchievement` are tables nothing live writes (SIDE_BUGS S-127).
+from achievements.models import Achievement, UserAchievement
 # NOTE: `Notification` is deliberately NOT imported from social.models here.
 # NotificationSerializer binds to the canonical notifications.Notification
 # (imported further down). The old social.models import was shadowed by that
@@ -410,7 +413,14 @@ class ChallengeSerializer(serializers.ModelSerializer):
 
 
 class AchievementSerializer(serializers.ModelSerializer):
-    """Serializer for achievements"""
+    """A badge of the `achievements` app, in the shape `/api/social/achievements/`
+    has always answered.
+
+    Bound to `achievements.Achievement` since SIDE_BUGS S-127: it was bound to
+    `social.Achievement`, a catalogue no engine awards, so the social routes listed
+    badges nobody could earn and `user_achievements/` was always empty. The field list
+    is unchanged — both models carry exactly these columns.
+    """
     
     class Meta:
         model = Achievement

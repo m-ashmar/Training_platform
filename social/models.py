@@ -477,7 +477,15 @@ class ChallengeParticipation(models.Model):
         ('completed', 'Completed'),
         ('dropped', 'Dropped Out'),
     ]
-    
+
+    #: Participations that hold NO place in the standing. Someone who dropped out is
+    #: behind nobody and ahead of nobody: the leaderboard does not list them, the home
+    #: card's "how many are ahead of me" does not count them, and the stored `rank` is
+    #: NULL for them — otherwise a rival who quit while leading kept rank 1, and with it
+    #: the Challenge Winner badge's `rank=1`, from the person actually in front
+    #: (SIDE_BUGS S-045). One tuple, read by all three, so they cannot disagree.
+    NOT_IN_STANDING = ('dropped',)
+
     user = models.ForeignKey(
         CustomUser,
         on_delete=models.CASCADE,
