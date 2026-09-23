@@ -4,9 +4,12 @@ The card is the same everywhere (matches, roster, profile), built for a whole pa
 once: `proof` (platform-verified numbers, `users/trainer_proof.py`) and `media`
 (`mediakit`) in one query each, never per trainer.
 
-Price: `coaching_price` is present only when the calling BUILD may show a coaching fee
-(`policy.services.can_show_price(request, COACHING_1TO1)`); otherwise the key is absent,
-not null. Nothing on a card depends on who is asking, and the email is never on it.
+Price: `coaching_price` and `coaching_currency` are present only when the calling BUILD
+may show a coaching fee (`policy.services.can_show_price(request, COACHING_1TO1)`);
+otherwise the keys are absent, not null. The price is in the READER's currency (a
+signed-in client's own; the price of record for nobody signed in, or when the rate
+cannot convert it), and `coaching_currency` always names the unit (`CoachingPriceBook`).
+That, and nothing else on a card, depends on who is asking; the email is never on it.
 
 Matching reads what the client answered at onboarding (goal, place, days per week,
 injury areas) against what the trainer coaches, plus the proof numbers, and explains
@@ -121,6 +124,72 @@ def matches_for_goal(client) -> int:
                if goal in _focus_codes(goal_focus, specialities))
 
 
+class CoachingPriceBook:
+    """Coaching prices for ONE reader, for a whole page: every number in the reader's
+    currency, with that currency beside it.
+
+    The owner (2026-09-21): every price a person sees is in their own currency. The
+    trainer lists showed `trainer_hourly_rate` — a bare number in the TRAINER's
+    currency — so a pound client reading a dollar trainer's `100.00` read it as pounds
+    and was then charged 1,300,000 (SIDE_BUGS S-041). The charge was always right
+    (`take_hold` converts); the display was not.
+
+    One wallet query for all the page's trainers and at most one rate query
+    (`wallet.exchange.price_list_converter`), never a lookup per row. A price that
+    cannot be converted (no rate, a stale one) is shown as its price of record in ITS
+    currency — the unit is always beside the number, so it cannot be misread. Nobody
+    signed in: the price of record. `shown` is False on a build that may not show a
+    coaching fee (`policy.services.can_show_price`, `ios` today, or no channel at all):
+    every price AND its currency are then None — the keys stay (additive), no price
+    string reaches a store build (BACKEND_BUGS B-007). The channel is read once per
+    request, not per row.
+    """
+
+    def __init__(self, request, trainer_ids=()):
+        from policy.money import MoneyType
+        from policy.services import can_show_price
+        from wallet import currency_for
+        from wallet.exchange import price_list_converter
+        from wallet.models import Wallet, _platform_currency
+
+        shown = getattr(request, '_coaching_price_shown', None)
+        if shown is None:
+            shown = can_show_price(request, MoneyType.COACHING_1TO1)
+            if request is not None:
+                request._coaching_price_shown = shown
+        self.shown = shown
+        user = getattr(request, 'user', None)
+        self.reader_currency = (currency_for(user) if shown and user is not None
+                                and user.is_authenticated else None)
+        # Nothing to price on a build that may not show one: no wallet query either.
+        ids = {pk for pk in trainer_ids if pk is not None} if shown else set()
+        self._base = _platform_currency()
+        self._currencies = dict(Wallet.objects.filter(owner_id__in=ids)
+                                .values_list('owner_id', 'currency')) if ids else {}
+        self._convert = price_list_converter(self.reader_currency)
+
+    def currency_of(self, trainer_id) -> str:
+        """The trainer's currency — their wallet's, like `wallet.currency_for`."""
+        return self._currencies.get(trainer_id, self._base)
+
+    def price(self, amount, currency):
+        """`(amount_str | None, currency | None)`, in the reader's currency when it can be."""
+        if not self.shown or amount is None:
+            return None, None
+        converted, unit = self._convert(amount, currency)
+        return str(converted), unit
+
+    def trainer_rate(self, trainer):
+        """The trainer's current monthly price, for this reader."""
+        return self.price(getattr(trainer, 'trainer_hourly_rate', None),
+                          self.currency_of(trainer.pk))
+
+    def agreed(self, relation):
+        """What this relation agreed to, in its own quoted currency, for this reader."""
+        return self.price(relation.agreed_rate,
+                          relation.agreed_currency or self.currency_of(relation.trainer_id))
+
+
 def _absolute(request, url):
     return request.build_absolute_uri(url) if request is not None and url else url
 
@@ -135,6 +204,8 @@ def trainer_cards(trainers, request, *, proof=None) -> list[dict]:
     proof = proof if proof is not None else proof_for(trainers)
     media = media_map(OwnerType.TRAINER, ids, request)
     show_price = can_show_price(request, MoneyType.COACHING_1TO1)
+    # In the READER's currency, with the unit beside it (SIDE_BUGS S-041).
+    prices = CoachingPriceBook(request, ids) if show_price else None
     cards = []
     for t in trainers:
         card = {
@@ -149,7 +220,9 @@ def trainer_cards(trainers, request, *, proof=None) -> list[dict]:
             'media': media[t.pk],
         }
         if show_price:
-            card['coaching_price'] = str(t.trainer_hourly_rate or '0.00')
+            amount, unit = prices.price(t.trainer_hourly_rate or 0, prices.currency_of(t.pk))
+            card['coaching_price'] = amount
+            card['coaching_currency'] = unit
             card['money_type'] = MoneyType.COACHING_1TO1.value
         cards.append(card)
     return cards

@@ -14,7 +14,7 @@ from rest_framework import status, generics
 from django.utils.translation import gettext as _
 from .models import (AlreadyReversed, Wallet, Transaction, AgentProfile, AgentAPIKey,
                      WalletAuditLog, IdempotencyKey, move_funds_atomic,
-                     ensure_agent_profile)
+                     ensure_agent_profile, wallet_for)
 from .serializers import (
     WalletSerializer,
     TransactionSerializer,
@@ -65,10 +65,15 @@ def _lock_agent_profile(agent_profile):
     return AgentProfile.objects.select_for_update().get(pk=agent_profile.pk)
 
 
-def _topup_limit_error(agent_profile, actor, amount, request):
+def _topup_limit_error(agent_profile, actor, amount, request, currency):
     """
     Enforce agent daily/monthly top-up caps FAIL-CLOSED. A limit of 0 means
     "no top-ups permitted", not unlimited. Returns a Response on breach, else None.
+
+    PER CURRENCY (SIDE_BUGS S-059). The totals count only this currency's top-ups and
+    are held against this currency's caps (`AgentProfile.limits_for`). They used to add
+    pounds and dollars together against one number, so a cap an operator set in pounds
+    let the same number of dollars through — about 13,000 times the value.
 
     CONCURRENCY CONTRACT: `agent_profile` must already be locked by
     `_lock_agent_profile`, and the ledger write this guards must happen in the SAME
@@ -78,6 +83,11 @@ def _topup_limit_error(agent_profile, actor, amount, request):
     Holding the profile lock from here through move_funds_atomic is what makes the
     aggregate below true at the moment the money moves.
     """
+    limits = agent_profile.limits_for(currency)
+    if limits is None:
+        # A currency this agent has no caps for is refused, never treated as open.
+        limits = (0, 0)
+    daily_limit, monthly_limit = limits
     today = timezone.localdate()
     month_start = today.replace(day=1)
     # RANGES on the column, not a function of it. `created_at__date=` compiles to
@@ -92,20 +102,41 @@ def _topup_limit_error(agent_profile, actor, amount, request):
     month_from = timezone.make_aware(
         datetime.datetime.combine(month_start, datetime.time.min))
     day_total = Transaction.objects.filter(
-        actor=actor, tx_type="topup",
+        actor=actor, tx_type="topup", currency=currency,
         created_at__gte=day_start, created_at__lt=tomorrow,
     ).aggregate(Sum("amount"))["amount__sum"] or 0
     month_total = Transaction.objects.filter(
-        actor=actor, tx_type="topup", created_at__gte=month_from,
+        actor=actor, tx_type="topup", currency=currency, created_at__gte=month_from,
     ).aggregate(Sum("amount"))["amount__sum"] or 0
-    if day_total + amount > agent_profile.daily_limit:
-        audit("wallet.topup.limit_block", request, {"scope": "daily", "attempt": float(amount), "used": float(day_total)})
+    if day_total + amount > daily_limit:
+        audit("wallet.topup.limit_block", request, {"scope": "daily", "currency": currency, "attempt": float(amount), "used": float(day_total)})
         return Response({"error": _("Daily limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-    if month_total + amount > agent_profile.monthly_limit:
-        audit("wallet.topup.limit_block", request, {"scope": "monthly", "attempt": float(amount), "used": float(month_total)})
+    if month_total + amount > monthly_limit:
+        audit("wallet.topup.limit_block", request, {"scope": "monthly", "currency": currency, "attempt": float(amount), "used": float(month_total)})
         return Response({"error": _("Monthly limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
     return None
 
+
+def _topup_currency_mismatch(client, currency):
+    """409 `currency_mismatch` when the cash is not in the client's currency, else None.
+
+    An agent top-up carried no currency, so the typed number was minted in whatever the
+    client's wallet held: a client who had chosen dollars and handed over 500,000
+    pounds of cash received 500,000 DOLLARS (SIDE_BUGS S-059). The agent now says which
+    currency the cash is in, and money in the other one is refused rather than
+    relabelled. Arriving money never chooses a person's currency either: a client who
+    has not picked dollars is a pound client until they do (`PUT /api/wallet/currency/`,
+    allowed while the wallet is empty).
+    """
+    from .models import currency_for
+
+    theirs = currency_for(client)
+    if theirs == currency:
+        return None
+    return Response({"error": _("This client's wallet is in a different currency."),
+                     "code": "currency_mismatch",
+                     "client_currency": theirs, "topup_currency": currency},
+                    status=status.HTTP_409_CONFLICT)
 
 
 def _idempotency_conflict(exc):
@@ -188,8 +219,15 @@ class WalletCurrencyView(APIView):
     exchange of the whole balance at a recorded rate, which the owner has not asked
     for.
 
+    Also refused while the wallet is untouched but money priced in its currency is on
+    its way — a plan checkout still open (or completed and not yet paid out), a
+    coaching request or invitation still pending, or a coaching hold: 409 with
+    `code: "currency_locked_open_checkout"` and `currency`. Switching then made the
+    payment land in a wallet of the other currency and be recorded with no ledger leg.
+    Answer the checkout or the request first.
+
     Codes: `currency_required` (400), `currency_unsupported` (400),
-    `currency_locked` (409).
+    `currency_locked` (409), `currency_locked_open_checkout` (409).
 
     A statement of what the caller holds, with no price and nothing to buy, so it
     takes no `X-App-Channel` and is identical on every build.
@@ -206,7 +244,7 @@ class WalletCurrencyView(APIView):
 
     def put(self, request):
         from .currencies import CURRENCY_CODES
-        from .models import CurrencyLocked, set_currency_for
+        from .models import CurrencyChangeBlocked, CurrencyLocked, set_currency_for
 
         wanted = (body_dict(request).get("currency") or "").upper()
         if not wanted:
@@ -219,6 +257,11 @@ class WalletCurrencyView(APIView):
         except CurrencyLocked as exc:
             return Response({"error": _("Your currency cannot be changed once your "
                                         "wallet has been used."),
+                             "code": exc.code, "currency": exc.currency},
+                            status=status.HTTP_409_CONFLICT)
+        except CurrencyChangeBlocked as exc:
+            return Response({"error": _("Your currency cannot be changed while a payment "
+                                        "or a coaching request is open."),
                              "code": exc.code, "currency": exc.currency},
                             status=status.HTTP_409_CONFLICT)
         except ValueError:
@@ -383,10 +426,24 @@ class AgentDirectoryView(generics.ListAPIView):
 
 
 class AgentTopUpView(APIView):
+    """`POST /api/wallet/agent/topup/` — an agent's server credits a client's wallet
+    with cash taken in person, signed with the agent's key (`X-Agent-Auth`).
+
+    Body: `client_identifier` (account number "YG-204-781", user id or email),
+    `amount`, `currency` ("SYP" | "USD" — the currency of the CASH, required),
+    `idempotency_key`, `timestamp`, `signature`. The signed message is
+    `client_identifier|amount|timestamp|idempotency_key|currency`.
+
+    200 `{reference_id, balance, currency}`. Refusals: 400 `validation_error` (a
+    missing or unknown `currency` is `field_errors.currency`), 401 (auth), 403 (IP,
+    agent not active), 404 (no such client), 409 `currency_mismatch` with
+    `client_currency` and `topup_currency` when the client trades in the other
+    currency, 429 (the daily or monthly cap FOR THAT CURRENCY), 409/422 idempotency.
+
+    Server-to-server: no build is involved, so nothing here depends on one.
+    """
     permission_classes = [IsAuthenticated, IsAgent]
     throttle_classes = [ChargingRateThrottle]
-
-
 
     def post(self, request):
         serializer = TopUpRequestSerializer(data=request.data)
@@ -428,7 +485,9 @@ class AgentTopUpView(APIView):
         # Verify HMAC against the RAW secret (recovered from encrypted storage) —
         # never against the stored digest, which would itself be a bearer signer.
         raw_secret = decrypt_secret(api_key.secret_ciphertext) if api_key.secret_ciphertext else None
-        message = f"{serializer.validated_data['client_identifier']}|{serializer.validated_data['amount']}|{serializer.validated_data['timestamp']}|{serializer.validated_data['idempotency_key']}"
+        # The currency is SIGNED: it decides what the amount is worth, so an unsigned
+        # one would let the same signature mint dollars instead of pounds.
+        message = f"{serializer.validated_data['client_identifier']}|{serializer.validated_data['amount']}|{serializer.validated_data['timestamp']}|{serializer.validated_data['idempotency_key']}|{serializer.validated_data['currency']}"
         if not raw_secret or not verify_hmac_signature(raw_secret, message, parsed.signature):
             audit("wallet.topup.auth_failed", request, {"reason": "bad_signature"})
             return Response({"error": _("Signature verification failed")}, status=status.HTTP_401_UNAUTHORIZED)
@@ -442,7 +501,11 @@ class AgentTopUpView(APIView):
 
         agent_profile = ensure_agent_profile(request.user)
         amount = serializer.validated_data["amount"]
+        currency = serializer.validated_data["currency"]
         idem_key = serializer.validated_data["idempotency_key"]
+        mismatch = _topup_currency_mismatch(client, currency)
+        if mismatch is not None:
+            return mismatch
 
         # Cap check and ledger write share ONE transaction, with the agent's profile
         # locked for its whole span. See _topup_limit_error's concurrency contract.
@@ -451,7 +514,8 @@ class AgentTopUpView(APIView):
             if agent_profile.status != "active":
                 return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
 
-            limit_error = _topup_limit_error(agent_profile, request.user, amount, request)
+            limit_error = _topup_limit_error(agent_profile, request.user, amount, request,
+                                             currency)
             if limit_error:
                 return limit_error
 
@@ -459,7 +523,8 @@ class AgentTopUpView(APIView):
             try:
                 idem, replay = idempotency.reserve(
                     request.user, idem_key,
-                    idempotency.fingerprint(op="topup", client=client.id, amount=amount),
+                    idempotency.fingerprint(op="topup", client=client.id, amount=amount,
+                                            currency=currency),
                 )
             except idempotency.IdempotencyConflict as exc:
                 return _idempotency_conflict(exc)
@@ -467,26 +532,42 @@ class AgentTopUpView(APIView):
                 audit("wallet.topup.idempotent_hit", request, {"key": idem_key})
                 return Response(replay, status=status.HTTP_200_OK)
 
-            client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
+            # Never `wallet_for(..., currency)`: arriving money does not choose a
+            # person's currency. `currency=` makes the ledger refuse a wallet that
+            # changed unit since the check above.
+            client_wallet = wallet_for(client, "client")
             tx = move_funds_atomic(
                 None,
                 client_wallet,
                 amount,
                 actor_id=request.user.id,
                 tx_type="topup",
+                currency=currency,
                 money_type=MoneyType.WALLET_MOVE,
                 metadata={"agent_id": request.user.id, "api_key_id": getattr(api_key, "key_id", None)},
             )
             # refresh balance from DB to reflect updated value
             client_wallet.refresh_from_db()
-            resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance)}
+            resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance),
+                    "currency": tx.currency}
             idempotency.complete(idem, resp)
 
-        audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount)})
+        audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount), "currency": currency})
         return Response(resp, status=status.HTTP_200_OK)
 
 
 class ClientTransferToTrainerView(APIView):
+    """`POST /api/wallet/client/transfer/` — a client sends money to a trainer.
+
+    Body: `trainer_id`, `amount`, `idempotency_key`. Headers: `X-App-Channel`.
+
+    200 `{reference_id, client_balance, trainer_balance}`. Refusals: 403
+    `not_available_on_channel` and "only clients", 404 (no such trainer), 409
+    `currency_mismatch` with `client_currency` and `trainer_currency` when the two trade
+    in different currencies (nothing is converted on a transfer), 402
+    `insufficient_balance` with `currency`, 400 (any other refusal), 409/422
+    idempotency.
+    """
     permission_classes = [IsAuthenticated]
     throttle_classes = [ChargingRateThrottle]
 
@@ -503,6 +584,18 @@ class ClientTransferToTrainerView(APIView):
             return Response({"error": _("Only clients can initiate transfers")}, status=status.HTTP_403_FORBIDDEN)
 
         trainer = get_object_or_404(User, id=serializer.validated_data["trainer_id"], user_type="trainer")
+
+        # Before the key is reserved: a transfer converts nothing, so two people in
+        # different currencies cannot send each other money, and the app is told so
+        # with a code rather than a bare 400 (SIDE_BUGS S-160).
+        from .models import currency_for
+        client_currency, trainer_currency = currency_for(request.user), currency_for(trainer)
+        if client_currency != trainer_currency:
+            return Response({"error": _("You and this trainer use different currencies."),
+                             "code": "currency_mismatch",
+                             "client_currency": client_currency,
+                             "trainer_currency": trainer_currency},
+                            status=status.HTTP_409_CONFLICT)
 
         idem_key = serializer.validated_data["idempotency_key"]
         try:
@@ -522,10 +615,26 @@ class ClientTransferToTrainerView(APIView):
         client_wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
         trainer_wallet, _created = Wallet.objects.get_or_create(owner=trainer, defaults={"owner_type": "trainer"})
 
+        from .models import CurrencyMismatch, InsufficientBalance
+
         amount = serializer.validated_data["amount"]
         try:
             tx = move_funds_atomic(client_wallet, trainer_wallet, amount, actor_id=request.user.id, tx_type="transfer",
                                    money_type=MoneyType.WALLET_MOVE, metadata={"trainer_id": trainer.id})
+        except InsufficientBalance:
+            idempotency.release(idem)
+            return Response({"error": _("Insufficient wallet balance."),
+                             "code": "insufficient_balance",
+                             "currency": client_wallet.currency},
+                            status=status.HTTP_402_PAYMENT_REQUIRED)
+        except CurrencyMismatch:
+            # A wallet changed unit between the check above and the lock.
+            idempotency.release(idem)
+            return Response({"error": _("You and this trainer use different currencies."),
+                             "code": "currency_mismatch",
+                             "client_currency": currency_for(request.user),
+                             "trainer_currency": currency_for(trainer)},
+                            status=status.HTTP_409_CONFLICT)
         except ValueError as e:
             # No funds moved (atomic rollback) — release the key so the caller can retry.
             idempotency.release(idem)
@@ -540,6 +649,21 @@ class ClientTransferToTrainerView(APIView):
 
 
 class AdminReversalView(APIView):
+    """`POST /api/wallet/admin/reversal/` — support puts one ledger row back.
+
+    Body: `reference_id`, `idempotency_key`, optional `reason`. 200 `{reference_id}`.
+    Refusals: 404, 409 `already_reversed`, 409 `not_reversible` (a reversal), 409
+    `exchange_leg` (one half of a currency exchange — see below), 400, 409/422
+    idempotency.
+
+    ONE LEG OF AN EXCHANGE IS REFUSED (SIDE_BUGS S-161). A cross-currency coaching
+    payout is two rows — a debit out of escrow in the client's currency and a credit
+    into the trainer's wallet in theirs — tied by `exchange_reference`. Reversing only
+    the credit burned the trainer's money while the escrow debit stayed burned too;
+    reversing only the debit minted escrow money whose trainer side was never taken
+    back; and either way the coaching month still read as paid. Undoing an exchange is
+    a decision about both legs and the month, and this endpoint does not make it.
+    """
     permission_classes = [IsAuthenticated, IsAdmin]
 
     def post(self, request):
@@ -561,6 +685,12 @@ class AdminReversalView(APIView):
         if original.tx_type == "reversal":
             return Response({"error": _("A reversal cannot itself be reversed"),
                              "code": "not_reversible"}, status=status.HTTP_409_CONFLICT)
+        if original.exchange_reference:
+            return Response({"error": _("This is one half of a currency exchange and "
+                                        "cannot be reversed on its own."),
+                             "code": "exchange_leg",
+                             "exchange_reference": original.exchange_reference},
+                            status=status.HTTP_409_CONFLICT)
 
         idem_key = serializer.validated_data["idempotency_key"]
         try:
@@ -684,6 +814,16 @@ class AgentTopUpProxyView(APIView):
     """Server-side signing proxy for agent top-ups.
 
     Mobile calls this endpoint with JWT; the server signs using the stored secret and executes the top-up flow directly.
+
+    Body: `client_identifier`, `amount`, `currency` ("SYP" | "USD" — the currency of the
+    CASH the agent took, required), `idempotency_key`. Headers: `X-App-Channel`.
+
+    200 `{reference_id, balance, currency}`. Refusals: 400 `validation_error` (a missing
+    or unknown `currency` is `field_errors.currency`), 403 `not_available_on_channel`,
+    agent not active, 404 (no such client), 409 `currency_mismatch` with
+    `client_currency` and `topup_currency` when the client trades in the other
+    currency, 429 (the cap FOR THAT CURRENCY), 409/422 idempotency. Same rules as
+    `AgentTopUpView`.
     """
     permission_classes = [IsAuthenticated, IsAgent]
     throttle_classes = [ChargingRateThrottle]
@@ -706,12 +846,16 @@ class AgentTopUpProxyView(APIView):
 
         client_identifier = serializer.validated_data["client_identifier"]
         amount = serializer.validated_data["amount"]
+        currency = serializer.validated_data["currency"]
         idempotency_key = serializer.validated_data["idempotency_key"]
 
         # --- Pre-side-effect validation before reserving the idempotency key ---
         client = _client_named(client_identifier)
         if getattr(client, "user_type", None) != "client":
             return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
+        mismatch = _topup_currency_mismatch(client, currency)
+        if mismatch is not None:
+            return mismatch
 
         # Same serialization as the signed endpoint. This path needs only a JWT, so it
         # is the easier of the two to race: an agent's own app can fire ten parallel
@@ -721,7 +865,8 @@ class AgentTopUpProxyView(APIView):
             if agent_profile.status != "active":
                 return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
 
-            limit_error = _topup_limit_error(agent_profile, request.user, amount, request)
+            limit_error = _topup_limit_error(agent_profile, request.user, amount, request,
+                                             currency)
             if limit_error:
                 return limit_error
 
@@ -729,7 +874,8 @@ class AgentTopUpProxyView(APIView):
             try:
                 idem, replay = idempotency.reserve(
                     request.user, idempotency_key,
-                    idempotency.fingerprint(op="topup", client=client.id, amount=amount),
+                    idempotency.fingerprint(op="topup", client=client.id, amount=amount,
+                                            currency=currency),
                 )
             except idempotency.IdempotencyConflict as exc:
                 return _idempotency_conflict(exc)
@@ -737,14 +883,16 @@ class AgentTopUpProxyView(APIView):
                 audit("wallet.topup.idempotent_hit", request, {"key": idempotency_key})
                 return Response(replay, status=status.HTTP_200_OK)
 
-            client_wallet, _created = Wallet.objects.get_or_create(owner=client, defaults={"owner_type": "client"})
+            client_wallet = wallet_for(client, "client")   # see AgentTopUpView
             tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id, tx_type="topup",
+                                   currency=currency,
                                    money_type=MoneyType.WALLET_MOVE, metadata={"agent_id": request.user.id})
             client_wallet.refresh_from_db()
-            resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance)}
+            resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance),
+                    "currency": tx.currency}
             idempotency.complete(idem, resp)
 
-        audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount)})
+        audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount), "currency": currency})
         return Response(resp, status=status.HTTP_200_OK)
 
 class AdminAuditExportView(APIView):
@@ -776,7 +924,32 @@ class AdminAuditExportView(APIView):
         return Response(resp)
 
 
+#: What a single top-up must reach to count as "large" when nobody has set a threshold
+#: for its currency. It is the one number this alert ever had, kept as it was rather
+#: than invented per currency: `WALLET_LARGE_TOPUP_THRESHOLDS` (`{"SYP": ..., "USD":
+#: ...}`) is where the owner's numbers go.
+DEFAULT_LARGE_TOPUP_THRESHOLD = 1000
+
+
+def large_topup_thresholds() -> dict:
+    """currency -> the amount one top-up must reach to be flagged."""
+    from .currencies import CURRENCY_CODES
+
+    configured = getattr(settings, "WALLET_LARGE_TOPUP_THRESHOLDS", None) or {}
+    return {code: configured.get(code, DEFAULT_LARGE_TOPUP_THRESHOLD)
+            for code in CURRENCY_CODES}
+
+
 class AdminSuspiciousActivityView(APIView):
+    """`GET /api/wallet/admin/alerts/suspicious/?days=` — heuristics for an operator.
+
+    `large_topups` and `rapid_topups` count CASH top-ups only, and `large_topups` is
+    judged and totalled per currency, each against its own threshold
+    (`large_topup_thresholds`); its entries carry `currency`. The mint leg of a plan
+    payment is also a `topup` row, and counting it flagged every client who bought a
+    plan, while one threshold for both currencies let a dollar top-up worth millions of
+    pounds through unflagged (SIDE_BUGS S-162).
+    """
     permission_classes = [IsAuthenticated, IsAdmin]
 
     def get(self, request):
@@ -788,10 +961,18 @@ class AdminSuspiciousActivityView(APIView):
         for row in failed_auths:
             if row["cnt"] and row["cnt"] >= 5:
                 alerts.append({"type": "failed_auth_spike", "actor_id": row["actor_id"], "count": row["cnt"]})
-        large_topups = Transaction.objects.filter(tx_type="topup", created_at__gte=since, amount__gte=1000).values("actor_id").annotate(total=Sum("amount"))
+        # Cash top-ups: not the mint leg of a plan payment.
+        topups = (Transaction.objects.filter(tx_type="topup", created_at__gte=since)
+                  .exclude(metadata__has_key="original_payment_id"))
+        large = Q()
+        for code, threshold in large_topup_thresholds().items():
+            large |= Q(currency=code, amount__gte=threshold)
+        large_topups = (topups.filter(large).values("actor_id", "currency")
+                        .annotate(total=Sum("amount")).order_by("actor_id", "currency"))
         for row in large_topups:
-            alerts.append({"type": "large_topups", "actor_id": row["actor_id"], "total": float(row["total"] or 0)})
-        rapid_topups = Transaction.objects.filter(tx_type="topup", created_at__gte=since).values("actor_id").annotate(cnt=Sum(1))
+            alerts.append({"type": "large_topups", "actor_id": row["actor_id"],
+                           "currency": row["currency"], "total": float(row["total"] or 0)})
+        rapid_topups = topups.values("actor_id").annotate(cnt=Sum(1))
         for row in rapid_topups:
             if row["cnt"] and row["cnt"] >= 20:
                 alerts.append({"type": "rapid_topups", "actor_id": row["actor_id"], "count": row["cnt"]})

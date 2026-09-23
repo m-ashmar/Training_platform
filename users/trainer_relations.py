@@ -47,7 +47,20 @@ logger = logging.getLogger(__name__)
 
 
 class HoldFailed(Exception):
-    """The client's charge could not be held, so the relation must not be granted."""
+    """The client's charge could not be held, so the relation must not be granted.
+
+    `code` says why, for the view to answer (SIDE_BUGS S-085): `insufficient_balance`,
+    `currency_mismatch`, `exchange_rate_stale` / `exchange_rate_missing` (the price had
+    to cross a currency and the operator's rate would not price it), or `hold_failed`
+    for anything else. The message is for the log, never for the person.
+    """
+
+    code = "hold_failed"
+
+    def __init__(self, message="", code=None):
+        super().__init__(message)
+        if code:
+            self.code = code
 
 
 class TrainerHasActiveClients(Exception):
@@ -81,7 +94,7 @@ def _wallet_for(user, owner_type, currency=None):
 
 def price_of(relation) -> Decimal:
     """What this pair agreed to, as the PRICE OF RECORD: the trainer's number, in the
-    trainer's own currency.
+    trainer's own currency (`price_of_record` gives the unit with it).
 
     Falls back to the trainer's rate only when the row predates `agreed_rate`, never to
     a rate raised after the client asked. What the CLIENT is charged is this converted
@@ -91,6 +104,45 @@ def price_of(relation) -> Decimal:
     if relation.agreed_rate is not None:
         return Decimal(relation.agreed_rate)
     return Decimal(getattr(relation.trainer, 'trainer_hourly_rate', None) or 0)
+
+
+def price_of_record(relation) -> tuple[Decimal, str]:
+    """`(amount, currency)` this pair agreed to.
+
+    The currency is the one snapshotted beside `agreed_rate` when the price was quoted
+    (`agreed_currency`), not whatever the trainer's wallet holds by the time the hold
+    is taken: read that late, a trainer who switched currency after inviting re-priced
+    the agreement by four orders of magnitude (SIDE_BUGS S-083). A row with no snapshot
+    — the trainer's live rate, or a row from before the column — is in the trainer's
+    currency now, which is what it was quoted in.
+    """
+    from wallet import currency_for
+
+    if relation.agreed_rate is not None and relation.agreed_currency:
+        return Decimal(relation.agreed_rate), relation.agreed_currency
+    return price_of(relation), currency_for(relation.trainer)
+
+
+def quote_agreed_price(relation, trainer) -> None:
+    """Snapshot the trainer's price AND its unit onto `relation` (not saved).
+
+    Everywhere a request or an invitation writes `agreed_rate` it writes this, so the
+    number never exists without the currency it was quoted in.
+    """
+    from wallet import currency_for
+
+    relation.agreed_rate = getattr(trainer, 'trainer_hourly_rate', None)
+    relation.agreed_currency = currency_for(trainer) if relation.agreed_rate is not None else ''
+
+
+def priced_for_client(relation):
+    """The `subscription.pricing.Priced` for one month of this coaching: the client's
+    charge in the client's currency, the price of record, and the rate row used."""
+    from subscription.pricing import charge_for
+    from wallet import currency_for
+
+    amount, currency = price_of_record(relation)
+    return charge_for(amount, currency, currency_for(relation.client))
 
 
 def charge_for_client(relation):
@@ -105,11 +157,7 @@ def charge_for_client(relation):
     operator's rate is missing or stale. A pair who already share a currency converts
     nothing and is never stopped by a stale rate.
     """
-    from subscription.pricing import charge_for
-    from wallet import currency_for
-
-    priced = charge_for(price_of(relation), currency_for(relation.trainer),
-                        currency_for(relation.client))
+    priced = priced_for_client(relation)
     return priced.amount, priced.currency, priced.rate
 
 
@@ -135,17 +183,26 @@ def take_hold(relation, actor) -> None:
         # whatever the trainer prices in. Refused rather than guessed when the two
         # differ and the operator's rate is missing or stale — the code travels on the
         # exception so the view can answer it.
-        amount, currency, _rate = charge_for_client(relation)
+        priced = priced_for_client(relation)
     except ExchangeRateUnavailable as exc:
-        failure = HoldFailed(str(exc))
-        failure.code = exc.code
-        raise failure from exc
+        raise HoldFailed(str(exc), code=exc.code) from exc
+    amount, currency = priced.amount, priced.currency
     if amount <= 0:
         return
 
     client_wallet = _wallet_for(relation.client, "client", currency)
     if client_wallet.balance < amount:
-        raise HoldFailed("Insufficient client wallet balance for the trainer charge")
+        raise HoldFailed("Insufficient client wallet balance for the trainer charge",
+                         code="insufficient_balance")
+    # The conversion, written down where the money is (SIDE_BUGS S-151): the hold leg
+    # itself crosses nothing — client and escrow are the same currency — so the rate
+    # goes in its metadata, not its `exchange_rate` column, which means "this row
+    # crossed". The month carries it as columns (`open_period`).
+    snapshot = {'price_amount': str(priced.price_amount),
+                'price_currency': priced.price_currency}
+    if priced.rate is not None:
+        snapshot.update({'exchange_rate_id': priced.rate.pk,
+                         'exchange_rate_value': str(priced.rate.rate)})
     try:
         tx = move_funds_atomic(
             client_wallet, get_escrow_wallet(currency), amount, currency=currency,
@@ -154,10 +211,11 @@ def take_hold(relation, actor) -> None:
             metadata={'purpose': 'trainer_request_hold',
                       'trainer_id': relation.trainer_id,
                       'client_id': relation.client_id,
-                      'relation_id': relation.id})
+                      'relation_id': relation.id, **snapshot})
     except ValueError as exc:
-        # `move_funds_atomic`'s own refusals (balance, currency): our words, safe to show.
-        raise HoldFailed(str(exc)) from exc
+        # `move_funds_atomic`'s own refusals (balance, currency). Logged, never shown:
+        # the view answers the `code`.
+        raise HoldFailed(str(exc), code=getattr(exc, 'code', None)) from exc
     except Exception as exc:
         # Anything else is the database's words, and approval puts this text in a 402
         # body: a lost deadlock sent Postgres process ids, transaction ids and relation
@@ -168,7 +226,7 @@ def take_hold(relation, actor) -> None:
     relation.save(update_fields=['hold_reference', 'updated_at'])
     # Month 1 of the coaching, with the commission rate of today (users/coaching.py).
     from .coaching import open_period
-    open_period(relation, tx)
+    open_period(relation, tx, priced=priced)
 
 
 def _move_hold(relation, actor, destination_owner, owner_type, purpose, *, pay_out=False):

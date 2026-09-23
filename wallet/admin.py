@@ -124,12 +124,17 @@ class AgentProfileAdmin(admin.ModelAdmin):
     #: controls and stay editable; which account the profile belongs to does not.
     readonly_fields = ("user", "wallet_type")
     list_display = ("user", "display_name", "city", "is_listed", "wallet_type",
-                    "daily_limit", "monthly_limit", "status")
+                    "daily_limit", "monthly_limit", "daily_limit_usd", "monthly_limit_usd",
+                    "status")
     list_filter = ("wallet_type", "status", "is_listed", "city")
     search_fields = ("user__email", "user__username", "display_name", "city", "area")
     fieldsets = (
         (None, {"fields": ("user", "wallet_type", "status")}),
-        ("Limits and access", {"fields": ("daily_limit", "monthly_limit", "ip_allowlist")}),
+        # One pair of caps per currency: the first pair is Syrian pounds, the second US
+        # dollars. 0 means no top-ups in that currency (SIDE_BUGS S-059).
+        ("Limits and access", {"fields": ("daily_limit", "monthly_limit",
+                                          "daily_limit_usd", "monthly_limit_usd",
+                                          "ip_allowlist")}),
         # What a client sees on the TopUp screen. `is_listed` is the switch, and it is
         # off until the agent has agreed to be published: `public_phone` is the shop
         # line they gave us for that, never the number they registered with.
@@ -226,8 +231,30 @@ class ExchangeRateAdmin(admin.ModelAdmin):
                     "created_at")
     list_filter = ("base", "quote")
     ordering = ("-effective_from", "-id")
-    fields = ("base", "quote", "rate", "effective_from", "note")
+    #: No `base`/`quote` on the form: there is ONE pair, in one direction
+    #: (`wallet.currencies.RATE_BASE/RATE_QUOTE`), and `save_model` stamps it. The form
+    #: offered both, so an operator could enter "1 SYP = 0.000077 USD", see it marked
+    #: live, and have every conversion keep using the stale USD/SYP row it never
+    #: replaced (SIDE_BUGS S-156).
+    fields = ("rate", "effective_from", "note")
     readonly_fields = ()
+
+    def get_queryset(self, request):
+        """The page's rows, each told which one is live — decided ONCE per page.
+
+        The status column asked `ExchangeRate.current()` per row, an N+1 on the rate
+        history, and re-implemented the staleness rule beside the one the conversion
+        uses (SIDE_BUGS S-157). `wallet.exchange.rate_health()` is that rule, read once
+        here and carried on every row.
+        """
+        from django.db.models import BigIntegerField, Value
+
+        from .exchange import rate_health
+
+        live = rate_health()["rate"]
+        return super().get_queryset(request).annotate(
+            fx_live_pk=Value(live.pk if live is not None else None,
+                             output_field=BigIntegerField()))
 
     @admin.display(description="Pair")
     def pair(self, obj):
@@ -235,23 +262,44 @@ class ExchangeRateAdmin(admin.ModelAdmin):
 
     @admin.display(description="Status")
     def status(self, obj):
-        """Live / superseded / queued, and how old the live one is."""
-        from .exchange import max_age_days, rate_age_days
-        from .models import ExchangeRate as _Rate
+        """Live / superseded / queued / not used, and how old the live one is.
 
-        current = _Rate.current(obj.base, obj.quote)
-        if current is None or obj.effective_from > timezone.now():
+        Live means the row `wallet.exchange.current_rate()` returns — the one every
+        conversion uses — and stale means what `wallet.exchange.is_stale` says, the same
+        rule `convert_at_the_operators_rate` refuses on. A row for any other pair is
+        never read by a conversion and says so.
+        """
+        from .currencies import RATE_BASE, RATE_QUOTE
+        from .exchange import current_rate, is_stale, max_age_days, rate_age_days
+
+        if (obj.base, obj.quote) != (RATE_BASE, RATE_QUOTE):
+            return format_html(
+                '<span style="color:#b00">not used — conversions read only '
+                '1 {} = ? {}</span>', RATE_BASE, RATE_QUOTE)
+        live_pk = getattr(obj, "fx_live_pk", None)
+        if not hasattr(obj, "fx_live_pk"):
+            # A row read outside the changelist queryset (a detail page).
+            live = current_rate()
+            live_pk = live.pk if live is not None else None
+        if obj.effective_from > timezone.now():
             return format_html('<span style="color:#888">queued</span>')
-        if current.pk != obj.pk:
+        if live_pk != obj.pk:
             return format_html('<span style="color:#888">superseded</span>')
         age = rate_age_days(obj) or 0
-        if age > max_age_days():
+        if is_stale(obj):
             return format_html(
                 '<b style="color:#b00">LIVE — {} days old, past the {}-day limit: '
                 'cross-currency purchases are refused until a new rate is set '
                 '(same-currency sales are unaffected)</b>',
                 f"{age:.1f}", max_age_days())
         return format_html('<b style="color:#070">live — {} days old</b>', f"{age:.1f}")
+
+    def get_fields(self, request, obj=None):
+        # An existing row shows its pair; the add form has none to choose.
+        if obj is not None:
+            return ("base", "quote", "rate", "effective_from", "set_by", "note",
+                    "created_at")
+        return self.fields
 
     def get_readonly_fields(self, request, obj=None):
         # Every field, once the row exists: append-only means the form may create and
@@ -262,8 +310,12 @@ class ExchangeRateAdmin(admin.ModelAdmin):
         return ()
 
     def save_model(self, request, obj, form, change):
+        from .currencies import RATE_BASE, RATE_QUOTE
+
         if change:   # defence in depth; the model raises too
             raise PermissionError("ExchangeRate is append-only: add a new rate.")
+        # The one pair a conversion reads, whatever a crafted POST carried.
+        obj.base, obj.quote = RATE_BASE, RATE_QUOTE
         obj.set_by = request.user
         obj.save()
 

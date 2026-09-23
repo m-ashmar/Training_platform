@@ -817,6 +817,12 @@ class TrainerClientRelation(models.Model):
     #: raise the rate, then approve and sweep the client's wallet. The client agreed
     #: to a number, so that number is what they pay.
     agreed_rate = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    #: The UNIT of `agreed_rate`: the trainer's currency when the price was quoted,
+    #: written beside it every time it is written. A bare number was read in whatever
+    #: currency the trainer's wallet had at hold time, so a trainer who invited at
+    #: 500000 (pounds) and then switched to dollars charged the client 500000 dollars
+    #: (SIDE_BUGS S-083). Blank only on a row whose `agreed_rate` is empty too.
+    agreed_currency = models.CharField(max_length=3, blank=True, default='')
     #: The reference of the escrow Transaction while money is held for this pair, and
     #: empty when nothing is held. The hold had no identity at all: it was found by
     #: searching transaction metadata, released nowhere, and settled by the routine
@@ -953,6 +959,29 @@ class CoachingPeriod(models.Model):
     commission_rate = models.DecimalField(max_digits=5, decimal_places=4)
     commission = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     trainer_share = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    #: THE PRICE OF RECORD this month was charged for, and the rate that turned it into
+    #: `price` (SIDE_BUGS S-151). The trainer prices in their currency and the client
+    #: pays in theirs, so a month charged across the two is a conversion, and every
+    #: conversion is snapshotted: without these a USD-priced month charged in SYP could
+    #: not be explained on a receipt or by support, and every renewal re-charged the
+    #: number with no record of how it was reached. Same shape as `subscription.Payment`
+    #: (`price_amount`, `price_currency`, `exchange_rate`, `exchange_rate_value`).
+    #: A renewal copies month 1's: it is charged at the same client-currency price.
+    #: Null on months written before this existed; `exchange_rate` is null too when
+    #: nothing was converted.
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    price_currency = models.CharField(max_length=3, blank=True, default='')
+    exchange_rate = models.ForeignKey('wallet.ExchangeRate', null=True, blank=True,
+                                      on_delete=models.PROTECT,
+                                      related_name='coaching_periods')
+    exchange_rate_value = models.DecimalField(max_digits=18, decimal_places=6,
+                                              null=True, blank=True)
+    #: The trainer's share of a paid month is still in escrow, owed: it had to cross a
+    #: currency and the operator's rate was missing or stale when the month was paid
+    #: out (SIDE_BUGS S-082). The client's charge and the platform's commission are
+    #: not held up by it — the month runs — and the hourly run pays the share once the
+    #: rate is fresh (`users.coaching.settle_owed_payouts`). Null when nothing is owed.
+    payout_owed_since = models.DateTimeField(null=True, blank=True, db_index=True)
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='held',
                               db_index=True)
     #: The client -> escrow ledger row for this month.

@@ -48,6 +48,7 @@ from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDen
                                        ValidationError as DRFValidationError)
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 from training_platform.query_params import body_dict
+from .trainer_directory import CoachingPriceBook
 
 logger = logging.getLogger(__name__)
 
@@ -55,25 +56,6 @@ logger = logging.getLogger(__name__)
 #: The longest note a client may send with a request (RequestSheet).
 CLIENT_NOTE_MAX_LENGTH = 500
 
-
-def _shown_coaching_price(request, value):
-    """A coaching fee on a legacy payload, or None where this BUILD may not show one.
-
-    The key stays (additive); its value is null on a build whose
-    `can_show_coaching_prices` is off (`ios` today) or that declares no channel — the
-    spec's "no price strings reach store builds" (BACKEND_BUGS.md B-007). The
-    `/api/v1/trainers/` cards omit the key instead.
-    """
-    from policy.money import MoneyType
-    from policy.services import can_show_price
-
-    # Once per request, not per row: `can_show_price` reads the channel's row, and a
-    # 100-row page cost 100 queries.
-    shown = getattr(request, '_coaching_price_shown', None)
-    if shown is None:
-        shown = can_show_price(request, MoneyType.COACHING_1TO1)
-        request._coaching_price_shown = shown
-    return value if shown else None
 
 class CustomLoginView(LoginView):
     serializer_class = CustomLoginSerializer
@@ -577,12 +559,18 @@ class AssignClientView(APIView):
             # In a savepoint: `unique_pending_trainer_request_per_client` is a partial
             # unique index, and catching its IntegrityError outside an atomic block
             # leaves the surrounding transaction unusable for everything after it.
+            from .trainer_relations import quote_agreed_price
+            # The price AND its unit (SIDE_BUGS S-083): a bare `agreed_rate` was read in
+            # whatever currency the trainer's wallet had by the time it was charged.
+            quoted = TrainerClientRelation()
+            quote_agreed_price(quoted, request.user)
             with transaction.atomic():
                 relation, created = TrainerClientRelation.objects.get_or_create(
                     trainer=request.user,
                     client=client,
                     defaults={'status': 'pending', 'initiated_by': 'trainer',
-                              'agreed_rate': getattr(request.user, 'trainer_hourly_rate', None),
+                              'agreed_rate': quoted.agreed_rate,
+                              'agreed_currency': quoted.agreed_currency,
                               'requested_at': timezone.now(), 'responded_at': None}
                 )
             
@@ -601,10 +589,11 @@ class AssignClientView(APIView):
                     # Update status to pending for new request
                     relation.status = 'pending'
                     relation.initiated_by = 'trainer'
-                    relation.agreed_rate = getattr(request.user, 'trainer_hourly_rate', None)
+                    quote_agreed_price(relation, request.user)
                     relation.requested_at, relation.responded_at = timezone.now(), None
                     relation.client_note = ''    # the client's old note is not theirs to keep
                     relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
+                                                 'agreed_currency',
                                                  'requested_at', 'responded_at',
                                                  'client_note', 'updated_at'])
             
@@ -833,6 +822,9 @@ class PublicTrainersListView(APIView):
         page = paginator.paginate_queryset(trainers, request, view=self)
         
         if page is not None:
+            # In the reader's currency, with the unit beside it (SIDE_BUGS S-041): one
+            # wallet query and at most one rate query for the page.
+            prices = CoachingPriceBook(request, [t.pk for t in page])
             trainer_data = []
             for trainer in page:
                 trainer_data.append({
@@ -845,7 +837,8 @@ class PublicTrainersListView(APIView):
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_certifications': trainer.trainer_certifications,
                     'trainer_experience_years': trainer.trainer_experience_years,
-                    'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
+                    'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
+                    'coaching_currency': prices.trainer_rate(trainer)[1],
                     'trainer_is_verified': trainer.trainer_is_verified,
                     'client_count': trainer.client_count_anno,
                 })
@@ -854,6 +847,8 @@ class PublicTrainersListView(APIView):
                 'trainer_count': trainers.count()
             })
             
+        trainers = list(trainers)
+        prices = CoachingPriceBook(request, [t.pk for t in trainers])
         trainer_data = []
         for trainer in trainers:
             trainer_data.append({
@@ -866,7 +861,8 @@ class PublicTrainersListView(APIView):
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
                 'trainer_experience_years': trainer.trainer_experience_years,
-                'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
+                'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
+                'coaching_currency': prices.trainer_rate(trainer)[1],
                 'trainer_is_verified': trainer.trainer_is_verified,
                 'client_count': trainer.client_count_anno,
             })
@@ -955,6 +951,9 @@ class AvailableTrainersView(APIView):
         page = paginator.paginate_queryset(trainers, request, view=self)
         
         if page is not None:
+            # In the reader's currency, with the unit beside it (SIDE_BUGS S-041): one
+            # wallet query and at most one rate query for the page.
+            prices = CoachingPriceBook(request, [t.pk for t in page])
             trainer_data = []
             for trainer in page:
                 trainer_data.append({
@@ -968,7 +967,8 @@ class AvailableTrainersView(APIView):
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_certifications': trainer.trainer_certifications,
                     'trainer_experience_years': trainer.trainer_experience_years,
-                    'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
+                    'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
+                    'coaching_currency': prices.trainer_rate(trainer)[1],
                     'trainer_is_verified': trainer.trainer_is_verified,
                     'client_count': trainer.client_count_anno,
                 })
@@ -978,6 +978,8 @@ class AvailableTrainersView(APIView):
                 'trainer_count': trainers.count()
             })
         
+        trainers = list(trainers)
+        prices = CoachingPriceBook(request, [t.pk for t in trainers])
         trainer_data = []
         for trainer in trainers:
             trainer_data.append({
@@ -991,7 +993,8 @@ class AvailableTrainersView(APIView):
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
                 'trainer_experience_years': trainer.trainer_experience_years,
-                'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
+                'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
+                'coaching_currency': prices.trainer_rate(trainer)[1],
                 'trainer_is_verified': trainer.trainer_is_verified,
                 'client_count': trainer.client_count_anno,
             })
@@ -1235,9 +1238,12 @@ class ClientRequestTrainerView(APIView):
     400 `trainer_id_required`, `invalid_note`, `note_too_long`, `trainer_not_accepting`,
     `already_has_trainer`, `request_pending_elsewhere`, `already_with_this_trainer`,
     `request_already_pending`, `app_channel_required` (no known `X-App-Channel`, for a
-    trainer who charges); 402 `insufficient_balance` (with `required`, `balance`);
+    trainer who charges); 402 `insufficient_balance` (with `required`, `balance` and
+    `currency` — the month's price IN THE CLIENT'S CURRENCY, converted from the
+    trainer's at the operator's rate, and the client's balance in the same unit);
     403 `permission_denied` (the caller is not a client), `not_available_on_channel`;
-    404 `not_found`.
+    404 `not_found`; 409 `exchange_rate_stale` / `exchange_rate_missing` when the
+    trainer prices in the other currency and the operator's rate cannot convert it.
     """
     permission_classes = [IsAuthenticated]
     
@@ -1293,23 +1299,33 @@ class ClientRequestTrainerView(APIView):
                 from policy.money import MoneyType
                 from policy.services import require_purchase_allowed
                 require_purchase_allowed(request, MoneyType.COACHING_1TO1)
-            # Enforce wallet balance >= trainer charge before allowing request
-            try:
-                from wallet.models import Wallet
-                trainer_charge = getattr(trainer, 'trainer_hourly_rate', None) or 0
-                if trainer_charge and trainer_charge > 0:
-                    client_wallet, _created = Wallet.objects.get_or_create(owner=request.user, defaults={"owner_type": "client"})
-                    if client_wallet.balance < trainer_charge:
-                        return Response(
-                            {'error': _('Insufficient wallet balance to request this trainer'),
-                             'code': 'insufficient_balance',
-                             'required': str(trainer_charge), 'balance': str(client_wallet.balance)},
-                            status=status.HTTP_402_PAYMENT_REQUIRED
-                        )
-            except Exception:
-                # Optional side effect: swallowing this silently is what made the
-                # surrounding failures invisible in logs. Control flow is unchanged.
-                logger.debug('suppressed non-fatal error', exc_info=True)
+            # The client's wallet must cover month 1 before the request is sent. In the
+            # CLIENT's currency (SIDE_BUGS S-084): the trainer's rate is in theirs, and
+            # comparing the two bare numbers told a dollar client with $100 that a
+            # 500,000-pound trainer (about $38) cost "500000.00". No broad `except`
+            # any more: it swallowed a failed conversion and let the request through.
+            trainer_charge = getattr(trainer, 'trainer_hourly_rate', None) or 0
+            if trainer_charge > 0:
+                from subscription.pricing import charge_for
+                from wallet import currency_for
+                from wallet.exchange import ExchangeRateUnavailable, refusal_body
+                from wallet.models import wallet_for
+
+                try:
+                    required = charge_for(trainer_charge, currency_for(trainer),
+                                          currency_for(request.user))
+                except ExchangeRateUnavailable as exc:
+                    return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+                client_wallet = wallet_for(request.user, 'client')
+                if client_wallet.balance < required.amount:
+                    return Response(
+                        {'error': _('Insufficient wallet balance to request this trainer'),
+                         'code': 'insufficient_balance',
+                         'required': str(required.amount),
+                         'balance': str(client_wallet.balance),
+                         'currency': required.currency},
+                        status=status.HTTP_402_PAYMENT_REQUIRED
+                    )
             
             # Check if trainer is available
             if not trainer.trainer_is_available:
@@ -1344,13 +1360,19 @@ class ClientRequestTrainerView(APIView):
                 )
             
             # Check if relation already exists
+            from .trainer_relations import quote_agreed_price
+            quoted = TrainerClientRelation()
+            quote_agreed_price(quoted, trainer)
             relation, created = TrainerClientRelation.objects.get_or_create(
                 trainer=trainer,
                 client=request.user,
                 defaults={'status': 'pending', 'initiated_by': 'client',
-                          # The price the client is agreeing to, right now. Read again
-                          # at approval it was whatever the trainer had since set it to.
-                          'agreed_rate': getattr(trainer, 'trainer_hourly_rate', None),
+                          # The price the client is agreeing to, right now, AND the
+                          # currency it is in. Read again at approval it was whatever
+                          # the trainer had since set it to, and in whatever currency
+                          # their wallet had since taken (SIDE_BUGS S-083).
+                          'agreed_rate': quoted.agreed_rate,
+                          'agreed_currency': quoted.agreed_currency,
                           'requested_at': timezone.now(), 'responded_at': None,
                           'client_note': note}
             )
@@ -1372,11 +1394,12 @@ class ClientRequestTrainerView(APIView):
                     # Allow new request after rejection
                     relation.status = 'pending'
                     relation.initiated_by = 'client'
-                    relation.agreed_rate = getattr(trainer, 'trainer_hourly_rate', None)
+                    quote_agreed_price(relation, trainer)
                     relation.requested_at, relation.responded_at = timezone.now(), None
                     # This request's note, never the declined one's.
                     relation.client_note = note
                     relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
+                                                 'agreed_currency',
                                                  'requested_at', 'responded_at',
                                                  'client_note', 'updated_at'])
             
@@ -1723,6 +1746,14 @@ class ClientRespondToTrainerInviteView(APIView):
       user_blocked              403  one of you blocked the other after it was sent
       refund_failed             409  the hold could not be returned; nothing changed
 
+    Accepting takes month 1 into escrow, in the client's currency; if that fails:
+
+      insufficient_balance      402  the client's wallet does not cover month 1
+      exchange_rate_stale       409  the trainer prices in the other currency and the
+      exchange_rate_missing     409    operator's rate is too old / was never set
+      currency_mismatch         409  the charge could not be moved in this currency
+      hold_failed               402  anything else; nothing changed, try again
+
     `trainer/respond-to-request/` answers with the same codes for the mirror cases, so
     the app needs one branch for both sides.
     """
@@ -1793,7 +1824,15 @@ class ClientRespondToTrainerInviteView(APIView):
 
 
 class ClientPendingTrainerInvitesView(APIView):
-    """Invitations waiting on this client, so the app can show them."""
+    """Invitations waiting on this client, so the app can show them.
+
+    `{invitations: [{request_id, trainer_id, trainer_name, agreed_rate, agreed_currency,
+    created_at}]}`. `agreed_rate` is the invitation's price in the CLIENT's currency —
+    what accepting it will charge — and `agreed_currency` is that currency; when the
+    operator's rate cannot convert it, it is the trainer's quoted price and
+    `agreed_currency` names the trainer's currency. Both null on a build that may not
+    show a coaching fee.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -1805,13 +1844,47 @@ class ClientPendingTrainerInvitesView(APIView):
         rows = (TrainerClientRelation.objects
                 .filter(client=request.user, status='pending', initiated_by='trainer')
                 .select_related('trainer').order_by('-created_at', '-id')[:50])
+        rows = list(rows)
+        # The price the invitation carries, in THIS client's currency, with the unit
+        # beside it (SIDE_BUGS S-041). One wallet query for the page.
+        prices = CoachingPriceBook(request, [r.trainer_id for r in rows])
         return Response({'invitations': [{
             'request_id': r.id,
             'trainer_id': r.trainer_id,
             'trainer_name': r.trainer.full_name or r.trainer.username,
-            'agreed_rate': _shown_coaching_price(request, r.agreed_rate),
+            'agreed_rate': prices.agreed(r)[0],
+            'agreed_currency': prices.agreed(r)[1],
             'created_at': r.created_at,
         } for r in rows]})
+
+
+def _hold_refusal(exc):
+    """The response for a `HoldFailed` from `take_hold`, by its `code`.
+
+    409 `exchange_rate_stale` / `exchange_rate_missing` — the price had to cross a
+    currency and the operator's rate would not price it (the same body a checkout
+    answers, `wallet.exchange.refusal_body`); 402 `insufficient_balance` — the client's
+    wallet does not cover month 1; 409 `currency_mismatch`; 402 `hold_failed` —
+    anything else, try again.
+    """
+    from rest_framework import status as http
+    from rest_framework.response import Response
+
+    from wallet.exchange import REFUSAL_MESSAGES, refusal_body
+
+    code = getattr(exc, 'code', None) or 'hold_failed'
+    if code in REFUSAL_MESSAGES:
+        return Response(refusal_body(exc), status=http.HTTP_409_CONFLICT)
+    if code == 'insufficient_balance':
+        return Response({'error': _("The client's wallet does not cover the first month "
+                                    "of coaching."),
+                         'code': code}, status=http.HTTP_402_PAYMENT_REQUIRED)
+    if code == 'currency_mismatch':
+        return Response({'error': _('The trainer charge could not be held in this '
+                                    'currency.'),
+                         'code': code}, status=http.HTTP_409_CONFLICT)
+    return Response({'error': _('The trainer charge could not be held. Please try again.'),
+                     'code': 'hold_failed'}, status=http.HTTP_402_PAYMENT_REQUIRED)
 
 
 def approve_trainer_relation(relation, actor):
@@ -1901,10 +1974,11 @@ def approve_trainer_relation(relation, actor):
         try:
             take_hold(relation, actor)
         except HoldFailed as exc:
+            # The reason travels as a `code`, and the words the person reads are ours,
+            # translated (SIDE_BUGS S-085). The exception's own text is for the log:
+            # it used to go into the body, untranslated, operator English and all.
             logger.warning("Trainer hold failed for relation %s: %s", relation.id, exc)
-            return Response({'error': _('The trainer charge could not be held: %(why)s')
-                             % {'why': str(exc)}},
-                            status=http.HTTP_402_PAYMENT_REQUIRED), relation
+            return _hold_refusal(exc), relation
 
         relation.status = 'approved'
         relation.responded_at = timezone.now()
@@ -2021,6 +2095,11 @@ class TrainerRespondToRequestView(APIView):
       trainer_unavailable       409  the trainer was deactivated in the meantime
       user_blocked              403  one of you blocked the other after it was sent
       refund_failed             409  the hold could not be returned; nothing changed
+      insufficient_balance      402  approving: the client's wallet does not cover month 1
+      exchange_rate_stale       409  approving: you price in the other currency and the
+      exchange_rate_missing     409    operator's rate is too old / was never set
+      currency_mismatch         409  approving: the charge could not be moved
+      hold_failed               402  approving: anything else; nothing changed, try again
 
     TODO: Add approval/rejection reasons
     TODO: Implement request history tracking
@@ -2176,6 +2255,9 @@ class ClientRequestStatusView(APIView):
                 client=request.user
             ).select_related('trainer').order_by('-created_at', '-id')
             
+            client_relations = list(client_relations)
+            # Every price in this client's currency, with its unit (SIDE_BUGS S-041).
+            prices = CoachingPriceBook(request, [r.trainer_id for r in client_relations])
             requests_data = []
             for relation in client_relations:
                 trainer = relation.trainer
@@ -2188,14 +2270,16 @@ class ClientRequestStatusView(APIView):
                     'trainer_bio': trainer.trainer_bio,
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_experience_years': trainer.trainer_experience_years,
-                    'trainer_hourly_rate': _shown_coaching_price(request, trainer.trainer_hourly_rate),
+                    'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
+                    'coaching_currency': prices.trainer_rate(trainer)[1],
                     # When THIS request was sent (a re-sent request reuses the row).
                     'requested_at': relation.requested_at or relation.created_at,
                     'status': relation.status,
                     # Additive (B-008): the answer's time ("training together since"),
                     # the price this client agreed to, and their note.
                     'responded_at': relation.responded_at,
-                    'agreed_rate': _shown_coaching_price(request, relation.agreed_rate),
+                    'agreed_rate': prices.agreed(relation)[0],
+                    'agreed_currency': prices.agreed(relation)[1],
                     'note': relation.client_note,
                 })
             
