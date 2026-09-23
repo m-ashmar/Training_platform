@@ -416,9 +416,11 @@ def training_dates(user, since=None) -> tuple:
 
 def streak_from(dates: set, today=None) -> tuple:
     """(current, longest) runs of consecutive days in `dates`. A run is current when it
-    reaches today or yesterday, as the streak endpoint has always required."""
+    reaches today or yesterday, as the streak endpoint has always required. A day after
+    `today` has not been trained yet and counts in neither (SIDE_BUGS S-112): a run
+    ending in the future read as current, because `(today - day).days` is negative."""
     today = today or timezone.localdate()
-    ordered = sorted(d for d in dates if d is not None)
+    ordered = sorted(d for d in dates if d is not None and d <= today)
     longest = run = 0
     previous = None
     for day in ordered:

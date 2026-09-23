@@ -4221,7 +4221,9 @@ msgid "This client's wallet is in a different currency."
 msgstr "محفظة هذا العميل بعملة مختلفة."
 
 #: wallet/views.py
-msgid "Your currency cannot be changed while a payment or a coaching request is open."
+msgid ""
+"Your currency cannot be changed while a payment or a coaching request is "
+"open."
 msgstr "لا يمكن تغيير عملتك أثناء وجود دفعة أو طلب تدريب مفتوح."
 
 #: wallet/views.py
@@ -4233,7 +4235,8 @@ msgid "Insufficient wallet balance."
 msgstr "رصيد المحفظة غير كافٍ."
 
 #: wallet/views.py
-msgid "This is one half of a currency exchange and cannot be reversed on its own."
+msgid ""
+"This is one half of a currency exchange and cannot be reversed on its own."
 msgstr "هذه العملية نصف عملية تحويل بين عملتين ولا يمكن عكسها وحدها."
 
 #: users/views.py
@@ -4247,3 +4250,35 @@ msgstr "تعذّر حجز رسوم المدرب بهذه العملة."
 #: users/views.py
 msgid "The trainer charge could not be held. Please try again."
 msgstr "تعذّر حجز رسوم المدرب. يرجى المحاولة مرة أخرى."
+
+#: routine/views.py
+#, python-format
+msgid "Invalid video URL format: %(url)s"
+msgstr "صيغة رابط الفيديو غير صالحة: %(url)s"
+
+#: routine/views.py
+#, python-format
+msgid "Media photo %(number)d: %(reason)s"
+msgstr "الصورة الإضافية %(number)d: %(reason)s"
+
+#: routine/views.py
+msgid "No image file provided. Please include a file with key \"image\""
+msgstr "لم يتم توفير ملف الصورة. يرجى تضمين ملف يحتوي على المفتاح \"image\""
+
+#: routine/views.py
+msgid "No media items provided. Please include \"media_items\" array"
+msgstr "لم يتم توفير عناصر وسائط. يرجى تضمين المصفوفة \"media_items\""
+
+#: routine/views.py
+msgid "No media_ids provided. Please include \"media_ids\" array"
+msgstr "لم يتم توفير معرّفات الوسائط. يرجى تضمين المصفوفة \"media_ids\""
+
+#: routine/views.py
+#, python-format
+msgid "Successfully added %(count)d media items to exercise \"%(name)s\""
+msgstr "تمت إضافة %(count)d من عناصر الوسائط إلى التمرين \"%(name)s\""
+
+#: routine/views.py
+#, python-format
+msgid "Successfully deleted %(count)d media items from exercise \"%(name)s\""
+msgstr "تم حذف %(count)d من عناصر الوسائط من التمرين \"%(name)s\""

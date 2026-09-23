@@ -1161,7 +1161,42 @@ envelope (it already did, from the project default) and now answers a bad `?page
 
 **One day of one routine.** `GET routine-exercises/?routine=<id>&day=<n>` — the same
 filters `template-exercises/?template=&day=` already had. The list stays scoped to
-routines you were assigned or wrote, so a filter can only narrow it.
+routines you were assigned or wrote, so a filter can only narrow it. Both are whole
+numbers: a routine id that does not exist answers the same empty page as somebody
+else's (it answered 400 `Select a valid choice`, which told a caller which ids were
+real), and a value that is not a whole number answers 400 on that parameter.
+
+**A progress row names an exercise you may read.** `POST user-exercise-progress/`:
+`exercise` must be one the exercise list shows you, or one you already have progress
+on — anything else answers 400 `validation_error` with `does_not_exist` on `exercise`,
+exactly as an id that does not exist does (it took any id, and the list then nested the
+whole exercise). `date` must be inside the training window the sync already applies:
+400 `date_in_future` or `date_too_old` on `date`. `POST set-logs/` answers the same two
+codes on `date` for a set whose day is outside it. `streaks/` and the adherence streak
+never count a day after today.
+
+**`user-exercise-progress/bulk-complete/` row errors carry a `code`.** Each `errors[]`
+entry is `{exercise, error, code}`: `progress_exists` or `progress_write_failed`.
+
+**Exercise images and photos.**
+- `POST exercises/create-with-image/` is for a trainer or an admin, like
+  `POST exercises/`: anyone else answers 403 `permission_denied`. A fault answers 500
+  `exercise_create_failed` and leaves nothing behind — no exercise, no media, no file.
+- A refused upload on `create-with-image/` (`image`, `media_photos`) and on
+  `exercises/{id}/image/` answers 400 with the upload guard's own `code`, as the profile
+  picture does: `file_too_large`, `invalid_mime_type`, `unreadable_image`,
+  `unsupported_format`, `image_dimensions_too_large`, `image_too_many_pixels`, and the
+  guard's other refusals; `invalid_image` when it names none. It answered `bad_request`.
+- `exercises/{id}/image/` obeys the exercise visibility rule: another trainer's private
+  exercise answers 404 `not_found`, byte-identical to a missing id (it answered 403).
+  403 `permission_denied` is only for an exercise you can see and do not own.
+- A photo uploaded through `create-with-image/` is served in `media[].content`,
+  `thumbnail` and `add-media/`'s `media_items[].content` as a URL signed when it is
+  read. It expires like every media URL: read it again, never keep it. (It was stored
+  signed, and died an hour after the upload on object storage.) Removing the media row
+  or the exercise removes the file.
+- A write through `add-media/` refreshes the cached exercise list, detail and
+  `add-media/` GET at once (they were stale for up to five minutes).
 
 **A workout that is still running** is `active` AND begun within the last twelve hours
 (`routine/sessions.py`). Past that it was forgotten, not left running:
@@ -1183,7 +1218,7 @@ nobody knows when the person stopped.
 | `GET` | `/api/routine/analytics/summary/` | auth | `AnalyticsViewSet` |
 | `GET` | `/api/routine/analytics/trends/` | auth | `AnalyticsViewSet` |
 | `GET, POST` | `/api/routine/exercises/` | IsAdminOrOwnerOrReadOnly | `ExerciseViewSet` |
-| `POST` | `/api/routine/exercises/create-with-image/` | auth | `ExerciseCreateWithImageView` |
+| `POST` | `/api/routine/exercises/create-with-image/` | IsTrainerOrAdmin | `ExerciseCreateWithImageView` |
 | `DELETE, GET, POST` | `/api/routine/exercises/{exercise_id}/add-media/` | auth | `ExerciseAddMediaView` |
 | `DELETE, POST` | `/api/routine/exercises/{exercise_id}/image/` | auth | `ExerciseImageUploadView` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/exercises/{id}/` | IsAdminOrOwnerOrReadOnly | `ExerciseViewSet` |

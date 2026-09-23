@@ -204,17 +204,15 @@ class Exercise(RowValidationMixin, models.Model):
         return False
 
     def save(self, *args, **kwargs):
-        # Clean up old exercise image if replaced
-        if self.pk:
-            try:
-                old = Exercise.objects.get(pk=self.pk)
-                if old.image and old.image != self.image:
-                    if default_storage.exists(old.image.name):
-                        default_storage.delete(old.image.name)
-            except Exercise.DoesNotExist:
-                # Optional side effect: swallowing this silently is what made the
-                # surrounding failures invisible in logs. Control flow is unchanged.
-                logger.debug('suppressed non-fatal error', exc_info=True)
+        # A replaced image is NOT removed here. It was: the old file was deleted inline,
+        # before `validate_row()` and before the UPDATE, so a save that then failed —
+        # or a transaction rolled back later — left the row pointing at a file that no
+        # longer existed, and every save cost two extra storage round-trips on object
+        # storage (SIDE_BUGS S-109). `training_platform/signals.py`
+        # `delete_replaced_files_on_update` is connected to every model with a file
+        # field, this one included, and removes the old file only once the write has
+        # COMMITTED — which is the whole reason it exists.
+        #
         # Visibility follows ownership; it is not a separate decision. Deriving the
         # column here is what stops it and `created_by` from ever disagreeing, which
         # is how the same exercise came to read as global to one code path and
@@ -257,6 +255,63 @@ class ExerciseMedia(models.Model):
 
     def __str__(self):
         return f"{self.media_type.capitalize()} for {self.exercise.name}"
+
+    #: Where `exercises/create-with-image/` stores an uploaded photo, as
+    #: `exercise_media/<exercise id>/<name>`. A `photo` row whose `content` starts with
+    #: this is a STORAGE NAME the platform wrote; any other `content` is a URL a coach
+    #: gave (`add-media/` accepts only http(s) URLs) or, for `text`, prose.
+    STORED_PHOTO_PREFIX = 'exercise_media/'
+
+    def stored_name(self):
+        """The storage name of a photo this platform stored, else None.
+
+        The row used to keep `default_storage.url(name)` instead — a SIGNED url, which
+        on object storage expires after `MEDIA_SIGNED_URL_TTL` (an hour), so every photo
+        uploaded through `create-with-image/` was a dead link soon after it was written
+        (SIDE_BUGS S-070). The name is stored; `content_url` makes the url when served.
+        """
+        content = self.content or ''
+        if self.media_type == 'photo' and content.startswith(self.STORED_PHOTO_PREFIX):
+            return content
+        return None
+
+    def content_url(self, request=None):
+        """`content` as the app should load it: a stored photo is signed NOW, through
+        `media_url` (the one function every media URL goes through); a URL or a text is
+        returned as it is."""
+        name = self.stored_name()
+        if name is None:
+            return self.content
+        from training_platform.media_storage import media_url
+        return media_url(name, request)
+
+
+@receiver(post_delete, sender=ExerciseMedia, dispatch_uid='exercise-media-stored-photo')
+def remove_a_stored_exercise_photo(sender, instance, **kwargs):
+    """A stored photo goes with its row — after the commit, never before.
+
+    Nothing removed it: the row held a URL, which is not a file, so deleting the media
+    (`add-media/` DELETE) or the whole exercise (its media CASCADE) left the bytes in
+    storage for ever (SIDE_BUGS S-070). Only a name this platform wrote is touched — a
+    coach's URL is somebody else's file. After the commit, like
+    `training_platform/signals.py` `_delete_after_commit`, so a rolled-back delete keeps
+    a live row pointing at a file that still exists.
+    """
+    name = instance.stored_name()
+    if not name:
+        return
+    if ExerciseMedia.objects.filter(content=name, media_type='photo').exclude(
+            pk=instance.pk).exists():
+        return
+
+    def _remove():
+        try:
+            default_storage.delete(name)
+        except Exception:  # noqa: BLE001 — storage may be down; never fail the delete
+            logger.warning("could not remove stored exercise photo %s", name,
+                           exc_info=True)
+
+    transaction.on_commit(_remove)
 
 
 class Routine(RowValidationMixin, models.Model):

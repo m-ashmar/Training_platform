@@ -18,11 +18,22 @@ logger = logging.getLogger(__name__)
 
 
 class ExerciseMediaSerializer(serializers.ModelSerializer):
-    """Serializer for Exercise Media (e.g., videos, photos, text)."""
+    """Serializer for Exercise Media (e.g., videos, photos, text).
+
+    `content` is what the app loads: a photo the platform stored (`create-with-image/`)
+    is a URL signed at the moment it is served, and it expires like every media URL —
+    read it again rather than keeping it. The row keeps the storage name; it used to
+    keep a signed URL, which died an hour after the upload (SIDE_BUGS S-070). A URL a
+    coach gave, and a text tip, are served as they were written.
+    """
+    content = serializers.SerializerMethodField()
 
     class Meta:
         model = ExerciseMedia
         fields = ['id', 'media_type', 'content']
+
+    def get_content(self, obj):
+        return obj.content_url(self.context.get('request'))
 
 
 class ExerciseMediaSlotsMixin:
@@ -141,7 +152,8 @@ class ExerciseSerializer(ExerciseMediaSlotsMixin, serializers.ModelSerializer):
         all_media = obj.media.all()
         for media in all_media:
              if media.media_type in ['photo', 'video']:
-                 return media.content
+                 # Signed when served, the same URL `media[].content` carries (S-070).
+                 return media.content_url(self.context.get('request'))
         return None
 
 
@@ -545,8 +557,80 @@ def fixed_once_written(attrs, instance, fields, code, message):
     return attrs
 
 
+def training_date_refusal(day, today=None):
+    """`(code, message)` when `day` is outside the window a training write accepts.
+
+    The window `set-logs/bulk-create/`, `set-logs/sync/` and
+    `user-exercise-progress/bulk-complete/` already held a day to: not in the future,
+    and not more than `MAX_BACKLOG_DAYS` back, with the same two codes. The plain
+    `POST user-exercise-progress/` and `POST set-logs/` had no bound at all, so a day
+    could be recorded ahead of time — it entered `training_dates`, and the streak read a
+    run ending in the future as current (SIDE_BUGS S-112). None when the day is fine.
+    """
+    if day is None:
+        return None
+    # `routine.views` imports this module, so its constant is read at call time.
+    from .views import MAX_BACKLOG_DAYS
+
+    today = today or timezone.localdate()
+    if day > today:
+        return 'date_in_future', _('Cannot log a workout in the future.')
+    if (today - day).days > MAX_BACKLOG_DAYS:
+        return 'date_too_old', (_('Cannot log a workout more than %(d)d days in the past.')
+                                % {'d': MAX_BACKLOG_DAYS})
+    return None
+
+
+class ReadableExerciseField(serializers.PrimaryKeyRelatedField):
+    """An exercise the CALLER may read — or has already trained.
+
+    `POST user-exercise-progress/` took any exercise id, and the list and detail then
+    nest the whole exercise (`UserExerciseProgressDetailSerializer`): name,
+    description, image, media. So anyone could walk ids and read every trainer's private
+    library, signed video links included (SIDE_BUGS S-056). The rule is
+    `routine.permissions.visible_exercises_for`, and an id outside it is refused
+    exactly like one that does not exist — the same 400 `does_not_exist` on `exercise`,
+    so the answer tells nobody which ids are real.
+
+    One addition, the one `analytics/strength/` makes: an exercise the caller already
+    has progress on is theirs to log again whatever became of the routine it came from.
+    They lifted it, the name is not news to them, and an id cannot be guessed into a
+    name because the history has to exist. The row being edited keeps its own exercise,
+    so a PUT that repeats it is still the no-op `fixed_once_written` promises.
+
+    Without a request in the context there is no caller to decide for: the serializer
+    was built by trusted code, not by an API write, and the field reads every exercise
+    as it always did.
+    """
+
+    def get_queryset(self):
+        from django.db.models import Q
+
+        from .permissions import visible_exercises_for
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if request is None or user is None:
+            return Exercise.objects.all()
+        readable = Q(pk__in=visible_exercises_for(user).values('pk'))
+        if getattr(user, 'is_authenticated', False):
+            readable |= Q(pk__in=UserExerciseProgress.objects.filter(user=user)
+                          .values('exercise_id'))
+        instance = getattr(self.parent, 'instance', None)
+        if isinstance(instance, UserExerciseProgress):
+            readable |= Q(pk=instance.exercise_id)
+        return Exercise.objects.filter(readable)
+
+
 class UserExerciseProgressSerializer(serializers.ModelSerializer):
     """Serializer for tracking user progress on individual exercises.
+
+    **On create** (an API write, with the request in the context): `exercise` must be
+    one the caller may read or has already trained — anything else answers 400
+    `does_not_exist` on `exercise`, exactly like an id that does not exist
+    (`ReadableExerciseField`, SIDE_BUGS S-056) — and `date` must be inside the training
+    window: 400 `date_in_future` or `date_too_old` on `date`, the codes
+    `set-logs/sync/` already answers (`training_date_refusal`, SIDE_BUGS S-112).
 
     `exercise` and `date` are FIXED once the row is written: a PATCH that changes
     either answers 400 `progress_immutable` on that field, and re-sending the value the
@@ -570,8 +654,18 @@ class UserExerciseProgressSerializer(serializers.ModelSerializer):
     with no set log behind it — a claim that completed a day that was never trained.
     Send the sets; the numbers follow.
     """
-    exercise = serializers.PrimaryKeyRelatedField(queryset=Exercise.objects.all())
+    exercise = ReadableExerciseField()
     user = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    def validate_date(self, value):
+        """Inside the training window, on create. An update cannot move the date at all
+        (`progress_immutable`), so re-sending an old row's own date stays a no-op."""
+        if self.instance is None and self.context.get('request') is not None:
+            refusal = training_date_refusal(value)
+            if refusal is not None:
+                code, message = refusal
+                raise serializers.ValidationError(message, code=code)
+        return value
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -818,6 +912,8 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     `set_date_mismatch` on `date`), omit it and the set is TODAY's — and must match the
     row just the same, so an undated set cannot be backdated onto an older row
     rather than today. `routine/models.py ExerciseSetLog` says why the two must agree.
+    A new set's day must also be inside the training window: 400 `date_in_future` or
+    `date_too_old` on `date` (`training_date_refusal`, SIDE_BUGS S-112).
     """
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
@@ -956,6 +1052,15 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
                     _("A set is logged on the day of the exercise it belongs to "
                       "(%(day)s). Log it against that day's progress record.")
                     % {'day': owner_date}, code='set_date_mismatch')]})
+
+        # Inside the training window, like every route that writes training (SIDE_BUGS
+        # S-112): a progress row dated ahead must not become a way to log tomorrow's
+        # sets today, nor a year-old row a way round the backlog bound.
+        if self.instance is None and self.context.get('request') is not None:
+            refusal = training_date_refusal(attrs.get('date'))
+            if refusal is not None:
+                raise serializers.ValidationError({'date': [serializers.ErrorDetail(
+                    refusal[1], code=refusal[0])]})
 
         if self.instance is None and attrs.get('reps') is None:
             if not as_prescribed:

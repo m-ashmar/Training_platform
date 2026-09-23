@@ -200,7 +200,11 @@ def test_b002_an_exercise_photo_is_stored_re_encoded_under_a_server_name(make_us
     })
     assert resp.status_code in (200, 201), resp.content
     media = ExerciseMedia.objects.get(exercise__name="bb squat", media_type="photo")
-    path = media.content.split("/media/", 1)[1].split("?", 1)[0]
+    # A deliberate contract change of the STORED column, not of what this protects:
+    # since SIDE_BUGS S-070 the row keeps the storage name (it kept a signed URL, which
+    # expired an hour after the upload), and the URL is made when the row is served.
+    # The file is found from the name; the assertions below are unchanged.
+    path = media.stored_name() or media.content.split("/media/", 1)[1].split("?", 1)[0]
     assert path.endswith(".jpg") and "x.html" not in path
     with default_storage.open(path) as stored:
         assert b"<script" not in stored.read()
