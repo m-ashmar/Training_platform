@@ -1079,6 +1079,39 @@ abandoned session are untouched and still count everywhere they counted before; 
 the session stops claiming a workout is in progress. `end_time` stays null, because
 nobody knows when the person stopped.
 
+**Routine writes and reads corrected on 2026-09-23** (SIDE_BUGS S-067..S-126, branch
+`fx/rttr`). Two NEW codes, nothing renamed:
+
+- `PATCH`, `PUT` and `DELETE workout-sessions/{id}/` belong to the session's owner and an
+  admin; a trainer answers 403 (they still read it). `DELETE` removes the sets logged in
+  the session and recomputes what they were counted in, and is refused with 403
+  `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while the coaching is unpaid
+  or over, judged at the session's start.
+- A session's `status` only moves forward: `active` → `completed` or `abandoned`. A PATCH
+  that changes a `completed` or `abandoned` status answers 400 **`session_status_final`**
+  on `status`; re-sending the status it holds is a no-op. `duration` is null for a
+  session with no end that is not running (abandoned, or active and begun more than
+  twelve hours ago) — it was "now minus start" and grew for ever.
+- `POST set-logs/` by a trainer naming a client's progress row or session answers 403
+  **`set_not_yours`** — the rule that already refused a trainer's edit and delete. An
+  admin keeps the write. `reps` is 1-1000 on the single POST and PATCH, as on
+  `bulk-create/` and `sync/` (0 was accepted).
+- `PATCH set-logs/{id}/` of a set from an earlier day works; omitting `date` there no
+  longer means "today" (it answered 400 `set_date_mismatch` for every earlier set).
+- `set-logs/sync/`: a `duplicate` row is recomputed again, so a retry repairs a send that
+  died before its recount. `set-logs/my-progress/` lists sets newest first (`date`
+  descending, then newest written).
+- `analytics/trends/` `completion_trend` is bucketed by the training `date`, and its
+  `period` is a date (`YYYY-MM-DD`) like `volume_trend`'s; it was `updated_at`, a datetime.
+- `analytics/admin_dashboard/` is paginated over clients by id — `{dashboard, count, next,
+  previous}`, 25 a page, `?page_size=` up to 100. `dashboard` keeps its key and row shape.
+- `trainer/client-progress/{id}/` `recent_activity[].routine_name` is in the coach's
+  language (`Routine.translations`), as every other routine name.
+- A day that completed itself from its sets moves back from `completed` in
+  `routine-progress/` when those sets are deleted; a day the person closed (`completed`,
+  `confirmed_unlogged`, `bulk_complete`, or `routine-progress/`) stays completed. The
+  nightly sweep records a day as `unclosed` only when that routine day itself has work.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/routine/` | auth | `APIRootView` |
