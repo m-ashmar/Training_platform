@@ -117,6 +117,12 @@ def test_s067_a_trainer_cannot_finish_or_delete_a_clients_session_and_a_freeze_r
     finished = api(trainer).patch(f"/api/routine/workout-sessions/{session.pk}/",
                                   json.dumps({"status": "completed"}), content_type=JSON)
     assert finished.status_code == 403, finished.content
+    # The field code a trainer's edit has always answered still answers first
+    # (tests/test_routine_extras.py::test_only_the_person_who_trained_says_how_hard_it_felt).
+    rated = api(trainer).patch(f"/api/routine/workout-sessions/{session.pk}/",
+                               json.dumps({"effort_rating": 1}), content_type=JSON)
+    assert rated.status_code == 400, rated.content
+    assert "effort_not_yours" in _codes(rated.json()), rated.json()
     removed = api(trainer).delete(f"/api/routine/workout-sessions/{session.pk}/")
     assert removed.status_code == 403, removed.content
     session.refresh_from_db()

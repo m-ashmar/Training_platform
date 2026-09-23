@@ -2059,7 +2059,9 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     **PATCH, PUT and DELETE belong to the person who trained, and to an admin**
     (SIDE_BUGS S-067). A trainer reads a client's sessions and answers 403 on every
     write to one — the same rule as a client's sets, which a session holds: deleting
-    it deletes every set logged in it, and finishing it closes the client's day.
+    it deletes every set logged in it, and finishing it closes the client's day. (A
+    trainer's PATCH that also fails validation answers that 400 first, as it always
+    has — `effort_not_yours` on `effort_rating`; nothing is written either way.)
     DELETE removes the session and the sets logged in it, and recomputes everything
     those sets were counted in, exactly as deleting each set would; it is refused with
     403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while the coaching is
@@ -2192,6 +2194,13 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         # Judged at the session's own start: finishing a workout begun while the coaching
         # was paid is allowed after it freezes.
         instance = serializer.instance
+        # Only the person who trained, or an admin, writes a session (SIDE_BUGS S-067).
+        # Refused HERE rather than in the permission class so that a trainer's edit
+        # still answers the field codes it always has (`effort_not_yours`) first —
+        # either way nothing of theirs is written.
+        from .permissions import is_session_writer
+        if not is_session_writer(self.request.user, instance):
+            raise PermissionDenied()
         _require_can_train(self.request.user, instance.routine, instance.start_time)
         serializer.save()
 
