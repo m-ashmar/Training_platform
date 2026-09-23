@@ -2178,7 +2178,9 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     and stay counted (see that task's docstring). `?status=abandoned` lists the ones
     the sweep has already reached.
 
-    The list is paginated: `{count, next, previous, results}`, `?page_size=` up to 100.
+    The list is paginated: `{count, next, previous, results}`, `?page_size=` up to 100,
+    newest first: by `start_time`, then by `id`, so the order is total and a row never
+    repeats or goes missing between pages (BACKEND_BUGS B-067).
 
     Input: API requests with session data (POST), session updates (PATCH)
     Output: JSON responses with session data
@@ -2212,10 +2214,15 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         """
         from .permissions import accessible_user_ids
         allowed_ids = accessible_user_ids(self.request.user)
+        # Newest first, and a TOTAL order: the list is paged by page number, and two
+        # sessions begun in the same second must not swap between pages (BACKEND_BUGS
+        # B-067). Said here rather than left to `Meta.ordering`, which is what it rested
+        # on; `workoutsess_recent_idx (user, -start_time, -id)` serves exactly this.
+        ordered = self.queryset.order_by('-start_time', '-id')
         if allowed_ids is None:  # admin
-            base = self.queryset
+            base = ordered
         else:
-            base = self.queryset.filter(user_id__in=allowed_ids)
+            base = ordered.filter(user_id__in=allowed_ids)
         # "Is a workout running" has one answer in this platform, and it is not
         # `status='active'` on its own (SIDE_BUGS S-022): a row the client walked away
         # from reads `active` until the nightly sweep reaches it. Asked for the running
@@ -2413,6 +2420,11 @@ class AnalyticsViewSet(viewsets.ViewSet):
         
         Input: Query param 'period' (week, month, year)
         Output: JSON with total volume, days trained, PRs, comparisons, top muscles.
+
+        `volume_change_percent` compares this window's volume with the window of the
+        same length just before it, to one decimal. It is NULL when that earlier window
+        holds no volume — a first week, month or year has nothing to be compared with,
+        and is not a +100% (BACKEND_BUGS B-068; it answered the constant 100.0 there).
         """
         from datetime import timedelta
         # Validated against the three the view actually implements. Anything else fell
@@ -2487,11 +2499,13 @@ class AnalyticsViewSet(viewsets.ViewSet):
             total=Sum(F('weight') * F('reps'))
         )['total'] or 0
         
-        volume_change = 0
+        # A change FROM NOTHING is not a percentage. It was the constant 100.0 whenever
+        # the previous window was empty, so a first month read exactly like a real
+        # doubling and the app could only hide the chip on 100.0, the genuine one
+        # included (BACKEND_BUGS B-068). Null says "nothing to compare with".
+        volume_change = None
         if prev_volume > 0:
             volume_change = round(((total_volume - prev_volume) / prev_volume) * 100, 1)
-        elif total_volume > 0:
-            volume_change = 100.0 # From 0 to something is 100% (or infinite) increase
 
         # Top Muscles Worked
         muscle_data = setlogs.values(
@@ -2712,7 +2726,11 @@ class AnalyticsViewSet(viewsets.ViewSet):
 
         With `exercise_id`: the same for one exercise plus `points` (one entry per
         training day: `estimated_1rm`, `best_weight`, `best_reps`, `volume_kg`, `sets`),
-        `share` — the headline a card can draw — and `progression`.
+        `share` — the headline a card can draw — and `progression`. An `exercise_id`
+        that is SENT is always read as one (BACKEND_BUGS B-073): not a whole number is
+        400 `bad_exercise_id` with `field`; a whole number that names no exercise this
+        caller may read — 0 and negatives included, and another trainer's private one —
+        is 404 `not_found`. Only an absent or empty `exercise_id` answers the overview.
 
         `progression` is what to change next: `{code, effort: {typical,
         rated_sessions}, adherence_percent, direction, sessions, latest, next, needs}`.
@@ -2755,8 +2773,20 @@ class AnalyticsViewSet(viewsets.ViewSet):
         done_percent = adherence(user, today - timedelta(days=27), today,
                                  today=today)['sets']['done_percent']
 
-        exercise_id = _int_or_none(request.query_params.get('exercise_id'))
-        if exercise_id:
+        # PRESENT is what decides, not truthy (BACKEND_BUGS B-073): `?exercise_id=0` was
+        # falsy and answered the whole overview as if no id had been sent. An id that is
+        # not a whole number is 400; a whole number that names no exercise you may read —
+        # 0 and negatives included — is the 404 every missing id answers.
+        raw_exercise_id = request.query_params.get('exercise_id')
+        exercise_id = None
+        if raw_exercise_id not in (None, ''):
+            exercise_id = _int_or_none(raw_exercise_id)
+            if exercise_id is None:
+                return Response(
+                    {'error': _('exercise_id must be a whole number.'),
+                     'code': 'bad_exercise_id', 'field': 'exercise_id'},
+                    status=status.HTTP_400_BAD_REQUEST)
+        if exercise_id is not None:
             # The same rule as every other endpoint that takes an exercise id
             # (`routine.permissions.visible_exercises_for`): another trainer's private
             # exercise is answered exactly like an id that does not exist, so no name

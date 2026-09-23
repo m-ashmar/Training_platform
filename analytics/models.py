@@ -256,6 +256,13 @@ class UserGoal(models.Model):
     # Goal parameters
     target_value = models.FloatField()
     current_value = models.FloatField(default=0)
+    #: Where the goal was measured FROM (BACKEND_BUGS B-066, B-069). Progress is the share
+    #: of the way from here to `target_value`, in whichever direction that is: 82 -> 75 kg
+    #: aims down, 72.5 -> 100 kg aims up. Set once, at creation. Null on goals created
+    #: without one: those are measured from 0 upward, as every goal was before this
+    #: column existed, except a `weight_loss` goal, whose first reading becomes its start.
+    #: Not used by `workout_frequency`, which is counted per week (`analytics/goals.py`).
+    start_value = models.FloatField(null=True, blank=True)
     unit = models.CharField(max_length=20, blank=True)
     
     # Timeline
@@ -292,20 +299,60 @@ class UserGoal(models.Model):
     def __str__(self):
         return f"{self.user.username} - {self.title} ({self.progress_percentage}%)"
     
+    #: Goal types that aim DOWN by their nature, whatever start they were given, so that
+    #: one created without a start still knows which way it points. Every other type
+    #: aims wherever its start and target say, and up when there is no start.
+    AIMS_DOWN = frozenset({'weight_loss'})
+
+    def aims_down(self) -> bool:
+        """True when reaching the target means the number going DOWN."""
+        if self.goal_type in self.AIMS_DOWN:
+            return True
+        if self.start_value is not None and self.start_value != self.target_value:
+            return self.target_value < self.start_value
+        return False
+
     def update_progress(self, new_value):
-        """Update goal progress"""
+        """Record a reading: progress is the share of the way from the start to the target.
+
+        It was `new_value / target_value`: no start and no direction, so a goal aiming
+        DOWN (weight 82 -> 75) read 100% for any value above its target, and the first
+        reading marked it completed; a lift 72.5 -> 100 read 82.5% at 82.5 kg, where the
+        way covered is 36% (BACKEND_BUGS B-066).
+
+        Bounded to [0, 100]: a reading that moved the wrong way is 0, not negative. The
+        goal completes only when the target is REACHED in its direction — at or below it
+        for a goal that aims down, at or above it for one that aims up — and a completed
+        goal stays completed (`UserGoalSerializer.validate_status`).
+        """
+        if self.start_value is None and self.goal_type in self.AIMS_DOWN:
+            # A loss is measured from where the person stood when they started; with
+            # nothing recorded, the first reading is that place. Never 0 kg.
+            self.start_value = new_value
         self.current_value = new_value
-        if self.target_value > 0:
-            # Bounded BOTH ways. `min(100, ...)` alone let a negative value produce a
-            # completed goal showing -50%.
-            self.progress_percentage = max(0.0, min(100.0, (new_value / self.target_value) * 100))
-        
-        # Check if goal is completed
-        if self.progress_percentage >= 100 and self.status == 'active':
+        self.progress_percentage = self.progress_for(new_value)
+        if self.status == 'active' and self.reached(new_value):
             self.status = 'completed'
             self.completed_at = timezone.now()
-        
         self.save()
+
+    def reached(self, value) -> bool:
+        """Has `value` reached the target, in the goal's direction?"""
+        if self.aims_down():
+            return value <= self.target_value
+        return value >= self.target_value
+
+    def progress_for(self, value) -> float:
+        """The share of the way from the start to the target that `value` stands at, 0-100."""
+        if self.reached(value):
+            return 100.0
+        start = self.start_value if self.start_value is not None else 0.0
+        down = self.aims_down()
+        span = (start - self.target_value) if down else (self.target_value - start)
+        if span <= 0:
+            return 0.0
+        covered = (start - value) if down else (value - start)
+        return max(0.0, min(100.0, covered / span * 100))
 
 
 class AnalyticsDashboard(models.Model):

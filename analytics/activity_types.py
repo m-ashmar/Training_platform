@@ -1,8 +1,9 @@
 """The names a `UserActivity.activity_type` may hold.
 
 One vocabulary, because there were two. `analytics/recorder.py` is the only server-side
-writer of `UserActivity` and it writes `routine_completed`, `exercise_completed`,
-`diet_plan_generated` and `meal_completed`. `social/services.py` reads
+writer of `UserActivity` and it writes `routine_completed`, `diet_plan_generated` and
+`meal_completed` (one per meal); it wrote `exercise_completed`, one per logged set, until
+2026-09-24 (BACKEND_BUGS B-071), and those rows are still read. `social/services.py` reads
 `workout_completed` and `meal_logged` — names nothing has ever written. Every workout,
 streak, milestone, late-night and early-morning achievement in the social app was
 therefore unearnable, and silently so: the queries return 0, not an error.
