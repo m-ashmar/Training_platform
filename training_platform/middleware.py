@@ -566,6 +566,13 @@ class CacheMiddleware(MiddlewareMixin):
             cached_response = cache_backend.get(cache_key)
             if cached_response is not None:
                 logger.debug(f"Cache hit for {request.path} (from {'private' if is_private else 'public'} cache)")
+                # Django runs `process_response` for the response returned here too.
+                # Without this mark it wrote the hit straight back with a fresh TTL, so
+                # an entry read once per TTL never expired, and the staleness the
+                # registry bounds at 300 or 600 s had no bound at all for anything that
+                # does not bump the model version (an exchange rate, a wallet's
+                # currency, a trainer-client relation).
+                request._api_cache_hit = True
                 return JsonResponse(cached_response, safe=False)
         return None
     
@@ -586,13 +593,16 @@ class CacheMiddleware(MiddlewareMixin):
                 return response
             cache_key = self._build_key(request, identity, rule)
 
+            is_json = response.get('Content-Type', '').startswith('application/json')
             try:
-                # Only cache JSON responses
-                if response.get('Content-Type', '').startswith('application/json'):
+                # Only cache JSON responses. A hit is served, never written again: the
+                # entry keeps the expiry it was stored with (see `process_request`).
+                if is_json and not getattr(request, '_api_cache_hit', False):
                     response_data = json.loads(response.content)
                     backend = private_cache() if is_private else public_cache()
                     backend.set(cache_key, response_data, rule['ttl'])
                     logger.debug(f"Cached response for {request.path} into {'private' if is_private else 'public'} cache")
+                if is_json:
                     # Inform CDN / proxies of dimensions that affect this response.
                     # PATCHED, not assigned: a plain assignment threw away the `Vary`
                     # already on the response — `Cookie` from the session middleware,

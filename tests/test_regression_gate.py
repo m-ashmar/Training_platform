@@ -5,7 +5,8 @@ exists because 84 fixes across 11 phases had no automated protection: `manage.py
 discovered nothing, and CI ran security scanners without ever executing the application.
 
 Kept deliberately fast (one shared database, no per-test migrations) so it can run on
-every pull request. The 53 standalone probes in tests/security/ remain the deep suite.
+every pull request. The standalone probes in tests/security/ are an audit's evidence, not
+a suite: nothing collects them (tests/security/README.md, and run_probes.py to run them).
 """
 import collections
 import json

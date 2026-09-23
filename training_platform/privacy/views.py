@@ -22,6 +22,12 @@ class PersonalDataExportView(APIView):
 
     Returned as a file download rather than a page: the payload contains the user's
     full health and training history and should not sit in a browser cache.
+
+    `{generated_at, user_id, sections: {<label>: [rows]}}`, one section per registered
+    source (`privacy/sources.py`). It never discloses what the API itself withholds:
+    `blocks` is `{id, blocked, created_at}` for the blocks this person MADE, never one
+    made against them; `reports_made` is what `GET /api/v1/reports/mine/` pages, without
+    who handled it. Identical on every build.
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -47,6 +53,10 @@ class PersonalDataEraseView(APIView):
     `?dry_run=1` reports what would happen without touching anything. `GET` is the same
     preview; for a trainer, `preview.trainer_relations.active_clients` counts the clients
     they still coach, and while it is above 0 the erasure is refused.
+
+    Rows about the caller that other people hold go too and are never counted in the
+    preview or the report: blocks made against them, and the chat notices they sent,
+    which sit in the other side's inbox with their name and words.
 
     Answers:
       200 `{message, detail}`   erased.

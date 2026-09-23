@@ -176,22 +176,31 @@ class TokenError(ValidationError):
 
 
 # ------------------------------------------------------------------- pure arithmetic
+def _luminance_of(red: float, green: float, blue: float) -> float:
+    """WCAG 2.1 relative luminance of three sRGB channels on the 0-255 scale."""
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+              for c in (red / 255.0, green / 255.0, blue / 255.0)]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _ratio(a: float, b: float) -> float:
+    lighter, darker = (a, b) if a >= b else (b, a)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
 def relative_luminance(colour: str) -> float:
     """WCAG 2.1 relative luminance of an opaque `#RGB` or `#RRGGBB` colour.
 
-    Eight-digit hex is accepted and its alpha IGNORED: no token that takes part in a
-    contrast pair is allowed to be translucent, so there is never a backdrop to
-    composite against, and silently treating one as opaque is the conservative read.
+    Eight-digit hex is accepted and its alpha IGNORED: this is the reading for a token
+    that must be opaque. A translucent backdrop is measured by `worst_case_ratio`,
+    which composites it first.
     """
     text = colour.strip().lstrip("#")
     if len(text) == 3:
         text = "".join(c * 2 for c in text)
     if len(text) not in (6, 8):
         raise ValueError(f"not a hex colour: {colour!r}")
-    channels = [int(text[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
-    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-              for c in channels]
-    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    return _luminance_of(*(int(text[i:i + 2], 16) for i in (0, 2, 4)))
 
 
 def contrast_ratio(foreground: str, background: str) -> float:
@@ -200,10 +209,50 @@ def contrast_ratio(foreground: str, background: str) -> float:
     Symmetric by definition — `(L_lighter + 0.05) / (L_darker + 0.05)` — so the
     argument names are documentation, not behaviour.
     """
-    a = relative_luminance(foreground)
-    b = relative_luminance(background)
-    lighter, darker = (a, b) if a >= b else (b, a)
-    return (lighter + 0.05) / (darker + 0.05)
+    return _ratio(relative_luminance(foreground), relative_luminance(background))
+
+
+def _channels_and_alpha(colour: str) -> tuple[int, int, int, float]:
+    """`(red, green, blue, alpha)` of any colour value the grammar accepts.
+
+    `rgba(r,g,b,a)`, or hex: `#RGB`, `#RRGGBB`, and `#RRGGBBAA` with the alpha LAST, as
+    CSS and tokens.json write it.
+    """
+    rgba = _RGBA_RE.match(colour.strip())
+    if rgba:
+        return (int(rgba.group(1)), int(rgba.group(2)), int(rgba.group(3)),
+                float(rgba.group(4)))
+    text = colour.strip().lstrip("#")
+    if len(text) == 3:
+        text = "".join(c * 2 for c in text)
+    if len(text) not in (6, 8):
+        raise ValueError(f"not a colour: {colour!r}")
+    alpha = int(text[6:8], 16) / 255.0 if len(text) == 8 else 1.0
+    return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16), alpha
+
+
+def worst_case_ratio(foreground: str, backdrop: str) -> float:
+    """The lowest contrast an opaque `foreground` can have on a translucent `backdrop`
+    laid over ANY picture.
+
+    The backdrop is composited (source-over, in sRGB, as the app draws it) onto what is
+    behind it. Luminance rises with every channel, so the composite's luminance runs
+    exactly from "over pure black" to "over pure white", and every value between is
+    reached by some photo. If the text's own luminance falls inside that range, some
+    photo makes the text the same brightness as its background: the ratio is 1.0.
+    Otherwise the nearer end is the worst photo there is.
+    """
+    red, green, blue, alpha = _channels_and_alpha(backdrop)
+
+    def over(base: float) -> float:
+        return _luminance_of(*(alpha * c + (1.0 - alpha) * base
+                               for c in (red, green, blue)))
+
+    darkest, brightest = over(0.0), over(255.0)
+    text = relative_luminance(foreground)
+    if darkest <= text <= brightest:
+        return 1.0
+    return _ratio(text, darkest if text < darkest else brightest)
 
 
 # ------------------------------------------------------------------ readability pairs
@@ -244,6 +293,35 @@ TEXT_PAIRS = tuple(
 NON_TEXT_PAIRS = tuple(
     (fg, bg) for fg in ("ink-faint", "line-strong", "focus-ring") for bg in _SURFACES
 )
+
+#: The translucent tokens text is written on, and which `ink` is written there:
+#: (foreground, the theme the foreground is read from — None for the same theme as the
+#: backdrop — backdrop). Each must hold `TEXT_MIN_RATIO` over the worst picture that can
+#: be behind it (`worst_case_ratio`), in both themes.
+#:
+#: Straight from the design system's own usage lines. `media-veil`: "Media stays dark
+#: in both themes, so text on media is always ink from the dark theme." `glass`:
+#: "Anything floating over media: ... floating info chips, sticky purchase bars", with
+#: the theme's own ink on it. No other colour holds 4.5:1 on either in the design as
+#: shipped (`ink-muted` on the light theme's veil can fall to 4.25:1), so naming one
+#: here would refuse the app's own skin.
+#:
+#: This guard skipped every translucent value and no pair named one, while the
+#: grammar accepts any alpha on these tokens down to 0 — so
+#: `{"media-veil": {"dark": "rgba(0,0,0,0)"}}` saved and shipped, and took away the
+#: veil that keeps text readable on a photo.
+BACKDROP_TEXT_PAIRS = (
+    ("ink", "dark", "media-veil"),
+    ("ink", None, "glass"),
+)
+
+#: Translucent tokens nothing is written on, so there is no text for a contrast guard
+#: to measure. tokens.json: `scrim` is "behind sheets and dialogs" (the sheet is an
+#: opaque `surface` and carries the text); `ember-glow` is "light, not fill";
+#: `edge-light` is a 1px highlight and the border of glass. Every translucent token is
+#: in exactly one of this set and `BACKDROP_TEXT_PAIRS`, which `tests/test_fx_cross.py`
+#: checks, so a new one cannot slip past the guard unclassified.
+TRANSLUCENT_WITHOUT_TEXT = frozenset({"scrim", "ember-glow", "edge-light"})
 
 
 # ------------------------------------------------------------------------ validation
@@ -422,10 +500,22 @@ def contrast_failures(tokens: dict) -> list:
                     continue  # unreachable today: no pair token is translucent
                 ratio = contrast_ratio(fg, bg)
                 if ratio < minimum - 1e-9:
-                    failures.append(_(
-                        "%(fg)s on %(bg)s in the %(theme)s theme is only "
-                        "%(ratio)s:1, under the %(minimum)s:1 this platform requires. "
-                        "The app would ship unreadable text."
-                    ) % {"fg": foreground, "bg": background, "theme": theme,
-                         "ratio": f"{ratio:.2f}", "minimum": minimum})
+                    failures.append(_failure(foreground, background, theme, ratio,
+                                             minimum))
+    for foreground, ink_theme, backdrop in BACKDROP_TEXT_PAIRS:
+        for theme in THEMES:
+            ratio = worst_case_ratio(palette[foreground][ink_theme or theme],
+                                     palette[backdrop][theme])
+            if ratio < TEXT_MIN_RATIO - 1e-9:
+                failures.append(_failure(foreground, backdrop, theme, ratio,
+                                         TEXT_MIN_RATIO))
     return failures
+
+
+def _failure(foreground, background, theme, ratio, minimum):
+    return _(
+        "%(fg)s on %(bg)s in the %(theme)s theme is only "
+        "%(ratio)s:1, under the %(minimum)s:1 this platform requires. "
+        "The app would ship unreadable text."
+    ) % {"fg": foreground, "bg": background, "theme": theme,
+         "ratio": f"{ratio:.2f}", "minimum": minimum}

@@ -896,6 +896,10 @@ tokens exist here — control sizes and shadows are not overridable, so nothing 
 shrink a tap target. A name or shape outside that is refused when the operator saves the
 row, along with any colour pair that would drop text under 4.5:1 contrast (3:1 for
 `ink-faint`, `line-strong` and `focus-ring`), so the app never has to validate a payload.
+The see-through backdrops text is written on are measured as they are drawn: `ink` on
+`glass`, and the dark theme's `ink` on `media-veil`, must hold 4.5:1 over the darkest
+and the brightest photo that can be behind them — so a veil or a glass made transparent
+is refused like any other unreadable pair.
 
 A theme carries no copy and no links, by construction: there is no field in this response
 that holds a sentence or a URL. That is how the store rule — remote themes may not carry
@@ -915,6 +919,13 @@ fetch is `304 Not Modified` with no body.
 |---|---|---|---|
 | `DELETE, GET` | `/api/privacy/erase/` | auth | `PersonalDataEraseView` |
 | `GET` | `/api/privacy/export/` | auth | `PersonalDataExportView` |
+
+The export discloses nothing the API itself withholds: its `blocks` section is `{id,
+blocked, created_at}` for the blocks this person MADE, never one made against them, and
+`reports_made` carries what `GET /api/v1/reports/mine/` pages, without who handled it.
+An erasure also removes rows about the person that other people hold — blocks made
+against them, and the chat notices they sent, which sit in the other side's inbox with
+their name and words — and never counts them in the preview or the report.
 
 ### Routines & Workouts
 
@@ -1083,7 +1094,7 @@ operator maintains in the console. Four things the app needs:
   `SHAMCASH_USD_MIN_AMOUNT` and `SHAMCASH_USD_MAX_AMOUNT` are set (the owner's numbers;
   none is assumed). A new exchange rate, or an edited `ChannelCapabilities` row, reaches
   the cached plan list at once.
-- **A coaching price is in the client's currency too.** `GET /api/v1/coaching/status/`
+- **A coaching price is in the client's currency too.** `GET /api/v1/coaching/current/`
   gains `coaching_currency` beside `coaching_price`; the price is what the client will
   actually be charged, and both are null together when the rate needed to quote it is
   missing or stale.

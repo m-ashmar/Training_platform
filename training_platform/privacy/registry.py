@@ -60,6 +60,20 @@ class PersonalDataSource:
     #: for a routine, while those clients stayed active and were told "Successfully
     #: unassigned".
     before_erase: Callable | None = None
+    #: Rows that go with this person on erasure although they are NOT this person's to
+    #: read, as `erase_also(user) -> QuerySet` of this source's model. Only for
+    #: `on_erase="delete"`. Deleted in the same transaction as the source's own rows,
+    #: never exported, and never counted in the erasure report.
+    #:
+    #: `user_field` is what BOTH operations follow, so a path that erasure needs and the
+    #: export must not show had nowhere to go. `moderation.Block` was registered on
+    #: `("blocker", "blocked")` so an erasure would clear both sides — and the export
+    #: therefore handed a blocked person every block made against them, with the
+    #: blocker's id, which the block list itself promises never to disclose. The report
+    #: is left out for the same reason: it is shown to the subject (`GET
+    #: privacy/erase/` is the preview), and "blocks: 2" to someone who made none says
+    #: they were blocked twice.
+    erase_also: Callable | None = None
 
     def get_model(self):
         from django.apps import apps
@@ -192,6 +206,9 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
                         for key, value in values.items():
                             setattr(obj, key, value)
                         obj.save(update_fields=list(values))
+            if source.erase_also is not None and not dry_run:
+                # Not counted: see `PersonalDataSource.erase_also`.
+                source.erase_also(user).delete()
             report[source.label] = {"rows": count, "action": action,
                                     **extra.get(source.label, {})}
 
@@ -335,6 +352,11 @@ def validate_sources() -> list[str]:
                 problems.append(
                     f"{source.label}: anonymise field {fname!r} is not on {source.model}"
                 )
+        if source.erase_also is not None and source.on_erase != "delete":
+            problems.append(
+                f"{source.label}: erase_also deletes rows, so it needs on_erase='delete', "
+                f"not {source.on_erase!r}"
+            )
     return problems
 
 
