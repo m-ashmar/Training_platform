@@ -1171,12 +1171,28 @@ operator maintains in the console. Four things the app needs:
   `409 checkout_open` with `payment_id` and `expires_at` (a checkout is open; a transfer
   cleared after the change would otherwise buy the new plan at the old price). Needs
   `X-App-Channel` when the new plan is paid, and answers `403 not_available_on_channel`
-  on `play`/`ios` like every other plan purchase. Full table:
-  `SubscriptionViewSet.change_plan`.
-- Every checkout records the plan it was priced for. `item` on a payment row and on the
-  receipt names THAT plan, so earlier payments keep naming what they bought after a
-  plan change; a transfer that clears late against an expired checkout grants the plan it
-  paid for.
+  on `play`/`ios` like every other plan purchase. `plan_id` is an integer as
+  `POST v1/subscriptions/` takes it (`true`, `2.9`, a non-number: `invalid_plan`); a body
+  that is not a JSON object is `400 validation_error`. The `subscription` it answers is
+  the one `GET v1/subscriptions/{id}/` answers: the plan priced in the reader's currency,
+  no price on a store build. Full table: `SubscriptionViewSet.change_plan`.
+- `POST v1/gateways/` answers `409 price_changed` also when the subscription moved to
+  another plan while the call ran (a change-plan from another device); `expected_amount`
+  / `expected_currency` are what the plan it is on now would charge, and no checkout is
+  opened.
+- Every checkout records the plan it was priced for, with its name in every language and
+  the period sold. `item` on a payment row and on the receipt names THAT plan, in the
+  reader's language, so earlier payments keep naming what they bought after a plan change
+  or a rename; a cancellation row names the plan that was cancelled. Completion grants the
+  period that was sold, so the receipt and the cover agree.
+- A transfer that clears late against an expired checkout, after a plan change: with
+  nothing running it grants the plan it paid for; with paid cover running, the
+  subscription holds the dearest plan among the paid periods still running (by the plans'
+  prices of record), and a refund re-decides it the same way.
+- A frozen subscription reads its diet plans if its plan has diet OR the last plan it paid
+  for did — choosing a plan without diet, which buys nothing, no longer takes the read
+  away.
+- `payments/{id}/reconcile/` on a payment already completed answers `payment_id` too.
 - `payments/{id}/status/` and `payments/{id}/reconcile/` answer a `code` on every
   refusal: `404 not_found`, `400 no_gateway_reference`,
   `502 gateway_unreachable`, `400 reconcile_rejected` (B-048).

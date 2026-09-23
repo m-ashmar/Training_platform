@@ -80,7 +80,18 @@ Every parallel build touches the same four places, so expect these and nothing e
   `.po` with `msgfmt`.** Never hand-resolve the `.mo`.
 - `training_platform/settings_base.py` `INSTALLED_APPS`, `training_platform/urls.py`,
   `training_platform/privacy/registry.py` — one line each, keep both sides.
-- `API_CONTRACT.md` — usually auto-merges.
+- `API_CONTRACT.md` — usually auto-merges. When two branches each add a "What wiring the
+  X screens found" block before the same line, it conflicts: keep both blocks, in order.
+- `BACKEND_BUGS.md` — every branch that fills rows conflicts with every other one, and with
+  the app session appending new rows. Resolve BY ROW ID: the union of rows, and for a row
+  on both sides the side whose Status / Backend note is filled. **Never write a bare `|`
+  inside a cell**, not even inside backticks: markdown splits the row there and the note
+  spills into phantom columns (three nutrition rows did, 2026-09-23). Write `/` instead.
+
+**Proving a test fails on the old code.** Checking the base commit's files out into your
+worktree, or `git archive`-ing it, can be refused by the permission classifier (three
+refusals, 2026-09-23). Say in your report that the old-code run is still owed; the main
+session runs it in a separate worktree at the base commit.
 
 ## Rules that outrank your judgement
 

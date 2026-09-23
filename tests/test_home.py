@@ -291,7 +291,17 @@ def test_a_role_without_a_designed_shell_gets_an_empty_list(make_user, api, role
 # ------------------------------------------------------------------ the full screen
 def test_a_full_client_gets_every_section_in_a_sensible_order(make_user, api,
                                                               django_capture_on_commit_callbacks):
+    from home.sections import week_start
+    from routine.models import Routine
+
     trainer, client, relation, routine, rows = _coached(make_user, api, "full")
+    # A full client's program was already running when this week began. `start_date`
+    # defaults to today, and since BACKEND_BUGS B-045 no day before a program starts is
+    # planned — so the `planned: 7` below held only when this ran on the week's first day
+    # (a Saturday). Setup, not the assertion: the start stays inside this week, so the
+    # hero's week 1 / day 1 are unchanged.
+    Routine.objects.filter(pk=routine.pk).update(
+        start_date=week_start(timezone.localdate()))
     _subscribe(client, "full")
     _diet_day(client)
     _consent(client)

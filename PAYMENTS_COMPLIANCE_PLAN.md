@@ -145,8 +145,11 @@ is locked (spec §8); the numbers above are the defaults.
    difference for the days left, or start the new plan when the old one ends). Also
    decided in code, reversible: a transfer that clears late against an expired checkout
    for the OLD plan grants the plan it paid for; if cover on another plan was paid in the
-   meantime, the dearer plan is kept and the late period added
-   (`PaymentService._plan_to_hold`).
+   meantime, the subscription holds the dearest plan among the paid periods still running
+   (prices of record; a tie or two currencies keeps the current one) and the late period
+   is added; a refund re-decides it (`PaymentService._dearest_running_plan`). A stacked
+   period on a cheaper plan therefore runs on the dearer plan's features until it ends —
+   per-period plans would need a schedule the model does not have.
 
 ## Traps this branch cost a session to find
 
