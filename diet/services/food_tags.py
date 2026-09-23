@@ -4,10 +4,12 @@ A tag is a machine code; the app draws the words (BACKEND_BUGS B-065). Every tag
 decided by a column the food already carries, against a threshold named below with the
 standard it comes from. None is guessed from a name.
 
-What the catalogue does NOT hold, and so is never tagged: fibre (no column — `fetch_usda`
-reads USDA nutrient 1079 and nothing stores it), vegetarian / vegan (no flag, and a
-category such as "Proteins" does not say whether a food is meat), sugar and salt. Adding
-any of them is a data decision for the owner, not a rule to write here.
+Fibre is stored since the owner's decision of 2026-09-23 (`FoodItem.fiber`, USDA nutrient
+1079); a food whose fibre is unknown (NULL) earns no fibre tag, never a guess.
+
+What the catalogue does NOT hold, and so is never tagged: vegetarian / vegan (the owner
+decided against a vegetarian flag, 2026-09-23, and a category such as "Proteins" does not
+say whether a food is meat), sugar and salt.
 """
 from __future__ import annotations
 
@@ -32,6 +34,12 @@ LOW_FAT_MAX_G_PER_100G = 3.0
 #: "Low calorie": no more than 40 kcal per 100 g (EC 1924/2006 "low energy", solids).
 LOW_CALORIE_MAX_KCAL_PER_100G = 40.0
 
+#: "High fibre": at least 6 g of fibre per 100 g (EC 1924/2006, Annex). The regulation
+#: also accepts 3 g per 100 kcal; that arm is not applied, because on a food this light it
+#: says nothing a person would call fibrous — it would tag a cucumber (0.5 g per 100 g,
+#: 15 kcal). The card claims fibre by weight, as the food is eaten.
+HIGH_FIBER_MIN_G_PER_100G = 6.0
+
 
 def food_tags(food) -> List[str]:
     """The tags this food earns, in a stable order. Reads columns only: no query."""
@@ -48,4 +56,8 @@ def food_tags(food) -> List[str]:
         tags.append("low_fat")
     if kcal <= LOW_CALORIE_MAX_KCAL_PER_100G:
         tags.append("low_calorie")
+    # Unknown fibre (None) is not 0 g and not a guess: no tag either way.
+    fiber = getattr(food, "fiber", None)
+    if fiber is not None and float(fiber) >= HIGH_FIBER_MIN_G_PER_100G:
+        tags.append("high_fiber")
     return tags

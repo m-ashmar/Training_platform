@@ -71,17 +71,34 @@ def test_a_swap_offer_carries_the_portion_it_would_serve_and_a_tag(seeded_catalo
     assert current["quantity_grams"] == pytest.approx(float(component.quantity))
     assert current["calories"] == component.calculate_nutrition()["calories"]
 
-    vocabulary = {"more_calories", "more_protein", "fewer_calories", "similar"}
+    # `more_fiber` joined the vocabulary when foods started storing fibre (the owner,
+    # 2026-09-23; tests/test_food_fibre.py): a deliberate contract change, additive.
+    vocabulary = {"more_calories", "more_protein", "fewer_calories", "more_fiber", "similar"}
+    from diet.models import FoodItem
+
+    fibre_per_100g = dict(FoodItem.objects.filter(
+        id__in=[o["food_id"] for o in offers] + [component.food_id])
+        .values_list("id", "fiber"))
+
+    def portion_fibre(food_id, grams):
+        known = fibre_per_100g[food_id]
+        return None if known is None else round(known * grams / 100.0, 1)
+
+    assert current["fiber"] == portion_fibre(component.food_id, current["quantity_grams"])
     for offer in offers:
         for key in ("quantity_grams", "serving", "serving_ar", "image_url", "calories",
                     "protein", "carbs", "fat", "fiber", "tag", "tag_delta", "delta"):
             assert key in offer, f"offer lacks {key}: {offer}"
         assert offer["quantity_grams"] > 0
-        # The catalogue holds no fibre: said as null, never invented.
-        assert offer["fiber"] is None
+        # Never invented: null exactly when the food's fibre is unknown, else that
+        # portion's own figure. It was "always null" while no column held fibre; the
+        # owner decided on 2026-09-23 that foods store it.
+        assert offer["fiber"] == portion_fibre(offer["food_id"], offer["quantity_grams"])
         assert offer["tag"] in vocabulary
         d_kcal = offer["calories"] - current["calories"]
         d_protein = offer["protein"] - current["protein"]
+        d_fibre = (None if offer["fiber"] is None or current["fiber"] is None
+                   else offer["fiber"] - current["fiber"])
         assert offer["delta"]["calories"] == pytest.approx(d_kcal, abs=0.11)
         assert offer["delta"]["protein"] == pytest.approx(d_protein, abs=0.11)
         bar = max(views.SWAP_CALORIE_CHANGE_MIN_KCAL,
@@ -94,8 +111,13 @@ def test_a_swap_offer_carries_the_portion_it_would_serve_and_a_tag(seeded_catalo
         elif offer["tag"] == "fewer_calories":
             assert d_protein < views.SWAP_MORE_PROTEIN_MIN_G and d_kcal <= -bar
             assert offer["tag_delta"] == pytest.approx(d_kcal, abs=0.11)
+        elif offer["tag"] == "more_fiber":
+            assert abs(d_kcal) < bar and d_protein < views.SWAP_MORE_PROTEIN_MIN_G
+            assert d_fibre is not None and d_fibre >= views.SWAP_MORE_FIBER_MIN_G
+            assert offer["tag_delta"] == pytest.approx(d_fibre, abs=0.11)
         else:
             assert abs(d_kcal) < bar and d_protein < views.SWAP_MORE_PROTEIN_MIN_G
+            assert d_fibre is None or d_fibre < views.SWAP_MORE_FIBER_MIN_G
             assert offer["tag_delta"] is None
 
     chosen = offers[0]
@@ -319,10 +341,18 @@ def test_a_food_row_carries_the_tags_its_data_supports(seeded_catalogue, make_us
     assert rows
     cuisine = dict(FoodItem.objects.filter(id__in=[row["id"] for row in rows])
                    .values_list("id", "cuisine"))
+    fibre = dict(FoodItem.objects.filter(id__in=[row["id"] for row in rows])
+                 .values_list("id", "fiber"))
     seen = set()
     for row in rows:
         tags = row["tags"]
         seen.update(tags)
+        # Foods store fibre since the owner's decision of 2026-09-23: the tag follows the
+        # stored figure, and an unknown one (null) claims nothing.
+        assert row["fiber"] == fibre[row["id"]], row
+        assert ("high_fiber" in tags) == (
+            fibre[row["id"]] is not None
+            and fibre[row["id"]] >= ft.HIGH_FIBER_MIN_G_PER_100G), row
         kcal, protein, fat = row["calories"], row["protein"], row["fat"]
         assert ("high_protein" in tags) == (
             kcal > 0 and protein * ft.PROTEIN_KCAL_PER_GRAM >= ft.HIGH_PROTEIN_ENERGY_SHARE * kcal), row
@@ -330,6 +360,8 @@ def test_a_food_row_carries_the_tags_its_data_supports(seeded_catalogue, make_us
         assert ("low_calorie" in tags) == (kcal <= ft.LOW_CALORIE_MAX_KCAL_PER_100G), row
         assert ("levantine" in tags) == (cuisine[row["id"]] == "levantine"), row
         assert ("western" in tags) == (cuisine[row["id"]] == "western"), row
-    # No column holds fibre or a vegetarian flag, so neither is ever claimed.
-    assert not seen & {"vegetarian", "vegan", "high_fiber", "high_fibre"}
+    # No column holds a vegetarian flag (the owner declined one, 2026-09-23), so it is
+    # never claimed. Fibre left this set when foods started storing it (asserted above,
+    # row by row); the one spelling of its tag is `high_fiber`, like `fiber`.
+    assert not seen & {"vegetarian", "vegan", "high_fibre"}
     assert "high_protein" in seen and "low_fat" in seen

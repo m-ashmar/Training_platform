@@ -1291,10 +1291,11 @@ contract.
   `swap_food` without `chosen_food_id` gains `current` (`{food_id, quantity_grams,
   calories, protein, carbs, fat, fiber}`) and, per offer, `quantity_grams` (the portion
   the swap itself would serve — one rule for both), `serving`, `serving_ar`, `image_url`
-  (null when none), `calories`, `protein`, `carbs`, `fat`, `fiber` (always null: the
-  catalogue holds no fibre), `tag`, `tag_delta` and `delta`. `tag` is a code:
-  `more_calories` | `more_protein` | `fewer_calories` | `similar` (first match); `tag_delta`
-  is the kcal or protein grams behind it, null for `similar`. `more_fiber` is reserved.
+  (null when none), `calories`, `protein`, `carbs`, `fat`, `fiber` (that portion's
+  fibre, null when unknown — see "Foods store fibre" below), `tag`, `tag_delta` and
+  `delta`. `tag` is a code: `more_calories` | `more_protein` | `fewer_calories` |
+  `more_fiber` | `similar` (first match); `tag_delta` is the kcal, protein grams or fibre
+  grams behind it, null for `similar`.
 - **Codes where there were none.** Swap to a food already in that meal: `409
   food_already_on_plate`. Unknown `action` on `interact/` and `meals/{id}/complete/`: `400
   invalid_action`. Both routes: `403 clients_only`, `400 missing_fields` (with `fields`),
@@ -1314,8 +1315,25 @@ contract.
   coach's account is closed or erased).
 - **Food tags.** `GET /api/diet/v1/food/list/` rows gain `tags`: `levantine` | `western`,
   `high_protein`, `low_fat`, `low_calorie`, from the food's own columns against the EU
-  nutrition-claim thresholds (`diet/services/food_tags.py`). No vegetarian or fibre tag:
-  the catalogue holds neither.
+  nutrition-claim thresholds (`diet/services/food_tags.py`); `high_fiber` since
+  2026-09-23 (below). No vegetarian tag.
+- **Foods store fibre** (the owner, 2026-09-23; BACKEND_BUGS B-058, B-065). Additive:
+  `FoodItem.fiber` is grams per 100 g, from USDA nutrient 1079 for the 100 USDA foods
+  (the curated Levantine foods have none yet). **Null means not known, never 0 g** — a
+  food whose fibre is unknown claims nothing.
+  - Swap (`client/meals/interact/` `swap_food`): `current.fiber` and each offer's `fiber`
+    are that portion's grams (per-100 g figure scaled by `quantity_grams`, one decimal),
+    null when the food's fibre is unknown. `more_fiber` is now emitted: the offer's
+    portion carries at least `SWAP_MORE_FIBER_MIN_G` (2 g) more fibre than the current
+    one, both known. It comes after `more_calories`, `more_protein` and
+    `fewer_calories` and before `similar`, so it only ever replaces what was `similar`;
+    `tag_delta` is the fibre grams gained.
+  - `GET /api/diet/v1/food/list/` rows gain `fiber` (per 100 g, null when unknown) and
+    the tag `high_fiber` (spelled like `fiber` and `more_fiber`): at least 6 g per 100 g,
+    the EU "high fibre" claim; never on unknown fibre. It comes last in `tags`, after
+    the existing ones, whose order does not change.
+  - **No vegetarian tag, and none is coming**: the owner decided against a vegetarian
+    flag (2026-09-23). The app drops «نباتي».
 
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
