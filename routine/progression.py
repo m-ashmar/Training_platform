@@ -44,9 +44,10 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-#: How many of the most recent rated sessions holding the exercise are read. Three is
-#: enough to tell a hard day from a hard block, and short enough that last month's
-#: training does not decide today's suggestion.
+#: How many of the most recent sessions holding the exercise are read — rated or not;
+#: the ratings among them are the effort. Three is enough to tell a hard day from a
+#: hard block, and short enough that last month's training does not decide today's
+#: suggestion.
 EFFORT_SESSIONS = 3
 
 #: The least history the rule needs: training days of THIS exercise inside the window
@@ -83,7 +84,14 @@ def _median(values) -> float:
 
 def recent_effort(user, exercise_ids, *, until=None, since=None,
                   sessions=EFFORT_SESSIONS) -> dict:
-    """`{exercise_id: [rating, ...]}` — the last `sessions` rated sessions per exercise.
+    """`{exercise_id: [rating, ...]}` — the ratings among the last `sessions` sessions
+    holding each exercise, newest first.
+
+    The last `sessions` SESSIONS, rated or not, and then the ratings among them — the
+    rule the module docstring writes out ("none of the last EFFORT_SESSIONS sessions
+    holding it was rated" is `not_enough_data`). It read the last `sessions` RATED
+    sessions instead, so one rating from seven weeks ago, followed by any number of
+    unrated workouts, still decided `add_weight` or `deload` today (SIDE_BUGS S-111).
 
     ONE query for every exercise asked about, because the coach's client screen asks
     about five at once and the client's own screen may ask about twelve. A session
@@ -98,7 +106,7 @@ def recent_effort(user, exercise_ids, *, until=None, since=None,
     until = until or timezone.localdate()
     since = since or until - timedelta(weeks=TREND_WEEKS)
     rows = (WorkoutSession.objects
-            .filter(user=user, effort_rating__isnull=False,
+            .filter(user=user,
                     start_time__date__gte=since, start_time__date__lte=until,
                     set_logs__user_exercise_progress__exercise_id__in=ids)
             # DISTINCT: the join is over set logs, so a session of ten sets would
@@ -109,10 +117,13 @@ def recent_effort(user, exercise_ids, *, until=None, since=None,
             .distinct()
             .order_by('-start_time', '-pk'))
     collected: dict = {exercise_id: [] for exercise_id in ids}
+    seen: dict = {exercise_id: 0 for exercise_id in ids}
     for exercise_id, _pk, rating, _start in rows:
-        bucket = collected.get(exercise_id)
-        if bucket is not None and len(bucket) < sessions:
-            bucket.append(int(rating))
+        if exercise_id not in seen or seen[exercise_id] >= sessions:
+            continue
+        seen[exercise_id] += 1          # a session read, whether or not it was rated
+        if rating is not None:
+            collected[exercise_id].append(int(rating))
     return collected
 
 

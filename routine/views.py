@@ -1344,6 +1344,40 @@ def _sync_number(raw, *, low, high, default=None):
     return value
 
 
+def _duplicate_touch(user, row, existing):
+    """`(progress, routine, day)` for a set a re-sent batch already wrote — so its
+    recomputation runs again (SIDE_BUGS S-120).
+
+    `set-logs/sync/` has no outer transaction: each set commits on its own, and the
+    recomputation runs once at the end. A request that died in between (a timeout, a
+    dropped connection, a worker restart) left those sets written and never counted,
+    and the retry — the thing the app does next — answered them `duplicate` with
+    nothing to recompute, so `completed_sets`, the day's `RoutineProgress` and any
+    closed outcome stayed stale until another set of the exercise arrived. The
+    recomputation is idempotent, so running it for a set already counted costs time and
+    changes nothing.
+
+    Scoped like the first write: the stored set's own session names the routine and
+    the day; without one, the row's `routine_id` (under the same rule step 4 of
+    `_sync_one_set` applies) and `day`.
+    """
+    from .models import Routine
+
+    progress = existing.user_exercise_progress
+    if progress is None:
+        return None
+    session = existing.workout_session
+    routine = getattr(session, 'routine', None)
+    day = getattr(session, 'day', None)
+    routine_id = _int_or_none(row.get('routine_id')) if isinstance(row, dict) else None
+    if routine is None and routine_id is not None:
+        routine = (Routine.objects.filter(pk=routine_id)
+                   .filter(Q(assigned_to=user) | Q(created_by=user)).distinct().first())
+    if isinstance(row, dict):
+        day = _int_or_none(row.get('day')) or day
+    return progress, routine, day
+
+
 def _sync_one_set(request, row, key, known, today):
     """Write one set of an offline batch. Returns `(answer, touched, log)`.
 
@@ -1383,7 +1417,7 @@ def _sync_one_set(request, row, key, known, today):
                 'set_number': existing.set_number,
                 'exercise_id': (existing.user_exercise_progress.exercise_id
                                 if existing.user_exercise_progress_id else None),
-                'personal_record': False}, None, None
+                'personal_record': False}, _duplicate_touch(user, row, existing), None
 
     # 2. The date. Bounded exactly as `bulk-create` bounds it.
     parsed = parse_date(str(row.get('date'))) if row.get('date') else today
@@ -1520,7 +1554,7 @@ def _sync_one_set(request, row, key, known, today):
             raise
         return {'client_uuid': str(key), 'status': 'duplicate', 'id': twin.pk,
                 'set_number': twin.set_number, 'exercise_id': exercise_id,
-                'personal_record': False}, None, None
+                'personal_record': False}, (progress, routine, day), None
 
     return ({'client_uuid': str(key), 'status': 'created', 'id': log.pk,
              'set_number': log.set_number, 'exercise_id': exercise_id,
@@ -1545,16 +1579,25 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     `personal_record: true` and sends them the `personal_record` push (the owner,
     2026-09-20). The first set of an exercise never counts as a record.
 
-    PATCH and DELETE belong to the PERSON WHOSE SET IT IS (BACKEND_DELTA item 15), and
-    to an admin; a trainer may read a client's sets and no longer edit or delete them —
-    they did not lift them. Anyone else gets 404, because the list is scoped. Only
+    POST, PATCH and DELETE belong to the PERSON WHOSE SET IT IS (BACKEND_DELTA item 15),
+    and to an admin; a trainer may read a client's sets and no longer create, edit or
+    delete them — they did not lift them. A trainer's POST naming a client's progress
+    row or session answers 403 `set_not_yours` (SIDE_BUGS S-114), and the coaching
+    refusal on a create is judged for the set's owner, never for the coach. `reps` is
+    1-1000 (400 on `reps`), the bound every logging route applies (S-115). Anyone
+    else gets 404, because the list is scoped. Only
     `weight`, `reps`, `notes` and `rpe` may change: moving a set to another progress
     row, session, set number or date answers 400 `set_immutable` on that field. Both
     are refused with 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while
     the coaching the set's routine came from is unpaid or over, judged on the set's own
     date. A delete recomputes everything the set was counted in — the exercise's
     completed sets, the day's `RoutineProgress`, and the `DayOutcome` of a day that was
-    already closed, which can turn a complete day short and break a streak.
+    already closed, which can turn a complete day short and break a streak. A day that
+    completed ITSELF from its sets (outcome `via` `auto`, or `session` on top of it)
+    moves back from `completed` when they are deleted; a day the person closed
+    (`completed`, `confirmed_unlogged`, `bulk_complete`, or `routine-progress/`, which
+    writes no outcome) stays completed, and only its outcome turns short (SIDE_BUGS
+    S-110).
     """
     queryset = ExerciseSetLog.objects.all()
     serializer_class = ExerciseSetLogSerializer
@@ -1608,10 +1651,32 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         data = serializer.validated_data
         session = data.get('workout_session')
         progress = data.get('user_exercise_progress')
+        # WHOSE set this is, and who may write it (SIDE_BUGS S-114). The serializer lets
+        # an approved trainer NAME a client's progress row or session — that is the
+        # read rule — and a trainer then logged sets the client never lifted: filling
+        # in short days, completing them, repairing a streak, raising the adherence the
+        # coach is judged by, and pushing `personal_record` to the client for it. The
+        # same reason a trainer may not edit or delete a client's set (they did not
+        # lift it) refuses the create: 403 `set_not_yours`. An admin keeps the write,
+        # as for edits. Whether a coach should ever log for a client is the owner's
+        # call; until then this fails closed.
+        actor = self.request.user
+        owner_id = (progress.user_id if progress is not None
+                    else session.user_id if session is not None else actor.id)
+        is_admin = actor.is_staff or getattr(actor, 'is_admin', False)
+        if owner_id != actor.id and not is_admin:
+            raise PermissionDenied(
+                _("Only the person who trained can log a set. A coach reads a "
+                  "client's sets and does not write them."), code='set_not_yours')
+        # The coaching refusal is a rule about the CLIENT and their coach, so it is
+        # asked about the set's owner (the caller, once the check above has run) — it
+        # was asked about the trainer, who is never refused, so a frozen coaching could
+        # still be logged into. An admin is asked about as themselves, as
+        # `_refuse_if_frozen` asks.
         if session is not None:
-            _require_can_train(self.request.user, session.routine, session.start_time)
+            _require_can_train(actor, session.routine, session.start_time)
         elif progress is not None:
-            _require_can_train_exercise(self.request.user, progress.exercise_id,
+            _require_can_train_exercise(actor, progress.exercise_id,
                                         data.get('date') or timezone.localdate())
         try:
             serializer.save()
@@ -1676,6 +1741,9 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         to 100 (SIDE_BUGS S-032). It answered a bare JSON array holding every set the
         person had ever logged: a year of training is one unbounded response, built by
         serialising every row into memory first. Both shapes page the same way.
+
+        Order: the sets newest first (`date` descending, then the most recently written);
+        `group_by=exercise` rows by exercise name.
         """
         user = request.user
         if not user.is_authenticated or not user.is_client:
@@ -1715,8 +1783,11 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                 return self.get_paginated_response(result)
             return Response(result)
         # Default: the client's set logs (optionally filtered by routine), a page at a
-        # time. `ExerciseSetLog.Meta.ordering` is ('set_number', 'id') — a total order,
-        # so LIMIT/OFFSET does not repeat or hide rows.
+        # time, NEWEST FIRST — `-date`, then `-id` so the order is total and LIMIT/OFFSET
+        # neither repeats nor hides a row (SIDE_BUGS S-121). It kept the model's
+        # ('set_number', 'id'), so page 1 was every "set 1" the person ever logged,
+        # oldest first, and the recent sets were on the last page.
+        qs = qs.order_by('-date', '-id')
         page = self.paginate_queryset(qs)
         if page is not None:
             return self.get_paginated_response(self.get_serializer(page, many=True).data)
@@ -1874,15 +1945,30 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                         # request fails with TransactionManagementError instead of
                         # being recorded in `errors`.
                         with transaction.atomic():
-                            # update_or_create, not get_or_create: re-submitting a set with a
-                            # corrected weight/reps previously returned success while silently
+                            # Update, not get: re-submitting a set with a corrected
+                            # weight/reps previously returned success while silently
                             # discarding the correction, so users could never fix a mistake.
-                            log, created = ExerciseSetLog.objects.update_or_create(
-                                user_exercise_progress=progress,
-                                set_number=set_num,
-                                date=date,
-                                defaults={'weight': set_weight, 'reps': set_reps}
-                            )
+                            #
+                            # The OLDEST row for this set number, not `update_or_create`
+                            # (SIDE_BUGS S-071): `(progress, set_number, date)` carries no
+                            # unique constraint — only `client_uuid` is unique — so a set
+                            # re-sent without the app's id writes a second row, and then
+                            # `update_or_create` raised MultipleObjectsReturned, which is
+                            # not an IntegrityError: every later "log the whole day" for
+                            # that day answered 500. The duplicate is left as it is; the
+                            # counts already collapse set numbers (`_recalc_locked`).
+                            log = (ExerciseSetLog.objects.select_for_update()
+                                   .filter(user_exercise_progress=progress,
+                                           set_number=set_num, date=date)
+                                   .order_by('id').first())
+                            created = log is None
+                            if created:
+                                log = ExerciseSetLog.objects.create(
+                                    user_exercise_progress=progress, set_number=set_num,
+                                    date=date, weight=set_weight, reps=set_reps)
+                            else:
+                                log.weight, log.reps = set_weight, set_reps
+                                log.save(update_fields=['weight', 'reps'])
                         results.append({'exercise': rex.exercise.name, 'set_number': set_num,
                                         'created': created, 'id': log.id})
                     except IntegrityError as e:
@@ -1946,7 +2032,10 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 
             created     `{client_uuid, status, id, set_number, exercise_id,
                          personal_record}`
-            duplicate   the same, for the row the first send wrote
+            duplicate   the same, for the row the first send wrote — nothing is
+                        written, and what the set is counted in is recomputed
+                        again, so a send that died before its recount is repaired
+                        by the retry (SIDE_BUGS S-120)
             error       `{client_uuid, status, code, error}` — `bad_row`,
                         `client_uuid_required`, `idempotency_conflict`, `bad_date`,
                         `date_in_future`, `date_too_old`, `exercise_required`,
@@ -1995,9 +2084,12 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                                and not isinstance(raw, bool) else _uuid.UUID(str(raw)))
             except (ValueError, TypeError, AttributeError):
                 keys[index] = None          # malformed: answered `client_uuid_required`
+        # The session and its routine come along: a `duplicate` is recomputed too, scoped
+        # to where it was logged (`_duplicate_touch`), and that must not cost a query a
+        # row either.
         known = {log.client_uuid: log for log in ExerciseSetLog.objects
                  .filter(client_uuid__in=[k for k in keys.values() if k is not None])
-                 .select_related('user_exercise_progress')}
+                 .select_related('user_exercise_progress', 'workout_session__routine')}
 
         results, fresh = [], []
         # `(progress_pk, routine_pk, day)`: the recomputation runs ONCE per progress
@@ -2045,6 +2137,24 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     API endpoint for managing WorkoutSession objects.
     A client opens sessions on routines assigned to them; a trainer may open one for an
     approved client (`user` in the body). The owner PATCHes their session.
+
+    **PATCH, PUT and DELETE belong to the person who trained, and to an admin**
+    (SIDE_BUGS S-067). A trainer reads a client's sessions and answers 403 on every
+    write to one — the same rule as a client's sets, which a session holds: deleting
+    it deletes every set logged in it, and finishing it closes the client's day. (A
+    trainer's PATCH that also fails validation answers that 400 first, as it always
+    has — `effort_not_yours` on `effort_rating`; nothing is written either way.)
+    DELETE removes the session and the sets logged in it, and recomputes everything
+    those sets were counted in, exactly as deleting each set would; it is refused with
+    403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while the coaching is
+    unpaid or over, judged at the session's start.
+
+    **`status` only moves forward** (SIDE_BUGS S-122): `active` may become `completed`
+    or `abandoned`; `completed` and `abandoned` are final, and a PATCH that changes
+    either answers 400 `session_status_final` on `status` (re-sending the status the
+    row already holds is a no-op, so a PUT of the whole object still works). Reopening
+    a finished workout re-ran everything finishing it does — the client and the coach
+    were told twice — and finishing an abandoned one invented a twelve-hour workout.
 
     While the coaching a routine came from is unpaid (frozen) or over, the routine stays
     readable and opening or editing a session on it answers 403 `coaching_frozen` /
@@ -2166,8 +2276,28 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         # Judged at the session's own start: finishing a workout begun while the coaching
         # was paid is allowed after it freezes.
         instance = serializer.instance
+        # Only the person who trained, or an admin, writes a session (SIDE_BUGS S-067).
+        # Refused HERE rather than in the permission class so that a trainer's edit
+        # still answers the field codes it always has (`effort_not_yours`) first —
+        # either way nothing of theirs is written.
+        from .permissions import is_session_writer
+        if not is_session_writer(self.request.user, instance):
+            raise PermissionDenied()
         _require_can_train(self.request.user, instance.routine, instance.start_time)
         serializer.save()
+
+    def perform_destroy(self, instance):
+        """Deleting a workout deletes the sets logged in it (the foreign key cascades),
+        so it is refused exactly as deleting those sets is: only the owner or an admin
+        reaches here (`IsSessionOwnerOrTrainerOrAdmin`), and a frozen or ended coaching
+        refuses it, judged at the session's start (SIDE_BUGS S-067). Asked about the
+        CALLER, as `ExerciseSetLogViewSet._refuse_if_frozen` asks: an admin clearing up a
+        bad row is not caught by a client's unpaid month.
+
+        Each deleted set is recomputed by the `post_delete` receiver in
+        `routine/models.py`, which runs for a cascade too; nothing is duplicated here."""
+        _require_can_train(self.request.user, instance.routine, instance.start_time)
+        instance.delete()
 
     def update(self, request, *args, **kwargs):
         """PATCH or PUT: the client marks the session completed, and finishing it
@@ -2527,7 +2657,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         from datetime import timedelta
 
         from .outcomes import adherence
-        from .serializers import DayOutcomeSerializer
+        from .serializers import DayOutcomeSummarySerializer
         from users.models import CustomUser
 
         user = request.user
@@ -2559,13 +2689,12 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # `routine-progress/`, which answers `outcome` per day.
         # `.defer('detail')`, not "serialise then pop": a year of days would otherwise
         # read every prescribed exercise of every day out of the database and render it
-        # only to throw it away. The per-day rows are on `routine-progress/`.
-        days = DayOutcomeSerializer(
+        # only to throw it away. The per-day rows are on `routine-progress/`. And a
+        # serializer that does not NAME the column, or rendering it loads it back one
+        # row at a time (SIDE_BUGS S-072).
+        body['by_day'] = DayOutcomeSummarySerializer(
             DayOutcome.objects.filter(user=user, date__gte=start, date__lte=today)
             .defer('detail').order_by('date', 'id'), many=True).data
-        for row in days:
-            row.pop('detail', None)
-        body['by_day'] = days
         return Response(body)
 
     @action(detail=False, methods=['get'])
@@ -2674,7 +2803,11 @@ class AnalyticsViewSet(viewsets.ViewSet):
         """
         Get training volume and completion trends over time (per day/week/month).
         Input: user_id (optional), period=day|week|month
-        Output: JSON with date/period and volume/completion
+        Output: `{volume_trend: [{period, total_volume}], completion_trend: [{period,
+        completed, total}]}`. `period` is a DATE (`YYYY-MM-DD`, the first day of the
+        week or month) in both lists, and both are bucketed by the day the training
+        happened. `completion_trend` was bucketed by when its row was last written and
+        answered a datetime (SIDE_BUGS S-123).
         """
         from .models import ExerciseSetLog, RoutineProgress
         from django.db.models.functions import TruncDay, TruncWeek, TruncMonth
@@ -2701,14 +2834,17 @@ class AnalyticsViewSet(viewsets.ViewSet):
         volume_trend = setlogs.values('period').annotate(
             total_volume=Sum(F('weight') * F('reps'))
         ).order_by('period')
-        # Completion trend
+        # Completion trend, bucketed by the TRAINING date (SIDE_BUGS S-123). It used
+        # `updated_at`, which is `auto_now`: a day's completion landed on whatever day its
+        # row was last touched — a later sync, a recalculation — which is exactly why the
+        # model says `updated_at` is useless as a training date.
         rps = RoutineProgress.objects.filter(user_id=user_id)
         if period == 'week':
-            rps = rps.annotate(period=TruncWeek('updated_at'))
+            rps = rps.annotate(period=TruncWeek('date'))
         elif period == 'month':
-            rps = rps.annotate(period=TruncMonth('updated_at'))
+            rps = rps.annotate(period=TruncMonth('date'))
         else:
-            rps = rps.annotate(period=TruncDay('updated_at'))
+            rps = rps.annotate(period=TruncDay('date'))
         completion_trend = rps.values('period').annotate(
             completed=Count('id', filter=Q(status='completed')),
             total=Count('id')
@@ -2718,8 +2854,15 @@ class AnalyticsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def admin_dashboard(self, request):
         """
-        Admin/trainer dashboard: summary stats for all clients.
-        Output: JSON with client stats (volume, completion, streaks)
+        Admin/trainer dashboard: summary stats for the caller's clients (a trainer's
+        approved clients; every client for an admin). 403 for anyone else.
+
+        Output: `{dashboard: [{client_id, username, total_volume, completion_rate,
+        max_streak}], count, next, previous}` — PAGINATED over clients, by id, 25 a page,
+        `?page=` / `?page_size=` up to 100 (400 naming the parameter when either is
+        bad). `dashboard` is the key it has always been; `count`, `next` and `previous`
+        are new. For an admin the list was every client on the platform in one
+        response, and the aggregates were computed for all of them (SIDE_BUGS S-124).
         """
         from .models import RoutineProgress, ExerciseSetLog
         from users.models import CustomUser
@@ -2736,22 +2879,25 @@ class AnalyticsViewSet(viewsets.ViewSet):
             clients = CustomUser.objects.filter(id__in=ids or [])
         else:
             clients = CustomUser.objects.filter(user_type='client')
-        
-        # Prefetch related data to avoid N+1 queries
-        # `exercise_progress__set_logs` was prefetched here and never read: the
-        # aggregates below run their own queries. For twenty clients with a year of
-        # training that was ~36k progress rows and ~110k set logs pulled into the
-        # worker to produce a page of summaries.
-        clients = clients.select_related('assigned_trainer').prefetch_related(
-            'routine_progress'
-        )
+
+        # Nothing is prefetched: every figure below is an aggregate with its own query.
+        # `exercise_progress__set_logs` was prefetched here and never read (~36k
+        # progress rows and ~110k set logs for twenty clients), and so was
+        # `routine_progress` after it — for an admin, every RoutineProgress row on the
+        # platform loaded to build a list that never looks at one (SIDE_BUGS S-124).
+        # A page of clients, by id, and the aggregates for that page only.
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(clients.order_by('id').only('id', 'username'),
+                                           request, view=self)
+        clients = list(page) if page is not None else list(clients.only('id', 'username'))
+        client_ids = [client.id for client in clients]
         
         # Calculate date range for volume (last 30 days)
         thirty_days_ago = timezone.localdate() - timedelta(days=30)
         
         # Bulk aggregate volume data for all clients
         volume_data = ExerciseSetLog.objects.filter(
-            user_exercise_progress__user__in=clients,
+            user_exercise_progress__user_id__in=client_ids,
             date__gte=thirty_days_ago
         ).values('user_exercise_progress__user').annotate(
             total_volume=Sum(F('weight') * F('reps'))
@@ -2762,7 +2908,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         
         # Bulk aggregate completion data for all clients
         completion_data = RoutineProgress.objects.filter(
-            user__in=clients
+            user_id__in=client_ids
         ).values('user').annotate(
             total_days=Count('id'),
             completed_days=Count('id', filter=Q(status='completed'))
@@ -2795,7 +2941,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # every outcome and every progress row this platform has ever written.
         streak_window = timezone.localdate() - timedelta(days=STREAK_WINDOW_DAYS)
         broken = set()
-        for row in (DayOutcome.objects.filter(user__in=clients, date__gte=streak_window)
+        for row in (DayOutcome.objects.filter(user_id__in=client_ids, date__gte=streak_window)
                     .values('user_id', 'date')
                     .annotate(complete=_Count('id', filter=Q(complete=True)))
                     .filter(complete=0)):
@@ -2803,7 +2949,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
 
         streak_lookup = {}
         streak_rows = [row for row in (RoutineProgress.objects
-                       .filter(user__in=clients, status='completed',
+                       .filter(user_id__in=client_ids, status='completed',
                                date__gte=streak_window)
                        .values_list('user_id', 'date')
                        .order_by('user_id', 'date')
@@ -2849,6 +2995,11 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 'max_streak': max_streak
             })
         
+        if page is not None:
+            # The project envelope, with the rows under the key they have always had.
+            return Response({'dashboard': dashboard, 'count': paginator.page.paginator.count,
+                             'next': paginator.get_next_link(),
+                             'previous': paginator.get_previous_link()})
         return Response({'dashboard': dashboard})
 
 
@@ -4237,10 +4388,13 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                      # weekly statistics use seven days and the activity list shows a
                      # month — and unlike a slice it composes with the nested prefetch.
                      'workout_sessions',
+                     # `routine` joined here: every row below names its routine, and
+                     # reading it off an unloaded session cost one query per session
+                     # (SIDE_BUGS S-126).
                      queryset=WorkoutSession.objects.filter(
                         status='completed',
                         end_time__gte=timezone.now() - timedelta(days=RECENT_ACTIVITY_DAYS),
-                     ).order_by('-end_time').prefetch_related(
+                     ).select_related('routine').order_by('-end_time').prefetch_related(
                          Prefetch(
                              'set_logs',
                              queryset=ExerciseSetLog.objects.select_related(
@@ -4249,11 +4403,12 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                          )
                      )
                  ),
-                 # Prefetch routine progress
-                 'routine_progress'
+                 # `routine_progress` was prefetched here too — every row of the
+                 # client's whole history — and nothing below reads it (S-126).
              ).get(id=client_id, user_type='client')
              
              # 3. Efficient In-Memory Calculation (No new DB queries)
+             from .services import routine_name_for
              recent_sessions = client.workout_sessions.all() # Uses prefetch cache
              
              # Calculate Weekly Stats (Python-side to use prefetch)
@@ -4284,7 +4439,10 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                      'date': session.end_time,
                      'duration': session.duration,
                      'volume': session_volume,
-                     'routine_name': session.routine.name if session.routine else "Custom Workout",
+                     # In the coach's own language, like every other routine name
+                     # this app shows (`routine_name_for`); the column is the
+                     # default-language one (S-126). A session always has a routine.
+                     'routine_name': routine_name_for(session.routine, user),
                      'exercises': list(exercises_done),
                      # How hard the client said it was, or null (BACKEND_DELTA item 11).
                      # Volume says what was moved; this says what it cost them.

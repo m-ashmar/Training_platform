@@ -4282,3 +4282,31 @@ msgstr "تمت إضافة %(count)d من عناصر الوسائط إلى الت
 #, python-format
 msgid "Successfully deleted %(count)d media items from exercise \"%(name)s\""
 msgstr "تم حذف %(count)d من عناصر الوسائط من التمرين \"%(name)s\""
+
+#: routine/serializers.py
+msgid "A finished or abandoned workout cannot be reopened or finished again."
+msgstr "لا يمكن إعادة فتح تمرين منتهٍ أو متروك، ولا إنهاؤه مرة أخرى."
+
+#: routine/views.py
+msgid ""
+"Only the person who trained can log a set. A coach reads a client's sets and "
+"does not write them."
+msgstr ""
+"يسجّل المجموعةَ الشخصُ الذي تمرّن فقط. يطّلع المدرب على مجموعات المتدرب ولا "
+"يسجّلها."
+
+#: routine/serializers.py
+msgid ""
+"Great job! You've finished this day's workout. Rest up for the next one."
+msgstr ""
+"أحسنت! لقد أنهيت تمرين هذا اليوم. خذ قسطًا من الراحة استعدادًا للتمرين التالي."
+
+#: routine/serializers.py
+#, python-format
+msgid "Keep pushing! Exercises left to complete Day %(day)s: %(remaining)s."
+msgstr "واصل! التمارين المتبقية لإكمال اليوم %(day)s: %(remaining)s."
+
+#: routine/serializers.py
+#, python-format
+msgid "Ready to start? Begin your Day %(day)s workout now."
+msgstr "هل أنت مستعد؟ ابدأ تمرين اليوم %(day)s الآن."
