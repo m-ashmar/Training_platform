@@ -130,6 +130,17 @@ class PaymentGatewayService:
             logger.error(f"Failed to fetch payment status: {str(e)}")
             raise PaymentGatewayError(f"Status check failed: {str(e)}")
 
+    def list_transactions(self, start, end):
+        """`(transactions, complete)` in a window (`BaseGateway.list_transactions`)."""
+        try:
+            return self.gateway.list_transactions(start, end)
+        except Exception as e:
+            logger.error(f"Failed to list transactions: {str(e)}")
+            raise PaymentGatewayError(f"Transaction listing failed: {str(e)}")
+
+    def transaction_facts(self, txn) -> Dict[str, Any]:
+        return self.gateway.transaction_facts(txn)
+
     def refund(self, reference: str, amount=None) -> Dict[str, Any]:
         return self.gateway.refund(reference, amount)
 

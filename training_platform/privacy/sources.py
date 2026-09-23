@@ -323,6 +323,12 @@ register(PersonalDataSource(label="payments", model="subscription.Payment",
                             user_field="subscription__user", on_erase="keep"))
 register(PersonalDataSource(label="subscription_usage", model="subscription.SubscriptionUsage",
                             user_field="subscription__user", on_erase="keep"))
+# A transfer held for review against a customer's checkout (B-051): the sender's note
+# and account as the gateway reported them. A financial record like the payment it
+# belongs to — kept on erasure, exported to the customer it names. A transfer queued
+# with no checkout named belongs to nobody yet and is not reachable from a person.
+register(PersonalDataSource(label="transfer_reviews", model="subscription.TransferReview",
+                            user_field="payment__subscription__user", on_erase="keep"))
 # A live credential, not a record. An erased account must not keep one.
 register(PersonalDataSource(label="agent_api_keys", model="wallet.AgentAPIKey",
                             user_field="agent__user"))

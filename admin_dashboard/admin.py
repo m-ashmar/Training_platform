@@ -11,6 +11,7 @@ This module provides a powerful admin interface for managing all aspects of the 
 - System Configuration
 """
 
+from django import forms
 from django.contrib import admin
 from django.contrib.admin import AdminSite
 from django.utils.html import format_html
@@ -59,7 +60,7 @@ from diet.admin import (
 )
 from subscription.models import (
     SubscriptionPlan, Subscription, Payment, 
-    SubscriptionFeature, SubscriptionUsage
+    SubscriptionFeature, SubscriptionUsage, TransferReview
 )
 from social.models import (
     Post, Comment, UserFollow, Challenge, ChallengeParticipation,
@@ -418,6 +419,101 @@ class PaymentAdmin(_SubscriptionPaymentAdmin):
     list_filter = ('status', 'payment_method', 'currency', 'created_at')
     search_fields = ('subscription__user__email', 'transaction_id')
 
+class TransferReviewForm(forms.ModelForm):
+    """Only one thing is typed here: the checkout to attach a queued transfer to."""
+    attach_to_payment = forms.UUIDField(
+        required=False, label="Attach to payment",
+        help_text="The id of the checkout this transfer was for. It is then held for "
+                  "review; approve or reject it with the actions.")
+
+    class Meta:
+        model = TransferReview
+        fields = ['resolution_note']
+
+
+class TransferReviewAdmin(admin.ModelAdmin):
+    """The review queue (the spec, section 7; BACKEND_BUGS B-051): transfers on the
+    merchant account that no checkout claimed exactly.
+
+    Nothing about the money is edited here. Each decision is an action that goes
+    through `PaymentService` and records who took it: approve (the checkout completes
+    on this transfer), reject (the money goes back to its sender by hand — say so in
+    the note), dismiss (not a customer's payment), or attach a queued transfer to the
+    checkout it was for.
+    """
+    form = TransferReviewForm
+    list_select_related = ('payment', 'resolved_by')
+    list_display = ('created_at', 'reason', 'status', 'amount', 'currency', 'note',
+                    'sender', 'payment')
+    list_filter = ('status', 'reason', 'currency')
+    search_fields = ('transaction_id', 'note', 'sender', 'payment__id',
+                     'payment__gateway_transaction_reference')
+    readonly_fields = ('gateway', 'transaction_id', 'amount', 'currency', 'note', 'sender',
+                       'occurred_at', 'reason', 'payment', 'candidate_payment_ids',
+                       'status', 'resolved_by', 'resolved_at', 'raw', 'created_at')
+    actions = ['approve', 'reject', 'dismiss']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def _decide(self, request, queryset, decide, verb):
+        from django.contrib import messages
+        from subscription.services.payment_service import (
+            InvalidPaymentTransition, PaymentError,
+        )
+
+        done, refused = 0, []
+        for review in queryset:
+            try:
+                decide(review)
+                done += 1
+            except (InvalidPaymentTransition, PaymentError) as exc:
+                refused.append(f"{review.transaction_id}: {exc}")
+        if done:
+            self.message_user(request, f"{verb} {done} transfer(s).", messages.SUCCESS)
+        for line in refused:
+            self.message_user(request, line, messages.ERROR)
+
+    @admin.action(description="Approve: complete its checkout on this transfer")
+    def approve(self, request, queryset):
+        from subscription.services.payment_service import PaymentService
+        self._decide(request, queryset, lambda r: PaymentService.approve_review(
+            r.id, request.user, r.resolution_note), "Approved")
+
+    @admin.action(description="Reject: the money goes back to its sender by hand")
+    def reject(self, request, queryset):
+        from subscription.services.payment_service import PaymentService
+        self._decide(request, queryset, lambda r: PaymentService.reject_review(
+            r.id, request.user, r.resolution_note or "Rejected on review"), "Rejected")
+
+    @admin.action(description="Dismiss: not a customer's payment")
+    def dismiss(self, request, queryset):
+        from subscription.services.payment_service import PaymentService
+        self._decide(request, queryset, lambda r: PaymentService.dismiss_review(
+            r.id, request.user, r.resolution_note), "Dismissed")
+
+    def save_model(self, request, obj, form, change):
+        """Saves the note; an `attach_to_payment` goes through the payment service."""
+        from django.contrib import messages
+        from subscription.services.payment_service import (
+            InvalidPaymentTransition, PaymentError, PaymentService,
+        )
+
+        TransferReview.objects.filter(pk=obj.pk).update(
+            resolution_note=form.cleaned_data.get('resolution_note', '')[:500])
+        target = form.cleaned_data.get('attach_to_payment')
+        if target:
+            try:
+                PaymentService.attach_review(obj.pk, target, request.user)
+                self.message_user(request, f"Attached to payment {target}; it is held for "
+                                           f"review.", messages.SUCCESS)
+            except (InvalidPaymentTransition, PaymentError, Payment.DoesNotExist) as exc:
+                self.message_user(request, f"Not attached: {exc}", messages.ERROR)
+
+
 # ============================================================================
 # SOCIAL FEATURES MANAGEMENT
 # ============================================================================
@@ -634,6 +730,7 @@ admin_site.register(DailyAdvice)
 admin_site.register(SubscriptionPlan, SubscriptionPlanAdmin)
 admin_site.register(Subscription, SubscriptionAdmin)
 admin_site.register(Payment, PaymentAdmin)
+admin_site.register(TransferReview, TransferReviewAdmin)
 admin_site.register(SubscriptionFeature)
 admin_site.register(SubscriptionUsage)
 

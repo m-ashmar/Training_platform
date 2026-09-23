@@ -4440,3 +4440,23 @@ msgid ""
 msgstr ""
 "الأيام المتبقية في خطتك تغطي سعر الخطة الجديدة. يمكنك الترقية عندما يتبقى وقت "
 "أقل من الفترة."
+
+#: notifications/domain/subscription_events.py
+msgid "We are checking your payment"
+msgstr "نتحقق من دفعتك"
+
+#: notifications/domain/subscription_events.py
+msgid ""
+"We received a transfer that does not exactly match your payment. Our team is "
+"checking it and will let you know."
+msgstr "وصلنا تحويل لا يطابق دفعتك تماماً. يتحقق فريقنا منه وسنخبرك بالنتيجة."
+
+#: notifications/domain/subscription_events.py
+msgid "We could not accept your transfer"
+msgstr "تعذّر قبول تحويلك"
+
+#: notifications/domain/subscription_events.py
+msgid ""
+"The transfer we checked could not be matched to your payment. Contact support to "
+"have it returned."
+msgstr "تعذّرت مطابقة التحويل الذي تحققنا منه مع دفعتك. تواصل مع الدعم لاسترداده."

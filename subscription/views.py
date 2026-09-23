@@ -43,7 +43,7 @@ from .services.payment_gateways import (
     CurrencyNotChargeable, PaymentGatewayError, PaymentGatewayService,
 )
 from .services.payment_service import (
-    CheckoutOpen, PaymentService, PaymentError, InvalidPaymentTransition,
+    AmountMismatch, CheckoutOpen, PaymentService, PaymentError, InvalidPaymentTransition,
     PaymentVerificationError, PlanChanged, SubscriptionAlreadyActive, UpgradePriceMoved,
 )
 from .upgrade import UpgradeNotPayable, UpgradeRefused, quote_upgrade
@@ -157,6 +157,19 @@ def _upgrade_payload_from_record(payment, record):
         'period_days': record.get('period_days'),
         'starts': 'when_paid',
     }
+
+
+def review_of(payment):
+    """`{reason, held_at}` for a payment a person is checking or has rejected, else None.
+
+    Only the reason code and when: the transfer itself (amount, note, sender) is the
+    sender's and stays in the operator console."""
+    if payment.status not in ('needs_review', 'rejected'):
+        return None
+    record = (payment.metadata or {}).get('review') or {}
+    if not record:
+        return None
+    return {'reason': record.get('reason'), 'held_at': record.get('held_at')}
 
 
 def _locked_subscription(pk):
@@ -1233,7 +1246,29 @@ class PaymentWebhookView(APIView):
         gateway_status = str(payment_data.get('status', '')).lower()
         try:
             if gateway_status in SUCCESS_STATUSES:
-                PaymentService.complete_payment(payment.id, payment_data)
+                try:
+                    PaymentService.complete_payment(payment.id, payment_data)
+                except AmountMismatch as mismatch:
+                    # Money for this checkout, but not the amount or currency it asked
+                    # for. Refusing it made the gateway redeliver for ever and left the
+                    # money unaccounted for; it is held for an operator (B-051) and the
+                    # delivery is acknowledged.
+                    logger.warning("Webhook for payment %s held for review: %s",
+                                   payment.id, mismatch)
+                    PaymentService.hold_for_review(
+                        payment.id,
+                        {'transaction_id': payment_data.get('transaction_id')
+                         or payment_data.get('event_id'),
+                         'amount': payment_data.get('amount'),
+                         'currency': payment_data.get('currency'),
+                         'note': payment_data.get('reference', ''),
+                         'occurred_at': payment_data.get('occurred_at'),
+                         'gateway_data': payment_data.get('gateway_data') or payment_data},
+                        reason=('currency_differs' if str(payment_data.get('currency', '')
+                                                          ).upper() not in ('', str(payment.currency).upper())
+                                else 'amount_differs'),
+                        gateway=gateway_name)
+                    return
                 logger.info(f"Webhook completed payment {payment.id} via {gateway_name}")
             elif gateway_status in FAILURE_STATUSES:
                 PaymentService.fail_payment(payment.id, payment_data.get('error_message', 'Payment failed'))
@@ -1599,8 +1634,16 @@ class PaymentStatusView(APIView):
     To reconcile a pending payment against the gateway, use `POST .../reconcile/`.
 
     200 `{success, payment_id, status, amount, currency, payment_method, invoice_number,
-    created_at, updated_at, expires_at, reference}` (`expires_at` null once the checkout
-    is no longer open). 404 `not_found` — no such payment, or not the caller's
+    created_at, updated_at, expires_at, reference, review}` (`expires_at` null once the
+    checkout is no longer open, and while it is held for review).
+
+    `status` can be `needs_review` (BACKEND_BUGS B-051): money arrived that is almost
+    right — the reference with another amount or currency, or the amount with no
+    reference — and a person is checking it (the design's PayMatching). It never
+    expires; it ends `completed` (approved, or an exact transfer arrived) or `rejected`
+    (the money goes back to its sender by hand). `review` is null otherwise, else
+    `{"reason": "amount_differs" | "currency_differs" | "reference_missing" | ...,
+    "held_at": "<iso>"}`. 404 `not_found` — no such payment, or not the caller's
     (one answer for both).
     """
     permission_classes = [permissions.IsAuthenticated]
@@ -1628,6 +1671,10 @@ class PaymentStatusView(APIView):
             # counts down to this. Null once the checkout is no longer open.
             'expires_at': checkout_expires_at(payment),
             'reference': payment.gateway_transaction_reference,
+            # Why a person is checking it, when `status` is `needs_review` or
+            # `rejected` (B-051): a code the app draws PayMatching from. Never the
+            # transfer's details — they are the sender's.
+            'review': review_of(payment),
         })
 
 
@@ -1640,7 +1687,9 @@ class PaymentReconcileView(APIView):
     status flag and never activates on unverified data.
 
     200 `{success, payment_id, status, invoice_number}` — `status` is whatever the
-    payment is after asking (still `pending` when the gateway has seen nothing yet).
+    payment is after asking: still `pending` when the gateway has seen nothing yet, and
+    `needs_review` when a transfer quoting this reference arrived with another amount or
+    currency — a person is checking it (BACKEND_BUGS B-051).
     Refusals, each with its `code` (BACKEND_BUGS B-048):
       404 `not_found`               no such payment, or not the caller's
       400 `no_gateway_reference`    the checkout never reached the gateway
@@ -1689,7 +1738,16 @@ class PaymentReconcileView(APIView):
                              'code': 'gateway_unreachable'},
                             status=status.HTTP_502_BAD_GATEWAY)
 
-        if str(result.get('status', '')).lower() in ('completed', 'success', 'succeeded', 'paid'):
+        if str(result.get('status', '')).lower() == 'needs_review':
+            # The reference, with another amount or currency: held for an operator
+            # (B-051). The answer is 200 with `status: "needs_review"`.
+            try:
+                PaymentService.hold_for_review(payment.id, result,
+                                               reason=result.get('reason') or 'amount_differs')
+                payment.refresh_from_db()
+            except (PaymentVerificationError, InvalidPaymentTransition) as e:
+                logger.warning(f"Reconcile could not hold {payment.id}: {str(e)}")
+        elif str(result.get('status', '')).lower() in ('completed', 'success', 'succeeded', 'paid'):
             try:
                 PaymentService.complete_payment(payment.id, result)
                 payment.refresh_from_db()

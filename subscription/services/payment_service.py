@@ -37,7 +37,7 @@ from django.utils import timezone
 from policy.money import source_of_payment_method
 
 from ..models import (OPEN_PAYMENT_STATUSES, Payment, Subscription, SubscriptionPlan,
-                      plan_snapshot)
+                      TransferReview, plan_snapshot)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,18 @@ class InvalidPaymentTransition(PaymentError):
 
 class PaymentVerificationError(PaymentError):
     """Raised when gateway-reported data does not match the payment record."""
+
+
+class AmountMismatch(PaymentVerificationError):
+    """The gateway reported money for this payment, but not the amount or currency it
+    asked for. Not a forgery to refuse: money that is almost right, which the webhook
+    and the pollers hold for an operator (`hold_for_review`) instead of dropping."""
+
+
+class ReviewConflict(PaymentError):
+    """An operator decision the review queue cannot take as asked: the row is closed,
+    the payment is not held on it, the transfer already confirmed another payment, or
+    its currency is not the payment's. The message says which."""
 
 
 class PlanChanged(PaymentError):
@@ -382,6 +394,274 @@ class PaymentService:
         )
         return payment
 
+    # ------------------------------------------------------------------ #
+    # The review queue (the spec, section 7; BACKEND_BUGS B-051)
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def hold_for_review(cls, payment_id, facts: dict, *, reason: str,
+                        gateway: str = 'shamcash') -> TransferReview | None:
+        """Hold money that is almost right for an operator, never drop it.
+
+        `facts` is what the gateway saw (`transaction_facts`: transaction id, amount,
+        currency, note, sender, when; `gateway_data` is kept as `raw`). One queue row per
+        transaction, ever: seeing the same transfer again returns the row it already has,
+        and a transfer that already confirmed a payment is not queued at all (returns
+        None) — one transfer confirms one payment, once.
+
+        A checkout that can still take money (open, or expired within the late-money
+        window) becomes `needs_review`: it keeps its reference, blocks a second checkout,
+        never expires, and the customer is told a person is checking it. A checkout
+        already paid, or closed for good, is left as it is and the transfer is queued
+        against it (`duplicate_transfer` / `checkout_closed`): money that needs handing
+        back, which only an operator can do.
+        """
+        txn_id = str(facts.get('transaction_id') or facts.get('event_id') or '')
+        if not txn_id:
+            raise PaymentVerificationError("A transfer with no transaction id cannot be held")
+        from django.db.models import Q
+
+        with transaction.atomic():
+            subscription, payment = cls._lock_subscription_and_payment(payment_id)
+            existing = TransferReview.objects.select_for_update().filter(
+                transaction_id=txn_id).first()
+            if existing is not None:
+                return existing
+            if Payment.objects.filter(Q(transaction_id=txn_id) | Q(gateway_event_id=txn_id)).exists():
+                logger.info("Transfer %s already confirmed a payment; not queued", txn_id)
+                return None
+            holds = payment.status == 'needs_review' or payment.can_transition_to('needs_review')
+            if not holds:
+                reason = ('duplicate_transfer' if payment.status in ('completed', 'refunded')
+                          else 'checkout_closed')
+            review = cls._queue_transfer(facts, txn_id, reason=reason, payment=payment,
+                                         gateway=gateway)
+            if holds and payment.status != 'needs_review':
+                meta = dict(payment.metadata or {})
+                meta['review'] = {'reason': reason, 'transaction_id': txn_id,
+                                  'held_at': timezone.now().isoformat()}
+                payment.metadata = meta
+                payment.status = 'needs_review'
+                payment.save(update_fields=['status', 'metadata', 'updated_at'])
+                logger.warning("Payment %s held for review (%s, transfer %s)",
+                               payment.id, reason, txn_id)
+                recipient_id = subscription.user_id
+                transaction.on_commit(lambda: cls._notify_review(
+                    'payment_needs_review', recipient_id, payment.id))
+            return review
+
+    @staticmethod
+    def _queue_transfer(facts, txn_id, *, reason, payment=None, candidates=(),
+                        gateway='shamcash') -> TransferReview:
+        """The queue row for one transfer (the caller has checked it is new)."""
+        from django.utils.dateparse import parse_datetime
+
+        try:
+            amount = Decimal(str(facts.get('amount'))).quantize(Decimal('0.01'))
+        except (InvalidOperation, TypeError, ValueError):
+            amount = Decimal('0.00')
+        occurred = facts.get('occurred_at')
+        if isinstance(occurred, str):
+            occurred = parse_datetime(occurred)
+        raw = facts.get('gateway_data')
+        return TransferReview.objects.create(
+            gateway=gateway, transaction_id=txn_id, amount=amount,
+            currency=str(facts.get('currency') or '').upper()[:3],
+            note=str(facts.get('note') or '')[:500], sender=str(facts.get('sender') or '')[:255],
+            occurred_at=occurred if hasattr(occurred, 'tzinfo') else None,
+            raw=raw if isinstance(raw, dict) else {}, reason=reason, payment=payment,
+            candidate_payment_ids=[str(c) for c in candidates])
+
+    @classmethod
+    def queue_unclaimed_transfer(cls, facts: dict, *, candidates=(),
+                                 gateway: str = 'shamcash') -> TransferReview | None:
+        """Queue a transfer no checkout can be named for: no reference, and an amount
+        that fits no open checkout (`no_candidate`) or several (`several_candidates`).
+        An operator attaches it (`attach_review`) or dismisses it."""
+        from django.db.models import Q
+
+        txn_id = str(facts.get('transaction_id') or '')
+        if not txn_id:
+            return None
+        with transaction.atomic():
+            if TransferReview.objects.filter(transaction_id=txn_id).exists():
+                return None
+            if Payment.objects.filter(Q(transaction_id=txn_id) | Q(gateway_event_id=txn_id)).exists():
+                return None
+            return cls._queue_transfer(
+                facts, txn_id, reason='several_candidates' if candidates else 'no_candidate',
+                candidates=candidates, gateway=gateway)
+
+    @classmethod
+    def approve_review(cls, review_id, operator, note: str = '') -> Payment:
+        """An operator accepts a held transfer as payment for its checkout.
+
+        The payment completes through `complete_payment`, with the transfer as the
+        verified money — so everything a payment does on completion happens here too:
+        the period is granted, the ledger records it, the receipt is issued. If the
+        transfer's amount is not the checkout's, the operator is accepting THAT amount
+        for it: the payment is recorded at what arrived (the price it was opened at is
+        kept in `metadata['review']['price']`), so the ledger and the receipt say what
+        was actually received. A transfer in another currency cannot be approved: reject
+        it and hand the money back.
+        """
+        from django.db.models import Q
+
+        payment_id = (TransferReview.objects.filter(pk=review_id)
+                      .values_list('payment_id', flat=True).first())
+        if payment_id is None:
+            raise ReviewConflict("This transfer is not held on a checkout; attach it first")
+        with transaction.atomic():
+            subscription, payment = cls._lock_subscription_and_payment(payment_id)
+            review = TransferReview.objects.select_for_update().get(pk=review_id)
+            if review.status != 'open' or review.payment_id != payment.id:
+                raise ReviewConflict(f"Review {review.id} is {review.status}")
+            if payment.status != 'needs_review':
+                raise ReviewConflict(f"Payment {payment.id} is {payment.status}, not held")
+            if review.currency != str(payment.currency).upper():
+                raise ReviewConflict(f"The transfer is in {review.currency} and the checkout "
+                                     f"in {payment.currency}: reject it and hand it back")
+            if Payment.objects.filter(Q(transaction_id=review.transaction_id)
+                                      | Q(gateway_event_id=review.transaction_id)
+                                      ).exclude(pk=payment.pk).exists():
+                raise ReviewConflict(f"Transfer {review.transaction_id} already confirmed "
+                                     f"another payment")
+            meta = dict(payment.metadata or {})
+            record = dict(meta.get('review') or {})
+            record.update({'approved_by': operator.pk if operator else None,
+                           'transaction_id': review.transaction_id})
+            if review.amount != payment.amount:
+                record['price'] = str(payment.amount)
+                payment.amount = review.amount
+            meta['review'] = record
+            payment.metadata = meta
+            payment.save(update_fields=['amount', 'metadata', 'updated_at'])
+            review.status = 'approved'
+            review.resolved_by = operator
+            review.resolved_at = timezone.now()
+            review.resolution_note = (note or '')[:500]
+            review.save(update_fields=['status', 'resolved_by', 'resolved_at',
+                                       'resolution_note'])
+            return cls.complete_payment(payment.id, {
+                'amount': str(review.amount), 'currency': review.currency,
+                'status': 'completed', 'transaction_id': review.transaction_id,
+                'event_id': review.transaction_id,
+                'reference': payment.gateway_transaction_reference,
+                'gateway_data': review.raw or None,
+            })
+
+    @classmethod
+    def reject_review(cls, review_id, operator, note: str = '') -> TransferReview:
+        """An operator refuses a held transfer. The money goes back to its sender by
+        hand — nothing here moves it — and `note` should say so.
+
+        Its checkout, if held on it and on no other open transfer, becomes `rejected`:
+        it stops blocking, the customer can open a new one, and they are told."""
+        payment_id = (TransferReview.objects.filter(pk=review_id)
+                      .values_list('payment_id', flat=True).first())
+        with transaction.atomic():
+            payment = None
+            if payment_id is not None:
+                subscription, payment = cls._lock_subscription_and_payment(payment_id)
+            review = TransferReview.objects.select_for_update().get(pk=review_id)
+            if review.status != 'open':
+                raise ReviewConflict(f"Review {review.id} is {review.status}")
+            review.status = 'rejected'
+            review.resolved_by = operator
+            review.resolved_at = timezone.now()
+            review.resolution_note = (note or '')[:500]
+            review.save(update_fields=['status', 'resolved_by', 'resolved_at',
+                                       'resolution_note'])
+            others = (payment is not None and TransferReview.objects.filter(
+                payment=payment, status='open').exists())
+            if payment is not None and payment.status == 'needs_review' and not others:
+                payment.status = 'rejected'
+                payment.gateway_error = (note or 'Rejected on review')[:2000]
+                payment.save(update_fields=['status', 'gateway_error', 'updated_at'])
+                recipient_id = payment.subscription.user_id
+                transaction.on_commit(lambda: cls._notify_review(
+                    'payment_rejected', recipient_id, payment.id))
+            return review
+
+    @classmethod
+    def attach_review(cls, review_id, payment_id, operator) -> TransferReview:
+        """An operator names the checkout a queued transfer was for. The checkout is
+        then held on it (`needs_review`) and the operator approves or rejects as for
+        any other. Only a transfer not already held on a checkout can be attached."""
+        with transaction.atomic():
+            subscription, payment = cls._lock_subscription_and_payment(payment_id)
+            review = TransferReview.objects.select_for_update().get(pk=review_id)
+            if review.status != 'open':
+                raise ReviewConflict(f"Review {review.id} is {review.status}")
+            if review.payment_id is not None and review.payment_id != payment.id:
+                held = Payment.objects.filter(pk=review.payment_id,
+                                              status='needs_review').exists()
+                if held:
+                    raise ReviewConflict("This transfer holds another checkout: reject it "
+                                         "there first")
+            if review.currency != str(payment.currency).upper():
+                raise ReviewConflict(f"The transfer is in {review.currency} and the checkout "
+                                     f"in {payment.currency}")
+            if not (payment.status == 'needs_review'
+                    or payment.can_transition_to('needs_review')):
+                raise ReviewConflict(f"Payment {payment.id} is {payment.status}")
+            review.payment = payment
+            review.save(update_fields=['payment'])
+            if payment.status != 'needs_review':
+                meta = dict(payment.metadata or {})
+                meta['review'] = {'reason': review.reason,
+                                  'transaction_id': review.transaction_id,
+                                  'held_at': timezone.now().isoformat(),
+                                  'attached_by': operator.pk if operator else None}
+                payment.metadata = meta
+                payment.status = 'needs_review'
+                payment.save(update_fields=['status', 'metadata', 'updated_at'])
+                recipient_id = subscription.user_id
+                transaction.on_commit(lambda: cls._notify_review(
+                    'payment_needs_review', recipient_id, payment.id))
+            return review
+
+    @classmethod
+    def dismiss_review(cls, review_id, operator, note: str = '') -> TransferReview:
+        """An operator closes a queued transfer that is not a customer's payment for any
+        checkout. A transfer holding a checkout cannot be dismissed: reject it."""
+        with transaction.atomic():
+            review = TransferReview.objects.select_for_update().get(pk=review_id)
+            if review.status != 'open':
+                raise ReviewConflict(f"Review {review.id} is {review.status}")
+            if review.payment_id and Payment.objects.filter(
+                    pk=review.payment_id, status='needs_review').exists():
+                raise ReviewConflict("This transfer holds a checkout: reject it instead")
+            review.status = 'dismissed'
+            review.resolved_by = operator
+            review.resolved_at = timezone.now()
+            review.resolution_note = (note or '')[:500]
+            review.save(update_fields=['status', 'resolved_by', 'resolved_at',
+                                       'resolution_note'])
+            return review
+
+    @staticmethod
+    def _notify_review(event_type: str, recipient_id, payment_id) -> None:
+        """Push and inbox for a review decision (the spec's table: needs review, and
+        rejected — both push and in-app, no email). Called on commit."""
+        from notifications.services import NotificationService
+        from users.models import CustomUser
+
+        recipient = CustomUser.objects.filter(pk=recipient_id).first()
+        if recipient is None:
+            return
+        if event_type == 'payment_needs_review':
+            NotificationService.create_and_send(
+                recipient=recipient, event_type="payment_needs_review",
+                related_object_id=str(payment_id),
+                metadata={'context': {}, 'data': {'type': 'payment_needs_review',
+                                                  'payment_id': str(payment_id)}})
+        else:
+            NotificationService.create_and_send(
+                recipient=recipient, event_type="payment_rejected",
+                related_object_id=str(payment_id),
+                metadata={'context': {}, 'data': {'type': 'payment_rejected',
+                                                  'payment_id': str(payment_id)}})
+
     @classmethod
     def fail_payment(cls, payment_id, error_message: str = "") -> Payment:
         """Mark a payment failed (legal from pending/processing/authorized)."""
@@ -686,13 +966,13 @@ class PaymentService:
 
         expected_amount = Decimal(payment.amount).quantize(Decimal('0.01'))
         if reported_amount != expected_amount:
-            raise PaymentVerificationError(
+            raise AmountMismatch(
                 f"Amount mismatch: expected {expected_amount}, gateway reported {reported_amount}"
             )
 
         reported_currency = str(verified_data.get('currency', payment.currency)).upper()
         if reported_currency != str(payment.currency).upper():
-            raise PaymentVerificationError(
+            raise AmountMismatch(
                 f"Currency mismatch: expected {payment.currency}, gateway reported {reported_currency}"
             )
 

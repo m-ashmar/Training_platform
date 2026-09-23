@@ -1232,6 +1232,27 @@ operator maintains in the console. Four things the app needs:
   credit, days_left, currency, late}` (null on every other receipt), and the PDF prints
   the plan it replaced, the new price and the credit.
 
+**Money that is almost right is held for a person** (the spec, section 7; BACKEND_BUGS
+B-051, 2026-09-23).
+
+- A payment's `status` can be `needs_review`: a transfer arrived quoting its reference
+  with another amount or currency, or with its amount and no reference (the only open
+  checkout that amount fits). It is the design's PayMatching: it never expires (no
+  `expires_at`), it still blocks a second checkout, and it ends `completed` (an operator
+  approves it, or an exact transfer arrives) or `rejected` (the money goes back to its
+  sender by hand). `payments/{id}/status/` gains `review`: null, or `{reason, held_at}`
+  with `reason` one of `amount_differs`, `currency_differs`, `reference_missing`,
+  `checkout_closed`, `duplicate_transfer`. `payments/{id}/reconcile/` can answer 200
+  `status: "needs_review"`.
+- Pushes, in the spec's table: `payment_needs_review` and `payment_rejected` (push and
+  in-app, `data.payment_id`). No amount, no instruction to pay again.
+- An approved transfer whose amount was not the checkout's is recorded at what
+  arrived: the payment's `amount` and its receipt say what was received.
+- Operators work the queue in the console (`/dj-admin/subscription/transferreview/`):
+  approve, reject, dismiss, or attach a transfer to the checkout it was for. A sweep
+  reads the merchant account every ten minutes for transfers no checkout claimed. One
+  ShamCash transaction confirms one payment, once.
+
 **What wiring the Me screens found** (BACKEND_BUGS B-053..B-057, 2026-09-23). Additive:
 the refusals below answered only their status default (`bad_request` / `not_found`) and
 now answer their own code, which §6 reads as that default; no code a view named changed.

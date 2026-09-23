@@ -11,7 +11,9 @@ marked 'active' are already past their end_date. Nothing moves a subscription ou
 'active' when its cover ends, so paid access never lapses on its own.
 """
 import logging
+import re
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 
 from celery import shared_task
 
@@ -284,7 +286,7 @@ def poll_open_payments(now=None):
                 .select_related('subscription__user')
                 .order_by('created_at')[:batch])
 
-    checked = completed = expired = failed = 0
+    checked = completed = expired = failed = held = 0
     for payment in rows:
         checked += 1
         result = None
@@ -309,6 +311,21 @@ def poll_open_payments(now=None):
                 completed += 1
             except (PaymentVerificationError, InvalidPaymentTransition) as exc:
                 logger.warning("poll: refused to complete payment %s: %s", payment.id, exc)
+            continue
+        if state == 'needs_review':
+            # The reference, with another amount or currency: held for an operator,
+            # never dropped (B-051). Seeing the same transfer again is a no-op.
+            try:
+                PaymentService.hold_for_review(payment.id, result,
+                                               reason=result.get('reason') or 'amount_differs')
+                held += 1
+            except (PaymentVerificationError, InvalidPaymentTransition) as exc:
+                logger.warning("poll: could not hold payment %s for review: %s",
+                               payment.id, exc)
+            continue
+        if payment.status == 'needs_review':
+            # Money was seen for it: an operator decides, not the clock and not a
+            # gateway flag. Only an exact transfer (above) completes it meanwhile.
             continue
         if state in ('failed', 'declined', 'rejected'):
             try:
@@ -348,11 +365,11 @@ def poll_open_payments(now=None):
     if checked >= batch:
         logger.warning("poll: hit the %s-row cap; the rest waits for the next minute",
                        batch)
-    if completed or expired or failed:
-        logger.info("poll: %s checked, %s completed, %s expired, %s failed",
-                    checked, completed, expired, failed)
+    if completed or expired or failed or held:
+        logger.info("poll: %s checked, %s completed, %s expired, %s failed, %s held",
+                    checked, completed, expired, failed, held)
     return {'checked': checked, 'completed': completed, 'expired': expired,
-            'failed': failed, 'capped': checked >= batch}
+            'failed': failed, 'held': held, 'capped': checked >= batch}
 
 
 @shared_task(
@@ -412,8 +429,16 @@ def poll_expired_checkouts(now=None):
             logger.warning("late poll: gateway lookup failed for payment %s: %s",
                            payment.id, exc)
             continue
-        if str((result or {}).get('status', '')).lower() not in (
-                'completed', 'success', 'succeeded', 'paid'):
+        state = str((result or {}).get('status', '')).lower()
+        if state == 'needs_review':
+            # Almost-right money for a closed checkout is still money: held (B-051).
+            try:
+                PaymentService.hold_for_review(payment.id, result,
+                                               reason=result.get('reason') or 'amount_differs')
+            except (PaymentVerificationError, InvalidPaymentTransition) as exc:
+                logger.warning("late poll: could not hold payment %s: %s", payment.id, exc)
+            continue
+        if state not in ('completed', 'success', 'succeeded', 'paid'):
             continue
         try:
             PaymentService.complete_payment(payment.id, result)
@@ -426,3 +451,115 @@ def poll_expired_checkouts(now=None):
     if checked >= batch:
         logger.warning("late poll: hit the %s-row cap; older closed checkouts wait", batch)
     return {'checked': checked, 'completed': completed, 'capped': checked >= batch}
+
+
+#: A payment reference as `PaymentGatewayService._generate_reference` writes it —
+#: `SHAMCASH_<milliseconds>_<8 hex>` — found anywhere in a transfer's note, in any case.
+REFERENCE_IN_NOTE = re.compile(r'([A-Za-z]+)_(\d{10,})_([0-9A-Fa-f]{8})')
+
+
+@shared_task(
+    name="subscription.sweep_unmatched_transfers",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+)
+def sweep_unmatched_transfers(now=None):
+    """Find the money no checkout claimed, and put it in front of an operator.
+
+    The pollers ask the gateway about each checkout BY ITS REFERENCE, so a transfer
+    that quotes no reference — or a mistyped one — is invisible to them: the money sat
+    on the merchant account and the checkout expired (the spec, section 7: "a transfer
+    with the right amount and a wrong reference lands in the review queue with evidence,
+    and is not lost"; BACKEND_BUGS B-051). This reads the account over the gateway's
+    lookback and, for each transfer that is neither on a payment nor already queued:
+
+      * its note names a checkout still open (or closed within the late-money window):
+        left to the pollers, which match it exactly or hold it within minutes;
+      * its note names a checkout paid or closed for good: queued against it
+        (`duplicate_transfer` / `checkout_closed`) — money to hand back;
+      * no reference, and its amount and currency fit exactly ONE open checkout opened
+        before it: that checkout is held for review (`reference_missing`);
+      * otherwise queued alone (`no_candidate` / `several_candidates`, with the
+        candidates) for an operator to attach or dismiss.
+
+    Every ten minutes. A window the gateway could not read in full changes nothing it
+    did not see.
+    """
+    from django.conf import settings
+    from django.db.models import Q
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+
+    from .models import HELD_PAYMENT_STATUSES, OPEN_PAYMENT_STATUSES, Payment, TransferReview
+    from .services.payment_gateways import PaymentGatewayError, PaymentGatewayService
+    from .services.payment_service import PaymentError, PaymentService
+
+    now = now or timezone.now()
+    lookback = timedelta(hours=int(getattr(settings, 'PAYMENT_LATE_MONEY_WINDOW_HOURS', 72)))
+    late_window = lookback
+    try:
+        gateway = PaymentGatewayService('shamcash')
+        txns, complete = gateway.list_transactions(now - lookback, now)
+    except (PaymentGatewayError, Exception) as exc:   # noqa: BLE001
+        logger.warning("sweep: could not read the merchant account: %s", exc)
+        return {'seen': 0, 'held': 0, 'queued': 0, 'complete': False}
+
+    facts = [gateway.transaction_facts(t) | {'gateway_data': t} for t in txns]
+    facts = [f for f in facts if f['transaction_id']]
+    ids = [f['transaction_id'] for f in facts]
+    known = set(Payment.objects.filter(Q(transaction_id__in=ids) | Q(gateway_event_id__in=ids))
+                .values_list('transaction_id', flat=True))
+    known |= set(Payment.objects.filter(gateway_event_id__in=ids)
+                 .values_list('gateway_event_id', flat=True))
+    known |= set(TransferReview.objects.filter(transaction_id__in=ids)
+                 .values_list('transaction_id', flat=True))
+
+    held = queued = 0
+    for fact in facts:
+        if fact['transaction_id'] in known:
+            continue
+        refs = {f"{p.upper()}_{ms}_{h.lower()}"
+                for p, ms, h in REFERENCE_IN_NOTE.findall(fact.get('note') or '')}
+        named = (Payment.objects.filter(gateway_transaction_reference__in=refs)
+                 .order_by('-created_at', '-id').first() if refs else None)
+        try:
+            if named is not None:
+                if named.status in OPEN_PAYMENT_STATUSES and named.status not in HELD_PAYMENT_STATUSES:
+                    continue                  # the open poller matches or holds it
+                if named.status == 'expired' and named.created_at >= now - late_window:
+                    continue                  # the late poller matches or holds it
+                if PaymentService.hold_for_review(named.id, fact, reason='checkout_closed'):
+                    queued += 1
+                continue
+            try:
+                amount = Decimal(str(fact.get('amount'))).quantize(Decimal('0.01'))
+            except (InvalidOperation, TypeError, ValueError):
+                amount = None
+            occurred = fact.get('occurred_at')
+            occurred = parse_datetime(occurred) if isinstance(occurred, str) else occurred
+            candidates = []
+            if amount is not None:
+                candidates = list(
+                    Payment.objects
+                    .filter(status__in=OPEN_PAYMENT_STATUSES, amount=amount,
+                            currency=fact.get('currency'))
+                    .exclude(status__in=HELD_PAYMENT_STATUSES)
+                    .exclude(gateway_transaction_reference__isnull=True)
+                    .exclude(gateway_transaction_reference='')
+                    .filter(**({'created_at__lte': occurred} if hasattr(occurred, 'tzinfo')
+                               and occurred is not None else {}))
+                    .order_by('created_at', 'id').values_list('id', flat=True))
+            if len(candidates) == 1:
+                if PaymentService.hold_for_review(candidates[0], fact,
+                                                  reason='reference_missing'):
+                    held += 1
+            elif PaymentService.queue_unclaimed_transfer(fact, candidates=candidates):
+                queued += 1
+        except PaymentError as exc:
+            logger.warning("sweep: transfer %s not queued: %s", fact['transaction_id'], exc)
+
+    if held or queued:
+        logger.warning("sweep: %s transfer(s) held a checkout for review, %s queued alone",
+                       held, queued)
+    return {'seen': len(facts), 'held': held, 'queued': queued, 'complete': complete}

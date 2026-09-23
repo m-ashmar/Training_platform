@@ -41,6 +41,20 @@ class PaymentGateway(ABC):
         provider transaction matches the expected amount/currency/reference."""
         raise NotImplementedError
 
+    def list_transactions(self, start, end):
+        """`(transactions, complete)` on the merchant account in a window, for the sweep
+        that finds transfers no checkout claimed. A gateway that cannot list answers
+        nothing, incompletely — so the sweep treats the window as unseen."""
+        return [], False
+
+    @staticmethod
+    def transaction_facts(txn) -> Dict[str, Any]:
+        """The review queue's fields for one listed transaction."""
+        return {'transaction_id': str(txn.get('id') or ''), 'amount': txn.get('amount'),
+                'currency': str(txn.get('currency', '')).upper(),
+                'note': str(txn.get('note') or '')[:500], 'sender': '',
+                'occurred_at': txn.get('occurred_at')}
+
     @abstractmethod
     def verify_webhook(self, payload: bytes, headers: Dict[str, str]) -> Tuple[bool, Dict[str, Any]]:
         """Verify a webhook's signature + freshness and return (is_valid, normalized_data)."""
