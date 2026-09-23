@@ -75,6 +75,11 @@ class MealPlanFactory:
             reason=(ai_meal.reason or '')[:200],
             reason_ar=(ai_meal.reason_ar or '')[:200],
             target=dict(ai_meal.target) if ai_meal.target else None,
+            # The Arabic description, in the column's documented place for it. It was
+            # English only (BACKEND_BUGS B-063); `meal_payload` reads it as
+            # `description_ar`.
+            translations=({"ar": {"description": ai_meal.description_ar}}
+                          if ai_meal.description_ar else {}),
         )
 
     @staticmethod

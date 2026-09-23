@@ -4384,3 +4384,8 @@ msgid ""
 msgstr ""
 "سُجّل %(tracked)s فقط من أصل %(days)s من أيام الخطة؛ اليوم الذي لم يُسجَّل فيه "
 "شيء يُحتسب صفراً."
+
+# The event action without a meal (BACKEND_BUGS B-060).
+#: diet/views.py
+msgid "meal_id is required"
+msgstr "الحقل meal_id مطلوب"

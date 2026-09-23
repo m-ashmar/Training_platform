@@ -63,6 +63,9 @@ class AIMeal(BaseModel):
     #: because a persisted English name cannot be translated back into its parts.
     meal_name_ar: Optional[str] = Field(default=None, description="Meal name in Arabic")
     reason_ar: Optional[str] = Field(default=None, description="Reason in Arabic")
+    #: And the description, which was English only (BACKEND_BUGS B-063). Persisted in
+    #: `Meal.translations["ar"]["description"]`, the column's documented place for it.
+    description_ar: Optional[str] = Field(default=None, description="Description in Arabic")
     #: The target this meal was actually built to. Meals compensate each other, so a
     #: later slot's target is the policy split plus the earlier slots' signed residual.
     #: Anything that judges a meal — the API, the benchmark — must judge it against

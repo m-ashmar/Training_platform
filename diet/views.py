@@ -99,11 +99,17 @@ class BadInput(ValueError, DRFValidationError):
     in `PASSTHROUGH_EXCEPTIONS` and so it reaches DRF's handler instead of the view's
     broad `except Exception`. Without that second base, every new call to `_id()` or
     `_body()` in a handler that happens not to catch `BadInput` would be a 500.
+
+    `refusal_code` names the field for a view that answers it with a `code`
+    (`bad_component_id`, `bad_body`, ...; BACKEND_BUGS B-060). It is kept OFF the DRF
+    detail on purpose: a handler that lets this reach DRF keeps answering the code it
+    always did, because a shipped code never changes.
     """
 
-    def __init__(self, message):
+    def __init__(self, message, code: str = "bad_request"):
         DRFValidationError.__init__(self, message)
         ValueError.__init__(self, message)
+        self.refusal_code = code
 
     def __str__(self):
         detail = self.detail
@@ -139,19 +145,20 @@ def _id(value, field: str) -> int:
     named back to the client in a 200. `trainer_services._validated_items` has always
     rejected both; this helper truncated them.
     """
+    code = f"bad_{field}"
     if isinstance(value, bool):
-        raise BadInput(f"{field} must be an id")
+        raise BadInput(f"{field} must be an id", code)
     try:
         out = int(value)
     except (TypeError, ValueError):
-        raise BadInput(f"{field} must be an id")
+        raise BadInput(f"{field} must be an id", code)
     try:
         if float(value) != out:
-            raise BadInput(f"{field} must be a whole number")
+            raise BadInput(f"{field} must be a whole number", code)
     except (TypeError, ValueError):
-        raise BadInput(f"{field} must be an id")
+        raise BadInput(f"{field} must be an id", code)
     if out <= 0:
-        raise BadInput(f"{field} must be an id")
+        raise BadInput(f"{field} must be an id", code)
     return out
 
 
@@ -181,7 +188,7 @@ def _body(request) -> dict:
         return data
     if data is None or data == "":
         return {}
-    raise BadInput("expected a JSON object")
+    raise BadInput("expected a JSON object", "bad_body")
 
 
 def _text(value, field: str, *, limit: int = 500) -> str:
@@ -220,7 +227,7 @@ def _as_bool(value, field: str) -> bool:
         return bool(value)
     if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0", "yes", "no"):
         return value.strip().lower() in ("true", "1", "yes")
-    raise BadInput(f"{field} must be true or false")
+    raise BadInput(f"{field} must be true or false", f"bad_{field}")
 
 
 def listing(results, *, count=None, extra=None):
@@ -245,10 +252,28 @@ class FoodListView(APIView):
     """
     API endpoint to get all food items from the local database with pagination.
     Returns a paginated list of all available food items.
+
+    `GET v1/food/list/?page=&page_size=&category=&search=` →
+    `{count, next, previous, results, pagination, filters}`. Each row: `id`, `name`,
+    `name_ar`, `calories`, `protein`, `carbs`, `fat` (per 100 g), `image_url` (null when
+    none), `serving_size`, `serving_size_grams`, `category`, `category_id`, `api_id`, the
+    four `*_per_gram` figures, and `tags` (BACKEND_BUGS B-065).
+
+    `tags` is a list of machine codes, in this order when present — the app draws the
+    words: `levantine` | `western` (the food's cuisine; a universal food has none),
+    `high_protein` (at least 20% of its energy from protein), `low_fat` (at most 3 g fat
+    per 100 g), `low_calorie` (at most 40 kcal per 100 g). Thresholds and their source are
+    in `diet/services/food_tags.py`. There is no fibre, vegetarian or sugar tag: the
+    catalogue holds no such data, and a tag is never guessed from a name.
+
+    Refusals: 400 `validation_error` (a bad `page`/`page_size`), 400 `bad_request` (a
+    NUL character in `category`/`search`), 403 `no_entitlement` / `feature_not_in_plan`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
-    
+
     def get(self, request):
+        from diet.services.food_tags import food_tags
+
         try:
             # Get query parameters for filtering and pagination
             # Bounded. Every other number in this module is clamped; this one was not,
@@ -307,7 +332,9 @@ class FoodListView(APIView):
                     'calories_per_gram': food.calories_per_gram,
                     'protein_per_gram': food.protein_per_gram,
                     'carbs_per_gram': food.carbs_per_gram,
-                    'fat_per_gram': food.fat_per_gram
+                    'fat_per_gram': food.fat_per_gram,
+                    # From columns already on the row: no query per food.
+                    'tags': food_tags(food),
                 })
             
             # Calculate pagination info
@@ -1223,6 +1250,23 @@ class PlanTaskStatusView(APIView):
 
     The async endpoints return a task id and nothing else ever read the result, so
     an infeasible or refused plan was indistinguishable from one still running.
+
+    `GET v1/plans/tasks/<task_id>/`, polled by the client that started the task with
+    `POST v1/plans/generate/`. Answers 200 with `{task_id, state}`:
+
+    - `PENDING` | `STARTED` | `RETRY` | `RECEIVED` — still running; poll again.
+    - `FAILURE` — plus `error` (a sentence); start again.
+    - `SUCCESS` — plus what the task returned: `{plan_id, superseded_plan_ids,
+      replaced_a_plan_written_for_you}` when a plan was built, or `{error, code}` when it
+      was refused and the allowance given back — `code` one of `infeasible_calories`
+      (with `max_feasible_kcal`, `suggestion`), `no_servable_meal`, `plan_already_exists`,
+      `preferences_changed`, `invalid_request`.
+
+    Refusals: 404 `not_found` — a task id this caller did not start, an id that was never
+    issued, or one whose record has expired (an hour after it was enqueued); the three are
+    one answer on purpose, so an id says nothing about anybody else's task. On this route
+    `not_found` always means "no task of yours by that id": start again (BACKEND_BUGS
+    B-062). 403 `no_entitlement` / `feature_not_in_plan`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
@@ -1236,7 +1280,12 @@ class PlanTaskStatusView(APIView):
         # read as None, which the check treated as "mine". The owner is recorded when
         # the task is enqueued instead, so it is known from the first poll.
         if not task_belongs_to(task_id, request.user):
-            return Response({"error": _("Task not found")}, status=status.HTTP_404_NOT_FOUND)
+            # Named explicitly: `not_found`, the code this 404 has always answered (the
+            # error envelope filled it in) and that the gate pins
+            # (`test_an_admin_cannot_poll_a_task_that_was_never_issued`). A shipped code
+            # never changes; `task_not_found` would need the owner (BACKEND_BUGS B-062).
+            return Response({"error": _("Task not found"), "code": "not_found"},
+                            status=status.HTTP_404_NOT_FOUND)
 
         result = AsyncResult(str(task_id))
         state = result.state
@@ -2316,14 +2365,12 @@ class MealComponentsView(APIView):
                     'components__food__category'
                 ).get(id=meal_id)
             
-            from django.utils import translation
-            lang_code = translation.get_language() or 'en'
-            
-            # Dynamic translation unpacking
+            # The ENGLISH column, as `meal_payload` gives it; the Arabic is its
+            # `description_ar` (BACKEND_BUGS B-063). This swapped in the active language's
+            # translation, which nothing wrote until the planner began recording the
+            # Arabic one, so `description` was always the English — and stays so.
             description = meal.description
-            if meal.translations and lang_code in meal.translations:
-                description = meal.translations[lang_code].get('description', description)
-                
+
             # Check permissions
             if request.user.is_trainer:
                 if not _trainer_may_read_plan(request.user, meal.diet_plan):
@@ -2541,16 +2588,43 @@ class EnhancedClientProgressView(APIView):
 class MealCompletionView(APIView):
     """
     API endpoint for clients to complete entire meals or individual components.
+
+    `POST v1/client/meals/<meal_id>/complete/` — the client's own meal, on the plan they
+    currently follow. JSON body, by `action` (BACKEND_BUGS B-060):
+
+    - `complete_meal` (the default when `action` is absent) — no other field. Ticks every
+      component and records one COMPLETED event (a retry does not add a second).
+      200 `{message, meal_id, completion_percentage: 100.0, completed_at}`.
+    - `complete_component` — `component_id` (a component of THIS meal, required) and
+      `actual_quantity` (grams eaten, optional, 0 to 1000; 0 is "I had none").
+      200 `{message, component_id, meal_completion_percentage, meal_is_completed,
+      completed_at}`.
+
+    Refusals, each with its `code`:
+
+    - 400 `invalid_action` — `action` is not one of the two above.
+    - 400 `missing_fields` (with `fields`) — `component_id` absent.
+    - 400 `bad_component_id` — `component_id` is not a positive whole number.
+    - 400 `bad_actual_quantity` — `actual_quantity` not a number, or outside 0–1000 g.
+    - 400 `bad_body` — the body is not a JSON object.
+    - 403 `clients_only` — the caller is not a client.
+    - 403 `no_entitlement` / `feature_not_in_plan` — no diet access (a frozen
+      subscription is refused here: completing is a use, not a read).
+    - 404 `not_found` — no such meal or component, or not this client's.
+    - 409 `plan_superseded` — the meal is on a plan that has been replaced; refresh.
+    - 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
-    
+
     def post(self, request, meal_id):
         """Complete a meal or its components."""
         try:
             # Check if user is a client
             if not request.user.is_client:
+                # `clients_only`, the code the sibling client routes answer for the same
+                # refusal. Without one the envelope filled in `permission_denied`.
                 return Response(
-                    {"error": _("Only clients can complete meals")},
+                    {"error": _("Only clients can complete meals"), "code": "clients_only"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2604,10 +2678,11 @@ class MealCompletionView(APIView):
                 
                 if not component_id:
                     return Response(
-                        {"error": _("component_id is required")},
+                        {"error": _("component_id is required"), "code": "missing_fields",
+                         "fields": ["component_id"]},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                
+
                 # `_id(...)`, like the sibling endpoint below. This one took the raw
                 # value, so `component_id: "abc"` was a ValueError and a 500 here while
                 # the identical action on /meals/interact/ answered 400.
@@ -2630,12 +2705,16 @@ class MealCompletionView(APIView):
             
             else:
                 return Response(
-                    {"error": _("Invalid action. Use 'complete_meal' or 'complete_component'")},
+                    {"error": _("Invalid action. Use 'complete_meal' or 'complete_component'"),
+                     "code": "invalid_action"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            # With the field's code (`bad_component_id`, `bad_body`): this answered the
+            # sentence alone and the envelope filled in the generic `bad_request`.
+            return Response({"error": str(e), "code": e.refusal_code},
+                            status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -2796,19 +2875,155 @@ class ClientWeeklyProgressView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+#: Swap offer tags (BACKEND_BUGS B-058). The app draws the chip's words from the tag;
+#: these decide which one an offer earns, comparing the portion the swap WOULD put on
+#: the plate with the portion it replaces.
+#:
+#: Three grams of protein: about half an egg white, the smallest difference a chip is
+#: worth. Below it the gap is the portion ladder's own rounding — a same-energy swap
+#: lands on the nearest servable rung, not on an exact gram figure.
+SWAP_MORE_PROTEIN_MIN_G = 3.0
+#: A tenth of the replaced portion's energy, and never less than 15 kcal. Below that the
+#: difference is the same rung rounding plus the catalogue's own precision (its figures
+#: are per 100 g, rounded), not a change the client would notice on the plate; the
+#: absolute floor keeps a 40 kcal cucumber from earning "fewer calories" for 4 kcal.
+SWAP_CALORIE_CHANGE_MIN_SHARE = 0.10
+SWAP_CALORIE_CHANGE_MIN_KCAL = 15.0
+
+
+def _swap_grams(component, chosen) -> float:
+    """How much of `chosen` a swap puts on the plate in place of `component`.
+
+    Portioned to the same energy as the food it replaces, then moved to the nearest
+    amount of the new food a person would serve. ONE rule, read both by the offer list
+    (so an offer's calories are the calories the client will get) and by the swap.
+    """
+    from diet.planner.portion import nearest_portion
+
+    k_old = float(component.food.calories or 0)
+    k_new = float(chosen.calories or 0)
+    grams = (float(component.quantity) * (k_old / k_new)
+             if k_old > 0 and k_new > 0 else float(component.quantity))
+    return nearest_portion(chosen, grams).grams
+
+
+def _portion_figures(food, grams) -> dict:
+    """`{calories, protein, carbs, fat}` of `grams` of `food`, by the plate's own rule
+    (`MealComponent.calculate_nutrition`), so an offer and the component it becomes
+    cannot disagree. An unsaved instance: no query."""
+    return MealComponent(food=food, quantity=grams).calculate_nutrition()
+
+
+def _swap_tag(current: dict, offered: dict):
+    """`(tag, tag_delta)` for one offer against the portion it would replace.
+
+    First match wins: `more_calories` (a cost is never hidden behind a benefit),
+    `more_protein`, `fewer_calories`, else `similar` with no delta. `tag_delta` is the
+    signed number behind the tag: grams of protein, or kcal. `more_fiber` is part of the
+    vocabulary and is never emitted: the catalogue holds no fibre figure.
+    """
+    d_kcal = float(offered["calories"]) - float(current["calories"])
+    d_protein = float(offered["protein"]) - float(current["protein"])
+    kcal_bar = max(SWAP_CALORIE_CHANGE_MIN_KCAL,
+                   SWAP_CALORIE_CHANGE_MIN_SHARE * float(current["calories"]))
+    if d_kcal >= kcal_bar:
+        return "more_calories", round(d_kcal, 1)
+    if d_protein >= SWAP_MORE_PROTEIN_MIN_G:
+        return "more_protein", round(d_protein, 1)
+    if d_kcal <= -kcal_bar:
+        return "fewer_calories", round(d_kcal, 1)
+    return "similar", None
+
+
+def _swap_offer(component, current: dict, food, sim: float) -> dict:
+    """One alternative on the Swap screen, as the plate would hold it."""
+    grams = _swap_grams(component, food)
+    figures = _portion_figures(food, grams)
+    tag, tag_delta = _swap_tag(current, figures)
+    return {
+        "food_id": food.id, **food_names(food),
+        "similarity": round(sim, 2),
+        "quantity_grams": grams,
+        "serving": describe(food, grams),
+        "serving_ar": describe(food, grams, "ar"),
+        "image_url": food.image_url or None,
+        **figures,
+        # No fibre column in the catalogue: always null until the owner adds the data.
+        "fiber": None,
+        "tag": tag,
+        "tag_delta": tag_delta,
+        "delta": {key: round(float(figures[key]) - float(current[key]), 1)
+                  for key in ("calories", "protein", "carbs", "fat")},
+    }
+
+
 class ClientMealInteractionView(APIView):
     """
     API endpoint for clients to interact with meals (complete components, rate meals).
+
+    `POST v1/client/meals/interact/` — JSON body, by `action` (BACKEND_BUGS B-060). Every
+    id names something of the caller's own; anything else is a 404.
+
+    - `swap_food` — `component_id` (required), `chosen_food_id` (optional).
+      Without `chosen_food_id`: the offers, 200 `{component_id, food, current, offers}`.
+      `food` is the English name of the food on the plate; `current` is that portion,
+      `{food_id, quantity_grams, calories, protein, carbs, fat, fiber}`. `offers` is up
+      to six foods of the same macro slot the client may eat (allergies and exclusions
+      applied), most similar first, each: `food_id`, `name`, `name_ar`, `similarity`
+      (0–1), `quantity_grams` (the portion the swap WOULD put on the plate — the same
+      rule as the swap itself: same energy, nearest servable amount), `serving`,
+      `serving_ar`, `image_url` (null when the food has none), `calories`, `protein`,
+      `carbs`, `fat` (for that portion), `fiber` (always null: the catalogue holds no
+      fibre), `tag`, `tag_delta` and `delta` (`{calories, protein, carbs, fat}`, offer
+      minus current). `tag` is a code, the app draws the words (BACKEND_BUGS B-058):
+      `more_calories` | `more_protein` | `fewer_calories` | `similar`, first match in
+      that order; `tag_delta` is the number behind it (kcal, or grams of protein; null
+      for `similar`). `more_fiber` is reserved and not emitted until fibre data exists.
+      Thresholds: `SWAP_MORE_PROTEIN_MIN_G`, `SWAP_CALORIE_CHANGE_MIN_SHARE`,
+      `SWAP_CALORIE_CHANGE_MIN_KCAL` in this module.
+      With `chosen_food_id`: the swap. The component takes the new food at that portion,
+      un-ticked and unrated; 200 `{message, component}` (`component` in the meal
+      payload's component shape).
+    - `rate_component` — `component_id`, `is_liked` (both required).
+      200 `{message, component: {id, is_liked}}`.
+    - `event` — `meal_id` (required), `kind`: `viewed` | `accepted`.
+      200 `{message, meal_id, kind}`.
+    - `complete_component` — `component_id` (required), `actual_quantity` (grams eaten,
+      optional, 0 to 1000). 200 `{message, component: {id, is_completed, completed_at}}`.
+    - `rate_meal` — `meal_id`, `is_liked` (both required), `notes` (optional).
+      200 `{message, meal: {id, is_liked, notes}}`.
+
+    Refusals, each with its `code`:
+
+    - 400 `invalid_action` — `action` absent or not one of the five above.
+    - 400 `missing_fields` (with `fields`, the names absent) — a required field absent.
+    - 400 `bad_component_id` | `bad_chosen_food_id` | `bad_meal_id` — not a positive
+      whole number. 400 `bad_is_liked` — not true/false. 400 `bad_body` — the body is
+      not a JSON object.
+    - 400 `bad_kind` — `event` with a `kind` other than `viewed` / `accepted`.
+    - 400 `bad_actual_quantity` — `actual_quantity` not a number, or outside 0–1000 g.
+    - 400 `food_not_allowed` — `swap_food` to a food the client's allergies or
+      exclusions forbid; `error` says why.
+    - 403 `clients_only` — the caller is not a client.
+    - 403 `no_entitlement` / `feature_not_in_plan` — no diet access (a frozen
+      subscription is refused here: every action is a use, not a read).
+    - 404 `not_found` — no such component, meal or food (a food under review counts as
+      none), or not this client's.
+    - 409 `food_already_on_plate` — `swap_food` to a food already in that meal
+      (BACKEND_BUGS B-059).
+    - 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
-    
+
     def post(self, request):
         """Complete a meal component or rate a meal."""
         try:
             # Check if user is a client
             if not request.user.is_client:
+                # `clients_only`, the code the sibling client routes answer for the same
+                # refusal. Without one the envelope filled in `permission_denied`.
                 return Response(
-                    {"error": _("Only clients can interact with meals")},
+                    {"error": _("Only clients can interact with meals"), "code": "clients_only"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2820,11 +3035,20 @@ class ClientMealInteractionView(APIView):
                 # portioned to the same energy so the meal's shape survives. Recorded as
                 # a MealSwap, which learning reads before anything else.
                 from diet.planner.similarity import SimilarityIndex
-                from diet.planner.portion import nearest_portion
+                # Through `_id`, like `complete_component`: a raw `"abc"` reached the ORM,
+                # raised ValueError and came back as a 500, and an absent id was a 404.
+                component_id = _body(request).get('component_id')
+                if component_id in (None, ""):
+                    return Response(
+                        {"error": _("component_id is required"), "code": "missing_fields",
+                         "fields": ["component_id"]},
+                        status=status.HTTP_400_BAD_REQUEST)
                 component = get_object_or_404(
                     MealComponent.objects.select_related('meal', 'food'),
-                    id=_body(request).get('component_id'), meal__diet_plan__user=request.user)
+                    id=_id(component_id, 'component_id'), meal__diet_plan__user=request.user)
                 chosen_id = _body(request).get('chosen_food_id')
+                if chosen_id:
+                    chosen_id = _id(chosen_id, 'chosen_food_id')
                 # Built AFTER the component is resolved and only for foods that could
                 # actually replace it — the same macro slot. This loaded and vectorised
                 # the entire catalogue on every tap, including the "just show me the
@@ -2844,10 +3068,17 @@ class ClientMealInteractionView(APIView):
                 index = SimilarityIndex(candidates)
                 if not chosen_id:
                     offered = index.neighbours(component.food_id, k=6)
+                    # Each offer as the plate would hold it (BACKEND_BUGS B-058): the
+                    # portion from the swap's own rule, its figures, and a tag against
+                    # what it replaces. All from rows already loaded: no query per offer.
+                    current = _portion_figures(component.food, float(component.quantity))
                     return Response({"component_id": component.id,
                                      "food": name_en_of(component.food),
-                                     "offers": [{"food_id": f.id, **food_names(f),
-                                                 "similarity": round(sim, 2)} for f, sim in offered]})
+                                     "current": {"food_id": component.food_id,
+                                                 "quantity_grams": float(component.quantity),
+                                                 **current, "fiber": None},
+                                     "offers": [_swap_offer(component, current, f, sim)
+                                                for f, sim in offered]})
                 chosen = get_object_or_404(
                     FoodItem.objects.select_related('category'),
                     id=chosen_id, needs_review=False)
@@ -2856,13 +3087,16 @@ class ClientMealInteractionView(APIView):
                         {"error": limits.reason(chosen) or _("That food is not available to you"),
                          "code": "food_not_allowed"},
                         status=status.HTTP_400_BAD_REQUEST)
-                k_old = float(component.food.calories or 0); k_new = float(chosen.calories or 0)
-                grams = float(component.quantity) * (k_old / k_new) if k_old > 0 and k_new > 0 else float(component.quantity)
-                grams = nearest_portion(chosen, grams).grams
+                # The rule the offer list quoted, so the plate gets the portion the
+                # client was shown.
+                grams = _swap_grams(component, chosen)
                 rejected = component.food
                 with transaction.atomic():
                     if MealComponent.objects.filter(meal=component.meal, food=chosen).exclude(pk=component.pk).exists():
-                        return Response({"error": _("That food is already on this plate")},
+                        # With a code (BACKEND_BUGS B-059); the envelope filled in the
+                        # generic `conflict`, which says nothing the app can act on.
+                        return Response({"error": _("That food is already on this plate"),
+                                         "code": "food_already_on_plate"},
                                         status=status.HTTP_409_CONFLICT)
                     component.food = chosen
                     component.quantity = grams
@@ -2893,11 +3127,20 @@ class ClientMealInteractionView(APIView):
                 return Response({"message": _("Swapped"), "component": component_payload(component)})
 
             if action == 'rate_component':
+                component_id = _body(request).get('component_id')
+                if component_id in (None, ""):
+                    return Response(
+                        {"error": _("component_id is required"), "code": "missing_fields",
+                         "fields": ["component_id"]},
+                        status=status.HTTP_400_BAD_REQUEST)
                 component = get_object_or_404(
-                    MealComponent, id=_body(request).get('component_id'), meal__diet_plan__user=request.user)
+                    MealComponent, id=_id(component_id, 'component_id'),
+                    meal__diet_plan__user=request.user)
                 is_liked = _body(request).get('is_liked')
                 if is_liked is None:
-                    return Response({"error": _("is_liked is required")}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({"error": _("is_liked is required"), "code": "missing_fields",
+                                     "fields": ["is_liked"]},
+                                    status=status.HTTP_400_BAD_REQUEST)
                 component.is_liked = _as_bool(is_liked, 'is_liked')
                 component.save(update_fields=['is_liked'])
                 MealEvent.objects.create(user=request.user, meal=component.meal, kind=MealEvent.RATED)
@@ -2909,9 +3152,16 @@ class ClientMealInteractionView(APIView):
                 # them; viewed and accepted only the app can know.
                 kind = str(_body(request).get('kind') or '').lower()
                 if kind not in (MealEvent.VIEWED, MealEvent.ACCEPTED):
-                    return Response({"error": _("kind must be viewed or accepted")},
+                    return Response({"error": _("kind must be viewed or accepted"),
+                                     "code": "bad_kind"},
                                     status=status.HTTP_400_BAD_REQUEST)
-                meal = get_object_or_404(Meal, id=_body(request).get('meal_id'), diet_plan__user=request.user)
+                meal_id = _body(request).get('meal_id')
+                if meal_id in (None, ""):
+                    return Response({"error": _("meal_id is required"), "code": "missing_fields",
+                                     "fields": ["meal_id"]},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                meal = get_object_or_404(Meal, id=_id(meal_id, 'meal_id'),
+                                         diet_plan__user=request.user)
                 MealEvent.objects.create(user=request.user, meal=meal, kind=kind)
                 return Response({"message": _("Recorded"), "meal_id": meal.id, "kind": kind})
 
@@ -2921,10 +3171,11 @@ class ClientMealInteractionView(APIView):
                 
                 if not component_id:
                     return Response(
-                        {"error": _("component_id is required")},
+                        {"error": _("component_id is required"), "code": "missing_fields",
+                         "fields": ["component_id"]},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                
+
                 component = get_object_or_404(MealComponent, id=_id(component_id, 'component_id'),
                                               meal__diet_plan__user=request.user)
                 client_service = ClientProgressService(request.user)
@@ -2944,9 +3195,12 @@ class ClientMealInteractionView(APIView):
                 is_liked = _body(request).get('is_liked')
                 notes = _body(request).get('notes', '')
                 
-                if not all([meal_id, is_liked is not None]):
+                missing = ([] if meal_id else ["meal_id"]) + \
+                          ([] if is_liked is not None else ["is_liked"])
+                if missing:
                     return Response(
-                        {"error": _("meal_id and is_liked are required")},
+                        {"error": _("meal_id and is_liked are required"),
+                         "code": "missing_fields", "fields": missing},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -2966,12 +3220,16 @@ class ClientMealInteractionView(APIView):
             
             else:
                 return Response(
-                    {"error": _("Invalid action. Use swap_food, rate_component, event, complete_component or rate_meal")},
+                    {"error": _("Invalid action. Use swap_food, rate_component, event, complete_component or rate_meal"),
+                     "code": "invalid_action"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            # With the field's code (`bad_component_id`, `bad_meal_id`, ...): this
+            # answered the sentence alone and the envelope filled in `bad_request`.
+            return Response({"error": str(e), "code": e.refusal_code},
+                            status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -3055,21 +3313,35 @@ class MyDietPlansView(APIView):
     List all diet plans for the authenticated client user.
     Supports standard pagination: ?page=N&page_size=N
 
+    Each row: `id`, `goal`, `daily_calories`, `start_date`, `end_date`, `is_active`,
+    `template_name`, `meals_count`, `allergen_report`, and who wrote it (BACKEND_BUGS
+    B-064): `generation_strategy` — `ENGINE` (built by the platform's planner at the
+    client's request; no person and no external model) or `TRAINER` (written by a coach)
+    — and `author`, `{id, name}` of the coach who wrote it (`name` their full name, else
+    their username), or null for an ENGINE plan, and for a TRAINER plan whose coach's
+    account no longer exists.
+
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`.
+    `feature_not_in_plan`; 404 `not_found` for a page past the end.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
-    
+
     def get(self, request):
         from routine.views import StandardResultsSetPagination
 
         try:
+            # The author in the SAME query (a join), so the row's `author` costs nothing
+            # per plan.
             plans = (DietPlan.objects
                      .filter(user=request.user)
+                     .select_related('created_by')
                      .only('id', 'goal', 'daily_calories', 'start_date', 'end_date', 'is_active',
-                           'created_at', 'template_id', 'allergen_report')
+                           'created_at', 'template_id', 'allergen_report',
+                           'generation_strategy', 'created_by__id',
+                           'created_by__first_name', 'created_by__last_name',
+                           'created_by__username')
                      .order_by('-start_date', '-created_at'))
 
             # Paginate the queryset first before building dicts
@@ -3103,6 +3375,12 @@ class MyDietPlansView(APIView):
                     # So the client can flag a plan whose ingredients could not all be
                     # cleared against the user's declared allergies.
                     'allergen_report': p.allergen_report or {},
+                    # Who wrote it, as the model records it (BACKEND_BUGS B-064): the
+                    # Generate screen warns "your coach Rami wrote your current plan".
+                    'generation_strategy': p.generation_strategy,
+                    'author': ({'id': p.created_by.id,
+                                'name': p.created_by.full_name or p.created_by.username}
+                               if p.created_by_id and p.created_by is not None else None),
                 })
 
             if page is not None:

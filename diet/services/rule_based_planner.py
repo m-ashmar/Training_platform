@@ -126,7 +126,55 @@ def feasible_kcal_ceiling(meal_count: int, snack_count: int, goal: str = "mainta
 
 
 SLOT_AR = {"Breakfast": "الفطور", "Lunch": "الغداء", "Dinner": "العشاء", "Snack": "الوجبة الخفيفة"}
-CUISINE_AR = {"levantine": "شامي", "western": "غربي", "universal": ""}
+#: "for <slot>", whole. `لوجبة {SLOT_AR}` doubled the noun for a snack — «لوجبة الوجبة
+#: الخفيفة» — because the snack's Arabic name already IS "the light meal"
+#: (BACKEND_BUGS B-063).
+FOR_SLOT_AR = {"Breakfast": "لوجبة الفطور", "Lunch": "لوجبة الغداء", "Dinner": "لوجبة العشاء",
+               "Snack": "للوجبة الخفيفة"}
+#: Every cuisine word the catalogue and the recipe library use, in Arabic. `Recipe.cuisine`
+#: is free text ("Everyday", "Levantine", "Mediterranean"); a word missing here fell
+#: through untranslated into the Arabic sentence — «طبق everyday يناسب هدف الفطور»
+#: (BACKEND_BUGS B-063). A word not in this table is now LEFT OUT of the Arabic, never
+#: copied into it. Display text only: nothing ranks or selects on these.
+CUISINE_AR = {"levantine": "شامي", "western": "غربي", "universal": "",
+              "everyday": "يومي", "mediterranean": "متوسطي"}
+
+
+def _minutes_ar(minutes: int) -> str:
+    """A count of minutes in Arabic, with the noun the count takes."""
+    if minutes == 1:
+        return "دقيقة واحدة"
+    if minutes == 2:
+        return "دقيقتان"
+    if 3 <= minutes <= 10:
+        return f"{minutes} دقائق"
+    return f"{minutes} دقيقة"
+
+
+def _recipe_descriptions(recipe) -> tuple:
+    """`(description, description_ar)` for a library dish.
+
+    The English is the recipe's English column, read explicitly: `recipe.description` is
+    a modeltranslation field and follows the ACTIVE language, so a plan generated from
+    the Arabic app could store Arabic in `Meal.description`. The Arabic is the recipe's
+    own Arabic when an operator wrote one, else composed from the same two facts the
+    English states — the cuisine and the minutes — so it never carries an English word.
+    """
+    en = (getattr(recipe, "description_en", None) or getattr(recipe, "description", "")
+          or "")
+    ar = (getattr(recipe, "description_ar", None) or "").strip()
+    if ar and ar != en.strip():
+        return en, ar
+    cuisine_ar = CUISINE_AR.get((getattr(recipe, "cuisine", "") or "").strip().lower(), "")
+    minutes = int(getattr(recipe, "prep_minutes", 0) or 0)
+    dish = f"طبق {cuisine_ar}" if cuisine_ar else "طبق"
+    return en, (f"{dish} · حوالي {_minutes_ar(minutes)}" if minutes > 0 else dish)
+
+
+def _built_descriptions(meal_name: str) -> tuple:
+    """`(description, description_ar)` for a meal the engine assembled itself."""
+    return (f"Built from your {meal_name.lower()} foods.",
+            f"مكوَّنة من أطعمتك {FOR_SLOT_AR.get(meal_name, 'لهذه الوجبة')}.")
 
 
 def _reasons(meal_name: str, chosen_foods, cuisine: str = "", built: bool = False):
@@ -136,6 +184,7 @@ def _reasons(meal_name: str, chosen_foods, cuisine: str = "", built: bool = Fals
     English sentence cannot be translated back into its parts.
     """
     slot_ar = SLOT_AR.get(meal_name, meal_name)
+    for_slot_ar = FOR_SLOT_AR.get(meal_name, f"لوجبة {slot_ar}")
     if chosen_foods:
         # The ENGLISH column. `f.name` is a modeltranslation virtual field, so a plan
         # generated from the Arabic app stored "because you chose برغل, كوسا for lunch" in
@@ -145,12 +194,13 @@ def _reasons(meal_name: str, chosen_foods, cuisine: str = "", built: bool = Fals
         en = [getattr(f, "name_en", None) or f.name for f in chosen_foods[:2]]
         ar = [getattr(f, "name_ar", None) or f.name for f in chosen_foods[:2]]
         return (f"because you chose {', '.join(en)} for {meal_name.lower()}",
-                f"لأنك اخترت {' و'.join(ar)} لوجبة {slot_ar}")
+                f"لأنك اخترت {' و'.join(ar)} {for_slot_ar}")
     if built:
         return (f"built from your {meal_name.lower()} foods to fit your target",
-                f"مكوَّنة من أطعمتك المختارة لوجبة {slot_ar} لتناسب هدفك")
+                f"مكوَّنة من أطعمتك المختارة {for_slot_ar} لتناسب هدفك")
     c = (cuisine or "").strip().lower()
-    c_ar = CUISINE_AR.get(c, c)
+    # Unknown words are dropped, not copied: the Arabic line carried «everyday».
+    c_ar = CUISINE_AR.get(c, "")
     if c:
         return (f"a {c} dish that fits your {meal_name.lower()} target",
                 f"طبق {c_ar} يناسب هدف {slot_ar}" if c_ar else f"طبق يناسب هدف {slot_ar}")
@@ -761,9 +811,11 @@ class RuleBasedPlanner:
                     if pool_obj.preference(meal_name, classify_food(p.food)).get(p.food.id, 0) >= W_MEAL_PREF:
                         chosen_here.append(p.food)
             reason, reason_ar = _reasons(meal_name, chosen_here, built=True)
+            description, description_ar = _built_descriptions(meal_name)
             meal = AIMeal(
                 meal_name=meal_name,
-                description=f"Built from your {meal_name.lower()} foods.",
+                description=description,
+                description_ar=description_ar,
                 reason=reason,
                 reason_ar=reason_ar,
                 ingredients=[
@@ -1006,10 +1058,12 @@ class RuleBasedPlanner:
                                  key=lambda f: f.name)
             cuisine = (getattr(match.recipe, "cuisine", "") or "").strip()
             reason, reason_ar = _reasons(meal_name, chosen_here, cuisine)
+            description, description_ar = _recipe_descriptions(match.recipe)
             meal = AIMeal(
                 meal_name=match.name,
                 meal_name_ar=match.name_ar,
-                description=getattr(match.recipe, "description", "") or "",
+                description=description,
+                description_ar=description_ar,
                 reason=reason,
                 reason_ar=reason_ar,
                 ingredients=ingredients,

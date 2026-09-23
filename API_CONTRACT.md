@@ -1160,6 +1160,38 @@ operator maintains in the console. Four things the app needs:
   purchase (spec §4: "top-up is done with an agent in person, so there is nothing to
   hide").
 
+**What wiring the nutrition screens found** (BACKEND_BUGS B-058..B-065, 2026-09-23).
+Additive; no code changed value. The views' docstrings carry the full contract.
+
+- **Swap offers are what the plate would hold.** `POST /api/diet/v1/client/meals/interact/`
+  `swap_food` without `chosen_food_id` gains `current` (`{food_id, quantity_grams,
+  calories, protein, carbs, fat, fiber}`) and, per offer, `quantity_grams` (the portion
+  the swap itself would serve — one rule for both), `serving`, `serving_ar`, `image_url`
+  (null when none), `calories`, `protein`, `carbs`, `fat`, `fiber` (always null: the
+  catalogue holds no fibre), `tag`, `tag_delta` and `delta`. `tag` is a code:
+  `more_calories` | `more_protein` | `fewer_calories` | `similar` (first match); `tag_delta`
+  is the kcal or protein grams behind it, null for `similar`. `more_fiber` is reserved.
+- **Codes where there were none.** Swap to a food already in that meal: `409
+  food_already_on_plate`. Unknown `action` on `interact/` and `meals/{id}/complete/`: `400
+  invalid_action`. Both routes: `403 clients_only`, `400 missing_fields` (with `fields`),
+  `400 bad_component_id` / `bad_chosen_food_id` / `bad_meal_id` / `bad_is_liked` /
+  `bad_body`, and `event` with another `kind`: `400 bad_kind`. A malformed id on
+  `swap_food` / `rate_component` / `event` was a 500 and an absent one a 404; both are
+  400 now. `GET /api/diet/v1/plans/tasks/{task_id}/` for a task the caller did not start
+  keeps answering `404 not_found`, the code it has always carried (renaming it to
+  `task_not_found` is the owner's call); its docstring now says so.
+- **Arabic that is Arabic.** The meal payload (every view that returns a meal) gains
+  `description_ar` and `display_description`; `description` stays the English column.
+  The Arabic reason no longer carries an English cuisine word or «لوجبة الوجبة الخفيفة».
+  Plans generated before 2026-09-23 have no recorded Arabic description: `description_ar`
+  falls back to the English, as `name_ar` and `reason_ar` do.
+- **Who wrote a plan.** `GET /api/diet/v1/my/diet-plans/` rows gain `generation_strategy`
+  (`ENGINE` | `TRAINER`) and `author` (`{id, name}` of the coach, or null).
+- **Food tags.** `GET /api/diet/v1/food/list/` rows gain `tags`: `levantine` | `western`,
+  `high_protein`, `low_fat`, `low_calorie`, from the food's own columns against the EU
+  nutrition-claim thresholds (`diet/services/food_tags.py`). No vegetarian or fibre tag:
+  the catalogue holds neither.
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 
