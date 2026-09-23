@@ -68,6 +68,25 @@ class SubscriptionAlreadyActive(PaymentError):
     """A first payment was asked for while the subscription's cover is still running."""
 
 
+class UpgradePriceMoved(PaymentError):
+    """What is left to pay for an upgrade is not what the caller showed the customer:
+    a day of credit ran out, or a price or the rate moved, between the quote and the
+    lock. `quote` is the figure it would charge now."""
+
+    def __init__(self, message, quote):
+        super().__init__(message)
+        self.quote = quote
+
+
+class CheckoutOpen(PaymentError):
+    """Another checkout is open for this subscription; `payment` is it. The customer
+    may be transferring against its reference right now."""
+
+    def __init__(self, message, payment):
+        super().__init__(message)
+        self.payment = payment
+
+
 class PaymentService:
     """Centralized, verified payment lifecycle operations."""
 
@@ -143,11 +162,17 @@ class PaymentService:
             # Cover running: `_dearest_running_plan` (a late transfer after a
             # `change-plan`). The period granted is the one sold, so the receipt agrees.
             bought = cls._plan_bought(payment, subscription)
-            days = payment.plan_bought()['duration_days'] or bought.duration_days
-            subscription.plan = (cls._dearest_running_plan(subscription, clearing=payment)
-                                 if subscription.is_active else bought)
-            payment.covers_from, payment.covers_until = cls._activate_subscription(
-                subscription, source_of_payment_method(payment.payment_method), days)
+            source = source_of_payment_method(payment.payment_method)
+            if (payment.metadata or {}).get('kind') == 'upgrade':
+                payment.covers_from, payment.covers_until = cls._apply_upgrade(
+                    payment, subscription, bought, source)
+            else:
+                days = payment.plan_bought()['duration_days'] or bought.duration_days
+                subscription.plan = (
+                    cls._dearest_running_plan(subscription, clearing=payment)
+                    if subscription.is_active else bought)
+                payment.covers_from, payment.covers_until = cls._activate_subscription(
+                    subscription, source, days)
             payment.save()
 
             logger.info(
@@ -288,6 +313,8 @@ class PaymentService:
             payment.save()
 
             now = timezone.now()
+            if cls._undo_upgrade(payment, subscription, now):
+                return cls._finish_refund(payment, subscription, reason)
             # What THIS payment bought comes off — no more, no less. An earlier version
             # set `end_date = now` whatever else had been paid, so refunding a customer's
             # FIRST month destroyed the two months they had paid for and kept. Its
@@ -325,28 +352,34 @@ class PaymentService:
                     subscription.plan = held
             subscription.save()
 
-            # And take the MONEY back, not just the access. `wallet.signals` credits the
-            # client's wallet and pays the trainer out of it when a payment completes;
-            # nothing undid either leg, so the platform refunded the card and the trainer
-            # kept the payout. Inside the same transaction as the status change, so a
-            # refund is one fact.
-            try:
-                from wallet.signals import unwind_payment
+            return cls._finish_refund(payment, subscription, reason)
 
-                legs = unwind_payment(payment)
-            except Exception:
-                logger.exception(
-                    "Payment %s was refunded but the ledger could not be unwound; the "
-                    "trainer payout and the minted top-up are still outstanding",
-                    payment.id)
-                raise
+    @classmethod
+    def _finish_refund(cls, payment: Payment, subscription: Subscription, reason: str):
+        """The ledger half of a refund, once the access half is written. The caller
+        holds the subscription and payment locks."""
+        # And take the MONEY back, not just the access. `wallet.signals` credits the
+        # client's wallet and pays the trainer out of it when a payment completes;
+        # nothing undid either leg, so the platform refunded the card and the trainer
+        # kept the payout. Inside the same transaction as the status change, so a
+        # refund is one fact.
+        try:
+            from wallet.signals import unwind_payment
 
-            logger.warning(
-                "Payment %s refunded (%s); subscription %s now %s until %s; "
-                "%d wallet leg(s) reversed",
-                payment.id, reason or 'no reason given',
-                subscription.id, subscription.status, subscription.end_date, legs,
-            )
+            legs = unwind_payment(payment)
+        except Exception:
+            logger.exception(
+                "Payment %s was refunded but the ledger could not be unwound; the "
+                "trainer payout and the minted top-up are still outstanding",
+                payment.id)
+            raise
+
+        logger.warning(
+            "Payment %s refunded (%s); subscription %s now %s until %s; "
+            "%d wallet leg(s) reversed",
+            payment.id, reason or 'no reason given',
+            subscription.id, subscription.status, subscription.end_date, legs,
+        )
         return payment
 
     @classmethod
@@ -463,6 +496,85 @@ class PaymentService:
             open_payments = Payment.objects.filter(
                 subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
             return cls._checkout_under_lock(locked, open_payments, 'initial', initiate)
+
+    @classmethod
+    def start_upgrade(cls, subscription: Subscription, to_plan: SubscriptionPlan, initiate,
+                      *, expected_from_plan_id, expected_to_pay=None,
+                      gateway_name=None) -> Payment:
+        """Open the checkout that moves a RUNNING subscription onto a dearer plan.
+
+        The owner (2026-09-23): an upgrade is allowed while a plan runs, a downgrade is
+        not; what is left of the current plan is credited by days; the customer pays
+        the new plan's price minus that credit, and the new plan starts, for its full
+        length, when that payment clears (`_apply_upgrade`). The price is decided HERE,
+        under the subscription lock (`subscription.upgrade.quote_upgrade`), and written
+        onto the payment with the credit it was struck at.
+
+        `expected_from_plan_id` is the plan the caller quoted the upgrade from, read
+        without this lock; if the row has moved since, `PlanChanged`. `expected_to_pay`
+        is the figure the customer was shown; if the quote under the lock differs,
+        `UpgradePriceMoved` — no checkout is opened for a figure nobody saw.
+
+        One checkout at a time, as for every other button: an open checkout that is
+        this same upgrade comes back as it is (`already_open`), anything else open is
+        `CheckoutOpen`. Raises `subscription.upgrade.UpgradeRefused` subclasses and
+        `ExchangeRateUnavailable` from the quote.
+        """
+        from wallet import currency_for as _currency_for
+
+        from ..upgrade import quote_upgrade
+
+        with transaction.atomic():
+            locked = (Subscription.objects.select_for_update(of=('self',))
+                      .select_related('plan', 'user').get(pk=subscription.pk))
+            if expected_from_plan_id is not None and locked.plan_id != expected_from_plan_id:
+                raise PlanChanged(f"Subscription {locked.id} moved from plan "
+                                  f"{expected_from_plan_id} to {locked.plan_id}")
+            open_payments = list(Payment.objects
+                                 .filter(subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
+                                 .order_by('created_at', 'id'))
+            for payment in open_payments:
+                if not payment.gateway_transaction_reference:
+                    continue
+                meta = payment.metadata or {}
+                if meta.get('kind') == 'upgrade' and payment.plan_bought()['plan_id'] == to_plan.pk:
+                    payment.already_open = True
+                    return payment
+                raise CheckoutOpen(f"Subscription {locked.id} has checkout {payment.id} open",
+                                   payment)
+
+            quote = quote_upgrade(locked, to_plan, buyer_currency=_currency_for(locked.user),
+                                  gateway_name=gateway_name)
+            if expected_to_pay is not None and quote.to_pay != expected_to_pay:
+                raise UpgradePriceMoved(f"Upgrade of {locked.id} now costs {quote.to_pay}, "
+                                        f"not {expected_to_pay}", quote)
+            # A row never offered to anyone (no reference) is adopted, as the Pay button
+            # does, rather than left beside a new one.
+            unoffered = [p for p in open_payments if not p.gateway_transaction_reference]
+            payment = unoffered[0] if unoffered else Payment(subscription=locked,
+                                                             status='pending')
+            if unoffered:
+                payment.created_at = timezone.now()
+            payment.subscription = locked
+            payment.amount = quote.to_pay
+            payment.currency = quote.currency
+            # The price of record is the NEW plan's: what the dearest-plan rule and the
+            # receipt compare. The charge is that price minus the credit.
+            payment.price_amount = quote.priced.price_amount
+            payment.price_currency = quote.priced.price_currency
+            payment.exchange_rate = quote.priced.rate
+            payment.exchange_rate_value = getattr(quote.priced.rate, 'rate', None)
+            payment.metadata = {'kind': 'upgrade', 'plan': plan_snapshot(to_plan),
+                                'upgrade': quote.as_record()}
+            payment.description = f"Upgrade to {to_plan.name}"
+            method, reference, response = initiate(payment)
+            payment.payment_method = method
+            payment.gateway_transaction_reference = reference
+            payment.gateway_response = response or {}
+            payment.save()
+            payment.already_open = False
+            payment.quote = quote
+            return payment
 
     @classmethod
     def _checkout_under_lock(cls, subscription: Subscription, open_payments, kind: str,
@@ -697,6 +809,109 @@ class PaymentService:
             logger.warning("Subscription %s moves to plan %s, bought by an earlier payment "
                            "still running", subscription.id, chosen)
         return plan
+
+    @classmethod
+    def _apply_upgrade(cls, payment: Payment, subscription: Subscription,
+                       to_plan: SubscriptionPlan, source: str):
+        """Switch the plan for an upgrade payment that cleared; return its window.
+
+        While the plan the credit was struck on is still running, the credit is still
+        the customer's: the new plan starts NOW and runs its full length, and a new run
+        of cover begins (`start_date` moves), so the replaced plan's payments stop
+        counting as this run's (`Subscription.current_run_payments`). What the row was
+        is kept on the payment (`metadata['upgrade']['replaced']`) so a refund can put
+        it back (`_undo_upgrade`).
+
+        Cleared LATE — against a checkout that expired after the credited time ran out,
+        or after the row moved — the credit is gone: that time was used. Only what this
+        money bought is granted, the new plan's length × to_pay ÷ new_price, by the
+        ordinary activation; the snapshot's period says so, so the receipt agrees.
+
+        The caller holds the subscription and payment locks.
+        """
+        meta = dict(payment.metadata or {})
+        upgrade = dict(meta.get('upgrade') or {})
+        now = timezone.now()
+        from_plan_id = (upgrade.get('from_plan') or {}).get('id')
+        if subscription.is_active and subscription.plan_id == from_plan_id:
+            upgrade['replaced'] = {
+                'plan_id': subscription.plan_id,
+                'status': subscription.status,
+                'start_date': subscription.start_date.isoformat(),
+                'end_date': subscription.end_date.isoformat(),
+                'trial_end_date': (subscription.trial_end_date.isoformat()
+                                   if subscription.trial_end_date else None),
+                'switched_at': now.isoformat(),
+            }
+            meta['upgrade'] = upgrade
+            payment.metadata = meta
+            subscription.plan = to_plan
+            subscription.start_date = now
+            subscription.end_date = now + timedelta(days=to_plan.duration_days)
+            subscription.trial_end_date = None
+            subscription.status = 'active'
+            subscription.source = source
+            # `save()` re-inherits the new plan's five flags: the plan changed.
+            subscription.save()
+            return now, subscription.end_date
+
+        new_price = Decimal(upgrade.get('new_price') or payment.amount)
+        period = int(meta.get('plan', {}).get('duration_days') or to_plan.duration_days)
+        days = max(1, int((Decimal(period) * payment.amount / new_price)
+                          .to_integral_value(rounding='ROUND_HALF_UP')))
+        upgrade['late'] = True
+        meta['upgrade'] = upgrade
+        meta['plan'] = {**meta.get('plan', {}), 'duration_days': days}
+        payment.metadata = meta
+        logger.warning("Upgrade payment %s cleared after its credit ran out; granting %d "
+                       "day(s) of plan %s", payment.id, days, to_plan.pk)
+        subscription.plan = (cls._dearest_running_plan(subscription, clearing=payment)
+                             if subscription.is_active else to_plan)
+        return cls._activate_subscription(subscription, source, days)
+
+    @classmethod
+    def _undo_upgrade(cls, payment: Payment, subscription: Subscription, now) -> bool:
+        """Refunding an upgrade that switched the plan puts the old plan back.
+
+        The upgrade's money bought the switch; the credit for the replaced plan's
+        remaining days went into it. Taking back only the new period (the ordinary
+        refund) would cancel the customer's cover and lose the days they had paid for
+        on the old plan. So when this payment began the current run and nothing else
+        was paid in it since, the row goes back to what `_apply_upgrade` recorded —
+        plan, dates, status — and if the old end has passed by now, the cover is over
+        as it would have been. Otherwise (renewals were bought on the new plan after
+        it) the ordinary refund applies. Returns whether it undid.
+
+        The caller holds the subscription and payment locks, and has already marked the
+        payment refunded.
+        """
+        from django.utils.dateparse import parse_datetime
+
+        replaced = ((payment.metadata or {}).get('upgrade') or {}).get('replaced')
+        if (payment.metadata or {}).get('kind') != 'upgrade' or not replaced:
+            return False
+        if payment.covers_from is None or subscription.start_date != payment.covers_from:
+            return False
+        if subscription.current_run_payments().exists():
+            return False
+        plan = SubscriptionPlan.objects.filter(pk=replaced['plan_id']).first()
+        if plan is None:
+            return False
+        subscription.plan = plan
+        subscription.start_date = parse_datetime(replaced['start_date'])
+        subscription.end_date = parse_datetime(replaced['end_date'])
+        subscription.trial_end_date = (parse_datetime(replaced['trial_end_date'])
+                                       if replaced.get('trial_end_date') else None)
+        if subscription.end_date > now:
+            subscription.status = replaced.get('status') or 'active'
+        else:
+            subscription.status = 'cancelled'
+            subscription.cancelled_at = now
+            subscription.auto_renew = False
+        subscription.save()
+        logger.warning("Refund of upgrade %s put subscription %s back on plan %s until %s",
+                       payment.id, subscription.id, plan.pk, subscription.end_date)
+        return True
 
     @staticmethod
     def _activate_subscription(subscription: Subscription, source: str,

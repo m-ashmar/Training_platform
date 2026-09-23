@@ -138,18 +138,17 @@ is locked (spec §8); the numbers above are the defaults.
    want a retention window instead. (c) Blocking does not hide a challenge whose creator
    was blocked; only the leaderboard drops them, because hiding a shared activity would
    take the blocker's own progress with it.
-5. **Changing plan mid-period** (BACKEND_BUGS B-047, 2026-09-23). `POST
-   v1/subscriptions/{id}/change-plan/` moves a subscription only while no cover runs and
-   no checkout is open; with cover running it answers `409 plan_change_while_active`.
-   Owed: whether an upgrade mid-period is allowed, and how it is priced (pay the
-   difference for the days left, or start the new plan when the old one ends). Also
-   decided in code, reversible: a transfer that clears late against an expired checkout
-   for the OLD plan grants the plan it paid for; if cover on another plan was paid in the
-   meantime, the subscription holds the dearest plan among the paid periods still running
-   (prices of record; a tie or two currencies keeps the current one) and the late period
-   is added; a refund re-decides it (`PaymentService._dearest_running_plan`). A stacked
-   period on a cheaper plan therefore runs on the dearer plan's features until it ends —
-   per-period plans would need a schedule the model does not have.
+5. **Changing plan mid-period — DECIDED by the owner, 2026-09-23.** An UPGRADE is allowed
+   while a plan runs; a DOWNGRADE is blocked until the period ends (then `change-plan`).
+   Credit for what is left = the price paid × days left ÷ the period's length (days, not
+   features used). The new plan's price minus that credit is what is left to pay, shown
+   before paying; the new plan starts when that payment clears and runs its FULL length.
+   Built as `GET`/`POST v1/subscriptions/{id}/upgrade/` (`PaymentService.quote_upgrade`,
+   `start_upgrade`). Still decided in code, reversible: a late transfer against an
+   expired upgrade checkout grants the days its money bought without the credit (that
+   time was used); refunding an upgrade puts the old plan and its dates back; an upgrade
+   whose credit covers the whole new price is refused (`upgrade_not_payable`) — the owner
+   declined both extra days and wallet credit for leftover value.
 
 ## Traps this branch cost a session to find
 

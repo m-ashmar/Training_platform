@@ -879,7 +879,7 @@ The flags are enforced by the server, not only rendered by the app:
 | `code` | Status | When |
 |---|---|---|
 | `app_channel_required` | 400 | The capabilities endpoint, or any endpoint that opens a checkout or moves wallet money, called without a known `X-App-Channel` |
-| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
+| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `GET`/`POST v1/subscriptions/{id}/upgrade/`, `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
 
 On a build with `can_show_prices: false` the plan endpoints omit `price`, `subscriptions/current/`
 omits `plan_price` and the four conversion keys beside it (`price_converted`,
@@ -1207,6 +1207,30 @@ operator maintains in the console. Four things the app needs:
   labelled PDF (B-049).
 - `subscriptions/current/` gains `plan_id` beside `plan_name` (B-050).
 - `subscriptions/{id}/renew/` answers `expires_at`, as `POST v1/gateways/` does (B-052).
+
+**Upgrading while a plan runs** (the owner, 2026-09-23).
+
+- `GET /api/subscription/v1/subscriptions/{id}/upgrade/?plan_id=` — the quote, charging
+  nothing: `{from_plan, to_plan, currency, new_price, credit, to_pay, days_left,
+  period_days, starts: "when_paid"}`, every amount in the caller's currency. The credit is
+  the price paid for the running period × WHOLE days left ÷ that period's length (the day
+  under way is used), so `to_pay` holds for a day at a time.
+- `POST` the same path `{plan_id, gateway?, amount?, currency?}` opens the checkout for
+  `to_pay` and answers what `POST v1/gateways/` answers plus `upgrade` (the quote it was
+  struck at). When it clears, the new plan starts and runs its FULL length; the days left
+  on the old plan were what the credit paid for. A refund of that payment puts the old
+  plan and its dates back.
+- Only a DEARER plan: `409 not_an_upgrade` otherwise (a cheaper plan waits until the
+  period ends, then `change-plan/`). `409 no_running_cover` when nothing runs (use
+  `change-plan/`, then Pay). `409 upgrade_not_payable` with `to_pay` and `minimum` when the
+  credit covers the new price or leaves less than the gateway takes. Also
+  `checkout_open`, `price_changed`, `exchange_rate_*`, `invalid_plan`, and the channel
+  refusals. Full table: `SubscriptionViewSet.upgrade`.
+- `change-plan/` keeps answering `409 plan_change_while_active` while cover runs; its
+  table now points at `upgrade/`.
+- The receipt of an upgrade gains `upgrade`: `{from_plan_id, from_plan_name, new_price,
+  credit, days_left, currency, late}` (null on every other receipt), and the PDF prints
+  the plan it replaced, the new price and the credit.
 
 **What wiring the Me screens found** (BACKEND_BUGS B-053..B-057, 2026-09-23). Additive:
 the refusals below answered only their status default (`bad_request` / `not_found`) and
@@ -1608,6 +1632,7 @@ It therefore equals the row count of `GET comments/?post={id}` for the same view
 | `DELETE, GET, PATCH, PUT` | `/api/subscription/v1/subscriptions/{id}/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/cancel/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/change-plan/` | auth | `SubscriptionViewSet` |
+| `GET, POST` | `/api/subscription/v1/subscriptions/{id}/upgrade/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/renew/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/subscriptions/{id}/usage/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/usage/` | auth | `SubscriptionUsageViewSet` |

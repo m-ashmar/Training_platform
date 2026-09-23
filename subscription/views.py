@@ -43,9 +43,10 @@ from .services.payment_gateways import (
     CurrencyNotChargeable, PaymentGatewayError, PaymentGatewayService,
 )
 from .services.payment_service import (
-    PaymentService, PaymentError, InvalidPaymentTransition, PaymentVerificationError,
-    PlanChanged, SubscriptionAlreadyActive,
+    CheckoutOpen, PaymentService, PaymentError, InvalidPaymentTransition,
+    PaymentVerificationError, PlanChanged, SubscriptionAlreadyActive, UpgradePriceMoved,
 )
+from .upgrade import UpgradeNotPayable, UpgradeRefused, quote_upgrade
 # NOTE: use PaymentGatewayManager.get_available_gateways() (returns a dict of
 # gateway_name -> info). The same-named helper in settings.gateway_config returns
 # a plain LIST of names; calling .items() on it raised
@@ -116,6 +117,46 @@ def _plan_moved(subscription_pk, request, price_changed):
     except ExchangeRateUnavailable as exc:
         return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
     return price_changed(priced.amount, priced.currency)
+
+
+def _upgrade_refusal(exc):
+    """409 for an upgrade the rule refuses (`subscription.upgrade.UpgradeRefused`)."""
+    messages = {
+        'no_running_cover': _('Nothing is running on this subscription. Choose the plan, '
+                              'then pay for it.'),
+        'not_an_upgrade': _('Only a dearer plan can replace the running one. The plan '
+                            'can change once the current period ends.'),
+        'upgrade_not_payable': _('The days left on your plan cover the new plan. You can '
+                                 'upgrade when less of the period is left.'),
+    }
+    body = {'error': messages.get(exc.code, _('Request could not be completed.')),
+            'code': exc.code}
+    if isinstance(exc, UpgradeNotPayable):
+        # Nothing to pay is 0.00: a credit larger than the price is not money owed back
+        # (the owner declined extra days and wallet credit for it).
+        body['to_pay'] = str(max(exc.to_pay, Decimal('0.00')))
+        body['minimum'] = str(exc.minimum) if exc.minimum is not None else None
+    return Response(body, status=status.HTTP_409_CONFLICT)
+
+
+def _upgrade_payload_from_record(payment, record):
+    """The quote an ALREADY-open upgrade checkout was struck at, from its payment."""
+    plan = payment.plan_bought()
+    from_plan = record.get('from_plan') or {}
+    from .models import _snapshot_name
+
+    return {
+        'from_plan': {'id': from_plan.get('id'), 'name': _snapshot_name(from_plan)},
+        'to_plan': {'id': plan['plan_id'], 'name': plan['plan_name'],
+                    'duration_days': plan['duration_days']},
+        'currency': record.get('currency', payment.currency),
+        'new_price': record.get('new_price'),
+        'credit': record.get('credit'),
+        'to_pay': record.get('to_pay', str(payment.amount)),
+        'days_left': record.get('days_left'),
+        'period_days': record.get('period_days'),
+        'starts': 'when_paid',
+    }
 
 
 def _locked_subscription(pk):
@@ -511,7 +552,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
         | 404 | `not_found` | not the caller's subscription |
         | 400 | `invalid_plan` | `plan_id` missing, or names no active plan |
-        | 409 | `plan_change_while_active` | cover is running; it can change once the period ends |
+        | 409 | `plan_change_while_active` | cover is running: a DEARER plan is `subscriptions/{id}/upgrade/` (the credit for the days left comes off its price); a cheaper one waits until the period ends |
         | 409 | `checkout_open` | a checkout is open for this subscription; `payment_id` and `expires_at` say which, and when it closes |
         | 400 | `validation_error` | the body is not a JSON object |
         | 500 | `server_error` | unexpected fault |
@@ -584,6 +625,172 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                          'changed': True,
                          'subscription': SubscriptionSerializer(
                              locked, context=self.get_serializer_context()).data})
+
+    @action(detail=True, methods=['get', 'post'], url_path='upgrade')
+    def upgrade(self, request, pk=None):
+        """Move a RUNNING subscription onto a dearer plan, paying the difference.
+
+        The owner (2026-09-23): an upgrade is allowed while a plan runs, a downgrade is
+        not (it waits until the period ends, then `change-plan`). What is left of the
+        running plan is credited by whole days — the price paid × days left ÷ the
+        length of the period it bought — and comes off the new plan's price. The new
+        plan starts when that payment clears and runs its FULL length.
+
+        Headers: `X-App-Channel` (required: both methods show or charge a price),
+        `X-App-Version`. Refused on `play`/`ios` like every plan purchase.
+
+        `GET ?plan_id=<int>` — the quote, charging nothing: ::
+
+            {"from_plan": {"id", "name"}, "to_plan": {"id", "name", "duration_days"},
+             "currency": "SYP", "new_price": "20000.00", "credit": "6000.00",
+             "to_pay": "14000.00", "days_left": 9, "period_days": 30,
+             "starts": "when_paid"}
+
+        Every amount is in the caller's currency. `days_left` counts whole days (the
+        day under way is used), so `to_pay` holds for a day at a time.
+
+        `POST {"plan_id": <int>, "gateway": "shamcash", "amount": "14000.00",
+        "currency": "SYP"}` — opens the checkout for `to_pay`. `gateway` defaults to
+        `shamcash`. `amount`/`currency` are optional: the figure the app showed, held to
+        what the checkout will charge (`409 price_changed` otherwise). 200: ::
+
+            {"success": true, "payment_id", "reference", "amount", "currency",
+             "payment_url", "instructions", "expires_at", "upgrade": {<the quote>}}
+
+        If this same upgrade is already open its checkout comes back as it is.
+
+        Codes it can answer (branch on `code`, never on the text):
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 400 | `app_channel_required` | no known `X-App-Channel` |
+        | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
+        | 404 | `not_found` | not the caller's subscription |
+        | 400 | `invalid_plan` | `plan_id` missing, not an integer, or names no active plan |
+        | 409 | `no_running_cover` | nothing is running: use `change-plan/`, then Pay |
+        | 409 | `not_an_upgrade` | the plan does not cost more than the running one; it can change when the period ends |
+        | 409 | `upgrade_not_payable` | the credit covers the new price, or leaves less than the gateway takes; `to_pay` and `minimum` say so |
+        | 409 | `checkout_open` | another checkout is open; `payment_id` and `expires_at` say which (POST) |
+        | 409 | `price_changed` | the quoted `amount`/`currency` is not what the checkout would charge, or the plan moved; `expected_amount`/`expected_currency` are what it would charge now (POST) |
+        | 409 | `exchange_rate_stale` / `exchange_rate_missing` | a price has to cross currencies and the operator's rate is too old / was never set |
+        | 400 | `invalid_amount` | the quoted `amount` is not a number (POST) |
+        | 503 | `gateway_unavailable` | that gateway is not configured to take payments (POST) |
+        | 503 | `currency_not_chargeable` | the gateway cannot charge in the caller's currency (POST) |
+        | 400 | `gateway_error` | the gateway could not open the checkout (POST) |
+        | 400 | `validation_error` | the body is not a JSON object (POST) |
+        | 500 | `server_error` | unexpected fault |
+        """
+        from .utils import checkout_expires_at
+
+        require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
+        subscription = self.get_object()
+        params = request.query_params if request.method == 'GET' else body_dict(request)
+        try:
+            plan_id = serializers.IntegerField(min_value=1).run_validation(
+                params.get('plan_id'))
+        except serializers.ValidationError:
+            plan_id = None
+        plan = (SubscriptionPlan.objects.filter(pk=plan_id, is_active=True).first()
+                if plan_id is not None else None)
+        if plan is None:
+            return Response({'error': _('Invalid or inactive plan'), 'code': 'invalid_plan'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        gateway_name = params.get('gateway') or 'shamcash'
+        buyer_currency = wallet_currency_for(request.user)
+
+        try:
+            quote = quote_upgrade(subscription, plan, buyer_currency=buyer_currency,
+                                  gateway_name=gateway_name)
+        except UpgradeRefused as exc:
+            return _upgrade_refusal(exc)
+        except ExchangeRateUnavailable as exc:
+            return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+        if request.method == 'GET':
+            return Response(quote.as_payload())
+
+        quoted_amount = params.get('amount')
+        quoted = None
+        if quoted_amount is not None:
+            try:
+                quoted = Decimal(str(quoted_amount)).quantize(Decimal('0.01'))
+            except (InvalidOperation, TypeError, ValueError):
+                return Response({'error': _('Invalid amount'), 'code': 'invalid_amount'},
+                                status=status.HTTP_400_BAD_REQUEST)
+        quoted_currency = params.get('currency')
+        quoted_currency = str(quoted_currency).upper() if quoted_currency is not None else None
+
+        def _price_changed(amount, currency):
+            return Response(
+                {'error': _('The price has changed. Please refresh and try again.'),
+                 'code': 'price_changed',
+                 'expected_amount': str(amount), 'expected_currency': currency},
+                status=status.HTTP_409_CONFLICT)
+
+        if ((quoted is not None and quoted != quote.to_pay)
+                or (quoted_currency is not None and quoted_currency != quote.currency)):
+            return _price_changed(quote.to_pay, quote.currency)
+
+        try:
+            gateway_service = PaymentGatewayManager.get_service_for_initiation(gateway_name)
+        except PaymentGatewayError as e:
+            logger.error("Upgrade checkout refused: %s", e)
+            return Response({'error': _('That payment method is not available right now.'),
+                             'code': 'gateway_unavailable'},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        try:
+            payment = PaymentService.start_upgrade(
+                subscription, plan,
+                _checkout_opener(request, subscription, gateway_name, lambda: gateway_service),
+                # Both read above without the lock: the plan the credit was struck on,
+                # and the figure the customer is about to pay. Either moving is refused
+                # under the lock rather than opening a checkout nobody quoted.
+                expected_from_plan_id=quote.from_plan.pk,
+                expected_to_pay=quote.to_pay,
+                gateway_name=gateway_name)
+        except UpgradePriceMoved as exc:
+            return _price_changed(exc.quote.to_pay, exc.quote.currency)
+        except PlanChanged:
+            return _price_changed(quote.to_pay, quote.currency)
+        except CheckoutOpen as exc:
+            return Response(
+                {'error': _('A payment is already open for this subscription. '
+                            'Complete it, or change the plan once it closes.'),
+                 'code': 'checkout_open', 'payment_id': str(exc.payment.id),
+                 'expires_at': checkout_expires_at(exc.payment)},
+                status=status.HTTP_409_CONFLICT)
+        except UpgradeRefused as exc:
+            return _upgrade_refusal(exc)
+        except ExchangeRateUnavailable as exc:
+            return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+        except CurrencyNotChargeable as e:
+            logger.warning("Upgrade checkout refused for subscription %s: %s",
+                           subscription.id, e)
+            return _currency_not_chargeable()
+        except PaymentGatewayError as e:
+            logger.warning("Upgrade checkout for %s not initiated: %s", subscription.id, e)
+            return Response({'error': _('Request could not be completed.'),
+                             'code': 'gateway_error'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if payment.already_open and (
+                (quoted is not None and quoted != payment.amount)
+                or (quoted_currency is not None and quoted_currency != payment.currency)):
+            return _price_changed(payment.amount, payment.currency)
+        record = (payment.metadata or {}).get('upgrade') or {}
+        resp = payment.gateway_response or {}
+        return Response({
+            'success': True,
+            'payment_id': str(payment.id),
+            'reference': payment.gateway_transaction_reference,
+            'amount': str(payment.amount),
+            'currency': payment.currency,
+            'payment_url': resp.get('payment_url'),
+            'instructions': resp.get('instructions'),
+            'expires_at': resp.get('expires_at') or checkout_expires_at(payment),
+            # What this checkout was struck at: the quote as it was when it opened.
+            'upgrade': (payment.quote.as_payload() if getattr(payment, 'quote', None)
+                        else _upgrade_payload_from_record(payment, record)),
+        })
 
     @action(detail=False, methods=['get'])
     def current(self, request):
@@ -1567,6 +1774,11 @@ class PaymentReceiptView(APIView):
                 "price_of_record_currency": "USD",      was priced at, and the rate the
                 "rate": "13000.000000",                 charge was struck at — read off the
                 "rate_text": "1 USD = 13000.000000 SYP"},  payment, never today's rate
+            "upgrade": null | {                         null unless this paid an UPGRADE
+                "from_plan_id", "from_plan_name",       (`subscriptions/{id}/upgrade/`):
+                "new_price": "20000.00",                the plan it replaced, the new
+                "credit": "6000.00", "days_left": 9,    plan's price, and the credit for
+                "currency": "SYP", "late": false},      the days left that came off it
             "method": {"code": "shamcash", "name": "<translated>"},
             "reference": "<the gateway's reference, or "">",
             "covers": {"from": ..., "until": ...},      the access it bought

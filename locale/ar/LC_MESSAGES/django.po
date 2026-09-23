@@ -4407,3 +4407,36 @@ msgstr "تم تغيير الخطة. أكمل الدفع لتبدأ."
 #: diet/views.py
 msgid "meal_id is required"
 msgstr "الحقل meal_id مطلوب"
+
+#: subscription/receipts.py
+msgid "Upgraded from"
+msgstr "ترقية من"
+
+#: subscription/receipts.py
+msgid "Plan price"
+msgstr "سعر الخطة"
+
+#: subscription/receipts.py
+msgid "Credit for days left"
+msgstr "رصيد الأيام المتبقية"
+
+#: subscription/views.py
+msgid ""
+"Nothing is running on this subscription. Choose the plan, then pay for it."
+msgstr "لا يوجد اشتراك سارٍ. اختر الخطة ثم ادفع ثمنها."
+
+#: subscription/views.py
+msgid ""
+"Only a dearer plan can replace the running one. The plan can change once the "
+"current period ends."
+msgstr ""
+"لا يمكن استبدال الخطة الحالية إلا بخطة أعلى سعراً. يمكن تغيير الخطة بعد انتهاء "
+"الفترة الحالية."
+
+#: subscription/views.py
+msgid ""
+"The days left on your plan cover the new plan. You can upgrade when less of "
+"the period is left."
+msgstr ""
+"الأيام المتبقية في خطتك تغطي سعر الخطة الجديدة. يمكنك الترقية عندما يتبقى وقت "
+"أقل من الفترة."

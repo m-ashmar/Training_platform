@@ -45,7 +45,7 @@ fixed with their own tests (`_0923b_review.py`, `_0923_final_review.py`).
 |---|---|
 | B-051 | A matching / needs-review payment state is plan step 5's checkout-session work |
 | B-058, B-065 | `fiber`, `more_fiber` and a vegetarian tag need catalogue data the owner has to decide on |
-| Plan change mid-period | Refused (`plan_change_while_active`) until the owner decides how it is priced (`PAYMENTS_COMPLIANCE_PLAN.md`, Open 5) |
+| Plan change mid-period | Decided and built (owner, 2026-09-23): an upgrade is `GET`/`POST subscriptions/{id}/upgrade/` (credit for whole days left, new plan runs its full length once paid); a downgrade waits until the period ends |
 
 ### New server rules the app must handle
 

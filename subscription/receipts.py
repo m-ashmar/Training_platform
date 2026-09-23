@@ -96,6 +96,33 @@ def item_of(payment) -> dict:
     return {**payment.plan_bought(), "money_type": payment.money_type}
 
 
+def upgrade_of(payment) -> dict | None:
+    """What an upgrade charged and why it is less than the plan's price, or None.
+
+    Read from the record the checkout kept (`metadata['upgrade']`,
+    `subscription.upgrade.UpgradeQuote.as_record`): the plan it replaced, the new plan's
+    price, the credit for the whole days left on the old one, and what was paid. A
+    receipt for 14,000 on a 20,000 plan must say where the other 6,000 went.
+    """
+    from .models import _snapshot_name
+
+    if (payment.metadata or {}).get("kind") != "upgrade":
+        return None
+    record = (payment.metadata or {}).get("upgrade") or {}
+    from_plan = record.get("from_plan") or {}
+    return {
+        "from_plan_id": from_plan.get("id"),
+        "from_plan_name": _snapshot_name(from_plan),
+        "new_price": record.get("new_price"),
+        "credit": record.get("credit"),
+        "days_left": record.get("days_left"),
+        "currency": record.get("currency") or payment.currency,
+        # True when the money cleared after the credited time had run out: only the
+        # days it paid for were granted (`PaymentService._apply_upgrade`).
+        "late": bool(record.get("late")),
+    }
+
+
 def issued_at(payment):
     """When the money was confirmed.
 
@@ -152,6 +179,7 @@ def receipt_data(payment, *, invoice_number: str | None = None) -> dict:
         "amount": str(payment.amount),
         "currency": payment.currency,
         "exchange": exchange_of(payment),
+        "upgrade": upgrade_of(payment),
         "method": {"code": payment.payment_method,
                    "name": method_name(payment.payment_method)},
         "reference": payment.gateway_transaction_reference or "",
@@ -255,6 +283,15 @@ def render_pdf(data: dict, *, compress: bool = True) -> bytes:
         rows[3:3] = [
             (_("Price"), _money(fx["price_of_record"], fx["price_of_record_currency"])),
             (_("Exchange rate"), fx["rate_text"]),
+        ]
+    up = data.get("upgrade")
+    if up and up.get("credit") is not None and not up.get("late"):
+        # An upgrade charged the new plan's price LESS the credit for the days left on
+        # the plan it replaced: both are on the document, so the amount explains itself.
+        rows[3:3] = [
+            (_("Upgraded from"), up["from_plan_name"]),
+            (_("Plan price"), _money(up["new_price"], up["currency"])),
+            (_("Credit for days left"), "-" + _money(up["credit"], up["currency"])),
         ]
     for label, value in rows:
         if not str(value):
