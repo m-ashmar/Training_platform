@@ -7,9 +7,12 @@ NO usable hardcoded fallbacks; production readiness is enforced at startup by
 `enforce_production_safety()` in settings_production.py.
 """
 
+import logging
 import os
-from decimal import Decimal
-from typing import Dict, Any
+from decimal import Decimal, InvalidOperation
+from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 # ========================
 # Environment Configuration
@@ -51,6 +54,34 @@ SHAMCASH_CONFIG = {
     },
 }
 
+def _amount_limits_from_env(prefix: str, currency: str) -> Optional[Dict[str, Decimal]]:
+    """`{'min', 'max'}` for one currency from `<PREFIX>_<CUR>_MIN_AMOUNT` / `_MAX_AMOUNT`,
+    or None — never a guessed number.
+
+    Both must be set, both must be positive decimals and min must not exceed max; any
+    other state is "this gateway does not charge in that currency", which is the
+    fail-closed default. A malformed value is logged rather than raised, so a typo in
+    one variable refuses dollar checkouts instead of taking the whole process down.
+    """
+    raw_min = os.getenv(f'{prefix}_{currency}_MIN_AMOUNT', '').strip()
+    raw_max = os.getenv(f'{prefix}_{currency}_MAX_AMOUNT', '').strip()
+    if not raw_min and not raw_max:
+        return None
+    try:
+        low, high = Decimal(raw_min), Decimal(raw_max)
+    except (InvalidOperation, ValueError):
+        logger.error("%s_%s_MIN_AMOUNT/_MAX_AMOUNT are not numbers; %s checkouts stay "
+                     "refused", prefix, currency, currency)
+        return None
+    if not (low.is_finite() and high.is_finite()) or low <= 0 or high < low:
+        logger.error("%s_%s amount limits %s..%s are not a usable range; %s checkouts "
+                     "stay refused", prefix, currency, raw_min, raw_max, currency)
+        return None
+    return {'min': low, 'max': high}
+
+
+_SHAMCASH_USD_LIMITS = _amount_limits_from_env('SHAMCASH', 'USD')
+
 # ========================
 # Gateway Registry
 # ========================
@@ -64,8 +95,14 @@ GATEWAY_REGISTRY = {
         # then compared against amounts of any currency, so a plan priced in USD was
         # measured against a Syrian-pound floor. A currency with no entry here cannot
         # be charged at all — fail closed rather than borrow another currency's bounds.
+        #
+        # USD has NO built-in bounds (SIDE_BUGS S-052): they are the owner's numbers and
+        # nobody has given them yet, so every dollar checkout is refused with
+        # `currency_not_chargeable` until SHAMCASH_USD_MIN_AMOUNT and
+        # SHAMCASH_USD_MAX_AMOUNT are both set. No default is invented here.
         'amount_limits': {
             'SYP': {'min': Decimal('100'), 'max': Decimal('5000000')},
+            **({'USD': _SHAMCASH_USD_LIMITS} if _SHAMCASH_USD_LIMITS else {}),
         },
     },
 }

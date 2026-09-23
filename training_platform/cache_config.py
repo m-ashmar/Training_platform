@@ -88,6 +88,18 @@ VERSIONED_MODELS = {entry["model"].title().replace("_", ""): entry["model"]
 # to a social achievement flushed the cache for a route it has nothing to do with.
 MODEL_VERSION_KEYS = {
     "subscription.SubscriptionPlan": "SUBSCRIPTIONPLAN",
+    # The plan list is not a function of the plan rows alone. Every price on it is
+    # converted at the operator's rate, so a new rate left every reader the old figure
+    # for up to ten minutes — and POST gateways/ then answered 409 "the price has
+    # changed" while a refresh returned the same cached number (SIDE_BUGS S-078).
+    # `ExchangeRate` is append-only, so this is one bump per rate the operator sets.
+    "wallet.ExchangeRate": "SUBSCRIPTIONPLAN",
+    # And whether a build may see a price at all is a `ChannelCapabilities` row: an
+    # operator withdrawing prices from a store build left that build receiving them
+    # for the rest of the TTL (SIDE_BUGS S-139). The same counter is the home
+    # screen's policy generation (`home/views.py`), whose price-gated sections have the
+    # same dependency.
+    "policy.ChannelCapabilities": "SUBSCRIPTIONPLAN",
     "routine.Exercise": "EXERCISE",
     "routine.RoutineTemplate": "ROUTINETEMPLATE",
     # All three, not just the catalogue. `/api/achievements/` and its `my`, `progress` and

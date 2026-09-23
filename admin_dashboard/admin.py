@@ -20,8 +20,9 @@ from django.http import JsonResponse
 from django.contrib import messages
 from django.db.models import Count, Sum, Avg, Q
 from subscription.admin import (
-    activate_subscriptions, cancel_subscriptions, extend_subscriptions,
+    PLAN_BASIC_FIELDS, activate_subscriptions, cancel_subscriptions, extend_subscriptions,
 )
+from subscription.admin import PaymentAdmin as _SubscriptionPaymentAdmin
 from django.utils import timezone
 from django.utils.safestring import mark_safe
 from django.template.response import TemplateResponse
@@ -347,15 +348,17 @@ class MealAdmin(admin.ModelAdmin):
 class SubscriptionPlanAdmin(admin.ModelAdmin):
     """Subscription plan management"""
     
-    list_display = ('name', 'plan_type', 'price', 'duration_days', 'is_active', 'feature_count')
-    list_filter = ('plan_type', 'is_active', 'has_diet_access', 'has_routine_access')
+    list_display = ('name', 'plan_type', 'price', 'currency', 'duration_days', 'is_active', 'feature_count')
+    list_filter = ('plan_type', 'currency', 'is_active', 'has_diet_access', 'has_routine_access')
     search_fields = ('name',)
-    list_editable = ('is_active', 'price')
+    # `price` is NOT editable in the list: a bare number in a grid, with the unit in
+    # another column, is how "10" meant as dollars became a 10-pound plan (SIDE_BUGS
+    # S-074). A price is changed on the plan's own form, beside its currency.
+    list_editable = ('is_active',)
     
     fieldsets = (
         ('Basic Information', {
-            'fields': ('name', 'plan_type', 'description', 'price', 'duration_days',
-                       'is_active', 'is_featured')
+            'fields': PLAN_BASIC_FIELDS
         }),
         ('Features', {
             'fields': (
@@ -399,16 +402,21 @@ class SubscriptionAdmin(admin.ModelAdmin):
     # The same logged, through-the-model actions as the default admin site.
     actions = [activate_subscriptions, cancel_subscriptions, extend_subscriptions]
 
-class PaymentAdmin(admin.ModelAdmin):
-    """Payment tracking"""
+class PaymentAdmin(_SubscriptionPaymentAdmin):
+    """Payment tracking.
+
+    The default site's `PaymentAdmin`, so the two cannot disagree: every field the
+    payment service owns is read-only, no payment is added by hand, and a state change
+    is one of its three actions, each of which goes through `PaymentService`. This one
+    left every column editable, `status` included (SIDE_BUGS S-128).
+    """
     
     # Without this each row re-queried subscription — ~100 extra
     # queries per changelist page.
-    list_select_related = ('subscription',)
-    list_display = ('subscription', 'amount', 'payment_method', 'status', 'created_at')
-    list_filter = ('status', 'payment_method', 'created_at')
+    list_select_related = ('subscription', 'subscription__user')
+    list_display = ('subscription', 'amount', 'currency', 'payment_method', 'status', 'created_at')
+    list_filter = ('status', 'payment_method', 'currency', 'created_at')
     search_fields = ('subscription__user__email', 'transaction_id')
-    readonly_fields = ('created_at', 'updated_at')
 
 # ============================================================================
 # SOCIAL FEATURES MANAGEMENT

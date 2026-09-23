@@ -131,12 +131,21 @@ def rate_health(at=None) -> dict:
     }
 
 
+#: `convert_at_the_operators_rate(rate=...)` not given: it reads the rate itself.
+READ_THE_RATE = object()
+
+
 def convert_at_the_operators_rate(amount, from_currency: str, to_currency: str, *,
-                                  at=None):
+                                  at=None, rate=READ_THE_RATE):
     """`(converted_amount, rate_row)` for `amount`, at the rate an operator set.
 
     THE ONLY conversion in the codebase. See this module's docstring for who may call
     it and for the rounding and staleness rules.
+
+    `rate`: the `current_rate(at)` row (or None) the caller has ALREADY read for this
+    same moment, so pricing a list of N things reads the rate once rather than N times
+    (SIDE_BUGS S-130). Every rule below still applies to it — missing and stale still
+    refuse. Omitted, the rate is read here.
 
     Returns `(Decimal, None)` unchanged when the two currencies are the same: a
     same-currency purchase is not a conversion, consults no rate, and is therefore
@@ -151,15 +160,17 @@ def convert_at_the_operators_rate(amount, from_currency: str, to_currency: str, 
     for code in (from_currency, to_currency):
         if not is_supported(code):
             raise NoExchangeRate(f"{code!r} is not a currency this platform trades in")
-    return _convert_at(amount, from_currency, to_currency, current_rate(at=at), at=at)
+    row = current_rate(at=at) if rate is READ_THE_RATE else rate
+    return _convert_at(amount, from_currency, to_currency, row, at=at)
 
 
 def _convert_at(amount: Decimal, from_currency: str, to_currency: str, row, *, at=None):
     """The body of `convert_at_the_operators_rate` for a rate row already looked up.
 
     Private to this module: the refusal (missing, stale) and the arithmetic are the
-    same whether the row was read for one price or for a whole price list
-    (`price_list_converter`), so they are written once.
+    same whether the row was read for one price, passed in by a caller pricing a list
+    (`rate=`), or read once for a whole trainer roster (`price_list_converter`), so
+    they are written once.
     """
     if row is None:
         raise NoExchangeRate(

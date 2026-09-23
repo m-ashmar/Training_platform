@@ -30,6 +30,17 @@ class PaymentGatewayError(Exception):
     pass
 
 
+class CurrencyNotChargeable(PaymentGatewayError):
+    """This gateway is not configured to charge in this currency (no amount bounds).
+
+    Its own class so a view can answer the app a `code` instead of the generic "request
+    could not be completed": a buyer whose currency the gateway cannot take is not a
+    gateway fault, and nothing they retry will change it (SIDE_BUGS S-052).
+    """
+
+    code = 'currency_not_chargeable'
+
+
 class PaymentGatewayService:
     """Unified interface for handling the active payment gateway."""
 
@@ -68,6 +79,9 @@ class PaymentGatewayService:
         callback_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Initiate a payment. Caller supplies the reference (tied to the Payment row)."""
+        # Checked BEFORE the broad wrapper below, which turns every failure into a bare
+        # PaymentGatewayError and would hide why this one was refused.
+        self._require_chargeable_currency(currency)
         try:
             self._validate_payment_request(amount, currency, user_data)
             payment_data = {
@@ -120,6 +134,16 @@ class PaymentGatewayService:
         return self.gateway.refund(reference, amount)
 
     # ------------------------------------------------------------------ #
+    def _require_chargeable_currency(self, currency: str) -> None:
+        """Refuse, with `CurrencyNotChargeable`, a currency this gateway cannot charge in:
+        one it does not support, or one it has no configured amount bounds for."""
+        gateway_info = get_gateway_info(self.gateway_name)
+        code = str(currency).upper()
+        if (code not in gateway_info['supported_currencies']
+                or not get_amount_limits(self.gateway_name, code)):
+            raise CurrencyNotChargeable(
+                f"{self.gateway_name} is not configured to charge in {code}")
+
     def _validate_payment_request(self, amount: Decimal, currency: str, user_data: Dict[str, Any]):
         gateway_info = get_gateway_info(self.gateway_name)
         currency = str(currency).upper()

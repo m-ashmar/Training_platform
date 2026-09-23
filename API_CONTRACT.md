@@ -771,7 +771,9 @@ The flags are enforced by the server, not only rendered by the app:
 | `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
 
 On a build with `can_show_prices: false` the plan endpoints omit `price`, `subscriptions/current/`
-omits `plan_price`, and `GET v1/gateways/` answers an empty list. Additive fields:
+omits `plan_price` and the four conversion keys beside it (`price_converted`,
+`exchange_rate`, `price_of_record`, `price_of_record_currency` — absent, not null), and
+`GET v1/gateways/` answers an empty list. Additive fields:
 `money_type` on payments and wallet transactions (`PLATFORM_SUB`, `COACHING_1TO1`,
 `ROUTINE_PRODUCT`, `WALLET_MOVE`) and `source` on subscriptions (`shamcash`, `agent_wallet`,
 `operator_grant`, `trial`, reserved: `apple_iap`, `google_play`; blank until entitled).
@@ -861,6 +863,48 @@ coach never rewrites last week; sets synced afterwards still count.
   `PAYMENT_POLL_GRACE_SECONDS` to arrive first. The app does not need to poll; it may
   still call `POST /api/subscription/v1/payments/{id}/reconcile/` when the customer asks.
 
+**The checkout, corrected** (SIDE_BUGS S-075, S-077, S-131, S-134..S-137, 2026-09-23).
+All additive: no shipped `code` changed.
+
+- `POST /api/subscription/v1/subscriptions/` writes the subscription and **no payment**.
+  It used to write a pending payment at the plan's price in the PLAN'S currency, with no
+  reference, which nothing could complete. The checkout is `POST v1/gateways/`.
+- A checkout's window (`expires_at`, and when the poller closes it) starts when the
+  checkout is OPENED — also when it takes over a reference-less row written earlier.
+- Money for a CLOSED checkout is looked for without a webhook: every 10 minutes for
+  `PAYMENT_LATE_MONEY_WINDOW_HOURS` (72) the server asks the gateway about each expired
+  checkout that has a reference (`subscription.poll_expired_checkouts`) and completes
+  the ones that were paid. The app does nothing; the subscription simply becomes active.
+- The poller's `checkout_expired` inbox row is written whatever the customer's push
+  preferences say; the preference decides only whether it is pushed.
+- `PATCH /api/subscription/v1/subscriptions/{id}/` with `auto_renew` in the body now
+  answers `auto_renew_read_only` as the TOP-LEVEL `code` (it was only inside
+  `field_errors`, under a top-level `validation_error`). `field_errors.auto_renew` is kept.
+- `POST /api/subscription/v1/gateways/` and `POST .../subscriptions/{id}/renew/` answer
+  `amount` and `currency`: what the returned reference charges, in the buyer's currency —
+  for a checkout that was already open, the amount it was opened at, which after a rate
+  change is not today's figure. Draw these on the Pay screen.
+- `POST v1/gateways/`'s optional `amount`/`currency` assertion is checked against what
+  the call will charge — the open checkout's amount when there is one — and a mismatch is
+  `409 price_changed` with `expected_amount`/`expected_currency`.
+- Codes added to refusals that had none:
+
+  | Endpoint | Status | `code` | When |
+  |---|---|---|---|
+  | `POST v1/gateways/` | 400 | `missing_fields` | `gateway` or `subscription_id` missing |
+  | `POST v1/gateways/` | 404 | `not_found` | no such subscription, or not the caller's |
+  | `POST v1/gateways/` | 400 | `payment_not_required` | the plan is free |
+  | `POST v1/gateways/` | 400 | `invalid_amount` | the quoted `amount` is not a number |
+  | `POST v1/gateways/` | 409 | `price_changed` | the quote is not what the call would charge |
+  | `POST v1/gateways/` | 409 | `subscription_active` | cover is running; renew instead |
+  | both | 503 | `currency_not_chargeable` | the gateway takes no payments in the buyer's currency (today: every USD buyer, until the owner sets ShamCash's USD bounds) |
+  | both | 400 | `gateway_error` | the gateway refused or failed to open the checkout |
+  | `.../renew/` | 400 | `not_renewable` | the subscription is not `active` or `expired` |
+  | both | 500 | `server_error` | unexpected fault |
+
+  The full table for each endpoint is in its docstring (`subscription/views.py`
+  `PaymentGatewayView.post`, `SubscriptionViewSet.renew`).
+
 **Receipts, and the money screens** (plan step 5, 2026-09-20 — `screens/07-money/`).
 
 Everything in this block is a RECORD OF MONEY THAT HAS ALREADY MOVED, not a sale: no
@@ -889,8 +933,10 @@ show plan status, expiry and history, and history without receipts is not histor
 - `subscriptions/current/` gains `plan_duration_days` (what a renewal adds, and the
   denominator of the days-left gauge — `start_date` cannot serve, a renewal moves only
   `end_date`), `plan_currency` and `plan_features` (`diet`, `routines`, `challenges`,
-  `ai_advice`, `priority_support`, `max_meals_per_day`, `max_routines`). Only
-  `plan_price` is withheld from a build that may not show prices.
+  `ai_advice`, `priority_support`, `max_meals_per_day`, `max_routines`). `plan_price`
+  and its four conversion keys (`price_converted`, `exchange_rate`, `price_of_record`,
+  `price_of_record_currency`) are withheld from a build that may not show prices;
+  `plan_currency` is the READER'S currency and stays on every build.
 - `subscriptions/current/` answers **404 `no_subscription`** when the account has never
   had one — show the plans rather than an error. The body kept its `message`, which
   shipped without a `code`; branch on the `code` (§2), never on the text.
@@ -936,7 +982,12 @@ operator maintains in the console. Four things the app needs:
   answer `409` with
   `code: "exchange_rate_stale"` or `"exchange_rate_missing"` when the plan is priced in
   the other currency and the operator's rate is missing or too old. A SAME-currency
-  purchase never consults the rate and is never refused for this.
+  purchase never consults the rate and is never refused for this. They answer
+  `503 currency_not_chargeable` when the gateway has no amount bounds for the buyer's
+  currency: ShamCash has SYP bounds only, so **every USD checkout is refused** until
+  `SHAMCASH_USD_MIN_AMOUNT` and `SHAMCASH_USD_MAX_AMOUNT` are set (the owner's numbers;
+  none is assumed). A new exchange rate, or an edited `ChannelCapabilities` row, reaches
+  the cached plan list at once.
 - **A coaching price is in the client's currency too.** `GET /api/v1/coaching/status/`
   gains `coaching_currency` beside `coaching_price`; the price is what the client will
   actually be charged, and both are null together when the rate needed to quote it is

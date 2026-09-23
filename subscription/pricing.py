@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from wallet.exchange import convert_at_the_operators_rate
+from wallet.exchange import READ_THE_RATE, convert_at_the_operators_rate
 
 
 @dataclass(frozen=True)
@@ -60,20 +60,25 @@ class Priced:
         }
 
 
-def charge_for(price_amount, price_currency: str, buyer_currency: str, *, at=None) -> Priced:
+def charge_for(price_amount, price_currency: str, buyer_currency: str, *, at=None,
+               rate=READ_THE_RATE) -> Priced:
     """What to charge a buyer who trades in `buyer_currency` for a price of record.
 
     Raises `wallet.exchange.ExchangeRateUnavailable` (a `code` on it) when the price
     has to cross and the operator's rate is missing or stale. The caller turns that
     into a refusal the app can read — it must never fall back to the unconverted
     number, which would charge dollars to a pound wallet.
+
+    `rate`: a `wallet.exchange.current_rate()` row already read for this request, so a
+    list prices every row at ONE read of the rate (see `convert_at_the_operators_rate`).
     """
-    amount, rate = convert_at_the_operators_rate(
-        price_amount, price_currency, buyer_currency, at=at)
-    return Priced(amount, buyer_currency, Decimal(price_amount), price_currency, rate)
+    amount, row = convert_at_the_operators_rate(
+        price_amount, price_currency, buyer_currency, at=at, rate=rate)
+    return Priced(amount, buyer_currency, Decimal(price_amount), price_currency, row)
 
 
-def price_for(price_amount, price_currency: str, reader_currency: str, *, at=None) -> Priced:
+def price_for(price_amount, price_currency: str, reader_currency: str, *, at=None,
+              rate=READ_THE_RATE) -> Priced:
     """The same number for a price LIST, where a refusal must not blank the catalogue.
 
     A stale rate stops a sale; it must not stop a person browsing. When the price
@@ -84,7 +89,7 @@ def price_for(price_amount, price_currency: str, reader_currency: str, *, at=Non
     from wallet.exchange import ExchangeRateUnavailable
 
     try:
-        return charge_for(price_amount, price_currency, reader_currency, at=at)
+        return charge_for(price_amount, price_currency, reader_currency, at=at, rate=rate)
     except ExchangeRateUnavailable:
         return Priced(Decimal(price_amount), price_currency,
                       Decimal(price_amount), price_currency, None)

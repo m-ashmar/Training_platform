@@ -249,7 +249,9 @@ def poll_open_payments(now=None):
       * expires a checkout still unpaid `PAYMENT_CHECKOUT_TTL_MINUTES` after it opened,
         so the customer can start again, and tells them it was closed. Money that turns
         up for it afterwards is still honoured: `expired -> completed` is a legal
-        transition precisely so a late webhook is not refused.
+        transition precisely so a late webhook is not refused, and
+        `poll_expired_checkouts` keeps asking the gateway about it for
+        `PAYMENT_LATE_MONEY_WINDOW_HOURS`, because in reconcile mode there is no webhook.
 
     Never trusts a bare status flag: `fetch_payment_status` matches amount, currency and
     reference on the merchant account, and `complete_payment` verifies again.
@@ -257,7 +259,6 @@ def poll_open_payments(now=None):
     from django.conf import settings
     from django.utils import timezone
 
-    from notifications.models import UserNotificationPreference
     from notifications.services import NotificationService
 
     from .services.payment_gateways import PaymentGatewayError, PaymentGatewayService
@@ -291,7 +292,8 @@ def poll_open_payments(now=None):
             gateway = PaymentGatewayService(payment.payment_method)
             result = gateway.fetch_payment_status(
                 payment.gateway_transaction_reference,
-                expected={'amount': payment.amount, 'currency': payment.currency},
+                expected={'amount': payment.amount, 'currency': payment.currency,
+                          'since': payment.created_at},
             )
         except (PaymentGatewayError, Exception) as exc:   # noqa: BLE001
             # One unreachable gateway must not stop the queue, and an unanswered
@@ -331,10 +333,11 @@ def poll_open_payments(now=None):
         recipient = getattr(payment.subscription, 'user', None)
         if recipient is None:
             continue
-        if not UserNotificationPreference.is_channel_enabled(recipient, 'checkout_expired'):
-            continue
-        # The inbox row is always written; a muted type simply sends no push. Keyed on
-        # the payment, so a retry of this run cannot tell anyone twice.
+        # The inbox row is always written; a muted type simply sends no push —
+        # `NotificationService` asks the preferences when it DELIVERS (B-014). This
+        # used to skip the call for a muted type, so a customer who silenced the push
+        # also lost the record that their checkout was closed (SIDE_BUGS S-133). Keyed
+        # on the payment, so a retry of this run cannot tell anyone twice.
         NotificationService.create_and_send(
             recipient=recipient, event_type="checkout_expired",
             related_object_id=str(payment.id),
@@ -350,3 +353,76 @@ def poll_open_payments(now=None):
                     checked, completed, expired, failed)
     return {'checked': checked, 'completed': completed, 'expired': expired,
             'failed': failed, 'capped': checked >= batch}
+
+
+@shared_task(
+    name="subscription.poll_expired_checkouts",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+)
+@no_retry_on_timeout
+def poll_expired_checkouts(now=None):
+    """Keep looking for money that arrives for a checkout the poller already closed.
+
+    `poll_open_payments` expires a checkout nobody paid within its window, and the state
+    machine lets `expired -> completed` precisely so late money is honoured — but only a
+    webhook could ever deliver it, and in ShamCash's default reconcile mode there is no
+    webhook (`verify_webhook` refuses every delivery until a secret is configured). So a
+    customer who paid in the last minute of the window, or whose transfer posted late,
+    kept 'expired' and got nothing (SIDE_BUGS S-077).
+
+    Every run asks the gateway about each expired checkout that has a reference and
+    opened within `PAYMENT_LATE_MONEY_WINDOW_HOURS` (72: the gateway's own lookback, so
+    nothing older could be found anyway), newest first, at most `PAYMENT_POLL_BATCH`.
+    Only a verified 'completed' does anything, and it goes through
+    `PaymentService.complete_payment` like every other completion. 'pending', 'failed'
+    and 'unknown' leave the row as it is. Scheduled every ten minutes, not every
+    minute: a closed checkout is not being watched by anyone, and each ask is a
+    round trip to the merchant account.
+    """
+    from django.conf import settings
+    from django.utils import timezone
+
+    from .models import Payment
+    from .services.payment_gateways import PaymentGatewayError, PaymentGatewayService
+    from .services.payment_service import (InvalidPaymentTransition,
+                                           PaymentService, PaymentVerificationError)
+
+    now = now or timezone.now()
+    window = timedelta(hours=int(getattr(settings, 'PAYMENT_LATE_MONEY_WINDOW_HOURS', 72)))
+    batch = int(getattr(settings, 'PAYMENT_POLL_BATCH', 100))
+
+    rows = list(Payment.objects
+                .filter(status='expired', created_at__gte=now - window)
+                .exclude(gateway_transaction_reference='')
+                .exclude(gateway_transaction_reference__isnull=True)
+                .order_by('-created_at', '-id')[:batch])
+
+    checked = completed = 0
+    for payment in rows:
+        checked += 1
+        try:
+            result = PaymentGatewayService(payment.payment_method).fetch_payment_status(
+                payment.gateway_transaction_reference,
+                expected={'amount': payment.amount, 'currency': payment.currency,
+                          'since': payment.created_at},
+            )
+        except (PaymentGatewayError, Exception) as exc:   # noqa: BLE001
+            logger.warning("late poll: gateway lookup failed for payment %s: %s",
+                           payment.id, exc)
+            continue
+        if str((result or {}).get('status', '')).lower() not in (
+                'completed', 'success', 'succeeded', 'paid'):
+            continue
+        try:
+            PaymentService.complete_payment(payment.id, result)
+            completed += 1
+            logger.warning("late poll: payment %s was paid after its checkout closed; "
+                           "completed", payment.id)
+        except (PaymentVerificationError, InvalidPaymentTransition) as exc:
+            logger.warning("late poll: refused to complete payment %s: %s", payment.id, exc)
+
+    if checked >= batch:
+        logger.warning("late poll: hit the %s-row cap; older closed checkouts wait", batch)
+    return {'checked': checked, 'completed': completed, 'capped': checked >= batch}

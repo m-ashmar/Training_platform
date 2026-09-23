@@ -126,6 +126,16 @@ class ShamCashGateway(PaymentGateway):
         }
 
     # ------------------------------------------------------------------ #
+    #: Transactions asked for per lookup. A page that comes back this full may have
+    #: more behind it (SIDE_BUGS S-129).
+    PAGE_LIMIT = 200
+    #: Lookups one status check may spend splitting a full window before it gives up and
+    #: answers 'unknown'. Bounds the traffic a single checkout can cause.
+    MAX_LOOKUPS = 16
+    #: Allowance for the gateway's clock against ours when the window starts at the
+    #: moment the checkout opened.
+    CLOCK_SLACK = timezone.timedelta(minutes=10)
+
     def fetch_payment_status(self, reference: str, expected: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Verify by locating a matching transaction on the merchant account.
@@ -133,36 +143,106 @@ class ShamCashGateway(PaymentGateway):
         reference within the lookback window. Never trusts a bare status flag.
 
         Three answers, and the third one matters: 'completed' (a matching transaction
-        is on the account), 'pending' (the account was read and nothing matches — so
-        nobody has paid) and 'unknown' (the account could not be read at all, which is
-        evidence of nothing).
+        is on the account), 'pending' (the account was read IN FULL and nothing matches
+        — so nobody has paid) and 'unknown' (the account could not be read, or could not
+        be read in full, which is evidence of nothing).
+
+        THE WHOLE WINDOW, NOT ONE PAGE (SIDE_BUGS S-129). This read one page of at most
+        200 transactions from the last 72 h and answered 'pending' when the reference was
+        not on it — and the poller expires a checkout on 'pending'. On an account busy
+        enough to fill a page, a paid checkout whose transfer fell outside it was
+        expired. Now:
+          * the window starts when the checkout opened (`expected['since']`, less
+            `CLOCK_SLACK`) when the caller knows it, capped at the lookback — a transfer
+            cannot quote a reference before it existed;
+          * a page that comes back full, or that says it has more, is split in two by
+            time and each half read, up to `MAX_LOOKUPS`. Only the documented
+            `start_at`/`end_at`/`limit` parameters are used: the pagination scheme is one
+            of the things still to CONFIRM with ShamCash;
+          * if the window still cannot be read in full, the answer is 'unknown', which
+            closes nothing.
         """
         expected = expected or {}
         lookback_hours = int(self.config.get('reconcile_lookback_hours', 72))
         now = timezone.now()
-        params = {
-            'account_id': self.account_id,
-            'start_at': (now - timezone.timedelta(hours=lookback_hours)).isoformat(),
-            'end_at': now.isoformat(),
-            'limit': 200,
-        }
-        try:
-            envelope = self._get('/transactions', params)
-        except Exception as e:
-            # 'unknown', not 'pending': a lookup that FAILED is not evidence that
-            # nobody paid. Answering 'pending' made an outage indistinguishable from an
-            # unpaid checkout, and the poller closes unpaid checkouts — so a few minutes
-            # of gateway trouble would have expired every checkout in flight.
-            logger.warning(f"ShamCash status lookup failed for {reference}: {e}")
-            return {'status': 'unknown', 'reference': reference, 'error': str(e)}
+        start = now - timezone.timedelta(hours=lookback_hours)
+        since = expected.get('since')
+        if since is not None:
+            start = max(start, since - self.CLOCK_SLACK)
+        if start >= now:
+            start = now - self.CLOCK_SLACK
 
-        txns = (envelope.get('data') or []) if isinstance(envelope, dict) else []
         exp_amount = None
         if expected.get('amount') is not None:
             exp_amount = Decimal(str(expected['amount'])).quantize(Decimal('0.01'))
         exp_currency = str(expected.get('currency', '')).upper() or None
 
+        windows = [(start, now)]
+        lookups = 0
+        truncated = False
+        while windows:
+            if lookups >= self.MAX_LOOKUPS:
+                truncated = True
+                break
+            low, high = windows.pop()
+            lookups += 1
+            params = {
+                'account_id': self.account_id,
+                'start_at': low.isoformat(),
+                'end_at': high.isoformat(),
+                'limit': self.PAGE_LIMIT,
+            }
+            try:
+                envelope = self._get('/transactions', params)
+            except Exception as e:
+                # 'unknown', not 'pending': a lookup that FAILED is not evidence that
+                # nobody paid. Answering 'pending' made an outage indistinguishable from
+                # an unpaid checkout, and the poller closes unpaid checkouts — so a few
+                # minutes of gateway trouble would have expired every checkout in flight.
+                logger.warning(f"ShamCash status lookup failed for {reference}: {e}")
+                return {'status': 'unknown', 'reference': reference, 'error': str(e)}
+
+            txns = (envelope.get('data') or []) if isinstance(envelope, dict) else []
+            match = self._match(txns, reference, exp_amount, exp_currency)
+            if match is not None:
+                return match
+            if len(txns) >= self.PAGE_LIMIT or self._says_there_is_more(envelope):
+                if high - low <= timezone.timedelta(seconds=1):
+                    truncated = True       # a second's worth of transfers fills a page
+                    continue
+                middle = low + (high - low) / 2
+                windows.append((middle, high))
+                windows.append((low, middle))
+
+        if truncated:
+            logger.warning("ShamCash: the account holds more transactions than %s lookups "
+                           "can read for %s; answering unknown", self.MAX_LOOKUPS, reference)
+            return {'status': 'unknown', 'reference': reference,
+                    'error': 'the transaction window could not be read in full'}
+        return {'status': 'pending', 'reference': reference}
+
+    @staticmethod
+    def _says_there_is_more(envelope) -> bool:
+        """Whether the envelope itself says the page is not the end (CONFIRM the key).
+
+        A short page is only proof of the end if the gateway does not cap pages below
+        `PAGE_LIMIT`; any of the usual continuation markers is taken at its word."""
+        if not isinstance(envelope, dict):
+            return False
+        for holder in (envelope, envelope.get('meta'), envelope.get('pagination')):
+            if not isinstance(holder, dict):
+                continue
+            for key in ('has_more', 'next', 'next_page', 'next_page_url', 'next_cursor'):
+                if holder.get(key):
+                    return True
+        return False
+
+    @staticmethod
+    def _match(txns, reference, exp_amount, exp_currency) -> Optional[Dict[str, Any]]:
+        """The verified 'completed' answer for the first transaction that matches, or None."""
         for txn in txns:
+            if not isinstance(txn, dict):
+                continue
             # CONFIRM these field names against a real ShamCash transaction object.
             note = str(txn.get('note') or txn.get('description') or '')
             if reference not in note:
@@ -187,8 +267,7 @@ class ShamCashGateway(PaymentGateway):
                 'occurred_at': txn.get('occurred_at'),
                 'gateway_data': txn,
             }
-
-        return {'status': 'pending', 'reference': reference}
+        return None
 
     # ------------------------------------------------------------------ #
     def verify_webhook(self, payload: bytes, headers: Dict[str, str]) -> Tuple[bool, Dict[str, Any]]:

@@ -18,7 +18,7 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from .models import (
-    SubscriptionPlan, Subscription, Payment, 
+    OPEN_PAYMENT_STATUSES, SubscriptionPlan, Subscription, Payment,
     SubscriptionFeature, SubscriptionUsage
 )
 from .serializers import (
@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
-from .services.payment_gateways import PaymentGatewayService, PaymentGatewayError
+from .services.payment_gateways import (
+    CurrencyNotChargeable, PaymentGatewayError, PaymentGatewayService,
+)
 from .services.payment_service import (
     PaymentService, PaymentError, InvalidPaymentTransition, PaymentVerificationError,
     SubscriptionAlreadyActive,
@@ -89,6 +91,18 @@ def _checkout_opener(request, subscription, gateway_name, gateway_service):
         )
         return gateway_name, reference, init.get('response', {})
     return initiate
+
+
+def _currency_not_chargeable():
+    """503 `currency_not_chargeable`: the gateway takes no payments in this buyer's
+    currency until the operator configures its amount bounds (SIDE_BUGS S-052). The
+    text is the one the exchange-rate refusal already uses, because to the customer it
+    is the same fact: paying in their currency is not available right now."""
+    from wallet.exchange import REFUSAL_MESSAGES, NoExchangeRate
+
+    return Response({'error': REFUSAL_MESSAGES[NoExchangeRate.code],
+                     'code': CurrencyNotChargeable.code},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
 def _locked_subscription(pk):
@@ -185,20 +199,19 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        """Create a new subscription for the current user with proper error handling"""
+        """Create the subscription — and NO payment.
+
+        This also wrote a pending Payment at the plan's price in the PLAN'S currency,
+        unconverted and with no price of record, although a payment is charged in the
+        BUYER'S currency (the owner, 2026-09-21): a dollar client's history showed a
+        pound amount, and an operator completing that row paid out nothing because the
+        currencies disagreed (SIDE_BUGS S-134). Nothing could complete it anyway — it
+        had no reference. The checkout is opened, priced and snapshotted by
+        `PaymentService` when the customer taps Pay (`POST v1/gateways/`).
+        """
         try:
             with transaction.atomic():
                 subscription = serializer.save()
-                
-                # Create initial payment record
-                Payment.objects.create(
-                    subscription=subscription,
-                    amount=subscription.plan.price,
-                    currency=subscription.plan.currency,
-                    status='pending',
-                    description=f"Subscription to {subscription.plan.name}"
-                )
-                
                 logger.info(f"Created subscription {subscription.id} for user {self.request.user.id}")
                 
         except ValidationError as e:
@@ -218,9 +231,31 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         barrier, both calls answering 200 and the payment staying 'completed'. The row is
         now read under `select_for_update` — the lock the payment service takes before it
         extends cover — and only the fields the request changes are written.
+
+        Nothing is writable today (`SubscriptionUpdateSerializer`). Codes it can answer:
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 400 | `auto_renew_read_only` | the body carries `auto_renew`; renewal is never automatic. `field_errors.auto_renew` repeats it |
+        | 400 | `validation_error` | the subscription is not active or on trial |
+        | 404 | `not_found` | not the caller's subscription |
         """
         partial = kwargs.pop('partial', False)
         subscription = self.get_object()
+        if 'auto_renew' in (request.data if hasattr(request.data, 'keys') else {}):
+            # Refused HERE, with the code at the top level of the body. The serializer's
+            # own refusal is a field error, and the exception handler turns every field
+            # error into `code: "validation_error"` — so the app, which branches on the
+            # top-level `code` as the contract tells it to, never saw
+            # `auto_renew_read_only` (SIDE_BUGS S-131). The field error is kept beside it.
+            from rest_framework.exceptions import ErrorDetail
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+
+            refusal = DRFValidationError({'auto_renew': [ErrorDetail(
+                SubscriptionUpdateSerializer.AUTO_RENEW_READ_ONLY,
+                code='auto_renew_read_only')]})
+            refusal.service_code = 'auto_renew_read_only'
+            raise refusal
         with transaction.atomic():
             locked = _locked_subscription(subscription.pk)
             serializer = self.get_serializer(locked, data=request.data, partial=partial)
@@ -312,6 +347,33 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         it does NOT extend or activate the subscription. Activation happens only
         after the gateway confirms funds (webhook or verified reconcile), via
         PaymentService.complete_payment.
+
+        `POST`, authenticated. Headers: `X-App-Channel` (required — it opens a
+        checkout), `X-App-Version`. Body: `{"gateway": "shamcash"}` (optional; that is
+        the default). If the subscription already has an open checkout — whichever
+        button opened it — THAT checkout comes back, not a second one.
+
+        200::
+
+            {"message": "<translated>", "payment_id": "<uuid>", "reference": "...",
+             "status": "pending", "amount": "5000.00", "currency": "SYP",
+             "payment_url": null | "...", "instructions": {...} | null}
+
+        `amount`/`currency` are what this checkout charges, in the buyer's currency —
+        for a checkout that was already open, what it was opened at.
+
+        Codes it can answer (branch on `code`, never on the text):
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 400 | `app_channel_required` | no known `X-App-Channel` |
+        | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
+        | 404 | `not_found` | not the caller's subscription |
+        | 400 | `not_renewable` | the subscription is not `active` or `expired` |
+        | 409 | `exchange_rate_stale` / `exchange_rate_missing` | the plan is priced in the other currency and the operator's rate is too old / was never set |
+        | 503 | `currency_not_chargeable` | the gateway is not configured to charge in the buyer's currency |
+        | 400 | `gateway_error` | the gateway could not open the checkout (not configured, or refused it) |
+        | 500 | `server_error` | unexpected fault |
         """
         try:
             require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
@@ -342,11 +404,18 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 # with its own `code` rather than charged at yesterday's pound.
                 logger.warning("Renewal for subscription %s refused: %s", subscription.id, exc)
                 return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+            except CurrencyNotChargeable as e:
+                logger.warning("Renewal for subscription %s refused: %s", subscription.id, e)
+                return _currency_not_chargeable()
             except PaymentGatewayError as e:
                 logger.warning("Renewal for subscription %s not initiated: %s", subscription.id, e)
-                return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': _('Request could not be completed.'),
+                                 'code': 'gateway_error'},
+                                status=status.HTTP_400_BAD_REQUEST)
             except PaymentError:
-                return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': _('Request could not be completed.'),
+                                 'code': 'not_renewable'},
+                                status=status.HTTP_400_BAD_REQUEST)
 
             resp = payment.gateway_response or {}
             if payment.already_open:
@@ -360,6 +429,10 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 'payment_id': str(payment.id),
                 'reference': payment.gateway_transaction_reference,
                 'status': payment.status,
+                # What THIS checkout charges. For one that was already open, the figure
+                # it was opened at — which may be an older rate than today's.
+                'amount': str(payment.amount),
+                'currency': payment.currency,
                 'payment_url': resp.get('payment_url'),
                 'instructions': resp.get('instructions'),
             })
@@ -372,7 +445,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         except Exception as e:
             logger.error(f"Error renewing subscription: {str(e)}")
             return Response(
-                {'error': _('Failed to renew subscription')},
+                {'error': _('Failed to renew subscription'), 'code': 'server_error'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -382,8 +455,12 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
 
         `GET`, authenticated, no body. 200 is `UserSubscriptionSummarySerializer` —
         `access` (`active | frozen | inactive`), `renewal_due`, `plan_duration_days`,
-        `plan_currency`, `plan_features`; `plan_price` is withheld from a build whose
-        `can_show_prices` is off.
+        `plan_currency`, `plan_features`, and the renewal's price in the READER'S
+        currency: `plan_price` (and `plan_currency`, which is the reader's currency, not
+        necessarily the plan's), `price_converted`, `exchange_rate`, `price_of_record`,
+        `price_of_record_currency` — see the serializer for each. All five price keys
+        are ABSENT (not null) on a build whose `can_show_prices` is off (`play`, `ios`);
+        `plan_currency` stays, since a currency code is not a price.
 
         Codes it can answer:
 
@@ -908,9 +985,10 @@ class PaymentGatewayView(APIView):
     
     def post(self, request):
         """
-        Initiate a payment for one of the caller's own subscriptions.
+        Initiate a payment for one of the caller's own subscriptions — the Pay button.
 
-        Expected payload:
+        `POST`, authenticated. Headers: `X-App-Channel` (required — it opens a
+        checkout), `X-App-Version`. Expected payload:
         {
             "gateway": "shamcash",
             "subscription_id": "uuid",
@@ -928,7 +1006,40 @@ class PaymentGatewayView(APIView):
         `amount`/`currency` are still accepted, but only as an assertion of the
         price the client displayed. A mismatch is a conflict, not an instruction —
         silently charging the server price would bill the user something other
-        than the figure they agreed to.
+        than the figure they agreed to. The assertion is checked against WHAT THIS
+        CALL WILL CHARGE: the plan's price in the buyer's currency at today's rate
+        for a new checkout, or — when the subscription already has an open checkout —
+        the amount that checkout was opened at, which after a rate change is not
+        today's figure (SIDE_BUGS S-136). The 409 says which, and the response always
+        carries the checkout's own `amount`/`currency`.
+
+        200::
+
+            {"success": true, "payment_id": "<uuid>", "reference": "...",
+             "amount": "5000.00", "currency": "SYP",
+             "payment_url": null | "...", "instructions": {...} | null,
+             "expires_at": "<ISO 8601>"}
+
+        `amount`/`currency` are what the returned reference charges, in the buyer's
+        currency — draw THESE on the Pay screen, not a figure from the plan list.
+
+        Codes it can answer (branch on `code`, never on the text):
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 400 | `app_channel_required` | no known `X-App-Channel` |
+        | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
+        | 400 | `missing_fields` | `gateway` or `subscription_id` missing |
+        | 404 | `not_found` | no such subscription, or not the caller's |
+        | 400 | `payment_not_required` | the plan is free |
+        | 409 | `exchange_rate_stale` / `exchange_rate_missing` | the plan is priced in the other currency and the operator's rate is too old / was never set |
+        | 400 | `invalid_amount` | the quoted `amount` is not a number |
+        | 409 | `price_changed` | the quoted `amount`/`currency` is not what this call would charge; `expected_amount`/`expected_currency` say what it would |
+        | 409 | `subscription_active` | cover is running; use `subscriptions/{id}/renew/` |
+        | 503 | `gateway_unavailable` | that gateway is not configured to take payments |
+        | 503 | `currency_not_chargeable` | the gateway is not configured to charge in the buyer's currency |
+        | 400 | `gateway_error` | the gateway refused or failed to open the checkout |
+        | 500 | `server_error` | unexpected fault |
         """
         try:
             require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
@@ -938,7 +1049,7 @@ class PaymentGatewayView(APIView):
 
             if not gateway_name or not subscription_id:
                 return Response(
-                    {'error': _('Missing required fields')},
+                    {'error': _('Missing required fields'), 'code': 'missing_fields'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -950,7 +1061,7 @@ class PaymentGatewayView(APIView):
                 )
             except (Subscription.DoesNotExist, ValidationError, ValueError):
                 return Response(
-                    {'error': _('Subscription not found')},
+                    {'error': _('Subscription not found'), 'code': 'not_found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
 
@@ -964,7 +1075,8 @@ class PaymentGatewayView(APIView):
                 # is still nothing, and a free plan must not be refused because the
                 # operator's rate is stale.
                 return Response(
-                    {'error': _('This plan does not require a payment')},
+                    {'error': _('This plan does not require a payment'),
+                     'code': 'payment_not_required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -988,32 +1100,57 @@ class PaymentGatewayView(APIView):
                 logger.warning("Checkout refused for subscription %s: %s",
                                subscription.id, exc)
                 return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
-            amount = priced.amount
-            currency = priced.currency
+
+            # What this call will actually charge. An open checkout that already has a
+            # reference is handed back as it is (`PaymentService.start_payment`), at the
+            # amount it was opened at — so after a rate change its figure is not
+            # `priced`, and checking the quote against `priced` let the app's number
+            # pass while the reference it got back charged another (SIDE_BUGS S-136).
+            # Read without the lock: the lock is taken below, and the answer is checked
+            # again against the payment that comes back.
+            already_open = (Payment.objects
+                            .filter(subscription=subscription,
+                                    status__in=OPEN_PAYMENT_STATUSES)
+                            .exclude(gateway_transaction_reference__isnull=True)
+                            .exclude(gateway_transaction_reference='')
+                            .order_by('created_at', 'id').first())
+            if already_open is not None:
+                amount, currency = already_open.amount, already_open.currency
+            else:
+                amount, currency = priced.amount, priced.currency
 
             # --- Optional client confirmation of the price it displayed ---
             quoted_amount = request.data.get('amount')
+            quoted = None
             if quoted_amount is not None:
                 try:
-                    quoted = Decimal(str(quoted_amount))
+                    quoted = Decimal(str(quoted_amount)).quantize(Decimal('0.01'))
                 except (InvalidOperation, TypeError, ValueError):
                     return Response(
-                        {'error': _('Invalid amount')},
+                        {'error': _('Invalid amount'), 'code': 'invalid_amount'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                if quoted.quantize(Decimal('0.01')) != Decimal(amount).quantize(Decimal('0.01')):
-                    return Response(
-                        {'error': _('The price has changed. Please refresh and try again.'),
-                         'expected_amount': str(amount), 'expected_currency': currency},
-                        status=status.HTTP_409_CONFLICT
-                    )
             quoted_currency = request.data.get('currency')
-            if quoted_currency is not None and str(quoted_currency).upper() != currency:
+            quoted_currency = (str(quoted_currency).upper()
+                               if quoted_currency is not None else None)
+
+            def _mismatch(charged_amount, charged_currency):
+                return ((quoted is not None
+                         and quoted != Decimal(charged_amount).quantize(Decimal('0.01')))
+                        or (quoted_currency is not None
+                            and quoted_currency != charged_currency))
+
+            def _price_changed(charged_amount, charged_currency):
                 return Response(
                     {'error': _('The price has changed. Please refresh and try again.'),
-                     'expected_amount': str(amount), 'expected_currency': currency},
+                     'code': 'price_changed',
+                     'expected_amount': str(charged_amount),
+                     'expected_currency': charged_currency},
                     status=status.HTTP_409_CONFLICT
                 )
+
+            if _mismatch(amount, currency):
+                return _price_changed(amount, currency)
 
             # Through the MANAGER, which is the only place the enabled check lives.
             # Constructing the service directly skipped it, so a deploy missing
@@ -1047,12 +1184,21 @@ class PaymentGatewayView(APIView):
                 # Extending an active subscription is what the renew action is for. Decided
                 # under the lock, so a payment clearing at this moment is seen.
                 return Response(
-                    {'error': _('This subscription is already active. Use renew to extend it.')},
+                    {'error': _('This subscription is already active. Use renew to extend it.'),
+                     'code': 'subscription_active'},
                     status=status.HTTP_409_CONFLICT
                 )
+            except CurrencyNotChargeable as e:
+                logger.warning("Checkout refused for subscription %s: %s",
+                               subscription.id, e)
+                return _currency_not_chargeable()
 
             if payment.already_open:
                 logger.info("Checkout %s already open; returning its reference", payment.id)
+                # The checkout under the lock is not the one read above (it closed, or
+                # another opened, in between): the quote is held to it all the same.
+                if _mismatch(payment.amount, payment.currency):
+                    return _price_changed(payment.amount, payment.currency)
             else:
                 logger.info(f"Payment initiated: {payment.id} via {gateway_name}")
 
@@ -1063,6 +1209,11 @@ class PaymentGatewayView(APIView):
                 'success': True,
                 'payment_id': str(payment.id),
                 'reference': payment.gateway_transaction_reference,
+                # What the returned reference charges, in the buyer's currency. It was
+                # not answered, so after a rate change the app drew one figure and the
+                # already-open reference it was handed charged another (S-136).
+                'amount': str(payment.amount),
+                'currency': payment.currency,
                 'payment_url': resp.get('payment_url'),
                 'instructions': resp.get('instructions'),
                 # When the reference stops being payable — what the Pay screen counts
@@ -1076,7 +1227,7 @@ class PaymentGatewayView(APIView):
         except PaymentGatewayError as e:
             logger.error(f"Payment gateway error: {str(e)}")
             return Response(
-                {'error': _('Request could not be completed.')},
+                {'error': _('Request could not be completed.'), 'code': 'gateway_error'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         except PASSTHROUGH_EXCEPTIONS:
@@ -1087,7 +1238,7 @@ class PaymentGatewayView(APIView):
         except Exception as e:
             logger.error(f"Error initiating payment: {str(e)}")
             return Response(
-                {'error': _('Failed to initiate payment')},
+                {'error': _('Failed to initiate payment'), 'code': 'server_error'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1159,7 +1310,8 @@ class PaymentReconcileView(APIView):
             gateway_service = PaymentGatewayService(payment.payment_method)
             result = gateway_service.fetch_payment_status(
                 payment.gateway_transaction_reference,
-                expected={'amount': payment.amount, 'currency': payment.currency},
+                expected={'amount': payment.amount, 'currency': payment.currency,
+                          'since': payment.created_at},
             )
         except PaymentGatewayError as e:
             logger.warning(f"Reconcile lookup failed for {payment.id}: {str(e)}")
@@ -1230,7 +1382,12 @@ class PaymentReceiptView(APIView):
             "status": "paid",
             "item": {"plan_id", "plan_name", "plan_type", "duration_days",
                      "money_type"},                     draw as "Premium · 30 يوماً"
-            "amount": "2500.00", "currency": "SYP",
+            "amount": "2500.00", "currency": "SYP",     what was CHARGED, in the payer's currency
+            "exchange": null | {                        null unless the plan was priced in
+                "price_of_record": "2.00",              the other currency; then what it
+                "price_of_record_currency": "USD",      was priced at, and the rate the
+                "rate": "13000.000000",                 charge was struck at — read off the
+                "rate_text": "1 USD = 13000.000000 SYP"},  payment, never today's rate
             "method": {"code": "shamcash", "name": "<translated>"},
             "reference": "<the gateway's reference, or "">",
             "covers": {"from": ..., "until": ...},      the access it bought
@@ -1238,6 +1395,9 @@ class PaymentReceiptView(APIView):
             "platform": {"name", "legal_name", "contact_email", "website"},
             "plan_duration_days": 30,
             "pdf_url": "<this path>?format=pdf"}}
+
+    A receipt for a converted charge must say so: when `exchange` is not null, draw
+    the price of record and `rate_text` beside the amount (SIDE_BUGS S-137).
 
     Errors (branch on `code`):
 

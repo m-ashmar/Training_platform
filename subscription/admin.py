@@ -70,18 +70,26 @@ def extend_subscriptions(modeladmin, request, queryset):
                        source=s.source or 'operator_grant'))
     modeladmin.message_user(request, f"Extended {count} subscriptions.")
 
+#: A plan's price is a number AND a unit. Both admin sites show and edit `currency` next
+#: to `price`: neither did, so every plan an operator created took the field default
+#: 'SYP' — an operator could not price a plan in dollars, and one typing "10" meaning
+#: dollars made a 10-pound plan that every dollar reader was then shown converted from
+#: ten pounds (SIDE_BUGS S-074). Shared, so the two sites cannot drift apart again.
+PLAN_BASIC_FIELDS = ('name', 'plan_type', 'description', 'price', 'currency',
+                     'duration_days', 'is_active', 'is_featured')
+
+
 @admin.register(SubscriptionPlan)
 class SubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = ('name', 'plan_type', 'price', 'duration_days', 'is_active', 'is_featured', 'has_diet_access', 'has_routine_access')
-    list_filter = ('plan_type', 'is_active', 'is_featured', 'has_diet_access', 'has_routine_access')
+    list_display = ('name', 'plan_type', 'price', 'currency', 'duration_days', 'is_active', 'is_featured', 'has_diet_access', 'has_routine_access')
+    list_filter = ('plan_type', 'currency', 'is_active', 'is_featured', 'has_diet_access', 'has_routine_access')
     search_fields = ('name',)
     readonly_fields = ['created_at', 'updated_at']
     
     fieldsets = (
         ('Basic Information', {
             # `is_featured` is the "الأكثر اختياراً" badge on the Plans screen.
-            'fields': ('name', 'plan_type', 'description', 'price', 'duration_days',
-                       'is_active', 'is_featured')
+            'fields': PLAN_BASIC_FIELDS
         }),
         ('Features', {
             'fields': (
@@ -139,6 +147,22 @@ class SubscriptionAdmin(admin.ModelAdmin):
     
     actions = [activate_subscriptions, cancel_subscriptions, extend_subscriptions]
 
+#: Everything about a payment that `PaymentService` (or the payout receiver) owns. None of
+#: it is editable in either admin site: the change form left `status`, `amount`,
+#: `currency` and `subscription` open, so an operator could write 'completed' with no
+#: activation and no ledger, or edit the amount of a converted payment until it no
+#: longer matched its snapshot and the gateway refused it (SIDE_BUGS S-128). A state
+#: change goes through the actions below, which call the service.
+PAYMENT_READONLY_FIELDS = (
+    'id', 'subscription', 'amount', 'currency', 'status', 'payment_method', 'money_type',
+    'price_amount', 'price_currency', 'exchange_rate', 'exchange_rate_value',
+    'transaction_id', 'payment_intent_id', 'gateway_transaction_reference',
+    'gateway_event_id', 'gateway_response', 'gateway_error', 'invoice_number',
+    'completed_at', 'covers_from', 'covers_until', 'payout_settled_at', 'metadata',
+    'created_at', 'updated_at',
+)
+
+
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
     list_display = [
@@ -150,12 +174,17 @@ class PaymentAdmin(admin.ModelAdmin):
     # Written only by the payment service and the payout receiver. A completed payment with
     # no `payout_settled_at` is a trainer payout still owed; `subscription.settle_owed_payouts`
     # sends it, and this is where a person sees one that keeps failing.
-    readonly_fields = ['id', 'created_at', 'updated_at',
-                       'covers_from', 'covers_until', 'payout_settled_at']
+    readonly_fields = PAYMENT_READONLY_FIELDS
     
     fieldsets = (
         ('Payment Details', {
-            'fields': ('subscription', 'amount', 'currency', 'status', 'payment_method')
+            'fields': ('subscription', 'amount', 'currency', 'status', 'payment_method',
+                       'money_type')
+        }),
+        ('Price of record', {
+            # How `amount` was reached when the buyer trades in the other currency.
+            'fields': ('price_amount', 'price_currency', 'exchange_rate',
+                       'exchange_rate_value')
         }),
         ('What it bought', {
             'fields': ('covers_from', 'covers_until', 'payout_settled_at')
@@ -173,7 +202,13 @@ class PaymentAdmin(admin.ModelAdmin):
     )
     
     actions = ['mark_as_completed', 'mark_as_failed', 'mark_as_refunded']
-    
+
+    def has_add_permission(self, request):
+        # A payment is opened by the checkout (`PaymentService.start_payment`) and by
+        # nothing else. An add form would write a row in any status with no activation,
+        # no price of record and no reference — the bypass S-128 closes, from the front.
+        return False
+
     def subscription_user(self, obj):
         return obj.subscription.user.username
     subscription_user.short_description = 'User'
