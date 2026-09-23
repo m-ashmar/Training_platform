@@ -471,6 +471,13 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'subscription.poll_expired_checkouts',
         'schedule': crontab(minute='*/10'),
     },
+    # Money no checkout claimed: a transfer with no reference, a mistyped one, or one
+    # for a checkout already paid. The pollers ask by reference and cannot see it; this
+    # reads the account and queues it for an operator (BACKEND_BUGS B-051).
+    'sweep-unmatched-transfers': {
+        'task': 'subscription.sweep_unmatched_transfers',
+        'schedule': crontab(minute='5-59/10'),
+    },
     # The backstop PaymentService, wallet/signals.py and PaymentAdmin all describe for a
     # payout the on-commit receiver lost. It was registered and scheduled nowhere, so it
     # never ran (SIDE_BUGS S-076). Every ten minutes, matching its PAYOUT_GRACE.

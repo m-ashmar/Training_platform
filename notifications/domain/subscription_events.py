@@ -49,3 +49,32 @@ class CheckoutExpiredEvent(BaseDomainEvent):
     )
     recipient_id: int = 0
     payment_id: str = ""
+
+
+@dataclass
+class PaymentNeedsReviewEvent(BaseDomainEvent):
+    """A transfer arrived for the customer's payment that is almost right — the
+    reference with another amount, or the amount with no reference — and a person is
+    checking it (BACKEND_BUGS B-051; the spec's table: push and in-app, no email).
+    Reassurance only: no amount, no instruction to pay again."""
+    template = NotificationTemplate(
+        title=_("We are checking your payment"),
+        body=_("We received a transfer that does not exactly match your payment. Our team "
+               "is checking it and will let you know."),
+    )
+    recipient_id: int = 0
+    payment_id: str = ""
+
+
+@dataclass
+class PaymentRejectedEvent(BaseDomainEvent):
+    """An operator could not accept the transfer held for the customer's payment; the
+    money goes back to its sender by hand (the spec's table: push and in-app)."""
+    template = NotificationTemplate(
+        title=_("We could not accept your transfer"),
+        body=_("The transfer we checked could not be matched to your payment. Contact "
+               "support to have it returned."),
+    )
+    recipient_id: int = 0
+    payment_id: str = ""
+

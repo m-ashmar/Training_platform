@@ -51,6 +51,9 @@ EVENT_CLASS_REGISTRY = {
     'subscription_expiring': 'notifications.domain.subscription_events.SubscriptionExpiringEvent',
     'subscription_expired': 'notifications.domain.subscription_events.SubscriptionExpiredEvent',
     'checkout_expired': 'notifications.domain.subscription_events.CheckoutExpiredEvent',
+    # The review queue (subscription.services.payment_service, B-051).
+    'payment_needs_review': 'notifications.domain.subscription_events.PaymentNeedsReviewEvent',
+    'payment_rejected': 'notifications.domain.subscription_events.PaymentRejectedEvent',
     # Trainer-client chat (chat/events.py). One nudge until the thread is opened.
     'chat_message': 'notifications.domain.chat_events.ChatMessageEvent',
     # Progress (routine/strength.py, routine/tasks.py). Fact-only, no claims.

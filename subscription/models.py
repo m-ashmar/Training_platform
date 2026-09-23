@@ -17,9 +17,10 @@ from wallet.currencies import SUPPORTED_CURRENCIES as _SUPPORTED_CURRENCIES
 # between states is subscription.services.payment_service.PaymentService; any
 # other write must respect these transitions (illegal ones raise).
 PAYMENT_STATUS_TRANSITIONS = {
-    'pending':    {'processing', 'authorized', 'completed', 'failed', 'cancelled', 'expired'},
-    'processing': {'authorized', 'completed', 'failed', 'expired'},
-    'authorized': {'completed', 'failed', 'expired'},
+    'pending':    {'processing', 'authorized', 'completed', 'failed', 'cancelled', 'expired',
+                   'needs_review'},
+    'processing': {'authorized', 'completed', 'failed', 'expired', 'needs_review'},
+    'authorized': {'completed', 'failed', 'expired', 'needs_review'},
     'completed':  {'refunded'},
     'failed':     {'pending'},   # allow a fresh retry
     'cancelled':  set(),
@@ -28,12 +29,24 @@ PAYMENT_STATUS_TRANSITIONS = {
     # expires a checkout nobody finished so the customer can open a new one; if the
     # gateway then confirms the old one, refusing it would mean a customer who paid and
     # got nothing, and a webhook retrying for ever against a row that can never move.
-    'expired':    {'completed'},
+    'expired':    {'completed', 'needs_review'},
+    # Money arrived that is almost right — the reference with another amount, or the
+    # amount with no reference (the spec, section 7; BACKEND_BUGS B-051). It is held
+    # for an operator, never dropped: they approve it (completed) or reject it. An
+    # exact transfer that turns up meanwhile still completes it.
+    'needs_review': {'completed', 'rejected'},
+    'rejected':   set(),
 }
 
 #: A payment that can still turn into money. A subscription has at most ONE of these at
 #: a time: it is the checkout, whichever button opened it. See PaymentService.start_payment.
-OPEN_PAYMENT_STATUSES = ('pending', 'processing', 'authorized')
+#: `needs_review` is one of them: money was seen for it, so it blocks a second checkout
+#: and keeps the buyer's currency locked like any other; unlike the others it never
+#: expires (`subscription.tasks.poll_open_payments`, `utils.checkout_expires_at`).
+OPEN_PAYMENT_STATUSES = ('pending', 'processing', 'authorized', 'needs_review')
+
+#: Open, but held for an operator: never expired, no countdown.
+HELD_PAYMENT_STATUSES = ('needs_review',)
 
 # Currencies the platform prices and charges in. BOTH are sold (the owner, 2026-09-21):
 # Syrian pounds and US dollars, and nothing else, with no FX between them ever. The list
@@ -307,12 +320,17 @@ class Subscription(RowValidationMixin, models.Model):
         period that began before `start_date` belongs to cover that already ran out or
         was given up — an immediate cancel keeps its payment `completed`, with its old
         `covers_until` still in the future. The refund's own rule
-        (`PaymentService._cover_to_take_back`) draws the same line.
+        (`PaymentService._cover_to_take_back`) draws the same line. Nor does a payment
+        an upgrade credited (`metadata['credited_into']`): its value moved into the
+        upgrade's period.
         """
         payments = self.payments.filter(status='completed')
         if self.start_date:
             payments = payments.filter(covers_from__gte=self.start_date)
-        return payments
+        # A payment whose remaining days an upgrade credited has been spent: its value
+        # now lives in the upgrade's period (`PaymentService._apply_upgrade`). Left in,
+        # a renewal stacked before an upgrade was credited AND still counted.
+        return payments.exclude(metadata__has_key='credited_into')
 
     def last_run_plans(self):
         """Every plan the payments of the last run bought (`current_run_payments`).
@@ -393,6 +411,8 @@ class Payment(RowValidationMixin, models.Model):
         ('refunded', 'Refunded'),
         ('cancelled', 'Cancelled'),
         ('expired', 'Expired'),
+        ('needs_review', 'Needs review'),
+        ('rejected', 'Rejected'),
     ]
 
     PAYMENT_METHOD = [
@@ -613,6 +633,70 @@ class Payment(RowValidationMixin, models.Model):
 
     def __str__(self):
         return f"{self.subscription.user.username} - {self.amount} {self.currency} ({self.status})"
+
+class TransferReview(models.Model):
+    """A transfer on the merchant account that no checkout claimed exactly: the review
+    queue (the spec, section 7; BACKEND_BUGS B-051).
+
+    "Right amount with wrong or missing reference, or right reference with wrong
+    amount, goes to NEEDS_REVIEW with the evidence attached, never silently dropped."
+    One row per gateway transaction (`transaction_id` is unique, so the same transfer
+    can be held, and therefore confirm, once). When it names a checkout, that payment
+    is `needs_review` while the row is open. Every decision is an operator's, through
+    `PaymentService` (`approve_review`, `reject_review`, `attach_review`,
+    `dismiss_review`), and records who, when and why.
+    """
+
+    REASONS = [
+        ('amount_differs', 'The reference, another amount'),
+        ('currency_differs', 'The reference, another currency'),
+        ('reference_missing', 'The amount of one open checkout, no reference'),
+        ('several_candidates', 'The amount of several open checkouts, no reference'),
+        ('no_candidate', 'No open checkout matches'),
+        ('checkout_closed', 'The reference of a checkout no longer open'),
+        ('duplicate_transfer', 'The reference of a checkout already paid'),
+    ]
+    STATUSES = [
+        ('open', 'Open'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('dismissed', 'Dismissed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    gateway = models.CharField(max_length=30, default='shamcash')
+    transaction_id = models.CharField(max_length=255, unique=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    #: What the sender wrote, and who they were, as the gateway reports them.
+    note = models.CharField(max_length=500, blank=True, default='')
+    sender = models.CharField(max_length=255, blank=True, default='')
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    raw = models.JSONField(default=dict, blank=True)
+    reason = models.CharField(max_length=30, choices=REASONS)
+    #: The checkout it is held against, when one is named (then that payment is
+    #: `needs_review` while this row is open).
+    payment = models.ForeignKey(Payment, null=True, blank=True, on_delete=models.PROTECT,
+                                related_name='transfer_reviews')
+    #: Every checkout the amount fits, when there is more than one.
+    candidate_payment_ids = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=10, choices=STATUSES, default='open', db_index=True)
+    resolved_by = models.ForeignKey(CustomUser, null=True, blank=True,
+                                    on_delete=models.SET_NULL,
+                                    related_name='resolved_transfer_reviews')
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_note = models.CharField(max_length=500, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [models.Index(fields=['status', 'created_at'])]
+        verbose_name = "Transfer review"
+        verbose_name_plural = "Transfer reviews"
+
+    def __str__(self):
+        return f"{self.transaction_id} {self.amount} {self.currency} ({self.reason}, {self.status})"
+
 
 class SubscriptionFeature(models.Model):
     """Individual features that can be enabled/disabled per subscription"""

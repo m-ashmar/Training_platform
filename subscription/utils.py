@@ -26,9 +26,12 @@ def checkout_expires_at(payment):
     the screen and the server cannot disagree. A payment that is finished — completed,
     failed, cancelled, expired, refunded — has no deadline left to show.
     """
-    from .models import OPEN_PAYMENT_STATUSES
+    from .models import HELD_PAYMENT_STATUSES, OPEN_PAYMENT_STATUSES
 
-    if payment.status not in OPEN_PAYMENT_STATUSES or payment.created_at is None:
+    # A checkout held for review (B-051) is open but never expires: money was seen for
+    # it and an operator decides. No countdown.
+    if (payment.status not in OPEN_PAYMENT_STATUSES
+            or payment.status in HELD_PAYMENT_STATUSES or payment.created_at is None):
         return None
     return payment.created_at + checkout_ttl()
 

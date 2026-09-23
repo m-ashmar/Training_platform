@@ -209,6 +209,17 @@ class PaymentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    def to_representation(self, obj):
+        data = super().to_representation(obj)
+        # The review record is the operator's (who approved, which gateway transaction,
+        # attached by whom): the customer's row carries only why and when (B-051).
+        meta = data.get('metadata')
+        if isinstance(meta, dict) and isinstance(meta.get('review'), dict):
+            review = meta['review']
+            data['metadata'] = {**meta, 'review': {'reason': review.get('reason'),
+                                                   'held_at': review.get('held_at')}}
+        return data
+
     def get_item(self, obj):
         """What was bought, in pieces — the app joins them with the language's own
         separator rather than being handed a sentence it cannot lay out RTL."""

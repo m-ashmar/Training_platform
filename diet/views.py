@@ -257,16 +257,19 @@ class FoodListView(APIView):
 
     `GET v1/food/list/?page=&page_size=&category=&search=` →
     `{count, next, previous, results, pagination, filters}`. Each row: `id`, `name`,
-    `name_ar`, `calories`, `protein`, `carbs`, `fat` (per 100 g), `image_url` (null when
+    `name_ar`, `calories`, `protein`, `carbs`, `fat` (per 100 g), `fiber` (grams per
+    100 g; null when the food's fibre is not known — never 0), `image_url` (null when
     none), `serving_size`, `serving_size_grams`, `category`, `category_id`, `api_id`, the
     four `*_per_gram` figures, and `tags` (BACKEND_BUGS B-065).
 
     `tags` is a list of machine codes, in this order when present — the app draws the
     words: `levantine` | `western` (the food's cuisine; a universal food has none),
     `high_protein` (at least 20% of its energy from protein), `low_fat` (at most 3 g fat
-    per 100 g), `low_calorie` (at most 40 kcal per 100 g). Thresholds and their source are
-    in `diet/services/food_tags.py`. There is no fibre, vegetarian or sugar tag: the
-    catalogue holds no such data, and a tag is never guessed from a name.
+    per 100 g), `low_calorie` (at most 40 kcal per 100 g), `high_fiber` (at least 6 g of
+    fibre per 100 g; never when the fibre is unknown). Thresholds and their source are in
+    `diet/services/food_tags.py`. There is no vegetarian tag (the owner decided against
+    a vegetarian flag, 2026-09-23) and no sugar tag, and a tag is never guessed from a
+    name.
 
     Refusals: 400 `validation_error` (a bad `page`/`page_size`), 400 `bad_request` (a
     NUL character in `category`/`search`), 403 `no_entitlement` / `feature_not_in_plan`.
@@ -325,6 +328,8 @@ class FoodListView(APIView):
                     'protein': food.protein,
                     'carbs': food.carbs,
                     'fat': food.fat,
+                    # Per 100 g; null is "not known", never 0 g (the owner, 2026-09-23).
+                    'fiber': food.fiber,
                     'image_url': food.image_url,
                     'serving_size': food.serving_size,
                     'serving_size_grams': food.serving_size_grams,
@@ -2891,6 +2896,13 @@ SWAP_MORE_PROTEIN_MIN_G = 3.0
 #: absolute floor keeps a 40 kcal cucumber from earning "fewer calories" for 4 kcal.
 SWAP_CALORIE_CHANGE_MIN_SHARE = 0.10
 SWAP_CALORIE_CHANGE_MIN_KCAL = 15.0
+#: Two grams of fibre (the owner, 2026-09-23: foods store fibre). EFSA sets 25 g a day as
+#: adequate for an adult, so two grams is 8% of the day, the smallest gain a chip is
+#: worth. Below it the gap can be the portion ladder's rounding alone: the same-energy
+#: portion moves to the nearest servable rung, up to half a rung away, and half a rung of
+#: cooked lentils (an eighth of a 180 g cup) is 1.8 g of fibre. Only when BOTH portions'
+#: fibre is known; an unknown figure never earns a tag.
+SWAP_MORE_FIBER_MIN_G = 2.0
 
 
 def _swap_grams(component, chosen) -> float:
@@ -2909,20 +2921,39 @@ def _swap_grams(component, chosen) -> float:
     return nearest_portion(chosen, grams).grams
 
 
+def _portion_fiber(food, grams):
+    """Grams of fibre in `grams` of `food`, scaled and rounded as
+    `MealComponent.calculate_nutrition` scales the macros; None when the food's fibre is
+    not known — never 0 g."""
+    if food.fiber is None:
+        return None
+    return round(float(food.fiber) * float(grams) / food.serving_size_grams, 1)
+
+
 def _portion_figures(food, grams) -> dict:
-    """`{calories, protein, carbs, fat}` of `grams` of `food`, by the plate's own rule
-    (`MealComponent.calculate_nutrition`), so an offer and the component it becomes
-    cannot disagree. An unsaved instance: no query."""
-    return MealComponent(food=food, quantity=grams).calculate_nutrition()
+    """`{calories, protein, carbs, fat, fiber}` of `grams` of `food`, by the plate's own
+    rule (`MealComponent.calculate_nutrition`), so an offer and the component it becomes
+    cannot disagree. `fiber` is null when the food's fibre is unknown. An unsaved
+    instance: no query."""
+    return {**MealComponent(food=food, quantity=grams).calculate_nutrition(),
+            "fiber": _portion_fiber(food, grams)}
 
 
 def _swap_tag(current: dict, offered: dict):
     """`(tag, tag_delta)` for one offer against the portion it would replace.
 
     First match wins: `more_calories` (a cost is never hidden behind a benefit),
-    `more_protein`, `fewer_calories`, else `similar` with no delta. `tag_delta` is the
-    signed number behind the tag: grams of protein, or kcal. `more_fiber` is part of the
-    vocabulary and is never emitted: the catalogue holds no fibre figure.
+    `more_protein`, `fewer_calories`, `more_fiber`, else `similar` with no delta.
+    `tag_delta` is the signed number behind the tag: grams of protein, kcal, or grams of
+    fibre.
+
+    `more_fiber` (earnable since foods store fibre, the owner's decision of 2026-09-23)
+    sits last among the benefits, just before `similar`. Energy and protein are what the
+    plan is built to, so a swap that moves
+    either says so first; fibre is the news only when it moves neither. It also means the
+    new tag re-labels no offer that earned one of the other three before — it can only
+    turn a `similar` into `more_fiber`. It needs BOTH portions' fibre known: an unknown
+    figure (null) is never compared.
     """
     d_kcal = float(offered["calories"]) - float(current["calories"])
     d_protein = float(offered["protein"]) - float(current["protein"])
@@ -2934,6 +2965,14 @@ def _swap_tag(current: dict, offered: dict):
         return "more_protein", round(d_protein, 1)
     if d_kcal <= -kcal_bar:
         return "fewer_calories", round(d_kcal, 1)
+    fiber_now, fiber_offered = current.get("fiber"), offered.get("fiber")
+    if fiber_now is not None and fiber_offered is not None:
+        # Rounded to the figures' own precision BEFORE the comparison: both sides are
+        # one-decimal portions, and 3.3 - 1.3 is 1.9999999999999998 in floating point —
+        # a 2.0 g gain the app draws was answered `similar` (the review, L15).
+        d_fiber = round(float(fiber_offered) - float(fiber_now), 1)
+        if d_fiber >= SWAP_MORE_FIBER_MIN_G:
+            return "more_fiber", d_fiber
     return "similar", None
 
 
@@ -2949,9 +2988,8 @@ def _swap_offer(component, current: dict, food, sim: float) -> dict:
         "serving": describe(food, grams),
         "serving_ar": describe(food, grams, "ar"),
         "image_url": food.image_url or None,
+        # `fiber` among them: the portion's fibre, null when the food's is unknown.
         **figures,
-        # No fibre column in the catalogue: always null until the owner adds the data.
-        "fiber": None,
         "tag": tag,
         "tag_delta": tag_delta,
         "delta": {key: round(float(figures[key]) - float(current[key]), 1)
@@ -2969,20 +3007,22 @@ class ClientMealInteractionView(APIView):
     - `swap_food` — `component_id` (required), `chosen_food_id` (optional).
       Without `chosen_food_id`: the offers, 200 `{component_id, food, current, offers}`.
       `food` is the English name of the food on the plate; `current` is that portion,
-      `{food_id, quantity_grams, calories, protein, carbs, fat, fiber}`. `offers` is up
+      `{food_id, quantity_grams, calories, protein, carbs, fat, fiber}` (`fiber` in
+      grams for that portion, null when the food's fibre is not known). `offers` is up
       to six foods of the same macro slot the client may eat (allergies and exclusions
       applied), most similar first, each: `food_id`, `name`, `name_ar`, `similarity`
       (0–1), `quantity_grams` (the portion the swap WOULD put on the plate — the same
       rule as the swap itself: same energy, nearest servable amount), `serving`,
       `serving_ar`, `image_url` (null when the food has none), `calories`, `protein`,
-      `carbs`, `fat` (for that portion), `fiber` (always null: the catalogue holds no
-      fibre), `tag`, `tag_delta` and `delta` (`{calories, protein, carbs, fat}`, offer
-      minus current). `tag` is a code, the app draws the words (BACKEND_BUGS B-058):
-      `more_calories` | `more_protein` | `fewer_calories` | `similar`, first match in
-      that order; `tag_delta` is the number behind it (kcal, or grams of protein; null
-      for `similar`). `more_fiber` is reserved and not emitted until fibre data exists.
+      `carbs`, `fat`, `fiber` (for that portion; `fiber` is null when the food's fibre
+      is not known — never 0), `tag`, `tag_delta` and `delta` (`{calories, protein,
+      carbs, fat}`, offer minus current). `tag` is a code, the app draws the words
+      (BACKEND_BUGS B-058): `more_calories` | `more_protein` | `fewer_calories` |
+      `more_fiber` | `similar`, first match in that order; `more_fiber` only when both
+      the offer's and the current portion's fibre are known. `tag_delta` is the number
+      behind it (kcal, grams of protein, or grams of fibre; null for `similar`).
       Thresholds: `SWAP_MORE_PROTEIN_MIN_G`, `SWAP_CALORIE_CHANGE_MIN_SHARE`,
-      `SWAP_CALORIE_CHANGE_MIN_KCAL` in this module.
+      `SWAP_CALORIE_CHANGE_MIN_KCAL`, `SWAP_MORE_FIBER_MIN_G` in this module.
       With `chosen_food_id`: the swap. The component takes the new food at that portion,
       un-ticked and unrated; 200 `{message, component}` (`component` in the meal
       payload's component shape).
@@ -3078,7 +3118,7 @@ class ClientMealInteractionView(APIView):
                                      "food": name_en_of(component.food),
                                      "current": {"food_id": component.food_id,
                                                  "quantity_grams": float(component.quantity),
-                                                 **current, "fiber": None},
+                                                 **current},
                                      "offers": [_swap_offer(component, current, f, sim)
                                                 for f, sim in offered]})
                 chosen = get_object_or_404(

@@ -19,7 +19,7 @@ and order live in `BACKEND_DELTA.md`, not here.
 | 2 | Capabilities endpoint, channel header, server-side refusal | DONE, 2 follow-ups | `policy/` app, `GET /api/v1/config/capabilities`, seeded per spec §4, change log, operator console. Left: (a) AI coach must decline "how do I pay" on `play`/`ios` — needs the channel on the WebSocket handshake; (b) `preferred_language`-independent: notification texts for `PLATFORM_SUB` states on store channels (arrives with step 5) |
 | 3 | Merge the unmerged payments fix | DONE | `c9-fix-payments` merged here; full suite on a fresh DB is the gate |
 | 4 | Double-entry ledger, commission settings + snapshot, remove the 100% forward | DONE | Coaching commission DONE with the monthly coaching (`users/coaching.py`, `BACKEND_DELTA.md` item 16): 20% of every month, rate copied onto each `CoachingPeriod`, to a platform revenue wallet. The 100% forward is GONE (2026-09-20): a plan payment is minted into the client's wallet and moved straight out to the platform's revenue wallet, whether or not anyone coaches them — `SUBSCRIPTION_TRAINER_SHARE` is kept at 0 so the owner can price a trainer's share later rather than the code having to grow one back. A client with no trainer used to get NO ledger rows at all, so the platform's largest revenue line was invisible in its own ledger; it is recorded now. Left for a later pass, neither blocking: the rates are settings rather than operator-editable rows, and escrow/revenue are still wallets rather than named ledger accounts |
-| 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | PART DONE | **Receipts + the money screens' fields: DONE on branch `build/money`, unmerged** (see below). Done earlier on this branch: the 60s poller (`subscription.poll_open_payments`), checkout TTL, idempotency, `auto_renew` read-only. STILL TODO: the six-state checkout-session model (`OPEN/MATCHING/NEEDS_REVIEW/CONFIRMED/REJECTED/EXPIRED`) with its event rows and the operator review queue, the notification matrix of spec §7 (including the receipt emailed on confirmation), and the saved-language fix. `preferred_language` is settable since BACKEND_BUGS B-005 (`POST /api/auth/user/update/`). Plan expiry notices EXIST (owner, 2026-09-19; `BACKEND_DELTA.md` item 18): `subscription_expiring` 3 days ahead and `subscription_expired` on days 0/3/7/14/30 from `subscription.send_renewal_reminders`, store-safe text, `access`/`renewal_due` on `subscriptions/current/`; extend these, never add parallel expiry notices |
+| 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | PART DONE | **Receipts + the money screens' fields: DONE on branch `build/money`, unmerged** (see below). Done earlier on this branch: the 60s poller (`subscription.poll_open_payments`), checkout TTL, idempotency, `auto_renew` read-only. DONE 2026-09-23 (BACKEND_BUGS B-051): the review queue — payment states `needs_review` and `rejected`, `subscription.TransferReview`, holds from the pollers, reconcile and the webhook, a ten-minute sweep for transfers no checkout claimed (`subscription.sweep_unmatched_transfers`), operator approve / reject / attach / dismiss in the console, and the `payment_needs_review` / `payment_rejected` pushes. STILL TODO: the checkout-session model as its own table (today the `Payment` row is the session) with an immutable event row for EVERY transition (today only the review decisions record who and when), the notification matrix of spec §7 (including the receipt emailed on confirmation), and the saved-language fix. `preferred_language` is settable since BACKEND_BUGS B-005 (`POST /api/auth/user/update/`). Plan expiry notices EXIST (owner, 2026-09-19; `BACKEND_DELTA.md` item 18): `subscription_expiring` 3 days ahead and `subscription_expired` on days 0/3/7/14/30 from `subscription.send_renewal_reminders`, store-safe text, `access`/`renewal_due` on `subscriptions/current/`; extend these, never add parallel expiry notices |
 | 6 | Trainer verification, then withdrawals | TODO | |
 | 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | DONE (branch `build/moderation`, unmerged) | Date of birth + minimum age 14 was already done with the design-v2 work (`BACKEND_DELTA.md` item 3). B1/B2/B5 are the new `moderation/` app: `Report`, `Block`, `AIConsent`; `POST/GET /api/v1/reports/`, `reports/mine/`, `GET/POST/DELETE /api/v1/blocks/`, `GET/POST /api/v1/ai-consent/`; the queue at `/dj-admin/moderation/report/` (operator-only, two closing actions). Enforcement: `moderation.services.blocked_ids` filters posts, comments, follows, profiles, notifications, the challenge leaderboard, available-trainers and trainer matches; `is_blocked` refuses sending AND accepting a trainer request; `require_ai_consent`/`HasAIConsent` gate the AI coach on REST and in `chat_service.chat_stream`. Tests: `tests/test_moderation.py`. Left for step 8: the report/block hooks on the two-way chat |
 | 8 | Two-way trainer–client chat with report/block hooks | TODO | Makes the 1:1 coaching claim real-time in fact |
@@ -138,18 +138,20 @@ is locked (spec §8); the numbers above are the defaults.
    want a retention window instead. (c) Blocking does not hide a challenge whose creator
    was blocked; only the leaderboard drops them, because hiding a shared activity would
    take the blocker's own progress with it.
-5. **Changing plan mid-period** (BACKEND_BUGS B-047, 2026-09-23). `POST
-   v1/subscriptions/{id}/change-plan/` moves a subscription only while no cover runs and
-   no checkout is open; with cover running it answers `409 plan_change_while_active`.
-   Owed: whether an upgrade mid-period is allowed, and how it is priced (pay the
-   difference for the days left, or start the new plan when the old one ends). Also
-   decided in code, reversible: a transfer that clears late against an expired checkout
-   for the OLD plan grants the plan it paid for; if cover on another plan was paid in the
-   meantime, the subscription holds the dearest plan among the paid periods still running
-   (prices of record; a tie or two currencies keeps the current one) and the late period
-   is added; a refund re-decides it (`PaymentService._dearest_running_plan`). A stacked
-   period on a cheaper plan therefore runs on the dearer plan's features until it ends —
-   per-period plans would need a schedule the model does not have.
+5. **Changing plan mid-period — DECIDED by the owner, 2026-09-23.** An UPGRADE is allowed
+   while a plan runs; a DOWNGRADE is blocked until the period ends (then `change-plan`).
+   Credit for what is left = the price paid × days left ÷ the period's length (days, not
+   features used). The new plan's price minus that credit is what is left to pay, shown
+   before paying; the new plan starts when that payment clears and runs its FULL length.
+   Built as `GET`/`POST v1/subscriptions/{id}/upgrade/` (`PaymentService.quote_upgrade`,
+   `start_upgrade`, `_apply_upgrade`). Decided in code after an adversarial review,
+   reversible: the credit is per running payment at its own price; it is re-read when the
+   money clears and the new period is what money + credit buy (full length when paid as
+   quoted); every contributor's share of that period is recorded, and a refund takes
+   back exactly the refunded money's share (refunding the upgrade leaves the credited
+   days on the new plan). An upgrade whose credit covers the whole new price is refused
+   (`upgrade_not_payable`) — the owner declined both extra days and wallet credit for
+   leftover value.
 
 ## Traps this branch cost a session to find
 

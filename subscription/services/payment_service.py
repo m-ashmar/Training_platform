@@ -37,7 +37,7 @@ from django.utils import timezone
 from policy.money import source_of_payment_method
 
 from ..models import (OPEN_PAYMENT_STATUSES, Payment, Subscription, SubscriptionPlan,
-                      plan_snapshot)
+                      TransferReview, plan_snapshot)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,18 @@ class PaymentVerificationError(PaymentError):
     """Raised when gateway-reported data does not match the payment record."""
 
 
+class AmountMismatch(PaymentVerificationError):
+    """The gateway reported money for this payment, but not the amount or currency it
+    asked for. Not a forgery to refuse: money that is almost right, which the webhook
+    and the pollers hold for an operator (`hold_for_review`) instead of dropping."""
+
+
+class ReviewConflict(PaymentError):
+    """An operator decision the review queue cannot take as asked: the row is closed,
+    the payment is not held on it, the transfer already confirmed another payment, or
+    its currency is not the payment's. The message says which."""
+
+
 class PlanChanged(PaymentError):
     """The subscription moved to another plan between the caller's quote and the lock
     (`change-plan` from the customer's other device). The caller priced one plan; a
@@ -66,6 +78,25 @@ class PlanChanged(PaymentError):
 
 class SubscriptionAlreadyActive(PaymentError):
     """A first payment was asked for while the subscription's cover is still running."""
+
+
+class UpgradePriceMoved(PaymentError):
+    """What is left to pay for an upgrade is not what the caller showed the customer:
+    a day of credit ran out, or a price or the rate moved, between the quote and the
+    lock. `quote` is the figure it would charge now."""
+
+    def __init__(self, message, quote):
+        super().__init__(message)
+        self.quote = quote
+
+
+class CheckoutOpen(PaymentError):
+    """Another checkout is open for this subscription; `payment` is it. The customer
+    may be transferring against its reference right now."""
+
+    def __init__(self, message, payment):
+        super().__init__(message)
+        self.payment = payment
 
 
 class PaymentService:
@@ -136,6 +167,15 @@ class PaymentService:
             if payment.completed_at is None:
                 payment.completed_at = timezone.now()
 
+            # A transfer queued for review that turns out to be THIS payment's exact money
+            # (the sweep saw it before the poller matched it) is settled by this
+            # completion, not left open as "money to hand back" (the review, L2).
+            txn = str(verified_data.get('transaction_id') or event_id or '')
+            if txn:
+                TransferReview.objects.filter(transaction_id=txn, status='open').update(
+                    status='approved', payment=payment, resolved_at=timezone.now(),
+                    resolution_note='Settled automatically: this transfer completed the payment')
+
             # --- Activate / extend the subscription, and record what that bought ---
             # The plan and the period THIS payment was sold (its checkout's snapshot),
             # read before the row's plan is decided: a row with no snapshot reads its
@@ -143,11 +183,17 @@ class PaymentService:
             # Cover running: `_dearest_running_plan` (a late transfer after a
             # `change-plan`). The period granted is the one sold, so the receipt agrees.
             bought = cls._plan_bought(payment, subscription)
-            days = payment.plan_bought()['duration_days'] or bought.duration_days
-            subscription.plan = (cls._dearest_running_plan(subscription, clearing=payment)
-                                 if subscription.is_active else bought)
-            payment.covers_from, payment.covers_until = cls._activate_subscription(
-                subscription, source_of_payment_method(payment.payment_method), days)
+            source = source_of_payment_method(payment.payment_method)
+            if (payment.metadata or {}).get('kind') == 'upgrade':
+                payment.covers_from, payment.covers_until = cls._apply_upgrade(
+                    payment, subscription, bought, source)
+            else:
+                days = payment.plan_bought()['duration_days'] or bought.duration_days
+                subscription.plan = (
+                    cls._dearest_running_plan(subscription, clearing=payment)
+                    if subscription.is_active else bought)
+                payment.covers_from, payment.covers_until = cls._activate_subscription(
+                    subscription, source, days)
             payment.save()
 
             logger.info(
@@ -325,29 +371,316 @@ class PaymentService:
                     subscription.plan = held
             subscription.save()
 
-            # And take the MONEY back, not just the access. `wallet.signals` credits the
-            # client's wallet and pays the trainer out of it when a payment completes;
-            # nothing undid either leg, so the platform refunded the card and the trainer
-            # kept the payout. Inside the same transaction as the status change, so a
-            # refund is one fact.
-            try:
-                from wallet.signals import unwind_payment
+            return cls._finish_refund(payment, subscription, reason)
 
-                legs = unwind_payment(payment)
-            except Exception:
-                logger.exception(
-                    "Payment %s was refunded but the ledger could not be unwound; the "
-                    "trainer payout and the minted top-up are still outstanding",
-                    payment.id)
-                raise
+    @classmethod
+    def _finish_refund(cls, payment: Payment, subscription: Subscription, reason: str):
+        """The ledger half of a refund, once the access half is written. The caller
+        holds the subscription and payment locks."""
+        # And take the MONEY back, not just the access. `wallet.signals` credits the
+        # client's wallet and pays the trainer out of it when a payment completes;
+        # nothing undid either leg, so the platform refunded the card and the trainer
+        # kept the payout. Inside the same transaction as the status change, so a
+        # refund is one fact.
+        try:
+            from wallet.signals import unwind_payment
 
-            logger.warning(
-                "Payment %s refunded (%s); subscription %s now %s until %s; "
-                "%d wallet leg(s) reversed",
-                payment.id, reason or 'no reason given',
-                subscription.id, subscription.status, subscription.end_date, legs,
-            )
+            legs = unwind_payment(payment)
+        except Exception:
+            logger.exception(
+                "Payment %s was refunded but the ledger could not be unwound; the "
+                "trainer payout and the minted top-up are still outstanding",
+                payment.id)
+            raise
+
+        logger.warning(
+            "Payment %s refunded (%s); subscription %s now %s until %s; "
+            "%d wallet leg(s) reversed",
+            payment.id, reason or 'no reason given',
+            subscription.id, subscription.status, subscription.end_date, legs,
+        )
         return payment
+
+    # ------------------------------------------------------------------ #
+    # The review queue (the spec, section 7; BACKEND_BUGS B-051)
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def hold_for_review(cls, payment_id, facts: dict, *, reason: str,
+                        gateway: str = 'shamcash') -> TransferReview | None:
+        """Hold money that is almost right for an operator, never drop it.
+
+        `facts` is what the gateway saw (`transaction_facts`: transaction id, amount,
+        currency, note, sender, when; `gateway_data` is kept as `raw`). One queue row per
+        transaction, ever: seeing the same transfer again returns the row it already has,
+        and a transfer that already confirmed a payment is not queued at all (returns
+        None) — one transfer confirms one payment, once.
+
+        A checkout that can still take money (open, or expired within the late-money
+        window) becomes `needs_review`: it keeps its reference, blocks a second checkout,
+        never expires, and the customer is told a person is checking it. A checkout
+        already paid, or closed for good, is left as it is and the transfer is queued
+        against it (`duplicate_transfer` / `checkout_closed`): money that needs handing
+        back, which only an operator can do.
+        """
+        txn_id = str(facts.get('transaction_id') or facts.get('event_id') or '')
+        if not txn_id:
+            raise PaymentVerificationError("A transfer with no transaction id cannot be held")
+        from django.db.models import Q
+
+        with transaction.atomic():
+            subscription, payment = cls._lock_subscription_and_payment(payment_id)
+            existing = TransferReview.objects.select_for_update().filter(
+                transaction_id=txn_id).first()
+            if existing is not None:
+                return existing
+            if Payment.objects.filter(Q(transaction_id=txn_id) | Q(gateway_event_id=txn_id)).exists():
+                logger.info("Transfer %s already confirmed a payment; not queued", txn_id)
+                return None
+            holds = payment.status == 'needs_review' or payment.can_transition_to('needs_review')
+            if holds and payment.status == 'expired':
+                # Closed for good once the late-money window has passed: the customer has
+                # moved on and may hold a newer checkout. The money is queued against it,
+                # the row is left as it is (the review, L2).
+                from django.conf import settings
+
+                late = timedelta(hours=int(getattr(settings, 'PAYMENT_LATE_MONEY_WINDOW_HOURS', 72)))
+                if payment.created_at < timezone.now() - late:
+                    holds = False
+            if not holds:
+                reason = ('duplicate_transfer' if payment.status in ('completed', 'refunded')
+                          else 'checkout_closed')
+            review = cls._queue_transfer(facts, txn_id, reason=reason, payment=payment,
+                                         gateway=gateway)
+            if holds and payment.status != 'needs_review':
+                meta = dict(payment.metadata or {})
+                meta['review'] = {'reason': reason, 'transaction_id': txn_id,
+                                  'held_at': timezone.now().isoformat()}
+                payment.metadata = meta
+                payment.status = 'needs_review'
+                payment.save(update_fields=['status', 'metadata', 'updated_at'])
+                logger.warning("Payment %s held for review (%s, transfer %s)",
+                               payment.id, reason, txn_id)
+                recipient_id = subscription.user_id
+                transaction.on_commit(lambda: cls._notify_review(
+                    'payment_needs_review', recipient_id, payment.id))
+            return review
+
+    @staticmethod
+    def _queue_transfer(facts, txn_id, *, reason, payment=None, candidates=(),
+                        gateway='shamcash') -> TransferReview:
+        """The queue row for one transfer (the caller has checked it is new)."""
+        from django.utils.dateparse import parse_datetime
+
+        try:
+            amount = Decimal(str(facts.get('amount'))).quantize(Decimal('0.01'))
+        except (InvalidOperation, TypeError, ValueError):
+            amount = Decimal('0.00')
+        occurred = facts.get('occurred_at')
+        if isinstance(occurred, str):
+            occurred = parse_datetime(occurred)
+        raw = facts.get('gateway_data')
+        return TransferReview.objects.create(
+            gateway=gateway, transaction_id=txn_id, amount=amount,
+            currency=str(facts.get('currency') or '').upper()[:3],
+            note=str(facts.get('note') or '')[:500], sender=str(facts.get('sender') or '')[:255],
+            occurred_at=occurred if hasattr(occurred, 'tzinfo') else None,
+            raw=raw if isinstance(raw, dict) else {}, reason=reason, payment=payment,
+            candidate_payment_ids=[str(c) for c in candidates])
+
+    @classmethod
+    def queue_unclaimed_transfer(cls, facts: dict, *, candidates=(),
+                                 gateway: str = 'shamcash') -> TransferReview | None:
+        """Queue a transfer no checkout can be named for: no reference, and an amount
+        that fits no open checkout (`no_candidate`) or several (`several_candidates`).
+        An operator attaches it (`attach_review`) or dismisses it."""
+        from django.db.models import Q
+
+        txn_id = str(facts.get('transaction_id') or '')
+        if not txn_id:
+            return None
+        with transaction.atomic():
+            if TransferReview.objects.filter(transaction_id=txn_id).exists():
+                return None
+            if Payment.objects.filter(Q(transaction_id=txn_id) | Q(gateway_event_id=txn_id)).exists():
+                return None
+            return cls._queue_transfer(
+                facts, txn_id, reason='several_candidates' if candidates else 'no_candidate',
+                candidates=candidates, gateway=gateway)
+
+    @classmethod
+    def approve_review(cls, review_id, operator, note: str = '') -> Payment:
+        """An operator accepts a held transfer as payment for its checkout.
+
+        The payment completes through `complete_payment`, with the transfer as the
+        verified money — so everything a payment does on completion happens here too:
+        the period is granted, the ledger records it, the receipt is issued. If the
+        transfer's amount is not the checkout's, the operator is accepting THAT amount
+        for it: the payment is recorded at what arrived (the price it was opened at is
+        kept in `metadata['review']['price']`), so the ledger and the receipt say what
+        was actually received. A transfer in another currency cannot be approved: reject
+        it and hand the money back.
+        """
+        from django.db.models import Q
+
+        payment_id = (TransferReview.objects.filter(pk=review_id)
+                      .values_list('payment_id', flat=True).first())
+        if payment_id is None:
+            raise ReviewConflict("This transfer is not held on a checkout; attach it first")
+        with transaction.atomic():
+            subscription, payment = cls._lock_subscription_and_payment(payment_id)
+            review = TransferReview.objects.select_for_update().get(pk=review_id)
+            if review.status != 'open' or review.payment_id != payment.id:
+                raise ReviewConflict(f"Review {review.id} is {review.status}")
+            if payment.status != 'needs_review':
+                raise ReviewConflict(f"Payment {payment.id} is {payment.status}, not held")
+            if review.currency != str(payment.currency).upper():
+                raise ReviewConflict(f"The transfer is in {review.currency} and the checkout "
+                                     f"in {payment.currency}: reject it and hand it back")
+            if Payment.objects.filter(Q(transaction_id=review.transaction_id)
+                                      | Q(gateway_event_id=review.transaction_id)
+                                      ).exclude(pk=payment.pk).exists():
+                raise ReviewConflict(f"Transfer {review.transaction_id} already confirmed "
+                                     f"another payment")
+            meta = dict(payment.metadata or {})
+            record = dict(meta.get('review') or {})
+            record.update({'approved_by': operator.pk if operator else None,
+                           'transaction_id': review.transaction_id})
+            if review.amount != payment.amount:
+                record['price'] = str(payment.amount)
+                payment.amount = review.amount
+            meta['review'] = record
+            payment.metadata = meta
+            payment.save(update_fields=['amount', 'metadata', 'updated_at'])
+            review.status = 'approved'
+            review.resolved_by = operator
+            review.resolved_at = timezone.now()
+            review.resolution_note = (note or '')[:500]
+            review.save(update_fields=['status', 'resolved_by', 'resolved_at',
+                                       'resolution_note'])
+            return cls.complete_payment(payment.id, {
+                'amount': str(review.amount), 'currency': review.currency,
+                'status': 'completed', 'transaction_id': review.transaction_id,
+                'event_id': review.transaction_id,
+                'reference': payment.gateway_transaction_reference,
+                'gateway_data': review.raw or None,
+            })
+
+    @classmethod
+    def reject_review(cls, review_id, operator, note: str = '') -> TransferReview:
+        """An operator refuses a held transfer. The money goes back to its sender by
+        hand — nothing here moves it — and `note` should say so.
+
+        Its checkout, if held on it and on no other open transfer, becomes `rejected`:
+        it stops blocking, the customer can open a new one, and they are told."""
+        payment_id = (TransferReview.objects.filter(pk=review_id)
+                      .values_list('payment_id', flat=True).first())
+        with transaction.atomic():
+            payment = None
+            if payment_id is not None:
+                subscription, payment = cls._lock_subscription_and_payment(payment_id)
+            review = TransferReview.objects.select_for_update().get(pk=review_id)
+            if review.status != 'open':
+                raise ReviewConflict(f"Review {review.id} is {review.status}")
+            if review.payment_id != payment_id:
+                # Attached to a checkout while this call waited for the lock: the decision
+                # was taken on another state. Refused; ask again (the review, L6).
+                raise ReviewConflict(f"Review {review.id} changed checkout; try again")
+            review.status = 'rejected'
+            review.resolved_by = operator
+            review.resolved_at = timezone.now()
+            review.resolution_note = (note or '')[:500]
+            review.save(update_fields=['status', 'resolved_by', 'resolved_at',
+                                       'resolution_note'])
+            others = (payment is not None and TransferReview.objects.filter(
+                payment=payment, status='open').exists())
+            if payment is not None and payment.status == 'needs_review' and not others:
+                payment.status = 'rejected'
+                payment.gateway_error = (note or 'Rejected on review')[:2000]
+                payment.save(update_fields=['status', 'gateway_error', 'updated_at'])
+                recipient_id = payment.subscription.user_id
+                transaction.on_commit(lambda: cls._notify_review(
+                    'payment_rejected', recipient_id, payment.id))
+            return review
+
+    @classmethod
+    def attach_review(cls, review_id, payment_id, operator) -> TransferReview:
+        """An operator names the checkout a queued transfer was for. The checkout is
+        then held on it (`needs_review`) and the operator approves or rejects as for
+        any other. Only a transfer not already held on a checkout can be attached."""
+        with transaction.atomic():
+            subscription, payment = cls._lock_subscription_and_payment(payment_id)
+            review = TransferReview.objects.select_for_update().get(pk=review_id)
+            if review.status != 'open':
+                raise ReviewConflict(f"Review {review.id} is {review.status}")
+            if review.payment_id is not None and review.payment_id != payment.id:
+                held = Payment.objects.filter(pk=review.payment_id,
+                                              status='needs_review').exists()
+                if held:
+                    raise ReviewConflict("This transfer holds another checkout: reject it "
+                                         "there first")
+            if review.currency != str(payment.currency).upper():
+                raise ReviewConflict(f"The transfer is in {review.currency} and the checkout "
+                                     f"in {payment.currency}")
+            if not (payment.status == 'needs_review'
+                    or payment.can_transition_to('needs_review')):
+                raise ReviewConflict(f"Payment {payment.id} is {payment.status}")
+            review.payment = payment
+            review.save(update_fields=['payment'])
+            if payment.status != 'needs_review':
+                meta = dict(payment.metadata or {})
+                meta['review'] = {'reason': review.reason,
+                                  'transaction_id': review.transaction_id,
+                                  'held_at': timezone.now().isoformat(),
+                                  'attached_by': operator.pk if operator else None}
+                payment.metadata = meta
+                payment.status = 'needs_review'
+                payment.save(update_fields=['status', 'metadata', 'updated_at'])
+                recipient_id = subscription.user_id
+                transaction.on_commit(lambda: cls._notify_review(
+                    'payment_needs_review', recipient_id, payment.id))
+            return review
+
+    @classmethod
+    def dismiss_review(cls, review_id, operator, note: str = '') -> TransferReview:
+        """An operator closes a queued transfer that is not a customer's payment for any
+        checkout. A transfer holding a checkout cannot be dismissed: reject it."""
+        with transaction.atomic():
+            review = TransferReview.objects.select_for_update().get(pk=review_id)
+            if review.status != 'open':
+                raise ReviewConflict(f"Review {review.id} is {review.status}")
+            if review.payment_id and Payment.objects.filter(
+                    pk=review.payment_id, status='needs_review').exists():
+                raise ReviewConflict("This transfer holds a checkout: reject it instead")
+            review.status = 'dismissed'
+            review.resolved_by = operator
+            review.resolved_at = timezone.now()
+            review.resolution_note = (note or '')[:500]
+            review.save(update_fields=['status', 'resolved_by', 'resolved_at',
+                                       'resolution_note'])
+            return review
+
+    @staticmethod
+    def _notify_review(event_type: str, recipient_id, payment_id) -> None:
+        """Push and inbox for a review decision (the spec's table: needs review, and
+        rejected — both push and in-app, no email). Called on commit."""
+        from notifications.services import NotificationService
+        from users.models import CustomUser
+
+        recipient = CustomUser.objects.filter(pk=recipient_id).first()
+        if recipient is None:
+            return
+        if event_type == 'payment_needs_review':
+            NotificationService.create_and_send(
+                recipient=recipient, event_type="payment_needs_review",
+                related_object_id=str(payment_id),
+                metadata={'context': {}, 'data': {'type': 'payment_needs_review',
+                                                  'payment_id': str(payment_id)}})
+        else:
+            NotificationService.create_and_send(
+                recipient=recipient, event_type="payment_rejected",
+                related_object_id=str(payment_id),
+                metadata={'context': {}, 'data': {'type': 'payment_rejected',
+                                                  'payment_id': str(payment_id)}})
 
     @classmethod
     def fail_payment(cls, payment_id, error_message: str = "") -> Payment:
@@ -465,6 +798,90 @@ class PaymentService:
             return cls._checkout_under_lock(locked, open_payments, 'initial', initiate)
 
     @classmethod
+    def start_upgrade(cls, subscription: Subscription, to_plan: SubscriptionPlan, initiate,
+                      *, expected_from_plan_id, expected_to_pay=None,
+                      gateway_name=None) -> Payment:
+        """Open the checkout that moves a RUNNING subscription onto a dearer plan.
+
+        The owner (2026-09-23): an upgrade is allowed while a plan runs, a downgrade is
+        not; what is left of the current plan is credited by days; the customer pays
+        the new plan's price minus that credit, and the new plan starts, for its full
+        length, when that payment clears (`_apply_upgrade`). The price is decided HERE,
+        under the subscription lock (`subscription.upgrade.quote_upgrade`), and written
+        onto the payment with the credit it was struck at.
+
+        `expected_from_plan_id` is the plan the caller quoted the upgrade from, read
+        without this lock; if the row has moved since, `PlanChanged`. `expected_to_pay`
+        is the figure the customer was shown; if the quote under the lock differs,
+        `UpgradePriceMoved` — no checkout is opened for a figure nobody saw.
+
+        One checkout at a time, as for every other button: an open checkout that is
+        this same upgrade comes back as it is (`already_open`), anything else open is
+        `CheckoutOpen`. Raises `subscription.upgrade.UpgradeRefused` subclasses and
+        `ExchangeRateUnavailable` from the quote.
+        """
+        from wallet import currency_for as _currency_for
+
+        from ..upgrade import quote_upgrade
+
+        with transaction.atomic():
+            locked = (Subscription.objects.select_for_update(of=('self',))
+                      .select_related('plan', 'user').get(pk=subscription.pk))
+            if expected_from_plan_id is not None and locked.plan_id != expected_from_plan_id:
+                raise PlanChanged(f"Subscription {locked.id} moved from plan "
+                                  f"{expected_from_plan_id} to {locked.plan_id}")
+            open_payments = list(Payment.objects
+                                 .filter(subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
+                                 .order_by('created_at', 'id'))
+            for payment in open_payments:
+                if not payment.gateway_transaction_reference:
+                    continue
+                meta = payment.metadata or {}
+                if payment.status == 'needs_review':
+                    # A person is checking money that arrived for it: not payable, not
+                    # this call's to hand back (the review, L1).
+                    raise CheckoutOpen(f"Subscription {locked.id} has checkout "
+                                       f"{payment.id} held for review", payment)
+                if meta.get('kind') == 'upgrade' and payment.plan_bought()['plan_id'] == to_plan.pk:
+                    payment.already_open = True
+                    return payment
+                raise CheckoutOpen(f"Subscription {locked.id} has checkout {payment.id} open",
+                                   payment)
+
+            quote = quote_upgrade(locked, to_plan, buyer_currency=_currency_for(locked.user),
+                                  gateway_name=gateway_name)
+            if expected_to_pay is not None and quote.to_pay != expected_to_pay:
+                raise UpgradePriceMoved(f"Upgrade of {locked.id} now costs {quote.to_pay}, "
+                                        f"not {expected_to_pay}", quote)
+            # A row never offered to anyone (no reference) is adopted, as the Pay button
+            # does, rather than left beside a new one.
+            unoffered = [p for p in open_payments if not p.gateway_transaction_reference]
+            payment = unoffered[0] if unoffered else Payment(subscription=locked,
+                                                             status='pending')
+            if unoffered:
+                payment.created_at = timezone.now()
+            payment.subscription = locked
+            payment.amount = quote.to_pay
+            payment.currency = quote.currency
+            # The price of record is the NEW plan's: what the dearest-plan rule and the
+            # receipt compare. The charge is that price minus the credit.
+            payment.price_amount = quote.priced.price_amount
+            payment.price_currency = quote.priced.price_currency
+            payment.exchange_rate = quote.priced.rate
+            payment.exchange_rate_value = getattr(quote.priced.rate, 'rate', None)
+            payment.metadata = {'kind': 'upgrade', 'plan': plan_snapshot(to_plan),
+                                'upgrade': quote.as_record()}
+            payment.description = f"Upgrade to {to_plan.name}"
+            method, reference, response = initiate(payment)
+            payment.payment_method = method
+            payment.gateway_transaction_reference = reference
+            payment.gateway_response = response or {}
+            payment.save()
+            payment.already_open = False
+            payment.quote = quote
+            return payment
+
+    @classmethod
     def _checkout_under_lock(cls, subscription: Subscription, open_payments, kind: str,
                              initiate) -> Payment:
         """Return the open checkout, or open one. The caller holds the subscription lock.
@@ -489,6 +906,14 @@ class PaymentService:
         candidates = list(open_payments.order_by('created_at', 'id'))
         for payment in candidates:
             if payment.gateway_transaction_reference:
+                # An open UPGRADE, or a payment a person is checking (B-051), is not
+                # this button's checkout: handed back as one, the Renew screen drew
+                # "renew Basic" at an upgrade's price, and paying it switched the plan
+                # (the review of 2026-09-23, U12). Refused, with which one it is.
+                if ((payment.metadata or {}).get('kind') == 'upgrade'
+                        or payment.status == 'needs_review'):
+                    raise CheckoutOpen(f"Subscription {subscription.id} has "
+                                       f"{payment.status} checkout {payment.id} open", payment)
                 logger.info("Checkout %s already open for subscription %s",
                             payment.id, subscription.id)
                 payment.already_open = True
@@ -574,13 +999,13 @@ class PaymentService:
 
         expected_amount = Decimal(payment.amount).quantize(Decimal('0.01'))
         if reported_amount != expected_amount:
-            raise PaymentVerificationError(
+            raise AmountMismatch(
                 f"Amount mismatch: expected {expected_amount}, gateway reported {reported_amount}"
             )
 
         reported_currency = str(verified_data.get('currency', payment.currency)).upper()
         if reported_currency != str(payment.currency).upper():
-            raise PaymentVerificationError(
+            raise AmountMismatch(
                 f"Currency mismatch: expected {payment.currency}, gateway reported {reported_currency}"
             )
 
@@ -698,6 +1123,121 @@ class PaymentService:
                            "still running", subscription.id, chosen)
         return plan
 
+    @classmethod
+    def _apply_upgrade(cls, payment: Payment, subscription: Subscription,
+                       to_plan: SubscriptionPlan, source: str):
+        """Switch the plan for an upgrade payment that cleared; return its window.
+
+        VALUE-EXACT, decided on the row as it is NOW, not as it was quoted. The credit is
+        re-read (`upgrade.credit_for_run`) when the money clears: days used since the
+        quote are not credited twice, a renewal paid meanwhile is credited rather than
+        erased, and a run that ended has nothing left to credit (the review of
+        2026-09-23, U4). The new plan then runs for what the money AND that credit buy:
+        its length × (paid + credit) ÷ its price, in whole days — its full length when
+        the money clears as quoted.
+
+        Each contributor's share of that period is written down
+        (`metadata['upgrade']['switch']`): the upgrade's own money, and every payment
+        whose days were credited, which is marked `credited_into` so it no longer counts
+        as the run's. A refund of any of them takes back exactly its share
+        (`_cover_to_take_back`) — never the whole period, never nothing (U1, U2, U7).
+
+        A switch needs cover running on a plan the new one is dearer than. Otherwise
+        (cover ended, or a dearer plan is already running) nothing is credited and the
+        money buys its own share of the new plan's length, by the ordinary activation.
+
+        The caller holds the subscription and payment locks.
+        """
+        from ..upgrade import credit_for_run, is_dearer
+
+        meta = dict(payment.metadata or {})
+        record = dict(meta.get('upgrade') or {})
+        now = timezone.now()
+        new_price = Decimal(record.get('new_price') or payment.amount)
+        length = int(to_plan.duration_days)
+        try:
+            switching = subscription.is_active and (
+                subscription.plan_id == (record.get('from_plan') or {}).get('id')
+                or is_dearer(to_plan, subscription.plan, payment.currency))
+        except Exception:                 # a rate that cannot price the comparison
+            switching = False
+
+        if switching:
+            credit, days_left, found = credit_for_run(
+                subscription, buyer_currency=payment.currency, now=now)
+            parts = [{'payment_id': str(part.payment_id), 'credit': part.credit}
+                     for part in found]
+            # Paid as quoted — within its checkout window, on the very payments the
+            # credit was struck on — the quote is honoured: the customer paid the figure
+            # they were shown and gets the full length they were promised, even if a
+            # whole day ticked over while the transfer posted (the review, L14).
+            from ..utils import checkout_ttl
+
+            quoted = record.get('parts')
+            if (quoted is not None and record.get('credit') is not None
+                    and payment.created_at and now <= payment.created_at + checkout_ttl()
+                    # One whole day may tick while a transfer posts; three days is not
+                    # "as quoted", and the days used since are not credited twice (U4).
+                    and int(record.get('days_left') or 0) - int(days_left) <= 1
+                    and [q['payment_id'] for q in quoted] == [p['payment_id'] for p in parts]):
+                credit = Decimal(record['credit'])
+                days_left = record.get('days_left', days_left)
+                parts = [{'payment_id': q['payment_id'], 'credit': Decimal(q['credit'])}
+                         for q in quoted]
+            value = Decimal(payment.amount) + credit
+            days = max(1, int((Decimal(length) * value / new_price)
+                              .to_integral_value(rounding='ROUND_HALF_UP')))
+            period = days * 86400
+            credited = [{'payment_id': part['payment_id'], 'credit': str(part['credit']),
+                         'share_seconds': int(period * part['credit'] / value)}
+                        for part in parts]
+            record['switch'] = {
+                'at': now.isoformat(),
+                'credit_applied': str(credit),
+                'days_credited': int(days_left),
+                'granted_days': days,
+                # The money's share is what the credited shares leave, so the shares
+                # add up to the period exactly: refunding every contributor leaves
+                # nothing, not a second.
+                'money_share_seconds': period - sum(c['share_seconds'] for c in credited),
+                'credited': credited,
+                'replaced': {'plan_id': subscription.plan_id,
+                             'start_date': subscription.start_date.isoformat(),
+                             'end_date': subscription.end_date.isoformat()},
+            }
+            # The payments the credit came from are spent: their value is in this period
+            # now, and they leave the run. ONLY those — one the credit never reached keeps
+            # its own place, so its refund still takes back what it bought (L13).
+            for spent in Payment.objects.filter(pk__in=[c['payment_id'] for c in credited]):
+                spent_meta = dict(spent.metadata or {})
+                spent_meta['credited_into'] = str(payment.id)
+                Payment.objects.filter(pk=spent.pk).update(metadata=spent_meta)
+            meta['upgrade'] = record
+            meta['plan'] = {**meta.get('plan', {}), 'duration_days': days}
+            payment.metadata = meta
+            subscription.plan = to_plan
+            subscription.start_date = now
+            subscription.end_date = now + timedelta(days=days)
+            subscription.trial_end_date = None
+            subscription.status = 'active'
+            subscription.source = source
+            # `save()` re-inherits the new plan's five flags: the plan changed.
+            subscription.save()
+            return now, subscription.end_date
+
+        days = max(1, int((Decimal(length) * Decimal(payment.amount) / new_price)
+                          .to_integral_value(rounding='ROUND_HALF_UP')))
+        record['switch'] = {'at': now.isoformat(), 'credit_applied': '0.00',
+                            'days_credited': 0, 'granted_days': days, 'late': True}
+        meta['upgrade'] = record
+        meta['plan'] = {**meta.get('plan', {}), 'duration_days': days}
+        payment.metadata = meta
+        logger.warning("Upgrade payment %s cleared with nothing left to credit; granting %d "
+                       "day(s) of plan %s", payment.id, days, to_plan.pk)
+        subscription.plan = (cls._dearest_running_plan(subscription, clearing=payment)
+                             if subscription.is_active else to_plan)
+        return cls._activate_subscription(subscription, source, days)
+
     @staticmethod
     def _activate_subscription(subscription: Subscription, source: str,
                                days: int | None = None):
@@ -749,6 +1289,79 @@ class PaymentService:
         return base, subscription.end_date
 
     @staticmethod
+    def _upgrade_share(payment: Payment, subscription: Subscription):
+        """The part of the current cover a refunded payment paid for, when it took part in
+        an upgrade; None otherwise.
+
+        An upgrade's period was bought by its own money and by the credit for the days
+        left on the payments it replaced; `_apply_upgrade` wrote each one's share of the
+        period down. A payment's part is its FRACTION of the period it went into, times
+        what that period still accounts for — the whole of it while it is the live one,
+        or, if a later upgrade credited it in turn, the share of THAT period its
+        remaining days bought, and so on down the chain (the review, L10). So refunding
+        the upgrade takes back its money's part and leaves the credited days; refunding
+        a credited payment takes back the days its credit became, however many upgrades
+        later. Nothing, if the subscription has restarted since.
+        """
+        meta = payment.metadata or {}
+        into = meta.get('credited_into')
+        switch = (meta.get('upgrade') or {}).get('switch') or {}
+        own = meta.get('kind') == 'upgrade' and switch and not switch.get('late')
+        if not into and not own:
+            return None
+        if into:
+            upgrade = Payment.objects.filter(pk=into).only('metadata').first()
+            outer = ((upgrade.metadata or {}).get('upgrade') or {}).get('switch') if upgrade else None
+            part = next((c for c in (outer or {}).get('credited') or []
+                         if c.get('payment_id') == str(payment.pk)), None)
+            if part is None:
+                return timedelta(0)
+            share = Decimal(part.get('share_seconds') or 0)
+            period = PaymentService._period(outer)
+            live = PaymentService._live_period(upgrade, subscription)
+        else:
+            share = Decimal(switch.get('money_share_seconds') or 0)
+            period = PaymentService._period(switch)
+            live = PaymentService._live_period(payment, subscription)
+        # Multiplied before dividing, then rounded: a third of a period divided first
+        # lost a second, and two refunds that should end the cover left two seconds of it.
+        return timedelta(seconds=int((share * live / period).to_integral_value(
+            rounding='ROUND_HALF_UP')))
+
+    @staticmethod
+    def _period(switch) -> Decimal:
+        """An upgrade period's length in seconds, from its switch record."""
+        return Decimal(max(1, int(switch.get('granted_days') or 0)) * 86400)
+
+    @staticmethod
+    def _live_period(upgrade: Payment, subscription: Subscription, depth: int = 0) -> Decimal:
+        """How many seconds of the CURRENT cover an upgrade's whole period accounts for.
+
+        All of it while it is the live switch; if a later upgrade credited it, the share
+        of that one's period its remaining days bought, scaled the same way; nothing if
+        the subscription restarted since."""
+        from django.utils.dateparse import parse_datetime
+
+        meta = upgrade.metadata or {}
+        switch = (meta.get('upgrade') or {}).get('switch') or {}
+        into = meta.get('credited_into')
+        if into and depth < 20:
+            outer_payment = Payment.objects.filter(pk=into).only('metadata').first()
+            outer = (((outer_payment.metadata or {}).get('upgrade') or {}).get('switch')
+                     if outer_payment else None)
+            part = next((c for c in (outer or {}).get('credited') or []
+                         if c.get('payment_id') == str(upgrade.pk)), None)
+            if part is None:
+                return Decimal(0)
+            return (Decimal(part.get('share_seconds') or 0)
+                    * PaymentService._live_period(outer_payment, subscription, depth + 1)
+                    / PaymentService._period(outer))
+        at = parse_datetime(switch.get('at') or '')
+        if subscription.start_date and at and at < subscription.start_date:
+            return Decimal(0)
+        return PaymentService._period(switch)
+
+    @staticmethod
     def _cover_to_take_back(payment: Payment, subscription: Subscription) -> timedelta:
         """How much of the subscription's current cover a refunded payment paid for.
 
@@ -762,6 +1375,9 @@ class PaymentService:
         already ran out: refunding January's payment in March must not take March's
         paid month with it.
         """
+        share = PaymentService._upgrade_share(payment, subscription)
+        if share is not None:
+            return share
         began = payment.covers_from or payment.created_at
         if subscription.start_date and began and began < subscription.start_date:
             return timedelta(0)

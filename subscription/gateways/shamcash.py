@@ -177,7 +177,55 @@ class ShamCashGateway(PaymentGateway):
             exp_amount = Decimal(str(expected['amount'])).quantize(Decimal('0.01'))
         exp_currency = str(expected.get('currency', '')).upper() or None
 
-        windows = [(start, now)]
+        partial = []
+
+        def visit(txns):
+            match = self._match(txns, reference, exp_amount, exp_currency)
+            if match is None and not partial:
+                near = self._near_miss(txns, reference, exp_amount, exp_currency)
+                if near is not None:
+                    partial.append(near)
+            return match
+
+        found, _txns, truncated, error = self._read_window(start, now, visit=visit,
+                                                           reference=reference)
+        if found is not None:
+            return found
+        if error is not None:
+            # 'unknown', not 'pending': a lookup that FAILED is not evidence that
+            # nobody paid. Answering 'pending' made an outage indistinguishable from
+            # an unpaid checkout, and the poller closes unpaid checkouts — so a few
+            # minutes of gateway trouble would have expired every checkout in flight.
+            return {'status': 'unknown', 'reference': reference, 'error': error}
+        if partial:
+            # The reference, with another amount or currency: money for THIS checkout,
+            # not the money it asked for. Held for an operator (B-051), never dropped
+            # and never completed as it is — even when the window was not read in full,
+            # because an exact transfer found later still completes the checkout.
+            return partial[0]
+        if truncated:
+            logger.warning("ShamCash: the account holds more transactions than %s lookups "
+                           "can read for %s; answering unknown", self.MAX_LOOKUPS, reference)
+            return {'status': 'unknown', 'reference': reference,
+                    'error': 'the transaction window could not be read in full'}
+        return {'status': 'pending', 'reference': reference}
+
+    def list_transactions(self, start, end):
+        """Every transaction on the merchant account between `start` and `end`, for the
+        sweep that finds transfers no checkout claimed (`subscription.tasks.
+        sweep_unmatched_transfers`). Returns `(transactions, complete)`: `complete` is
+        False when the window could not be read in full or a lookup failed, and the
+        caller must then treat what it did not see as unseen, never as absent.
+        """
+        _found, txns, truncated, error = self._read_window(start, end)
+        return txns, not (truncated or error)
+
+    def _read_window(self, start, end, *, visit=None, reference=''):
+        """Read the account from `start` to `end`, splitting any page that comes back
+        full, up to `MAX_LOOKUPS` lookups. `visit(page)` may return a result, which
+        ends the read. Returns `(found, transactions, truncated, error)`."""
+        windows = [(start, end)]
+        seen = []
         lookups = 0
         truncated = False
         while windows:
@@ -195,31 +243,68 @@ class ShamCashGateway(PaymentGateway):
             try:
                 envelope = self._get('/transactions', params)
             except Exception as e:
-                # 'unknown', not 'pending': a lookup that FAILED is not evidence that
-                # nobody paid. Answering 'pending' made an outage indistinguishable from
-                # an unpaid checkout, and the poller closes unpaid checkouts — so a few
-                # minutes of gateway trouble would have expired every checkout in flight.
-                logger.warning(f"ShamCash status lookup failed for {reference}: {e}")
-                return {'status': 'unknown', 'reference': reference, 'error': str(e)}
+                logger.warning(f"ShamCash status lookup failed for {reference or 'the sweep'}: {e}")
+                return None, seen, truncated, str(e)
 
             txns = (envelope.get('data') or []) if isinstance(envelope, dict) else []
-            match = self._match(txns, reference, exp_amount, exp_currency)
-            if match is not None:
-                return match
+            txns = [t for t in txns if isinstance(t, dict)]
+            if visit is not None:
+                found = visit(txns)
+                if found is not None:
+                    return found, seen, truncated, None
             if len(txns) >= self.PAGE_LIMIT or self._says_there_is_more(envelope):
                 if high - low <= timezone.timedelta(seconds=1):
                     truncated = True       # a second's worth of transfers fills a page
+                    seen.extend(txns)
                     continue
                 middle = low + (high - low) / 2
-                windows.append((middle, high))
+                # Pushed so the NEWER half is read first: when `MAX_LOOKUPS` runs out on
+                # a busy account, what goes unread is the oldest, not the transfers that
+                # came in just now (the review, L9).
                 windows.append((low, middle))
+                windows.append((middle, high))
+                continue
+            seen.extend(txns)
+        return None, seen, truncated, None
 
-        if truncated:
-            logger.warning("ShamCash: the account holds more transactions than %s lookups "
-                           "can read for %s; answering unknown", self.MAX_LOOKUPS, reference)
-            return {'status': 'unknown', 'reference': reference,
-                    'error': 'the transaction window could not be read in full'}
-        return {'status': 'pending', 'reference': reference}
+    @staticmethod
+    def transaction_facts(txn) -> Dict[str, Any]:
+        """The fields the review queue keeps, read off one transaction (CONFIRM the
+        names against a real ShamCash transaction object)."""
+        return {
+            'transaction_id': str(txn.get('id') or txn.get('transaction_id') or ''),
+            'amount': txn.get('amount'),
+            'currency': str(txn.get('currency', '')).upper(),
+            'note': str(txn.get('note') or txn.get('description') or '')[:500],
+            'sender': str(txn.get('sender') or txn.get('from') or txn.get('sender_account')
+                          or '')[:255],
+            'occurred_at': txn.get('occurred_at'),
+        }
+
+    @classmethod
+    def _near_miss(cls, txns, reference, exp_amount, exp_currency) -> Optional[Dict[str, Any]]:
+        """A transaction quoting `reference` whose amount or currency is not the one
+        asked for, as a 'needs_review' answer with its evidence — or None."""
+        for txn in txns:
+            note = str(txn.get('note') or txn.get('description') or '')
+            if not reference or reference.lower() not in note.lower():
+                continue
+            facts = cls.transaction_facts(txn)
+            currency = facts['currency']
+            if exp_currency and currency and currency != exp_currency:
+                reason = 'currency_differs'
+            else:
+                try:
+                    same = (exp_amount is None or Decimal(str(facts['amount']))
+                            .quantize(Decimal('0.01')) == exp_amount)
+                except Exception:
+                    same = False
+                if same:
+                    continue          # an exact match: `_match` answers it
+                reason = 'amount_differs'
+            return {'status': 'needs_review', 'reason': reason, 'reference': reference,
+                    **facts, 'event_id': facts['transaction_id'], 'gateway_data': txn}
+        return None
 
     @staticmethod
     def _says_there_is_more(envelope) -> bool:
@@ -244,8 +329,11 @@ class ShamCashGateway(PaymentGateway):
             if not isinstance(txn, dict):
                 continue
             # CONFIRM these field names against a real ShamCash transaction object.
+            # In any case: a phone keyboard capitalises the first letter of a note, and
+            # the sweep already read references case-insensitively — a match the pollers
+            # could not see was deferred to them and never surfaced (the review, L3).
             note = str(txn.get('note') or txn.get('description') or '')
-            if reference not in note:
+            if reference.lower() not in note.lower():
                 continue
             txn_amount = txn.get('amount')
             txn_currency = str(txn.get('currency', '')).upper()

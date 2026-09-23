@@ -62,6 +62,8 @@ class Command(BaseCommand):
                 api_id=f"usda-{data['fdc_id']}",
                 calories=data["calories"], protein=data["protein"],
                 carbs=data["carbs"], fat=data["fat"],
+                # USDA nutrient 1079, per 100 g. Absent or null is NOT KNOWN, never 0 g.
+                fiber=data.get("fiber"),
                 source=data.get("usda_description", ""),
             ))
 
@@ -71,6 +73,8 @@ class Command(BaseCommand):
                 cuisine="levantine",
                 api_id=f"lev-{_slug(name)}",
                 calories=kcal, protein=protein, carbs=carbs, fat=fat,
+                # The curated rows carry no fibre figure: unknown.
+                fiber=None,
                 source="curated (absent from USDA SR Legacy and Foundation)",
             ))
 
@@ -182,20 +186,24 @@ class Command(BaseCommand):
                 # catalogue load back; and `name` is a translated virtual field, so the
                 # lookup silently moved to `name_ar` under a non-English locale and
                 # matched nothing, re-creating all 136 rows.
-                obj, was_new = FoodItem.objects.update_or_create(
-                    api_id=row["api_id"],
-                    defaults=dict(
-                        name=row["name"],
-                        name_en=row["name"],
-                        calories=row["calories"], protein=row["protein"],
-                        carbs=row["carbs"], fat=row["fat"],
-                        serving_size="100g", serving_size_grams=100,
-                        category=categories[row["category"]],
-                        meal_slots=list(row["slots"]),
-                        cuisine=row["cuisine"],
-                        needs_review=False,
-                    ),
+                defaults = dict(
+                    name=row["name"],
+                    name_en=row["name"],
+                    calories=row["calories"], protein=row["protein"],
+                    carbs=row["carbs"], fat=row["fat"],
+                    serving_size="100g", serving_size_grams=100,
+                    category=categories[row["category"]],
+                    meal_slots=list(row["slots"]),
+                    cuisine=row["cuisine"],
+                    needs_review=False,
                 )
+                # Fibre only where the source KNOWS it (the owner, 2026-09-23). A new row
+                # without it is created NULL — unknown, never 0 g — and an existing one
+                # keeps whatever an operator entered: the file has nothing to say about it.
+                if row["fiber"] is not None:
+                    defaults["fiber"] = row["fiber"]
+                obj, was_new = FoodItem.objects.update_or_create(
+                    api_id=row["api_id"], defaults=defaults)
                 if hasattr(obj, "name_ar"):
                     obj.name_ar = row["name_ar"]
                     obj.save(update_fields=["name_ar"])

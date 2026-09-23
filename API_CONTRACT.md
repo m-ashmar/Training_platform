@@ -879,7 +879,7 @@ The flags are enforced by the server, not only rendered by the app:
 | `code` | Status | When |
 |---|---|---|
 | `app_channel_required` | 400 | The capabilities endpoint, or any endpoint that opens a checkout or moves wallet money, called without a known `X-App-Channel` |
-| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
+| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `GET`/`POST v1/subscriptions/{id}/upgrade/`, `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
 
 On a build with `can_show_prices: false` the plan endpoints omit `price`, `subscriptions/current/`
 omits `plan_price` and the four conversion keys beside it (`price_converted`,
@@ -1208,6 +1208,61 @@ operator maintains in the console. Four things the app needs:
 - `subscriptions/current/` gains `plan_id` beside `plan_name` (B-050).
 - `subscriptions/{id}/renew/` answers `expires_at`, as `POST v1/gateways/` does (B-052).
 
+**Upgrading while a plan runs** (the owner, 2026-09-23).
+
+- `GET /api/subscription/v1/subscriptions/{id}/upgrade/?plan_id=` — the quote, charging
+  nothing: `{from_plan, to_plan, currency, new_price, credit, to_pay, days_left,
+  starts: "when_paid"}`, every amount in the caller's currency. The credit is each running
+  payment at what it cost × its share of the WHOLE days left ÷ the period it bought (the
+  day under way is used), so `to_pay` holds for a day at a time. While an upgrade to the
+  same plan is open, `GET` answers ITS quote with `payment_id`.
+- `POST` the same path `{plan_id, gateway?, amount?, currency?}` opens the checkout for
+  `to_pay` and answers what `POST v1/gateways/` answers plus `upgrade` (the quote it was
+  struck at). When it clears the credit is re-read and the new plan starts, running for
+  what the money and the credit buy — its FULL length when it clears as quoted. A refund
+  takes back exactly what the refunded money bought: refunding the upgrade leaves the
+  credited days on the new plan, refunding a credited payment takes back the days its
+  credit became.
+- Only a DEARER plan: `409 not_an_upgrade` otherwise (a cheaper plan waits until the
+  period ends, then `change-plan/`). `409 no_running_cover` when nothing runs (use
+  `change-plan/`, then Pay). `409 upgrade_not_payable` with `to_pay` and `minimum` when the
+  credit covers the new price or leaves less than the gateway takes. Also
+  `checkout_open`, `price_changed`, `exchange_rate_*`, `invalid_plan`, and the channel
+  refusals. Full table: `SubscriptionViewSet.upgrade`.
+- `change-plan/` keeps answering `409 plan_change_while_active` while cover runs; its
+  table now points at `upgrade/`.
+- The receipt of an upgrade gains `upgrade`: `{from_plan_id, from_plan_name, new_price,
+  credit, days_left, granted_days, period_price, currency, late}` (null on every other
+  receipt): `period_price` is what the granted days were worth (paid + credit, so
+  `period_price - credit` is the amount paid), and the PDF prints the plan it replaced,
+  that price and the credit. Paid as quoted within its checkout window, the quoted
+  credit is honoured and the full length granted. `late: true` means
+  no cover was left to credit when the money cleared: `credit` and `days_left` are null.
+- `renew/` and `POST v1/gateways/` answer `409 checkout_open` (`payment_id`, `status`,
+  `expires_at`) when the open checkout is an upgrade or a payment under review, instead
+  of handing it back as their own.
+
+**Money that is almost right is held for a person** (the spec, section 7; BACKEND_BUGS
+B-051, 2026-09-23).
+
+- A payment's `status` can be `needs_review`: a transfer arrived quoting its reference
+  with another amount or currency, or with its amount and no reference (the only open
+  checkout that amount fits). It is the design's PayMatching: it never expires (no
+  `expires_at`), it still blocks a second checkout, and it ends `completed` (an operator
+  approves it, or an exact transfer arrives) or `rejected` (the money goes back to its
+  sender by hand). `payments/{id}/status/` gains `review`: null, or `{reason, held_at}`
+  with `reason` one of `amount_differs`, `currency_differs`, `reference_missing`,
+  `checkout_closed`, `duplicate_transfer`. `payments/{id}/reconcile/` can answer 200
+  `status: "needs_review"`.
+- Pushes, in the spec's table: `payment_needs_review` and `payment_rejected` (push and
+  in-app, `data.payment_id`). No amount, no instruction to pay again.
+- An approved transfer whose amount was not the checkout's is recorded at what
+  arrived: the payment's `amount` and its receipt say what was received.
+- Operators work the queue in the console (`/dj-admin/subscription/transferreview/`):
+  approve, reject, dismiss, or attach a transfer to the checkout it was for. A sweep
+  reads the merchant account every ten minutes for transfers no checkout claimed. One
+  ShamCash transaction confirms one payment, once.
+
 **What wiring the Me screens found** (BACKEND_BUGS B-053..B-057, 2026-09-23). Additive:
 the refusals below answered only their status default (`bad_request` / `not_found`) and
 now answer their own code, which §6 reads as that default; no code a view named changed.
@@ -1239,10 +1294,11 @@ contract.
   `swap_food` without `chosen_food_id` gains `current` (`{food_id, quantity_grams,
   calories, protein, carbs, fat, fiber}`) and, per offer, `quantity_grams` (the portion
   the swap itself would serve — one rule for both), `serving`, `serving_ar`, `image_url`
-  (null when none), `calories`, `protein`, `carbs`, `fat`, `fiber` (always null: the
-  catalogue holds no fibre), `tag`, `tag_delta` and `delta`. `tag` is a code:
-  `more_calories` | `more_protein` | `fewer_calories` | `similar` (first match); `tag_delta`
-  is the kcal or protein grams behind it, null for `similar`. `more_fiber` is reserved.
+  (null when none), `calories`, `protein`, `carbs`, `fat`, `fiber` (that portion's
+  fibre, null when unknown — see "Foods store fibre" below), `tag`, `tag_delta` and
+  `delta`. `tag` is a code: `more_calories` | `more_protein` | `fewer_calories` |
+  `more_fiber` | `similar` (first match); `tag_delta` is the kcal, protein grams or fibre
+  grams behind it, null for `similar`.
 - **Codes where there were none.** Swap to a food already in that meal: `409
   food_already_on_plate`. Unknown `action` on `interact/` and `meals/{id}/complete/`: `400
   invalid_action`. Both routes: `403 clients_only`, `400 missing_fields` (with `fields`),
@@ -1262,8 +1318,25 @@ contract.
   coach's account is closed or erased).
 - **Food tags.** `GET /api/diet/v1/food/list/` rows gain `tags`: `levantine` | `western`,
   `high_protein`, `low_fat`, `low_calorie`, from the food's own columns against the EU
-  nutrition-claim thresholds (`diet/services/food_tags.py`). No vegetarian or fibre tag:
-  the catalogue holds neither.
+  nutrition-claim thresholds (`diet/services/food_tags.py`); `high_fiber` since
+  2026-09-23 (below). No vegetarian tag.
+- **Foods store fibre** (the owner, 2026-09-23; BACKEND_BUGS B-058, B-065). Additive:
+  `FoodItem.fiber` is grams per 100 g, from USDA nutrient 1079 for the 100 USDA foods
+  (the curated Levantine foods have none yet). **Null means not known, never 0 g** — a
+  food whose fibre is unknown claims nothing.
+  - Swap (`client/meals/interact/` `swap_food`): `current.fiber` and each offer's `fiber`
+    are that portion's grams (per-100 g figure scaled by `quantity_grams`, one decimal),
+    null when the food's fibre is unknown. `more_fiber` is now emitted: the offer's
+    portion carries at least `SWAP_MORE_FIBER_MIN_G` (2 g) more fibre than the current
+    one, both known. It comes after `more_calories`, `more_protein` and
+    `fewer_calories` and before `similar`, so it only ever replaces what was `similar`;
+    `tag_delta` is the fibre grams gained.
+  - `GET /api/diet/v1/food/list/` rows gain `fiber` (per 100 g, null when unknown) and
+    the tag `high_fiber` (spelled like `fiber` and `more_fiber`): at least 6 g per 100 g,
+    the EU "high fibre" claim; never on unknown fibre. It comes last in `tags`, after
+    the existing ones, whose order does not change.
+  - **No vegetarian tag, and none is coming**: the owner decided against a vegetarian
+    flag (2026-09-23). The app drops «نباتي».
 
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
@@ -1608,6 +1681,7 @@ It therefore equals the row count of `GET comments/?post={id}` for the same view
 | `DELETE, GET, PATCH, PUT` | `/api/subscription/v1/subscriptions/{id}/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/cancel/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/change-plan/` | auth | `SubscriptionViewSet` |
+| `GET, POST` | `/api/subscription/v1/subscriptions/{id}/upgrade/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/renew/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/subscriptions/{id}/usage/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/usage/` | auth | `SubscriptionUsageViewSet` |
