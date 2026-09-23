@@ -107,9 +107,21 @@ register(PersonalDataSource(
     on_erase="delete"))
 
 # --- notifications ------------------------------------------------------------
+# The chat notices this person SENT go with them too. Each one sits in the other side's
+# inbox holding the sender's name and the first 120 characters of what they wrote
+# (`chat/events.py`), and the conversation it points at is deleted above — so without
+# this the thread vanished and the other side's inbox kept rendering the erased
+# person's name and words for the 90 days of retention. Not exported: they are the
+# recipient's inbox, not the sender's data to download.
+def _chat_notices_sent(user):
+    from notifications.models import Notification
+
+    return Notification.objects.filter(actor=user, event_type="chat_message")
+
+
 register(PersonalDataSource(
     label="notifications", model="notifications.Notification", user_field="recipient",
-    retention_days=90))
+    retention_days=90, erase_also=_chat_notices_sent))
 
 # --- financial: KEPT. Wallet.owner is PROTECT so a deletion cannot erase a balance,
 #     and payment history has to survive an erasure request.
@@ -224,12 +236,33 @@ register(PersonalDataSource(label="password_reset_tokens", model="users.Password
 # no longer identifies anybody. Reports made AGAINST the person are untouched by
 # design: `target_id` is not a foreign key, so erasing an account does not erase the
 # complaints about it.
+#
+# The export carries what `GET reports/mine/` carries (`moderation.serializers
+# .ReportSerializer`) and nothing more. With no `fields` it exported every column,
+# `handled_by` among them: the operator who decided each complaint, which the API and the
+# contract both promise the reporter is never told.
 register(PersonalDataSource(label="reports_made", model="moderation.Report",
-                            user_field="reporter", on_erase="anonymise",
+                            user_field="reporter",
+                            fields=["id", "target_type", "target_id", "reason", "note",
+                                    "status", "resolution_note", "handled_at",
+                                    "created_at"],
+                            on_erase="anonymise",
                             anonymise={"note": ""}))
 # Blocks are one person's private list and mean nothing once the account is gone.
+# The list is the blocks this person MADE — that is all the export shows, as `GET
+# blocks/` does. A block made AGAINST them is never disclosed, so those rows are not in
+# `user_field` (which the export follows); they are deleted with the account through
+# `erase_also`, which neither exports nor counts them. Registered on both sides, the
+# export told a blocked person exactly who had blocked them.
+def _blocks_against(user):
+    from moderation.models import Block
+
+    return Block.objects.filter(blocked=user)
+
+
 register(PersonalDataSource(label="blocks", model="moderation.Block",
-                            user_field=("blocker", "blocked"), on_erase="delete"))
+                            user_field="blocker", fields=["id", "blocked", "created_at"],
+                            on_erase="delete", erase_also=_blocks_against))
 # Consent dies with the account: there is nothing left to process, and a consent row
 # for a retired account is a permission nobody can exercise.
 register(PersonalDataSource(label="ai_consent", model="moderation.AIConsent",
