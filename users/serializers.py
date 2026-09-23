@@ -423,22 +423,10 @@ class TrainerProfileSerializer(TrainerMatchingFieldsMixin, serializers.ModelSeri
             return url
         return None
 
-    def validate_profile_picture(self, value):
-        # Content-based validation. The previous check trusted `content_type`, an
-        # attacker-controlled header, so this second upload path (/api/auth/user/update/)
-        # bypassed the hardening applied to the dedicated profile-picture endpoint.
-        if not value:
-            return value
-        from django.core.exceptions import ValidationError as DjangoValidationError
-        from training_platform.file_security import process_uploaded_image
-        import os as _os
-        try:
-            safe_file, ext = process_uploaded_image(value, max_bytes=2 * 1024 * 1024)
-        except DjangoValidationError as e:
-            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
-        base = _os.path.splitext(getattr(value, 'name', 'profile'))[0][:60] or 'profile'
-        safe_file.name = f"{base}.{ext}"
-        return safe_file
+    # No `validate_profile_picture`: `profile_picture` is a read-only method field, so
+    # one here never ran (SIDE_BUGS S-150, as B-026 for UserDetailsSerializer).
+    # Pictures go through `POST /api/auth/user/profile-picture/`, which checks the
+    # content; this serializer only reads the URL.
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -484,22 +472,10 @@ class ClientProfileSerializer(OnboardingFieldsMixin, serializers.ModelSerializer
             return url
         return None
 
-    def validate_profile_picture(self, value):
-        # Content-based validation. The previous check trusted `content_type`, an
-        # attacker-controlled header, so this second upload path (/api/auth/user/update/)
-        # bypassed the hardening applied to the dedicated profile-picture endpoint.
-        if not value:
-            return value
-        from django.core.exceptions import ValidationError as DjangoValidationError
-        from training_platform.file_security import process_uploaded_image
-        import os as _os
-        try:
-            safe_file, ext = process_uploaded_image(value, max_bytes=2 * 1024 * 1024)
-        except DjangoValidationError as e:
-            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
-        base = _os.path.splitext(getattr(value, 'name', 'profile'))[0][:60] or 'profile'
-        safe_file.name = f"{base}.{ext}"
-        return safe_file
+    # No `validate_profile_picture`: `profile_picture` is a read-only method field, so
+    # one here never ran (SIDE_BUGS S-150, as B-026 for UserDetailsSerializer).
+    # Pictures go through `POST /api/auth/user/profile-picture/`, which checks the
+    # content; this serializer only reads the URL.
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -529,22 +505,10 @@ class CustomUserSerializer(serializers.ModelSerializer):
             return url
         return None
 
-    def validate_profile_picture(self, value):
-        # Content-based validation. The previous check trusted `content_type`, an
-        # attacker-controlled header, so this second upload path (/api/auth/user/update/)
-        # bypassed the hardening applied to the dedicated profile-picture endpoint.
-        if not value:
-            return value
-        from django.core.exceptions import ValidationError as DjangoValidationError
-        from training_platform.file_security import process_uploaded_image
-        import os as _os
-        try:
-            safe_file, ext = process_uploaded_image(value, max_bytes=2 * 1024 * 1024)
-        except DjangoValidationError as e:
-            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
-        base = _os.path.splitext(getattr(value, 'name', 'profile'))[0][:60] or 'profile'
-        safe_file.name = f"{base}.{ext}"
-        return safe_file
+    # No `validate_profile_picture`: `profile_picture` is a read-only method field, so
+    # one here never ran (SIDE_BUGS S-150, as B-026 for UserDetailsSerializer).
+    # Pictures go through `POST /api/auth/user/profile-picture/`, which checks the
+    # content; this serializer only reads the URL.
 
 class DeviceTokenSerializer(serializers.ModelSerializer):
     class Meta:
