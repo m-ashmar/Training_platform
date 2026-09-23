@@ -204,12 +204,14 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         # ONE query for the board. It was an aggregate and then a
         # `CustomUser.objects.get` per row — up to 50 more queries a request — ordered
         # by `-total_points` alone, which is not an order: two people tied on points
-        # swapped places between requests. `user` breaks the tie (SIDE_BUGS S-088).
+        # swapped places between requests. The user's id breaks the tie (SIDE_BUGS
+        # S-088) — `user_id`, not `user`: ordering by the relation sorts by
+        # `CustomUser.Meta.ordering`, which is not the id.
         leaders = (UserAchievement.objects
                    .values('user', 'user__username', 'user__profile_picture')
                    .annotate(total_points=DjSum('achievement__points'),
                              total_achievements=Count('id'))
-                   .order_by('-total_points', 'user')[:limit])
+                   .order_by('-total_points', 'user_id')[:limit])
 
         # Blocked people are dropped AFTER the rank is counted, the rule the challenge
         # leaderboard follows (`social/views.py`): ranks stay true and the reader sees
