@@ -220,6 +220,39 @@ if SENTRY_DSN:
 # PRODUCTION SAFETY ENFORCEMENT
 # Called at wsgi/asgi startup to crash if config is unsafe.
 # ========================
+def _gcs_key_problem(name):
+    """Why the GCS signing key named `name` is unusable, or None when it is fine.
+
+    Read the way `training_platform.gcs_storage._credentials` reads it
+    (`settings_secrets.get_secret`: the secret store when `AWS_SECRET_NAME` is set, the
+    environment otherwise), so the boot check and the storage can never disagree about
+    where the key lives. Usable means: present, a JSON object, and carrying the two
+    fields a V4 signature is made from, `private_key` and `client_email`.
+    """
+    import json
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    from .settings_secrets import get_secret
+
+    if not os.environ.get(name) and not os.environ.get("AWS_SECRET_NAME"):
+        return (f"{name} is not set and there is no secret store to read it from "
+                "— media URLs cannot be signed")
+    try:
+        raw = get_secret(name)
+    except ImproperlyConfigured as exc:
+        return f"{name} could not be read — media URLs cannot be signed: {exc}"
+    try:
+        info = json.loads(raw)
+    except ValueError:
+        return f"{name} is not valid JSON — it must be the service account key file"
+    if not isinstance(info, dict) or not info.get("private_key") \
+            or not info.get("client_email"):
+        return (f"{name} holds no service account private_key/client_email — "
+                "media URLs cannot be signed")
+    return None
+
+
 def enforce_production_safety():
     """
     Runtime invariant checks. Any violation crashes the process.
@@ -315,12 +348,16 @@ def enforce_production_safety():
         # Signing a V4 URL needs the service account's private key. Without it every
         # media URL raises at serialization time, which is a 500 on screens that work
         # perfectly in development.
+        #
+        # The key is READ here, from wherever `gcs_storage` will read it, and checked for
+        # what signing needs. Accepting "AWS_SECRET_NAME is set" as proof booted green a
+        # deploy whose store did not hold the key at all: the storage then fell back to
+        # ambient credentials that cannot sign, and every screen with media answered 500
+        # (SIDE_BUGS S-148).
         _cred_name = globals().get("GS_CREDENTIALS_SECRET_NAME", "GS_CREDENTIALS_JSON")
-        if not os.environ.get(_cred_name) and not os.environ.get("AWS_SECRET_NAME"):
-            errors.append(
-                f"{_cred_name} is not set and there is no secret store to read it from "
-                "— media URLs cannot be signed"
-            )
+        _cred_problem = _gcs_key_problem(_cred_name)
+        if _cred_problem:
+            errors.append(_cred_problem)
 
     # --- Field encryption key ---
     # Without it EncryptedTextField writes health data in plain text, and it does so

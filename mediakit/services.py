@@ -205,6 +205,65 @@ _OWNER_MODELS = {OwnerType.TRAINER: _user_model, OwnerType.EXERCISE: _exercise_m
                  OwnerType.TRAINER_EXERCISE: _exercise_model}
 
 
+#: The columns that hold stored bytes. Excluded from the model check that runs BEFORE
+#: anything is written (`clean_before_writing`), because they are what is about to be
+#: written.
+FILE_FIELDS = ("original", "file_1x", "file_2x", "poster")
+
+
+def check_alt_text(alt_ar=None, alt_en=None) -> None:
+    """Refuse alt text the row cannot hold, before a single byte is decoded or stored.
+
+    `alt_ar`/`alt_en` are `CharField(max_length=...)`, and that was only checked by the
+    `full_clean()` that ran AFTER the upload's files were written: a 201-character
+    caption rolled the row back and left up to 64 MB in the bucket that nothing
+    referenced or deleted — per request, around the per-exercise cap — and the view
+    answered `code="invalid"`, which no table documents (SIDE_BUGS S-103). Raises
+    `ValidationError(code="media_alt_too_long")`. The limit is the column's own.
+    """
+    from django.core.exceptions import ValidationError
+    from django.utils.translation import gettext as _
+
+    for field, value in (("alt_ar", alt_ar), ("alt_en", alt_en)):
+        limit = MediaAsset._meta.get_field(field).max_length
+        if value is not None and len(str(value)) > limit:
+            raise ValidationError(
+                _("The description is too long: at most %(max)s characters.")
+                % {"max": limit},
+                code="media_alt_too_long")
+
+
+def clean_before_writing(asset: MediaAsset) -> None:
+    """Every model check that does not depend on the files, run before they exist."""
+    asset.full_clean(exclude=list(FILE_FIELDS))
+
+
+def stored_names(asset: MediaAsset) -> dict:
+    """`{field: stored name}` for the file columns, to tell afterwards what was new."""
+    return {field: getattr(asset, field).name or "" for field in FILE_FIELDS}
+
+
+def discard_new_files(asset: MediaAsset, before: dict) -> None:
+    """Delete what this call wrote to storage and no row will ever point at.
+
+    Called when the write fails after the files are stored: the transaction rolls the
+    row back, and without this the bytes stay in the bucket, unreferenced, for ever. A
+    name that was already there before the call is left alone — it is the replaced
+    file, and the row still holds it.
+    """
+    import logging
+
+    for field in FILE_FIELDS:
+        current = getattr(asset, field)
+        name = current.name or ""
+        if name and name != before.get(field, ""):
+            try:
+                current.storage.delete(name)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "could not remove an orphaned upload %s", name, exc_info=True)
+
+
 def apply_upload(asset: MediaAsset, processed) -> None:
     """Write a processed upload onto `asset` (files to storage, fields in memory)."""
     asset.blur = processed.blur
@@ -224,25 +283,39 @@ def store(*, owner_type, owner_id, slot_key, upload, uploaded_by=None,
     trainer whose demonstration this is, and it is half of that owner's key.
 
     Raises `django.core.exceptions.ValidationError` (with a `code`) when the upload or
-    the slot is refused. The replaced files are removed once the transaction commits
-    (`training_platform/signals.py`), so a rollback never leaves a row without its files.
+    the slot is refused — `media_alt_too_long` for alt text over the column's length,
+    checked before anything is decoded. The replaced files are removed once the
+    transaction commits (`training_platform/signals.py`), so a rollback never leaves a
+    row without its files; and the model is checked BEFORE the new files are written,
+    and anything written is deleted again if the write fails, so a refusal never leaves
+    bytes in storage that no row points at.
     """
     owner_id, person = resolve_owner(owner_type, owner_id, slot_key, person)
+    check_alt_text(alt_ar, alt_en)
     processed = process_upload(upload, resolve(slot_key))
     key = owner_key(owner_type, owner_id, slot_key, person)
 
-    with transaction.atomic():
-        asset = (MediaAsset.objects.select_for_update().filter(**key).first()
-                 or MediaAsset(**key))
-        asset.person = person
-        asset.uploaded_by = uploaded_by
-        if focal is not None:
-            asset.focal_x, asset.focal_y = (min(1.0, max(0.0, float(v))) for v in focal)
-        if alt_ar is not None:
-            asset.alt_ar = alt_ar
-        if alt_en is not None:
-            asset.alt_en = alt_en
-        apply_upload(asset, processed)
-        asset.full_clean()
-        asset.save()
+    asset, before = None, {}
+    try:
+        with transaction.atomic():
+            asset = (MediaAsset.objects.select_for_update().filter(**key).first()
+                     or MediaAsset(**key))
+            before = stored_names(asset)
+            asset.person = person
+            asset.uploaded_by = uploaded_by
+            if focal is not None:
+                asset.focal_x, asset.focal_y = (min(1.0, max(0.0, float(v)))
+                                                for v in focal)
+            if alt_ar is not None:
+                asset.alt_ar = alt_ar
+            if alt_en is not None:
+                asset.alt_en = alt_en
+            clean_before_writing(asset)
+            apply_upload(asset, processed)
+            asset.full_clean()
+            asset.save()
+    except Exception:
+        if asset is not None:
+            discard_new_files(asset, before)
+        raise
     return asset

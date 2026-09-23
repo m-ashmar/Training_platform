@@ -34,18 +34,21 @@ logger = logging.getLogger(__name__)
 def _credentials():
     """The service account, from the secret store — never from a file in the image.
 
-    Returns None when nothing is configured, which leaves google-cloud-storage to fall
-    back to Application Default Credentials (fine for reading and writing on a GCP host,
-    NOT enough to sign a URL — see the module docstring).
+    Raises `ImproperlyConfigured` when nothing is configured. It used to log a warning
+    and return None, leaving google-cloud-storage on Application Default Credentials,
+    which can read and write but cannot SIGN — so every media URL raised at
+    serialization and every screen with media answered 500, on a deploy that had booted
+    green (SIDE_BUGS S-148). Failing here is failing closed, like every other secret;
+    `settings_production.enforce_production_safety` checks the same key at boot.
     """
     name = getattr(settings, 'GS_CREDENTIALS_SECRET_NAME', 'GS_CREDENTIALS_JSON')
     try:
         raw = get_secret(name)
-    except ImproperlyConfigured:
-        logger.warning(
-            "%s is not set: falling back to Application Default Credentials. "
-            "Signed URLs need the private key and will fail.", name)
-        return None
+    except ImproperlyConfigured as exc:
+        raise ImproperlyConfigured(
+            f"MEDIA_BACKEND=gcs needs {name}: signed media URLs need the service "
+            f"account's private key ({exc})"
+        ) from exc
 
     try:
         info = json.loads(raw)

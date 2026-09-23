@@ -21,7 +21,7 @@ from datetime import timedelta
 
 from celery import shared_task
 from django.core.files.base import ContentFile
-from django.db import InterfaceError, OperationalError
+from django.db import InterfaceError, OperationalError, transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,41 @@ def _local_copy(asset):
     return handle.name, True
 
 
-def _probe(path):
+class _LazyCopy:
+    """The stored original as a local path, fetched the first time a tool needs it.
+
+    The download used to happen before anything asked whether ffprobe or ffmpeg exist,
+    and the production image installs neither: every uploaded video — up to 64 MB — was
+    pulled from the bucket to the worker, which is billed egress, only for the asset to
+    be marked `ready` with nothing filled in, and the hourly sweep did it again for
+    anything stuck (SIDE_BUGS S-102). Each tool below finds its binary FIRST and only
+    then asks for the path, so with no tools there is no download at all.
+    """
+
+    def __init__(self, asset):
+        self._asset = asset
+        self._path = None
+        self._temporary = False
+
+    def path(self):
+        if self._path is None:
+            self._path, self._temporary = _local_copy(self._asset)
+        return self._path
+
+    def cleanup(self):
+        if self._temporary and self._path:
+            try:
+                os.unlink(self._path)
+            except OSError:
+                logger.debug("could not remove the temporary video copy", exc_info=True)
+
+
+def _path_of(source):
+    """A plain path is used as given; a `_LazyCopy` is materialised now."""
+    return source.path() if isinstance(source, _LazyCopy) else source
+
+
+def _probe(source):
     """`{"duration": float|None, "width": int|None, "height": int|None}` or None.
 
     None means "ffprobe could not tell us" — a missing binary, a timeout, or output we
@@ -81,6 +115,7 @@ def _probe(path):
     ffprobe = _tool("ffprobe")
     if not ffprobe:
         return None
+    path = _path_of(source)
     try:
         result = subprocess.run(
             [ffprobe, "-v", "error", "-select_streams", "v:0",
@@ -107,11 +142,12 @@ def _probe(path):
             "width": stream.get("width"), "height": stream.get("height")}
 
 
-def _poster_bytes(path, at_seconds=POSTER_AT_SECONDS):
+def _poster_bytes(source, at_seconds=POSTER_AT_SECONDS):
     """One JPEG frame, or None when ffmpeg is absent or cannot produce one."""
     ffmpeg = _tool("ffmpeg")
     if not ffmpeg:
         return None
+    path = _path_of(source)
     out = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     out.close()
     try:
@@ -149,9 +185,12 @@ def fill_video_metadata(asset_id):
     sweep below for anything that never got picked up.
 
     With ffprobe/ffmpeg present: `duration_seconds`, `width`, `height` and a poster
-    frame. Without them: nothing is filled, the asset still becomes `ready`, and the app
-    plays `video_url` and paints its own placeholder — the visible cost of no
-    transcoder, not an upload that failed.
+    frame. Without them: nothing is filled, NOTHING IS DOWNLOADED (`_LazyCopy`), the
+    asset still becomes `ready`, and the app plays `video_url` and paints its own
+    placeholder — the visible cost of no transcoder, not an upload that failed.
+
+    The answer is written onto the row as it is when the run ends, and only if it still
+    holds the bytes the run measured (`_finish`): a re-upload during the run wins.
 
     `failed` is reserved for a file ffprobe RAN on and refused. That is the one case
     where the bytes we stored are not playable, and an operator needs to see it.
@@ -173,42 +212,66 @@ def fill_video_metadata(asset_id):
     if asset.kind != "video" or not asset.original:
         return {"asset": asset_id, "state": asset.processing_state}
 
-    path, temporary = _local_copy(asset)
+    # WHICH bytes this run measures. Everything below takes minutes at worst, and the
+    # coach may re-upload the slot meanwhile; the answer is written only if the row
+    # still holds these bytes when it is (`_finish`).
+    probed_name = asset.original.name
+    source = _LazyCopy(asset)
     try:
-        facts = _probe(path)
+        facts = _probe(source)
         if facts is False:
-            asset.processing_state = MediaAsset.FAILED
-            asset.save(update_fields=["processing_state", "updated_at"])
             logger.warning("video %s is stored but not playable (ffprobe refused it)",
                            asset_id)
-            return {"asset": asset_id, "state": asset.processing_state}
+            return _finish(asset_id, probed_name, MediaAsset.FAILED)
+        poster = _poster_bytes(source)
+        return _finish(asset_id, probed_name, MediaAsset.READY, facts=facts, poster=poster)
+    finally:
+        source.cleanup()
+
+
+def _finish(asset_id, probed_name, state, *, facts=None, poster=None):
+    """Write one run's answer onto the row — the row as it is NOW, locked.
+
+    The instance loaded at the start of the task is stale by the time the tools are
+    done. Saving it wrote its `original` back into the pre_save comparison
+    (`training_platform/signals.py` `delete_replaced_files_on_update`), so if the coach
+    had re-uploaded the slot in the meantime the NEW video was scheduled for deletion
+    while the row kept pointing at it — a video_url that 404s for good, on a row marked
+    `ready` with the old video's poster (SIDE_BUGS S-064). So: re-read under
+    `select_for_update`, and if the row no longer holds the bytes this run measured,
+    write nothing. The re-upload queued its own run (`mediakit.video.store_video`).
+    """
+    from .models import MediaAsset
+
+    with transaction.atomic():
+        fresh = MediaAsset.objects.select_for_update().filter(pk=asset_id).first()
+        if fresh is None:
+            logger.info("video metadata: asset %s is gone", asset_id)
+            return {"asset": asset_id, "state": "missing"}
+        if fresh.original.name != probed_name:
+            logger.info("video metadata: asset %s was re-uploaded during the run; "
+                        "leaving it to its own run", asset_id)
+            return {"asset": asset_id, "state": fresh.processing_state,
+                    "superseded": True}
 
         fields = ["processing_state", "updated_at"]
-        if facts:
+        if state == MediaAsset.READY and facts:
             if facts["duration"]:
-                asset.duration_seconds = round(facts["duration"], 3)
+                fresh.duration_seconds = round(facts["duration"], 3)
                 fields.append("duration_seconds")
             if facts["width"] and facts["height"]:
-                asset.width, asset.height = int(facts["width"]), int(facts["height"])
+                fresh.width, fresh.height = int(facts["width"]), int(facts["height"])
                 fields += ["width", "height"]
-
-        poster = _poster_bytes(path)
-        if poster:
+        if state == MediaAsset.READY and poster:
             # `save=False`: one UPDATE at the end, with the state, so a row is never
             # briefly `ready` with no poster or the other way round.
-            asset.poster.save("poster.jpg", ContentFile(poster), save=False)
+            fresh.poster.save("poster.jpg", ContentFile(poster), save=False)
             fields.append("poster")
 
-        asset.processing_state = MediaAsset.READY
-        asset.save(update_fields=fields)
-        return {"asset": asset_id, "state": asset.processing_state,
-                "poster": bool(poster), "probed": bool(facts)}
-    finally:
-        if temporary:
-            try:
-                os.unlink(path)
-            except OSError:
-                logger.debug("could not remove the temporary video copy", exc_info=True)
+        fresh.processing_state = state
+        fresh.save(update_fields=fields)
+    return {"asset": asset_id, "state": state,
+            "poster": bool(poster) and state == MediaAsset.READY, "probed": bool(facts)}
 
 
 @shared_task(

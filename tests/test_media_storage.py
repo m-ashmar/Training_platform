@@ -393,14 +393,25 @@ def test_production_refuses_the_local_media_backend():
     assert unset.returncode != 0 and "MEDIA_BACKEND" in unset.stderr
 
 
+#: A service-account key's SHAPE: the two fields a V4 signature is made from. The boot
+#: check reads the key and requires them since SIDE_BUGS S-148 — `"{}"` passed it, and
+#: so did a secret store that held no key at all, and both booted a deploy on which
+#: every media URL failed to sign. A placeholder, like the JWT keys above: nothing
+#: parses it as key material at boot.
+GCS_KEY_JSON = json.dumps({
+    "type": "service_account", "client_email": "media@example.iam.gserviceaccount.com",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----\n",
+})
+
+
 @pytest.mark.django_db(transaction=False)
 def test_production_boots_on_object_storage_and_needs_a_bucket_and_a_key():
     booted = _production_boot(MEDIA_BACKEND="gcs", GS_BUCKET_NAME="yalla-gym-media",
-                              GS_CREDENTIALS_JSON="{}")
+                              GS_CREDENTIALS_JSON=GCS_KEY_JSON)
     assert booted.returncode == 0, booted.stderr
     assert "BOOTED" in booted.stdout
 
-    no_bucket = _production_boot(MEDIA_BACKEND="gcs", GS_CREDENTIALS_JSON="{}")
+    no_bucket = _production_boot(MEDIA_BACKEND="gcs", GS_CREDENTIALS_JSON=GCS_KEY_JSON)
     assert no_bucket.returncode != 0 and "GS_BUCKET_NAME" in no_bucket.stderr
 
     # Signing a V4 URL needs the service account's private key; without it every media

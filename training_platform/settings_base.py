@@ -1021,16 +1021,26 @@ LARGE_UPLOAD_PATHS = {
 # server called it the exercise's demonstration.
 #
 # Exact hostnames, comma-separated; an entry beginning with a dot matches that domain
-# and its subdomains (`.example.com` allows `cdn.example.com`). The project's own
-# object storage is always in the list. Adding a third party — a video site, say — is
-# a product decision the owner makes here, never a coach's, and it is the only way in.
-EXERCISE_MEDIA_ALLOWED_HOSTS = tuple(
-    part.strip().lower()
-    for part in get_env('EXERCISE_MEDIA_ALLOWED_HOSTS', '').split(',')
-    if part.strip()
-) + ('storage.googleapis.com',) + (
-    (f'{GS_BUCKET_NAME}.storage.googleapis.com',) if GS_BUCKET_NAME else ()
-)
+# and its subdomains (`.example.com` allows `cdn.example.com`); an entry with a path,
+# `host/prefix`, matches that exact host and only paths under `/prefix/`. The project's
+# own object storage is always in the list — as ITS BUCKET, never as the bare shared
+# host: `storage.googleapis.com` serves every GCS bucket in the world, so allowing the
+# host allowed any coach's own public bucket (a tracker, a paywall, content that
+# changes next month), which is the hole this list exists to close (SIDE_BUGS S-081).
+# With no bucket configured nothing on GCS is allowed. Adding a third party — a video
+# site, say — is a product decision the owner makes here, never a coach's, and it is
+# the only way in.
+def _exercise_media_allowed_hosts(configured, bucket):
+    listed = tuple(part.strip().lower() for part in (configured or '').split(',')
+                   if part.strip())
+    bucket = (bucket or '').strip().strip('/').lower()
+    ours = (f'storage.googleapis.com/{bucket}', f'{bucket}.storage.googleapis.com') \
+        if bucket else ()
+    return listed + ours
+
+
+EXERCISE_MEDIA_ALLOWED_HOSTS = _exercise_media_allowed_hosts(
+    get_env('EXERCISE_MEDIA_ALLOWED_HOSTS', ''), GS_BUCKET_NAME)
 
 # WHERE the evidence of a REFUSED upload is kept (training_platform.file_security).
 # A prefix, not a path: the sample is written through the DEFAULT media storage below,

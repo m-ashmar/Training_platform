@@ -57,6 +57,33 @@ def connected_trainer_ids(viewer) -> set[int]:
                .values_list("trainer_id", flat=True))
 
 
+def author_line_applies(viewer, routine_author_id) -> bool:
+    """Whether line (a) — "the coach who prescribed it demonstrates it" — is for THIS
+    viewer.
+
+    It is for the person the routine was prescribed to, for its author, and for an
+    operator. It is NOT for another coach. A trainer's routine list includes routines
+    assigned to their clients that the client's PREVIOUS coach wrote
+    (`routine.views.RoutineViewSet.get_queryset`: `assigned_to__id__in=<my clients>`),
+    and applying line (a) there served the old coach's private `trainer_exercise`
+    footage — their own filmed library — to a competing coach as `routine_author`
+    (SIDE_BUGS S-101). A trainer reading someone else's routine gets their own library,
+    then the catalogue, like everywhere else.
+
+    Decided from the viewer's role and id alone, so it costs no query: a client only
+    ever reads routines assigned to them (the same queryset; `?routine_id=` on the media
+    route is scoped to `assigned_to`/`created_by` too), and an admin reads everything.
+    """
+    if not routine_author_id or viewer is None \
+            or not getattr(viewer, "is_authenticated", False):
+        return False
+    if viewer.id == int(routine_author_id):
+        return True
+    if getattr(viewer, "is_admin", False) or getattr(viewer, "is_staff", False):
+        return True
+    return not getattr(viewer, "is_trainer", False)
+
+
 def resolve_exercise_media(viewer, exercise_ids, *, routine_author_id=None,
                            request=None, connected=None) -> dict[int, dict]:
     """The media a viewer sees for each exercise. Batched: one query for the page.
@@ -80,7 +107,9 @@ def resolve_exercise_media(viewer, exercise_ids, *, routine_author_id=None,
     Returns `{exercise_id: {"media": {slot: payload}, "media_source": str | None,
     "media_trainer_id": int | None}}`, with an entry for every id asked for.
     `routine_author_id` is the `created_by` of the routine these exercises were read
-    out of — omit it outside a routine, and line (a) simply does not apply.
+    out of — omit it outside a routine, and line (a) simply does not apply. Nor does it
+    when the viewer is a trainer who did not write that routine
+    (`author_line_applies`): one coach never sees another's private footage.
 
     `connected` lets a caller that already knows the viewer's approved trainers pass
     them in, so a response resolving several routines pays for that query once.
@@ -92,10 +121,13 @@ def resolve_exercise_media(viewer, exercise_ids, *, routine_author_id=None,
 
     if connected is None:
         connected = connected_trainer_ids(viewer)
-    # The routine's author is a candidate whether or not the viewer is their client:
-    # they are the person who prescribed this work, and the client is reading their
-    # routine. They are NOT given visibility of anything — the exercise was already
-    # ruled visible before this ran.
+    # The routine's author is a candidate whether or not the viewer is still their
+    # client: they are the person who prescribed this work, and the client is reading
+    # their routine. They are NOT given visibility of anything — the exercise was
+    # already ruled visible before this ran. A coach reading a routine another coach
+    # wrote is not that client, and line (a) is dropped for them.
+    if not author_line_applies(viewer, routine_author_id):
+        routine_author_id = None
     people = set(connected) | ({routine_author_id} if routine_author_id else set())
 
     # ONE query for the whole page: both owner types, every exercise, every candidate

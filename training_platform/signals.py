@@ -345,6 +345,12 @@ def delete_replaced_files_on_update(sender, instance, **kwargs):
     if instance.pk is None:
         return
     field_names = _file_fields(sender)
+    # A save limited by `update_fields` writes only those columns, so a file field left
+    # out of it keeps its stored value and its file is still referenced. Comparing it
+    # anyway deleted the file a STALE instance no longer knew about (SIDE_BUGS S-064).
+    update_fields = kwargs.get('update_fields')
+    if update_fields is not None:
+        field_names = [name for name in field_names if name in update_fields]
     if not field_names:
         return
     try:
