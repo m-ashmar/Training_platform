@@ -20,13 +20,15 @@ you want a number.
 
 After adding a migration, the run needs `--create-db` or it dies with `DuplicateColumn`.
 
-## Six gate tests that will fail work that is otherwise correct
+## Gate tests that will fail work that is otherwise correct
 
 | It checks | What you must do |
 |---|---|
 | `API_CONTRACT.md` diffed against the URLconf | Every new route goes in that file **in the same commit**. A route not listed fails the suite |
 | The privacy registry | A model holding personal data must be registered under `training_platform/privacy/` |
 | Every registered notification event is emitted | A key in `notifications/channels/fcm.py` `EVENT_CLASS_REGISTRY` needs an event class, **a listener**, and a LITERAL `event_type="..."` in non-test source. A test asserting `emit_event` was called does NOT prove delivery — assert the `Notification` row |
+| Every push event is in the contract | A new `event_type` must also be a row of `API_CONTRACT.md` §4 (the push table), with its `data` keys (`test_s009_every_registered_push_event_is_in_the_contract`) |
+| Ordering is total | A list view's `order_by` must end in a unique column (`'-created_at', '-id'`); a scan fails `order_by('created_at')` alone |
 | Beat entries resolve | Every `CELERY_BEAT_SCHEDULE` entry must name a real registered task |
 | The Arabic catalogue | **Every string you pass to `_()` — and every `{% trans %}` — must be IN `django.po` with Arabic, and in the compiled `django.mo`.** Not "every entry already in the file": the gate used to check only those, so a string that never reached the catalogue was invisible and shipped in English (SIDE_BUGS S-019 — 152 of them). None fuzzy. Add the entry, then `msgfmt --check-format -o locale/ar/LC_MESSAGES/django.mo locale/ar/LC_MESSAGES/django.po` and commit the `.mo` |
 | One predicate decides what a trainer sees | A source scan forbids reading `assigned_trainer` directly — use the approved relation |
