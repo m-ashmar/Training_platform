@@ -255,6 +255,12 @@ per-address limits above have `code: "throttled"`.
   its HTTP-status default.
 - **Breaking changes** (removing or renaming a path or field, changing a type, changing
   an existing `code`) require a new prefix (`v2/`); `v1` keeps working.
+- **A refusal that answered only its status default** — the `code` the error envelope
+  fills in when a view names none (`bad_request`, `not_found`, `conflict`,
+  `permission_denied`; §2) — may gain a code of its own. That is a new `code` value, not
+  a changed one: a client that follows the rule above reads the new value as exactly the
+  default it replaces. A code a view NAMED is never changed. (Recorded 2026-09-23, when
+  the app session asked for codes on eleven such refusals — BACKEND_BUGS B-054..B-061.)
 - Adding a new push `event_type` is additive — the app must ignore `data.type` values it
   does not recognise rather than crash.
 
@@ -1202,8 +1208,9 @@ operator maintains in the console. Four things the app needs:
 - `subscriptions/current/` gains `plan_id` beside `plan_name` (B-050).
 - `subscriptions/{id}/renew/` answers `expires_at`, as `POST v1/gateways/` does (B-052).
 
-**What wiring the Me screens found** (BACKEND_BUGS B-053..B-057, 2026-09-23). All
-additive; no existing `code` changed.
+**What wiring the Me screens found** (BACKEND_BUGS B-053..B-057, 2026-09-23). Additive:
+the refusals below answered only their status default (`bad_request` / `not_found`) and
+now answer their own code, which §6 reads as that default; no code a view named changed.
 
 - `GET/POST /api/auth/user/update/` — the profile gains `phone_number`, READ-ONLY: the
   number given at registration, or null when none is on file (the column's placeholder
@@ -1221,7 +1228,12 @@ additive; no existing `code` changed.
   is (B-056).
 
 **What wiring the nutrition screens found** (BACKEND_BUGS B-058..B-065, 2026-09-23).
-Additive; no code changed value. The views' docstrings carry the full contract.
+Additive under §6: every new code replaces a status default the envelope filled in
+(`conflict`, `bad_request`, `permission_denied`, `not_found`), never a code a view named.
+One status moves: an ABSENT `component_id` / `meal_id` on `swap_food`, `rate_component`
+and `event` is now `400 missing_fields` (it reached `get_object_or_404` and answered
+`404 not_found`); the app never sends that request. The views' docstrings carry the full
+contract.
 
 - **Swap offers are what the plate would hold.** `POST /api/diet/v1/client/meals/interact/`
   `swap_food` without `chosen_food_id` gains `current` (`{food_id, quantity_grams,
@@ -1246,7 +1258,8 @@ Additive; no code changed value. The views' docstrings carry the full contract.
   Plans generated before 2026-09-23 have no recorded Arabic description: `description_ar`
   falls back to the English, as `name_ar` and `reason_ar` do.
 - **Who wrote a plan.** `GET /api/diet/v1/my/diet-plans/` rows gain `generation_strategy`
-  (`ENGINE` | `TRAINER`) and `author` (`{id, name}` of the coach, or null).
+  (`ENGINE` | `TRAINER`) and `author` (`{id, name}` of the coach, or null — also once the
+  coach's account is closed or erased).
 - **Food tags.** `GET /api/diet/v1/food/list/` rows gain `tags`: `levantine` | `western`,
   `high_protein`, `low_fat`, `low_calorie`, from the food's own columns against the EU
   nutrition-claim thresholds (`diet/services/food_tags.py`). No vegetarian or fibre tag:

@@ -145,7 +145,8 @@ def _minutes_ar(minutes: int) -> str:
     if minutes == 1:
         return "دقيقة واحدة"
     if minutes == 2:
-        return "دقيقتان"
+        # Genitive: the only caller puts it after «حوالي» ("about"), which governs it.
+        return "دقيقتين"
     if 3 <= minutes <= 10:
         return f"{minutes} دقائق"
     return f"{minutes} دقيقة"

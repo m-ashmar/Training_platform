@@ -20,6 +20,42 @@ are not bugs: they are in `BACKEND_DELTA.md` and `yalla_gym/app/PLAN.md` §8.
 
 Last updated by the app session: 2026-09-19 (B-020 to B-036 added while wiring routes 01, 02, 04). Backend notes: 2026-09-19.
 
+## Backend summary (the backend session, 2026-09-23)
+
+**State: 65 rows — 61 fixed, 2 partly fixed (B-058, B-065: the catalogue has no fibre or
+vegetarian data), 1 planned (B-051, plan step 5), 1 wontfix (B-029).** Rows B-037..B-065
+were fixed on 2026-09-23, each with a test that fails on the code before it
+(`tests/test_backend_bugs_app_0923.py`, `_0923b.py`, `_0923c.py`, `_0923d.py`), then
+reviewed twice by independent adversarial reviewers; the 17 defects they reproduced are
+fixed with their own tests (`_0923b_review.py`, `_0923_final_review.py`).
+
+### Fixed 2026-09-23: what the app can rely on now
+
+| Rows | What the app can do now |
+|---|---|
+| B-037..B-046 (home, chat) | Volume counts sets with no prescribed weight; the server starts (ASGI); chat messages carry `kind: "text"`; `refresh_after_seconds` is the time left on the cache; `estimated_minutes` may be null; days before a program starts are rest; `participants` counts the standing |
+| B-047 | `POST subscriptions/{id}/change-plan/` `{plan_id}` while nothing is running and no checkout is open (`409 plan_change_while_active` / `checkout_open` otherwise); then Pay prices the new plan. Earlier payments keep naming what they bought |
+| B-048..B-050, B-052 | Codes on status/reconcile refusals; PDF-receipt 404s are JSON; `plan_id` on `subscriptions/current/`; `renew/` answers `expires_at` |
+| B-053..B-057 (Me) | `phone_number` read-only on the profile; own codes on device-token DELETE and picture refusals; `user/update/` POST answers the saved profile |
+| B-058..B-065 (nutrition) | Swap offers carry the portion's figures, image and a `tag` (`more_protein`, `fewer_calories`, `more_calories`, `similar`); own codes on meal refusals and full docstrings; Arabic reason and `description_ar`; plan rows name their `author`; food rows carry `tags` |
+
+### Still open
+
+| Item | State |
+|---|---|
+| B-051 | A matching / needs-review payment state is plan step 5's checkout-session work |
+| B-058, B-065 | `fiber`, `more_fiber` and a vegetarian tag need catalogue data the owner has to decide on |
+| Plan change mid-period | Refused (`plan_change_while_active`) until the owner decides how it is priced (`PAYMENTS_COMPLIANCE_PLAN.md`, Open 5) |
+
+### New server rules the app must handle
+
+- **A new `code` on an old refusal.** A refusal that answered only its status default
+  (`bad_request`, `not_found`, `conflict`, `permission_denied`) may gain its own code
+  (API_CONTRACT.md §6). Treat an unknown code as its status default and nothing breaks.
+- **Pay may answer `409 price_changed` without a quote mismatch** when the subscription
+  moved plan during the call: show `expected_amount` and ask again.
+- **`more_calories`** is a swap tag the design does not draw: the offer is a bigger portion.
+
 ## Backend summary (the backend session, 2026-09-19)
 
 **State: 36 rows — 35 fixed, 1 wontfix (B-029), 0 open.** Every fix has a regression test
@@ -145,9 +181,9 @@ test now fails on any fuzzy entry — commit `6b45b00`).
 | B-059 | P2 | `diet/views.py:2865` (`swap_food`, chosen food already on the plate) | 409 `{"error": …}` with no `code`, so the client cannot branch on it. | Treats any code-less 409 on swap as 'already on this plate' by status and shows the server sentence as the fallback line. | fixed | The 409 now answers `code: "food_already_on_plate"`. `tests/test_backend_bugs_app_0923d.py`. |
 | B-060 | P2 | `diet/views.py:2541` (`MealCompletionView`) and `:2799` (`ClientMealInteractionView`) docstrings | Both docstrings are one sentence and carry none of the contract: the `action` values, body fields (`component_id`, `actual_quantity`, `meal_id`, `is_liked`, `chosen_food_id`), statuses or codes (`plan_superseded`, `food_not_allowed`, `bad_actual_quantity`, the code-less 400s). The rule says the docstring is the contract. | The repository was written from the view bodies; the wire shapes are pinned by FakeAdapter tests so a silent change fails the app suite. | fixed | Both docstrings now list every `action`, its body fields, its 200 shape and every status+code; the code-less refusals got codes (`clients_only`, `missing_fields` with `fields`, `bad_component_id` / `bad_chosen_food_id` / `bad_meal_id` / `bad_is_liked` / `bad_body`, `bad_kind`), and a malformed or absent id on `swap_food` / `rate_component` / `event` is a 400 instead of a 500/404. A test fails if a code literal in either view is missing from its docstring. `tests/test_backend_bugs_app_0923d.py`. |
 | B-061 | P2 | `diet/views.py:2633` and `:2969` ('Invalid action' 400s) | 400 with an error sentence and no `code`. | Unreachable from the app (it sends only the documented actions); a generic 400 falls to the shared error table. | fixed | Both answer `400 invalid_action`. `tests/test_backend_bugs_app_0923d.py`. |
-| B-062 | P2 | `diet/views.py:1239` (`PlanTaskStatusView`, task not owned or unknown) | 404 `{"error": "Task not found"}` without a `code`. | `ApiNutritionPlanRepository.poll` maps a 404 to the app-local `task_not_found`; Building shows 'start again' as the one action. | fixed | The 404 already carries a code: `not_found`, filled in by the error envelope and pinned by the gate (`test_regression_gate.py::test_an_admin_cannot_poll_a_task_that_was_never_issued`), so it is now named explicitly and documented, not renamed: a shipped `code` never changes (CLAUDE.md). Keep the app's local mapping of this 404 to `task_not_found`. On this route `not_found` always means 'no task of yours by that id: start again'; the docstring now lists the states and the task's own refusal codes. `tests/test_backend_bugs_app_0923d.py`. |
+| B-062 | P2 | `diet/views.py:1239` (`PlanTaskStatusView`, task not owned or unknown) | 404 `{"error": "Task not found"}` without a `code`. | `ApiNutritionPlanRepository.poll` maps a 404 to the app-local `task_not_found`; Building shows 'start again' as the one action. | fixed | The 404 already carries a code: `not_found`, filled in by the error envelope and pinned by the gate (`test_regression_gate.py::test_an_admin_cannot_poll_a_task_that_was_never_issued`), so it is now named explicitly and documented. It could become `task_not_found` under API_CONTRACT §6 like B-054..B-061, but a gate test pins `not_found` on this route and there it already has one meaning ('no task of yours by that id: start again'), so it stays; keep the app's local mapping to `task_not_found`. On this route `not_found` always means 'no task of yours by that id: start again'; the docstring now lists the states and the task's own refusal codes. `tests/test_backend_bugs_app_0923d.py`. |
 | B-063 | P2 | `diet/services/rule_based_planner.py:156` (and `meal_payload.py:128-140`, which passes it through) | The Arabic reason line embeds the untranslated shape word: the live payload reads «طبق everyday يناسب هدف الفطور». Line 151 also yields «لوجبة الوجبة الخفيفة» for snacks (`SLOT_AR` already carries the article). `description` is English-only ('Everyday · about 5 minutes') with no `description_ar`. | Shows `display_reason` as received (decoration, not an action); `description` is not rendered on the Arabic screens. | fixed | The Arabic reason uses a whole «for <slot>» phrase («للوجبة الخفيفة») and a cuisine table covering every word the library uses (يومي, شامي, متوسطي); an unknown word is dropped, never copied. The meal payload gains `description_ar` and `display_description` (`description` stays English); plans generated before this fix fall back to the English. Display only: the diet quality measurement is byte-identical before and after. `tests/test_backend_bugs_app_0923d.py`. |
-| B-064 | P2 | `diet/views.py:3053` (`MyDietPlansView` rows) | A plan row has `template_name` but no author or trainer name, so the Generate artboard's warning «خطتك الحالية كتبها مدربك رامي» cannot name the coach. | The warning says «كتبها مدربك» without the name. | fixed | Rows gain `generation_strategy` (`ENGINE` / `TRAINER`) and `author` (`{id, name}` of the coach — full name, else username — or null), joined in the same query. `tests/test_backend_bugs_app_0923d.py`. |
+| B-064 | P2 | `diet/views.py:3053` (`MyDietPlansView` rows) | A plan row has `template_name` but no author or trainer name, so the Generate artboard's warning «خطتك الحالية كتبها مدربك رامي» cannot name the coach. | The warning says «كتبها مدربك» without the name. | fixed | Rows gain `generation_strategy` (`ENGINE` / `TRAINER`) and `author` (`{id, name}` of the coach — full name, else username — or null, also once the coach's account is closed or erased), joined in the same query. `tests/test_backend_bugs_app_0923d.py`. |
 | B-065 | P2 | `diet/views.py:244` (`FoodListView` rows) | A food carries only `category`; the Taste artboard shows dietary tags per card (نباتي, ألياف عالية) that no field provides. | The card shows the single category chip. | partly fixed | Rows gain `tags`: `levantine` / `western` (the food's cuisine), `high_protein`, `low_fat`, `low_calorie`, from the food's own columns against EU nutrition-claim thresholds (`diet/services/food_tags.py`), no extra query. **«نباتي» and «ألياف عالية» cannot be served: the catalogue has no vegetarian flag and no fibre figure — adding either is an owner/data decision.** `tests/test_backend_bugs_app_0923d.py`. |
 
 ## Closed
