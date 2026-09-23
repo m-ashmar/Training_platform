@@ -117,9 +117,17 @@ def component_payload(component, lang: Optional[str] = None) -> dict:
 def meal_payload(meal, lang: Optional[str] = None, targets: Optional[dict] = None,
                  with_components: bool = False) -> dict:
     lang = lang or current_lang()
-    description = meal.description
-    if meal.translations and lang in meal.translations:
-        description = meal.translations[lang].get("description", description)
+    # `description` is the ENGLISH column, like `name` and `reason`, and `description_ar`
+    # its Arabic sibling (BACKEND_BUGS B-063). The Arabic lives in
+    # `translations["ar"]["description"]`, written at generation. This used to swap
+    # `description` itself for the active language's translation; nothing wrote one, so
+    # every client always read the English column here — and still does, so the change
+    # is additive. A meal with no recorded Arabic (a trainer's own text, a plan generated
+    # before 2026-09-23) falls back to the English, as `name_ar` and `reason_ar` do.
+    description = meal.description or ""
+    translations = meal.translations if isinstance(meal.translations, dict) else {}
+    arabic = translations.get("ar") if isinstance(translations.get("ar"), dict) else {}
+    description_ar = arabic.get("description") or description
     # A meal without a stored name (written by a trainer, or before the column
     # existed) is named from what is on it, in both languages, rather than "".
     name = meal.name or _composed_name(meal, "en")
@@ -135,6 +143,8 @@ def meal_payload(meal, lang: Optional[str] = None, targets: Optional[dict] = Non
         "name_ar": name_ar,
         "display_name": name_ar if lang == "ar" else name,
         "description": description,
+        "description_ar": description_ar,
+        "display_description": description_ar if lang == "ar" else description,
         "reason": reason,
         "reason_ar": reason_ar,
         "display_reason": reason_ar if lang == "ar" else reason,

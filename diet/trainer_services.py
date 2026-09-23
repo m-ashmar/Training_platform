@@ -588,12 +588,16 @@ class TrainerDietPlanService:
                 return parts[0]
             return sep.join(parts[:-1]) + last + parts[-1]
 
-        slot_ar = {'Breakfast': 'الفطور', 'Lunch': 'الغداء',
-                   'Dinner': 'العشاء', 'Snack': 'الوجبة الخفيفة'}.get(meal_type, meal_type)
+        from diet.services.rule_based_planner import FOR_SLOT_AR, SLOT_AR
+
+        slot_ar = SLOT_AR.get(meal_type, meal_type)
+        # "for <slot>" whole, from the planner's table: `لوجبة {slot_ar}` read «لوجبة
+        # الوجبة الخفيفة» for a snack (BACKEND_BUGS B-063, the same fault as the engine's).
+        for_slot_ar = FOR_SLOT_AR.get(meal_type, f"لوجبة {slot_ar}")
         return (join(en, ', ', ' and ') or meal_type,
                 join(ar, '، ', ' و') or slot_ar,
                 str(_("chosen for you by your trainer")),
-                f"اختارها لك مدربك لوجبة {slot_ar}")
+                f"اختارها لك مدربك {for_slot_ar}")
 
 class ClientProgressService:
     """

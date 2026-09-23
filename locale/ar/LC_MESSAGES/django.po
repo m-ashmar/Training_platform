@@ -4397,9 +4397,13 @@ msgstr "يمكن تغيير الخطة بعد انتهاء الفترة الحا
 msgid ""
 "A payment is already open for this subscription. Complete it, or change the "
 "plan once it closes."
-msgstr ""
-"هناك دفعة مفتوحة لهذا الاشتراك. أكملها، أو غيّر الخطة بعد إغلاقها."
+msgstr "هناك دفعة مفتوحة لهذا الاشتراك. أكملها، أو غيّر الخطة بعد إغلاقها."
 
 #: subscription/views.py
 msgid "Plan changed. Complete the payment to start it."
 msgstr "تم تغيير الخطة. أكمل الدفع لتبدأ."
+
+# The event action without a meal (BACKEND_BUGS B-060).
+#: diet/views.py
+msgid "meal_id is required"
+msgstr "الحقل meal_id مطلوب"
