@@ -1,6 +1,6 @@
 import logging
 from django.shortcuts import render
-from rest_framework import viewsets, status, permissions, mixins
+from rest_framework import viewsets, status, permissions, mixins, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -19,7 +19,7 @@ from decimal import Decimal, InvalidOperation
 
 from .models import (
     OPEN_PAYMENT_STATUSES, SubscriptionPlan, Subscription, Payment,
-    SubscriptionFeature, SubscriptionUsage
+    SubscriptionFeature, SubscriptionUsage, plan_snapshot
 )
 from .serializers import (
     SubscriptionPlanSerializer, SubscriptionSerializer,
@@ -44,7 +44,7 @@ from .services.payment_gateways import (
 )
 from .services.payment_service import (
     PaymentService, PaymentError, InvalidPaymentTransition, PaymentVerificationError,
-    SubscriptionAlreadyActive,
+    PlanChanged, SubscriptionAlreadyActive,
 )
 # NOTE: use PaymentGatewayManager.get_available_gateways() (returns a dict of
 # gateway_name -> info). The same-named helper in settings.gateway_config returns
@@ -103,6 +103,19 @@ def _currency_not_chargeable():
     return Response({'error': REFUSAL_MESSAGES[NoExchangeRate.code],
                      'code': CurrencyNotChargeable.code},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+def _plan_moved(subscription_pk, request, price_changed):
+    """409 `price_changed` for a Pay tap whose plan moved under it (`PlanChanged`):
+    `expected_amount`/`expected_currency` are what the plan the row is on NOW would
+    charge this buyer, so the app can show it and ask again. If that figure cannot be
+    had (the rate is missing or stale), the rate's own 409 instead."""
+    plan = Subscription.objects.select_related('plan').get(pk=subscription_pk).plan
+    try:
+        priced = charge_for(plan.price, plan.currency, wallet_currency_for(request.user))
+    except ExchangeRateUnavailable as exc:
+        return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+    return price_changed(priced.amount, priced.currency)
 
 
 def _locked_subscription(pk):
@@ -318,7 +331,10 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                         currency=subscription.plan.currency,
                         status='cancelled',
                         description=f"Subscription cancelled: {reason}",
-                        metadata={'reason': reason, 'immediate': immediate}
+                        # The plan that was cancelled, so the history row keeps naming
+                        # it after the row moves to another plan (`Payment.plan_bought`).
+                        metadata={'reason': reason, 'immediate': immediate,
+                                  'plan': plan_snapshot(subscription.plan)}
                     )
 
             logger.info(f"Cancelled subscription {subscription.id} for user {request.user.id}")
@@ -497,16 +513,26 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         | 400 | `invalid_plan` | `plan_id` missing, or names no active plan |
         | 409 | `plan_change_while_active` | cover is running; it can change once the period ends |
         | 409 | `checkout_open` | a checkout is open for this subscription; `payment_id` and `expires_at` say which, and when it closes |
+        | 400 | `validation_error` | the body is not a JSON object |
+        | 500 | `server_error` | unexpected fault |
+
+        `plan_id` is an integer as `POST v1/subscriptions/` takes it: `true`, `2.9` or a
+        string that is not a number is `invalid_plan`, never a plan it happens to round to.
         """
         from .utils import checkout_expires_at
 
         subscription = self.get_object()
         body = body_dict(request)
+        # Parsed as `POST v1/subscriptions/` parses it (a DRF IntegerField). A bare
+        # `int()` took `true` as plan 1 and `2.9` as plan 2 — moving the row to a plan
+        # the client never named — and answered 500 for `1e999` (OverflowError).
         try:
-            plan = SubscriptionPlan.objects.filter(
-                pk=int(body.get('plan_id')), is_active=True).first()
-        except (TypeError, ValueError):
-            plan = None
+            plan_id = serializers.IntegerField(min_value=1).run_validation(
+                body.get('plan_id'))
+        except serializers.ValidationError:
+            plan_id = None
+        plan = (SubscriptionPlan.objects.filter(pk=plan_id, is_active=True).first()
+                if plan_id is not None else None)
         # The same rule as `create`: a paid plan is a purchase, and an id that names no
         # plan is treated as paid so the refusal never depends on a lookup.
         if plan is None or plan.price > 0:
@@ -522,7 +548,8 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             if locked.plan_id == plan.pk:
                 return Response({'message': _('The subscription is already on this plan.'),
                                  'changed': False,
-                                 'subscription': SubscriptionSerializer(locked).data})
+                                 'subscription': SubscriptionSerializer(
+                                     locked, context=self.get_serializer_context()).data})
             if locked.is_active:
                 return Response(
                     {'error': _('The plan can change once the current period ends.'),
@@ -551,9 +578,12 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         logger.info("Subscription %s moved from plan %s to plan %s by user %s",
                     locked.id, previous, plan.pk, request.user.id)
         locked = self.get_queryset().get(pk=locked.pk)
+        # With the request as context, as `GET v1/subscriptions/{id}/` answers it: the
+        # plan's price in the READER's currency, and none at all on a store build.
         return Response({'message': _('Plan changed. Complete the payment to start it.'),
                          'changed': True,
-                         'subscription': SubscriptionSerializer(locked).data})
+                         'subscription': SubscriptionSerializer(
+                             locked, context=self.get_serializer_context()).data})
 
     @action(detail=False, methods=['get'])
     def current(self, request):
@@ -1140,7 +1170,7 @@ class PaymentGatewayView(APIView):
         | 400 | `payment_not_required` | the plan is free |
         | 409 | `exchange_rate_stale` / `exchange_rate_missing` | the plan is priced in the other currency and the operator's rate is too old / was never set |
         | 400 | `invalid_amount` | the quoted `amount` is not a number |
-        | 409 | `price_changed` | the quoted `amount`/`currency` is not what this call would charge; `expected_amount`/`expected_currency` say what it would |
+        | 409 | `price_changed` | the quoted `amount`/`currency` is not what this call would charge, or the subscription moved to another plan (`subscriptions/{id}/change-plan/`) while this call ran; `expected_amount`/`expected_currency` say what it would charge now |
         | 409 | `subscription_active` | cover is running; use `subscriptions/{id}/renew/` |
         | 503 | `gateway_unavailable` | that gateway is not configured to take payments |
         | 503 | `currency_not_chargeable` | the gateway is not configured to charge in the buyer's currency |
@@ -1285,7 +1315,13 @@ class PaymentGatewayView(APIView):
                     subscription,
                     _checkout_opener(request, subscription, gateway_name,
                                      lambda: gateway_service),
+                    # The plan priced and quote-checked above, read without the lock. A
+                    # `change-plan` from the customer's other device that commits in
+                    # between would otherwise open a checkout at a price nobody quoted.
+                    expected_plan_id=plan.id,
                 )
+            except PlanChanged:
+                return _plan_moved(subscription.pk, request, _price_changed)
             except SubscriptionAlreadyActive:
                 # Extending an active subscription is what the renew action is for. Decided
                 # under the lock, so a payment clearing at this moment is seen.
@@ -1424,7 +1460,8 @@ class PaymentReconcileView(APIView):
         if payment.status == 'completed':
             # Already completed is not "nothing left to do" while its payout is owed.
             PaymentService.redeliver_payout(payment)
-            return Response({'success': True, 'status': 'completed',
+            return Response({'success': True, 'payment_id': str(payment.id),
+                             'status': 'completed',
                              'invoice_number': payment.invoice_number})
 
         if not payment.gateway_transaction_reference:
