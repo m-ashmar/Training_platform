@@ -14,7 +14,9 @@ register(PersonalDataSource(
     fields=["id", "username", "email", "phone_number", "first_name", "last_name",
             "age", "date_of_birth", "gender", "height", "weight", "activity_level",
             "specific_injury", "injury_areas", "client_goals", "training_goal",
-            "training_place", "training_days_per_week", "date_joined"],
+            "training_place", "training_days_per_week", "date_joined",
+            # The "help us improve" answer and when it was given (BACKEND_BUGS B-084).
+            "ai_training_consent", "ai_training_consent_set_at"],
     on_erase="anonymise",
     anonymise={
         "is_active": False,
@@ -35,6 +37,8 @@ register(PersonalDataSource(
         # Clearing the field triggers the post-commit receiver that removes
         # the stored file; leaving it would orphan the image.
         "profile_picture": None,
+        # A consent dies with the account, as `ai_consent` below does.
+        "ai_training_consent": False, "ai_training_consent_set_at": None,
     },
 ))
 register(PersonalDataSource(
