@@ -9,7 +9,7 @@ authenticated `user` object server-side — never from client input.
 import json
 import logging
 
-from django.utils.translation import gettext_lazy as _lazy
+from django.utils.translation import gettext_lazy
 
 from .tools.user_tools import (
     get_user_profile, get_body_stats, USER_TOOL_SCHEMAS,
@@ -37,19 +37,21 @@ logger = logging.getLogger(__name__)
 #: `LanguageContext`, like `chat_service.ITERATION_STATUSES`. These were English
 #: literals, so an Arabic reader saw "Reviewed your profile" beside an Arabic answer
 #: (SIDE_BUGS S-090). The app should branch on `name`, which never changes; the
-#: icon stays outside the translated text so a translator cannot drop it.
+#: icon stays outside the translated text so a translator cannot drop it. Spelled
+#: `gettext_lazy`, not aliased: `makemessages` and the catalogue gate find a literal
+#: only under the standard names.
 TOOL_DISPLAY_NAMES = {
-    "get_user_profile": ("👤", _lazy("Reviewed your profile")),
-    "get_body_stats": ("📏", _lazy("Checked your body metrics")),
-    "get_exercise_progress": ("📊", _lazy("Analyzed your exercise progress")),
-    "get_workout_history": ("🏋️", _lazy("Reviewed recent workouts")),
-    "get_training_volume": ("📈", _lazy("Calculated training volume")),
-    "get_active_diet_plan": ("🥗", _lazy("Checked your diet plan")),
-    "get_meal_details": ("🍽️", _lazy("Reviewed meal details")),
-    "get_diet_adherence": ("📋", _lazy("Analyzed diet adherence")),
-    "get_routine_schedule": ("📅", _lazy("Checked your routine schedule")),
-    "get_routine_progress": ("✅", _lazy("Reviewed routine progress")),
-    "get_overall_progress": ("🎯", _lazy("Compiled overall progress")),
+    "get_user_profile": ("👤", gettext_lazy("Reviewed your profile")),
+    "get_body_stats": ("📏", gettext_lazy("Checked your body metrics")),
+    "get_exercise_progress": ("📊", gettext_lazy("Analyzed your exercise progress")),
+    "get_workout_history": ("🏋️", gettext_lazy("Reviewed recent workouts")),
+    "get_training_volume": ("📈", gettext_lazy("Calculated training volume")),
+    "get_active_diet_plan": ("🥗", gettext_lazy("Checked your diet plan")),
+    "get_meal_details": ("🍽️", gettext_lazy("Reviewed meal details")),
+    "get_diet_adherence": ("📋", gettext_lazy("Analyzed diet adherence")),
+    "get_routine_schedule": ("📅", gettext_lazy("Checked your routine schedule")),
+    "get_routine_progress": ("✅", gettext_lazy("Reviewed routine progress")),
+    "get_overall_progress": ("🎯", gettext_lazy("Compiled overall progress")),
 }
 
 

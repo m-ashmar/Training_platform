@@ -534,9 +534,9 @@ def test_s061_rest_feedback_is_stored_for_a_user_without_training_consent(make_u
                              {"message_id": reply.id, "feedback": "positive"},
                              content_type=JSON)
     assert saved.status_code == 200, saved.content
-    assert saved.json()["feedback"] == "positive"
     reply.refresh_from_db()
-    assert reply.feedback == "positive", "nothing was stored"
+    assert reply.feedback == "positive", "answered 'Feedback saved' and stored nothing"
+    assert saved.json()["feedback"] == "positive"
 
     listed = api(person).get(f"/api/ai/sessions/{session.session_id}/messages/")
     assert listed.status_code == 200, listed.content
