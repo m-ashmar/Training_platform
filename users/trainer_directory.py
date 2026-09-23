@@ -145,14 +145,15 @@ class CoachingPriceBook:
     request, not per row.
     """
 
-    def __init__(self, request, trainer_ids=()):
+    def __init__(self, request, trainer_ids=(), *, shown=None):
         from policy.money import MoneyType
         from policy.services import can_show_price
         from wallet import currency_for
         from wallet.exchange import price_list_converter
         from wallet.models import Wallet, _platform_currency
 
-        shown = getattr(request, '_coaching_price_shown', None)
+        if shown is None:
+            shown = getattr(request, '_coaching_price_shown', None)
         if shown is None:
             shown = can_show_price(request, MoneyType.COACHING_1TO1)
             if request is not None:
@@ -173,11 +174,13 @@ class CoachingPriceBook:
         return self._currencies.get(trainer_id, self._base)
 
     def price(self, amount, currency):
-        """`(amount_str | None, currency | None)`, in the reader's currency when it can be."""
+        """`(Decimal | None, currency | None)`, in the reader's currency when it can be.
+
+        A Decimal, not a string: the legacy lists have always sent these as JSON
+        numbers and still do; the v2 card turns it into its string itself."""
         if not self.shown or amount is None:
             return None, None
-        converted, unit = self._convert(amount, currency)
-        return str(converted), unit
+        return self._convert(amount, currency)
 
     def trainer_rate(self, trainer):
         """The trainer's current monthly price, for this reader."""
@@ -205,7 +208,7 @@ def trainer_cards(trainers, request, *, proof=None) -> list[dict]:
     media = media_map(OwnerType.TRAINER, ids, request)
     show_price = can_show_price(request, MoneyType.COACHING_1TO1)
     # In the READER's currency, with the unit beside it (SIDE_BUGS S-041).
-    prices = CoachingPriceBook(request, ids) if show_price else None
+    prices = CoachingPriceBook(request, ids, shown=True) if show_price else None
     cards = []
     for t in trainers:
         card = {
@@ -221,7 +224,7 @@ def trainer_cards(trainers, request, *, proof=None) -> list[dict]:
         }
         if show_price:
             amount, unit = prices.price(t.trainer_hourly_rate or 0, prices.currency_of(t.pk))
-            card['coaching_price'] = amount
+            card['coaching_price'] = str(amount)
             card['coaching_currency'] = unit
             card['money_type'] = MoneyType.COACHING_1TO1.value
         cards.append(card)

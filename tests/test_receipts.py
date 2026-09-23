@@ -479,9 +479,12 @@ def test_an_agent_can_top_up_by_the_account_number_the_client_showed_them(
     profile.monthly_limit = Decimal("100000")
     profile.save()
 
+    # `currency` is required since SIDE_BUGS S-059 (a top-up carried no currency and
+    # was minted in whatever the client's wallet held); this client trades in pounds.
     resp = api(agent).post("/api/wallet/agent/topup/proxy/", {
         "client_identifier": account_number_for(client.id),
-        "amount": "5000.00", "idempotency_key": "rc-acct-1"}, content_type=JSON)
+        "amount": "5000.00", "currency": "SYP",
+        "idempotency_key": "rc-acct-1"}, content_type=JSON)
     assert resp.status_code == 200, resp.content
     assert resp.json()["balance"] == "5000.00"
 
@@ -513,8 +516,9 @@ def test_a_cash_top_up_row_names_the_agent_the_client_paid(make_user, api):
     profile.status, profile.display_name = "active", "مكتب الفرات"
     profile.daily_limit = profile.monthly_limit = Decimal("100000")
     profile.save()
+    # `currency` is required since SIDE_BUGS S-059; this client trades in pounds.
     assert api(agent).post("/api/wallet/agent/topup/proxy/", {
-        "client_identifier": str(client.id), "amount": "20000.00",
+        "client_identifier": str(client.id), "amount": "20000.00", "currency": "SYP",
         "idempotency_key": "rc-row-1"}, content_type=JSON).status_code == 200
 
     (row,) = api(client).get("/api/wallet/transactions/").json()["results"]
