@@ -141,23 +141,44 @@ class JWTAuthLogoutView(APIView):
             )
     
 class UpdateUserDetailsView(APIView):
+    """`/api/auth/user/update/` — the signed-in person's own profile. Auth: Bearer JWT.
+
+    The profile is `UserDetailsSerializer`'s fields. Read-only among them:
+    `profile_picture` (an absolute URL or null; change it with
+    `/api/auth/user/profile-picture/`), `phone_number` (the number given at registration,
+    or null when none is on file; changed through support, BACKEND_BUGS B-053),
+    `user_type`, `trainer_is_verified`, `is_active`, `onboarding_completed`,
+    `onboarding_missing` and `assigned_trainer`.
+    """
     serializer_class = UserDetailsSerializer
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Retrieve user details. `profile_picture` is an absolute URL."""
+        """200: the profile (see the class docstring). No body, no query.
+
+        | status | `code` | when |
+        |---|---|---|
+        | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+        """
         user = request.user
         serializer = UserDetailsSerializer(user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
-        """Update user details.
+        """Update the profile. Body (JSON or multipart): any subset of the writable
+        fields; a partial update. A read-only field sent here is ignored and the rest
+        of the request is saved — `phone_number` included, so a client echoing the
+        profile it read is not refused — except a picture FILE (below).
 
-        Errors go through the API envelope, so each field error carries its `code`
-        (`field_errors.<field>[0].code`), e.g. `under_minimum_age` on `date_of_birth`
-        or `age`. The field keys stay at the top level as before. `profile_picture` is
-        read-only here: a file sent as `profile_picture` answers 400
-        `profile_picture_read_only`; upload it with `POST /api/auth/user/profile-picture/`.
+        200: the saved profile, the same shape `GET` answers, read back from the
+        database (so a normalised value is what was stored), plus `message`
+        (BACKEND_BUGS B-057; it answered `{message}` alone).
+
+        | status | `code` | when |
+        |---|---|---|
+        | `400` | `validation_error` | a field is refused; each carries its own code in `field_errors.<field>[0].code`, e.g. `under_minimum_age` on `date_of_birth` or `age`. The field keys stay at the top level as before |
+        | `400` | `profile_picture_read_only` | a file sent as `profile_picture` (with `field`); nothing in the request is saved. Upload it with `POST /api/auth/user/profile-picture/` |
+        | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
         """
         user = request.user
         # Refused, not dropped (the owner, 2026-09-20; BACKEND_BUGS B-026): a picture
@@ -172,7 +193,11 @@ class UpdateUserDetailsView(APIView):
                                            context={'request': request})
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        return Response({'message': _('Details updated successfully!')}, status=status.HTTP_200_OK)
+        # Read back what was stored, so the app needs no second request to see it.
+        user.refresh_from_db()
+        saved = UserDetailsSerializer(user, context={'request': request}).data
+        return Response({**saved, 'message': _('Details updated successfully!')},
+                        status=status.HTTP_200_OK)
     
     
 class UserDetailsView(APIView):
@@ -2366,25 +2391,38 @@ class ClientRequestStatusView(APIView):
 
 class ProfilePictureUploadView(APIView):
     """
-    Dedicated endpoint for uploading profile pictures.
-    Accepts multipart/form-data with image file (`profile_picture`).
-
-    400 with the refusal's code (`file_too_large`, `unsupported_format`,
-    `image_dimensions_too_large`, ...); 500 `upload_failed` when storage fails — the
-    body never carries the exception's text.
+    `/api/auth/user/profile-picture/` — the signed-in person's own picture. Auth: Bearer
+    JWT. Every refusal carries `error`, `detail` and `code`; the body never carries an
+    exception's text.
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        """Upload a new profile picture"""
+        """Upload a new profile picture. Body: multipart/form-data with the image as the
+        `profile_picture` part (at most 2 MB; its content is checked, re-encoded and
+        stripped of EXIF).
+
+        200: `{message, profile_picture_url, user: {id, username, email, first_name,
+        last_name, user_type, profile_picture}}`.
+
+        | status | `code` | when |
+        |---|---|---|
+        | `400` | `profile_picture_required` | no `profile_picture` part, with `field` (BACKEND_BUGS B-055; it had no code of its own) |
+        | `400` | `file_too_large`, `unsupported_format`, `image_dimensions_too_large`, ... | the image is refused, with the refusal's own code (`invalid_image` when it names none) |
+        | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+        | `415` | `unsupported_media_type` | the body is not multipart/form-data |
+        | `500` | `upload_failed` | storage failed |
+        """
         try:
             # Get the uploaded file
             image_file = request.FILES.get('profile_picture')
-            
+
             if not image_file:
+                message = _('No image file provided. Please include a file with key "profile_picture"')
                 return Response(
-                    {'error': _('No image file provided. Please include a file with key "profile_picture"')},
+                    {'error': message, 'detail': message,
+                     'code': 'profile_picture_required', 'field': 'profile_picture'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -2442,7 +2480,16 @@ class ProfilePictureUploadView(APIView):
             )
 
     def delete(self, request):
-        """Remove profile picture"""
+        """Remove the profile picture. No body.
+
+        200: `{message}`.
+
+        | status | `code` | when |
+        |---|---|---|
+        | `404` | `profile_picture_not_found` | there is no picture to remove; `message` is kept beside `error` (BACKEND_BUGS B-056: it had no code of its own, so it could not be told from a routing 404) |
+        | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+        | `500` | `upload_failed` | storage failed |
+        """
         try:
             user = request.user
             if user.profile_picture:
@@ -2451,13 +2498,15 @@ class ProfilePictureUploadView(APIView):
                 # actually persists.
                 user.profile_picture = None
                 user.save()
-                
+
                 return Response({
                     'message': _('Profile picture removed successfully')
                 }, status=status.HTTP_200_OK)
             else:
+                message = _('No profile picture to remove')
                 return Response({
-                    'message': _('No profile picture to remove')
+                    'message': message, 'error': message, 'detail': message,
+                    'code': 'profile_picture_not_found',
                 }, status=status.HTTP_404_NOT_FOUND)
                 
         except PASSTHROUGH_EXCEPTIONS:

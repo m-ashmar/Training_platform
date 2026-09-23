@@ -1186,6 +1186,24 @@ operator maintains in the console. Four things the app needs:
 - `subscriptions/current/` gains `plan_id` beside `plan_name` (B-050).
 - `subscriptions/{id}/renew/` answers `expires_at`, as `POST v1/gateways/` does (B-052).
 
+**What wiring the Me screens found** (BACKEND_BUGS B-053..B-057, 2026-09-23). All
+additive; no existing `code` changed.
+
+- `GET/POST /api/auth/user/update/` — the profile gains `phone_number`, READ-ONLY: the
+  number given at registration, or null when none is on file (the column's placeholder
+  `0000000000`). Sent in a POST it is ignored and the rest of the request is saved, as
+  every other read-only field there; a number changes through support (B-053). A
+  successful POST now answers the saved profile — the same shape `GET` answers, read back
+  from the database — plus `message`, which it answered alone before (B-057).
+- `DELETE /api/auth/device-token/` — no `token`: 400 `token_required` with `field`; a
+  token this account does not hold: 404 `token_not_found`. Both were the generic
+  `bad_request` / `not_found` (B-054). The POST side is unchanged.
+- `POST /api/auth/user/profile-picture/` without the `profile_picture` part: 400
+  `profile_picture_required` with `field`, was the generic `bad_request` (B-055).
+  `DELETE` with no picture to remove: 404 `profile_picture_not_found`, keeping
+  `message` and gaining `error` / `detail`; it was `not_found`, which a routing 404 also
+  is (B-056).
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 
