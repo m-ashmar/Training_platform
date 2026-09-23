@@ -120,7 +120,9 @@ class HasDietAccessOrFrozenRead(HasDietAccess):
     The owner (2026-09-19): after the plan ends the client still sees their last diet
     plan and cannot use it — no generating, ticking, swapping, rating, advice or food
     catalogue — until they subscribe again. So a GET passes for a frozen row
-    (`Subscription.is_frozen`) whose plan had the diet feature; every other refusal is
+    (`Subscription.is_frozen`) whose plan had the diet feature, or whose last PAID plan
+    did (`Subscription.last_paid_plan` — the row may have been moved onto another plan
+    since, which buys nothing); every other refusal is
     unchanged (`no_entitlement`, `feature_not_in_plan`), and the app tells "ended" from
     "never subscribed" by `access` on `GET subscriptions/current/`.
 
@@ -137,7 +139,15 @@ class HasDietAccessOrFrozenRead(HasDietAccess):
             subscription = request.user.subscription
         except (ObjectDoesNotExist, AttributeError):
             return False
-        return bool(subscription.is_frozen and subscription.has_diet_access)
+        if not subscription.is_frozen:
+            return False
+        if subscription.has_diet_access:
+            return True
+        # What was PAID for decides the frozen read, not only the plan the row is on
+        # now: `change-plan` moves an unpaid row onto another plan and its flags, and
+        # choosing a plan without diet — buying nothing — took the last diet plan away.
+        paid = subscription.last_paid_plan()
+        return bool(paid is not None and paid.has_diet_access)
 
 
 class HasRoutineAccess(HasSubscriptionFeature):

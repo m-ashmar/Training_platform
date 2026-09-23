@@ -36,7 +36,8 @@ from django.utils import timezone
 
 from policy.money import source_of_payment_method
 
-from ..models import OPEN_PAYMENT_STATUSES, Payment, Subscription, SubscriptionPlan
+from ..models import (OPEN_PAYMENT_STATUSES, Payment, Subscription, SubscriptionPlan,
+                      plan_snapshot)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,12 @@ class InvalidPaymentTransition(PaymentError):
 
 class PaymentVerificationError(PaymentError):
     """Raised when gateway-reported data does not match the payment record."""
+
+
+class PlanChanged(PaymentError):
+    """The subscription moved to another plan between the caller's quote and the lock
+    (`change-plan` from the customer's other device). The caller priced one plan; a
+    checkout opened now would charge another."""
 
 
 class SubscriptionAlreadyActive(PaymentError):
@@ -130,10 +137,17 @@ class PaymentService:
                 payment.completed_at = timezone.now()
 
             # --- Activate / extend the subscription, and record what that bought ---
+            # The plan and the period THIS payment was sold (its checkout's snapshot),
+            # read before the row's plan is decided: a row with no snapshot reads its
+            # period from the plan the row is on. Nothing running: the plan it bought.
+            # Cover running: `_dearest_running_plan` (a late transfer after a
+            # `change-plan`). The period granted is the one sold, so the receipt agrees.
             bought = cls._plan_bought(payment, subscription)
-            subscription.plan = cls._plan_to_hold(payment, subscription, bought)
+            days = payment.plan_bought()['duration_days'] or bought.duration_days
+            subscription.plan = (cls._dearest_running_plan(subscription, clearing=payment)
+                                 if subscription.is_active else bought)
             payment.covers_from, payment.covers_until = cls._activate_subscription(
-                subscription, source_of_payment_method(payment.payment_method), bought)
+                subscription, source_of_payment_method(payment.payment_method), days)
             payment.save()
 
             logger.info(
@@ -301,6 +315,14 @@ class PaymentService:
                 subscription.status = 'cancelled'
                 subscription.cancelled_at = now
                 subscription.auto_renew = False
+            if subscription.is_active:
+                # The cover left is what the OTHER payments bought, so the plan follows
+                # them — the rule completion applies (`_dearest_running_plan`). Left
+                # alone, refunding the Premium payment that set the plan kept a Basic
+                # period on Premium's features. `save()` re-inherits the plan's flags.
+                held = cls._dearest_running_plan(subscription)
+                if held is not None:
+                    subscription.plan = held
             subscription.save()
 
             # And take the MONEY back, not just the access. `wallet.signals` credits the
@@ -415,13 +437,19 @@ class PaymentService:
             return cls._checkout_under_lock(locked, open_payments, 'renewal', initiate)
 
     @classmethod
-    def start_payment(cls, subscription: Subscription, initiate) -> Payment:
+    def start_payment(cls, subscription: Subscription, initiate,
+                      expected_plan_id=None) -> Payment:
         """The Pay button: the subscription's open checkout, opening one if it has none.
 
         Refused while cover is running — extending an active subscription is what renew
         is for. That check used to be the ONLY one on this path: nothing deduplicated,
         so two taps on a subscription that was pending or had lapsed each created a
         Payment with its own reference, both payable, and the second bought nothing.
+
+        `expected_plan_id` is the plan the caller priced and checked the customer's
+        quote against, read without this lock. If the row has moved to another plan
+        since (`change-plan`), `PlanChanged` is raised rather than opening a checkout
+        for a price nobody quoted.
         """
         with transaction.atomic():
             locked = (Subscription.objects.select_for_update(of=('self',))
@@ -429,6 +457,9 @@ class PaymentService:
             if locked.is_active:
                 raise SubscriptionAlreadyActive(
                     f"Subscription {locked.id} is already active; renew extends it")
+            if expected_plan_id is not None and locked.plan_id != expected_plan_id:
+                raise PlanChanged(f"Subscription {locked.id} moved from plan "
+                                  f"{expected_plan_id} to {locked.plan_id}")
             open_payments = Payment.objects.filter(
                 subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
             return cls._checkout_under_lock(locked, open_payments, 'initial', initiate)
@@ -513,8 +544,7 @@ class PaymentService:
         # What this checkout sells, as it is sold now. The subscription can move to
         # another plan later (B-047), so completion, the history row and the receipt
         # read the plan from here, not from the subscription (`Payment.plan_bought`).
-        metadata['plan'] = {'id': plan.id, 'name': plan.name, 'plan_type': plan.plan_type,
-                            'duration_days': plan.duration_days}
+        metadata['plan'] = plan_snapshot(plan)
         if kind == 'renewal':
             metadata['kind'] = 'renewal'
             payment.description = f"Renewal for {plan.name}"
@@ -599,50 +629,82 @@ class PaymentService:
         return plan
 
     @staticmethod
-    def _plan_to_hold(payment: Payment, subscription: Subscription,
-                      bought: SubscriptionPlan) -> SubscriptionPlan:
-        """Which plan the subscription is on once this payment clears.
-
-        The plan the money bought, except in one case. `change-plan` is refused while
-        cover runs or a checkout is open, so a payment for a plan other than the
-        subscription's can only be a LATE transfer against a checkout that expired
-        before the change (`expired -> completed` is legal: the money is real). Then:
-
-        * nothing running: the plan it bought — the customer holds nothing else;
-        * cover running that was PAID for on the current plan: whichever of the two
-          plans the customer paid more for, compared in their own currency (every
-          payment of one buyer is in one currency). Keeping the cheaper one would take
-          from a customer what they paid for; the new period follows either way.
-        * cover running that nobody paid for (a trial, an operator's grant): the plan
-          the money bought.
+    def _price_of_record(payment: Payment):
+        """What the plan this payment bought was priced at: `(amount, currency)` in the
+        PLAN's currency, as snapshotted at checkout. A buyer who switches currency pays
+        later plans in the other one, so the charged amounts of two payments do not
+        compare; their prices of record do. Rows with no snapshot give what they charged.
         """
-        if bought.pk == subscription.plan_id or not subscription.is_active:
-            return bought
-        paid_for_current = (Payment.objects
-                            .filter(subscription=subscription, status='completed',
-                                    metadata__plan__id=subscription.plan_id)
-                            .exclude(pk=payment.pk)
-                            .order_by('-completed_at', '-id')
-                            .values_list('amount', 'currency').first())
-        if paid_for_current is None:
-            return bought
-        amount, currency = paid_for_current
-        if currency == payment.currency and payment.amount <= amount:
-            logger.warning("Late payment %s for plan %s cleared on a subscription paid on "
-                           "plan %s; keeping %s", payment.id, bought.pk,
-                           subscription.plan_id, subscription.plan_id)
+        if payment.price_amount is not None and payment.price_currency:
+            return payment.price_amount, payment.price_currency
+        return payment.amount, payment.currency
+
+    @classmethod
+    def _dearest_running_plan(cls, subscription: Subscription, clearing: Payment | None = None):
+        """The plan the paid periods still running entitle the subscription to.
+
+        `change-plan` is refused while cover runs or a checkout is open, so two paid
+        periods on different plans can only meet through a LATE transfer against a
+        checkout that expired before the change (`expired -> completed` is legal: the
+        money is real). One rule decides the plan then, when a payment clears
+        (`clearing`, the payment being completed) and when one is refunded:
+
+        * Among the completed payments whose period has not ended, plus `clearing`, the
+          plan with the highest price of record (`_price_of_record`). Keeping the
+          cheaper one would take from a customer what they paid for; the periods stack
+          either way. A tie keeps the plan the row is on.
+        * Prices of record in different currencies do not compare without a rate: the
+          plan the row is on stays if one of those payments bought it, else the most
+          recently completed payment's plan.
+        * No paid period running (a trial, an operator's grant): `clearing`'s plan, or
+          None when there is nothing to decide — the caller leaves the row alone.
+
+        The caller holds the subscription lock.
+        """
+        now = timezone.now()
+        running = list(Payment.objects
+                       .filter(subscription=subscription, status='completed',
+                               covers_until__gt=now)
+                       .select_related('subscription__plan')
+                       .order_by('-completed_at', '-id'))
+        if clearing is not None:
+            running = [clearing, *[p for p in running if p.pk != clearing.pk]]
+        if not running:
+            return None
+        priced = {}                      # plan id -> price of record, most recent first
+        for p in running:
+            priced.setdefault(p.plan_bought()['plan_id'], cls._price_of_record(p))
+        current = subscription.plan_id
+        if len(priced) == 1:
+            chosen = next(iter(priced))
+        elif len({currency for _amount, currency in priced.values()}) == 1:
+            top = max(amount for amount, _currency in priced.values())
+            dearest = [pid for pid, (amount, _c) in priced.items() if amount == top]
+            chosen = current if current in dearest else dearest[0]
+        else:
+            chosen = current if current in priced else next(iter(priced))
+        if chosen == current:
             return subscription.plan
-        return bought
+        plan = SubscriptionPlan.objects.filter(pk=chosen).first()
+        if plan is None:
+            logger.warning("Paid period names plan %s, which does not exist; keeping %s",
+                           chosen, current)
+            return subscription.plan
+        if chosen != (clearing.plan_bought()['plan_id'] if clearing else None):
+            logger.warning("Subscription %s moves to plan %s, bought by an earlier payment "
+                           "still running", subscription.id, chosen)
+        return plan
 
     @staticmethod
     def _activate_subscription(subscription: Subscription, source: str,
-                               plan: SubscriptionPlan | None = None):
+                               days: int | None = None):
         """Grant one plan period for a payment that cleared; return the window it bought.
 
         `source` is where that money came from (`policy.money.EntitlementSource`); it is
-        recorded and never consulted for access. `plan` is the plan the payment bought
-        (`_plan_bought`); its duration is the period granted. Omitted, the
-        subscription's own plan.
+        recorded and never consulted for access. `days` is the period the payment was
+        SOLD (`Payment.plan_bought`), so the cover and the receipt agree even when the
+        operator edits the plan while the transfer is in flight. Omitted, the
+        subscription's plan's duration.
 
         The period runs from when the money cleared, or from the end of cover the
         customer already holds — never from a date written before they paid. The first
@@ -656,7 +718,7 @@ class PaymentService:
         The caller holds the subscription lock.
         """
         now = timezone.now()
-        duration = timedelta(days=(plan or subscription.plan).duration_days)
+        duration = timedelta(days=days or subscription.plan.duration_days)
 
         if subscription.is_active:
             # Cover the customer already holds is kept, and the new period follows it.

@@ -299,6 +299,23 @@ class Subscription(RowValidationMixin, models.Model):
             return 'active'
         return 'frozen' if self.is_frozen else 'inactive'
 
+    def last_paid_plan(self):
+        """The plan the most recent completed payment bought, or None if none cleared.
+
+        What a FROZEN row may still read follows what was paid for, not what the row is
+        on now: `change-plan` moves an unpaid row onto another plan and takes that
+        plan's five flags, so choosing a plan without diet — buying nothing — took the
+        frozen diet read away (`HasDietAccessOrFrozenRead`).
+        """
+        last = (self.payments.filter(status='completed')
+                .order_by('-completed_at', '-id').first())
+        if last is None:
+            return None
+        plan_id = last.plan_bought()['plan_id']
+        if plan_id == self.plan_id:
+            return self.plan
+        return SubscriptionPlan.objects.filter(pk=plan_id).first()
+
     @property
     def is_trial(self):
         """Check if subscription is in trial period"""
@@ -319,6 +336,37 @@ class Subscription(RowValidationMixin, models.Model):
     
     def __str__(self):
         return f"{self.user.username} - {self.plan.name} ({self.status})"
+
+def plan_snapshot(plan) -> dict:
+    """What a payment records about the plan it concerns (`Payment.plan_bought`).
+
+    Written by every row that names a plan: a checkout when it is priced
+    (`PaymentService._checkout_under_lock`) and a cancellation's audit row. The name is
+    kept in every served language, so a receipt reprinted in the other language still
+    names what was bought rather than what the plan is called today.
+    """
+    from django.conf import settings
+
+    snap = {'id': plan.id, 'plan_type': plan.plan_type,
+            'duration_days': plan.duration_days}
+    for code, _label in settings.LANGUAGES:
+        snap[f'name_{code}'] = getattr(plan, f'name_{code}', None) or ''
+    return snap
+
+
+def _snapshot_name(snap: dict) -> str:
+    """The snapshot's plan name in the active language, falling back as the plan
+    list itself does (`MODELTRANSLATION_FALLBACK_LANGUAGES`)."""
+    from django.conf import settings
+    from django.utils.translation import get_language
+
+    active = (get_language() or settings.LANGUAGE_CODE).split('-')[0]
+    order = [active, *getattr(settings, 'MODELTRANSLATION_FALLBACK_LANGUAGES', ())]
+    for code in order:
+        if snap.get(f'name_{code}'):
+            return snap[f'name_{code}']
+    return snap.get('name', '')
+
 
 class Payment(RowValidationMixin, models.Model):
     """Payment history for subscriptions"""
@@ -526,16 +574,23 @@ class Payment(RowValidationMixin, models.Model):
         """The plan this payment was priced for: `plan_id`, `plan_name`, `plan_type`,
         `duration_days`.
 
-        Read from the snapshot the checkout wrote (`metadata['plan']`), because the
-        subscription can move to another plan after it (`subscriptions/{id}/change-plan/`,
-        BACKEND_BUGS B-047): reading `subscription.plan` then would name the NEW plan on
-        every earlier receipt and history row. Rows opened before the snapshot existed,
-        and audit rows that bought nothing, fall back to the subscription's plan — which
-        is what every row said before, and was right while plans could not change.
+        Read from the snapshot the checkout wrote (`metadata['plan']`, `plan_snapshot`),
+        because the subscription can move to another plan after it
+        (`subscriptions/{id}/change-plan/`, BACKEND_BUGS B-047): reading
+        `subscription.plan` then would name the NEW plan on every earlier receipt and
+        history row. `duration_days` is the period that was SOLD, which is the period
+        completion grants (`PaymentService._activate_subscription`) even if the operator
+        edits the plan while the transfer is in flight — a receipt and the cover it
+        bought must agree. The name is the snapshot's in the reader's language: the plan
+        name is translated (`subscription/translation.py`), and freezing the one the
+        checkout request happened to be in put Arabic on an English receipt.
+
+        Rows opened before the snapshot existed fall back to the subscription's plan —
+        what every row said before, and right while plans could not change.
         """
         snap = (self.metadata or {}).get('plan')
         if isinstance(snap, dict) and snap.get('id') is not None:
-            return {'plan_id': snap['id'], 'plan_name': snap.get('name', ''),
+            return {'plan_id': snap['id'], 'plan_name': _snapshot_name(snap),
                     'plan_type': snap.get('plan_type', ''),
                     'duration_days': snap.get('duration_days')}
         plan = self.subscription.plan
