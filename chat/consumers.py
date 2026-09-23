@@ -21,7 +21,27 @@ Protocol (JSON, one object per frame):
       {"type": "message.deleted", "conversation", "message", "deleted_at"}
       {"type": "error", "code": "...", "detail": "..."}   branch on `code`
 
-Close codes: 4001 no usable token, 4004 not this caller's conversation.
+An `error` frame's `code` is one of the codes `POST .../messages/` and `.../read/`
+answer with (`blank_message`, `invalid_client_uuid`, `idempotency_conflict`,
+`no_relation`, `blocked`, `coaching_frozen` / `coaching_unpaid` / `coaching_ended`
+with `trainer_id` ...), or one of this socket's own:
+
+      invalid_frame   not JSON, or not a JSON object
+      unknown_type    a `type` this protocol does not have
+      auth            the credential died since connect: the access token expired,
+                      or the account was suspended. The socket closes with 4001 right
+                      after; reconnect with a fresh token.
+      rate_limited    the same hourly allowance the REST routes share
+                      (`training_platform.middleware.RateLimitMiddleware`, 1500 an hour
+                      for a client): every `message.send` and `message.read` frame
+                      counts against it exactly as one HTTP request would. Carries
+                      `retry_after` (seconds). Nothing was written.
+      server_error    an unhandled fault; the socket stays open
+
+`detail` is in the reader's language (`preferred_language`), as the REST answer is.
+
+Close codes: 4001 no usable token (at connect, or after an `auth` frame), 4004 not this
+caller's conversation.
 """
 import json
 import logging
@@ -78,21 +98,51 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def receive(self, text_data=None, bytes_data=None):
         if self.conversation is None:
             return
-        try:
-            frame = json.loads(text_data or '{}')
-            if not isinstance(frame, dict):
-                raise ValueError('not an object')
-        except (TypeError, ValueError):
-            await self._error('invalid_frame', _('Send a JSON object.'))
+        # The credential is re-checked per frame, not only at connect (SIDE_BUGS
+        # S-062). A socket presents its token once and then outlives it: a suspended
+        # account, or one whose access token expired, kept writing to the thread — and
+        # pushing to the other person's phone — while the REST route refused it. Same
+        # function the AI socket calls (`training_platform.ws_auth`). The row it reads
+        # also refreshes `self.user`, so a language changed since connect is honoured.
+        user = await database_sync_to_async(authenticate_scope)(self.scope)
+        if user is None or user.pk != self.user.pk:
+            with LanguageContext.for_user(self.user):
+                await self._error('auth',
+                                  _('Your session has expired. Please sign in again.'))
+            await self.close(code=4001)
             return
+        self.user = user
 
-        kind = frame.get('type')
-        if kind == 'message.send':
-            await self._send_message(frame)
-        elif kind == 'message.read':
-            await self._mark_read()
-        else:
-            await self._error('unknown_type', _('Unknown message type.'))
+        # Every sentence below is translated INSIDE the reader's language (S-093).
+        # `_()` runs where it is called, and DRF renders an exception's text when it is
+        # raised, so wrapping only the final `send` — as this consumer did — handed an
+        # Arabic reader English for every refusal.
+        with LanguageContext.for_user(self.user):
+            try:
+                frame = json.loads(text_data or '{}')
+                if not isinstance(frame, dict):
+                    raise ValueError('not an object')
+            except (TypeError, ValueError):
+                await self._error('invalid_frame', _('Send a JSON object.'))
+                return
+
+            kind = frame.get('type')
+            if kind not in ('message.send', 'message.read'):
+                await self._error('unknown_type', _('Unknown message type.'))
+                return
+            # WebSockets never pass through the HTTP middleware, so the owner's hourly
+            # allowance was not enforced here at all (S-092): one client could post
+            # without limit, each message a row, a broadcast and a queued push.
+            wait = await database_sync_to_async(_rate_limited)(self.user)
+            if wait is not None:
+                await self._error('rate_limited',
+                                  _('Too many requests. Please try again later.'),
+                                  retry_after=wait)
+                return
+            if kind == 'message.send':
+                await self._send_message(frame)
+            else:
+                await self._mark_read()
 
     # --- what the client asks for -------------------------------------------------
 
@@ -104,8 +154,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         as the other side does and both ends render one code path.
         """
         try:
-            await database_sync_to_async(services.send_message)(
-                self.conversation, self.user, frame)
+            await database_sync_to_async(_in_language)(
+                self.user, services.send_message, self.conversation, self.user, frame)
         except APIException as exc:
             await self._error(_code_of(exc), _detail_of(exc))
         except Exception:       # noqa: BLE001 — one bad frame must not close the socket
@@ -115,8 +165,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     async def _mark_read(self):
         try:
-            await database_sync_to_async(services.mark_read)(
-                self.conversation, self.user)
+            await database_sync_to_async(_in_language)(
+                self.user, services.mark_read, self.conversation, self.user)
         except APIException as exc:
             await self._error(_code_of(exc), _detail_of(exc))
         except Exception:       # noqa: BLE001
@@ -143,10 +193,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
         payload = {k: v for k, v in event.items() if k != 'type'}
         await self.send(text_data=json.dumps({'type': kind, **payload}, default=str))
 
-    async def _error(self, code, detail):
+    async def _error(self, code, detail, **extra):
         with LanguageContext.for_user(self.user):
             await self.send(text_data=json.dumps(
-                {'type': 'error', 'code': code, 'detail': str(detail)}))
+                {'type': 'error', 'code': code, 'detail': str(detail), **extra}))
 
     @database_sync_to_async
     def _load(self, conversation_id):
@@ -155,6 +205,44 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if conversation is None or conversation.other_id(self.user.pk) is None:
             return None
         return conversation
+
+
+def _in_language(user, function, *args):
+    """Run `function` with the reader's language active, in the thread it runs in.
+
+    The service raises DRF exceptions whose text is rendered at construction, in
+    whatever language that worker thread has active — which is not the reader's. So
+    the language is switched on HERE, beside the call, rather than trusted to travel
+    in from the event loop.
+    """
+    with LanguageContext.for_user(user):
+        return function(*args)
+
+
+def _rate_limited(user):
+    """Seconds left in the caller's window when this frame is over the allowance, else
+    None — and the frame is COUNTED either way.
+
+    The HTTP limiter's own bucket and numbers, not a copy of them: the key is
+    `rate_limit:user_<id>` in the rate-limit cache, the tier is the account's type, and
+    the allowance is whatever `RateLimitMiddleware` holds for it (1500 an hour for a
+    client, the owner's number). A socket and the REST routes therefore spend ONE
+    allowance, so opening a socket is not a way around it. Fails open on a cache
+    outage, as the middleware does.
+    """
+    from training_platform.middleware import RateLimitMiddleware
+
+    try:
+        limiter = RateLimitMiddleware(lambda request: None)
+        tier = getattr(user, 'user_type', None)
+        if tier not in limiter.rate_limits or tier == 'anonymous':
+            tier = 'client'
+        client_id = f"user_{user.pk}"
+        if limiter._is_rate_limited(client_id, tier):
+            return limiter._seconds_left(client_id, tier)
+    except Exception:       # noqa: BLE001 — a cache outage must not close the chat
+        logger.warning('chat socket rate limit unavailable', exc_info=True)
+    return None
 
 
 def _code_of(exc):

@@ -4310,3 +4310,13 @@ msgstr "واصل! التمارين المتبقية لإكمال اليوم %(da
 #, python-format
 msgid "Ready to start? Begin your Day %(day)s workout now."
 msgstr "هل أنت مستعد؟ ابدأ تمرين اليوم %(day)s الآن."
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Trainer chat message"
+msgstr "رسالة في محادثة المدرب"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Challenge"
+msgstr "تحدٍّ"

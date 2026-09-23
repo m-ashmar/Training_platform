@@ -182,3 +182,31 @@ class NotificationService:
         # Email (Future)
         # if UserNotificationPreference.is_channel_enabled(recipient, event_type, 'email'):
         #     EmailChannel.send(notification)
+
+
+def blank_previews(**filters) -> int:
+    """Blank `context.preview` on the Notification rows `filters` select; returns how many.
+
+    For content that has been taken back or hidden after its push was written: a chat
+    message its sender deleted (`chat.events.forget_preview`), a comment a moderator
+    hid or its author deleted (`notifications/listeners/social_listeners.py`). The
+    inbox renders its sentence from `context` at READ time
+    (`social.serializers.NotificationSerializer`), so the quoted words stayed readable
+    for as long as the row lived — the one surface moderation did not reach (SIDE_BUGS
+    S-094, S-107). The row itself is kept: who did what, and when, is still true.
+
+    Row by row, and only rows that still carry a preview: the JSON is rewritten in
+    Python rather than with a database JSON function so it reads the same on every
+    backend, and a burst of pushes about one object is a handful of rows.
+    """
+    changed = 0
+    for pk, metadata in (Notification.objects.filter(**filters)
+                         .values_list('pk', 'metadata')):
+        context = dict((metadata or {}).get('context') or {})
+        if not context.get('preview'):
+            continue
+        context['preview'] = ''
+        Notification.objects.filter(pk=pk).update(
+            metadata={**(metadata or {}), 'context': context})
+        changed += 1
+    return changed

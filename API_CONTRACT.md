@@ -383,6 +383,13 @@ conversation row carries `can_send` and `refusal` so the app can explain a close
 composer without posting first. A conversation that is not the caller's is **404**, never
 403.
 
+`refusal` / the send's 403 `code`, in the order they are decided: `no_relation` (never an
+approved pair and never a paid month), `blocked` (either of the two blocked the other —
+`moderation`; the thread stays readable), `coaching_ended` (the relation is gone — ending
+a coaching deletes it — but the pair paid for coaching), `coaching_frozen`,
+`coaching_unpaid`. `conversations/start/` answers the same 404 for a blocked pair as for
+a stranger, and opens (or returns) the thread of a pair whose paid coaching has ended.
+
 `POST .../messages/` may carry `client_uuid`, the app's own id for the message: the first
 send answers 201, a retry answers **200** with the same message, and an id already used
 by the other person in that thread answers 409 `idempotency_conflict`. `DELETE
@@ -393,12 +400,19 @@ Live: `ws://host/ws/chat/{conversation_id}/?token=<access JWT>`. Client frames
 `{"type": "message.send", body, client_uuid?}` and `{"type": "message.read"}`; server
 frames `message.new`, `message.read`, `message.deleted` and
 `{"type": "error", code, detail}`. A socket send runs the same checks and the same
-serializer as the REST route. Close codes: 4001 no usable token, 4004 not your
-conversation.
+serializer as the REST route, and `detail` is in the reader's language. The socket's
+own codes: `invalid_frame`, `unknown_type`, `server_error`, `auth` (the token expired or
+the account was suspended since connect — re-checked on every frame; the socket then
+closes with 4001) and `rate_limited` (with `retry_after` seconds: `message.send` and
+`message.read` frames spend the same hourly allowance as the REST routes — 1500 an hour
+for a client). Close codes: 4001 no usable token (at connect, or after `auth`), 4004 not
+your conversation.
 
 Push: `chat_message`, keyed on the conversation, sent only when the recipient has opened
 that thread since the last time they were told about it — ten messages in a minute are
-one push.
+one push, however fast the notification worker drains. A message its sender deletes
+stops being quoted in the recipient's inbox (`context.preview` is blanked on the
+`chat_message` row); a push already on the phone cannot be taken back.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -499,6 +513,16 @@ completes, a day closes or a chat message arrives.
 | `GET` | `/api/v1/home` | auth | `HomeView` |
 
 ### Notifications
+
+`POST message-client/` `{client_id, message}` — a trainer's one-line notice to a client
+they coach. It answers to the chat's rules: 404 `not_found` for a client who is not an
+approved client of the caller, 403 `user_blocked` when either of the two has blocked the
+other, and 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
+`trainer_id`) when the coaching cannot be used. An admin is not a party to a coaching and
+is not refused by those three.
+
+`comment_created` quotes the first words of a comment; once a moderator hides the
+comment or it is deleted, the quote is blanked on the inbox row.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -695,9 +719,13 @@ All authenticated.
 
 **Reporting.** `POST reports/` takes `{target_type, target_id, reason, note?}` and
 answers `201 {id, status}`. `target_type` is `user`, `chat_message`, `routine`,
-`diet_plan`, `exercise`, `social_post` or `comment`; `reason` is `spam`, `harassment`,
-`nudity`, `violence`, `scam`, `impersonation` or `other`; `note` is the reporter's own
-words, 1000 characters at most.
+`diet_plan`, `exercise`, `social_post`, `comment`, `coach_message` or `challenge`;
+`reason` is `spam`, `harassment`, `nudity`, `violence`, `scam`, `impersonation` or
+`other`; `note` is the reporter's own words, 1000 characters at most.
+`chat_message` is a message in a conversation with the AI coach; `coach_message` is a
+message in the trainer–client chat, reportable by the two people in that conversation
+(also after its sender deleted it); `challenge` is a community challenge, authored by
+its creator.
 
 | `code` | Status | When |
 |---|---|---|
@@ -721,9 +749,14 @@ public profiles, the available-trainers list or trainer matches; neither can sen
 other a trainer request (`user_blocked`, 403, on `client/request-trainer/` and
 `trainer/assign-client/`), and a request sent before the block cannot be accepted
 after it (same code on `trainer/respond-to-request/` and `client/respond-to-invite/`).
+In the chat neither can start a thread with the other (404) or write in an existing one
+(403 `blocked`, and the row reads `can_send: false, refusal: "blocked"`); the thread
+stays readable. `notifications/message-client/` answers 403 `user_blocked`.
 Blocking does not hide a challenge from either of them, but a blocked person is
 dropped from its leaderboard — with the ranks left as they were, so the board still
-reads 1, 2, 4.
+reads 1, 2, 4. Nor does a block end or hide an approved coaching: a client who blocks
+their current trainer is still in that trainer's `trainer/clients/` list until the
+coaching ends.
 
 Every count agrees with the list it summarises, for the viewer reading it:
 `followers_count`, `following_count` and `posts_count` on a public profile, and
@@ -1306,6 +1339,11 @@ challenge, including the ones at zero, ordered `-current_value`, then `joined_at
 `id` — the order `challenges/{id}/leaderboard/` and the home card's `challenge_rank`
 already read. Places run 1..N with no gaps and no nulls, and they stop changing once
 the challenge ends.
+
+A challenge an operator hid (the console's hide action, after a report — `target_type`
+`challenge` on `/api/v1/reports/`) is served to nobody, its creator included: it leaves
+the list, and its detail, `join`, `leave`, `update_progress` and `leaderboard` answer
+404. The home card stops showing it too.
 
 `comments_count` on a post is the number of comments THIS viewer can open: the stored
 counter less the ones hidden by moderation and the ones by accounts they have blocked.

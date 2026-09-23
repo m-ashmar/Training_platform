@@ -9,7 +9,7 @@ account on every build (`CLAUDE.md`, rule zero).
 The three models are deliberately independent of the apps they protect:
 
 * `Report` names its target by TYPE AND ID, never by a foreign key. Reportable things
-  live in five apps and one of them (`chat_message`) is deleted by the person's own
+  live in seven apps and one of them (`chat_message`) is deleted by the person's own
   GDPR request; a hard FK would make every one of those deletions a moderation
   problem — either it cascades the complaint away or it PROTECTs and the delete fails.
   A dangling `target_id` is the correct outcome: the report stays, and the console
@@ -33,7 +33,14 @@ def _label(text):
 
 
 class TargetType(models.TextChoices):
-    """What can be reported. The app sends one of these strings verbatim."""
+    """What can be reported. The app sends one of these strings verbatim.
+
+    `chat_message` is a message in a conversation with the AI coach (ai_assistant) and
+    stays that: a shipped value never changes meaning. A message in the trainer–client
+    chat (`chat.Message`) is `coach_message` (SIDE_BUGS S-105). `challenge` is a
+    community challenge — its title, description, rules, reward and image are written
+    by whoever created it and shown to everyone (S-065).
+    """
 
     USER = "user", _label("User")
     CHAT_MESSAGE = "chat_message", _label("Chat message")
@@ -42,6 +49,8 @@ class TargetType(models.TextChoices):
     EXERCISE = "exercise", _label("Exercise")
     SOCIAL_POST = "social_post", _label("Post")
     COMMENT = "comment", _label("Comment")
+    COACH_MESSAGE = "coach_message", _label("Trainer chat message")
+    CHALLENGE = "challenge", _label("Challenge")
 
 
 class ReportReason(models.TextChoices):

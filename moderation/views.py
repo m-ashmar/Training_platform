@@ -35,14 +35,21 @@ logger = logging.getLogger(__name__)
 
 class ReportCreateView(APIView):
     """POST /api/v1/reports/ — report a person, a post, a comment, a routine, a diet
-    plan, an exercise or a message from the AI coach.
+    plan, an exercise, a message from the AI coach, a message in the trainer–client
+    chat, or a challenge.
 
     Headers: `Authorization: Bearer <access>`, `Accept-Language`. Identical on every
     `X-App-Channel`.
 
     Body: `{target_type, target_id, reason, note?}`
       `target_type`: `user` | `chat_message` | `routine` | `diet_plan` | `exercise` |
-                     `social_post` | `comment`
+                     `social_post` | `comment` | `coach_message` | `challenge`
+                     `chat_message` is a message in a conversation with the AI coach;
+                     `coach_message` is a message in the chat with your trainer or
+                     client (`/api/v1/chat/`), reportable by the two people in that
+                     conversation, including one its sender has since deleted;
+                     `challenge` is a community challenge (`/api/social/challenges/`),
+                     authored by whoever created it.
       `reason`: `spam` | `harassment` | `nudity` | `violence` | `scam` |
                 `impersonation` | `other`
       `note`: the reporter's own words, up to 1000 characters, optional.
@@ -150,9 +157,19 @@ class BlockListCreateView(APIView):
       404 `user_not_found` — no such active account.
 
     The effect is symmetric and immediate: neither account appears in the other's feed,
-    post and comment lists, follower lists, notifications, public profiles, trainer
-    roster or trainer matches, and neither can send the other a trainer request. The
-    block is owned by whoever made it — only they can lift it.
+    post and comment lists, follower lists, notifications, public profiles, the
+    signed-in list of available trainers or trainer matches; neither can send the other
+    a trainer request; and in the chat neither can start a thread with the other (404)
+    or write in an existing one (403 `blocked`; the thread stays readable). The block is
+    owned by whoever made it — only they can lift it.
+
+    What a block does NOT do (SIDE_BUGS S-106, stated so the app is not told otherwise):
+    it does not end or hide an approved coaching. A client who blocks their current
+    trainer still appears in that trainer's client list (`/api/auth/trainer/clients/`)
+    with the profile a coach sees, until the coaching ends. The public trainer
+    directory (`/api/v1/trainers/`) takes no sign-in and so cannot filter by blocks.
+    Blocking does not hide a challenge either (a blocked person is only dropped from its
+    leaderboard).
     """
 
     permission_classes = [IsAuthenticated]

@@ -54,6 +54,15 @@ class Conversation(models.Model):
     #: yet — so the unread count is a plain comparison and never a COALESCE.
     trainer_last_read_at = models.DateTimeField(default=timezone.now)
     client_last_read_at = models.DateTimeField(default=timezone.now)
+    #: When each side was last PUSHED about this thread (`chat.events.notify_new_message`).
+    #: The nudge rule — tell someone again only once they have opened the thread since
+    #: the last push — is claimed against these with one conditional UPDATE at send time.
+    #: It used to be read from the last `chat_message` Notification row, which a Celery
+    #: worker writes LATER: a burst sent faster than the queue drained pushed once per
+    #: message, and a read between the send and the worker's write swallowed the next
+    #: legitimate push (SIDE_BUGS S-095). NULL = never pushed.
+    trainer_notified_at = models.DateTimeField(null=True, blank=True)
+    client_notified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = 'Conversation'

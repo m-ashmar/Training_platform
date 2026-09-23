@@ -8,8 +8,11 @@ the functions, the way the rest of this codebase does it.
 
 The rule the whole app exists to enforce: a block is symmetric in effect. `blocked_ids`
 returns both sides of every row the person appears in, so one row hides each of them
-from the other's feed, search, follower list, notifications and trainer roster. Only
-the blocker can remove it.
+from the other's feed, search, follower list, notifications, the signed-in list of
+available trainers and trainer matches, and closes the chat between them
+(`chat.permissions`). It does not end or hide an approved coaching — the trainer's own
+client list still shows a client who blocked them (`moderation/views.py`
+`BlockListCreateView`). Only the blocker can remove it.
 """
 from __future__ import annotations
 

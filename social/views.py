@@ -635,7 +635,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         #   so the serializer does not issue queries per challenge
         from django.db.models import Exists, OuterRef, Subquery
         qs = (
-            Challenge.objects.all()
+            # Not one an operator hid (SIDE_BUGS S-065) — for everyone, its creator
+            # included, the way a hidden post is served to nobody.
+            Challenge.objects.filter(is_hidden=False)
             .select_related('creator')
             .only(
                 'id', 'title', 'description', 'challenge_type',

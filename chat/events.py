@@ -52,10 +52,17 @@ def notify_new_message(message):
     THE DEDUP RULE, and it is deliberately one sentence long: tell someone about this
     conversation only when they have OPENED it since the last time we told them. Ten
     messages in a minute are therefore one push; the recipient reads the thread, the
-    next message pushes again. It needs no timer and no counter — the state is already
-    on the row (`..._last_read_at`) and in the inbox (the last `chat_message`
-    notification for this conversation) — and it is explainable to a person: "we only
-    nudge you once until you have looked".
+    next message pushes again. It needs no timer and no counter, and it is explainable
+    to a person: "we only nudge you once until you have looked".
+
+    The state is on the conversation row — `..._notified_at` beside `..._last_read_at` —
+    and the push is CLAIMED with one conditional UPDATE before it is emitted
+    (`_claim_nudge`). It used to be read from the last `chat_message` Notification row,
+    but a Celery worker writes that row after this function returns, so every message
+    of a burst that outran the queue saw "no push yet" and pushed, and a read between a
+    send and the worker's write left the next legitimate push swallowed (SIDE_BUGS
+    S-095). The UPDATE is atomic in Postgres: of two sends racing for one nudge,
+    exactly one updates the row.
 
     Delivery itself still obeys the recipient's settings: `NotificationService`
     dispatches through `UserNotificationPreference.is_channel_enabled`, so someone who
@@ -67,23 +74,11 @@ def notify_new_message(message):
         from notifications.domain.chat_events import ChatMessageEvent
         from notifications.domain.dispatcher import emit_event
 
-        from .models import Conversation
-
         conversation = message.conversation
         recipient_id = conversation.other_id(message.sender_id)
         if recipient_id is None:
             return
-        # Read the stamp from the ROW, never from this in-memory conversation. A
-        # consumer holds one object for the whole life of a socket, and the recipient
-        # may have opened the thread on their phone since it was loaded; a stale stamp
-        # would swallow the second, legitimate nudge for as long as the socket lives.
-        stamps = (Conversation.objects.filter(pk=conversation.pk)
-                  .values('client_id', 'client_last_read_at', 'trainer_last_read_at')
-                  .first()) or {}
-        read_at = (stamps.get('client_last_read_at')
-                   if recipient_id == stamps.get('client_id')
-                   else stamps.get('trainer_last_read_at'))
-        if not _should_notify(conversation.pk, recipient_id, read_at):
+        if not _claim_nudge(conversation, recipient_id):
             return
         sender = message.sender
         emit_event(ChatMessageEvent(
@@ -100,14 +95,47 @@ def notify_new_message(message):
                        getattr(message, 'pk', None), exc_info=True)
 
 
-def _should_notify(conversation_id, recipient_id, read_at) -> bool:
-    """Has the recipient opened this thread since we last told them about it?"""
-    from notifications.models import Notification
+def _claim_nudge(conversation, recipient_id) -> bool:
+    """Take the right to push `recipient_id` about this thread; True if it was ours.
 
-    last = (Notification.objects
-            .filter(recipient_id=recipient_id, event_type='chat_message',
-                    related_object_id=str(conversation_id))
-            .order_by('-created_at', '-id')
-            .values_list('created_at', flat=True)
-            .first())
-    return last is None or (read_at is not None and read_at > last)
+    One UPDATE on the ROW, never a read of this in-memory conversation: a consumer
+    holds one object for the whole life of a socket, and the recipient may have opened
+    the thread on their phone since it was loaded. The WHERE is re-checked under the
+    row lock, so a concurrent claim that committed first makes this one match nothing.
+    """
+    from django.db.models import F, Q
+    from django.utils import timezone
+
+    from .models import Conversation
+
+    side = 'client' if recipient_id == conversation.client_id else 'trainer'
+    notified, read = f'{side}_notified_at', f'{side}_last_read_at'
+    return bool(Conversation.objects
+                .filter(pk=conversation.pk)
+                .filter(Q(**{f'{notified}__isnull': True})
+                        | Q(**{f'{notified}__lt': F(read)}))
+                .update(**{notified: timezone.now()}))
+
+
+def forget_preview(message):
+    """Blank the preview of `message` wherever the recipient's inbox quotes it.
+
+    The push stores the first words of the message in the Notification row's
+    `context`, and `GET /api/social/notifications/` renders from it — so a message its
+    sender took back stayed readable in the other person's inbox for ever, although
+    `MessageDeleteView` promises no endpoint serves the text again (SIDE_BUGS S-094).
+    The row is kept (it still says who wrote, and when); only the quoted text goes.
+
+    Never raises: the tombstone stands whatever happens here.
+    """
+    try:
+        from notifications.services import blank_previews
+
+        recipient_id = message.conversation.other_id(message.sender_id)
+        if recipient_id is None:
+            return
+        blank_previews(recipient_id=recipient_id, event_type='chat_message',
+                       metadata__data__message_id=str(message.pk))
+    except Exception:       # noqa: BLE001
+        logger.warning('could not blank the preview of chat message %s',
+                       getattr(message, 'pk', None), exc_info=True)

@@ -383,6 +383,12 @@ class Challenge(models.Model):
         blank=True,
         null=True
     )
+
+    #: Hidden by an operator (the console's hide action), after a report or on sight.
+    #: A challenge is written by whoever created it and shown to everyone, so it needs
+    #: the same moderation switch a post and a comment have (SIDE_BUGS S-065). A hidden
+    #: challenge is served to nobody, its creator included.
+    is_hidden = models.BooleanField(default=False)
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)

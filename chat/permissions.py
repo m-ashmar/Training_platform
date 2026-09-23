@@ -8,11 +8,14 @@ no second implementation: a rule that exists twice is a rule that disagrees with
 
 Today it answers with:
 
-    `no_relation`      there is no APPROVED TrainerClientRelation between these two
+    `no_relation`      there is no APPROVED TrainerClientRelation between these two, and
+                       they never had a paid coaching month either
+    `blocked`          either of the two has blocked the other (`moderation.Block`)
     `coaching_frozen`  the renewal found the wallet short; the coaching is paused
     `coaching_unpaid`  support returned the month's payment
-    `coaching_ended`   the coaching is over
-    `blocked`          reserved for the moderation app; `_blocked` returns False today
+    `coaching_ended`   the coaching is over: no approved relation any more (ending a
+                       coaching deletes it, `users.coaching.end_coaching`), but the pair
+                       has paid months (`CoachingPeriod`), which outlive the relation
 
 THE RULE FOR A COACHING THAT IS NOT PAID (the owner, 2026-09-19): frozen, unpaid and
 ended keep the conversation READABLE by both sides and refuse SENDING with that code
@@ -27,11 +30,28 @@ from users.coaching import refusals_for
 def _blocked(sender, recipient) -> bool:
     """Has either of these two blocked the other?
 
-    False today: there is no blocking in this pass. The moderation app will own this
-    function — a block list, its own table, and its own endpoints — and every send path
-    already asks here, so wiring it up is one function body and no new call sites.
+    `moderation.services.is_blocked`, the one-to-one twin of `blocked_ids`: the block
+    is symmetric in effect, so a block made by EITHER side closes the composer for both
+    (SIDE_BUGS S-063). This stub answered False for as long as the moderation app
+    existed, so a blocked person could still write — and push to the blocker's lock
+    screen — while the home card already hid the coach-chat for the same pair.
     """
-    return False
+    from moderation.services import is_blocked
+
+    return is_blocked(sender, recipient)
+
+
+def _coached_for_money(trainer_id, client_id) -> bool:
+    """Did this pair ever have a paid coaching month?
+
+    What tells "the coaching ended" from "these two never worked together". Ending a
+    coaching DELETES the relation (`users.coaching.end_coaching`), so the relation
+    cannot answer; the months are money records and are kept (`CoachingPeriod`).
+    """
+    from users.models import CoachingPeriod
+
+    return CoachingPeriod.objects.filter(trainer_id=trainer_id,
+                                         client_id=client_id).exists()
 
 
 def pair_of(a, b):
@@ -81,10 +101,33 @@ def may_message(sender, recipient):
         return 'blocked'
     trainer, client = pair
     if client.pk not in approved_partner_ids(trainer):
-        return 'no_relation'
+        # The relation is gone. A pair that paid for coaching gets the code the
+        # module docstring promises (S-096); `no_relation` is for two people who were
+        # never a working pair.
+        return ('coaching_ended' if _coached_for_money(trainer.pk, client.pk)
+                else 'no_relation')
     # Two queries for the whole roster, and two for one pair. Same rule as
     # `training_refusal`, which is what refuses a workout on the same coaching.
     return refusals_for(trainer.pk, [client.pk]).get(client.pk)
+
+
+def may_open_thread(user, other):
+    """`(trainer, client)` when `user` may open (or re-open) the thread with `other`,
+    else None.
+
+    Opening is reading, and reading outlives the coaching: an approved pair, and a pair
+    whose PAID coaching has ended, may open the thread — the second one reads it and
+    finds the composer closed with `coaching_ended`. Nobody opens a thread with someone
+    they have blocked or who has blocked them (S-063): the start route answers the same
+    404 as for a stranger, so it cannot be used to learn that a block exists.
+    """
+    pair = pair_of(user, other)
+    if pair is None or _blocked(user, other):
+        return None
+    trainer, client = pair
+    if other.pk in approved_partner_ids(user) or _coached_for_money(trainer.pk, client.pk):
+        return pair
+    return None
 
 
 def refusals_for_conversations(user, conversations) -> dict:
@@ -92,25 +135,54 @@ def refusals_for_conversations(user, conversations) -> dict:
 
     The conversation list shows a composer that is either open or explained, so every
     row needs this answer; asking `may_message` per row would be four queries per
-    conversation. The bulk read costs one query for the approved relations plus two per
-    TRAINER on the page — one, for a client (a client has at most one approved trainer,
-    and every other thread is already refused by the relation check) and one for a
-    trainer looking at their own roster.
+    conversation. The bulk read costs one query for the approved relations, one for the
+    caller's blocks (`moderation.services.blocked_ids`, both directions), at most one
+    for the paid history of the rows whose relation is gone, plus two per TRAINER on the
+    page — one, for a client (a client has at most one approved trainer, and every other
+    thread is already refused by the relation check) and one for a trainer looking at
+    their own roster.
 
-    `_blocked` is NOT consulted here — it needs a bulk twin, and this is the call site
-    that will want one the day the moderation app lands.
+    The same order as `may_message`, so the row and the send can never disagree:
+    `blocked` first, then `coaching_ended` / `no_relation` for a pair with no approved
+    relation, then the coaching's own state.
     """
+    from moderation.services import blocked_ids
+
     rows = list(conversations)
     if not rows:
         return {}
     approved = approved_partner_ids(user)
-    answers, by_trainer = {}, {}
+    hidden = blocked_ids(user)
+    answers, by_trainer, gone = {}, {}, []
     for conversation in rows:
         other = conversation.other_id(user.pk)
-        if other is None or other not in approved:
+        if other is None:
             answers[conversation.pk] = 'no_relation'
             continue
+        if other in hidden:
+            answers[conversation.pk] = 'blocked'
+            continue
+        if other not in approved:
+            gone.append(conversation)
+            continue
         by_trainer.setdefault(conversation.trainer_id, []).append(conversation)
+    if gone:
+        from django.db.models import Q
+
+        from users.models import CoachingPeriod
+
+        # One query for every row whose relation is gone: which of these pairs paid.
+        pairs = Q()
+        for conversation in gone:
+            pairs |= Q(trainer_id=conversation.trainer_id,
+                       client_id=conversation.client_id)
+        paid = set(CoachingPeriod.objects.filter(pairs)
+                   .values_list('trainer_id', 'client_id').distinct())
+        for conversation in gone:
+            answers[conversation.pk] = (
+                'coaching_ended'
+                if (conversation.trainer_id, conversation.client_id) in paid
+                else 'no_relation')
     for trainer_id, group in by_trainer.items():
         refusals = refusals_for(trainer_id, [c.client_id for c in group])
         for conversation in group:

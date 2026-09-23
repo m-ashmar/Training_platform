@@ -5,10 +5,14 @@ The event type and its template were registered from the start with no way to pr
 one: there was no endpoint, no service call, nothing. A trainer could assign routines
 and diet plans but could not say a word to the person following them.
 
-Authorisation is the whole risk here. This is the only endpoint where one user writes
-text that lands on another user's lock screen, so it is restricted to trainers, and
-only to clients with an **approved** TrainerClientRelation — pending and rejected are
-not enough.
+Authorisation is the whole risk here. This is one of two endpoints where one user writes
+text that lands on another user's lock screen (the other is the chat), so it is
+restricted to trainers, and only to clients with an **approved** TrainerClientRelation —
+pending and rejected are not enough — and it answers to the same two rules the chat
+does (SIDE_BUGS S-066): nobody writes to a person they have blocked or who has blocked
+them, and a coaching that is frozen, unpaid or ended is silent in both directions (the
+owner's freeze rule, 2026-09-19). Before those checks this route was the way around
+both: a trainer the chat refused could still put text on the client's lock screen.
 """
 
 from __future__ import annotations
@@ -46,7 +50,25 @@ class TrainerMessageView(APIView):
     """
     POST /api/notifications/message-client/
 
-    Body: {"client_id": 42, "message": "Rest day tomorrow, focus on mobility."}
+    Auth: a trainer (or an admin). Body:
+    `{"client_id": 42, "message": "Rest day tomorrow, focus on mobility."}` — `message`
+    at most 500 characters, one line. Nothing here differs by build.
+
+    Answers:
+      201 `{"message", "delivered": true, "message_id"}` — written to the client's
+          inbox and pushed (unless they muted `custom`, which still keeps the row).
+      400 `validation_error` — empty message, control characters, over 500.
+      403 `permission_denied` — the caller is not a trainer or an admin.
+      404 `not_found` — no such active client, or not one this trainer has an APPROVED
+          relation with. One answer for both, so ids cannot be walked.
+      403 `user_blocked` — either of the two has blocked the other. The same answer
+          whichever side blocked, as on every other route that refuses a block.
+      403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
+          `trainer_id`) — the coaching cannot be used right now. The same codes and
+          shape the chat and every training write answer with.
+
+    An admin is not a party to a coaching: the relation, block and coaching checks
+    apply to trainers.
     """
 
     permission_classes = [IsAuthenticated]
@@ -80,13 +102,22 @@ class TrainerMessageView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        if not user.is_admin and not TrainerClientRelation.objects.filter(
-            trainer=user, client=client, status="approved"
-        ).exists():
-            return Response(
-                {"detail": _("No such client."), "code": "not_found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        if not user.is_admin:
+            if not TrainerClientRelation.objects.filter(
+                trainer=user, client=client, status="approved"
+            ).exists():
+                return Response(
+                    {"detail": _("No such client."), "code": "not_found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            # The chat's two rules, asked the way the chat asks them (S-066).
+            from moderation.exceptions import UserIsBlocked
+            from moderation.services import is_blocked
+            from users.coaching import raise_refusal, refusals_for
+
+            if is_blocked(user, client):
+                raise UserIsBlocked()
+            raise_refusal(refusals_for(user.pk, [client.pk]).get(client.pk), user.pk)
 
         # A unique id per message: the dedup key is
         # (recipient, event_type, related_object_id), so a shared id would let a
