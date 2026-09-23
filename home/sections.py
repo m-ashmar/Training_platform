@@ -604,7 +604,8 @@ def challenge_rank(person) -> dict | None:
            .filter(user=person)
            .exclude(status='dropped')
            .filter(~Q(challenge__status__in=Challenge.TERMINAL_STATUSES),
-                   challenge__start_date__lte=now, challenge__end_date__gte=now)
+                   challenge__start_date__lte=now, challenge__end_date__gte=now,
+                   challenge__is_hidden=False)
            .annotate(ahead=Coalesce(Subquery(ahead, output_field=IntegerField()), Value(0)))
            # `ahead` is named here on purpose: a `values()` after an `annotate()`
            # returns only the columns it lists, annotations included.

@@ -440,9 +440,15 @@ class ChallengeAdmin(admin.ModelAdmin):
     # Without this each row re-queried creator — ~100 extra
     # queries per changelist page.
     list_select_related = ('creator',)
-    list_display = ('title', 'creator', 'challenge_type', 'status', 'start_date', 'end_date', 'participant_count')
-    list_filter = ('challenge_type', 'status', 'start_date', 'end_date')
+    list_display = ('title', 'creator', 'challenge_type', 'status', 'is_hidden', 'start_date', 'end_date', 'participant_count')
+    list_filter = ('challenge_type', 'status', 'is_hidden', 'start_date', 'end_date')
     search_fields = ('title', 'creator__username')
+    # A challenge is user-written and shown to everyone: an operator hides one the way
+    # they hide a post (SIDE_BUGS S-065).
+    actions = [_set_field_action('hide_challenges', 'Hide selected challenges',
+                                 'Hidden by moderation', is_hidden=True),
+               _set_field_action('unhide_challenges', 'Unhide selected challenges',
+                                 'Unhidden by moderation', is_hidden=False)]
     
     def participant_count(self, obj):
         # Annotated in get_queryset: `.count()` here was one query per row.

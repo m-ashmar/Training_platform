@@ -103,6 +103,31 @@ def _fetch_chat_message(viewer, target_id):
         pk=target_id, session__user=viewer).select_related("session").first()
 
 
+def _fetch_coach_message(viewer, target_id):
+    from django.db.models import Q
+
+    from chat.models import Message
+
+    # A message in a trainer–client conversation, reportable by the two people in it —
+    # the same membership rule `chat/views.py` reads a thread by. A message its sender
+    # took back is still a row in the reporter's thread (a tombstone), and harassment
+    # that is deleted a minute later is exactly what needs reporting, so it stays
+    # reportable; the operator reads the stored text.
+    return (Message.objects
+            .filter(Q(conversation__trainer=viewer) | Q(conversation__client=viewer),
+                    pk=target_id)
+            .first())
+
+
+def _fetch_challenge(viewer, target_id):
+    from social.models import Challenge
+
+    # Every challenge the list serves is visible to every signed-in person
+    # (`social.views.ChallengeViewSet`); one an operator has hidden is not, and so is
+    # not reportable either.
+    return Challenge.objects.filter(pk=target_id, is_hidden=False).first()
+
+
 def _author_of_chat_message(row):
     # The person only wrote the messages with role "user"; everything else is the
     # model's output and has no author, so it stays reportable by the person it was
@@ -130,6 +155,12 @@ RESOLVERS: dict[str, TargetSpec] = {
     TargetType.CHAT_MESSAGE: TargetSpec(
         model="ai_assistant.ChatMessage", fetch=_fetch_chat_message,
         author=_author_of_chat_message),
+    TargetType.COACH_MESSAGE: TargetSpec(
+        model="chat.Message", fetch=_fetch_coach_message,
+        author=lambda row: row.sender_id),
+    TargetType.CHALLENGE: TargetSpec(
+        model="social.Challenge", fetch=_fetch_challenge,
+        author=lambda row: row.creator_id),
 }
 
 
