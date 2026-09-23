@@ -19,7 +19,12 @@ class DietAnalyzer:
     def analyze(self, user) -> dict:
         from diet.models import DietPlan, DailyProgress, Meal
 
-        plan = DietPlan.objects.filter(user=user, is_active=True).first()
+        from ai_assistant.tools.diet_tools import plan_day_adherence
+
+        # The plan covering today, not the newest active one: a plan a trainer has
+        # scheduled for next week has no progress rows yet, so every figure below read
+        # "not tracked" (SIDE_BUGS S-060).
+        plan = DietPlan.governing(user).first()
         if not plan:
             return {"has_active_plan": False}
 
@@ -28,30 +33,21 @@ class DietAnalyzer:
 
         # --- Adherence trend ---
         progress_qs = DailyProgress.objects.filter(
-            user=user, diet_plan=plan, date__gte=two_weeks_ago,
+            user=user, diet_plan=plan, date__gte=two_weeks_ago, date__lte=today,
         )
 
-        week1 = progress_qs.filter(
-            date__lt=today - timedelta(days=7),
-        )
-        week2 = progress_qs.filter(
-            date__gte=today - timedelta(days=7),
-        )
+        # Over each week's plan days, an untracked day counting 0, and None — never 0 —
+        # for a week with nothing tracked (SIDE_BUGS S-091). Averaging the stored rows
+        # averaged only the days the client logged, and `0` stood for "no data".
+        week1 = plan_day_adherence(user, plan, two_weeks_ago,
+                                   today - timedelta(days=8))
+        week2 = plan_day_adherence(user, plan, today - timedelta(days=7), today)
+        week1_adherence = week1["average"]
+        week2_adherence = week2["average"]
 
-        def _avg_adherence(qs):
-            total = 0
-            count = 0
-            for dp in qs:
-                if dp.target_calories > 0:
-                    pct = dp.calories_consumed / dp.target_calories * 100
-                    total += max(0, 100 - abs(pct - 100))
-                    count += 1
-            return round(total / count, 1) if count else 0
-
-        week1_adherence = _avg_adherence(week1)
-        week2_adherence = _avg_adherence(week2)
-
-        if week2_adherence > week1_adherence + 5:
+        if week1_adherence is None or week2_adherence is None:
+            adherence_trend = None      # nothing to compare against
+        elif week2_adherence > week1_adherence + 5:
             adherence_trend = "improving"
         elif week2_adherence < week1_adherence - 5:
             adherence_trend = "declining"
@@ -118,6 +114,8 @@ class DietAnalyzer:
             "adherence_trend": adherence_trend,
             "week1_adherence_pct": week1_adherence,
             "week2_adherence_pct": week2_adherence,
+            "days_tracked": len(week1["tracked"]) + len(week2["tracked"]),
+            "plan_days": len(week1["days"]) + len(week2["days"]),
             "macro_gap": macro_gap,
             "weakest_meal": weakest_meal,
             "weakest_meal_completion_pct": round(lowest_rate, 1) if weakest_meal else None,

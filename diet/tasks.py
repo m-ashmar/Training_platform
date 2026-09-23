@@ -166,7 +166,13 @@ def generate_daily_advice(user_id=None):
                         "generation_timestamp": timezone.now().isoformat(),
                         "user_metrics": {
                             "bmi": user.calculate_bmi() if hasattr(user, 'calculate_bmi') else None,
-                            "daily_calories": user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None,
+                            # The figure the TEXT names, from the same resolver
+                            # (SIDE_BUGS S-097). This called the profile formula again:
+                            # it raises for an incomplete profile, which dropped the
+                            # whole row for a client on a trainer's plan with no height
+                            # or age, and otherwise disagreed with the plan's target
+                            # printed in the sentence beside it.
+                            "daily_calories": _advice_calories(user, today),
                             "fitness_goal": user.resolve_fitness_goal()
                         },
                         "advice_effectiveness_tracking": {
@@ -207,6 +213,41 @@ def generate_daily_advice(user_id=None):
             extra={"user_id": user_id, "task": "generate_daily_advice"}
         )
 
+def _advice_calories(user, today):
+    """The daily calorie figure the advice names, or None when there is none to name.
+
+    The number the client's PLAN is built to. The profile formula is only a fallback:
+    a trainer's plan, or one generated at an earlier weight, has its own target, and
+    the advice named a different figure from the one on the plan screen beside it.
+
+    The plan governing TODAY, resolved exactly as every screen resolves it
+    (trainer_services._get_active_diet_plan). "Newest active" is not the same
+    question: create_diet_plan only supersedes plans whose dates OVERLAP, so a trainer
+    scheduling next week leaves two active rows and the newer one is not the one the
+    client is eating from.
+
+    The fallback never guesses. `calculate_daily_calories` raises for a profile
+    without height, weight, age or gender, and an activity level the client never
+    chose would be the sedentary factor silently (the owner, 2026-09-20: no plan is
+    built from an unanswered level) — both answer None.
+    """
+    active_plan = (DietPlan.objects
+                   .filter(user=user, is_active=True,
+                           start_date__lte=today, end_date__gte=today)
+                   .order_by('-start_date', '-id').only('daily_calories').first())
+    if active_plan is not None and active_plan.daily_calories:
+        return round(float(active_plan.daily_calories))
+    if not hasattr(user, 'calculate_daily_calories'):
+        return None
+    if getattr(user, 'activity_level_unanswered', False):
+        return None
+    try:
+        figure = user.calculate_daily_calories()
+    except ValueError:
+        return None
+    return round(float(figure)) if figure is not None else None
+
+
 def _generate_personalized_advice(user):
     """
     Generate personalized dietary advice for a user.
@@ -230,28 +271,16 @@ def _generate_personalized_advice(user):
     try:
         # Get user metrics
         bmi = user.calculate_bmi() if hasattr(user, 'calculate_bmi') else None
-        # The number the client's PLAN is built to. The profile formula is only a
-        # fallback: a trainer's plan, or one generated at an earlier weight, has its own
-        # target, and the advice named a different figure from the one on the plan
-        # screen beside it.
-        #
-        # The plan governing TODAY, resolved exactly as every screen resolves it
-        # (trainer_services._get_active_diet_plan). "Newest active" is not the same
-        # question: create_diet_plan only supersedes plans whose dates OVERLAP, so a
-        # trainer scheduling next week leaves two active rows and the newer one is not
-        # the one the client is eating from.
-        today = today_for(user)
-        active_plan = (DietPlan.objects
-                       .filter(user=user, is_active=True,
-                               start_date__lte=today, end_date__gte=today)
-                       .order_by('-start_date', '-id').only('daily_calories').first())
-        if active_plan is not None and active_plan.daily_calories:
-            daily_calories = round(float(active_plan.daily_calories))
-        else:
-            daily_calories = user.calculate_daily_calories() if hasattr(user, 'calculate_daily_calories') else None
+        # The plan's target for today, else a profile figure it can stand behind, else
+        # None — see `_advice_calories`. The row's `context_data` stores the same value.
+        daily_calories = _advice_calories(user, today_for(user))
         goal = user.resolve_fitness_goal()
 
         with translation.override(language):
+            if daily_calories is None:
+                # No figure we can stand behind: say nothing about a number rather
+                # than print "None calories".
+                return str(_("Stay hydrated and maintain a balanced diet with regular meals."))
             if goal == 'Lose':
                 advice = _("Aim for a moderate deficit of 300 to 500 calories a day. "
                            "Your target is %(kcal)s calories.") % {"kcal": daily_calories}

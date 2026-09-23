@@ -299,7 +299,18 @@ in its class docstring. Two worth naming here:
 
 A turn that ends in an `error` frame is **not** charged against the daily message
 allowance; each turn closes with `{"type": "rate_limit", "remaining", "resets_at"}`
-carrying what is actually left.
+carrying what is actually left. `resets_at` is the next midnight in the server's time
+zone as ISO 8601 **with its offset** (`2026-09-24T00:00:00+03:00`), the same instant
+`/api/subscription/v1/usage/today/` gives for `ai_messages`; it used to carry no offset.
+
+`tool_used.display` and `complete.tools_used[].display` are translated into the
+reader's language. Branch on `name`; `display` is for showing.
+
+👍/👎 is stored on the reply for every user, over REST and over the socket alike, and
+reads back as `feedback` (`positive` | `negative` | null) on each message of
+`sessions/{session_id}/messages/`. `POST feedback/` answers
+`{message, feedback, updated_records}`; `updated_records` counts training-data rows
+only, which exist only for a user who opted in, so 0 is normal.
 
 A `status` frame is `{"type": "status", "content", "code"}`. Render the `code`; the
 translated `content` is there for a build that predates it. The set, in the order a
@@ -379,6 +390,16 @@ tool-calling loop — `thinking`, `checking_data`, `analyzing`, `looking_deeper`
 | `GET, POST` | `/api/auth/user/update/` | auth | `UpdateUserDetailsView` |
 | `POST` | `/api/auth/verify-otp/` | public | `OTPVerificationView` |
 
+A trainer's email address is never sent to a client: `email` on
+`client/available-trainers/` and `trainer_email` on `client/request-status/` are always
+`null`, kept for builds that read them. `trainer/pending-requests/` gives the full row
+(email, picture, age, gender, goals, activity level, note) only for a request the client
+sent, and not once either of the two has blocked the other — that row keeps the short
+shape (`request_id`, `client_id`, `client_name`, `client_username`, `initiated_by`,
+`created_at`) so it can still be declined. `client/request-trainer/` answers 404
+`not_found` for no such trainer and for a `trainer_id` that is not a number, and both
+unassign routes answer 409 `refund_failed` when a held month cannot be returned.
+
 ### Chat
 
 Text messages between a trainer and the client they coach — text only in this pass (no
@@ -452,7 +473,12 @@ plan without `daily_calories` answers 400 `client_activity_level_required`.
 name: the sentence is composed by `diet/tasks.py` from the client's goal, their plan's
 calorie target and their BMI, so it carries the diet guard and neither `HasAIAdviceAccess`
 nor the `ai_consent_required` guard. Everything the AI coach actually answers is under
-`/api/ai/` and carries both.
+`/api/ai/` and carries both. `advice.context_data.user_metrics.daily_calories` is the
+figure the advice text names — the plan's target for today — or `null` when there is
+none it can stand behind.
+
+`client/progress/`, `client/progress/enhanced/` and `client/progress/weekly/` answer 403
+`clients_only` to a caller who is not a client.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -716,6 +742,7 @@ refuse with the same codes, because both go through the same two helpers:
 | `insufficient_balance` | 402 | Approving: the client's wallet does not cover month 1 (in the client's currency) |
 | `exchange_rate_stale` / `exchange_rate_missing` | 409 | Approving: the trainer prices in the other currency and the operator's rate is too old / was never set — the same body a checkout answers |
 | `currency_mismatch` | 409 | Approving: the charge could not be moved in the client's currency |
+| `client_has_other_trainer` | 400 | The client is already another trainer's (approving only) |
 | `hold_failed` | 402 | Approving: anything else; nothing was changed, try again. The 402 used to carry no `code` and the internal reason in `error` (SIDE_BUGS S-085) |
 
 `client/request-trainer/` checks the client's wallet against month 1 IN THE CLIENT'S
@@ -723,6 +750,8 @@ CURRENCY (converted from the trainer's at the operator's rate): its 402
 `insufficient_balance` carries `required`, `balance` and `currency`, and it answers 409
 `exchange_rate_stale` / `exchange_rate_missing` when the trainer prices in the other
 currency and the rate cannot convert it (SIDE_BUGS S-084).
+
+A `request_id` that is not a number answers `request_not_found` on both routes.
 
 Templates: a template is reused for any number of clients and every client gets a
 private copy (`templates/{id}/generate/`: `client_id`, or `client_ids` for several, or

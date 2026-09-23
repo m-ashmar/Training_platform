@@ -9,6 +9,8 @@ authenticated `user` object server-side — never from client input.
 import json
 import logging
 
+from django.utils.translation import gettext_lazy
+
 from .tools.user_tools import (
     get_user_profile, get_body_stats, USER_TOOL_SCHEMAS,
 )
@@ -29,20 +31,41 @@ from .tools.progress_tools import (
 
 logger = logging.getLogger(__name__)
 
-# Human-readable display names for transparency in the UI
+#: What the app shows while a tool runs (`tool_used.display`) and after the turn
+#: (`complete.tools_used[].display`): an icon and a sentence. The sentence goes through
+#: gettext and is rendered per frame by `display_name`, inside the reader's
+#: `LanguageContext`, like `chat_service.ITERATION_STATUSES`. These were English
+#: literals, so an Arabic reader saw "Reviewed your profile" beside an Arabic answer
+#: (SIDE_BUGS S-090). The app should branch on `name`, which never changes; the
+#: icon stays outside the translated text so a translator cannot drop it. Spelled
+#: `gettext_lazy`, not aliased: `makemessages` and the catalogue gate find a literal
+#: only under the standard names.
 TOOL_DISPLAY_NAMES = {
-    "get_user_profile": "👤 Reviewed your profile",
-    "get_body_stats": "📏 Checked your body metrics",
-    "get_exercise_progress": "📊 Analyzed your exercise progress",
-    "get_workout_history": "🏋️ Reviewed recent workouts",
-    "get_training_volume": "📈 Calculated training volume",
-    "get_active_diet_plan": "🥗 Checked your diet plan",
-    "get_meal_details": "🍽️ Reviewed meal details",
-    "get_diet_adherence": "📋 Analyzed diet adherence",
-    "get_routine_schedule": "📅 Checked your routine schedule",
-    "get_routine_progress": "✅ Reviewed routine progress",
-    "get_overall_progress": "🎯 Compiled overall progress",
+    "get_user_profile": ("👤", gettext_lazy("Reviewed your profile")),
+    "get_body_stats": ("📏", gettext_lazy("Checked your body metrics")),
+    "get_exercise_progress": ("📊", gettext_lazy("Analyzed your exercise progress")),
+    "get_workout_history": ("🏋️", gettext_lazy("Reviewed recent workouts")),
+    "get_training_volume": ("📈", gettext_lazy("Calculated training volume")),
+    "get_active_diet_plan": ("🥗", gettext_lazy("Checked your diet plan")),
+    "get_meal_details": ("🍽️", gettext_lazy("Reviewed meal details")),
+    "get_diet_adherence": ("📋", gettext_lazy("Analyzed diet adherence")),
+    "get_routine_schedule": ("📅", gettext_lazy("Checked your routine schedule")),
+    "get_routine_progress": ("✅", gettext_lazy("Reviewed routine progress")),
+    "get_overall_progress": ("🎯", gettext_lazy("Compiled overall progress")),
 }
+
+
+def display_name(function_name: str) -> str:
+    """The line the app shows for a tool, in the ACTIVE language, as a plain `str`.
+
+    An unknown name comes back as itself, as it always did.
+    """
+    entry = TOOL_DISPLAY_NAMES.get(function_name)
+    if entry is None:
+        return function_name
+    icon, text = entry
+    return f"{icon} {text}"
+
 
 # Maps function name → callable
 _TOOL_FUNCTIONS = {
@@ -103,5 +126,5 @@ class ToolRegistry:
 
     @staticmethod
     def get_display_name(function_name: str) -> str:
-        """Get human-readable display name for a tool."""
-        return TOOL_DISPLAY_NAMES.get(function_name, function_name)
+        """Get human-readable display name for a tool (see `display_name`)."""
+        return display_name(function_name)

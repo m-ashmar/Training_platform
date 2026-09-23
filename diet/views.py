@@ -1476,8 +1476,8 @@ class DailyAdviceView(APIView):
     `subscription/permissions.py HasDietAccessOrFrozenRead`), so this answers 403
     `no_entitlement` / `feature_not_in_plan` while frozen.
 
-    Refusals: 403 `no_entitlement`, `feature_not_in_plan`; 500 with no `code` is a
-    fault, not a refusal.
+    Refusals: 403 `no_entitlement`, `feature_not_in_plan`. A fault answers 500
+    `server_error`, like every other route in this file.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     
@@ -1541,8 +1541,9 @@ class DailyAdviceView(APIView):
             raise
         except Exception as e:
             logger.error(f"Daily advice error: {str(e)}")
+            # `server_error`, as every sibling in this file says (SIDE_BUGS S-048).
             return Response(
-                {"error": _("Failed to retrieve daily advice")},
+                {"error": _("Failed to retrieve daily advice"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -2166,9 +2167,6 @@ class DietPlanNutritionView(APIView):
                     # today's progress, 200 OK.
                     return Response({"error": _("date must be YYYY-MM-DD"), "code": "bad_date"},
                                     status=status.HTTP_400_BAD_REQUEST)
-            if target_date_str and target_date is None:
-                return Response({"error": _("Invalid date format. Use YYYY-MM-DD.")},
-                                status=status.HTTP_400_BAD_REQUEST)
             
             # Calculate plan nutrition
             plan_nutrition = diet_plan.calculate_daily_nutrition(target_date)
@@ -2484,7 +2482,7 @@ class EnhancedClientProgressView(APIView):
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`.
+    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -2493,8 +2491,12 @@ class EnhancedClientProgressView(APIView):
         try:
             # Check if user is a client
             if not request.user.is_client:
+                # `clients_only`, the code the coaching routes answer for the same
+                # refusal (SIDE_BUGS S-047). Without one the envelope filled in the
+                # generic `permission_denied`.
                 return Response(
-                    {"error": _("Only clients can access progress tracking")},
+                    {"error": _("Only clients can access progress tracking"),
+                     "code": "clients_only"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2508,9 +2510,6 @@ class EnhancedClientProgressView(APIView):
                     # today's progress, 200 OK.
                     return Response({"error": _("date must be YYYY-MM-DD"), "code": "bad_date"},
                                     status=status.HTTP_400_BAD_REQUEST)
-            if target_date_str and target_date is None:
-                return Response({"error": _("Invalid date format. Use YYYY-MM-DD.")},
-                                status=status.HTTP_400_BAD_REQUEST)
             
             # Get progress using enhanced service
             client_service = ClientProgressService(request.user)
@@ -2669,7 +2668,7 @@ class ClientProgressView(APIView):
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`.
+    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -2678,8 +2677,12 @@ class ClientProgressView(APIView):
         try:
             # Check if user is a client
             if not request.user.is_client:
+                # `clients_only`, the code the coaching routes answer for the same
+                # refusal (SIDE_BUGS S-047). Without one the envelope filled in the
+                # generic `permission_denied`.
                 return Response(
-                    {"error": _("Only clients can access progress tracking")},
+                    {"error": _("Only clients can access progress tracking"),
+                     "code": "clients_only"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2729,7 +2732,7 @@ class ClientWeeklyProgressView(APIView):
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`.
+    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -2738,8 +2741,12 @@ class ClientWeeklyProgressView(APIView):
         try:
             # Check if user is a client
             if not request.user.is_client:
+                # `clients_only`, the code the coaching routes answer for the same
+                # refusal (SIDE_BUGS S-047). Without one the envelope filled in the
+                # generic `permission_denied`.
                 return Response(
-                    {"error": _("Only clients can access progress tracking")},
+                    {"error": _("Only clients can access progress tracking"),
+                     "code": "clients_only"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             

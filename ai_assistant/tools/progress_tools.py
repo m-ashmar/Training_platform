@@ -18,7 +18,7 @@ def get_overall_progress(user, days=30, **kwargs):
     from routine.models import (
         WorkoutSession, UserExerciseProgress, DayOutcome, Routine,
     )
-    from diet.models import DailyProgress, DietPlan
+    from diet.models import DietPlan
 
     
     since_date = timezone.localdate() - timedelta(days=days)
@@ -37,36 +37,31 @@ def get_overall_progress(user, days=30, **kwargs):
     consistency_pct = round((exercise_days / max(days, 1)) * 100, 1)
 
     # --- Diet ---
-    plan = DietPlan.objects.filter(user=user, is_active=True).first()
+    # The plan covering today, not the newest active one (SIDE_BUGS S-060), and its
+    # adherence over the plan's days with an untracked day counting 0 (S-091) — the
+    # same figure `get_diet_adherence` gives, from `plan_day_adherence`.
+    from .diet_tools import plan_day_adherence
+
+    plan = DietPlan.governing(user).first()
     diet_summary = None
     if plan:
-        diet_progress = DailyProgress.objects.filter(
-            user=user, diet_plan=plan, date__gte=since_date,
-        )
-        diet_days = diet_progress.count()
-        completed_diet_days = diet_progress.filter(is_day_completed=True).count()
-        
-        # Calculate caloric adherence
-        total_cal_pct = 0
-        cal_days_count = 0
-        for dp in diet_progress:
-            if dp.target_calories > 0:
-                # Cap at 100% for "adherence" (overeating isn't adherence)
-                # Actually, strictly adherence means closeness to 100%. 
-                # Let's use the same logic as diet_tools: 100 - abs(pct - 100)
-                cal_pct = dp.calories_percentage
-                score = max(0, 100 - abs(cal_pct - 100))
-                total_cal_pct += score
-                cal_days_count += 1
-                
-        avg_cal_adherence = round(total_cal_pct / cal_days_count, 1) if cal_days_count else 0
-        
+        adherence = plan_day_adherence(user, plan, since_date)
+        rows = adherence["rows"].values()
+        diet_days = len(adherence["rows"])
+        completed_diet_days = sum(1 for dp in rows if dp.is_day_completed)
+        plan_days = len(adherence["days"])
+        tracked = bool(adherence["tracked"])
+        avg_cal_adherence = adherence["average"]
+
         diet_summary = {
             "days_tracked": diet_days,
             "days_completed": completed_diet_days,
+            "plan_days": plan_days,
+            # Finished days out of the plan's days. `None`, never 0, when nothing was
+            # tracked: `0` told the assistant a client who never tracked scored zero.
             "meal_completion_pct": (
-                round((completed_diet_days / diet_days * 100), 1)
-                if diet_days else 0
+                round(completed_diet_days / plan_days * 100, 1)
+                if tracked and plan_days else None
             ),
             "caloric_adherence_pct": avg_cal_adherence,
             "adherence_pct": avg_cal_adherence, # For compatibility/clarity

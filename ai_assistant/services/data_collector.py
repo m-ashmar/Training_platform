@@ -118,9 +118,8 @@ class DataCollector:
         # Active diet info
         try:
             from diet.models import DietPlan
-            plan = DietPlan.objects.filter(
-                user=user, is_active=True,
-            ).first()
+            # The plan covering today, as the tools read it (SIDE_BUGS S-060).
+            plan = DietPlan.governing(user).first()
             if plan:
                 snapshot["diet_goal"] = plan.goal
                 snapshot["daily_calories"] = plan.daily_calories

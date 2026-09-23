@@ -9,7 +9,10 @@ from .models import ChatSession, ChatMessage, AITrainingData
 class ChatMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatMessage
-        fields = ['id', 'role', 'content', 'tool_calls', 'tokens_used', 'created_at']
+        # `feedback` (`positive` | `negative` | null): the 👍/👎 given on this reply, so
+        # the app can show it after a reload. Additive (SIDE_BUGS S-061).
+        fields = ['id', 'role', 'content', 'tool_calls', 'tokens_used', 'created_at',
+                  'feedback']
         read_only_fields = fields
 
 

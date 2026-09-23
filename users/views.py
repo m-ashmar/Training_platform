@@ -37,7 +37,6 @@ from notifications.domain.trainer_client_events import (
     ClientRequestCancelledEvent,
     ClientUnassignedTrainerEvent,
 )
-from django.core.cache import cache
 from training_platform.i18n import LanguageContext, CACHE_VERSION
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -636,7 +635,8 @@ class UnassignClientView(APIView):
     the client is in (owner, 2026-09-19): while one runs this answers
     409 `coaching_month_active` with `ends_at`, and with `at_period_end: true` it instead
     schedules the end — 200 `{scheduled: true, ends_at}` — and the month is not renewed.
-    Before the first program (month 1 only held) the client is released and refunded.
+    Before the first program (month 1 only held) the client is released and refunded;
+    409 `refund_failed` when that refund cannot be made, and nothing changes.
     """
     permission_classes = [IsAuthenticated]
     
@@ -712,7 +712,8 @@ class UnassignClientView(APIView):
                         transaction.set_rollback(True)
                         return Response(
                             {'error': _('We could not return the held payment. '
-                                        'Nothing was changed; please try again.')},
+                                        'Nothing was changed; please try again.'),
+                             'code': 'refund_failed'},
                             status=status.HTTP_409_CONFLICT
                         )
                     # Every row for this pair, not just the approved one: a stale pending
@@ -905,7 +906,15 @@ class PublicTrainerClientStatsView(APIView):
         }, status=status.HTTP_200_OK)
 
 class AvailableTrainersView(APIView):
-    """View for clients to see available trainers"""
+    """GET /api/auth/client/available-trainers/ — trainers a client may ask, paged.
+
+    `?search=` filters on first name, last name and username. Trainers blocked either
+    way are not listed. `email` is always null: the key is kept for builds that read
+    it, and a trainer's address is never on a card (`users/trainer_directory.py`). It
+    was every trainer's address, to any signed-in client (SIDE_BUGS S-152).
+
+    403 `permission_denied` when the caller is not a client.
+    """
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
@@ -959,7 +968,9 @@ class AvailableTrainersView(APIView):
                 trainer_data.append({
                     'id': trainer.id,
                     'username': trainer.username,
-                    'email': trainer.email,
+                    # Never the address (SIDE_BUGS S-152): the key stays, null, for
+                    # builds that read it. See the class docstring.
+                    'email': None,
                     'first_name': trainer.first_name,
                     'last_name': trainer.last_name,
                     'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
@@ -985,7 +996,7 @@ class AvailableTrainersView(APIView):
             trainer_data.append({
                 'id': trainer.id,
                 'username': trainer.username,
-                'email': trainer.email,
+                'email': None,   # never the address; see the class docstring
                 'first_name': trainer.first_name,
                 'last_name': trainer.last_name,
                 'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
@@ -1116,12 +1127,22 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
 
     @staticmethod
     def invalidate_client_cache(client_id, trainer_id=None):
-        """Invalidate cache for all language variants."""
+        """Invalidate cache for all language variants.
+
+        In `private_cache()`, where `get_queryset` and `retrieve` write these keys. This
+        deleted them from the default cache (Redis DB0, sessions) while they live in
+        DB3, so after an assign, an unassign or a profile change the trainer kept the
+        old profile and the old approved-client list for up to five minutes
+        (SIDE_BUGS S-153).
+        """
         from django.conf import settings
-        for lang_code, _ in settings.LANGUAGES:
-            cache.delete(f"client_profile:{client_id}:{lang_code}:{CACHE_VERSION}")
+        from training_platform.cache import private_cache
+
+        store = private_cache()
+        for lang_code, _lang_name in settings.LANGUAGES:
+            store.delete(f"client_profile:{client_id}:{lang_code}:{CACHE_VERSION}")
             if trainer_id:
-                cache.delete(f"trainer:{trainer_id}:approved_clients:{lang_code}:{CACHE_VERSION}")
+                store.delete(f"trainer:{trainer_id}:approved_clients:{lang_code}:{CACHE_VERSION}")
 
 # NOTE: DeviceTokenRegisterView was removed — it was never routed (users/urls.py
 # maps device-token/ to FCMTokenView) and its update_or_create never reactivated
@@ -1242,8 +1263,9 @@ class ClientRequestTrainerView(APIView):
     `currency` — the month's price IN THE CLIENT'S CURRENCY, converted from the
     trainer's at the operator's rate, and the client's balance in the same unit);
     403 `permission_denied` (the caller is not a client), `not_available_on_channel`;
-    404 `not_found`; 409 `exchange_rate_stale` / `exchange_rate_missing` when the
-    trainer prices in the other currency and the operator's rate cannot convert it.
+    404 `not_found` (no such trainer, or a `trainer_id` that is not a number); 409
+    `exchange_rate_stale` / `exchange_rate_missing` when the trainer prices in the other
+    currency and the operator's rate cannot convert it.
     """
     permission_classes = [IsAuthenticated]
     
@@ -1278,6 +1300,13 @@ class ClientRequestTrainerView(APIView):
                 {'error': _('trainer_id is required'), 'code': 'trainer_id_required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        # An id that is not a number names no trainer. The lookup below raised
+        # ValueError for `"abc"` and the broad handler answered a code-less 500.
+        try:
+            trainer_id = int(str(trainer_id))
+        except (TypeError, ValueError):
+            return Response({'error': _('Trainer not found'), 'code': 'not_found'},
+                            status=status.HTTP_404_NOT_FOUND)
         
         try:
             from .models import TrainerClientRelation
@@ -1423,7 +1452,7 @@ class ClientRequestTrainerView(APIView):
             
         except CustomUser.DoesNotExist:
             return Response(
-                {'error': _('Trainer not found')}, 
+                {'error': _('Trainer not found'), 'code': 'not_found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         except PASSTHROUGH_EXCEPTIONS:
@@ -1449,7 +1478,9 @@ class ClientUnassignTrainerView(APIView):
     - Sends notification to the trainer
     - Invalidates relevant caches
     
-    Endpoint: POST /api/users/client/unassign-trainer/
+    Endpoint: POST /api/auth/client/unassign-trainer/
+
+    409 `refund_failed` when the held month could not be returned; nothing changed.
     """
     permission_classes = [IsAuthenticated]
     
@@ -1489,9 +1520,11 @@ class ClientUnassignTrainerView(APIView):
                     release_hold(relation, request.user)
                 except HoldFailed as exc:
                     logger.error("Refund failed for relation %s: %s", relation.id, exc)
+                    # The code the decline path answers for the same condition.
                     return Response(
                         {'error': _('We could not return your held payment. '
-                                    'Nothing was changed; please try again.')},
+                                    'Nothing was changed; please try again.'),
+                         'code': 'refund_failed'},
                         status=status.HTTP_409_CONFLICT
                     )
                 TrainerClientRelation.objects.filter(
@@ -1638,18 +1671,18 @@ class ClientCancelTrainerRequestView(APIView):
 
 
 class TrainerPendingRequestsView(APIView):
-    """
-    Enhanced view for trainers to see pending client requests.
-    
-    Features:
-    - Shows all pending requests for the trainer
-    - Includes client information and request details
-    - Supports pagination for large request lists
-    - Proper filtering and sorting
-    
-    TODO: Add request filtering by date
-    TODO: Implement request search functionality
-    TODO: Add request analytics and reporting
+    """GET /api/auth/trainer/pending-requests/ — this trainer's pending rows, newest
+    first.
+
+    A row always has `request_id`, `client_id`, `client_name`, `client_username`,
+    `initiated_by` and `created_at`. Only a request the CLIENT sent also carries their
+    email, picture, age, gender, goals, activity level, `requested_at`, `status` and
+    `note` — and not when either of the two has since blocked the other (SIDE_BUGS
+    S-154): that row stays listed, so it can still be declined, but with the short
+    shape, the same as an invitation the trainer sent. Nothing says which side
+    blocked or that anyone did.
+
+    403 `permission_denied` when the caller is not a trainer.
     """
     permission_classes = [IsAuthenticated]
     
@@ -1670,6 +1703,12 @@ class TrainerPendingRequestsView(APIView):
                 status='pending'
             ).select_related('client').order_by('-created_at', '-id')
             
+            # Either direction, one query. A block does not touch pending rows, so a
+            # client who asked and then blocked this trainer stayed listed here with
+            # their email, age, gender, goals, activity level and note — disclosed to
+            # the very person the block is against, until somebody answered.
+            blocked = blocked_ids(request.user)
+
             requests_data = []
             for relation in pending_relations:
                 client = relation.client
@@ -1680,7 +1719,8 @@ class TrainerPendingRequestsView(APIView):
                 # once, and take the full name, email address, age, gender and fitness
                 # goals of the entire client base. The consent boundary was enforced at
                 # APPROVAL and not at disclosure.
-                asked_for_this = relation.initiated_by == 'client'
+                asked_for_this = (relation.initiated_by == 'client'
+                                  and client.id not in blocked)
                 row = {
                     'request_id': relation.id,
                     'client_id': client.id,
@@ -1745,6 +1785,7 @@ class ClientRespondToTrainerInviteView(APIView):
       trainer_unavailable       409  the trainer was deactivated in the meantime
       user_blocked              403  one of you blocked the other after it was sent
       refund_failed             409  the hold could not be returned; nothing changed
+      client_has_other_trainer  400  you are already another trainer's client
 
     Accepting takes month 1 into escrow, in the client's currency; if that fails:
 
@@ -1963,12 +2004,16 @@ def approve_trainer_relation(relation, actor):
         # approve/transfer pairs; transfers answered 500 with their idempotency key
         # stuck, approvals 402 with Postgres internals in the body.
         locked_client = CustomUser.objects.select_for_update(no_key=True).get(pk=client.pk)
+        # One code for both: either way the client is already someone else's, and the
+        # app has one thing to say about it (SIDE_BUGS S-155).
         if locked_client.assigned_trainer_id and locked_client.assigned_trainer_id != trainer.id:
-            return Response({'error': _('Client is already assigned to another trainer')},
+            return Response({'error': _('Client is already assigned to another trainer'),
+                             'code': 'client_has_other_trainer'},
                             status=http.HTTP_400_BAD_REQUEST), relation
         if TrainerClientRelation.objects.filter(
                 client=client, status='approved').exclude(trainer=trainer).exists():
-            return Response({'error': _('Client already has an approved relation with another trainer')},
+            return Response({'error': _('Client already has an approved relation with another trainer'),
+                             'code': 'client_has_other_trainer'},
                             status=http.HTTP_400_BAD_REQUEST), relation
 
         try:
@@ -2100,6 +2145,9 @@ class TrainerRespondToRequestView(APIView):
       exchange_rate_missing     409    operator's rate is too old / was never set
       currency_mismatch         409  approving: the charge could not be moved
       hold_failed               402  approving: anything else; nothing changed, try again
+      client_has_other_trainer  400  the client is already another trainer's
+
+    A `request_id` that is not a number answers `request_not_found`.
 
     TODO: Add approval/rejection reasons
     TODO: Implement request history tracking
@@ -2131,10 +2179,21 @@ class TrainerRespondToRequestView(APIView):
                  'code': 'invalid_action'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+        # An id that is not a number names no request of yours: the same answer the
+        # client side gives. The lookup raised ValueError for `"abc"`, which only the
+        # broad handler below caught, as a code-less 500 (SIDE_BUGS S-155).
+        try:
+            request_id = int(str(request_id))
+        except (TypeError, ValueError):
+            return Response(
+                {'error': _('Request not found or already processed'),
+                 'code': 'request_not_found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
         try:
             from .models import TrainerClientRelation
-            
+
             # Get the request
             relation = TrainerClientRelation.objects.get(
                 id=request_id,
@@ -2224,18 +2283,19 @@ class TrainerRespondToRequestView(APIView):
 
 
 class ClientRequestStatusView(APIView):
-    """
-    Enhanced view for clients to check their request status.
-    
-    Features:
-    - Shows all requests made by the client
-    - Includes request status and trainer information
-    - Supports request history tracking
-    - Proper error handling
-    
-    TODO: Add request filtering by status
-    TODO: Implement request cancellation
-    TODO: Add request analytics
+    """GET /api/auth/client/request-status/ — every request this client has with a
+    trainer, newest first, whatever its status.
+
+    `trainer_email` is always null: the key is kept for builds that read it, and a
+    trainer's address is never disclosed to a client — it was, for every trainer the
+    client had ever asked, declined ones included (SIDE_BUGS S-152).
+
+    A request to a trainer one of them has since blocked stays listed, because it is
+    still this client's to cancel (`client/cancel-trainer-request/`) and, while it is
+    pending, it is the one outstanding request that stops them asking anyone else.
+    Of the trainer it carries nothing beyond their public card.
+
+    403 `permission_denied` when the caller is not a client.
     """
     permission_classes = [IsAuthenticated]
     
@@ -2265,7 +2325,9 @@ class ClientRequestStatusView(APIView):
                     'request_id': relation.id,
                     'trainer_id': trainer.id,
                     'trainer_name': trainer.full_name or trainer.username,
-                    'trainer_email': trainer.email,
+                    # Never the address (SIDE_BUGS S-152), also for a declined
+                    # request: the key stays, null, for builds that read it.
+                    'trainer_email': None,
                     'trainer_profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
                     'trainer_bio': trainer.trainer_bio,
                     'trainer_specializations': trainer.trainer_specializations,

@@ -100,6 +100,30 @@ class ChatMessage(models.Model):
         preview = self.content[:60] + ("..." if len(self.content) > 60 else "")
         return f"[{self.role}] {preview}"
 
+    def record_feedback(self, user, feedback):
+        """Store `user`'s 👍/👎 on this reply, and mirror it onto the training row.
+
+        ONE implementation for both surfaces. The socket stored it on the message; the
+        REST route (`POST /api/ai/feedback/`) updated only `AITrainingData`, which
+        exists only for the few who opted into training data, and answered "Feedback
+        saved" for everyone else with nothing saved (SIDE_BUGS S-061).
+
+        Returns how many training rows were updated (0 for a user without training
+        consent, or before the row is written — it copies the value from the message
+        when it is).
+        """
+        self.feedback = feedback
+        self.save(update_fields=['feedback'])
+        updated = AITrainingData.objects.filter(
+            user=user, message=self).update(user_feedback=feedback)
+        if not updated:
+            # A turn logged before the FK existed: fall back to the session and the
+            # full response text, which is at least an exact comparison.
+            updated = AITrainingData.objects.filter(
+                user=user, session=self.session, message__isnull=True,
+                ai_response=self.content).update(user_feedback=feedback)
+        return updated
+
 
 class AITrainingData(models.Model):
     """
