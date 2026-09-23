@@ -4213,3 +4213,13 @@ msgstr "السعر"
 #: subscription/receipts.py
 msgid "Exchange rate"
 msgstr "سعر الصرف"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Trainer chat message"
+msgstr "رسالة في محادثة المدرب"
+
+#: moderation/models.py
+msgctxt "moderation"
+msgid "Challenge"
+msgstr "تحدٍّ"
