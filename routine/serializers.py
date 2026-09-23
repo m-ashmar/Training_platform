@@ -772,14 +772,20 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
         return summary
     
     def get_next_suggested_action(self, obj):
-        """Suggest what user should do next."""
+        """Suggest what user should do next, in the request's language.
+
+        These were English sentences on every row, for an Arabic-first app (SIDE_BUGS
+        S-113). Worded so no plural form depends on the count."""
         if obj.status == 'completed':
-            return "Great job! You've finished this day's workout. Rest up for the next one."
+            return str(_("Great job! You've finished this day's workout. Rest up for "
+                         "the next one."))
         elif obj.status == 'in_progress':
-            remaining = obj.total_exercises - obj.exercises_completed
-            return f"Keep pushing! You have {remaining} exercises remaining to complete Day {obj.day}."
+            remaining = max(obj.total_exercises - obj.exercises_completed, 0)
+            return _("Keep pushing! Exercises left to complete Day %(day)s: "
+                     "%(remaining)s.") % {'day': obj.day, 'remaining': remaining}
         else:
-            return f"Ready to start? Begin your Day {obj.day} workout now."
+            return _("Ready to start? Begin your Day %(day)s workout now.") % {
+                'day': obj.day}
 
 
 class UserRoutineSerializer(serializers.ModelSerializer):
@@ -791,6 +797,20 @@ class UserRoutineSerializer(serializers.ModelSerializer):
     class Meta:
         model = Routine
         fields = ['id', 'users', 'routine_template', 'start_date', 'end_date', 'progress']
+
+
+class DayOutcomeSummarySerializer(DayOutcomeSerializer):
+    """A `DayOutcomeSerializer` row without `detail` — for `analytics/adherence/`
+    `by_day`, whose queryset DEFERS that column (SIDE_BUGS S-072).
+
+    Serialising a deferred field loads it, one query per row: the adherence view
+    deferred `detail`, rendered it through the full serializer anyway and then popped
+    it, so a year of days cost one extra query per day to read the very column the
+    deferral was there to skip."""
+
+    class Meta(DayOutcomeSerializer.Meta):
+        fields = [name for name in DayOutcomeSerializer.Meta.fields if name != 'detail']
+        read_only_fields = fields
 
 
 class ExerciseSetLogSerializer(serializers.ModelSerializer):

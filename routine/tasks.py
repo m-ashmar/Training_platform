@@ -122,9 +122,25 @@ def close_open_training_days(before=None):
     # the missed sets vanished and the streak was never broken, which is the loss this
     # feature exists to stop. A day nobody touched must still not become a miss, so a
     # `not_started` row is swept only when it carries work.
+    #
+    # Work ON THAT DAY (SIDE_BUGS S-069): a set of that date whose exercise that routine
+    # day prescribes, logged outside any session or in a session of that routine (and
+    # of that day, when the session named one) — the counting rule of
+    # `routine/outcomes.py day_work`. "Any set that date" swept every scaffold row the
+    # assignment writes (one per day, all dated the start date), so training day 1 on
+    # the day a routine was assigned turned days 2..N into `unclosed` misses with every
+    # planned set missed.
     worked = ExerciseSetLog.objects.filter(
         user_exercise_progress__user_id=models.OuterRef('user_id'),
-        date=models.OuterRef('date'))
+        date=models.OuterRef('date'),
+        user_exercise_progress__exercise__routine_exercises__routine_id=models.OuterRef(
+            'routine_id'),
+        user_exercise_progress__exercise__routine_exercises__day=models.OuterRef('day'),
+    ).filter(
+        models.Q(workout_session__isnull=True)
+        | (models.Q(workout_session__routine_id=models.OuterRef('routine_id'))
+           & (models.Q(workout_session__day__isnull=True)
+              | models.Q(workout_session__day=models.OuterRef('day')))))
     open_days = (RoutineProgress.objects
                  .filter(status__in=('in_progress', 'not_started'),
                          date__lt=before, date__gte=window_start)

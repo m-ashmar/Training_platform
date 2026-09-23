@@ -1085,6 +1085,25 @@ def _session_of_record(progress):
     return getattr(log, 'workout_session', None)
 
 
+#: The ways a PERSON closes a day as done (`DayOutcome.via`): "complete", "complete
+#: anyway" after the unlogged-sets warning, and "log the whole day". A day closed any
+#: other way that reads `completed` got there from its sets alone (`auto`, or `session`
+#: on top of it), so its status follows them (SIDE_BUGS S-110).
+PERSON_CLOSED_VIAS = ('completed', 'confirmed_unlogged', 'bulk_complete')
+
+
+def _closed_by_person(user, routine, day, date) -> bool:
+    """Whether a `completed` day was closed by the person rather than by its own sets.
+
+    A completed day with NO outcome counts as closed by the person: `routine-progress/`
+    writes the status with no outcome, and rows from before outcomes existed have none.
+    Nobody knows how those were closed, and a status a person set is not undone on a
+    guess."""
+    via = (DayOutcome.objects.filter(user=user, routine=routine, day=day, date=date)
+           .values_list('via', flat=True).first())
+    return via is None or via in PERSON_CLOSED_VIAS
+
+
 @receiver(post_save, sender=UserExerciseProgress)
 def update_routine_progress_on_exercise_progress(sender, instance, created, **kwargs):
     """Signal wrapper. The work is in `refresh_routine_progress` so that callers which
@@ -1200,20 +1219,29 @@ def refresh_routine_progress(instance, routine_scope=None, day_scope=None):
                 from .outcomes import refresh_day_quietly
                 refresh_day_quietly(user, routine, day, progress_date)
 
+            # Is this day already recorded as completed? Only asked when this pass
+            # finds it is not, which is the case a deleted set creates.
+            was_completed = status != 'completed' and RoutineProgress.objects.filter(
+                user=user, routine=routine, day=day, date=progress_date,
+                status='completed').exists()
+
             # Without a routine of record we cannot know the client opened THIS day, so
             # a partial count is not evidence of anything: a shared exercise made an
             # untrained day report `in_progress`. A fully-completed day is different —
             # every exercise it schedules was trained today, which is the verdict. A day
-            # ALREADY closed is refreshed above either way: it is evidence of itself.
-            if routine_scope is None and status != 'completed':
+            # ALREADY closed is refreshed above either way: it is evidence of itself,
+            # and so is a day already recorded as completed (see below).
+            if routine_scope is None and status != 'completed' and not was_completed:
                 continue
 
-            # A day the person completed stays completed: completing it with sets still
+            # A day the PERSON completed stays completed: completing it with sets still
             # unlogged is allowed after a warning (owner, BACKEND_BUGS B-011), and a set
-            # logged after that must not undo it.
-            if status != 'completed' and RoutineProgress.objects.filter(
-                    user=user, routine=routine, day=day, date=progress_date,
-                    status='completed').exists():
+            # logged or deleted after that must not undo it. A day that completed
+            # ITSELF from its sets does not: nobody closed it, so when those sets are
+            # deleted its status follows them (SIDE_BUGS S-110) — it read `completed`
+            # for ever in analytics/completion, the console's completion rate and
+            # `routine-progress/`, while its own outcome said it was short.
+            if was_completed and _closed_by_person(user, routine, day, progress_date):
                 continue
 
             # Update or create the RoutineProgress record
