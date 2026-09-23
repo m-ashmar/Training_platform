@@ -2225,7 +2225,7 @@ class ClientRequestStatusView(APIView):
     A request to a trainer one of them has since blocked stays listed, because it is
     still this client's to cancel (`client/cancel-trainer-request/`) and, while it is
     pending, it is the one outstanding request that stops them asking anyone else.
-    It carries nothing beyond the trainer's public card.
+    Of the trainer it carries nothing beyond their public card.
 
     403 `permission_denied` when the caller is not a client.
     """
