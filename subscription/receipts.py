@@ -91,14 +91,9 @@ def platform_details() -> dict:
 
 def item_of(payment) -> dict:
     """What was bought, in the pieces the app draws as "Premium · 30 يوماً"."""
-    plan = payment.subscription.plan
-    return {
-        "plan_id": plan.id,
-        "plan_name": plan.name,
-        "plan_type": plan.plan_type,
-        "duration_days": plan.duration_days,
-        "money_type": payment.money_type,
-    }
+    # What THIS payment bought, from its own snapshot: the subscription may be on
+    # another plan by the time the receipt is reprinted (`Payment.plan_bought`).
+    return {**payment.plan_bought(), "money_type": payment.money_type}
 
 
 def issued_at(payment):
@@ -146,14 +141,14 @@ def receipt_data(payment, *, invoice_number: str | None = None) -> dict:
     and a receipt reprinted next month must still say what happened this month.
     `exchange` is None for a same-currency purchase, which is most of them.
     """
-    plan = payment.subscription.plan
+    item = item_of(payment)
     payer = payment.subscription.user
     return {
         "payment_id": str(payment.id),
         "invoice_number": invoice_number or payment.invoice_number,
         "issued_at": issued_at(payment),
         "status": "paid",
-        "item": item_of(payment),
+        "item": item,
         "amount": str(payment.amount),
         "currency": payment.currency,
         "exchange": exchange_of(payment),
@@ -165,7 +160,7 @@ def receipt_data(payment, *, invoice_number: str | None = None) -> dict:
                   "name": (payer.full_name or payer.username),
                   "email": payer.email},
         "platform": platform_details(),
-        "plan_duration_days": plan.duration_days,
+        "plan_duration_days": item["duration_days"],
     }
 
 

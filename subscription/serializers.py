@@ -212,9 +212,9 @@ class PaymentSerializer(serializers.ModelSerializer):
     def get_item(self, obj):
         """What was bought, in pieces — the app joins them with the language's own
         separator rather than being handed a sentence it cannot lay out RTL."""
-        plan = obj.subscription.plan
-        return {'plan_id': plan.id, 'plan_name': plan.name,
-                'plan_type': plan.plan_type, 'duration_days': plan.duration_days}
+        # The plan THIS payment bought, not the one the subscription is on now — a
+        # plan change (B-047) must not rename every earlier row (`Payment.plan_bought`).
+        return obj.plan_bought()
 
     def get_receipt_available(self, obj):
         """Whether `payments/{id}/receipt/` will answer. Only a completed payment has
@@ -444,10 +444,15 @@ class UserSubscriptionSummarySerializer(PlanPriceInReadersCurrency,
     def add_price_fields(self, data, instance, request):
         return super().add_price_fields(data, instance.plan, request)
 
+    plan_id = serializers.IntegerField(source='plan.id', read_only=True)
+
     class Meta:
         model = Subscription
+        # `plan_id` so the app can tell WHICH catalogue plan this is without matching
+        # names: a renamed plan, or two with one name in different currencies, broke its
+        # "same plan -> renew, another -> refuse" decision (BACKEND_BUGS B-050).
         fields = [
-            'id', 'plan_name', 'plan_price', 'plan_currency',
+            'id', 'plan_id', 'plan_name', 'plan_price', 'plan_currency',
             'plan_duration_days', 'plan_features', 'status', 'start_date',
             'end_date', 'is_active', 'days_remaining', 'auto_renew', 'source',
             'access', 'renewal_due',
