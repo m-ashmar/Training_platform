@@ -144,11 +144,14 @@ is locked (spec §8); the numbers above are the defaults.
    features used). The new plan's price minus that credit is what is left to pay, shown
    before paying; the new plan starts when that payment clears and runs its FULL length.
    Built as `GET`/`POST v1/subscriptions/{id}/upgrade/` (`PaymentService.quote_upgrade`,
-   `start_upgrade`). Still decided in code, reversible: a late transfer against an
-   expired upgrade checkout grants the days its money bought without the credit (that
-   time was used); refunding an upgrade puts the old plan and its dates back; an upgrade
-   whose credit covers the whole new price is refused (`upgrade_not_payable`) — the owner
-   declined both extra days and wallet credit for leftover value.
+   `start_upgrade`, `_apply_upgrade`). Decided in code after an adversarial review,
+   reversible: the credit is per running payment at its own price; it is re-read when the
+   money clears and the new period is what money + credit buy (full length when paid as
+   quoted); every contributor's share of that period is recorded, and a refund takes
+   back exactly the refunded money's share (refunding the upgrade leaves the credited
+   days on the new plan). An upgrade whose credit covers the whole new price is refused
+   (`upgrade_not_payable`) — the owner declined both extra days and wallet credit for
+   leftover value.
 
 ## Traps this branch cost a session to find
 

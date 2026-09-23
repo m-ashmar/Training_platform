@@ -325,8 +325,6 @@ class PaymentService:
             payment.save()
 
             now = timezone.now()
-            if cls._undo_upgrade(payment, subscription, now):
-                return cls._finish_refund(payment, subscription, reason)
             # What THIS payment bought comes off — no more, no less. An earlier version
             # set `end_date = now` whatever else had been paid, so refunding a customer's
             # FIRST month destroyed the two months they had paid for and kept. Its
@@ -881,6 +879,14 @@ class PaymentService:
         candidates = list(open_payments.order_by('created_at', 'id'))
         for payment in candidates:
             if payment.gateway_transaction_reference:
+                # An open UPGRADE, or a payment a person is checking (B-051), is not
+                # this button's checkout: handed back as one, the Renew screen drew
+                # "renew Basic" at an upgrade's price, and paying it switched the plan
+                # (the review of 2026-09-23, U12). Refused, with which one it is.
+                if ((payment.metadata or {}).get('kind') == 'upgrade'
+                        or payment.status == 'needs_review'):
+                    raise CheckoutOpen(f"Subscription {subscription.id} has "
+                                       f"{payment.status} checkout {payment.id} open", payment)
                 logger.info("Checkout %s already open for subscription %s",
                             payment.id, subscription.id)
                 payment.already_open = True
@@ -1095,39 +1101,77 @@ class PaymentService:
                        to_plan: SubscriptionPlan, source: str):
         """Switch the plan for an upgrade payment that cleared; return its window.
 
-        While the plan the credit was struck on is still running, the credit is still
-        the customer's: the new plan starts NOW and runs its full length, and a new run
-        of cover begins (`start_date` moves), so the replaced plan's payments stop
-        counting as this run's (`Subscription.current_run_payments`). What the row was
-        is kept on the payment (`metadata['upgrade']['replaced']`) so a refund can put
-        it back (`_undo_upgrade`).
+        VALUE-EXACT, decided on the row as it is NOW, not as it was quoted. The credit is
+        re-read (`upgrade.credit_for_run`) when the money clears: days used since the
+        quote are not credited twice, a renewal paid meanwhile is credited rather than
+        erased, and a run that ended has nothing left to credit (the review of
+        2026-09-23, U4). The new plan then runs for what the money AND that credit buy:
+        its length × (paid + credit) ÷ its price, in whole days — its full length when
+        the money clears as quoted.
 
-        Cleared LATE — against a checkout that expired after the credited time ran out,
-        or after the row moved — the credit is gone: that time was used. Only what this
-        money bought is granted, the new plan's length × to_pay ÷ new_price, by the
-        ordinary activation; the snapshot's period says so, so the receipt agrees.
+        Each contributor's share of that period is written down
+        (`metadata['upgrade']['switch']`): the upgrade's own money, and every payment
+        whose days were credited, which is marked `credited_into` so it no longer counts
+        as the run's. A refund of any of them takes back exactly its share
+        (`_cover_to_take_back`) — never the whole period, never nothing (U1, U2, U7).
+
+        A switch needs cover running on a plan the new one is dearer than. Otherwise
+        (cover ended, or a dearer plan is already running) nothing is credited and the
+        money buys its own share of the new plan's length, by the ordinary activation.
 
         The caller holds the subscription and payment locks.
         """
+        from ..upgrade import credit_for_run, is_dearer
+
         meta = dict(payment.metadata or {})
-        upgrade = dict(meta.get('upgrade') or {})
+        record = dict(meta.get('upgrade') or {})
         now = timezone.now()
-        from_plan_id = (upgrade.get('from_plan') or {}).get('id')
-        if subscription.is_active and subscription.plan_id == from_plan_id:
-            upgrade['replaced'] = {
-                'plan_id': subscription.plan_id,
-                'status': subscription.status,
-                'start_date': subscription.start_date.isoformat(),
-                'end_date': subscription.end_date.isoformat(),
-                'trial_end_date': (subscription.trial_end_date.isoformat()
-                                   if subscription.trial_end_date else None),
-                'switched_at': now.isoformat(),
+        new_price = Decimal(record.get('new_price') or payment.amount)
+        length = int(to_plan.duration_days)
+        try:
+            switching = subscription.is_active and (
+                subscription.plan_id == (record.get('from_plan') or {}).get('id')
+                or is_dearer(to_plan, subscription.plan, payment.currency))
+        except Exception:                 # a rate that cannot price the comparison
+            switching = False
+
+        if switching:
+            credit, days_left, parts = credit_for_run(
+                subscription, buyer_currency=payment.currency, now=now)
+            value = Decimal(payment.amount) + credit
+            days = max(1, int((Decimal(length) * value / new_price)
+                              .to_integral_value(rounding='ROUND_HALF_UP')))
+            period = days * 86400
+            credited = [{'payment_id': str(part.payment_id), 'credit': str(part.credit),
+                         'share_seconds': int(period * part.credit / value)}
+                        for part in parts]
+            record['switch'] = {
+                'at': now.isoformat(),
+                'credit_applied': str(credit),
+                'days_credited': int(days_left),
+                'granted_days': days,
+                # The money's share is what the credited shares leave, so the shares
+                # add up to the period exactly: refunding every contributor leaves
+                # nothing, not a second.
+                'money_share_seconds': period - sum(c['share_seconds'] for c in credited),
+                'credited': credited,
+                'replaced': {'plan_id': subscription.plan_id,
+                             'start_date': subscription.start_date.isoformat(),
+                             'end_date': subscription.end_date.isoformat()},
             }
-            meta['upgrade'] = upgrade
+            # Everything this run was running on is spent: credited, or covering days
+            # nobody paid for. None of it counts as the new run's.
+            for spent in (subscription.current_run_payments()
+                          .filter(covers_until__gt=now).exclude(pk=payment.pk)):
+                spent_meta = dict(spent.metadata or {})
+                spent_meta['credited_into'] = str(payment.id)
+                Payment.objects.filter(pk=spent.pk).update(metadata=spent_meta)
+            meta['upgrade'] = record
+            meta['plan'] = {**meta.get('plan', {}), 'duration_days': days}
             payment.metadata = meta
             subscription.plan = to_plan
             subscription.start_date = now
-            subscription.end_date = now + timedelta(days=to_plan.duration_days)
+            subscription.end_date = now + timedelta(days=days)
             subscription.trial_end_date = None
             subscription.status = 'active'
             subscription.source = source
@@ -1135,63 +1179,18 @@ class PaymentService:
             subscription.save()
             return now, subscription.end_date
 
-        new_price = Decimal(upgrade.get('new_price') or payment.amount)
-        period = int(meta.get('plan', {}).get('duration_days') or to_plan.duration_days)
-        days = max(1, int((Decimal(period) * payment.amount / new_price)
+        days = max(1, int((Decimal(length) * Decimal(payment.amount) / new_price)
                           .to_integral_value(rounding='ROUND_HALF_UP')))
-        upgrade['late'] = True
-        meta['upgrade'] = upgrade
+        record['switch'] = {'at': now.isoformat(), 'credit_applied': '0.00',
+                            'days_credited': 0, 'granted_days': days, 'late': True}
+        meta['upgrade'] = record
         meta['plan'] = {**meta.get('plan', {}), 'duration_days': days}
         payment.metadata = meta
-        logger.warning("Upgrade payment %s cleared after its credit ran out; granting %d "
+        logger.warning("Upgrade payment %s cleared with nothing left to credit; granting %d "
                        "day(s) of plan %s", payment.id, days, to_plan.pk)
         subscription.plan = (cls._dearest_running_plan(subscription, clearing=payment)
                              if subscription.is_active else to_plan)
         return cls._activate_subscription(subscription, source, days)
-
-    @classmethod
-    def _undo_upgrade(cls, payment: Payment, subscription: Subscription, now) -> bool:
-        """Refunding an upgrade that switched the plan puts the old plan back.
-
-        The upgrade's money bought the switch; the credit for the replaced plan's
-        remaining days went into it. Taking back only the new period (the ordinary
-        refund) would cancel the customer's cover and lose the days they had paid for
-        on the old plan. So when this payment began the current run and nothing else
-        was paid in it since, the row goes back to what `_apply_upgrade` recorded —
-        plan, dates, status — and if the old end has passed by now, the cover is over
-        as it would have been. Otherwise (renewals were bought on the new plan after
-        it) the ordinary refund applies. Returns whether it undid.
-
-        The caller holds the subscription and payment locks, and has already marked the
-        payment refunded.
-        """
-        from django.utils.dateparse import parse_datetime
-
-        replaced = ((payment.metadata or {}).get('upgrade') or {}).get('replaced')
-        if (payment.metadata or {}).get('kind') != 'upgrade' or not replaced:
-            return False
-        if payment.covers_from is None or subscription.start_date != payment.covers_from:
-            return False
-        if subscription.current_run_payments().exists():
-            return False
-        plan = SubscriptionPlan.objects.filter(pk=replaced['plan_id']).first()
-        if plan is None:
-            return False
-        subscription.plan = plan
-        subscription.start_date = parse_datetime(replaced['start_date'])
-        subscription.end_date = parse_datetime(replaced['end_date'])
-        subscription.trial_end_date = (parse_datetime(replaced['trial_end_date'])
-                                       if replaced.get('trial_end_date') else None)
-        if subscription.end_date > now:
-            subscription.status = replaced.get('status') or 'active'
-        else:
-            subscription.status = 'cancelled'
-            subscription.cancelled_at = now
-            subscription.auto_renew = False
-        subscription.save()
-        logger.warning("Refund of upgrade %s put subscription %s back on plan %s until %s",
-                       payment.id, subscription.id, plan.pk, subscription.end_date)
-        return True
 
     @staticmethod
     def _activate_subscription(subscription: Subscription, source: str,
@@ -1244,6 +1243,43 @@ class PaymentService:
         return base, subscription.end_date
 
     @staticmethod
+    def _upgrade_share(payment: Payment, subscription: Subscription):
+        """The part of an upgrade's period a refunded payment paid for, or None when the
+        payment took no part in a switch.
+
+        An upgrade's period was bought by its own money and by the credit for the days
+        left on the payments it replaced; `_apply_upgrade` wrote each share down.
+        Refunding the upgrade takes back its money's share and leaves the credited days
+        (they were the customer's already). Refunding a credited payment takes back the
+        share its credit bought — the money comes back, so the days it became go too.
+        Nothing, if the subscription has restarted since the switch.
+        """
+        from django.utils.dateparse import parse_datetime
+
+        def _since_switch(switch):
+            at = parse_datetime(switch.get('at') or '')
+            return not (subscription.start_date and at and at < subscription.start_date)
+
+        record = (payment.metadata or {}).get('upgrade') or {}
+        switch = record.get('switch') or {}
+        if (payment.metadata or {}).get('kind') == 'upgrade' and switch and not switch.get('late'):
+            if not _since_switch(switch):
+                return timedelta(0)
+            return timedelta(seconds=int(switch.get('money_share_seconds') or 0))
+
+        into = (payment.metadata or {}).get('credited_into')
+        if not into:
+            return None
+        upgrade = Payment.objects.filter(pk=into).only('metadata').first()
+        switch = ((upgrade.metadata or {}).get('upgrade') or {}).get('switch') or {} if upgrade else {}
+        if not switch or not _since_switch(switch):
+            return timedelta(0)
+        for part in switch.get('credited') or []:
+            if part.get('payment_id') == str(payment.pk):
+                return timedelta(seconds=int(part.get('share_seconds') or 0))
+        return timedelta(0)
+
+    @staticmethod
     def _cover_to_take_back(payment: Payment, subscription: Subscription) -> timedelta:
         """How much of the subscription's current cover a refunded payment paid for.
 
@@ -1257,6 +1293,9 @@ class PaymentService:
         already ran out: refunding January's payment in March must not take March's
         paid month with it.
         """
+        share = PaymentService._upgrade_share(payment, subscription)
+        if share is not None:
+            return share
         began = payment.covers_from or payment.created_at
         if subscription.start_date and began and began < subscription.start_date:
             return timedelta(0)

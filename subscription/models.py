@@ -320,12 +320,17 @@ class Subscription(RowValidationMixin, models.Model):
         period that began before `start_date` belongs to cover that already ran out or
         was given up — an immediate cancel keeps its payment `completed`, with its old
         `covers_until` still in the future. The refund's own rule
-        (`PaymentService._cover_to_take_back`) draws the same line.
+        (`PaymentService._cover_to_take_back`) draws the same line. Nor does a payment
+        an upgrade credited (`metadata['credited_into']`): its value moved into the
+        upgrade's period.
         """
         payments = self.payments.filter(status='completed')
         if self.start_date:
             payments = payments.filter(covers_from__gte=self.start_date)
-        return payments
+        # A payment whose remaining days an upgrade credited has been spent: its value
+        # now lives in the upgrade's period (`PaymentService._apply_upgrade`). Left in,
+        # a renewal stacked before an upgrade was credited AND still counted.
+        return payments.exclude(metadata__has_key='credited_into')
 
     def last_run_plans(self):
         """Every plan the payments of the last run bought (`current_run_payments`).

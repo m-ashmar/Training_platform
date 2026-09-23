@@ -66,7 +66,7 @@ def test_the_quote_credits_the_whole_days_left_and_charges_nothing(
     q = resp.json()
     # 10000 paid for 30 days; 20 whole days left (the hour under way is used).
     assert (q["credit"], q["new_price"], q["to_pay"]) == ("6666.67", "20000.00", "13333.33")
-    assert (q["days_left"], q["period_days"], q["currency"]) == (20, 30, "SYP")
+    assert (q["days_left"], q["currency"]) == (20, "SYP")
     assert (q["from_plan"]["id"], q["to_plan"]["id"], q["starts"]) == \
         (basic.id, premium.id, "when_paid")
     assert Payment.objects.filter(subscription=sub).count() == before, "a quote charges nothing"
@@ -257,10 +257,15 @@ def test_an_upgrade_paid_after_its_credit_ran_out_grants_only_what_it_bought(
     assert granted == timedelta(days=23), "30 × 15000 ÷ 20000 = 22.5, rounded half up"
     receipt = c.get(f"/api/subscription/v1/payments/{payment.id}/receipt/").json()["receipt"]
     assert receipt["plan_duration_days"] == 23 and receipt["upgrade"]["late"] is True
+    assert (receipt["upgrade"]["credit"], receipt["upgrade"]["days_left"]) == (None, None), \
+        "no cover was left to credit"
 
 
-def test_refunding_an_upgrade_puts_the_old_plan_and_its_days_back(
+def test_refunding_an_upgrade_takes_back_what_its_money_bought(
         make_user, api, shamcash, django_capture_on_commit_callbacks):
+    """The upgrade's 30 Premium days were bought by 13,333.33 of money and 6,666.67 of
+    credit for 20 Basic days. Refunding the money takes back its 20 days; the 10 the
+    credit bought stay — they were the customer's already (the review of 2026-09-23)."""
     from subscription.models import Payment, Subscription
     from subscription.services.payment_service import PaymentService
 
@@ -268,18 +273,19 @@ def test_refunding_an_upgrade_puts_the_old_plan_and_its_days_back(
     premium = _plan("up13 premium", "20000.00", days=30, has_ai_advice=True)
     c, sub = _active_on(api, make_user, "up_refund", basic,
                         django_capture_on_commit_callbacks, days_left=20)
-    before = Subscription.objects.get(pk=sub.pk)
     body = _buy(c, sub, premium).json()
     upgrade = Payment.objects.get(pk=body["payment_id"])
     _complete(upgrade, django_capture_on_commit_callbacks)
+    upgrade.refresh_from_db()
     assert Subscription.objects.get(pk=sub.pk).plan_id == premium.id
 
     with django_capture_on_commit_callbacks(execute=True):
         PaymentService.refund_payment(upgrade.id, "chargeback")
 
     sub = Subscription.objects.get(pk=sub.pk)
-    assert (sub.plan_id, sub.has_ai_advice, sub.status) == (basic.id, False, "active")
-    assert (sub.start_date, sub.end_date) == (before.start_date, before.end_date)
+    assert (sub.plan_id, sub.status, sub.is_active) == (premium.id, "active", True)
+    left = sub.end_date - upgrade.covers_from
+    assert timedelta(days=9, hours=23) <= left <= timedelta(days=10, hours=1), left
 
 
 # ------------------------------------------------------------------- receipt, currency
@@ -301,7 +307,8 @@ def test_the_receipt_says_where_the_credit_went(make_user, api, shamcash,
     assert receipt["amount"] == "13333.33"
     assert receipt["upgrade"] == {
         "from_plan_id": basic.id, "from_plan_name": basic.name, "new_price": "20000.00",
-        "credit": "6666.67", "days_left": 20, "currency": "SYP", "late": False}
+        "credit": "6666.67", "days_left": 20, "granted_days": 30, "currency": "SYP",
+        "late": False}
     pdf = c.get(f"/api/subscription/v1/payments/{payment.id}/receipt/?format=pdf",
                 HTTP_ACCEPT_LANGUAGE="ar")
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"

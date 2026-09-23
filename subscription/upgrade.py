@@ -60,6 +60,89 @@ class UpgradeNotPayable(UpgradeRefused):
 
 
 @dataclass(frozen=True)
+class CreditPart:
+    """What one running payment of the current run contributes to a credit."""
+
+    payment_id: object
+    #: What that payment's period was worth, in its own currency: its amount, plus the
+    #: credit an upgrade switched into it (`value_of`).
+    value: Decimal
+    currency: str
+    #: The whole days left that fall in this payment's window, and the window's own
+    #: length, both in seconds (whole days).
+    seconds: int
+    window_seconds: int
+    #: value × seconds ÷ window, converted into the buyer's currency.
+    credit: Decimal
+
+
+def value_of(payment) -> Decimal:
+    """What a completed payment's period was worth, in its own currency.
+
+    Its amount — except an upgrade that switched the plan, whose period was bought by
+    its amount AND the credit that came off it (`metadata['upgrade']['switch']`). A
+    second upgrade credits the first one's days at the plan price they were worth, not
+    at the cash it happened to charge (the review of 2026-09-23, U3).
+    """
+    switch = ((payment.metadata or {}).get('upgrade') or {}).get('switch') or {}
+    extra = Decimal(switch.get('credit_applied') or '0')
+    return Decimal(payment.amount) + extra
+
+
+def credit_for_run(subscription, *, buyer_currency, now=None):
+    """The credit for what is left of `subscription`'s current run, in `buyer_currency`.
+
+    Returns `(credit, days_left, parts)`. WHOLE days left (the day under way is used):
+    by the second, what is left to pay moved every second or so and a customer who paid
+    the figure shown was refused. Those whole days are shared out over the run's running
+    payments in date order — each window takes what falls in it — and each payment is
+    credited at ITS own worth and currency: its value × its share ÷ its window. So
+    stacked renewals bought at different prices, or in a currency the buyer has since
+    left, are each credited at what they cost (the review of 2026-09-23, U8). Days no
+    payment covers — a trial, an operator's extension — are credited at nothing.
+
+    Payments whose value an upgrade already consumed are not the run's any more
+    (`Subscription.current_run_payments`), so nothing is credited twice.
+    """
+    now = now or timezone.now()
+    seconds_left = max(0, int((subscription.effective_end - now).total_seconds()))
+    days_left = seconds_left // 86400
+    budget = days_left
+
+    running = list(subscription.current_run_payments()
+                   .filter(covers_until__gt=now)
+                   .order_by('covers_from', 'id'))
+    parts = []
+    total = Decimal('0.00')
+    for payment in running:
+        if budget <= 0:
+            break
+        if not payment.covers_from or not payment.covers_until:
+            continue
+        # In WHOLE days, each rounded: a window is a whole number of days opened a few
+        # seconds after the one before it, and counting seconds lost a cent here and
+        # there between stacked renewals.
+        window = round((payment.covers_until - payment.covers_from).total_seconds() / 86400)
+        if window <= 0:
+            continue
+        start = max(payment.covers_from, now)
+        capacity = max(0, round((payment.covers_until - start).total_seconds() / 86400))
+        share = min(budget, capacity)
+        if share <= 0:
+            continue
+        budget -= share
+        value = value_of(payment)
+        native = (value * Decimal(share) / Decimal(window)).quantize(CENT,
+                                                                     rounding=ROUND_HALF_UP)
+        credit = (native if payment.currency == buyer_currency
+                  else charge_for(native, payment.currency, buyer_currency).amount)
+        parts.append(CreditPart(payment.pk, value, payment.currency, share * 86400,
+                                window * 86400, credit))
+        total += credit
+    return total.quantize(CENT, rounding=ROUND_HALF_UP), Decimal(days_left), parts
+
+
+@dataclass(frozen=True)
 class UpgradeQuote:
     """One upgrade, priced at one moment, for one buyer."""
 
@@ -69,17 +152,12 @@ class UpgradeQuote:
     currency: str
     #: The new plan's price for this buyer (its price of record, converted if need be).
     new_price: Decimal
-    #: What is left of the running plan, credited: paid × days left ÷ period length.
+    #: What is left of the running plan, credited (`credit_for_run`).
     credit: Decimal
     #: `new_price - credit`: what the checkout charges.
     to_pay: Decimal
-    #: WHOLE days of cover left when quoted (the day under way counts as used), and the
-    #: period the credit is read against — the one the latest payment of this run bought.
+    #: WHOLE days of cover left when quoted (the day under way counts as used).
     days_left: Decimal
-    period_days: int
-    #: What that payment was, in its own currency (the credit's source).
-    paid_amount: Decimal | None
-    paid_currency: str | None
     #: The new plan's pricing, for the payment's price-of-record and rate snapshot.
     priced: Priced
     quoted_at: datetime
@@ -95,14 +173,13 @@ class UpgradeQuote:
             'credit': str(self.credit),
             'to_pay': str(self.to_pay),
             'days_left': int(self.days_left),
-            'period_days': self.period_days,
             'starts': 'when_paid',
         }
 
     def as_record(self) -> dict:
         """What the checkout keeps on its payment (`metadata['upgrade']`), in plain JSON:
-        enough for completion to tell whether the credit is still the customer's, for a
-        refund to undo the switch, and for the receipt to explain the amount."""
+        what the customer was shown. What the switch actually credits is decided when
+        the money clears and written beside it (`PaymentService._apply_upgrade`)."""
         from .models import plan_snapshot
 
         return {
@@ -112,64 +189,34 @@ class UpgradeQuote:
             'credit': str(self.credit),
             'to_pay': str(self.to_pay),
             'days_left': int(self.days_left),
-            'period_days': self.period_days,
-            'paid_amount': str(self.paid_amount) if self.paid_amount is not None else None,
-            'paid_currency': self.paid_currency,
             'quoted_at': self.quoted_at.isoformat(),
         }
+
+
+def is_dearer(to_plan, from_plan, buyer_currency) -> bool:
+    """Whether `to_plan` costs this buyer more than `from_plan`, both priced now in the
+    buyer's currency (raises `ExchangeRateUnavailable` when a price has to cross)."""
+    new = charge_for(to_plan.price, to_plan.currency, buyer_currency)
+    current = charge_for(from_plan.price, from_plan.currency, buyer_currency)
+    return new.amount > current.amount
 
 
 def quote_upgrade(subscription, to_plan, *, buyer_currency, gateway_name=None, now=None):
     """Price moving `subscription` onto `to_plan` now. Raises an `UpgradeRefused`, or
     `wallet.exchange.ExchangeRateUnavailable` when a price has to cross currencies and
-    the operator's rate is missing or stale.
-
-    The credit is read from the LATEST payment of the current run on the current plan
-    (`Subscription.current_run_payments`): what it cost, and the period it bought. Days
-    left are the row's own (its `effective_end`), so stacked renewals, a trial's end and
-    a refund that shortened the cover are all already in them. The credit never exceeds
-    what the running payments of this run were — cover nobody paid for (a trial, an
-    operator's grant) is credited at nothing.
+    the operator's rate is missing or stale. The credit is `credit_for_run`.
     """
     now = now or timezone.now()
     if not subscription.is_active:
         raise NoRunningCover(f"Subscription {subscription.id} has no running cover")
     from_plan = subscription.plan
-    if to_plan.pk == from_plan.pk:
-        raise NotAnUpgrade(f"Subscription {subscription.id} is already on plan {to_plan.pk}")
+    if to_plan.pk == from_plan.pk or not is_dearer(to_plan, from_plan, buyer_currency):
+        raise NotAnUpgrade(f"Plan {to_plan.pk} is not dearer than plan {from_plan.pk} "
+                           f"for a {buyer_currency} buyer")
 
     new = charge_for(to_plan.price, to_plan.currency, buyer_currency)
-    current = charge_for(from_plan.price, from_plan.currency, buyer_currency)
-    if new.amount <= current.amount:
-        raise NotAnUpgrade(f"Plan {to_plan.pk} ({new.amount} {buyer_currency}) is not "
-                           f"dearer than plan {from_plan.pk} ({current.amount})")
-
-    # WHOLE days left: the day under way counts as used. Credited by the second, what
-    # is left to pay moved every second or so, and a customer who paid the figure they
-    # were shown was refused as `price_changed`. By whole days it holds for a day.
-    seconds_left = max(0, int((subscription.effective_end - now).total_seconds()))
-    days_left = Decimal(seconds_left // 86400)
-
-    running = list(subscription.current_run_payments()
-                   .filter(covers_until__gt=now)
-                   .select_related('subscription__plan')
-                   .order_by('-completed_at', '-id'))
-    on_this_plan = [p for p in running if p.plan_bought()['plan_id'] == from_plan.pk]
-    anchor = on_this_plan[0] if on_this_plan else None
-
-    credit = Decimal('0.00')
-    period_days = from_plan.duration_days
-    paid_amount = paid_currency = None
-    if anchor is not None:
-        period_days = int(anchor.plan_bought()['duration_days'] or from_plan.duration_days)
-        paid_amount, paid_currency = anchor.amount, anchor.currency
-        raw = (paid_amount * days_left / Decimal(max(period_days, 1)))
-        ceiling = sum((p.amount for p in running if p.currency == paid_currency),
-                      Decimal('0'))
-        native = min(raw, ceiling).quantize(CENT, rounding=ROUND_HALF_UP)
-        credit = (native if paid_currency == buyer_currency
-                  else charge_for(native, paid_currency, buyer_currency).amount)
-
+    credit, days_left, _parts = credit_for_run(subscription, buyer_currency=buyer_currency,
+                                               now=now)
     to_pay = (new.amount - credit).quantize(CENT, rounding=ROUND_HALF_UP)
     minimum = None
     if gateway_name:
@@ -185,5 +232,4 @@ def quote_upgrade(subscription, to_plan, *, buyer_currency, gateway_name=None, n
     return UpgradeQuote(
         from_plan=from_plan, to_plan=to_plan, currency=buyer_currency,
         new_price=new.amount, credit=credit, to_pay=to_pay, days_left=days_left,
-        period_days=period_days, paid_amount=paid_amount, paid_currency=paid_currency,
         priced=new, quoted_at=now)

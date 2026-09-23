@@ -139,6 +139,35 @@ def _upgrade_refusal(exc):
     return Response(body, status=status.HTTP_409_CONFLICT)
 
 
+def _gateway_known(name) -> bool:
+    """Whether `name` is a gateway this platform has (configured or not)."""
+    from .settings.gateway_config import get_gateway_info
+
+    if not isinstance(name, str) or not name:
+        return False
+    try:
+        get_gateway_info(name)
+    except (ValueError, KeyError):
+        return False
+    return True
+
+
+def _open_upgrade(subscription, plan):
+    """This subscription's open upgrade checkout to `plan`, if one is being paid."""
+    from .models import HELD_PAYMENT_STATUSES
+
+    for payment in (Payment.objects
+                    .filter(subscription=subscription, status__in=OPEN_PAYMENT_STATUSES,
+                            metadata__kind='upgrade')
+                    .exclude(status__in=HELD_PAYMENT_STATUSES)
+                    .exclude(gateway_transaction_reference__isnull=True)
+                    .exclude(gateway_transaction_reference='')
+                    .order_by('created_at', 'id')):
+        if payment.plan_bought()['plan_id'] == plan.pk:
+            return payment
+    return None
+
+
 def _upgrade_payload_from_record(payment, record):
     """The quote an ALREADY-open upgrade checkout was struck at, from its payment."""
     plan = payment.plan_bought()
@@ -154,9 +183,23 @@ def _upgrade_payload_from_record(payment, record):
         'credit': record.get('credit'),
         'to_pay': record.get('to_pay', str(payment.amount)),
         'days_left': record.get('days_left'),
-        'period_days': record.get('period_days'),
         'starts': 'when_paid',
     }
+
+
+def _checkout_open(payment):
+    """409 `checkout_open`: another checkout of this subscription is open — an upgrade,
+    or a payment a person is checking — and it is not this button's to hand back.
+    `payment_id` and `status` say which; `expires_at` when it closes (null while held
+    for review)."""
+    from .utils import checkout_expires_at
+
+    return Response(
+        {'error': _('A payment is already open for this subscription. '
+                    'Complete it, or change the plan once it closes.'),
+         'code': 'checkout_open', 'payment_id': str(payment.id), 'status': payment.status,
+         'expires_at': checkout_expires_at(payment)},
+        status=status.HTTP_409_CONFLICT)
 
 
 def review_of(payment):
@@ -442,6 +485,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
         | 404 | `not_found` | not the caller's subscription |
         | 400 | `not_renewable` | the subscription is not `active` or `expired` |
+        | 409 | `checkout_open` | the open checkout is an UPGRADE, or a payment a person is checking (`needs_review`): it is not a renewal; `payment_id`, `status` and `expires_at` say which |
         | 409 | `exchange_rate_stale` / `exchange_rate_missing` | the plan is priced in the other currency and the operator's rate is too old / was never set |
         | 503 | `currency_not_chargeable` | the gateway is not configured to charge in the buyer's currency |
         | 400 | `gateway_error` | the gateway could not open the checkout (not configured, or refused it) |
@@ -481,6 +525,8 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             except CurrencyNotChargeable as e:
                 logger.warning("Renewal for subscription %s refused: %s", subscription.id, e)
                 return _currency_not_chargeable()
+            except CheckoutOpen as exc:
+                return _checkout_open(exc.payment)
             except PaymentGatewayError as e:
                 logger.warning("Renewal for subscription %s not initiated: %s", subscription.id, e)
                 return Response({'error': _('Request could not be completed.'),
@@ -645,9 +691,16 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
 
         The owner (2026-09-23): an upgrade is allowed while a plan runs, a downgrade is
         not (it waits until the period ends, then `change-plan`). What is left of the
-        running plan is credited by whole days — the price paid × days left ÷ the
-        length of the period it bought — and comes off the new plan's price. The new
-        plan starts when that payment clears and runs its FULL length.
+        running plan is credited by whole days — each running payment at what it cost ×
+        its share of the days left ÷ the length of the period it bought — and comes off
+        the new plan's price. The new plan starts when that payment clears and runs for
+        what the money and the credit buy: its FULL length when the money clears as
+        quoted. The credit is re-read then, so days used before the money clears are
+        not credited twice, and a renewal paid meanwhile is credited, not lost.
+
+        A refund later takes back exactly what the refunded money bought: refunding the
+        upgrade leaves the credited days on the new plan; refunding a payment that was
+        credited takes back the days its credit became.
 
         Headers: `X-App-Channel` (required: both methods show or charge a price),
         `X-App-Version`. Refused on `play`/`ios` like every plan purchase.
@@ -656,8 +709,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
 
             {"from_plan": {"id", "name"}, "to_plan": {"id", "name", "duration_days"},
              "currency": "SYP", "new_price": "20000.00", "credit": "6000.00",
-             "to_pay": "14000.00", "days_left": 9, "period_days": 30,
-             "starts": "when_paid"}
+             "to_pay": "14000.00", "days_left": 9, "starts": "when_paid"}
 
         Every amount is in the caller's currency. `days_left` counts whole days (the
         day under way is used), so `to_pay` holds for a day at a time.
@@ -670,7 +722,9 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             {"success": true, "payment_id", "reference", "amount", "currency",
              "payment_url", "instructions", "expires_at", "upgrade": {<the quote>}}
 
-        If this same upgrade is already open its checkout comes back as it is.
+        If an upgrade to this same plan is already open, ITS figure is the price: `GET`
+        answers that checkout's quote with `payment_id`, and `POST` hands the checkout
+        back when `amount` is its amount.
 
         Codes it can answer (branch on `code`, never on the text):
 
@@ -683,7 +737,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         | 409 | `no_running_cover` | nothing is running: use `change-plan/`, then Pay |
         | 409 | `not_an_upgrade` | the plan does not cost more than the running one; it can change when the period ends |
         | 409 | `upgrade_not_payable` | the credit covers the new price, or leaves less than the gateway takes; `to_pay` and `minimum` say so |
-        | 409 | `checkout_open` | another checkout is open; `payment_id` and `expires_at` say which (POST) |
+        | 409 | `checkout_open` | another checkout is open; `payment_id`, `status` and `expires_at` say which (POST) |
         | 409 | `price_changed` | the quoted `amount`/`currency` is not what the checkout would charge, or the plan moved; `expected_amount`/`expected_currency` are what it would charge now (POST) |
         | 409 | `exchange_rate_stale` / `exchange_rate_missing` | a price has to cross currencies and the operator's rate is too old / was never set |
         | 400 | `invalid_amount` | the quoted `amount` is not a number (POST) |
@@ -709,17 +763,37 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             return Response({'error': _('Invalid or inactive plan'), 'code': 'invalid_plan'},
                             status=status.HTTP_400_BAD_REQUEST)
         gateway_name = params.get('gateway') or 'shamcash'
+        if not _gateway_known(gateway_name):
+            # Before anything is priced: the quote reads this gateway's minimum, and an
+            # unknown name raised there and answered 500 (the review, U9).
+            return Response({'error': _('That payment method is not available right now.'),
+                             'code': 'gateway_unavailable'},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
         buyer_currency = wallet_currency_for(request.user)
 
-        try:
-            quote = quote_upgrade(subscription, plan, buyer_currency=buyer_currency,
-                                  gateway_name=gateway_name)
-        except UpgradeRefused as exc:
-            return _upgrade_refusal(exc)
-        except ExchangeRateUnavailable as exc:
-            return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
-        if request.method == 'GET':
-            return Response(quote.as_payload())
+        # An upgrade to THIS plan already open: its figure is the price. The whole-day
+        # count, a price or the rate may have moved since it opened, and the customer
+        # may be transferring against its reference right now; re-quoting it made the
+        # two `price_changed` answers alternate for ever (the review, U5).
+        open_upgrade = _open_upgrade(subscription, plan)
+        quote = None
+        if open_upgrade is not None:
+            if request.method == 'GET':
+                return Response({**_upgrade_payload_from_record(
+                    open_upgrade, (open_upgrade.metadata or {}).get('upgrade') or {}),
+                    'payment_id': str(open_upgrade.id)})
+            charge, charge_currency = open_upgrade.amount, open_upgrade.currency
+        else:
+            try:
+                quote = quote_upgrade(subscription, plan, buyer_currency=buyer_currency,
+                                      gateway_name=gateway_name)
+            except UpgradeRefused as exc:
+                return _upgrade_refusal(exc)
+            except ExchangeRateUnavailable as exc:
+                return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+            if request.method == 'GET':
+                return Response(quote.as_payload())
+            charge, charge_currency = quote.to_pay, quote.currency
 
         quoted_amount = params.get('amount')
         quoted = None
@@ -739,9 +813,9 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                  'expected_amount': str(amount), 'expected_currency': currency},
                 status=status.HTTP_409_CONFLICT)
 
-        if ((quoted is not None and quoted != quote.to_pay)
-                or (quoted_currency is not None and quoted_currency != quote.currency)):
-            return _price_changed(quote.to_pay, quote.currency)
+        if ((quoted is not None and quoted != charge)
+                or (quoted_currency is not None and quoted_currency != charge_currency)):
+            return _price_changed(charge, charge_currency)
 
         try:
             gateway_service = PaymentGatewayManager.get_service_for_initiation(gateway_name)
@@ -757,20 +831,26 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 # Both read above without the lock: the plan the credit was struck on,
                 # and the figure the customer is about to pay. Either moving is refused
                 # under the lock rather than opening a checkout nobody quoted.
-                expected_from_plan_id=quote.from_plan.pk,
-                expected_to_pay=quote.to_pay,
+                expected_from_plan_id=subscription.plan_id,
+                expected_to_pay=quote.to_pay if quote is not None else None,
                 gateway_name=gateway_name)
         except UpgradePriceMoved as exc:
             return _price_changed(exc.quote.to_pay, exc.quote.currency)
         except PlanChanged:
-            return _price_changed(quote.to_pay, quote.currency)
+            # The row moved under this call (another device's upgrade cleared). The
+            # figure to show is what THIS upgrade costs from where it is now, or why it
+            # cannot be had — not the stale quote (the review, U14).
+            fresh = Subscription.objects.select_related('plan').get(pk=subscription.pk)
+            try:
+                again = quote_upgrade(fresh, plan, buyer_currency=buyer_currency,
+                                      gateway_name=gateway_name)
+            except UpgradeRefused as exc:
+                return _upgrade_refusal(exc)
+            except ExchangeRateUnavailable as exc:
+                return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+            return _price_changed(again.to_pay, again.currency)
         except CheckoutOpen as exc:
-            return Response(
-                {'error': _('A payment is already open for this subscription. '
-                            'Complete it, or change the plan once it closes.'),
-                 'code': 'checkout_open', 'payment_id': str(exc.payment.id),
-                 'expires_at': checkout_expires_at(exc.payment)},
-                status=status.HTTP_409_CONFLICT)
+            return _checkout_open(exc.payment)
         except UpgradeRefused as exc:
             return _upgrade_refusal(exc)
         except ExchangeRateUnavailable as exc:
@@ -1414,6 +1494,7 @@ class PaymentGatewayView(APIView):
         | 400 | `invalid_amount` | the quoted `amount` is not a number |
         | 409 | `price_changed` | the quoted `amount`/`currency` is not what this call would charge, or the subscription moved to another plan (`subscriptions/{id}/change-plan/`) while this call ran; `expected_amount`/`expected_currency` say what it would charge now |
         | 409 | `subscription_active` | cover is running; use `subscriptions/{id}/renew/` |
+        | 409 | `checkout_open` | the open checkout is an UPGRADE, or a payment a person is checking (`needs_review`); `payment_id`, `status` and `expires_at` say which |
         | 503 | `gateway_unavailable` | that gateway is not configured to take payments |
         | 503 | `currency_not_chargeable` | the gateway is not configured to charge in the buyer's currency |
         | 400 | `gateway_error` | the gateway refused or failed to open the checkout |
@@ -1576,6 +1657,8 @@ class PaymentGatewayView(APIView):
                 logger.warning("Checkout refused for subscription %s: %s",
                                subscription.id, e)
                 return _currency_not_chargeable()
+            except CheckoutOpen as exc:
+                return _checkout_open(exc.payment)
 
             if payment.already_open:
                 logger.info("Checkout %s already open; returning its reference", payment.id)
@@ -1835,8 +1918,15 @@ class PaymentReceiptView(APIView):
             "upgrade": null | {                         null unless this paid an UPGRADE
                 "from_plan_id", "from_plan_name",       (`subscriptions/{id}/upgrade/`):
                 "new_price": "20000.00",                the plan it replaced, the new
-                "credit": "6000.00", "days_left": 9,    plan's price, and the credit for
-                "currency": "SYP", "late": false},      the days left that came off it
+                "credit": "6000.00" | null,             plan's price, the credit that came
+                "days_left": 9 | null,                  off it when the money cleared and
+                "granted_days": 30,                     the whole days it was for, and the
+                "currency": "SYP", "late": false},      days of the new plan it all bought.
+                                                        `late: true`: the money cleared
+                                                        with no cover left to credit, so
+                                                        NO credit was applied — `credit`
+                                                        and `days_left` are null and the
+                                                        money bought `granted_days` alone
             "method": {"code": "shamcash", "name": "<translated>"},
             "reference": "<the gateway's reference, or "">",
             "covers": {"from": ..., "until": ...},      the access it bought

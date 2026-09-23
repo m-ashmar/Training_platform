@@ -110,16 +110,20 @@ def upgrade_of(payment) -> dict | None:
         return None
     record = (payment.metadata or {}).get("upgrade") or {}
     from_plan = record.get("from_plan") or {}
+    # What the SWITCH did when the money cleared (`PaymentService._apply_upgrade`), not
+    # what the quote said: the credit is re-read then. Late — no cover left to credit —
+    # means no credit was applied at all, so none is shown (the review, U15).
+    switch = record.get("switch") or {}
+    late = bool(switch.get("late"))
     return {
         "from_plan_id": from_plan.get("id"),
         "from_plan_name": _snapshot_name(from_plan),
         "new_price": record.get("new_price"),
-        "credit": record.get("credit"),
-        "days_left": record.get("days_left"),
+        "credit": None if late else switch.get("credit_applied", record.get("credit")),
+        "days_left": None if late else switch.get("days_credited", record.get("days_left")),
+        "granted_days": switch.get("granted_days"),
         "currency": record.get("currency") or payment.currency,
-        # True when the money cleared after the credited time had run out: only the
-        # days it paid for were granted (`PaymentService._apply_upgrade`).
-        "late": bool(record.get("late")),
+        "late": late,
     }
 
 
@@ -285,7 +289,7 @@ def render_pdf(data: dict, *, compress: bool = True) -> bytes:
             (_("Exchange rate"), fx["rate_text"]),
         ]
     up = data.get("upgrade")
-    if up and up.get("credit") is not None and not up.get("late"):
+    if up and up.get("credit") is not None and Decimal(up["credit"]) > 0:
         # An upgrade charged the new plan's price LESS the credit for the days left on
         # the plan it replaced: both are on the document, so the amount explains itself.
         rows[3:3] = [

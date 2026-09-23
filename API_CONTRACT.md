@@ -1212,14 +1212,17 @@ operator maintains in the console. Four things the app needs:
 
 - `GET /api/subscription/v1/subscriptions/{id}/upgrade/?plan_id=` — the quote, charging
   nothing: `{from_plan, to_plan, currency, new_price, credit, to_pay, days_left,
-  period_days, starts: "when_paid"}`, every amount in the caller's currency. The credit is
-  the price paid for the running period × WHOLE days left ÷ that period's length (the day
-  under way is used), so `to_pay` holds for a day at a time.
+  starts: "when_paid"}`, every amount in the caller's currency. The credit is each running
+  payment at what it cost × its share of the WHOLE days left ÷ the period it bought (the
+  day under way is used), so `to_pay` holds for a day at a time. While an upgrade to the
+  same plan is open, `GET` answers ITS quote with `payment_id`.
 - `POST` the same path `{plan_id, gateway?, amount?, currency?}` opens the checkout for
   `to_pay` and answers what `POST v1/gateways/` answers plus `upgrade` (the quote it was
-  struck at). When it clears, the new plan starts and runs its FULL length; the days left
-  on the old plan were what the credit paid for. A refund of that payment puts the old
-  plan and its dates back.
+  struck at). When it clears the credit is re-read and the new plan starts, running for
+  what the money and the credit buy — its FULL length when it clears as quoted. A refund
+  takes back exactly what the refunded money bought: refunding the upgrade leaves the
+  credited days on the new plan, refunding a credited payment takes back the days its
+  credit became.
 - Only a DEARER plan: `409 not_an_upgrade` otherwise (a cheaper plan waits until the
   period ends, then `change-plan/`). `409 no_running_cover` when nothing runs (use
   `change-plan/`, then Pay). `409 upgrade_not_payable` with `to_pay` and `minimum` when the
@@ -1229,8 +1232,12 @@ operator maintains in the console. Four things the app needs:
 - `change-plan/` keeps answering `409 plan_change_while_active` while cover runs; its
   table now points at `upgrade/`.
 - The receipt of an upgrade gains `upgrade`: `{from_plan_id, from_plan_name, new_price,
-  credit, days_left, currency, late}` (null on every other receipt), and the PDF prints
-  the plan it replaced, the new price and the credit.
+  credit, days_left, granted_days, currency, late}` (null on every other receipt), and
+  the PDF prints the plan it replaced, the new price and the credit. `late: true` means
+  no cover was left to credit when the money cleared: `credit` and `days_left` are null.
+- `renew/` and `POST v1/gateways/` answer `409 checkout_open` (`payment_id`, `status`,
+  `expires_at`) when the open checkout is an upgrade or a payment under review, instead
+  of handing it back as their own.
 
 **Money that is almost right is held for a person** (the spec, section 7; BACKEND_BUGS
 B-051, 2026-09-23).
