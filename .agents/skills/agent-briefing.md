@@ -56,6 +56,23 @@ Worktrees are how several agents build at once. The setup is done for you; what 
 
 ## The merge, and what conflicts
 
+**Never `git add -A` (or `git add .`) in the main checkout.** Stage the paths you mean.
+On 2026-09-20 one `git add -A` swept a stranger's working-tree state into a commit: it
+deleted `SYSTEM_OVERVIEW.md` (which `CLAUDE.md` tells every session to read) and added
+150 files of the abandoned `mobile/` app, and nobody noticed until an audit three days
+later — after it had been pushed.
+
+**Never pipe `git merge` through `tail` or `head`.** The CONFLICT lines come first and
+you will not see them. After every merge, run `git diff --name-only --diff-filter=U`
+and resolve each file it names; then `git grep -nE '^(<<<<<<<|>>>>>>>)( |$)'` must
+print nothing before you commit. A `tail`-ed merge committed `SIDE_BUGS.md` full of
+conflict markers, and the counts reported from it were wrong.
+
+**`.po` files: merge with gettext, not by hand.** Take the two sides with
+`git show :2:locale/ar/LC_MESSAGES/django.po > ours.po` and `:3:` for theirs, then
+`msgcat --use-first -o django.po ours.po theirs.po`. A text union of conflict hunks
+splits entries at the hunk boundary and leaves a `msgstr` with no `msgid`.
+
 Every parallel build touches the same four places, so expect these and nothing else:
 
 - `locale/ar/LC_MESSAGES/django.po` — both sides APPEND, so the resolution is "keep both,

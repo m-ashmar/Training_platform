@@ -92,3 +92,8 @@ key.md
 # Rotated log files were tracked (logs/diet.log.1, logs/django.log.1 — 90k lines):
 # `*.log` did not match them, so they were committed and would ship in any archive.
 logs/
+
+# The abandoned Flutter attempt (CLAUDE.md: never read or touch). It entered the index
+# once through a `git add -A`; this keeps it out.
+/mobile/
+/flutter/
