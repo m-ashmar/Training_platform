@@ -33,7 +33,7 @@ import tempfile
 import time
 from pathlib import Path
 
-import pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))  # THIS tree, like every script here (S-008 checks it)
+import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))  # THIS tree, like every script here (S-008 checks it)
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
