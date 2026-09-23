@@ -105,9 +105,15 @@ class ChatMessageListView(generics.ListAPIView):
 
 class FeedbackView(APIView):
     """
-    POST /api/ai/feedback/
+    POST /api/ai/feedback/  `{message_id, feedback: "positive" | "negative"}`
 
-    Submit 👍/👎 feedback for a specific assistant message.
+    Submit 👍/👎 feedback for one of your assistant replies. Stored on the reply —
+    `feedback` on `sessions/{id}/messages/` reads it back — for every user, whatever
+    their training-data consent; `updated_records` is how many training rows it was
+    also copied to (0 without that consent). Sending again replaces it.
+
+    200 `{message, feedback, updated_records}`; 404 `message_not_found`; 400
+    `validation_error` for a missing id or a value that is neither.
     """
     permission_classes = AI_PERMISSIONS
 
@@ -136,18 +142,15 @@ class FeedbackView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Match on the message itself. The previous filter used
-        # `ai_response__startswith=msg.content[:100]`, and assistant replies routinely
-        # share an opening line — one thumbs-up stamped TWO unrelated training rows,
-        # silently mislabelling the dataset.
-        updated = AITrainingData.objects.filter(
-            user=request.user,
-            session=msg.session,
-            message=msg,
-        ).update(user_feedback=feedback)
+        # On the message, which every user has, and then on the training row, which
+        # only an opted-in user has. This updated the training row alone and answered
+        # "Feedback saved" to everyone else with nothing saved (SIDE_BUGS S-061). The
+        # socket's `feedback` frame goes through the same method.
+        updated = msg.record_feedback(request.user, feedback)
 
         return Response({
             "message": _("Feedback saved. Thank you!"),
+            "feedback": feedback,
             "updated_records": updated,
         })
 

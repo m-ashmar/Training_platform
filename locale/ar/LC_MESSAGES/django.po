@@ -4213,3 +4213,58 @@ msgstr "السعر"
 #: subscription/receipts.py
 msgid "Exchange rate"
 msgstr "سعر الصرف"
+
+# The AI coach's tool lines, translated per frame (SIDE_BUGS S-090).
+#: ai_assistant/tool_registry.py
+msgid "Reviewed your profile"
+msgstr "راجعتُ ملفك الشخصي"
+
+#: ai_assistant/tool_registry.py
+msgid "Checked your body metrics"
+msgstr "تحقّقتُ من قياسات جسمك"
+
+#: ai_assistant/tool_registry.py
+msgid "Analyzed your exercise progress"
+msgstr "حلّلتُ تقدّمك في التمارين"
+
+#: ai_assistant/tool_registry.py
+msgid "Reviewed recent workouts"
+msgstr "راجعتُ تمارينك الأخيرة"
+
+#: ai_assistant/tool_registry.py
+msgid "Calculated training volume"
+msgstr "حسبتُ حجم التدريب"
+
+#: ai_assistant/tool_registry.py
+msgid "Checked your diet plan"
+msgstr "تحقّقتُ من خطتك الغذائية"
+
+#: ai_assistant/tool_registry.py
+msgid "Reviewed meal details"
+msgstr "راجعتُ تفاصيل الوجبات"
+
+#: ai_assistant/tool_registry.py
+msgid "Analyzed diet adherence"
+msgstr "حلّلتُ التزامك بالنظام الغذائي"
+
+#: ai_assistant/tool_registry.py
+msgid "Checked your routine schedule"
+msgstr "تحقّقتُ من جدول تمارينك"
+
+#: ai_assistant/tool_registry.py
+msgid "Reviewed routine progress"
+msgstr "راجعتُ تقدّمك في البرنامج التدريبي"
+
+#: ai_assistant/tool_registry.py
+msgid "Compiled overall progress"
+msgstr "جمعتُ ملخّص تقدّمك العام"
+
+# Adherence over the plan's days, an untracked day counting zero (SIDE_BUGS S-091).
+#: ai_assistant/tools/diet_tools.py
+#, python-format
+msgid ""
+"Only %(tracked)s of the %(days)s plan days were tracked; a day with nothing "
+"ticked counts as zero."
+msgstr ""
+"سُجّل %(tracked)s فقط من أصل %(days)s من أيام الخطة؛ اليوم الذي لم يُسجَّل فيه "
+"شيء يُحتسب صفراً."

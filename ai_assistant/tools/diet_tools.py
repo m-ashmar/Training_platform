@@ -10,13 +10,45 @@ from django.utils import timezone
 from django.utils.translation import gettext as _
 
 
+def plan_day_adherence(user, plan, since, until=None):
+    """Calorie adherence of `plan` from `since` to `until` (inclusive; today when
+    omitted), over the plan's DAYS rather than over the days that happen to have a row.
+
+    Since S-023 a `DailyProgress` row exists only for a day on which something was
+    ticked, so averaging the rows averaged the good days: a client who logged 2 of 7
+    days was told the adherence of those 2 (SIDE_BUGS S-091). Here every day the plan
+    has meals on counts, and a day with no row scores 0. Today counts only once
+    something is ticked — it is not over yet.
+
+    Returns `{rows, days, tracked, scores, average}`: the rows by date, every day
+    counted, the days that carry a tracked row, each day's score (100 = exactly on
+    target), and their mean — None when nothing was tracked at all, because no data is
+    not a score.
+    """
+    from diet.models import DailyProgress, Meal
+
+    today = timezone.localdate()
+    until = min(until or today, today)
+    rows = {dp.date: dp for dp in DailyProgress.objects.filter(
+        user=user, diet_plan=plan, date__gte=since, date__lte=until).order_by('date')}
+    tracked = sorted(day for day, dp in rows.items() if dp.target_calories > 0)
+    plan_days = set(Meal.objects.filter(
+        diet_plan=plan, date__gte=since, date__lte=min(until, today - timedelta(days=1)),
+    ).order_by().values_list('date', flat=True).distinct())
+    days = sorted(plan_days | set(tracked))
+    scores = {day: (max(0, 100 - abs(rows[day].calories_percentage - 100))
+                    if day in rows and rows[day].target_calories > 0 else 0)
+              for day in days}
+    average = round(sum(scores.values()) / len(days), 1) if tracked else None
+    return {"rows": rows, "days": days, "tracked": tracked, "scores": scores,
+            "average": average}
+
+
 def get_active_diet_plan(user, **kwargs):
-    """Get the user's currently active diet plan summary."""
+    """Get the user's currently active diet plan summary: the one covering today."""
     from diet.models import DietPlan
 
-    plan = DietPlan.objects.filter(
-        user=user, is_active=True,
-    ).select_related('template', 'created_by').first()
+    plan = DietPlan.governing(user).select_related('template', 'created_by').first()
 
     if not plan:
         return {"active_plan": None, "message": str(_("No active diet plan found."))}
@@ -59,7 +91,9 @@ def get_meal_details(user, date_str=None, **kwargs):
             return {"meals": [],
                     "message": str(_("I need the date as YYYY-MM-DD."))}
 
-    plan = DietPlan.objects.filter(user=user, is_active=True).first()
+    # The plan covering THAT day. The newest active plan is next week's as soon as a
+    # trainer schedules it, and the client was told they had no meals today.
+    plan = DietPlan.governing(user, target_date).first()
     if not plan:
         return {"meals": [], "message": str(_("No active diet plan."))}
 
@@ -101,10 +135,9 @@ def get_diet_adherence(user, days=7, **kwargs):
     Get diet adherence trends — calories consumed vs target,
     macro gaps, and best/worst days.
     """
-    from diet.models import DailyProgress, DietPlan
+    from diet.models import DietPlan
 
-
-    plan = DietPlan.objects.filter(user=user, is_active=True).first()
+    plan = DietPlan.governing(user).first()
     if not plan:
         return {"adherence": None, "message": str(_("No active diet plan."))}
 
@@ -114,38 +147,24 @@ def get_diet_adherence(user, days=7, **kwargs):
         return {"adherence": None,
                 "message": str(_("I need the number of days as a whole number."))}
     since = timezone.localdate() - timedelta(days=days)
-    progress_qs = DailyProgress.objects.filter(
-        user=user, diet_plan=plan, date__gte=since,
-    ).order_by('date')
-    
+    adherence = plan_day_adherence(user, plan, since)
 
     daily_data = []
-    total_adherence = 0
-    count = 0
-
-    for dp in progress_qs:
-        cal_pct = dp.calories_percentage
+    for dp in adherence["rows"].values():
         daily_data.append({
             "date": dp.date.isoformat(),
             "calories_consumed": dp.calories_consumed,
             "calories_target": dp.target_calories,
-            "calories_pct": cal_pct,
+            "calories_pct": dp.calories_percentage,
             "protein_pct": dp.protein_percentage,
             "carbs_pct": dp.carbs_percentage,
             "fat_pct": dp.fat_percentage,
             "meals_completed": dp.meals_completed,
             "total_meals": dp.total_meals,
         })
-        if dp.target_calories > 0:
-            # Adherence score: 100 when exactly on target
-            adherence = max(0, 100 - abs(cal_pct - 100))
-            total_adherence += adherence
-            count += 1
 
-    # `0` here read as "this client scored zero on adherence" for a client who has
-    # simply never tracked a day, and the assistant answers from the first field it
-    # finds. No data is not a score.
-    avg_adherence = round(total_adherence / count, 1) if count else None
+    count = len(adherence["tracked"])
+    plan_days = len(adherence["days"])
 
     # Find best and worst days
     # Closest to target, not the largest. Ranking by `calories_pct` reported a 200%
@@ -159,8 +178,12 @@ def get_diet_adherence(user, days=7, **kwargs):
     worst_day = max(daily_data, key=_distance_from_target) if daily_data else None
 
     payload = {
-        "average_adherence_pct": avg_adherence,
+        # Over every day of the plan in the period, an untracked one counting 0 — see
+        # `plan_day_adherence`. `None`, never 0, for a client who has tracked nothing:
+        # no data is not a score.
+        "average_adherence_pct": adherence["average"],
         "days_tracked": count,
+        "plan_days": plan_days,
         "daily_data": daily_data,
         "best_day": best_day,
         "worst_day": worst_day,
@@ -169,6 +192,10 @@ def get_diet_adherence(user, days=7, **kwargs):
     if not count:
         # Said in words as well as by a null, because the model reads the message.
         payload["message"] = str(_("This client has not tracked any days yet."))
+    elif count < plan_days:
+        payload["message"] = str(_(
+            "Only %(tracked)s of the %(days)s plan days were tracked; a day with "
+            "nothing ticked counts as zero.") % {"tracked": count, "days": plan_days})
     return payload
 
 

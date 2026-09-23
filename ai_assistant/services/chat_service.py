@@ -17,7 +17,7 @@ from django.conf import settings
 from django.utils.translation import gettext as _
 from django.utils.translation import gettext_lazy as _lazy
 
-from ai_assistant.tool_registry import ToolRegistry, TOOL_DISPLAY_NAMES
+from ai_assistant.tool_registry import ToolRegistry, display_name
 from ai_assistant.services.context_compiler import ContextCompiler
 from ai_assistant.services.memory_service import MemoryService
 from ai_assistant.services.security import InputSanitizer
@@ -213,7 +213,9 @@ class ChatService:
                     # Process each tool call
                     for tc in tool_calls_buffer:
                         func_name = tc["function"]["name"]
-                        display = TOOL_DISPLAY_NAMES.get(func_name, func_name)
+                        # Translated per frame, in the reader's language: see
+                        # `tool_registry.TOOL_DISPLAY_NAMES`. Branch on `name`.
+                        display = display_name(func_name)
                         yield {"type": "tool_used", "name": func_name, "display": display}
 
                         try:
@@ -347,7 +349,7 @@ class ChatService:
 
         # 13. Emit completion event
         tools_display = [
-            {"name": tc["name"], "display": TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"])}
+            {"name": tc["name"], "display": display_name(tc["name"])}
             for tc in tool_calls_made
         ]
         yield {

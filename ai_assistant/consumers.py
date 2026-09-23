@@ -29,6 +29,66 @@ from training_platform.ws_auth import authenticate_scope
 logger = logging.getLogger(__name__)
 
 
+def _daily_window(now=None):
+    """Today's date, the aware instant the day ends, and the seconds until then.
+
+    In `TIME_ZONE`, aware. This combined `localdate()` into a NAIVE midnight and
+    subtracted a naive `datetime.now()`, so `resets_at` reached the app with no offset
+    at all ("2026-09-24T00:00:00"), and the TTL was right only because Django happens
+    to export `TIME_ZONE` into the process's `TZ` (SIDE_BUGS S-050).
+    """
+    now = now or timezone.now()
+    zone = timezone.get_current_timezone()
+    today = timezone.localdate(now, zone)
+    midnight = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=zone)
+    return today, midnight, max(1, int((midnight - now).total_seconds()))
+
+
+def daily_limit_key(user_id, today=None):
+    """The one key both the reservation and the refund use for a user's day."""
+    today = today or timezone.localdate()
+    return f"ai_chat_limit:{user_id}:{today.isoformat()}"
+
+
+def reserve_daily_slot(user_id, max_messages, *, store=None, now=None):
+    """Take one of `user_id`'s messages for today. Returns (allowed, remaining,
+    resets_at), `resets_at` an ISO 8601 instant WITH its offset.
+
+    The first message of the day was not atomic (SIDE_BUGS S-089): `incr` on a missing
+    key raises, and every socket that saw it raise then `set` the counter to 1, so N
+    sockets sending their first message together were all allowed and the counter
+    ended at 1. `add` is SET-if-absent, so exactly one of them creates the key at 0
+    and INCR alone decides: every caller gets a distinct number.
+    """
+    from training_platform.cache import ratelimit_cache
+
+    rl = store or ratelimit_cache()
+    today, midnight, ttl = _daily_window(now)
+    key = daily_limit_key(user_id, today)
+    resets_at = midnight.isoformat()
+
+    rl.add(key, 0, ttl)
+    try:
+        current = rl.incr(key)
+    except ValueError:
+        # Gone between the two calls: the day ended in that instant. A fresh day's
+        # counter, created the same atomic way.
+        rl.add(key, 0, ttl)
+        current = rl.incr(key)
+
+    if current > max_messages:
+        # Roll back the over-limit increment so counter stays accurate
+        try:
+            rl.decr(key)
+        except Exception:
+            # Optional side effect: swallowing this silently is what made the
+            # surrounding failures invisible in logs. Control flow is unchanged.
+            logger.debug('suppressed non-fatal error', exc_info=True)
+        return False, 0, resets_at
+
+    return True, max_messages - current, resets_at
+
+
 class AIChatConsumer(AsyncWebsocketConsumer):
     """
     WebSocket endpoint: ws://host/ws/ai/chat/?token=<JWT>
@@ -73,7 +133,9 @@ class AIChatConsumer(AsyncWebsocketConsumer):
 
     A turn that ends on an `error` is NOT charged against the daily allowance
     (`_reserve_rate_limit`), and the `rate_limit` frame that closes every turn carries
-    what is actually left.
+    what is actually left. `resets_at` is the next midnight in the server's
+    `TIME_ZONE`, as ISO 8601 with its offset (`2026-09-24T00:00:00+03:00`); it used to
+    carry no offset at all.
     """
 
     def __init__(self, *args, **kwargs):
@@ -388,41 +450,10 @@ class AIChatConsumer(AsyncWebsocketConsumer):
         still spent the user's daily allowance: they paid for the assistant's failures.
 
         `remaining` counts the reservation as already spent, so it is what the user has
-        left AFTER this turn.
+        left AFTER this turn. The work is `reserve_daily_slot`, synchronous, below.
         """
         config = getattr(settings, 'AI_ASSISTANT_CONFIG', {})
-        max_messages = config.get('MAX_MESSAGES_PER_DAY', 50)
-        from training_platform.cache import ratelimit_cache
-
-        cache_key = f"ai_chat_limit:{self.user.id}:{timezone.localdate().isoformat()}"
-        rl = ratelimit_cache()
-
-        # Calculate reset time (midnight)
-        tomorrow = datetime.combine(
-            timezone.localdate() + timedelta(days=1), datetime.min.time(),
-        )
-        seconds_until_midnight = int((tomorrow - datetime.now()).total_seconds())
-        resets_at = tomorrow.isoformat()
-
-        # Increment first, then check (prevents concurrent bypass)
-        try:
-            current = rl.incr(cache_key)
-        except ValueError:
-            rl.set(cache_key, 1, seconds_until_midnight)
-            current = 1
-
-        if current > max_messages:
-            # Roll back the over-limit increment so counter stays accurate
-            try:
-                rl.decr(cache_key)
-            except Exception:
-                # Optional side effect: swallowing this silently is what made the
-                # surrounding failures invisible in logs. Control flow is unchanged.
-                logger.debug('suppressed non-fatal error', exc_info=True)
-            return False, 0, resets_at
-
-        remaining = max_messages - current
-        return True, remaining, resets_at
+        return reserve_daily_slot(self.user.id, config.get('MAX_MESSAGES_PER_DAY', 50))
 
     async def _refund_rate_limit(self, remaining):
         """Give back the slot a failed turn reserved. Returns the corrected `remaining`.
@@ -434,7 +465,7 @@ class AIChatConsumer(AsyncWebsocketConsumer):
         """
         from training_platform.cache import ratelimit_cache
 
-        cache_key = f"ai_chat_limit:{self.user.id}:{timezone.localdate().isoformat()}"
+        cache_key = daily_limit_key(self.user.id)
         try:
             ratelimit_cache().decr(cache_key)
         except Exception:
@@ -449,8 +480,8 @@ class AIChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def _save_feedback(self, message_id, feedback):
-        """Save user feedback to AITrainingData."""
-        from ai_assistant.models import AITrainingData, ChatMessage
+        """Save the user's feedback on one of their assistant replies."""
+        from ai_assistant.models import ChatMessage
         try:
             msg = ChatMessage.objects.get(
                 id=message_id,
@@ -467,18 +498,10 @@ class AIChatConsumer(AsyncWebsocketConsumer):
             # and `True` was returned unconditionally, so the user tapped 👍, saw
             # "Thanks for the feedback!", and nothing was recorded. The quality signal
             # for the entire assistant was silently zero.
-            msg.feedback = feedback
-            msg.save(update_fields=['feedback'])
-            # Mirrored onto the training row when the user consented and it is already
-            # written; a row written later copies it from the message.
-            updated = AITrainingData.objects.filter(
-                user=self.user, message=msg).update(user_feedback=feedback)
-            if not updated:
-                # A turn logged before the FK existed: fall back to the session and the
-                # full response text, which is at least an exact comparison.
-                AITrainingData.objects.filter(
-                    user=self.user, session=msg.session, message__isnull=True,
-                    ai_response=msg.content).update(user_feedback=feedback)
+            # Stored on the message, and mirrored onto the training row when the user
+            # consented and it is already written; a row written later copies it from
+            # the message. Shared with `POST /api/ai/feedback/`.
+            msg.record_feedback(self.user, feedback)
             return True
         except ChatMessage.DoesNotExist:
             return False

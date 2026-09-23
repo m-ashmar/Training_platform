@@ -844,6 +844,25 @@ class DietPlan(RowValidationMixin, models.Model):
                 raise ValidationError(
                     {'daily_calories': 'Must be greater than zero — a plan is a target to eat to.'})
 
+    @classmethod
+    def governing(cls, user, on_date=None):
+        """The active plans covering `on_date` (today when omitted), the governing one
+        first: `.first()` is the plan, or None.
+
+        The question every screen asks (`trainer_services._get_active_diet_plan`,
+        `diet/tasks.py`). "The newest active plan" is a different one: only plans whose
+        dates OVERLAP are superseded, so a trainer scheduling next week leaves two
+        active rows, and the newer is not the one the client is eating from — the AI
+        coach read next week's plan and told the client they had no meals today
+        (SIDE_BUGS S-060). A queryset method, so a caller can `select_related` first.
+        """
+        from django.utils import timezone
+
+        day = on_date or timezone.localdate()
+        return (cls.objects
+                .filter(user=user, is_active=True, start_date__lte=day, end_date__gte=day)
+                .order_by('-start_date', '-id'))
+
     def overlapping_active_plans(self):
         """Other active plans of this user's covering any of the same days."""
         if not (self.start_date and self.end_date and self.is_active):
