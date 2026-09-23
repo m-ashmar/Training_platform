@@ -20,6 +20,42 @@ are not bugs: they are in `BACKEND_DELTA.md` and `yalla_gym/app/PLAN.md` §8.
 
 Last updated by the app session: 2026-09-19 (B-020 to B-036 added while wiring routes 01, 02, 04). Backend notes: 2026-09-19.
 
+## Backend summary (the backend session, 2026-09-23)
+
+**State: 65 rows — 61 fixed, 2 partly fixed (B-058, B-065: the catalogue has no fibre or
+vegetarian data), 1 planned (B-051, plan step 5), 1 wontfix (B-029).** Rows B-037..B-065
+were fixed on 2026-09-23, each with a test that fails on the code before it
+(`tests/test_backend_bugs_app_0923.py`, `_0923b.py`, `_0923c.py`, `_0923d.py`), then
+reviewed twice by independent adversarial reviewers; the 17 defects they reproduced are
+fixed with their own tests (`_0923b_review.py`, `_0923_final_review.py`).
+
+### Fixed 2026-09-23: what the app can rely on now
+
+| Rows | What the app can do now |
+|---|---|
+| B-037..B-046 (home, chat) | Volume counts sets with no prescribed weight; the server starts (ASGI); chat messages carry `kind: "text"`; `refresh_after_seconds` is the time left on the cache; `estimated_minutes` may be null; days before a program starts are rest; `participants` counts the standing |
+| B-047 | `POST subscriptions/{id}/change-plan/` `{plan_id}` while nothing is running and no checkout is open (`409 plan_change_while_active` / `checkout_open` otherwise); then Pay prices the new plan. Earlier payments keep naming what they bought |
+| B-048..B-050, B-052 | Codes on status/reconcile refusals; PDF-receipt 404s are JSON; `plan_id` on `subscriptions/current/`; `renew/` answers `expires_at` |
+| B-053..B-057 (Me) | `phone_number` read-only on the profile; own codes on device-token DELETE and picture refusals; `user/update/` POST answers the saved profile |
+| B-058..B-065 (nutrition) | Swap offers carry the portion's figures, image and a `tag` (`more_protein`, `fewer_calories`, `more_calories`, `similar`); own codes on meal refusals and full docstrings; Arabic reason and `description_ar`; plan rows name their `author`; food rows carry `tags` |
+
+### Still open
+
+| Item | State |
+|---|---|
+| B-051 | A matching / needs-review payment state is plan step 5's checkout-session work |
+| B-058, B-065 | `fiber`, `more_fiber` and a vegetarian tag need catalogue data the owner has to decide on |
+| Plan change mid-period | Refused (`plan_change_while_active`) until the owner decides how it is priced (`PAYMENTS_COMPLIANCE_PLAN.md`, Open 5) |
+
+### New server rules the app must handle
+
+- **A new `code` on an old refusal.** A refusal that answered only its status default
+  (`bad_request`, `not_found`, `conflict`, `permission_denied`) may gain its own code
+  (API_CONTRACT.md §6). Treat an unknown code as its status default and nothing breaks.
+- **Pay may answer `409 price_changed` without a quote mismatch** when the subscription
+  moved plan during the call: show `expected_amount` and ask again.
+- **`more_calories`** is a swap tag the design does not draw: the offer is a bigger portion.
+
 ## Backend summary (the backend session, 2026-09-19)
 
 **State: 36 rows — 35 fixed, 1 wontfix (B-029), 0 open.** Every fix has a regression test
