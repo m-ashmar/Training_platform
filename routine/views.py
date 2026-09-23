@@ -17,9 +17,9 @@ from .serializers import (
     ExerciseSerializer, ExerciseCreateWithImageSerializer, RoutineSerializer, 
     RoutineExerciseSerializer, UserExerciseProgressSerializer, RoutineProgressSerializer,
     UserRoutineSerializer, ExerciseSetLogSerializer, TrainerRoutineSerializer,
-    ClientProfileViewSerializer, WorkoutSessionSerializer, RoutineTemplateSerializer,
+    WorkoutSessionSerializer, RoutineTemplateSerializer,
     ExerciseMediaSerializer,
-    RecentActivitySerializer, WorkoutSessionDetailSerializer
+    RecentActivitySerializer,
 )
 # NOT imported here any more:
 #   `RoutineTemplateExerciseSerializer` — this module defined a SECOND class of that
@@ -28,6 +28,9 @@ from .serializers import (
 #   nested writer `RoutineTemplateSerializer` uses and belongs only to serializers.py.
 #   `DetailedClientProgressSerializer` — imported and never used, and deleted with this
 #   line (SIDE_BUGS S-037).
+#   `WorkoutSessionDetailSerializer`, `ClientProfileViewSerializer` — the same, on the
+#   adjacent names (SIDE_BUGS S-055). `ClientProfileViewSerializer` is still used, by
+#   `users/views.py`, which imports it from serializers.py itself.
 from .permissions import (
     IsAdminOrOwnerOrReadOnly, 
     IsTrainerOrAdmin,
@@ -54,6 +57,8 @@ from datetime import timedelta
 RECENT_ACTIVITY_DAYS = 30
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
+import django_filters.rest_framework as django_filters
+from django import forms as django_forms
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.views import APIView
 from users.models import CustomUser
@@ -200,11 +205,47 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
+def _refused_upload(error, which=None):
+    """400 for an upload the guard refused, carrying the guard's OWN `code`.
+
+    `process_uploaded_image` says exactly what was wrong — `file_too_large`,
+    `invalid_mime_type`, `unreadable_image`, `unsupported_format`,
+    `image_dimensions_too_large`, `image_too_many_pixels`, ... — and these routes kept
+    only the sentence, so the envelope filled in `bad_request` and the app could not
+    tell a photo that is too big from a file that is not a photo (SIDE_BUGS S-118). The
+    profile picture route already passed it on; `invalid_image` is its fallback too.
+    `which` names the photo in a batch (`media_photos`), inside the translated sentence.
+    """
+    reason = error.messages[0] if getattr(error, 'messages', None) else str(error)
+    if which is not None:
+        reason = _('Media photo %(number)d: %(reason)s') % {'number': which, 'reason': reason}
+    return Response({'error': reason, 'code': getattr(error, 'code', None) or 'invalid_image'},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+
+def _discard_stored(names):
+    """Remove files this request stored before it failed. Best effort: the answer is
+    already a failure, and a storage outage must not turn it into a different one."""
+    from django.core.files.storage import default_storage
+
+    for name in names:
+        try:
+            default_storage.delete(name)
+        except Exception:  # noqa: BLE001 — logged, never raised
+            logger.warning("could not remove %s after a failed exercise create", name,
+                           exc_info=True)
+
+
 class ExerciseCreateWithImageView(APIView):
     """
     Enhanced endpoint for creating exercises with optional image upload and media content.
     
     Accepts multipart/form-data with exercise data and optional media files/URLs.
+
+    **Who may call it.** A trainer or an admin — `IsTrainerOrAdmin`, the rule
+    `POST exercises/` already applied. Anyone else answers 403 `permission_denied`
+    before a byte is read or stored: this route took any signed-in account, so a client
+    or an agent reached the form (SIDE_BUGS S-117).
     
     Supported media types:
     - Main exercise image (demonstration image)
@@ -224,15 +265,31 @@ class ExerciseCreateWithImageView(APIView):
       `media_host_not_allowed` otherwise, the same rule
       `exercises/{id}/add-media/` applies. 400 `media_url_invalid` for a
       malformed one.
-    - media_texts (optional): Additional text content (comma-separated)
+    - media_texts (optional): Additional text content (separated by `||`)
+
+    **A refused upload** (`image` or any of `media_photos`) answers 400 with the upload
+    guard's own `code` — `file_too_large`, `invalid_mime_type`, `unreadable_image`,
+    `unsupported_format`, `image_dimensions_too_large`, `image_too_many_pixels`, and
+    the guard's other refusals; `invalid_image` when it names none (SIDE_BUGS S-118).
+    For a photo the sentence says which one.
+
+    **Extra photos are stored by NAME.** Each is saved under
+    `exercise_media/<exercise id>/` and its `ExerciseMedia` row keeps the storage name;
+    `media[].content` and `thumbnail` are a URL made when the exercise is SERVED, signed
+    and expiring like every media URL — read it again, never store it. The row used to
+    keep the signed URL itself, which on object storage died an hour after the upload
+    (SIDE_BUGS S-070). Removing the media row or the exercise removes the file.
 
     A fault nobody anticipated answers 500 `exercise_create_failed` with a translated
     sentence and nothing else: the exception text used to BE the response body
     (SIDE_BUGS S-036, the same defect closed in the two media views as S-006), which
     hands whoever posted the form a stack trace's worth of internals — file paths,
-    storage bucket names, SQL. The traceback goes to the log.
+    storage bucket names, SQL. The traceback goes to the log. And it writes NOTHING:
+    the exercise, its media rows and every file this request stored are undone. The
+    500 used to be answered from inside the atomic block, which then committed — a
+    half-made exercise per failed attempt, and one more per retry (SIDE_BUGS S-057).
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsTrainerOrAdmin]
     parser_classes = [MultiPartParser, FormParser]
 
     # Atomic: these writes were independent, so a failure part-way left the
@@ -243,14 +300,17 @@ class ExerciseCreateWithImageView(APIView):
         """Create a new exercise with optional image and media content"""
         from .models import ExerciseMedia
         import re
-        
+
+        # Storage names this request wrote, so a failure can take them back out: the
+        # rollback undoes the rows, and nothing undoes a file but this list.
+        stored = []
         try:
             # Validate required fields
             required_fields = ['name', 'description', 'target_muscle']
             for field in required_fields:
                 if not request.data.get(field):
                     return Response(
-                        {'error': f'Missing required field: {field}'},
+                        {'error': _('Missing required field: %(field)s') % {'field': field}},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -259,28 +319,16 @@ class ExerciseCreateWithImageView(APIView):
             
             # Validate main image file if provided
             if image_file:
-                # Validate file type
                 # Validate CONTENT (magic bytes), cap pixel dimensions and re-encode.
-
                 # The client Content-Type header was the only previous check and is
-
                 # spoofable — PHP/SVG payloads were accepted and stored as .php/.svg.
-
                 from training_platform.file_security import process_uploaded_image
-
                 from django.core.exceptions import ValidationError as DjangoValidationError
 
                 try:
-
                     image_file, _img_ext = process_uploaded_image(image_file, max_bytes=5 * 1024 * 1024)
-
                 except DjangoValidationError as e:
-
-                    return Response(
-
-                        {'error': e.messages[0] if getattr(e, 'messages', None) else str(e)},
-
-                        status=status.HTTP_400_BAD_REQUEST)
+                    return _refused_upload(e)
 
             # Validate additional media photos if provided
             media_photos = request.FILES.getlist('media_photos')
@@ -298,11 +346,7 @@ class ExerciseCreateWithImageView(APIView):
                         safe_photo, photo_ext = process_uploaded_image(photo, max_bytes=5 * 1024 * 1024)
                         validated_photos.append((safe_photo, photo_ext))
                     except DjangoValidationError as e:
-                        msg = e.messages[0] if getattr(e, 'messages', None) else str(e)
-                        return Response(
-                            {'error': f'Media photo {i+1}: {msg}'},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
+                        return _refused_upload(e, which=i + 1)
 
             # Validate video URLs if provided
             media_videos = request.data.get('media_videos', '')
@@ -321,7 +365,7 @@ class ExerciseCreateWithImageView(APIView):
                 for i, url in enumerate(video_urls):
                     if not url_pattern.match(url):
                         return Response(
-                            {'error': f'Invalid video URL format: {url}',
+                            {'error': _('Invalid video URL format: %(url)s') % {'url': url},
                              'code': 'media_url_invalid'},
                             status=status.HTTP_400_BAD_REQUEST
                         )
@@ -357,35 +401,38 @@ class ExerciseCreateWithImageView(APIView):
                 **exercise_data
             )
 
-            # Set main image if provided
+            # Set main image if provided. Through `FieldFile.save`, with a server-made
+            # name carrying the DETECTED format's extension — exactly as
+            # `exercises/{id}/image/` stores one. The re-encoded image is a ContentFile
+            # with no name, and ASSIGNING it made Django refuse the save ("must have the
+            # name attribute specified"), so every request that sent `image` — the
+            # point of this route — answered 500 (SIDE_BUGS S-057).
             if image_file:
-                exercise.image = image_file
+                exercise.image.save(f"exercise.{_img_ext}", image_file, save=False)
+                stored.append(exercise.image.name)
                 exercise.save()
 
             # Create additional media records
             media_created = []
             
             # Handle additional photo uploads
+            from django.core.files.storage import default_storage
             for i, (photo_file, photo_ext) in enumerate(validated_photos):
-                # For uploaded photos, we need to save them and create a URL
-                # Since ExerciseMedia.content expects URLs, we'll store the file path.
-                # A server-made name with the DETECTED format's extension.
+                # A server-made name with the DETECTED format's extension, under a
+                # folder of this exercise's own.
                 photo_name = f"exercise_media_{exercise.id}_{i}.{photo_ext}"
-                
-                # Save photo to media storage (you might want to use a specific upload path)
-                from django.core.files.storage import default_storage
-                import os
-                
-                # Create a proper path for exercise media
-                photo_path = f"exercise_media/{exercise.id}/{photo_name}"
+                photo_path = f"{ExerciseMedia.STORED_PHOTO_PREFIX}{exercise.id}/{photo_name}"
                 saved_path = default_storage.save(photo_path, photo_file)
-                photo_url = default_storage.url(saved_path)
-                
-                # Create ExerciseMedia record
+                stored.append(saved_path)
+
+                # The storage NAME, never `default_storage.url(...)`: that URL is signed
+                # and expires (an hour on object storage), so the row held a dead link
+                # soon after it was written (SIDE_BUGS S-070). The URL is made when the
+                # row is served — `ExerciseMedia.content_url`.
                 media_record = ExerciseMedia.objects.create(
                     exercise=exercise,
                     media_type='photo',
-                    content=photo_url,
+                    content=saved_path,
                     title=f"Exercise Photo {i+1}",
                     description=f"Additional demonstration photo for {exercise.name}",
                     order=i
@@ -434,11 +481,21 @@ class ExerciseCreateWithImageView(APIView):
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
             # wrong contract for the client and hides real faults in the error budget.
+            # Propagating out of the atomic block rolls the rows back; the files are
+            # this function's to take back.
+            _discard_stored(stored)
             raise
         except Exception:
             # The exception TEXT used to be the response body (S-036) — the same defect
             # the two media views closed as S-006, in the class that pass did not
             # cover. Logged with the traceback, answered with a code.
+            #
+            # And undone. Returning a Response from inside `@transaction.atomic` is a
+            # NORMAL exit, so the block committed whatever had been written before the
+            # fault — the exercise row at least (S-057). Mark it for rollback, and
+            # remove the files the rows would have pointed at.
+            transaction.set_rollback(True)
+            _discard_stored(stored)
             logger.exception("exercise create-with-image failed for user %s",
                              getattr(request.user, 'pk', None))
             return Response(
@@ -932,6 +989,26 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         pass
 
 
+class _WholeNumberFilter(django_filters.NumberFilter):
+    """A whole number or a 400. `NumberFilter` parses a Decimal, and an integer column
+    takes `int()` of it — so `?routine=1.5` would have read routine 1."""
+    field_class = django_forms.IntegerField
+
+
+class RoutineExerciseFilter(django_filters.FilterSet):
+    """`?routine=<id>&day=<n>` as NUMBERS, never as a lookup of the routine row.
+
+    See `RoutineExerciseViewSet`: a model-choice filter validates the id against every
+    routine there is, and its two different answers are an existence oracle.
+    """
+    routine = _WholeNumberFilter(field_name='routine_id')
+    day = _WholeNumberFilter(field_name='day')
+
+    class Meta:
+        model = RoutineExercise
+        fields = ['routine', 'day']
+
+
 class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing RoutineExercise objects.
@@ -942,7 +1019,12 @@ class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     the whole-routine payload, though `template-exercises/` could already be filtered
     the same way (SIDE_BUGS S-030). The filters narrow what `get_queryset` has already
     scoped, so they cannot widen it: a routine that is neither yours nor assigned to
-    you answers an empty page, never somebody else's programme.
+    you answers an empty page, never somebody else's programme — and so does a routine
+    id that does not exist at all. Both are plain numbers: the auto-generated filter
+    checked `routine` against EVERY routine in the table, so a missing id answered 400
+    `Select a valid choice` while someone else's real one answered an empty 200, which
+    told anyone which routine ids exist (SIDE_BUGS S-119). A value that is not a whole
+    number answers 400 on that parameter.
 
     Paginated: `{count, next, previous, results}`, `?page_size=` up to 100.
     """
@@ -953,7 +1035,7 @@ class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     permission_classes = [IsAdminOrOwnerOrReadOnly]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['routine', 'day']
+    filterset_class = RoutineExerciseFilter
 
     def get_queryset(self):
         """
@@ -3186,6 +3268,13 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     Allows trainers, admins, and clients to create, view, and update their own progress records.
     A client's create answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when every routine
     of theirs holding the exercise comes from a coaching that is unpaid or over.
+
+    `POST` body: `exercise` (id), optional `date` (default today), `skipped`. 400
+    `validation_error` with, on the field: `does_not_exist` on `exercise` for an
+    exercise the caller may not read and has never trained — the same answer as an id
+    that does not exist (SIDE_BUGS S-056); `date_in_future` / `date_too_old` on `date`
+    outside the training window (SIDE_BUGS S-112). 400 `progress_exists` with the
+    existing row's `id` for a second row on the same exercise and day.
     """
     queryset = UserExerciseProgress.objects.all()
     serializer_class = UserExerciseProgressSerializer
@@ -3299,7 +3388,11 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         """
         Mark all exercises for a given routine and day as done for the current user.
         Input: routine_id, day, date, completed_sets, target_sets
-        
+
+        Answers `{results, errors, count}`. Each `errors[]` entry is
+        `{exercise, error, code}` — `code` is `progress_exists` or
+        `progress_write_failed`; `error` is translated and for showing only.
+
         403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`): the coaching this
         routine came from is unpaid or over — readable, not trainable (the owner).
         """
@@ -3380,12 +3473,20 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                 results.append({'exercise': rex.exercise.name, 'created': created, 'id': obj.id})
                 written.append(obj)
             except IntegrityError as e:
+                # Each row error carries a `code` (SIDE_BUGS S-042): this list had
+                # sentences only, and the duplicate one was English whatever the
+                # client spoke. `progress_exists` is the code `POST
+                # user-exercise-progress/` already answers for the same collision.
                 if 'unique constraint' in str(e).lower():
-                    errors.append({'exercise': rex.exercise.name, 'error': 'Duplicate progress for this user, exercise, and date.'})
+                    errors.append({'exercise': rex.exercise.name,
+                                   'error': _('A progress record for this user, exercise, '
+                                              'and date already exists.'),
+                                   'code': 'progress_exists'})
                 else:
                     logger.exception("bulk progress write failed for %s", rex.exercise_id)
                     errors.append({'exercise': rex.exercise.name,
-                                   'error': _('Could not record progress for this exercise.')})
+                                   'error': _('Could not record progress for this exercise.'),
+                                   'code': 'progress_write_failed'})
         if written:
             # One pass decides the whole day from every exercise's progress.
             refresh_routine_progress(written[-1], routine_scope=routine, day_scope=day)
@@ -3450,15 +3551,83 @@ def _media_host_allowed(url) -> bool:
     return False
 
 
+# ---- Resolving an exercise for a media write: one rule, written once ---------------
+# `ExerciseImageUploadView` and `ExerciseAddMediaView` each wrote the "may see" and
+# "may change" rules out for themselves, and the image view's copy had already drifted:
+# it resolved ids with `Exercise.objects.get`, so another trainer's private exercise
+# answered 403 while a missing id answered 404 (SIDE_BUGS S-125).
+
+def _visible_exercise(request, exercise_id):
+    """The exercise if this caller may read it at all, else None (-> 404).
+
+    `routine.permissions.visible_exercises_for`, the rule the exercise list uses.
+    `.first()` rather than `.get()`: the client branch of the rule joins through
+    routine_exercises, and a row reachable by two routes must not raise
+    MultipleObjectsReturned at the caller.
+    """
+    return visible_exercises_for(request.user).filter(id=exercise_id).first()
+
+
+def _exercise_not_found():
+    """The one answer for "no such exercise" and for "not yours to see".
+
+    A fresh dict per call, not a constant: `normalize_error_envelope` fills `detail`
+    and `code` into `response.data` in place, so a shared dict would be edited by the
+    first 404 this process serves.
+    """
+    return Response({'error': _('Exercise not found.')}, status=status.HTTP_404_NOT_FOUND)
+
+
+def _may_modify_exercise(request, exercise):
+    """Writes are owner-only: `created_by`, or an admin.
+
+    Global exercises belong to the shared catalogue: admin-only. The old guard was
+    `not is_global and created_by != user`, which short-circuits to False for global
+    exercises, leaving them writable by ANY user. Keyed on ownership rather than
+    `is_global`, because the "created_by => not global" invariant lives in
+    `Exercise.clean()`, which `.create()` never runs.
+    """
+    is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
+    if exercise.created_by_id:
+        return (exercise.created_by_id == request.user.id) or is_admin
+    # No owner => shared global catalog => admin only.
+    return is_admin
+
+
+def _not_yours_to_modify():
+    """403 `permission_denied`, only ever for an exercise the caller can already see.
+    Translated (SIDE_BUGS S-042): the four copies of this sentence were English."""
+    return Response({'error': _('You do not have permission to modify this exercise.'),
+                     'code': 'permission_denied'},
+                    status=status.HTTP_403_FORBIDDEN)
+
+
 class ExerciseImageUploadView(APIView):
     """
-    Dedicated endpoint for uploading exercise images.
-    Accepts multipart/form-data with image file.
+    `/api/routine/exercises/{exercise_id}/image/` — an exercise's main demonstration
+    image. `POST` is multipart/form-data with the file under `image`; `DELETE` takes no
+    body. Signed in.
 
-    `POST` answers `{message, exercise}` where `exercise` is the full
-    `ExerciseSerializer` shape, and 500 `image_upload_failed` /
-    `image_removal_failed` when the file could not be stored or removed — never the
-    exception text.
+    **Who.** The id is resolved through `routine.permissions.visible_exercises_for`
+    FIRST, the rule the exercise list and `add-media/` use: an exercise the caller may
+    not see answers `404 code="not_found"`, `{"error"/"detail": "Exercise not found."}`
+    — byte-identical to an id that does not exist. It answered 403 for another trainer's
+    private exercise, which told a caller which ids were real (SIDE_BUGS S-125). Then
+    ownership: the exercise's `created_by`, or an admin; the shared catalogue is
+    admin-only. Anyone else who can SEE it answers 403 `permission_denied`.
+
+    | Method | Answers |
+    |---|---|
+    | `POST` | `200` `{message, exercise}` · `400` no `image` · `400` refused upload · `403` · `404` · `500` `image_upload_failed` |
+    | `DELETE` | `200` `{message}` · `404` `{message}` when there is no image · `403` · `404` · `500` `image_removal_failed` |
+
+    `exercise` is the full `ExerciseSerializer` shape. A refused upload carries the
+    upload guard's own `code` — `file_too_large`, `invalid_mime_type`,
+    `unreadable_image`, `unsupported_format`, `image_dimensions_too_large`,
+    `image_too_many_pixels`, and the guard's other refusals; `invalid_image` when it
+    names none (SIDE_BUGS S-118). A 500 never carries the exception text.
+
+    Nothing here varies by build (`X-App-Channel`): it sells nothing and moves no money.
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -3466,41 +3635,19 @@ class ExerciseImageUploadView(APIView):
     def post(self, request, exercise_id):
         """Upload an image for a specific exercise"""
         try:
-            # Get the exercise
-            try:
-                exercise = Exercise.objects.get(id=exercise_id)
-            except Exercise.DoesNotExist:
-                return Response(
-                    {'error': 'Exercise not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-
-            # Check if user has permission to modify this exercise.
-            # Global exercises belong to the shared catalog: admin-only. The old
-            # guard was `not is_global and created_by != user`, which short-circuits
-            # to False for global exercises, leaving them writable by ANY user.
-            _is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
-            if exercise.created_by_id:
-                # Owned exercise: the creator (or an admin) may modify it. Keyed on
-                # ownership rather than is_global, because the "created_by => not
-                # global" invariant lives only in Exercise.clean(), which .create()
-                # never runs — so an owned row can still carry is_global=True.
-                allowed = (exercise.created_by_id == request.user.id) or _is_admin
-            else:
-                # No owner => shared global catalog => admin only.
-                allowed = _is_admin
-            if not allowed:
-                return Response(
-                    {'error': 'You do not have permission to modify this exercise'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+            # Invisible -> 404, exactly like a missing id; only then ownership.
+            exercise = _visible_exercise(request, exercise_id)
+            if exercise is None:
+                return _exercise_not_found()
+            if not _may_modify_exercise(request, exercise):
+                return _not_yours_to_modify()
 
             # Get the uploaded file
             image_file = request.FILES.get('image')
             
             if not image_file:
                 return Response(
-                    {'error': 'No image file provided. Please include a file with key "image"'},
+                    {'error': _('No image file provided. Please include a file with key "image"')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -3512,10 +3659,7 @@ class ExerciseImageUploadView(APIView):
             try:
                 safe_file, img_ext = process_uploaded_image(image_file, max_bytes=5 * 1024 * 1024)
             except DjangoValidationError as e:
-                return Response(
-                    {'error': e.messages[0] if getattr(e, 'messages', None) else str(e)},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return _refused_upload(e)
 
             # Store under the DETECTED format's extension, never the client filename.
             exercise.image.save(f"exercise.{img_ext}", safe_file, save=False)
@@ -3550,34 +3694,12 @@ class ExerciseImageUploadView(APIView):
     def delete(self, request, exercise_id):
         """Remove exercise image"""
         try:
-            # Get the exercise
-            try:
-                exercise = Exercise.objects.get(id=exercise_id)
-            except Exercise.DoesNotExist:
-                return Response(
-                    {'error': 'Exercise not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-
-            # Check if user has permission to modify this exercise.
-            # Global exercises belong to the shared catalog: admin-only. The old
-            # guard was `not is_global and created_by != user`, which short-circuits
-            # to False for global exercises, leaving them writable by ANY user.
-            _is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
-            if exercise.created_by_id:
-                # Owned exercise: the creator (or an admin) may modify it. Keyed on
-                # ownership rather than is_global, because the "created_by => not
-                # global" invariant lives only in Exercise.clean(), which .create()
-                # never runs — so an owned row can still carry is_global=True.
-                allowed = (exercise.created_by_id == request.user.id) or _is_admin
-            else:
-                # No owner => shared global catalog => admin only.
-                allowed = _is_admin
-            if not allowed:
-                return Response(
-                    {'error': 'You do not have permission to modify this exercise'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+            # Same order as POST: invisible -> 404, then ownership.
+            exercise = _visible_exercise(request, exercise_id)
+            if exercise is None:
+                return _exercise_not_found()
+            if not _may_modify_exercise(request, exercise):
+                return _not_yours_to_modify()
 
             if exercise.image:
                 # See users/views.py: the post-commit receiver owns file removal.
@@ -3626,8 +3748,8 @@ class ExerciseAddMediaView(APIView):
     404 gate, `POST` and `DELETE` additionally require ownership: the exercise's
     `created_by`, or an admin. The shared catalogue (`created_by IS NULL`) is
     admin-only — a client or trainer reading it gets 200 on GET and `403
-    code="permission_denied"`, "You do not have permission to modify this exercise",
-    on a write. A 403 is only ever returned for a row the caller can already see.
+    code="permission_denied"`, "You do not have permission to modify this exercise.",
+    on a write (translated, SIDE_BUGS S-042). A 403 is only ever returned for a row the caller can already see.
     Keyed on `created_by_id`, not `is_global`: the "created_by => not global"
     invariant lives in `Exercise.clean()`, which `.create()` never runs.
 
@@ -3639,7 +3761,14 @@ class ExerciseAddMediaView(APIView):
 
     `GET`'s `exercise` is the full `ExerciseSerializer` shape — the same object the
     exercise list and detail answer, `media_slots` included. `exercise_id` and
-    `exercise_name` are kept beside it.
+    `exercise_name` are kept beside it. A photo the platform STORED
+    (`create-with-image/`) is served in `media_items[].content` as a URL signed when it
+    is read; it expires like every media URL (SIDE_BUGS S-070). `message` on a 201/200
+    is translated and for showing only.
+
+    **Caching.** These GETs, the exercise list and the detail are cached per user for
+    five minutes; every `POST` and `DELETE` here invalidates them, so a coach sees their
+    own change at once (SIDE_BUGS S-138).
 
     Nothing here varies by build (`X-App-Channel`): it sells nothing and moves no money.
 
@@ -3686,35 +3815,11 @@ class ExerciseAddMediaView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    @staticmethod
-    def _not_found():
-        """The one answer for "no such exercise" and for "not yours to see".
-
-        A fresh dict per call, not a class constant: `normalize_error_envelope` fills
-        `detail` and `code` into `response.data` in place, so a shared dict would be
-        edited by the first 404 this process serves.
-        """
-        return Response({'error': _('Exercise not found.')},
-                        status=status.HTTP_404_NOT_FOUND)
-
-    @staticmethod
-    def _visible_exercise(request, exercise_id):
-        """The exercise if this caller may read it at all, else None (-> 404).
-
-        `.first()` rather than `.get()`: the client branch of the visibility rule
-        joins through routine_exercises, and a row reachable by two routes must not
-        raise MultipleObjectsReturned at the caller.
-        """
-        return visible_exercises_for(request.user).filter(id=exercise_id).first()
-
-    @staticmethod
-    def _may_modify(request, exercise):
-        """Writes are owner-only: `created_by`, or an admin. See the class docstring."""
-        is_admin = getattr(request.user, 'is_admin', False) or request.user.is_staff
-        if exercise.created_by_id:
-            return (exercise.created_by_id == request.user.id) or is_admin
-        # No owner => shared global catalog => admin only.
-        return is_admin
+    # The rules themselves are module-level, shared with `ExerciseImageUploadView`
+    # (SIDE_BUGS S-125): see `_visible_exercise` and `_may_modify_exercise`.
+    _not_found = staticmethod(_exercise_not_found)
+    _visible_exercise = staticmethod(_visible_exercise)
+    _may_modify = staticmethod(_may_modify_exercise)
 
     def post(self, request, exercise_id):
         """Add media items to an existing exercise. Owner or admin; see the class docstring."""
@@ -3731,17 +3836,14 @@ class ExerciseAddMediaView(APIView):
             # `not is_global and created_by != user`, which short-circuits to False for
             # global exercises, leaving them writable by ANY user.
             if not self._may_modify(request, exercise):
-                return Response(
-                    {'error': 'You do not have permission to modify this exercise'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+                return _not_yours_to_modify()
 
             # Get media items from request
             media_items = request.data.get('media_items', [])
             
             if not media_items:
                 return Response(
-                    {'error': 'No media items provided. Please include "media_items" array'},
+                    {'error': _('No media items provided. Please include "media_items" array')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -3828,7 +3930,8 @@ class ExerciseAddMediaView(APIView):
             
             # Return response
             response_data = {
-                'message': f'Successfully added {len(created_media)} media items to exercise "{exercise.name}"',
+                'message': _('Successfully added %(count)d media items to exercise "%(name)s"')
+                % {'count': len(created_media), 'name': exercise.name},
                 'exercise_id': exercise.id,
                 'exercise_name': exercise.name,
                 'created_media': created_media,
@@ -3877,7 +3980,8 @@ class ExerciseAddMediaView(APIView):
                 media_data.append({
                     'id': media.id,
                     'media_type': media.media_type,
-                    'content': media.content,
+                    # A stored photo is signed now, from its name (S-070).
+                    'content': media.content_url(request),
                     'title': media.title,
                     'description': media.description,
                     'order': media.order,
@@ -3925,17 +4029,14 @@ class ExerciseAddMediaView(APIView):
             # `not is_global and created_by != user`, which short-circuits to False for
             # global exercises, leaving them writable by ANY user.
             if not self._may_modify(request, exercise):
-                return Response(
-                    {'error': 'You do not have permission to modify this exercise'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+                return _not_yours_to_modify()
 
             # Get media IDs to delete
             media_ids = request.data.get('media_ids', [])
             
             if not media_ids:
                 return Response(
-                    {'error': 'No media_ids provided. Please include "media_ids" array'},
+                    {'error': _('No media_ids provided. Please include "media_ids" array')},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -3960,7 +4061,8 @@ class ExerciseAddMediaView(APIView):
                                   % {'id': media_id})
             
             response_data = {
-                'message': f'Successfully deleted {deleted_count} media items from exercise "{exercise.name}"',
+                'message': _('Successfully deleted %(count)d media items from exercise "%(name)s"')
+                % {'count': deleted_count, 'name': exercise.name},
                 'exercise_id': exercise.id,
                 'deleted_count': deleted_count,
                 'remaining_media_count': exercise.media.count()

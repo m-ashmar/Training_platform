@@ -106,6 +106,12 @@ MODEL_VERSION_KEYS = {
     # cached route; the alternative, filtering by owner type here, would put a second
     # copy of the slot vocabulary in the cache layer.
     "mediakit.MediaAsset": "EXERCISE",
+    # The same hole, left open for the LEGACY media model. `/api/routine/exercises/` is
+    # prefix-matched, so the list, the detail and `exercises/{id}/add-media/` GET are
+    # all cached here — and they serve `media[]`, `thumbnail` and `media_items[]` from
+    # `ExerciseMedia`, which bumped nothing. A coach added or deleted a tip or a photo
+    # through `add-media/` and saw the old set for up to five minutes (SIDE_BUGS S-138).
+    "routine.ExerciseMedia": "EXERCISE",
 }
 
 

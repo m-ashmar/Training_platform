@@ -4213,3 +4213,35 @@ msgstr "السعر"
 #: subscription/receipts.py
 msgid "Exchange rate"
 msgstr "سعر الصرف"
+
+#: routine/views.py
+#, python-format
+msgid "Invalid video URL format: %(url)s"
+msgstr "صيغة رابط الفيديو غير صالحة: %(url)s"
+
+#: routine/views.py
+#, python-format
+msgid "Media photo %(number)d: %(reason)s"
+msgstr "الصورة الإضافية %(number)d: %(reason)s"
+
+#: routine/views.py
+msgid "No image file provided. Please include a file with key \"image\""
+msgstr "لم يتم توفير ملف الصورة. يرجى تضمين ملف يحتوي على المفتاح \"image\""
+
+#: routine/views.py
+msgid "No media items provided. Please include \"media_items\" array"
+msgstr "لم يتم توفير عناصر وسائط. يرجى تضمين المصفوفة \"media_items\""
+
+#: routine/views.py
+msgid "No media_ids provided. Please include \"media_ids\" array"
+msgstr "لم يتم توفير معرّفات الوسائط. يرجى تضمين المصفوفة \"media_ids\""
+
+#: routine/views.py
+#, python-format
+msgid "Successfully added %(count)d media items to exercise \"%(name)s\""
+msgstr "تمت إضافة %(count)d من عناصر الوسائط إلى التمرين \"%(name)s\""
+
+#: routine/views.py
+#, python-format
+msgid "Successfully deleted %(count)d media items from exercise \"%(name)s\""
+msgstr "تم حذف %(count)d من عناصر الوسائط من التمرين \"%(name)s\""
