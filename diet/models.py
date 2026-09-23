@@ -139,6 +139,18 @@ class FoodItem(RowValidationMixin, models.Model):
     protein_per_gram = models.FloatField(default=0.0)
     carbs_per_gram = models.FloatField(default=0.0)
     fat_per_gram = models.FloatField(default=0.0)
+    #: Dietary fibre, grams per 100 g, like the four macros above (the owner, 2026-09-23;
+    #: BACKEND_BUGS B-058, B-065). NULL means NOT KNOWN and is never read as 0 g: a food
+    #: nobody measured must not claim to have no fibre, so there is no default. The USDA
+    #: rows get it from nutrient 1079 (`fetch_usda` -> `diet/data/usda_cache.json` ->
+    #: `load_food_catalogue`, and migration 0077 for a database loaded before it); the
+    #: curated Levantine rows have none until someone enters it. For display and tags
+    #: only — the planner never reads it. No `fiber_per_gram`: every reader scales this
+    #: per-100 g figure by the portion, as `MealComponent.calculate_nutrition` does.
+    fiber = models.FloatField(
+        null=True, blank=True,
+        help_text="Grams of dietary fibre per 100 g. Empty means not known — never 0 by "
+                  "default.")
     smart_score_weight = models.FloatField(default=1.0, help_text="Adaptive weight for smart macro planner")
 
 
@@ -249,7 +261,13 @@ class FoodItem(RowValidationMixin, models.Model):
             self.fat = float(self.fat)
         except Exception:
             self.fat = 0.0
-            
+        # Fibre is the one figure that may be unknown: unparseable is unknown, not 0 g.
+        if self.fiber is not None:
+            try:
+                self.fiber = float(self.fiber)
+            except Exception:
+                self.fiber = None
+
         # Reverse initialisation: derive the per-100g macros from per-gram values when a
         # caller supplied only those. ON CREATE ONLY. `0` is being used as a sentinel for
         # "not provided", which is indistinguishable from a real zero, so on UPDATE this
@@ -306,7 +324,10 @@ class FoodItem(RowValidationMixin, models.Model):
             self.protein = self.protein * normalization_factor
             self.carbs = self.carbs * normalization_factor
             self.fat = self.fat * normalization_factor
-            
+            # Per serving in, per 100 g out, like its four siblings; unknown stays unknown.
+            if self.fiber is not None:
+                self.fiber = self.fiber * normalization_factor
+
             # Update serving_size_grams to 100g standard
             self.serving_size_grams = 100
             
@@ -356,6 +377,11 @@ class FoodItem(RowValidationMixin, models.Model):
                 condition=models.Q(**{f"{field}__gte": 0, f"{field}__lt": FINITE_CEILING}),
                 name=f"food_{field}_is_a_finite_amount")
               for field in ("calories", "protein", "carbs", "fat")],
+            # The same bound for fibre, which may also be unknown (NULL).
+            models.CheckConstraint(
+                condition=(models.Q(fiber__isnull=True)
+                           | models.Q(fiber__gte=0, fiber__lt=FINITE_CEILING)),
+                name="food_fiber_is_a_finite_amount"),
         ]
 
     # Physical ceilings. Nothing validated nutrition before, so the catalogue contains
@@ -371,7 +397,7 @@ class FoodItem(RowValidationMixin, models.Model):
         from django.core.exceptions import ValidationError
 
         errors = {}
-        for field in ('calories', 'protein', 'carbs', 'fat'):
+        for field in ('calories', 'protein', 'carbs', 'fat', 'fiber'):
             val = getattr(self, field, None)
             if val is not None and val < 0:
                 errors[field] = 'Cannot be negative.'

@@ -117,7 +117,11 @@ class Command(BaseCommand):
                 "data_type": best.get("dataType"),
                 "query": query,
                 **{k: round(macros.get(k, 0.0), 2)
-                   for k in ("calories", "protein", "carbs", "fat", "fiber")},
+                   for k in ("calories", "protein", "carbs", "fat")},
+                # Fibre the response does not report is NOT KNOWN: written as null, never
+                # as 0 g, because `load_food_catalogue` stores it as the food's fibre and a
+                # food nobody measured must not claim to have none (the owner, 2026-09-23).
+                "fiber": round(macros["fiber"], 2) if "fiber" in macros else None,
             }
             self.stdout.write(f"  {name:<32} <- {best.get('description','')[:52]}")
             time.sleep(opts["sleep"])

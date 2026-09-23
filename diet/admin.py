@@ -124,9 +124,10 @@ class ImprovedFoodItemAdmin(TranslAdmin):
             'fields': ('name', 'category', 'api_id', 'image_url', 'image_preview')
         }),
         ('Nutrition per 100 g', {
-            'fields': ('calories', 'protein', 'carbs', 'fat', 'serving_size_grams'),
+            'fields': ('calories', 'protein', 'carbs', 'fat', 'fiber', 'serving_size_grams'),
             'description': ('Every food is stored per 100 g. To say how big a portion is, '
-                            'set unit grams below — not these numbers.')
+                            'set unit grams below — not these numbers. Leave fiber empty '
+                            'when it is not known: empty is "unknown", 0 claims none.')
         }),
         ('How the planner uses it', {
             'fields': ('meal_slots', 'cuisine', 'role', 'household_unit', 'unit_grams'),
