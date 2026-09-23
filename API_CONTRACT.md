@@ -1083,7 +1083,8 @@ nobody knows when the person stopped.
 `fx/rttr`). Two NEW codes, nothing renamed:
 
 - `PATCH`, `PUT` and `DELETE workout-sessions/{id}/` belong to the session's owner and an
-  admin; a trainer answers 403 (they still read it). `DELETE` removes the sets logged in
+  admin; a trainer answers 403 (they still read it; a trainer's PATCH that also fails
+  validation answers that 400 first, as before — `effort_not_yours`). `DELETE` removes the sets logged in
   the session and recomputes what they were counted in, and is refused with 403
   `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while the coaching is unpaid
   or over, judged at the session's start.
