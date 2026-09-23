@@ -278,13 +278,27 @@ def poll_open_payments(now=None):
     ttl_window = checkout_ttl()
     batch = int(getattr(settings, 'PAYMENT_POLL_BATCH', 100))
 
+    from .models import HELD_PAYMENT_STATUSES
+
     rows = list(Payment.objects
                 .filter(status__in=OPEN_PAYMENT_STATUSES,
                         created_at__lte=now - timedelta(seconds=grace))
+                .exclude(status__in=HELD_PAYMENT_STATUSES)
                 .exclude(gateway_transaction_reference='')
                 .exclude(gateway_transaction_reference__isnull=True)
                 .select_related('subscription__user')
-                .order_by('created_at')[:batch])
+                .order_by('created_at', 'id')[:batch])
+    # Held rows never expire, so oldest-first they would fill the batch for good and
+    # starve every new checkout (the review, L5). They are asked about in a small pass of
+    # their own — only an exact transfer does anything to them — least recently asked
+    # first, so every held row is reached in turn.
+    held_batch = int(getattr(settings, 'PAYMENT_POLL_HELD_BATCH', 10))
+    rows += list(Payment.objects
+                 .filter(status__in=HELD_PAYMENT_STATUSES)
+                 .exclude(gateway_transaction_reference='')
+                 .exclude(gateway_transaction_reference__isnull=True)
+                 .select_related('subscription__user')
+                 .order_by('updated_at', 'id')[:held_batch])
 
     checked = completed = expired = failed = held = 0
     for payment in rows:
@@ -325,7 +339,9 @@ def poll_open_payments(now=None):
             continue
         if payment.status == 'needs_review':
             # Money was seen for it: an operator decides, not the clock and not a
-            # gateway flag. Only an exact transfer (above) completes it meanwhile.
+            # gateway flag. Only an exact transfer (above) completes it meanwhile. Touched,
+            # so the held pass reaches the others before this one again.
+            Payment.objects.filter(pk=payment.pk).update(updated_at=now)
             continue
         if state in ('failed', 'declined', 'rejected'):
             try:
@@ -362,14 +378,14 @@ def poll_open_payments(now=None):
                       'data': {'type': 'checkout_expired',
                                'payment_id': str(payment.id)}})
 
-    if checked >= batch:
+    if checked >= batch + held_batch:
         logger.warning("poll: hit the %s-row cap; the rest waits for the next minute",
                        batch)
     if completed or expired or failed or held:
         logger.info("poll: %s checked, %s completed, %s expired, %s failed, %s held",
                     checked, completed, expired, failed, held)
     return {'checked': checked, 'completed': completed, 'expired': expired,
-            'failed': failed, 'held': held, 'capped': checked >= batch}
+            'failed': failed, 'held': held, 'capped': checked >= batch + held_batch}
 
 
 @shared_task(
@@ -515,7 +531,7 @@ def sweep_unmatched_transfers(now=None):
     known |= set(TransferReview.objects.filter(transaction_id__in=ids)
                  .values_list('transaction_id', flat=True))
 
-    held = queued = 0
+    held = queued = settled = 0
     for fact in facts:
         if fact['transaction_id'] in known:
             continue
@@ -525,10 +541,28 @@ def sweep_unmatched_transfers(now=None):
                  .order_by('-created_at', '-id').first() if refs else None)
         try:
             if named is not None:
-                if named.status in OPEN_PAYMENT_STATUSES and named.status not in HELD_PAYMENT_STATUSES:
-                    continue                  # the open poller matches or holds it
+                if named.status in OPEN_PAYMENT_STATUSES:
+                    # Open, or held: the open poller matches it exactly, or holds it, within
+                    # the minute; a held one waits for an operator either way (the review,
+                    # L2). Queuing it here raced that poller onto the same transfer.
+                    continue
                 if named.status == 'expired' and named.created_at >= now - late_window:
-                    continue                  # the late poller matches or holds it
+                    # Settled HERE, not left to the late poller: its batch is capped and
+                    # newest-first, so behind a hundred abandoned checkouts this one was
+                    # never reached and the money never surfaced (the review, L3).
+                    if _exact(fact, named):
+                        PaymentService.complete_payment(named.id, {
+                            'status': 'completed', 'amount': fact.get('amount'),
+                            'currency': fact.get('currency'),
+                            'transaction_id': fact['transaction_id'],
+                            'event_id': fact['transaction_id'],
+                            'reference': named.gateway_transaction_reference,
+                            'gateway_data': fact.get('gateway_data')})
+                        settled += 1
+                    elif PaymentService.hold_for_review(
+                            named.id, fact, reason=_near_reason(fact, named)):
+                        held += 1
+                    continue
                 if PaymentService.hold_for_review(named.id, fact, reason='checkout_closed'):
                     queued += 1
                 continue
@@ -559,7 +593,30 @@ def sweep_unmatched_transfers(now=None):
         except PaymentError as exc:
             logger.warning("sweep: transfer %s not queued: %s", fact['transaction_id'], exc)
 
-    if held or queued:
-        logger.warning("sweep: %s transfer(s) held a checkout for review, %s queued alone",
-                       held, queued)
-    return {'seen': len(facts), 'held': held, 'queued': queued, 'complete': complete}
+    if held or queued or settled:
+        logger.warning("sweep: %s transfer(s) held a checkout for review, %s queued alone, "
+                       "%s settled a closed checkout", held, queued, settled)
+    if not complete:
+        # Said out loud: what was not read was not seen, and an account too busy to read
+        # in full is a queue nobody is looking at (the review, L9).
+        logger.error("sweep: the merchant account could not be read in full; transfers in "
+                     "the unread part of the window are not in the review queue yet")
+    return {'seen': len(facts), 'held': held, 'queued': queued, 'settled': settled,
+            'complete': complete}
+
+
+def _exact(fact, payment) -> bool:
+    """Whether a listed transfer is exactly what `payment` asked for."""
+    try:
+        amount = Decimal(str(fact.get('amount'))).quantize(Decimal('0.01'))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return (amount == Decimal(payment.amount).quantize(Decimal('0.01'))
+            and str(fact.get('currency') or '').upper() == str(payment.currency).upper())
+
+
+def _near_reason(fact, payment) -> str:
+    """Why a transfer naming `payment` is not its exact money."""
+    currency = str(fact.get('currency') or '').upper()
+    return ('currency_differs' if currency and currency != str(payment.currency).upper()
+            else 'amount_differs')

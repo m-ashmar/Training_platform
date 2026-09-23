@@ -109,9 +109,19 @@ def credit_for_run(subscription, *, buyer_currency, now=None):
     days_left = seconds_left // 86400
     budget = days_left
 
-    running = list(subscription.current_run_payments()
-                   .filter(covers_until__gt=now)
-                   .order_by('covers_from', 'id'))
+    running = list(subscription.current_run_payments().filter(covers_until__gt=now))
+    # An upgrade that was REFUNDED took back only its money's share of its period; the
+    # days its credit bought are still cover, still worth what they were worth, and are
+    # still credited — at the nothing they were credited before (the review, L12).
+    refunded = (subscription.payments
+                .filter(status='refunded', metadata__kind='upgrade', covers_until__gt=now)
+                .exclude(metadata__has_key='credited_into'))
+    if subscription.start_date:
+        refunded = refunded.filter(covers_from__gte=subscription.start_date)
+    running += [u for u in refunded
+                if ((u.metadata or {}).get('upgrade') or {}).get('switch')
+                and not u.metadata['upgrade']['switch'].get('late')]
+    running.sort(key=lambda p: (p.covers_from, str(p.pk)))
     parts = []
     total = Decimal('0.00')
     for payment in running:
@@ -161,6 +171,8 @@ class UpgradeQuote:
     #: The new plan's pricing, for the payment's price-of-record and rate snapshot.
     priced: Priced
     quoted_at: datetime
+    #: Which payments the credit came from, and how much from each (`credit_for_run`).
+    parts: tuple = ()
 
     def as_payload(self) -> dict:
         """The shape the app draws before the customer pays."""
@@ -190,6 +202,8 @@ class UpgradeQuote:
             'to_pay': str(self.to_pay),
             'days_left': int(self.days_left),
             'quoted_at': self.quoted_at.isoformat(),
+            'parts': [{'payment_id': str(p.payment_id), 'credit': str(p.credit)}
+                      for p in self.parts],
         }
 
 
@@ -215,8 +229,8 @@ def quote_upgrade(subscription, to_plan, *, buyer_currency, gateway_name=None, n
                            f"for a {buyer_currency} buyer")
 
     new = charge_for(to_plan.price, to_plan.currency, buyer_currency)
-    credit, days_left, _parts = credit_for_run(subscription, buyer_currency=buyer_currency,
-                                               now=now)
+    credit, days_left, parts = credit_for_run(subscription, buyer_currency=buyer_currency,
+                                              now=now)
     to_pay = (new.amount - credit).quantize(CENT, rounding=ROUND_HALF_UP)
     minimum = None
     if gateway_name:
@@ -232,4 +246,4 @@ def quote_upgrade(subscription, to_plan, *, buyer_currency, gateway_name=None, n
     return UpgradeQuote(
         from_plan=from_plan, to_plan=to_plan, currency=buyer_currency,
         new_price=new.amount, credit=credit, to_pay=to_pay, days_left=days_left,
-        priced=new, quoted_at=now)
+        priced=new, quoted_at=now, parts=tuple(parts))

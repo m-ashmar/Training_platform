@@ -238,8 +238,19 @@ class PaymentAdmin(admin.ModelAdmin):
             self.message_user(request, line, messages.ERROR)
 
     def mark_as_completed(self, request, queryset):
-        """Only for a payment already settled out of band — it activates the subscription."""
+        """Only for a payment already settled out of band — it activates the subscription.
+
+        Not for a payment held for review (B-051): money arrived for it that is not what
+        it asked for, and completing it here minted the price that never arrived. It is
+        decided in the transfer review queue, which records what did."""
+        from django.contrib import messages
         from subscription.services.payment_service import PaymentService
+
+        held = queryset.filter(status='needs_review')
+        for payment in held:
+            self.message_user(request, f"{payment.id}: held for review — approve or reject "
+                                       f"its transfer in Transfer reviews", messages.ERROR)
+        queryset = queryset.exclude(status='needs_review')
         self._apply(request, queryset, lambda p: PaymentService.complete_payment(
             p.id,
             {'amount': p.amount, 'currency': p.currency, 'status': 'completed',

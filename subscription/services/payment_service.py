@@ -167,6 +167,15 @@ class PaymentService:
             if payment.completed_at is None:
                 payment.completed_at = timezone.now()
 
+            # A transfer queued for review that turns out to be THIS payment's exact money
+            # (the sweep saw it before the poller matched it) is settled by this
+            # completion, not left open as "money to hand back" (the review, L2).
+            txn = str(verified_data.get('transaction_id') or event_id or '')
+            if txn:
+                TransferReview.objects.filter(transaction_id=txn, status='open').update(
+                    status='approved', payment=payment, resolved_at=timezone.now(),
+                    resolution_note='Settled automatically: this transfer completed the payment')
+
             # --- Activate / extend the subscription, and record what that bought ---
             # The plan and the period THIS payment was sold (its checkout's snapshot),
             # read before the row's plan is decided: a row with no snapshot reads its
@@ -428,6 +437,15 @@ class PaymentService:
                 logger.info("Transfer %s already confirmed a payment; not queued", txn_id)
                 return None
             holds = payment.status == 'needs_review' or payment.can_transition_to('needs_review')
+            if holds and payment.status == 'expired':
+                # Closed for good once the late-money window has passed: the customer has
+                # moved on and may hold a newer checkout. The money is queued against it,
+                # the row is left as it is (the review, L2).
+                from django.conf import settings
+
+                late = timedelta(hours=int(getattr(settings, 'PAYMENT_LATE_MONEY_WINDOW_HOURS', 72)))
+                if payment.created_at < timezone.now() - late:
+                    holds = False
             if not holds:
                 reason = ('duplicate_transfer' if payment.status in ('completed', 'refunded')
                           else 'checkout_closed')
@@ -563,6 +581,10 @@ class PaymentService:
             review = TransferReview.objects.select_for_update().get(pk=review_id)
             if review.status != 'open':
                 raise ReviewConflict(f"Review {review.id} is {review.status}")
+            if review.payment_id != payment_id:
+                # Attached to a checkout while this call waited for the lock: the decision
+                # was taken on another state. Refused; ask again (the review, L6).
+                raise ReviewConflict(f"Review {review.id} changed checkout; try again")
             review.status = 'rejected'
             review.resolved_by = operator
             review.resolved_at = timezone.now()
@@ -815,6 +837,11 @@ class PaymentService:
                 if not payment.gateway_transaction_reference:
                     continue
                 meta = payment.metadata or {}
+                if payment.status == 'needs_review':
+                    # A person is checking money that arrived for it: not payable, not
+                    # this call's to hand back (the review, L1).
+                    raise CheckoutOpen(f"Subscription {locked.id} has checkout "
+                                       f"{payment.id} held for review", payment)
                 if meta.get('kind') == 'upgrade' and payment.plan_bought()['plan_id'] == to_plan.pk:
                     payment.already_open = True
                     return payment
@@ -1136,14 +1163,33 @@ class PaymentService:
             switching = False
 
         if switching:
-            credit, days_left, parts = credit_for_run(
+            credit, days_left, found = credit_for_run(
                 subscription, buyer_currency=payment.currency, now=now)
+            parts = [{'payment_id': str(part.payment_id), 'credit': part.credit}
+                     for part in found]
+            # Paid as quoted — within its checkout window, on the very payments the
+            # credit was struck on — the quote is honoured: the customer paid the figure
+            # they were shown and gets the full length they were promised, even if a
+            # whole day ticked over while the transfer posted (the review, L14).
+            from ..utils import checkout_ttl
+
+            quoted = record.get('parts')
+            if (quoted is not None and record.get('credit') is not None
+                    and payment.created_at and now <= payment.created_at + checkout_ttl()
+                    # One whole day may tick while a transfer posts; three days is not
+                    # "as quoted", and the days used since are not credited twice (U4).
+                    and int(record.get('days_left') or 0) - int(days_left) <= 1
+                    and [q['payment_id'] for q in quoted] == [p['payment_id'] for p in parts]):
+                credit = Decimal(record['credit'])
+                days_left = record.get('days_left', days_left)
+                parts = [{'payment_id': q['payment_id'], 'credit': Decimal(q['credit'])}
+                         for q in quoted]
             value = Decimal(payment.amount) + credit
             days = max(1, int((Decimal(length) * value / new_price)
                               .to_integral_value(rounding='ROUND_HALF_UP')))
             period = days * 86400
-            credited = [{'payment_id': str(part.payment_id), 'credit': str(part.credit),
-                         'share_seconds': int(period * part.credit / value)}
+            credited = [{'payment_id': part['payment_id'], 'credit': str(part['credit']),
+                         'share_seconds': int(period * part['credit'] / value)}
                         for part in parts]
             record['switch'] = {
                 'at': now.isoformat(),
@@ -1159,10 +1205,10 @@ class PaymentService:
                              'start_date': subscription.start_date.isoformat(),
                              'end_date': subscription.end_date.isoformat()},
             }
-            # Everything this run was running on is spent: credited, or covering days
-            # nobody paid for. None of it counts as the new run's.
-            for spent in (subscription.current_run_payments()
-                          .filter(covers_until__gt=now).exclude(pk=payment.pk)):
+            # The payments the credit came from are spent: their value is in this period
+            # now, and they leave the run. ONLY those — one the credit never reached keeps
+            # its own place, so its refund still takes back what it bought (L13).
+            for spent in Payment.objects.filter(pk__in=[c['payment_id'] for c in credited]):
                 spent_meta = dict(spent.metadata or {})
                 spent_meta['credited_into'] = str(payment.id)
                 Payment.objects.filter(pk=spent.pk).update(metadata=spent_meta)
@@ -1244,40 +1290,76 @@ class PaymentService:
 
     @staticmethod
     def _upgrade_share(payment: Payment, subscription: Subscription):
-        """The part of an upgrade's period a refunded payment paid for, or None when the
-        payment took no part in a switch.
+        """The part of the current cover a refunded payment paid for, when it took part in
+        an upgrade; None otherwise.
 
         An upgrade's period was bought by its own money and by the credit for the days
-        left on the payments it replaced; `_apply_upgrade` wrote each share down.
-        Refunding the upgrade takes back its money's share and leaves the credited days
-        (they were the customer's already). Refunding a credited payment takes back the
-        share its credit bought — the money comes back, so the days it became go too.
-        Nothing, if the subscription has restarted since the switch.
+        left on the payments it replaced; `_apply_upgrade` wrote each one's share of the
+        period down. A payment's part is its FRACTION of the period it went into, times
+        what that period still accounts for — the whole of it while it is the live one,
+        or, if a later upgrade credited it in turn, the share of THAT period its
+        remaining days bought, and so on down the chain (the review, L10). So refunding
+        the upgrade takes back its money's part and leaves the credited days; refunding
+        a credited payment takes back the days its credit became, however many upgrades
+        later. Nothing, if the subscription has restarted since.
         """
+        meta = payment.metadata or {}
+        into = meta.get('credited_into')
+        switch = (meta.get('upgrade') or {}).get('switch') or {}
+        own = meta.get('kind') == 'upgrade' and switch and not switch.get('late')
+        if not into and not own:
+            return None
+        if into:
+            upgrade = Payment.objects.filter(pk=into).only('metadata').first()
+            outer = ((upgrade.metadata or {}).get('upgrade') or {}).get('switch') if upgrade else None
+            part = next((c for c in (outer or {}).get('credited') or []
+                         if c.get('payment_id') == str(payment.pk)), None)
+            if part is None:
+                return timedelta(0)
+            share = Decimal(part.get('share_seconds') or 0)
+            period = PaymentService._period(outer)
+            live = PaymentService._live_period(upgrade, subscription)
+        else:
+            share = Decimal(switch.get('money_share_seconds') or 0)
+            period = PaymentService._period(switch)
+            live = PaymentService._live_period(payment, subscription)
+        # Multiplied before dividing, then rounded: a third of a period divided first
+        # lost a second, and two refunds that should end the cover left two seconds of it.
+        return timedelta(seconds=int((share * live / period).to_integral_value(
+            rounding='ROUND_HALF_UP')))
+
+    @staticmethod
+    def _period(switch) -> Decimal:
+        """An upgrade period's length in seconds, from its switch record."""
+        return Decimal(max(1, int(switch.get('granted_days') or 0)) * 86400)
+
+    @staticmethod
+    def _live_period(upgrade: Payment, subscription: Subscription, depth: int = 0) -> Decimal:
+        """How many seconds of the CURRENT cover an upgrade's whole period accounts for.
+
+        All of it while it is the live switch; if a later upgrade credited it, the share
+        of that one's period its remaining days bought, scaled the same way; nothing if
+        the subscription restarted since."""
         from django.utils.dateparse import parse_datetime
 
-        def _since_switch(switch):
-            at = parse_datetime(switch.get('at') or '')
-            return not (subscription.start_date and at and at < subscription.start_date)
-
-        record = (payment.metadata or {}).get('upgrade') or {}
-        switch = record.get('switch') or {}
-        if (payment.metadata or {}).get('kind') == 'upgrade' and switch and not switch.get('late'):
-            if not _since_switch(switch):
-                return timedelta(0)
-            return timedelta(seconds=int(switch.get('money_share_seconds') or 0))
-
-        into = (payment.metadata or {}).get('credited_into')
-        if not into:
-            return None
-        upgrade = Payment.objects.filter(pk=into).only('metadata').first()
-        switch = ((upgrade.metadata or {}).get('upgrade') or {}).get('switch') or {} if upgrade else {}
-        if not switch or not _since_switch(switch):
-            return timedelta(0)
-        for part in switch.get('credited') or []:
-            if part.get('payment_id') == str(payment.pk):
-                return timedelta(seconds=int(part.get('share_seconds') or 0))
-        return timedelta(0)
+        meta = upgrade.metadata or {}
+        switch = (meta.get('upgrade') or {}).get('switch') or {}
+        into = meta.get('credited_into')
+        if into and depth < 20:
+            outer_payment = Payment.objects.filter(pk=into).only('metadata').first()
+            outer = (((outer_payment.metadata or {}).get('upgrade') or {}).get('switch')
+                     if outer_payment else None)
+            part = next((c for c in (outer or {}).get('credited') or []
+                         if c.get('payment_id') == str(upgrade.pk)), None)
+            if part is None:
+                return Decimal(0)
+            return (Decimal(part.get('share_seconds') or 0)
+                    * PaymentService._live_period(outer_payment, subscription, depth + 1)
+                    / PaymentService._period(outer))
+        at = parse_datetime(switch.get('at') or '')
+        if subscription.start_date and at and at < subscription.start_date:
+            return Decimal(0)
+        return PaymentService._period(switch)
 
     @staticmethod
     def _cover_to_take_back(payment: Payment, subscription: Subscription) -> timedelta:

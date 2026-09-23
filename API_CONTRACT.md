@@ -1232,8 +1232,11 @@ operator maintains in the console. Four things the app needs:
 - `change-plan/` keeps answering `409 plan_change_while_active` while cover runs; its
   table now points at `upgrade/`.
 - The receipt of an upgrade gains `upgrade`: `{from_plan_id, from_plan_name, new_price,
-  credit, days_left, granted_days, currency, late}` (null on every other receipt), and
-  the PDF prints the plan it replaced, the new price and the credit. `late: true` means
+  credit, days_left, granted_days, period_price, currency, late}` (null on every other
+  receipt): `period_price` is what the granted days were worth (paid + credit, so
+  `period_price - credit` is the amount paid), and the PDF prints the plan it replaced,
+  that price and the credit. Paid as quoted within its checkout window, the quoted
+  credit is honoured and the full length granted. `late: true` means
   no cover was left to credit when the money cleared: `credit` and `days_left` are null.
 - `renew/` and `POST v1/gateways/` answer `409 checkout_open` (`payment_id`, `status`,
   `expires_at`) when the open checkout is an upgrade or a payment under review, instead

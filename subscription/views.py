@@ -1920,8 +1920,10 @@ class PaymentReceiptView(APIView):
                 "new_price": "20000.00",                the plan it replaced, the new
                 "credit": "6000.00" | null,             plan's price, the credit that came
                 "days_left": 9 | null,                  off it when the money cleared and
-                "granted_days": 30,                     the whole days it was for, and the
-                "currency": "SYP", "late": false},      days of the new plan it all bought.
+                "granted_days": 30,                     the whole days it was for, the days
+                "period_price": "20000.00",             of the new plan it all bought and
+                "currency": "SYP", "late": false},      what they were worth (paid + credit:
+                                                        `period_price - credit == amount`).
                                                         `late: true`: the money cleared
                                                         with no cover left to credit, so
                                                         NO credit was applied — `credit`

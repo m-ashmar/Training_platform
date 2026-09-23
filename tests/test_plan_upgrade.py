@@ -307,8 +307,8 @@ def test_the_receipt_says_where_the_credit_went(make_user, api, shamcash,
     assert receipt["amount"] == "13333.33"
     assert receipt["upgrade"] == {
         "from_plan_id": basic.id, "from_plan_name": basic.name, "new_price": "20000.00",
-        "credit": "6666.67", "days_left": 20, "granted_days": 30, "currency": "SYP",
-        "late": False}
+        "credit": "6666.67", "days_left": 20, "granted_days": 30,
+        "period_price": "20000.00", "currency": "SYP", "late": False}
     pdf = c.get(f"/api/subscription/v1/payments/{payment.id}/receipt/?format=pdf",
                 HTTP_ACCEPT_LANGUAGE="ar")
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"

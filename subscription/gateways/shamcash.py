@@ -258,8 +258,11 @@ class ShamCashGateway(PaymentGateway):
                     seen.extend(txns)
                     continue
                 middle = low + (high - low) / 2
-                windows.append((middle, high))
+                # Pushed so the NEWER half is read first: when `MAX_LOOKUPS` runs out on
+                # a busy account, what goes unread is the oldest, not the transfers that
+                # came in just now (the review, L9).
                 windows.append((low, middle))
+                windows.append((middle, high))
                 continue
             seen.extend(txns)
         return None, seen, truncated, None
@@ -284,7 +287,7 @@ class ShamCashGateway(PaymentGateway):
         asked for, as a 'needs_review' answer with its evidence — or None."""
         for txn in txns:
             note = str(txn.get('note') or txn.get('description') or '')
-            if not reference or reference not in note:
+            if not reference or reference.lower() not in note.lower():
                 continue
             facts = cls.transaction_facts(txn)
             currency = facts['currency']
@@ -326,8 +329,11 @@ class ShamCashGateway(PaymentGateway):
             if not isinstance(txn, dict):
                 continue
             # CONFIRM these field names against a real ShamCash transaction object.
+            # In any case: a phone keyboard capitalises the first letter of a note, and
+            # the sweep already read references case-insensitively — a match the pollers
+            # could not see was deferred to them and never surfaced (the review, L3).
             note = str(txn.get('note') or txn.get('description') or '')
-            if reference not in note:
+            if reference.lower() not in note.lower():
                 continue
             txn_amount = txn.get('amount')
             txn_currency = str(txn.get('currency', '')).upper()

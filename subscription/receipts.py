@@ -122,6 +122,12 @@ def upgrade_of(payment) -> dict | None:
         "credit": None if late else switch.get("credit_applied", record.get("credit")),
         "days_left": None if late else switch.get("days_credited", record.get("days_left")),
         "granted_days": switch.get("granted_days"),
+        # What the granted days were worth: what was paid plus the credit. It is the
+        # plan's price when the full length was granted, and always reconciles —
+        # `period_price - credit == amount` (the review, L14).
+        "period_price": str((Decimal(payment.amount)
+                             + Decimal(switch.get("credit_applied") or "0"))
+                            .quantize(Decimal("0.01"))),
         "currency": record.get("currency") or payment.currency,
         "late": late,
     }
@@ -294,7 +300,7 @@ def render_pdf(data: dict, *, compress: bool = True) -> bytes:
         # the plan it replaced: both are on the document, so the amount explains itself.
         rows[3:3] = [
             (_("Upgraded from"), up["from_plan_name"]),
-            (_("Plan price"), _money(up["new_price"], up["currency"])),
+            (_("Plan price"), _money(up["period_price"], up["currency"])),
             (_("Credit for days left"), "-" + _money(up["credit"], up["currency"])),
         ]
     for label, value in rows:

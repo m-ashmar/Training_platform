@@ -477,19 +477,22 @@ class TransferReviewAdmin(admin.ModelAdmin):
         for line in refused:
             self.message_user(request, line, messages.ERROR)
 
-    @admin.action(description="Approve: complete its checkout on this transfer")
+    @admin.action(description="Approve: complete its checkout on this transfer",
+                  permissions=['change'])
     def approve(self, request, queryset):
         from subscription.services.payment_service import PaymentService
         self._decide(request, queryset, lambda r: PaymentService.approve_review(
             r.id, request.user, r.resolution_note), "Approved")
 
-    @admin.action(description="Reject: the money goes back to its sender by hand")
+    @admin.action(description="Reject: the money goes back to its sender by hand",
+                  permissions=['change'])
     def reject(self, request, queryset):
         from subscription.services.payment_service import PaymentService
         self._decide(request, queryset, lambda r: PaymentService.reject_review(
             r.id, request.user, r.resolution_note or "Rejected on review"), "Rejected")
 
-    @admin.action(description="Dismiss: not a customer's payment")
+    @admin.action(description="Dismiss: not a customer's payment",
+                  permissions=['change'])
     def dismiss(self, request, queryset):
         from subscription.services.payment_service import PaymentService
         self._decide(request, queryset, lambda r: PaymentService.dismiss_review(

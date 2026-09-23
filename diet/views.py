@@ -2967,9 +2967,12 @@ def _swap_tag(current: dict, offered: dict):
         return "fewer_calories", round(d_kcal, 1)
     fiber_now, fiber_offered = current.get("fiber"), offered.get("fiber")
     if fiber_now is not None and fiber_offered is not None:
-        d_fiber = float(fiber_offered) - float(fiber_now)
+        # Rounded to the figures' own precision BEFORE the comparison: both sides are
+        # one-decimal portions, and 3.3 - 1.3 is 1.9999999999999998 in floating point —
+        # a 2.0 g gain the app draws was answered `similar` (the review, L15).
+        d_fiber = round(float(fiber_offered) - float(fiber_now), 1)
         if d_fiber >= SWAP_MORE_FIBER_MIN_G:
-            return "more_fiber", round(d_fiber, 1)
+            return "more_fiber", d_fiber
     return "similar", None
 
 
