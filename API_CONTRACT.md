@@ -873,7 +873,7 @@ The flags are enforced by the server, not only rendered by the app:
 | `code` | Status | When |
 |---|---|---|
 | `app_channel_required` | 400 | The capabilities endpoint, or any endpoint that opens a checkout or moves wallet money, called without a known `X-App-Channel` |
-| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
+| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
 
 On a build with `can_show_prices: false` the plan endpoints omit `price`, `subscriptions/current/`
 omits `plan_price` and the four conversion keys beside it (`price_converted`,
@@ -1159,6 +1159,32 @@ operator maintains in the console. Four things the app needs:
   account is active; `?city=` narrows it. Paying an agent in person is not an in-app
   purchase (spec §4: "top-up is done with an agent in person, so there is nothing to
   hide").
+
+**What wiring the money screens found** (BACKEND_BUGS B-047..B-052, 2026-09-23).
+
+- `POST /api/subscription/v1/subscriptions/{id}/change-plan/` `{plan_id}` moves a
+  subscription holding no running cover (`pending`, `expired`, `cancelled`, or past its
+  end) onto another plan, and charges nothing: the next step is `POST v1/gateways/`,
+  which prices the new plan. `200 {message, changed, subscription}` (`changed` false
+  when it is already that plan). `400 invalid_plan`; `409 plan_change_while_active`
+  (cover is running — pricing a mid-period change is the owner's decision);
+  `409 checkout_open` with `payment_id` and `expires_at` (a checkout is open; a transfer
+  cleared after the change would otherwise buy the new plan at the old price). Needs
+  `X-App-Channel` when the new plan is paid, and answers `403 not_available_on_channel`
+  on `play`/`ios` like every other plan purchase. Full table:
+  `SubscriptionViewSet.change_plan`.
+- Every checkout records the plan it was priced for. `item` on a payment row and on the
+  receipt names THAT plan, so earlier payments keep naming what they bought after a
+  plan change; a transfer that clears late against an expired checkout grants the plan it
+  paid for.
+- `payments/{id}/status/` and `payments/{id}/reconcile/` answer a `code` on every
+  refusal: `404 not_found`, `400 no_gateway_reference`,
+  `502 gateway_unreachable`, `400 reconcile_rejected` (B-048).
+- `payments/{id}/receipt/?format=pdf` answers its 404s (`not_found`,
+  `receipt_not_available`) as JSON with `Content-Type: application/json`, not as bytes
+  labelled PDF (B-049).
+- `subscriptions/current/` gains `plan_id` beside `plan_name` (B-050).
+- `subscriptions/{id}/renew/` answers `expires_at`, as `POST v1/gateways/` does (B-052).
 
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
@@ -1502,6 +1528,7 @@ It therefore equals the row count of `GET comments/?post={id}` for the same view
 | `GET` | `/api/subscription/v1/subscriptions/current/` | auth | `SubscriptionViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/subscription/v1/subscriptions/{id}/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/cancel/` | auth | `SubscriptionViewSet` |
+| `POST` | `/api/subscription/v1/subscriptions/{id}/change-plan/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/renew/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/subscriptions/{id}/usage/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/usage/` | auth | `SubscriptionUsageViewSet` |

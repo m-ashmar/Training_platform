@@ -522,6 +522,26 @@ class Payment(RowValidationMixin, models.Model):
             return True  # idempotent no-op
         return new_status in PAYMENT_STATUS_TRANSITIONS.get(self.status, set())
 
+    def plan_bought(self) -> dict:
+        """The plan this payment was priced for: `plan_id`, `plan_name`, `plan_type`,
+        `duration_days`.
+
+        Read from the snapshot the checkout wrote (`metadata['plan']`), because the
+        subscription can move to another plan after it (`subscriptions/{id}/change-plan/`,
+        BACKEND_BUGS B-047): reading `subscription.plan` then would name the NEW plan on
+        every earlier receipt and history row. Rows opened before the snapshot existed,
+        and audit rows that bought nothing, fall back to the subscription's plan — which
+        is what every row said before, and was right while plans could not change.
+        """
+        snap = (self.metadata or {}).get('plan')
+        if isinstance(snap, dict) and snap.get('id') is not None:
+            return {'plan_id': snap['id'], 'plan_name': snap.get('name', ''),
+                    'plan_type': snap.get('plan_type', ''),
+                    'duration_days': snap.get('duration_days')}
+        plan = self.subscription.plan
+        return {'plan_id': plan.id, 'plan_name': plan.name,
+                'plan_type': plan.plan_type, 'duration_days': plan.duration_days}
+
     def __str__(self):
         return f"{self.subscription.user.username} - {self.amount} {self.currency} ({self.status})"
 

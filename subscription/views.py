@@ -357,10 +357,12 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
 
             {"message": "<translated>", "payment_id": "<uuid>", "reference": "...",
              "status": "pending", "amount": "5000.00", "currency": "SYP",
-             "payment_url": null | "...", "instructions": {...} | null}
+             "payment_url": null | "...", "instructions": {...} | null,
+             "expires_at": "<iso>" | null}
 
         `amount`/`currency` are what this checkout charges, in the buyer's currency —
-        for a checkout that was already open, what it was opened at.
+        for a checkout that was already open, what it was opened at. `expires_at` is
+        when the server closes the checkout, as `POST v1/gateways/` answers it.
 
         Codes it can answer (branch on `code`, never on the text):
 
@@ -375,6 +377,8 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         | 400 | `gateway_error` | the gateway could not open the checkout (not configured, or refused it) |
         | 500 | `server_error` | unexpected fault |
         """
+        from .utils import checkout_expires_at
+
         try:
             require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
             subscription = self.get_object()
@@ -435,6 +439,10 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 'currency': payment.currency,
                 'payment_url': resp.get('payment_url'),
                 'instructions': resp.get('instructions'),
+                # When this checkout closes, as `POST v1/gateways/` already answers — the
+                # Pay screen's countdown needed a second call on the renewal path
+                # (BACKEND_BUGS B-052).
+                'expires_at': checkout_expires_at(payment),
             })
 
         except PASSTHROUGH_EXCEPTIONS:
@@ -449,6 +457,104 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
+    @action(detail=True, methods=['post'], url_path='change-plan')
+    def change_plan(self, request, pk=None):
+        """Move a subscription that holds no running cover onto another plan.
+
+        One subscription per user, and `POST v1/subscriptions/` refuses a second, so a
+        customer whose row is pending on the wrong plan, or lapsed on Basic, had no way
+        to buy Premium (BACKEND_BUGS B-047). This is that way. It moves the row and
+        nothing else: no payment is opened, nothing is charged. The next step is the
+        Pay button, `POST v1/gateways/`, which prices the NEW plan in the buyer's
+        currency.
+
+        `POST`, authenticated. Headers: `X-App-Channel` (required when the new plan is
+        paid — choosing one is the first step of buying it), `X-App-Version`. Body:
+        `{"plan_id": <int>}`.
+
+        Allowed while nothing is running: `pending`, `expired`, `cancelled`, or
+        `active`/`trial` past its end. Refused while cover runs — how an upgrade or a
+        downgrade mid-period is priced is the owner's to decide — and while a checkout
+        is open: the customer may be transferring against its reference right now, and
+        a transfer that cleared after the change would buy the new plan at the old
+        price. Each payment records the plan it was priced for, so the receipts and
+        history of earlier payments keep naming the plan they bought.
+
+        200::
+
+            {"message": "<translated>", "changed": true | false,
+             "subscription": {<the subscription, as GET v1/subscriptions/{id}/>}}
+
+        `changed` is false when `plan_id` is the plan the row is already on.
+
+        Codes it can answer (branch on `code`, never on the text):
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 400 | `app_channel_required` | no known `X-App-Channel` (the new plan is paid) |
+        | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
+        | 404 | `not_found` | not the caller's subscription |
+        | 400 | `invalid_plan` | `plan_id` missing, or names no active plan |
+        | 409 | `plan_change_while_active` | cover is running; it can change once the period ends |
+        | 409 | `checkout_open` | a checkout is open for this subscription; `payment_id` and `expires_at` say which, and when it closes |
+        """
+        from .utils import checkout_expires_at
+
+        subscription = self.get_object()
+        body = body_dict(request)
+        try:
+            plan = SubscriptionPlan.objects.filter(
+                pk=int(body.get('plan_id')), is_active=True).first()
+        except (TypeError, ValueError):
+            plan = None
+        # The same rule as `create`: a paid plan is a purchase, and an id that names no
+        # plan is treated as paid so the refusal never depends on a lookup.
+        if plan is None or plan.price > 0:
+            require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
+        if plan is None:
+            return Response({'error': _('Invalid or inactive plan'), 'code': 'invalid_plan'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            # The lock the Pay button and every completion take first, so a checkout
+            # opened or cleared concurrently is either seen here or prices the new plan.
+            locked = _locked_subscription(subscription.pk)
+            if locked.plan_id == plan.pk:
+                return Response({'message': _('The subscription is already on this plan.'),
+                                 'changed': False,
+                                 'subscription': SubscriptionSerializer(locked).data})
+            if locked.is_active:
+                return Response(
+                    {'error': _('The plan can change once the current period ends.'),
+                     'code': 'plan_change_while_active'},
+                    status=status.HTTP_409_CONFLICT)
+            # Open with a reference = offered to the customer. One with no reference
+            # was never offered, and is repriced from the plan when it opens.
+            open_checkout = (Payment.objects
+                             .filter(subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
+                             .exclude(gateway_transaction_reference__isnull=True)
+                             .exclude(gateway_transaction_reference='')
+                             .order_by('created_at', 'id').first())
+            if open_checkout is not None:
+                return Response(
+                    {'error': _('A payment is already open for this subscription. '
+                                'Complete it, or change the plan once it closes.'),
+                     'code': 'checkout_open',
+                     'payment_id': str(open_checkout.id),
+                     'expires_at': checkout_expires_at(open_checkout)},
+                    status=status.HTTP_409_CONFLICT)
+            previous = locked.plan_id
+            locked.plan = plan
+            # `save()` re-inherits the plan's five access flags on a plan change.
+            locked.save(update_fields=['plan', *Subscription.PLAN_FEATURE_FLAGS,
+                                       'updated_at'])
+        logger.info("Subscription %s moved from plan %s to plan %s by user %s",
+                    locked.id, previous, plan.pk, request.user.id)
+        locked = self.get_queryset().get(pk=locked.pk)
+        return Response({'message': _('Plan changed. Complete the payment to start it.'),
+                         'changed': True,
+                         'subscription': SubscriptionSerializer(locked).data})
+
     @action(detail=False, methods=['get'])
     def current(self, request):
         """The caller's own subscription, or a 404 the app can branch on.
@@ -1244,10 +1350,15 @@ class PaymentGatewayView(APIView):
 
 
 class PaymentStatusView(APIView):
-    """
-    Read-only payment status. A GET is a safe method and NEVER changes state —
-    it only reports the stored status. To reconcile a pending payment against the
-    gateway, use POST .../reconcile/ (PaymentReconcileView).
+    """`GET /api/subscription/v1/payments/{payment_id}/status/` — the stored status.
+
+    A GET is a safe method and NEVER changes state — it only reports the stored status.
+    To reconcile a pending payment against the gateway, use `POST .../reconcile/`.
+
+    200 `{success, payment_id, status, amount, currency, payment_method, invoice_number,
+    created_at, updated_at, expires_at, reference}` (`expires_at` null once the checkout
+    is no longer open). 404 `not_found` — no such payment, or not the caller's
+    (one answer for both).
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1255,7 +1366,8 @@ class PaymentStatusView(APIView):
         try:
             payment = Payment.objects.get(id=payment_id, subscription__user=request.user)
         except Payment.DoesNotExist:
-            return Response({'error': _('Payment not found')}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': _('Payment not found'), 'code': 'not_found'},
+                            status=status.HTTP_404_NOT_FOUND)
 
         from .utils import checkout_expires_at
 
@@ -1277,11 +1389,23 @@ class PaymentStatusView(APIView):
 
 
 class PaymentReconcileView(APIView):
-    """
-    Reconcile a PENDING payment against the gateway (fallback for missed webhooks).
-    Non-safe method: it authoritatively verifies the transaction at the provider
-    and, only on a verified match, completes it via PaymentService. It never
-    trusts a bare status flag and never activates on unverified data.
+    """`POST /api/subscription/v1/payments/{payment_id}/reconcile/` — ask the gateway.
+
+    Reconciles a PENDING payment against the gateway (fallback for missed webhooks).
+    Non-safe method: it authoritatively verifies the transaction at the provider and,
+    only on a verified match, completes it via PaymentService. It never trusts a bare
+    status flag and never activates on unverified data.
+
+    200 `{success, payment_id, status, invoice_number}` — `status` is whatever the
+    payment is after asking (still `pending` when the gateway has seen nothing yet).
+    Refusals, each with its `code` (BACKEND_BUGS B-048):
+      404 `not_found`               no such payment, or not the caller's
+      400 `no_gateway_reference`    the checkout never reached the gateway
+      502 `gateway_unreachable`     the provider could not be asked; nothing changed,
+                                    the money is safe, ask again later
+      400 `reconcile_rejected`      the provider answered but the match failed
+                                    verification (amount, currency, or an illegal
+                                    transition); nothing changed
     """
     permission_classes = [permissions.IsAuthenticated]
     # Every call makes an outbound gateway lookup, so an authenticated caller could
@@ -1294,7 +1418,8 @@ class PaymentReconcileView(APIView):
         try:
             payment = Payment.objects.get(id=payment_id, subscription__user=request.user)
         except Payment.DoesNotExist:
-            return Response({'error': _('Payment not found')}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': _('Payment not found'), 'code': 'not_found'},
+                            status=status.HTTP_404_NOT_FOUND)
 
         if payment.status == 'completed':
             # Already completed is not "nothing left to do" while its payout is owed.
@@ -1303,7 +1428,8 @@ class PaymentReconcileView(APIView):
                              'invoice_number': payment.invoice_number})
 
         if not payment.gateway_transaction_reference:
-            return Response({'error': _('Payment has no gateway reference to reconcile')},
+            return Response({'error': _('Payment has no gateway reference to reconcile'),
+                             'code': 'no_gateway_reference'},
                             status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -1315,7 +1441,8 @@ class PaymentReconcileView(APIView):
             )
         except PaymentGatewayError as e:
             logger.warning(f"Reconcile lookup failed for {payment.id}: {str(e)}")
-            return Response({'error': _('Could not verify payment with gateway')},
+            return Response({'error': _('Could not verify payment with gateway'),
+                             'code': 'gateway_unreachable'},
                             status=status.HTTP_502_BAD_GATEWAY)
 
         if str(result.get('status', '')).lower() in ('completed', 'success', 'succeeded', 'paid'):
@@ -1324,7 +1451,9 @@ class PaymentReconcileView(APIView):
                 payment.refresh_from_db()
             except (PaymentVerificationError, InvalidPaymentTransition) as e:
                 logger.warning(f"Reconcile rejected for {payment.id}: {str(e)}")
-                return Response({'error': _('Request could not be completed.')}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': _('Request could not be completed.'),
+                                 'code': 'reconcile_rejected'},
+                                status=status.HTTP_400_BAD_REQUEST)
 
         return Response({
             'success': True,
@@ -1349,7 +1478,20 @@ class ReceiptPDFRenderer(BaseRenderer):
     render_style = 'binary'
 
     def render(self, data, accepted_media_type=None, renderer_context=None):
-        return data
+        if isinstance(data, (bytes, bytearray)):
+            return data
+        # Not a PDF: a refusal (404 `not_found` / `receipt_not_available`) that DRF
+        # routed here because the format was negotiated before the handler ran. Handed
+        # back as a dict, HttpResponse joined its KEYS into the body — the app received
+        # `errorcodestatus` labelled application/pdf, and lost the very `code` the
+        # docstring tells it to branch on (BACKEND_BUGS B-049). Render it as the JSON
+        # every other refusal is, and say so in the content type.
+        from rest_framework.renderers import JSONRenderer
+
+        response = (renderer_context or {}).get('response')
+        if response is not None:
+            response['Content-Type'] = 'application/json'
+        return JSONRenderer().render(data, 'application/json', renderer_context)
 
 
 class PaymentReceiptView(APIView):
