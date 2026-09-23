@@ -1338,6 +1338,46 @@ contract.
   - **No vegetarian tag, and none is coming**: the owner decided against a vegetarian
     flag (2026-09-23). The app drops «نباتي».
 
+**What wiring the progress screens found** (BACKEND_BUGS B-066..B-073, 2026-09-24).
+Additive under §6: new fields and new codes; no code a view named changed. Two values
+move: `volume_change_percent` can now be null, and a sent-but-invalid `exercise_id` on
+`strength/` no longer answers the overview. The views' and serializers' docstrings carry
+the full contract.
+
+- **A goal has a start** (B-066, B-069). `GET/POST /api/analytics/goals/` rows gain
+  `start_value` (null when none). `POST` accepts it and stores the goal AT it in the same
+  write (`current_value = start_value`, 0%); without it a finite `metadata.start_value`
+  is taken. A start that already reaches the target: 400 `validation_error`, field code
+  `start_reaches_target`. Read-only after creation. `update_progress/` now measures the
+  share of the way from start to target in EITHER direction (82 → 75 kg at 80 is 28.6%),
+  0-100, and completes the goal only when the reading reaches the target in its
+  direction; a `weight_loss` goal always aims down, and without a start its first
+  reading becomes the start. A goal with no start is measured from 0 upward, as before.
+  Migration `analytics/0005` backfills `start_value` from `metadata.start_value`, sets a
+  never-moved goal at its start, recomputes its progress, and reopens a goal the old rule
+  completed short of its target.
+- **Weekly goals count themselves** (B-070). A `workout_frequency` goal's
+  `current_value` is the number of `completed` workout sessions begun THIS week
+  (Saturday to Friday, the home strip's week), `progress_percentage` that against the
+  target capped at 100, and rows gain `week_start` / `week_end` (dates; null on other
+  types). It never becomes `completed`. `update_progress/` on one: 400
+  `goal_counted_from_workouts`.
+- **The workouts list is newest first by a total order** (B-067):
+  `GET /api/routine/workout-sessions/` orders by `start_time` then `id`, descending.
+- **A first window is not a doubling** (B-068): `GET /api/routine/analytics/summary/`
+  `volume_change_percent` is null when the previous window holds no volume (it was
+  100.0).
+- **The activity log** (B-071, B-072). `GET /api/analytics/activities/recent_activities/` takes `?activity_type=`, one
+  type or a comma-separated list; an unknown name is 400 `bad_activity_type` with
+  `field`. Since 2026-09-24 a meal writes ONE `meal_completed` row, when its last food is
+  ticked, with `metadata` `{meal_id, name, name_ar, meal_type, date, calories}`, and a
+  logged set writes no `exercise_completed` row; older rows are kept as written. Every
+  activity row gains `workout`: on `routine_completed` `{session_id, routine_id, day,
+  duration_minutes, volume_kg, sets}` read from the session, null otherwise.
+- **An exercise id that is sent is read** (B-073). `GET /api/routine/analytics/strength/?exercise_id=`
+  that is not a whole number: 400 `bad_exercise_id` with `field`; 0, a negative or any
+  id naming no exercise the caller may read: 404 `not_found`, as a missing id always was.
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 

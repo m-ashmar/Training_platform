@@ -71,10 +71,21 @@ class UserActivityViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def recent_activities(self, request):
-        """Get recent activities for the user"""
+        """GET — the CALLER's activity log, newest first, paginated
+        (`{count, next, previous, results}`, `?page_size=` up to 100).
+
+        `?days=` (1-365, default 7) bounds how far back. `?activity_type=` narrows it to
+        one type or a comma-separated list of them (`routine_completed,meal_completed`);
+        a name that is not an activity type is 400 `bad_activity_type` with `field`
+        (BACKEND_BUGS B-071). Each row is `UserActivitySerializer`: a finished workout
+        carries `workout` (day, duration, volume — B-072), and since 2026-09-24 a meal
+        is ONE `meal_completed` row carrying the meal's id, name and calories in
+        `metadata`, and a logged set writes no row of its own (the workout it belongs to
+        is the row). Rows written before that are kept and shown as they were written.
+        """
         days = int_param(request.query_params, 'days', default=7, minimum=1, maximum=365)
         since_date = timezone.now() - timedelta(days=days)
-        
+
         # The hard [:50] slice hid every older row with nothing in the response to say
         # so — the same defect the wallet ledger had. Pagination replaces it, so the
         # client can page back and knows how many rows exist.
@@ -84,6 +95,17 @@ class UserActivityViewSet(viewsets.ModelViewSet):
         activities = UserActivity.objects.filter(
             user=request.user, timestamp__gte=since_date
         ).order_by('-timestamp', '-id')
+        asked = request.query_params.get('activity_type')
+        if asked not in (None, ''):
+            known = {key for key, _label in UserActivity.ACTIVITY_TYPES}
+            wanted = {name.strip() for name in asked.split(',') if name.strip()}
+            if not wanted or not wanted <= known:
+                return Response(
+                    {'error': _('activity_type must be one or more of: %(types)s.')
+                        % {'types': ', '.join(sorted(known))},
+                     'code': 'bad_activity_type', 'field': 'activity_type'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            activities = activities.filter(activity_type__in=wanted)
         page = self.paginate_queryset(activities)
         if page is not None:
             return self.get_paginated_response(self.get_serializer(page, many=True).data)
@@ -241,7 +263,14 @@ class UserSessionViewSet(viewsets.ModelViewSet):
 
 class UserGoalViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for user goals
+    The caller's goals (every goal for a staff account). Paginated lists.
+
+    `POST /api/analytics/goals/` — body `goal_type`, `title`, `target_value` (> 0), and
+    optionally `start_value`, `unit`, `target_date`, `description`, `metadata`. With a
+    start the goal is stored at it: `current_value = start_value`, 0% (BACKEND_BUGS
+    B-069). 400 `validation_error` with field codes: `start_reaches_target` on
+    `start_value`; `target_value` must be greater than zero. The goal's shape, and how a
+    `workout_frequency` goal is counted, are on `UserGoalSerializer`.
     """
     serializer_class = UserGoalSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -260,8 +289,30 @@ class UserGoalViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def update_progress(self, request, pk=None):
-        """Update goal progress"""
+        """POST `{new_value}` — a new reading; answers the goal.
+
+        Progress is the share of the way from the goal's start to its target, in either
+        direction (BACKEND_BUGS B-066): 82 -> 75 kg at 80 is 28.6%, a lift 72.5 -> 100 at
+        82.5 is 36.4%. It is bounded to 0-100, a reading that moved the wrong way is 0,
+        and the goal becomes `completed` (with `completed_at`) only when the reading
+        REACHES the target in its direction — at or below it for a goal aiming down, at
+        or above it for one aiming up. A goal with no `start_value` is measured from 0
+        upward, as before; a `weight_loss` goal always aims down, and without a start
+        its first reading becomes the start.
+
+        400: `missing_new_value`, `bad_new_value` (not a finite number), and
+        `goal_counted_from_workouts` for a `workout_frequency` goal — the server counts
+        that one from the week's workouts, so there is no number to send.
+        """
+        from .goals import COUNTED_TYPES
+
         goal = self.get_object()
+        if goal.goal_type in COUNTED_TYPES:
+            return Response(
+                {'error': _('This goal is counted from your workouts; there is no '
+                            'number to record.'),
+                 'code': 'goal_counted_from_workouts'},
+                status=status.HTTP_400_BAD_REQUEST)
         new_value = request.data.get('new_value')
         
         if new_value is None:

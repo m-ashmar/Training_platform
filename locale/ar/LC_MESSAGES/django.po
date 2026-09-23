@@ -4460,3 +4460,22 @@ msgid ""
 "The transfer we checked could not be matched to your payment. Contact support to "
 "have it returned."
 msgstr "تعذّرت مطابقة التحويل الذي تحققنا منه مع دفعتك. تواصل مع الدعم لاسترداده."
+
+#: analytics/serializers.py
+msgid ""
+"The goal would be reached at its start: the start must be short of the "
+"target."
+msgstr "سيكون الهدف محقّقاً منذ بدايته: يجب أن تكون نقطة البداية دون الهدف."
+
+#: analytics/views.py
+msgid "This goal is counted from your workouts; there is no number to record."
+msgstr "يُحسب هذا الهدف من تمارينك، فلا يوجد رقم لتسجيله."
+
+#: analytics/views.py
+#, python-format
+msgid "activity_type must be one or more of: %(types)s."
+msgstr "يجب أن يكون activity_type واحداً أو أكثر من: %(types)s."
+
+#: routine/views.py
+msgid "exercise_id must be a whole number."
+msgstr "يجب أن يكون exercise_id عدداً صحيحاً."

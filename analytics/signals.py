@@ -62,16 +62,12 @@ def on_workout_completed(sender, instance, **kwargs):
                       round(duration.total_seconds() / 60.0, 1), "min")
 
 
-@receiver(post_save, sender="routine.ExerciseSetLog")
-@_safe
-def on_exercise_logged(sender, instance, created, **kwargs):
-    if not created:
-        return
-    progress = instance.user_exercise_progress
-    if progress is None:
-        return
-    record_activity(progress.user, "exercise_completed",
-                    exercise_id=progress.exercise_id, set_number=instance.set_number)
+# No receiver on `routine.ExerciseSetLog` (BACKEND_BUGS B-071). It wrote one
+# `exercise_completed` row per logged SET, so a twenty-set workout was twenty-one rows of
+# the activity log, and the achievement engine, which counts `activity_types.WORKOUT`
+# rows as workouts, counted it as twenty-one workouts. The workout is the row: the
+# `routine_completed` above, one per finished session, which the log shows with its day,
+# duration and volume (`analytics/feed.py`). Rows already written stay as they are.
 
 
 @receiver(post_save, sender="diet.DietPlan")
@@ -86,21 +82,58 @@ def on_diet_plan_generated(sender, instance, created, **kwargs):
 @receiver(post_save, sender="diet.MealComponent")
 @_safe
 def on_meal_completed(sender, instance, **kwargs):
+    """One `meal_completed` row per MEAL, written when its last food is ticked.
+
+    It wrote one row per food, with no meal id, name or calories, so a lunch of four
+    foods was four identical untitled rows in the activity log (BACKEND_BUGS B-071).
+    Now the row is written once every component of the meal is completed — by ticking
+    them one at a time or by `complete_entire_meal`, which saves each component — and
+    carries the meal. A meal eaten only in part writes nothing.
+
+    `session_id` stays `meal-component-<pk>` (the component whose tick finished the
+    meal): `achievements/engine.py` `meal_count` reads a meal back out of that key, and
+    counts distinct meals behind it, so old and new rows count the same way there.
+
+    Once per meal, ever: no row is written while the meal already has one — a new one
+    (`metadata.meal_id`) or an old per-food one (`meal-component-<pk>` of any of its
+    foods). A completed food is saved again for other reasons (a rating), and without
+    the second check a meal finished before this change would be logged again, dated
+    the day it was rated.
+    """
     if not getattr(instance, "is_completed", False):
         return
-    from analytics.models import UserActivity
+    from django.db.models import F, FloatField, Q, Sum
+    from django.db.models.functions import Coalesce, NullIf
 
-    plan = getattr(getattr(instance, "meal", None), "diet_plan", None)
+    from analytics.models import UserActivity
+    from diet.models import MealComponent
+
+    meal = getattr(instance, "meal", None)
+    plan = getattr(meal, "diet_plan", None)
     if plan is None:
         return
+    components = MealComponent.objects.filter(meal_id=meal.pk)
+    if components.filter(is_completed=False).exists():
+        return
+    keys = [f"meal-component-{pk}" for pk in components.values_list("pk", flat=True)]
     if UserActivity.objects.filter(
+        Q(metadata__meal_id=meal.pk) | Q(session_id__in=keys),
         user_id=plan.user_id, activity_type="meal_completed",
-        session_id=f"meal-component-{instance.pk}",
     ).exists():
         return
+    # What was EATEN, by the rule the day's totals use (`DailyProgress.compute_figures`):
+    # the amount the client said, else the planned amount, per 100 g of the food.
+    eaten = Coalesce(F("actual_quantity_consumed"), F("quantity"), output_field=FloatField())
+    calories = components.aggregate(
+        kcal=Sum(eaten / NullIf(F("food__serving_size_grams"), 0)
+                 * F("food__calories")))["kcal"]
     record_activity(plan.user, "meal_completed",
                     session_id=f"meal-component-{instance.pk}",
-                    component_id=instance.pk, food_id=instance.food_id)
+                    meal_id=meal.pk, name=meal.name or "",
+                    name_ar=meal.name_ar or meal.name or "",
+                    meal_type=meal.meal_type,
+                    date=meal.date.isoformat() if meal.date else None,
+                    calories=round(float(calories or 0), 1))
 
 
 @receiver(post_save, sender="users.CustomUser")
