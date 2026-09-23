@@ -138,6 +138,15 @@ is locked (spec §8); the numbers above are the defaults.
    want a retention window instead. (c) Blocking does not hide a challenge whose creator
    was blocked; only the leaderboard drops them, because hiding a shared activity would
    take the blocker's own progress with it.
+5. **Changing plan mid-period** (BACKEND_BUGS B-047, 2026-09-23). `POST
+   v1/subscriptions/{id}/change-plan/` moves a subscription only while no cover runs and
+   no checkout is open; with cover running it answers `409 plan_change_while_active`.
+   Owed: whether an upgrade mid-period is allowed, and how it is priced (pay the
+   difference for the days left, or start the new plan when the old one ends). Also
+   decided in code, reversible: a transfer that clears late against an expired checkout
+   for the OLD plan grants the plan it paid for; if cover on another plan was paid in the
+   meantime, the dearer plan is kept and the late period added
+   (`PaymentService._plan_to_hold`).
 
 ## Traps this branch cost a session to find
 
