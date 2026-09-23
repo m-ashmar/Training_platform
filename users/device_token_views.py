@@ -120,10 +120,25 @@ class FCMTokenView(APIView):
         responses={200: 'Token removed', 404: 'Token not found'}
     )
     def delete(self, request):
+        """Unregister one of this account's device tokens (push master switch off, sign
+        out). Body (JSON): `token` (required).
+
+        200: `{message}`.
+
+        | status | `code` | when |
+        |---|---|---|
+        | `400` | `token_required` | no `token`, with `field` (BACKEND_BUGS B-054: it had no code of its own) |
+        | `404` | `token_not_found` | this account has no such token — already gone, or never registered here (B-054) |
+        | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+        | `500` | `server_error` | the database failed |
+        """
         token = request.data.get('token')
         if not token:
-            return Response({'error': _('Token is required')}, status=status.HTTP_400_BAD_REQUEST)
-            
+            message = _('Token is required')
+            return Response({'error': message, 'detail': message,
+                             'code': 'token_required', 'field': 'token'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         try:
             deleted_count, deleted_info = DeviceToken.objects.filter(
                 user=request.user,
@@ -134,7 +149,10 @@ class FCMTokenView(APIView):
                 logger.info(f"Unregistered FCM token for user {request.user.id}")
                 return Response({'message': _('Token unregistered successfully')}, status=status.HTTP_200_OK)
             else:
-                return Response({'error': _('Token not found')}, status=status.HTTP_404_NOT_FOUND)
+                message = _('Token not found')
+                return Response({'error': message, 'detail': message,
+                                 'code': 'token_not_found'},
+                                status=status.HTTP_404_NOT_FOUND)
                 
         except PASSTHROUGH_EXCEPTIONS:
             # These carry their own status; the broad handler below made them 500s.

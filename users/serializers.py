@@ -339,8 +339,13 @@ class CustomLoginSerializer(LoginSerializer):
 class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
                             serializers.ModelSerializer):
     profile_picture = serializers.SerializerMethodField()
+    # Read-only, like every login detail (BACKEND_BUGS B-053): a number is changed through
+    # support, never here. A `phone_number` sent to `user/update/` is ignored with the
+    # rest of the request saved, as `user_type` and the other read-only fields are —
+    # a client echoing back the profile it read is not refused.
+    phone_number = serializers.SerializerMethodField()
     onboarding_completed = serializers.BooleanField(source='is_onboarding_completed', read_only=True)
-    
+
     class Meta:
         model = CustomUser
         fields = [
@@ -360,6 +365,8 @@ class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
             # The language of this person's e-mails and pushes (`ar` | `en`). Nothing could
             # set it, so every one of them went out in English (BACKEND_BUGS B-005).
             'preferred_language',
+            # The EditProfile "login details" group draws it with a lock (B-053).
+            'phone_number',
         ]
         # assigned_trainer is read-only here: trainer assignment must go through
         # the request/approval + wallet-escrow flow, never self-service update.
@@ -373,6 +380,13 @@ class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
                 return request.build_absolute_uri(url)
             return url
         return None
+
+    def get_phone_number(self, obj):
+        """The number given at registration (Western digits), or null when none is on
+        file: the column's default `0000000000` is a placeholder, also what an erased
+        account is left with, and drawing it would show a number nobody owns."""
+        placeholder = CustomUser._meta.get_field('phone_number').get_default()
+        return obj.phone_number if obj.phone_number and obj.phone_number != placeholder else None
 
     # `validate_profile_picture` stood here and never ran: `profile_picture` is a
     # read-only method field, so a file posted to user/update/ was dropped (BACKEND_BUGS
