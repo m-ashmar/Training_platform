@@ -43,3 +43,36 @@ class ChatSessionDetailSerializer(serializers.ModelSerializer):
 class FeedbackSerializer(serializers.Serializer):
     message_id = serializers.IntegerField()
     feedback = serializers.ChoiceField(choices=['positive', 'negative'])
+
+
+class AITrainingConsentSerializer(serializers.Serializer):
+    """`{granted, set_at}` — the person's own answer to "help us improve".
+
+    `set_at` is null until they have answered once, which is how the app tells "never
+    asked" from "said no". Read from the user row (`CustomUser.ai_training_consent`,
+    `ai_training_consent_set_at`).
+    """
+
+    granted = serializers.BooleanField(source='ai_training_consent', read_only=True)
+    set_at = serializers.DateTimeField(source='ai_training_consent_set_at', read_only=True)
+
+
+class _JSONBoolean(serializers.BooleanField):
+    """`true` or `false` as JSON, and nothing else.
+
+    DRF's BooleanField also takes `"yes"`, `"on"`, `1` and friends. A consent is
+    switched on by the person's own tap, which the app sends as a JSON boolean; a
+    string or a number is a client bug, and a client bug must not be able to opt
+    anybody in. Refused with DRF's own "Must be a valid boolean." (`invalid`).
+    """
+
+    def to_internal_value(self, data):
+        if isinstance(data, bool):
+            return data
+        self.fail('invalid', input=data)
+
+
+class AITrainingConsentWriteSerializer(serializers.Serializer):
+    """`{granted: true|false}` — required; there is no default to fall back on."""
+
+    granted = _JSONBoolean()

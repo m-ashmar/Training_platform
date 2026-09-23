@@ -224,6 +224,14 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         default=False,
         help_text="User consented to their AI chat data being retained for model training.",
     )
+    # When the person last answered that question themselves, through
+    # `POST /api/ai/training-consent/` — the only writer. NULL means they were never
+    # asked, which is how the app tells "not asked yet" from "said no", as
+    # `moderation.AIConsent` keeps `granted_at` / `revoked_at` for the other AI consent.
+    ai_training_consent_set_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When the user last set ai_training_consent themselves (null: never).",
+    )
     profile_picture = models.ImageField(
         upload_to=user_profile_picture_upload_path,
         blank=True,

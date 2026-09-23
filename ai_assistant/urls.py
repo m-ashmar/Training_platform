@@ -12,6 +12,9 @@ urlpatterns = [
     # Feedback
     path('feedback/', views.FeedbackView.as_view(), name='feedback'),
 
-    # GDPR deletion
+    # What the assistant keeps (GET) and deleting it (DELETE)
     path('data/', views.GDPRDataDeleteView.as_view(), name='gdpr-delete'),
+
+    # "Help us improve": the training-data opt-in, off by default
+    path('training-consent/', views.AITrainingConsentView.as_view(), name='training-consent'),
 ]

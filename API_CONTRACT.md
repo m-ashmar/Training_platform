@@ -301,7 +301,7 @@ in its class docstring. Two worth naming here:
 | `code` | Where | When |
 |---|---|---|
 | `message_not_found` | `POST feedback/` (404) and the socket's `feedback` frame | No assistant message of yours by that id |
-| `ai_consent_required` | every `/api/ai/` route except `DELETE data/`, and the socket | The AI coach has not been allowed to read this person's data |
+| `ai_consent_required` | every `/api/ai/` route except `data/` (`GET` and `DELETE`) and `training-consent/`, and the socket | The AI coach has not been allowed to read this person's data |
 
 A turn that ends in an `error` frame is **not** charged against the daily message
 allowance; each turn closes with `{"type": "rate_limit", "remaining", "resets_at"}`
@@ -326,11 +326,12 @@ tool-calling loop — `thinking`, `checking_data`, `analyzing`, `looking_deeper`
 
 | Method | Path | Auth | View |
 |---|---|---|---|
-| `DELETE` | `/api/ai/data/` | auth | `GDPRDataDeleteView` |
+| `GET, DELETE` | `/api/ai/data/` | auth | `GDPRDataDeleteView` |
 | `POST` | `/api/ai/feedback/` | auth, HasAIAdviceAccess | `FeedbackView` |
 | `GET` | `/api/ai/sessions/` | auth, HasAIAdviceAccess | `ChatSessionListView` |
 | `GET` | `/api/ai/sessions/{session_id}/` | auth, HasAIAdviceAccess | `ChatSessionDetailView` |
 | `GET` | `/api/ai/sessions/{session_id}/messages/` | auth, HasAIAdviceAccess | `ChatMessageListView` |
+| `GET, POST` | `/api/ai/training-consent/` | auth | `AITrainingConsentView` |
 
 ### Analytics
 
@@ -853,7 +854,9 @@ granting and ignored when revoking.
 
 Until it is granted, the AI coach refuses: `403 ai_consent_required` on every
 `/api/ai/` route except `DELETE /api/ai/data/` (deleting what the assistant holds has
-to work after consent is withdrawn — that is the commonest reason to ask), and over
+to work after consent is withdrawn — that is the commonest reason to ask), `GET
+/api/ai/data/` (what that deletion would remove) and `/api/ai/training-consent/`
+("help us improve", a separate opt-in — see B-084 below), and over
 the WebSocket `ws/ai/chat/` the reply is
 `{"type": "error", "code": "ai_consent_required", "content": "..."}` with the socket
 left open, so the app can show the consent sheet and carry on in the same connection.
@@ -1337,6 +1340,36 @@ contract.
     the existing ones, whose order does not change.
   - **No vegetarian tag, and none is coming**: the owner decided against a vegetarian
     flag (2026-09-23). The app drops «نباتي».
+
+**What wiring the AI screens found** (BACKEND_BUGS B-082..B-085, 2026-09-24). Additive:
+two methods on routes, one new route and one new column; no `code` changed. The views'
+docstrings carry the full contract.
+
+- **The chat list pages by last activity** (B-082). `GET /api/ai/sessions/` is ordered
+  by `updated_at` (every answered turn moves it), then id, newest first — the order the
+  view always asked for; the cursor pagination it shared with the messages re-sorted it
+  by `created_at`. A chat continued today is on the first page. Same page size, same
+  `{next, previous, results}`, same row. `sessions/{id}/messages/` is unchanged.
+- **What the assistant keeps** (B-083). `GET /api/ai/data/` →
+  `{total_records, details: {messages, training_records, sessions, behavior_events,
+  insights, cost_records}, oldest_session_at}` (ISO 8601 with offset, null with no
+  chats). Gated exactly like `DELETE` on the same route: signed in, nothing else — no
+  plan, no AI consent — so AiPrivacy can show the numbers after the plan lapses or
+  consent is withdrawn. The counts are the ones `DELETE` reports as `details`, from one
+  function, so what it says will go is what goes.
+- **"Help us improve"** (B-084). `GET /api/ai/training-consent/` → `{granted, set_at}`;
+  `POST {"granted": true | false}` answers the same body. Off by default; `set_at` null
+  means never answered. Only the person's POST writes it; `granted` must be a JSON
+  boolean (`400 validation_error` otherwise, and on a missing `granted`). Signed in is
+  all it needs. It is NOT `ai-consent/`: that one lets the coach read the person's data
+  at all and is versioned; this one only decides whether a copy of each answered turn is
+  kept for training. Turning it off deletes the copies already kept and stops the next
+  turn from keeping one, on an open socket too. Carried in the privacy export's
+  `profile` (`ai_training_consent`, `ai_training_consent_set_at`) and reset by erasure.
+- **`DELETE /api/ai/data/` has a written contract** (B-085). What it deletes (the six
+  `details` kinds, nothing outside the assistant), `200 {message, deleted_records,
+  details}` — `deleted_records` 0 is still 200 — in one transaction; refusals `401
+  not_authenticated`, `405 method_not_allowed`. Unchanged behaviour.
 
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
