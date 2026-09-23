@@ -20,7 +20,7 @@ are not bugs: they are in `BACKEND_DELTA.md` and `yalla_gym/app/PLAN.md` §8.
 
 Last updated by the app session: 2026-09-19 (B-020 to B-036 added while wiring routes 01, 02, 04). Backend notes: 2026-09-19.
 
-## Backend summary (the backend session, 2026-09-23)
+## Backend summary (the backend session, 2026-09-24)
 
 **State: 86 rows — 85 fixed, 1 wontfix (B-029).** Rows B-037..B-065 were fixed on
 2026-09-23 and B-066..B-086 on 2026-09-24, each with a test that fails on the code before
