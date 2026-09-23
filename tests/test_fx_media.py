@@ -689,9 +689,10 @@ def test_s081_the_shared_gcs_host_is_not_on_the_list():
     any coach's own public bucket."""
     from django.conf import settings
 
+    assert "storage.googleapis.com" not in settings.EXERCISE_MEDIA_ALLOWED_HOSTS
+
     from training_platform.settings_base import _exercise_media_allowed_hosts
 
-    assert "storage.googleapis.com" not in settings.EXERCISE_MEDIA_ALLOWED_HOSTS
     assert _exercise_media_allowed_hosts("", "yalla-gym") == (
         "storage.googleapis.com/yalla-gym", "yalla-gym.storage.googleapis.com")
     assert _exercise_media_allowed_hosts("", "") == ()
