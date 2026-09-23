@@ -596,7 +596,10 @@ def test_s104_the_banner_follows_the_same_store_rule_as_home(api):
         answer = media(HTTP_X_APP_CHANNEL=store_build).json()["media"]
         assert "app.banner" not in answer, store_build
         assert "app.story.1" in answer, "only the banner is build-dependent"
-    assert "app.banner" not in media().json()["media"], "no channel is the strictest"
+    # `conftest.speaks_as_the_direct_apk` declares `apk` unless told otherwise; an empty
+    # header is how a test says "this caller declares no build".
+    assert "app.banner" not in media(HTTP_X_APP_CHANNEL="").json()["media"], \
+        "no channel is the strictest"
 
     direct = media(HTTP_X_APP_CHANNEL="apk")
     assert "app.banner" in direct.json()["media"]
