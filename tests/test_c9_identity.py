@@ -479,9 +479,14 @@ def test_a_hold_lost_in_the_database_does_not_send_postgres_to_the_app(seeded_ca
     relation.refresh_from_db()
     assert relation.status == "pending" and not relation.hold_reference
 
-    # The refusals that are ours still say what happened.
+    # The refusals that are ours still say what happened — through the `code` the app
+    # branches on, with a translated sentence beside it. This asserted the English word
+    # "Insufficient" in the body, which was the exception's own message leaking into
+    # the response; SIDE_BUGS S-085 stopped that deliberately (the exception text is for
+    # the log), so the reason is now read where the contract puts it.
     Wallet.objects.filter(owner=client_user).update(balance=Decimal("10.00"))
     r = t_api.post("/api/auth/trainer/respond-to-request/",
                    {"request_id": relation.id, "action": "approve"},
                    content_type="application/json")
-    assert r.status_code == 402 and "Insufficient" in r.content.decode(), r.content
+    assert (r.status_code, r.json()["code"]) == (402, "insufficient_balance"), r.content
+    assert r.json()["error"], "a sentence the person can read, not an empty refusal"

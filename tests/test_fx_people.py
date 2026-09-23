@@ -270,7 +270,12 @@ def test_s155_every_refusal_on_the_request_paths_carries_its_code(make_user, api
     refused = api(trainer).post("/api/auth/trainer/respond-to-request/",
                                 {"request_id": relation.id, "action": "approve"},
                                 content_type=JSON)
-    assert (refused.status_code, refused.json()["code"]) == (402, "exchange_rate_missing")
+    # 409, not 402: a rate that cannot convert the price is a conflict with the operator's
+    # state, not a shortfall in the client's wallet — the status the request pre-check
+    # and the checkout already answer for the same code. This expectation was written
+    # against an implementation the merge superseded (the money fixer's
+    # `_hold_refusal`, which maps each failure to its own status).
+    assert (refused.status_code, refused.json()["code"]) == (409, "exchange_rate_missing")
     relation.refresh_from_db()
     assert relation.status == "pending", "a refused approval changed the row"
 
