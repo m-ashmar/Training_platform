@@ -294,6 +294,18 @@ class ExchangeRateAdmin(admin.ModelAdmin):
                 f"{age:.1f}", max_age_days())
         return format_html('<b style="color:#070">live — {} days old</b>', f"{age:.1f}")
 
+    def get_form(self, request, obj=None, **kwargs):
+        # The one direction the number is read in, said on the form itself: with no pair
+        # to pick, the operator must know which way round to type it.
+        from .currencies import RATE_BASE, RATE_QUOTE
+
+        form = super().get_form(request, obj, **kwargs)
+        if obj is None and "rate" in form.base_fields:
+            form.base_fields["rate"].help_text = (
+                f"1 {RATE_BASE} = this many {RATE_QUOTE}. Conversions read only this "
+                f"direction.")
+        return form
+
     def get_fields(self, request, obj=None):
         # An existing row shows its pair; the add form has none to choose.
         if obj is not None:

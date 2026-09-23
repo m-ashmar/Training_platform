@@ -225,8 +225,8 @@ def test_s086_nobody_can_take_a_ledger_owners_name(make_user, rf):
               "phone_number": "+963911111111", "password1": "Xx!23456long",
               "password2": "Xx!23456long", "date_of_birth": "1990-01-01"},
         context={"request": rf.post("/api/auth/register/")})
-    assert not form.is_valid()
-    assert [e.code for e in form.errors["username"]] == ["username_taken"]
+    assert not form.is_valid(), "a ledger owner's username was accepted"
+    assert [e.code for e in form.errors.get("username", [])] == ["username_taken"]
 
     # A name taken before it was reserved (or by hand) no longer breaks the books.
     get_user_model().objects.create_user(email="squatter@gate.test",
