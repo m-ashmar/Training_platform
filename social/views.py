@@ -22,6 +22,9 @@ from .models import (
     ChallengeParticipation,
 )
 from .permissions import IsOwnerOrReadOnly, IsFollowParticipant
+# Where each participant of a challenge stands: ONE rule, read by every surface
+# (BACKEND_BUGS B-086). The module imports no model at import time.
+from .standing import STANDING_ORDER, WRITE_BATCH, in_standing, place
 from .serializers import (
     UserFollowSerializer, PostSerializer, CommentSerializer,
     ChallengeSerializer, AchievementSerializer, UserAchievementSerializer,
@@ -72,6 +75,9 @@ class UserFollowViewSet(viewsets.ModelViewSet):
     `POST follow_user/` body `{"user_id": <user id>}` both answer 403 `user_blocked`
     when either person has blocked the other — the same code and wording whichever
     side made the block. Unfollowing is never refused. Nothing differs by build.
+    Neither follows an account that is not active: `follows/` answers the
+    `validation_error` a missing `following_id` does, `follow_user/` 404
+    `user_not_found` (see each action for its codes).
     """
     serializer_class = UserFollowSerializer
     permission_classes = [IsFollowParticipant]
@@ -89,6 +95,39 @@ class UserFollowViewSet(viewsets.ModelViewSet):
                                 serializer.validated_data.get('following'))
         serializer.save(follower=self.request.user)
 
+    @staticmethod
+    def _target_id(request):
+        """The `user_id` of the body as an int, or None when it is not one.
+
+        It went straight into `CustomUser.objects.get(id=...)`, so `"abc"` raised
+        ValueError there — a 500 — and an absent id was a 404 (BACKEND_BUGS B-079). A
+        JSON array body has no `.get` at all.
+        """
+        data = request.data if isinstance(request.data, dict) else {}
+        raw = data.get('user_id')
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int):
+            candidate = raw
+        elif isinstance(raw, str) and raw.strip().isdigit():
+            candidate = int(raw.strip())
+        else:
+            return None
+        # A Postgres integer: anything larger is no user, and would be a 500 as a
+        # parameter.
+        return candidate if 0 < candidate <= 2_147_483_647 else None
+
+    @staticmethod
+    def _bad_target():
+        return Response({'error': _('user_id must be the id of a user.'),
+                         'code': 'invalid_user_id'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    @staticmethod
+    def _no_such_user():
+        return Response({'error': _('User not found'), 'code': 'user_not_found'},
+                        status=status.HTTP_404_NOT_FOUND)
+
     @action(detail=False, methods=['post'])
     def follow_user(self, request):
         """
@@ -99,16 +138,29 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             "user_id": 123
         }
 
-        201 followed · 200 already following · 400 following yourself ·
-        403 `user_blocked` (either of you has blocked the other) · 404 no such user.
+        Auth required; body `{"user_id": <int>}` (a digit string is accepted too).
+        Nothing differs by build. Answers:
+
+          201 `{"message"}` — followed (the person is told by a push);
+          200 `{"message"}` — you already followed them;
+          400 `invalid_user_id` — `user_id` absent, not a positive whole number, or a
+              JSON body that is not an object (was a 500 for `"abc"`, a 404 when absent);
+          400 `cannot_follow_yourself` — the id is your own;
+          403 `user_blocked` — either of you has blocked the other;
+          404 `user_not_found` — no such account, OR an account that is not active
+              (suspended or erased): the same answer, so it says nothing about which.
+              Following an inactive account used to succeed (BACKEND_BUGS B-079).
         """
-        user_id = request.data.get('user_id')
+        user_id = self._target_id(request)
+        if user_id is None:
+            return self._bad_target()
         try:
-            user_to_follow = CustomUser.objects.get(id=user_id)
+            user_to_follow = CustomUser.objects.get(id=user_id, is_active=True)
 
             if user_to_follow == request.user:
                 return Response(
-                    {'error': _('Cannot follow yourself')},
+                    {'error': _('Cannot follow yourself'),
+                     'code': 'cannot_follow_yourself'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -141,40 +193,44 @@ class UserFollowViewSet(viewsets.ModelViewSet):
                 )
                 
         except CustomUser.DoesNotExist:
-            return Response(
-                {'error': _('User not found')}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
-    
+            return self._no_such_user()
+
     @action(detail=False, methods=['post'])
     def unfollow_user(self, request):
         """
         Unfollow a user
-        
+
         POST /api/social/follows/unfollow_user/
         {
             "user_id": 123
         }
+
+        Auth required; body `{"user_id": <int>}`. Nothing differs by build. Never
+        refused for a block, and it works on an account that is no longer active, so a
+        follow of a suspended or erased account can always be undone. Answers:
+
+          200 `{"message"}` — you do not follow them (whether or not you did before);
+          400 `invalid_user_id` — as on `follow_user/` (was a 500 for `"abc"`);
+          404 `user_not_found` — no account has that id.
         """
-        user_id = request.data.get('user_id')
+        user_id = self._target_id(request)
+        if user_id is None:
+            return self._bad_target()
         try:
             user_to_unfollow = CustomUser.objects.get(id=user_id)
-            
+
             UserFollow.objects.filter(
                 follower=request.user,
                 following=user_to_unfollow
             ).delete()
-            
+
             return Response(
-                {'message': _('Successfully unfollowed user')}, 
+                {'message': _('Successfully unfollowed user')},
                 status=status.HTTP_200_OK
             )
-            
+
         except CustomUser.DoesNotExist:
-            return Response(
-                {'error': _('User not found')}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return self._no_such_user()
     
     @action(detail=False, methods=['get'])
     def followers(self, request):
@@ -679,6 +735,22 @@ from routine.views import StandardResultsSetPagination
 class ChallengeViewSet(viewsets.ModelViewSet):
     """
     API endpoints for community challenges
+
+    Auth required. Nothing differs by build. A challenge row (list, detail, create,
+    update) is `ChallengeSerializer`; since 2026-09-24 it also carries `metric` —
+    `manual` | `volume_kg` | `sets` | `workouts` | `training_days`, writable, default
+    `manual` — and `auto_counted` (read-only, `metric != "manual"`): when true the
+    server counts the participants' progress from the training they log
+    (`social/challenge_progress.py`), `update_progress` refuses a hand-typed number
+    (`progress_auto_counted`), and the app shows «ابدأ تمرين اليوم» instead of the
+    log sheet (BACKEND_BUGS B-075).
+
+    `user_progress` — `{current_value, progress_percentage, rank}` of the caller, or
+    null when they have not joined. `rank` is counted live by the one rule every
+    standing surface reads (`social/standing.py`, BACKEND_BUGS B-086): 1 + the number
+    of participants strictly ahead — more progress, then an earlier join, then a lower
+    participation id — so two people on the same number hold different places, the
+    earlier joiner first. Null for someone who dropped out.
     """
     serializer_class = ChallengeSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -700,7 +772,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 'id', 'title', 'description', 'challenge_type',
                 'target_value', 'unit', 'start_date', 'end_date',
                 'max_participants', 'participants_count', 'status',
-                'created_at', 'rules', 'reward_description', 'image',
+                'created_at', 'rules', 'reward_description', 'image', 'metric',
                 'creator__id', 'creator__username', 'creator__email',
                 'creator__user_type', 'creator__profile_picture',
             )
@@ -721,7 +793,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 is_joined_anno=Exists(part_qs),
                 cur_value_anno=Subquery(part_qs.values('current_value')[:1]),
                 prog_pct_anno=Subquery(part_qs.values('progress_percentage')[:1]),
-                rank_anno=Subquery(part_qs.values('rank')[:1]),
+                # Counted live by THE rule (`social/standing.py`), not read from the
+                # stored column: the column is only as fresh as its last write, and the
+                # Feed card read 2 while the board and the home card said 3 (B-086).
+                rank_anno=Subquery(in_standing(part_qs).annotate(place=place())
+                                   .values('place')[:1]),
             )
         return qs
     
@@ -786,8 +862,18 @@ class ChallengeViewSet(viewsets.ModelViewSet):
 
     def _invalidate_challenges_cache(self, request):
         """Invalidate every cached variant of this user's challenges list."""
+        self._bump_challenges_cache_version(
+            f"challenges_ver:{self._challenges_cache_user_part(request.user)}")
+
+    @classmethod
+    def invalidate_challenges_cache_for(cls, user_id):
+        """The same, for a person who is not the one asking — the one whose progress a
+        recount of their logged training just moved (`social/challenge_progress.py`)."""
+        cls._bump_challenges_cache_version(f"challenges_ver:user:{user_id}")
+
+    @staticmethod
+    def _bump_challenges_cache_version(version_key):
         try:
-            version_key = f"challenges_ver:{self._challenges_cache_user_part(request.user)}"
             try:
                 cache.incr(version_key)
             except ValueError:
@@ -811,12 +897,24 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         one early (`status: "completed"`, or an end date moved into the past) closes it
         here, so the check is queued here too — on commit, after the close is visible.
         """
-        was_over = serializer.instance.lifecycle_status == 'completed'
+        before = serializer.instance
+        was_over = before.lifecycle_status == 'completed'
+        measured = (before.metric, before.start_date, before.end_date)
         challenge = serializer.save()
         if not was_over and challenge.lifecycle_status == 'completed':
             from .tasks import award_challenge_winners
 
             transaction.on_commit(lambda: award_challenge_winners([challenge.pk]))
+        # What the challenge counts, or over which days, changed while it runs: every
+        # participant's number is recounted (one grouped query) and the standing
+        # re-ranked, rather than waiting for each of them to log again (B-075).
+        if (challenge.auto_counted and challenge.is_active
+                and (challenge.metric, challenge.start_date, challenge.end_date) != measured):
+            from .challenge_progress import recount
+
+            with transaction.atomic():
+                recount(challenge)
+                self._update_challenge_rankings(challenge)
 
     @action(detail=True, methods=['post'])
     def join(self, request, pk=None):
@@ -824,6 +922,16 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         Join a challenge
 
         POST /api/social/challenges/{id}/join/
+
+        Body: none. Nothing differs by build. Answers:
+          `201` `{"message"}` — joined. On an `auto_counted` challenge the training
+                you already logged inside its window is counted at once.
+          `200` `{"message"}` — you were already in it
+          `400` `{"error", "code": "challenge_closed"}` — not running: not started
+                yet, over, or cancelled
+          `400` `{"error", "code": "challenge_full"}` — `max_participants` reached (it
+                answered the bare `bad_request` default before, BACKEND_BUGS B-076)
+          `404` — no such challenge, or one an operator hid
         """
         challenge = self.get_object()
 
@@ -845,7 +953,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                     ChallengeParticipation.objects.filter(challenge=locked).count()
                     >= locked.max_participants):
                 return Response(
-                    {'error': _('Challenge is full')},
+                    {'error': _('Challenge is full'), 'code': 'challenge_full'},
                     status=status.HTTP_400_BAD_REQUEST)
             return self._join_locked(request, locked or challenge)
 
@@ -862,6 +970,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             Challenge.objects.filter(pk=challenge.pk).update(
                 participants_count=ChallengeParticipation.objects.filter(
                     challenge=challenge).count())
+            # What they already trained inside the window counts from the start (B-075).
+            if challenge.auto_counted:
+                from .challenge_progress import recount
+
+                recount(challenge, [request.user.id])
             # Rank the newcomer now. Ranks used to be written only by
             # `update_progress`, so anyone who joined and logged nothing kept
             # `rank=NULL` — last place is a place, and the app reads the column.
@@ -939,24 +1052,71 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     def leaderboard(self, request, pk=None):
         """
         Get challenge leaderboard
-        
-        GET /api/social/challenges/{id}/leaderboard/
+
+        GET /api/social/challenges/{id}/leaderboard/?limit=10
+
+        Auth required; no body; nothing differs by build. `limit` 1..50, default 10
+        (outside that range it is clamped; not a number: `400 validation_error`).
+        Answers `200`:
+
+            {"challenge": "<title>",
+             "auto_counted": true,
+             "leaderboard": [{"rank": 1,
+                              "user": {"id", "username", "first_name", "last_name",
+                                       "user_type", "profile_picture"},
+                              "current_value": 48900.0,
+                              "progress_percentage": 97.8}, …],
+             "me": {… the same shape, for the caller …} | null}
+
+        `rank` is THE place (`social/standing.py`): 1 + the participants strictly
+        ahead — more progress, then an earlier join, then a lower participation id —
+        the same number `user_progress.rank` on the challenge and the home card's
+        `challenge_rank` answer (BACKEND_BUGS B-086). Rows are listed in that order.
+        `user.user_type` is what draws the trainer's bronze ring; `profile_picture`
+        is an absolute URL or null (B-074).
+
+        `me` is the caller's own row whether or not it made the list — the app pins it
+        below the board when it did not — and null when the caller has not joined or
+        dropped out (someone who dropped holds no place and is never listed).
+
+        An account the caller has blocked, or that has blocked them, is left out of
+        `leaderboard` AFTER the places are counted: everyone else keeps their true
+        `rank` and the list may be shorter than `limit`.
+
+        `404` — no such challenge, or one an operator hid.
         """
         challenge = self.get_object()
-        
-        # A total order, and the user joined. `-current_value` alone is not an order:
-        # a hundred participants tied on 4.0 meant whichever row Postgres happened to
-        # return got rank 1 — and rank 1 is what the Challenge Winner and Champion
-        # badges key on. `-current_value, joined_at, id` breaks the tie by who got there
-        # first. `select_related` because `p.user.username` was a query per row.
-        #
-        # Someone who dropped out holds no place (`NOT_IN_STANDING`, SIDE_BUGS S-045):
-        # the stored `rank` and the home card's count leave them out too.
-        participants = ChallengeParticipation.objects.filter(
-            challenge=challenge
-        ).exclude(
-            status__in=ChallengeParticipation.NOT_IN_STANDING
-        ).select_related('user').order_by('-current_value', 'joined_at', 'id')[:10]
+        limit = int_param(request.query_params, 'limit', default=10, minimum=1, maximum=50)
+
+        # The places come from `place()`, the one rule every surface reads; the rows are
+        # listed in `STANDING_ORDER`, the order it counts in. `select_related` because
+        # the user's names and picture were a query per row.
+        standing = (in_standing(ChallengeParticipation.objects.filter(challenge=challenge))
+                    .select_related('user').annotate(place=place()))
+        participants = list(standing.order_by(*STANDING_ORDER)[:limit])
+        mine = next((p for p in participants if p.user_id == request.user.id), None)
+        if mine is None:
+            mine = standing.filter(user=request.user).first()
+
+        storage = CustomUser._meta.get_field('profile_picture').storage
+
+        def row(p):
+            person = p.user
+            picture = person.profile_picture.name if person.profile_picture else None
+            return {
+                'rank': p.place,
+                'user': {
+                    'id': person.id,
+                    'username': person.username,
+                    'first_name': person.first_name,
+                    'last_name': person.last_name,
+                    'user_type': person.user_type,
+                    'profile_picture': (request.build_absolute_uri(storage.url(picture))
+                                        if picture else None),
+                },
+                'current_value': p.current_value,
+                'progress_percentage': p.progress_percentage,
+            }
 
         # Blocked people are dropped from the board AFTER the rank is computed, so the
         # ranks stay true — the reader sees 1, 2, 4 with a gap rather than someone else
@@ -964,19 +1124,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         # have renumbered the whole board differently for every viewer, and the
         # Champion badge keys on rank 1.
         hidden = blocked_ids(request.user)
-        leaderboard = [{
-            'rank': idx + 1,
-            'user': {
-                'id': p.user.id,
-                'username': p.user.username
-            },
-            'current_value': p.current_value,
-            'progress_percentage': p.progress_percentage
-        } for idx, p in enumerate(participants) if p.user_id not in hidden]
-        
         return Response({
             'challenge': challenge.title,
-            'leaderboard': leaderboard
+            'auto_counted': challenge.auto_counted,
+            'leaderboard': [row(p) for p in participants if p.user_id not in hidden],
+            'me': row(mine) if mine is not None else None,
         })
 
     @action(detail=True, methods=['post'])
@@ -989,10 +1141,32 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             "current_value": 150.5,
             "notes": "Completed today's workout"
         }
+
+        The manual log, for a challenge the server cannot measure (`auto_counted`
+        false). Auth required; body `{"current_value": <number>, "notes"?}` — the
+        caller's total so far, not an increment. Nothing differs by build. Answers:
+
+          `200` `{"message", "participation": {current_value, progress_percentage,
+                status, rank, target_value, unit}}` — `rank` is the caller's place by
+                the one rule (`social/standing.py`), after this log
+          `400` `{"error", "code"}`, `code` one of:
+                `not_participating` — you have not joined (the code `leave` answers)
+                `challenge_closed` — not running: not started yet, over, or cancelled
+                    (the code `join` and `leave` answer)
+                `progress_auto_counted` — the server counts this challenge from your
+                    logged training; there is nothing to type in
+                `progress_required` — no `current_value`
+                `invalid_progress` — `current_value` is not a finite number
+                `negative_progress` — below zero
+                `progress_out_of_range` — more than a hundred times the target
+          `404` — no such challenge, or one an operator hid
+
+        The first five codes are new (2026-09-24, BACKEND_BUGS B-076): those refusals
+        answered only the `bad_request` default before. The checks run in that order.
         """
         challenge = self.get_object()
         user = request.user
-        
+
         # Check if user is participating in this challenge
         try:
             participation = ChallengeParticipation.objects.get(
@@ -1001,31 +1175,44 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             )
         except ChallengeParticipation.DoesNotExist:
             return Response(
-                {'error': _('You are not participating in this challenge. Join first!')}, 
+                {'error': _('You are not participating in this challenge. Join first!'),
+                 'code': 'not_participating'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         # Check if challenge is active
         if not challenge.is_active:
             return Response(
-                {'error': _('This challenge is not currently active')}, 
+                {'error': _('This challenge is not currently active'),
+                 'code': 'challenge_closed'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        current_value = request.data.get('current_value')
-        notes = request.data.get('notes', '')
-        
+
+        # Counted from logged training (B-075): a hand-typed number would be overwritten
+        # by the next set anyway, and taking it would let anyone type their way up.
+        if challenge.auto_counted:
+            return Response(
+                {'error': _('This challenge is counted from the training you log, so '
+                            'there is nothing to enter by hand.'),
+                 'code': 'progress_auto_counted'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        current_value = data.get('current_value')
+        notes = data.get('notes', '')
+
         if current_value is None:
             return Response(
-                {'error': _('current_value is required')}, 
+                {'error': _('current_value is required'), 'code': 'progress_required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             current_value = float(current_value)
         except (ValueError, TypeError):
             return Response(
-                {'error': _('current_value must be a valid number')}, 
+                {'error': _('current_value must be a valid number'),
+                 'code': 'invalid_progress'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1037,7 +1224,8 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         if current_value != current_value or current_value in (
                 float('inf'), float('-inf')):
             return Response(
-                {'error': _('current_value must be a valid number')},
+                {'error': _('current_value must be a valid number'),
+                 'code': 'invalid_progress'},
                 status=status.HTTP_400_BAD_REQUEST)
         if current_value < 0:
             return Response(
@@ -1051,29 +1239,17 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                  'code': 'progress_out_of_range'},
                 status=status.HTTP_400_BAD_REQUEST)
         
-        # Update participation progress
-        old_value = participation.current_value
-        participation.current_value = current_value
-        
-        # Calculate progress percentage
-        if challenge.target_value and challenge.target_value > 0:
-            participation.progress_percentage = max(0.0, min(
-                100.0, (current_value / challenge.target_value) * 100))
-        else:
-            participation.progress_percentage = 0.0
+        # Update participation progress: the value, its percentage and the completion,
+        # by the ONE implementation the counted progress uses too
+        # (`challenge_progress.apply_value`). Completion FOLLOWS the number, in both
+        # directions: the branch here only ever set `completed`, so a participant who
+        # logged 100 and then corrected it to 0 stayed "completed" with zero progress —
+        # and stayed eligible for the badge.
+        from .challenge_progress import apply_value
 
-        # Completion FOLLOWS the number, in both directions. The branch only ever set
-        # `completed`, so a participant who logged 100 and then corrected it to 0 stayed
-        # "completed" with zero progress — and stayed eligible for the badge.
-        if challenge.target_value:
-            reached = current_value >= challenge.target_value
-            if reached and participation.status != 'completed':
-                participation.status = 'completed'
-                participation.completed_at = timezone.now()
-            elif not reached and participation.status == 'completed':
-                participation.status = 'active'
-                participation.completed_at = None
-        
+        old_value = participation.current_value
+        apply_value(participation, challenge, current_value)
+
         # The row and the whole standing move together, under the CHALLENGE's lock.
         # Two people logging progress at the same moment each computed the board from
         # their own snapshot and wrote it, so the later writer could publish an order
@@ -1117,21 +1293,10 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             }
         })
     
-    #: The one order the standing of a challenge is read in, anywhere in this product.
-    #: `GET challenges/{id}/leaderboard/` already sorts this way and the home card's
-    #: `challenge_rank` (`home/sections.py`) counts "how many are ahead of me" with
-    #: exactly these three clauses, so the stored column is written with them too
-    #: rather than inventing a third answer to one question. Highest value first; on a
-    #: tie the person who joined earlier is ahead, because joining is the only act
-    #: either of them has a timestamp for — `completed_at` exists only for someone who
-    #: reached the target, so it cannot order the field, and `-current_value` alone is
-    #: not an order at all (it is what made two tied scores swap places between runs).
-    #: `id` last so the order is TOTAL: no two rows can compare equal.
-    RANKING_ORDER = ('-current_value', 'joined_at', 'id')
-
-    #: Rows per UPDATE. `bulk_update` builds one CASE arm per row, so a challenge with
-    #: thousands of participants is split rather than sent as one enormous statement.
-    RANKING_BATCH = 500
+    #: The order the standing is listed in — `social/standing.py STANDING_ORDER`, named
+    #: here as well because this is where it lived before it moved there.
+    RANKING_ORDER = STANDING_ORDER
+    RANKING_BATCH = WRITE_BATCH
 
     def _update_challenge_rankings(self, challenge):
         """Write `rank` for EVERY participant, in one pass, and return {id: rank}.
@@ -1148,45 +1313,18 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           `status='completed'` AND `rank=1`, so the "Challenge Winner" badge was
           awarded off that ordering.
 
-        `RANKING_ORDER` is a total order and is the order the leaderboard and the home
-        card already read, so all three now agree. Every participant still in the
-        standing is ranked, including the ones sitting at zero: places run 1..N with no
-        gaps. The one NULL is someone who dropped out (`NOT_IN_STANDING`): they hold no
-        place, so the person behind them moves up.
-        Only the rows whose place actually moved are written, in one `bulk_update`
-        (a `Case`/`When` UPDATE) instead of N `save()`s — a 200-person challenge costs
-        one SELECT and one UPDATE, not 200 full-row writes.
-
-        **A challenge that is over is not re-ranked.** `lifecycle_status` is terminal
-        once the end date has passed or someone closed the challenge; from that moment
-        the standing is a record, and the last ranks written while it was running are
-        the final ones. Without this, a late `leave` would quietly renumber a finished
-        board — and move the Challenge Winner badge.
+        It is `social/standing.py write_places` now: the column is written from
+        `place()`, the ONE rule the leaderboard, `user_progress.rank` and the home
+        card also read (BACKEND_BUGS B-086), so the four cannot disagree. Every
+        participant still in the standing is placed, including the ones at zero; a
+        dropped one is NULL (`NOT_IN_STANDING`, SIDE_BUGS S-045). One SELECT and one
+        bulk UPDATE of the rows whose place moved. **A challenge that is over is not
+        re-ranked**: the standing is a record from that moment, and a late `leave`
+        must not move the Challenge Winner badge.
         """
-        rows = list(ChallengeParticipation.objects
-                    .filter(challenge=challenge)
-                    .only('id', 'rank', 'status')
-                    .order_by(*self.RANKING_ORDER))
-        if challenge.lifecycle_status in Challenge.TERMINAL_STATUSES:
-            return {row.pk: row.rank for row in rows}
+        from .standing import write_places
 
-        # A participant who dropped out holds no place and is written NULL; everyone
-        # else is placed 1..N among themselves (`NOT_IN_STANDING`, SIDE_BUGS S-045).
-        moved = []
-        place = 0
-        for row in rows:
-            if row.status in ChallengeParticipation.NOT_IN_STANDING:
-                wanted = None
-            else:
-                place += 1
-                wanted = place
-            if row.rank != wanted:
-                row.rank = wanted
-                moved.append(row)
-        if moved:
-            ChallengeParticipation.objects.bulk_update(
-                moved, ['rank'], batch_size=self.RANKING_BATCH)
-        return {row.pk: row.rank for row in rows}
+        return write_places(challenge)
 
 
 class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
@@ -1381,22 +1519,52 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
-    """Read-only public user profiles with non-sensitive fields and social counts."""
+    """Read-only public user profiles with non-sensitive fields and social counts.
+
+    GET /api/social/users/public-profile/{id}/
+    GET /api/social/users/public-profile/by_username/?username=<exact username>
+    GET /api/social/users/public-profile/search/?q=<text>      (paginated, below)
+
+    Auth required; no body; nothing differs by build. A profile row is
+    `PublicUserProfileSerializer`: `id, username, user_type, first_name, last_name,
+    profile_picture_url, followers_count, following_count, posts_count, is_following`
+    and, since 2026-09-24 (BACKEND_BUGS B-077), `featured_achievements` (at most three:
+    `{id, key, name, category, points, icon_url, badge_color, is_rare, earned_at}`, `id`
+    the achievement's; a secret badge only on your own profile), `community_points`
+    (the points of every badge earned — what the community-points leaderboard ranks)
+    and `member_since` (`"YYYY-MM-01"`, the month joined).
+
+    An inactive account (suspended or erased), and anyone the caller has blocked or who
+    has blocked the caller, is not served: 404 `not_found` on the detail route, and
+    `by_username/` answers 404 `{"error": "User not found"}`. The counts agree with the
+    rows the caller can fetch (blocks, hidden posts).
+    """
     serializer_class = PublicUserProfileSerializer
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        # All active users are potentially viewable; serializer limits fields.
-        # Except the ones this person has blocked and the ones who have blocked them:
-        # a profile that still opens is a block that did nothing.
-        user = self.request.user
-        hidden = blocked_ids(user)
-        queryset = CustomUser.objects.filter(is_active=True).exclude(id__in=hidden)
+    #: The shortest `q` that `search/` answers. Two, because an Arabic given name can be
+    #: two letters and a username prefix of one letter is the whole directory.
+    SEARCH_MIN_LENGTH = 2
+    #: Longer than any username (150) or full name (30 + 1 + 30) can match.
+    SEARCH_MAX_LENGTH = 150
+    #: Who a search lists: members of the community. Staff and top-up agents keep a
+    #: public profile, but a stranger has no reason to go looking for one by name.
+    SEARCH_USER_TYPES = ('client', 'trainer')
 
-        # The three counts, annotated for the whole page rather than counted per row.
-        # Unfiltered they contradicted the lists they summarise: a profile claiming 12
-        # followers next to a follower list of 11 tells the viewer the account they
-        # blocked is still following — which is the one thing the block had to stop.
+    def _hidden(self):
+        """`blocked_ids` for this request, asked once (one query, both directions)."""
+        if not hasattr(self, '_hidden_ids'):
+            self._hidden_ids = blocked_ids(self.request.user)
+        return self._hidden_ids
+
+    def _visible_people(self):
+        """Every account this viewer may see: active, and neither side blocking."""
+        return CustomUser.objects.filter(is_active=True).exclude(id__in=self._hidden())
+
+    def _with_follow_figures(self, queryset):
+        """`is_following` and `followers_count`, for the whole page in its own query."""
+        user = self.request.user
+        hidden = self._hidden()
         return queryset.annotate(
             # `is_following` ran an `.exists()` per row, which made the page's cost
             # grow with the page and hid whether the counts below cost anything.
@@ -1406,6 +1574,26 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
             followers_count_anno=subquery_count(
                 UserFollow.objects.filter(following_id=OuterRef('pk')).exclude(
                     follower_id__in=hidden), 'following_id'),
+        )
+
+    def get_queryset(self):
+        # All active users are potentially viewable; serializer limits fields.
+        # Except the ones this person has blocked and the ones who have blocked them:
+        # a profile that still opens is a block that did nothing.
+        from django.db.models import IntegerField, Prefetch, Subquery, Sum
+        from django.db.models.functions import Coalesce
+        from achievements.models import UserAchievement as Earned
+        from .serializers import featured_badges_queryset
+
+        user = self.request.user
+        hidden = self._hidden()
+        queryset = self._with_follow_figures(self._visible_people())
+
+        # The three counts, annotated for the whole page rather than counted per row.
+        # Unfiltered they contradicted the lists they summarise: a profile claiming 12
+        # followers next to a follower list of 11 tells the viewer the account they
+        # blocked is still following — which is the one thing the block had to stop.
+        return queryset.annotate(
             following_count_anno=subquery_count(
                 UserFollow.objects.filter(follower_id=OuterRef('pk')).exclude(
                     following_id__in=hidden), 'follower_id'),
@@ -1413,11 +1601,26 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
             # cannot drift from `GET /api/social/posts/?author=<id>`.
             posts_count_anno=subquery_count(
                 visible_posts_for(user).filter(author_id=OuterRef('pk')), 'author_id'),
+            # The community points (B-077): the sum the achievements leaderboard ranks.
+            community_points_anno=Coalesce(
+                Subquery(Earned.objects.filter(user_id=OuterRef('pk')).order_by()
+                         .values('user_id').annotate(total=Sum('achievement__points'))
+                         .values('total')[:1], output_field=IntegerField()),
+                0, output_field=IntegerField()),
+        ).prefetch_related(
+            # The featured badges of every profile on the page, in ONE query.
+            Prefetch('earned_achievements', queryset=featured_badges_queryset(user),
+                     to_attr='featured_badges'),
         )
 
     @action(detail=False, methods=['get'])
     def by_username(self, request):
-        """Fetch public profile by username: /api/social/users/public-profile/by_username/?username=..."""
+        """Fetch public profile by username: /api/social/users/public-profile/by_username/?username=...
+
+        The EXACT username, case-sensitive — use `search/` to find people.
+        400 `{"error"}` without `username`; 404 `{"error"}` when no visible account has
+        it. Otherwise the profile, as the detail route answers it.
+        """
         username = request.query_params.get('username')
         if not username:
             return Response({'error': _('username is required')}, status=status.HTTP_400_BAD_REQUEST)
@@ -1430,3 +1633,62 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(serializer.data)
         except CustomUser.DoesNotExist:
             return Response({'error': _('User not found')}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=False, methods=['get'])
+    def search(self, request):
+        """Find people: GET /api/social/users/public-profile/search/?q=<text>&page=<n>
+
+        The Find screen's people search (BACKEND_BUGS B-081) — `by_username/` only ever
+        matched a whole username, case-sensitively. Auth required; no body; nothing
+        differs by build.
+
+        `q` — at least `SEARCH_MIN_LENGTH` (2) characters after trimming spaces and a
+        leading `@`, at most 150. It matches, case-insensitively, the START of the
+        username, of the first name, of the last name, or of "first last" (so «ليث الن»
+        finds ليث النجار). `%` and `_` are ordinary characters.
+
+        Listed: active, verified members (`client` and `trainer` accounts) other than
+        the caller, and never anyone the caller has blocked or who has blocked the
+        caller — a subset of the people whose profile the caller could open; staff,
+        top-up agents and signups that never verified are not listed. Order: an exact username first, then usernames that start
+        with `q`, then name matches; each group by username, then id.
+
+        Paginated, the project's one shape: `{count, next, previous, results}`, 25 a
+        page (`page_size` up to 100). A row is a SUBSET of the public profile —
+        `{id, username, user_type, first_name, last_name, profile_picture_url,
+        followers_count, is_following, member_since}` — so a search tells nobody more
+        than the profile would.
+
+        `400 {"error", "code": "query_too_short", "min_length": 2}` — `q` absent or
+        shorter than that. A bad `page` / `page_size` is the paginator's 400.
+        """
+        from django.db.models import Case, IntegerField, Value, When
+        from django.db.models.functions import Concat
+        from .serializers import PublicUserSearchSerializer
+
+        raw = request.query_params.get('q') or ''
+        query = raw.strip().lstrip('@').strip()[:self.SEARCH_MAX_LENGTH]
+        if len(query) < self.SEARCH_MIN_LENGTH:
+            return Response(
+                {'error': _('Type at least %(count)d characters to search.')
+                 % {'count': self.SEARCH_MIN_LENGTH},
+                 'code': 'query_too_short', 'min_length': self.SEARCH_MIN_LENGTH},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        people = (self._visible_people()
+                  .filter(email_verified=True, user_type__in=self.SEARCH_USER_TYPES)
+                  .exclude(pk=request.user.pk)
+                  .annotate(search_name=Concat('first_name', Value(' '), 'last_name'))
+                  .filter(Q(username__istartswith=query)
+                          | Q(first_name__istartswith=query)
+                          | Q(last_name__istartswith=query)
+                          | Q(search_name__istartswith=query))
+                  .annotate(match_rank=Case(
+                      When(username__iexact=query, then=Value(0)),
+                      When(username__istartswith=query, then=Value(1)),
+                      default=Value(2), output_field=IntegerField()))
+                  .order_by('match_rank', 'username', 'id'))
+        page = self.paginate_queryset(self._with_follow_figures(people))
+        serializer = PublicUserSearchSerializer(page, many=True,
+                                                context=self.get_serializer_context())
+        return self.get_paginated_response(serializer.data)

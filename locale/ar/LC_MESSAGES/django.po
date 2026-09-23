@@ -4460,3 +4460,62 @@ msgid ""
 "The transfer we checked could not be matched to your payment. Contact support to "
 "have it returned."
 msgstr "تعذّرت مطابقة التحويل الذي تحققنا منه مع دفعتك. تواصل مع الدعم لاسترداده."
+
+#: social/models.py
+msgid "Logged by hand"
+msgstr "يُسجَّل يدوياً"
+
+#: social/models.py
+msgid "Weight lifted (kg)"
+msgstr "الوزن المرفوع (كغ)"
+
+#: social/models.py
+msgid "Sets logged"
+msgstr "المجموعات المسجّلة"
+
+#: social/models.py
+msgid "Workouts finished"
+msgstr "التمارين المكتملة"
+
+#: social/models.py
+msgid "Days trained"
+msgstr "أيام التمرين"
+
+#: social/views.py
+msgid "user_id must be the id of a user."
+msgstr "يجب أن يكون user_id معرّف مستخدم."
+
+#: social/views.py
+msgid ""
+"This challenge is counted from the training you log, so there is nothing to "
+"enter by hand."
+msgstr "يُحسب تقدّمك في هذا التحدي تلقائياً من التمارين التي تسجّلها، فلا حاجة لإدخاله يدوياً."
+
+#: social/views.py
+#, python-format
+msgid "Type at least %(count)d characters to search."
+msgstr "اكتب %(count)d أحرف على الأقل للبحث."
+
+#: social/serializers.py
+msgid "A post shares one thing: a workout or a badge."
+msgstr "يشارك المنشور شيئاً واحداً: تمريناً أو شارة."
+
+#: social/serializers.py
+msgid "You can only share a workout of your own."
+msgstr "لا يمكنك مشاركة إلا تمارينك أنت."
+
+#: social/serializers.py
+msgid "Only a finished workout can be shared."
+msgstr "لا يمكن مشاركة إلا تمرين مكتمل."
+
+#: social/serializers.py
+msgid "You can only share a badge you have earned."
+msgstr "لا يمكنك مشاركة إلا شارة حصلت عليها."
+
+#: achievements/views.py
+msgid "Achievement not earned"
+msgstr "لم تحصل على هذا الإنجاز بعد"
+
+#: achievements/views.py
+msgid "Maximum 3 featured achievements allowed"
+msgstr "يمكنك إبراز 3 إنجازات كحدّ أقصى"

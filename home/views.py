@@ -275,8 +275,10 @@ class HomeView(APIView):
          "value": 12.0, "target": 20.0, "unit": "workouts",
          "progress_percent": 60.0, "ends_at": "..."}
 
-        `rank` is counted live, with the same tiebreaker the leaderboard uses; the
-        stored `rank` column is not read, because nothing keeps it true.
+        `rank` is counted live by the ONE rule the challenge's leaderboard rows and
+        `user_progress.rank` also answer (`social/standing.py place()`, BACKEND_BUGS
+        B-086): 1 + the participants strictly ahead — more progress, then an earlier
+        join, then a lower participation id. The stored `rank` column is not read.
 
     ``featured_trainers`` — only for a client with no coach::
 

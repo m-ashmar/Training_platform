@@ -11,3 +11,6 @@ class SocialConfig(AppConfig):
         # Imported explicitly: a silent `except ImportError: pass` here would hide a
         # broken signals module and cause stale caches with no error anywhere.
         import training_platform.signals  # noqa: F401
+        # Challenge progress counted from logged training: receivers on the routine
+        # app's set, progress and session rows (BACKEND_BUGS B-075).
+        import social.challenge_progress  # noqa: F401
