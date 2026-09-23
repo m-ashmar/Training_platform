@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError
+from django.utils.cache import patch_vary_headers
 from django.utils.translation import gettext as _
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -17,17 +18,41 @@ class AppMediaView(APIView):
     Open to everyone, visitors included: the intro story plays before sign-in. Returns
     `{"media": {"app.story.1": {...}, "app.banner": {...}, "app.empty.3": {...}}}` in the
     shape documented in `mediakit/services.py`. An empty slot is absent; the app draws
-    its built-in fallback for it. Identical for every caller and every build.
+    its built-in fallback for it. Identical for every caller of one build.
 
     Slots: `app.story.1`-`app.story.8` (9:16, intro story backgrounds), `app.banner`
     (21:9, home and seasonal banners), `app.empty.1`-`app.empty.12` (4:5, empty states).
     Operators fill them in the console (Media kit).
+
+    **What differs by build.** `app.banner` is served only to a build whose flags allow
+    prices (`can_show_prices`, from `X-App-Channel` and `X-App-Version`): `apk` and
+    `web` by default, never `play` or `ios` (the flag is store-locked there), and never
+    a request that declares no channel. It
+    is the operator's promotional picture and nothing on the row says whether it
+    advertises a purchase, so the only safe reading of the store rule is the one home
+    already applies to the same asset (`home/first_day.py` `media_banner`) — this route
+    served it to every build, which undid that filter (SIDE_BUGS S-104). On any other
+    build the slot is simply absent, exactly like an empty one. The response carries
+    `Vary: X-App-Channel, X-App-Version`.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
 
+    #: Slots a build that may not show prices does not get. See the docstring.
+    PRICED_SLOTS = ("app.banner",)
+
     def get(self, request):
-        return Response({"media": app_media(request)})
+        from policy.services import flags_for_request
+
+        media = app_media(request)
+        if not flags_for_request(request).get("can_show_prices"):
+            for slot in self.PRICED_SLOTS:
+                media.pop(slot, None)
+        response = Response({"media": media})
+        # A shared cache in front of this must key on the build, never serve one
+        # build's answer to another.
+        patch_vary_headers(response, ("X-App-Channel", "X-App-Version"))
+        return response
 
 
 def _visible_exercise(request, exercise_id):
@@ -171,6 +196,7 @@ class VideoUploadView(APIView):
     | `400` | `media_not_a_video` | the bytes are not an MP4 or a WebM |
     | `400` | `media_video_too_large` | over the size cap |
     | `400` | `media_video_too_long` | over the duration cap |
+    | `400` | `media_alt_too_long` | `alt_ar` or `alt_en` over 200 characters — refused before anything is stored |
     | `403` | `permission_denied` | visible, but not the caller's to change |
     | `404` | `not_found` | an exercise this caller may not see |
     | `413` | `payload_too_large` | the body itself is over the ceiling |

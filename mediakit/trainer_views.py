@@ -127,6 +127,7 @@ class TrainerExerciseMediaView(APIView):
     | `400` | `media_library_full` | the per-exercise cap |
     | `400` | `media_not_a_video`, `media_video_too_large`, `media_video_too_long` | the video pipeline |
     | `400` | `media_wrong_ratio`, `media_too_small`, `media_unsupported_format` | the image pipeline |
+    | `400` | `media_alt_too_long` | `alt_ar` or `alt_en` over 200 characters — refused before anything is stored |
     | `403` | `not_a_trainer` | the caller has no library here |
     | `404` | `not_found` | an exercise this caller may not see, or no such exercise |
     | `413` | `payload_too_large` | the body itself is over the ceiling |
