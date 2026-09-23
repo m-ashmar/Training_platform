@@ -126,12 +126,21 @@ def rate_health(at=None) -> dict:
     }
 
 
+#: `convert_at_the_operators_rate(rate=...)` not given: it reads the rate itself.
+READ_THE_RATE = object()
+
+
 def convert_at_the_operators_rate(amount, from_currency: str, to_currency: str, *,
-                                  at=None):
+                                  at=None, rate=READ_THE_RATE):
     """`(converted_amount, rate_row)` for `amount`, at the rate an operator set.
 
     THE ONLY conversion in the codebase. See this module's docstring for who may call
     it and for the rounding and staleness rules.
+
+    `rate`: the `current_rate(at)` row (or None) the caller has ALREADY read for this
+    same moment, so pricing a list of N things reads the rate once rather than N times
+    (SIDE_BUGS S-130). Every rule below still applies to it — missing and stale still
+    refuse. Omitted, the rate is read here.
 
     Returns `(Decimal, None)` unchanged when the two currencies are the same: a
     same-currency purchase is not a conversion, consults no rate, and is therefore
@@ -147,7 +156,7 @@ def convert_at_the_operators_rate(amount, from_currency: str, to_currency: str, 
         if not is_supported(code):
             raise NoExchangeRate(f"{code!r} is not a currency this platform trades in")
 
-    row = current_rate(at=at)
+    row = current_rate(at=at) if rate is READ_THE_RATE else rate
     if row is None:
         raise NoExchangeRate(
             f"no operator has set a {RATE_BASE}/{RATE_QUOTE} rate, so "

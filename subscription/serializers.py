@@ -9,6 +9,26 @@ from policy.money import MoneyType
 from policy.services import can_show_price
 
 
+def _pricing_memo(request) -> dict:
+    """What pricing a list needs to know ONCE per request, not once per row.
+
+    The plan list converted each row on its own: one Wallet query in `currency_for`, one
+    ExchangeRate query for a reader in the other currency, and one policy query for
+    whether the build may see a price — three queries per plan on the Plans screen and
+    on every cache miss (SIDE_BUGS S-130). The reader, their currency, the rate and the
+    build are the same for every row of one response, so they are read once and kept on
+    the request, which is exactly as long as they are true for.
+    """
+    memo = getattr(request, '_plan_pricing_memo', None)
+    if memo is None:
+        memo = {}
+        try:
+            request._plan_pricing_memo = memo
+        except AttributeError:
+            pass
+    return memo
+
+
 class PlanPriceByChannelMixin:
     """Leaves a plan's price out of a response to a build that may not show it.
 
@@ -27,10 +47,18 @@ class PlanPriceByChannelMixin:
         # LAST, after any price a subclass added. It used to be the whole method, so a
         # subclass that converts the price into the reader's currency would have handed
         # the number straight back to a build that may not show one.
-        if request is not None and not can_show_price(request, MoneyType.PLATFORM_SUB):
+        if request is not None and not self._build_may_show_price(request):
             for name in self.price_fields:
                 data.pop(name, None)
         return data
+
+    @staticmethod
+    def _build_may_show_price(request) -> bool:
+        """`can_show_price` for this request's build, asked once per request."""
+        memo = _pricing_memo(request)
+        if 'can_show_price' not in memo:
+            memo['can_show_price'] = can_show_price(request, MoneyType.PLATFORM_SUB)
+        return memo['can_show_price']
 
     def add_price_fields(self, data, instance, request):
         """Hook: a subclass adds or rewrites its price fields here, not in
@@ -80,8 +108,21 @@ class PlanPriceInReadersCurrency:
             return data
 
         from wallet import currency_for
+        from wallet.exchange import current_rate
 
-        priced = price_for(instance.price, instance.currency, currency_for(user))
+        # Once per request, not once per plan (S-130): the reader's currency, and — only
+        # if some row is priced in the other one — the operator's rate.
+        memo = _pricing_memo(request)
+        if memo.get('reader') != user.pk:
+            memo.pop('rate', None)
+            memo['reader'], memo['currency'] = user.pk, currency_for(user)
+        reader_currency = memo['currency']
+        if instance.currency != reader_currency and 'rate' not in memo:
+            memo['rate'] = current_rate()
+        priced = (price_for(instance.price, instance.currency, reader_currency,
+                            rate=memo['rate'])
+                  if instance.currency != reader_currency else
+                  price_for(instance.price, instance.currency, reader_currency))
         payload = priced.as_payload()
         data[self.amount_field] = payload.pop('price')
         data[self.currency_field] = payload.pop('currency')
@@ -277,6 +318,12 @@ class SubscriptionUpdateSerializer(serializers.ModelSerializer):
     it. The same shape as `profile_picture_read_only` (the owner, 2026-09-20).
     """
 
+    #: What the refusal says. The view raises it before this serializer runs, with
+    #: `auto_renew_read_only` as the TOP-LEVEL `code` (SIDE_BUGS S-131); `validate`
+    #: below keeps the same refusal for any other caller of this serializer.
+    AUTO_RENEW_READ_ONLY = _("Renewal is not automatic: nothing is charged without you. "
+                             "Cancelling is on the subscription itself.")
+
     class Meta:
         model = Subscription
         fields = ['auto_renew', 'status']
@@ -288,8 +335,7 @@ class SubscriptionUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(_("Cannot update inactive subscription"))
         if 'auto_renew' in getattr(self, 'initial_data', {}) or {}:
             raise serializers.ValidationError({'auto_renew': serializers.ErrorDetail(
-                _("Renewal is not automatic: nothing is charged without you. Cancelling "
-                  "is on the subscription itself."), code='auto_renew_read_only')})
+                self.AUTO_RENEW_READ_ONLY, code='auto_renew_read_only')})
         return data
 
 class SubscriptionCancelSerializer(serializers.Serializer):
@@ -359,11 +405,24 @@ class UserSubscriptionSummarySerializer(PlanPriceInReadersCurrency,
     `plan_duration_days` is how long a renewal adds ("جدّد 30 يوماً", and the
     denominator of the days-left gauge — `start_date` cannot serve as one, because a
     renewal extends `end_date` and leaves `start_date` where it was);
-    `plan_currency` is the unit `plan_price` is in, so the app never hard-codes "ل.س";
     `plan_features` is what the plan includes, which is what PaySuccess lists as
-    "ما فُتح لك الآن" and what the Paywall compares against. Only `plan_price` is
-    removed on a build that may not show prices — a duration, a currency code and a
-    feature list are not a price and are the same on every build.
+    "ما فُتح لك الآن" and what the Paywall compares against.
+
+    The renewal's price, in the READER'S currency (`PlanPriceInReadersCurrency`) —
+    what they will be charged when they renew, not the operator's price of record:
+
+    | Field | Means |
+    |---|---|
+    | `plan_price` | the plan's price converted into the reader's currency |
+    | `plan_currency` | the READER'S currency — the unit `plan_price` is in, so the app never hard-codes "ل.س". Not necessarily the plan's |
+    | `price_converted` | true when a rate was applied to get `plan_price` |
+    | `exchange_rate` | the rate used, as a string, or null |
+    | `price_of_record`, `price_of_record_currency` | what the operator priced the plan at, ONLY when converted; null otherwise |
+
+    On a build that may not show prices (`can_show_prices` off: `play`, `ios`) ALL FIVE
+    of `plan_price`, `price_converted`, `exchange_rate`, `price_of_record` and
+    `price_of_record_currency` are ABSENT from the response — not null. A duration, a
+    currency code and a feature list are not a price and are the same on every build.
     """
     plan_name = serializers.CharField(source='plan.name', read_only=True)
     plan_price = serializers.DecimalField(source='plan.price', max_digits=10, decimal_places=2, read_only=True)
@@ -400,9 +459,11 @@ class UserSubscriptionSummarySerializer(PlanPriceInReadersCurrency,
 
         Read from the subscription's own flag columns, which is where every
         permission check reads them (`subscription/permissions.py`), so the screen
-        says what the server will actually allow. They are copies of the plan's:
-        `Subscription.save()` re-inherits all five on every save, so a per-subscriber
-        override does not survive one — see the note in `PAYMENTS_COMPLIANCE_PLAN.md`.
+        says what the server will actually allow. They are copied from the plan when
+        the subscription is created or moved to another plan, and an operator's
+        per-subscriber override survives every other save (`Subscription.save()`,
+        SIDE_BUGS S-049) — so this may differ from the plan's own flags, and when it
+        does this is the answer that holds.
         """
         plan = obj.plan
         return {

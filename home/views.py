@@ -91,6 +91,17 @@ def _stamp(user_id) -> int:
         return 1
 
 
+def _policy_generation():
+    """The counter `training_platform/signals.py` bumps when a `ChannelCapabilities`
+    row (or a plan, or the exchange rate) is written — see `cache_config`."""
+    from training_platform.cache import public_cache
+
+    try:
+        return int(public_cache().get("CACHE_VERSION_SUBSCRIPTIONPLAN") or 1)
+    except Exception:
+        return 1
+
+
 class HomeView(APIView):
     """GET /api/v1/home — everything the first screen shows, in the order to show it.
 
@@ -334,8 +345,12 @@ class HomeView(APIView):
         # both sides. Nothing a client sends can invent unbounded keys.
         version = version_of(request)
         language = get_language() or 'ar'
+        # The stamp also carries the POLICY generation: a `ChannelCapabilities` edit
+        # changes what this build may be shown, and nothing retired the entry, so a
+        # build whose prices were withdrawn kept them for the TTL (SIDE_BUGS S-139).
         key = cache_key(person.pk, channel=channel, version=version,
-                        language=language, stamp=_stamp(person.pk))
+                        language=language,
+                        stamp=f"{_policy_generation()}.{_stamp(person.pk)}")
 
         from training_platform.cache import private_cache
 

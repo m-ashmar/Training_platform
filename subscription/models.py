@@ -172,7 +172,8 @@ class Subscription(RowValidationMixin, models.Model):
     source = models.CharField(max_length=16, choices=EntitlementSource.choices,
                               blank=True, default='', db_index=True)
     
-    # Access flags (inherited from plan but can be overridden)
+    # Access flags: copied from the plan when the row is created or moved to another
+    # plan, and an operator's override survives every other save (`save()` below).
     has_diet_access = models.BooleanField(default=False, db_index=True)
     has_routine_access = models.BooleanField(default=False, db_index=True)
     has_challenges_access = models.BooleanField(default=False, db_index=True)
@@ -216,17 +217,42 @@ class Subscription(RowValidationMixin, models.Model):
         if not self.end_date and self.plan:
             self.end_date = self.start_date + timedelta(days=self.plan.duration_days)
         
-        # Inherit features from plan
-        if self.plan:
-            self.has_diet_access = self.plan.has_diet_access
-            self.has_routine_access = self.plan.has_routine_access
-            self.has_challenges_access = self.plan.has_challenges_access
-            self.has_ai_advice = self.plan.has_ai_advice
-            self.has_priority_support = self.plan.has_priority_support
-        
+        # Inherit the plan's features when the row is CREATED and when its PLAN CHANGES —
+        # never on any other save. This copied all five on every save, so an operator's
+        # per-subscriber grant (the fields say "can be overridden") was reverted by the
+        # very next save of the row: an activation, a renewal, a cancel (SIDE_BUGS S-049).
+        # A change to the plan's own flags reaches a subscriber when they are moved onto
+        # a plan, not as a side effect of whatever next happens to save their row.
+        if self.plan_id and (self._state.adding
+                             or self.plan_id != getattr(self, '_loaded_plan_id', None)):
+            self.inherit_plan_features()
+
         self.validate_row()
         super().save(*args, **kwargs)
-    
+        self._loaded_plan_id = self.plan_id
+
+    #: The five access flags a subscription copies from its plan.
+    PLAN_FEATURE_FLAGS = ('has_diet_access', 'has_routine_access', 'has_challenges_access',
+                          'has_ai_advice', 'has_priority_support')
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        instance = super().from_db(db, field_names, values)
+        # The plan this row was READ with, so `save()` can tell a plan change from any
+        # other write. Absent when `plan` was deferred, which reads as "changed" and
+        # re-inherits — the behaviour before overrides were kept.
+        instance._loaded_plan_id = instance.__dict__.get('plan_id')
+        return instance
+
+    def refresh_from_db(self, *args, **kwargs):
+        super().refresh_from_db(*args, **kwargs)
+        self._loaded_plan_id = self.plan_id
+
+    def inherit_plan_features(self):
+        """Copy the plan's five access flags onto this row, discarding any override."""
+        for name in self.PLAN_FEATURE_FLAGS:
+            setattr(self, name, getattr(self.plan, name))
+
     #: Statuses that entitle the holder to the plan's features.
     ENTITLED_STATUSES = ('active', 'trial')
 

@@ -440,9 +440,11 @@ class PaymentService:
           already be paying against it. It comes back as it is, with the gateway
           response it was opened with, and `already_open` set.
         * An open payment with no reference was never offered to anyone, so it is
-          adopted rather than left beside a new one. POST /subscriptions/ writes exactly
-          such a row; nothing could ever complete it, and every subscriber's history
-          carried it as an orphan 'pending' payment beside the one that cleared.
+          adopted rather than left beside a new one, and its window starts now. POST
+          /subscriptions/ used to write exactly such a row (it no longer does — S-134);
+          nothing could ever complete it, and every subscriber's history carried it as
+          an orphan 'pending' payment beside the one that cleared. Rows written before
+          that change, and a renewal reserved with no `initiate`, are still adopted.
         * Otherwise a new payment is created.
 
         The gateway is initiated while the lock is held. In transfer/reconcile mode that
@@ -465,6 +467,15 @@ class PaymentService:
         plan = subscription.plan
         payment = candidates[0] if candidates else Payment(subscription=subscription,
                                                            status='pending')
+        if candidates and initiate is not None:
+            # The checkout OPENS now, whenever the adopted row was written. Its window —
+            # `utils.checkout_expires_at` and the poller's expiry test — is measured from
+            # `created_at`, and the adopted row kept the moment the plan was CHOSEN: a
+            # plan picked yesterday and paid for today opened a checkout that was born
+            # expired, and the poller closed it within a minute while the customer was
+            # transferring money against its reference (SIDE_BUGS S-075). Nothing was
+            # ever offered on the row before this, so its old timestamp records nothing.
+            payment.created_at = timezone.now()
         payment.subscription = subscription
         # THE PLAN'S PRICE, CHARGED IN THE BUYER'S CURRENCY.
         #

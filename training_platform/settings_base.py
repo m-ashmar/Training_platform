@@ -322,6 +322,10 @@ COACHING_FROZEN_REMINDER_DAYS = (3, 7, 14, 30)
 PAYMENT_POLL_GRACE_SECONDS = 20
 PAYMENT_CHECKOUT_TTL_MINUTES = 60
 PAYMENT_POLL_BATCH = 100
+# How long a CLOSED checkout is still asked about (subscription/tasks.py
+# poll_expired_checkouts): the ShamCash adapter's own lookback, since nothing older
+# could be found on the merchant account anyway.
+PAYMENT_LATE_MONEY_WINDOW_HOURS = 72
 
 SUBSCRIPTION_RENEWAL_NOTICE_DAYS = 3
 SUBSCRIPTION_LAPSED_REMINDER_DAYS = (0, 3, 7, 14, 30)
@@ -459,6 +463,20 @@ CELERY_BEAT_SCHEDULE = {
     'poll-open-payments': {
         'task': 'subscription.poll_open_payments',
         'schedule': crontab(minute='*'),
+    },
+    # Money that arrives for a checkout the poller already closed (SIDE_BUGS S-077). In
+    # reconcile mode no webhook will ever say so, so this asks the gateway about each
+    # closed checkout for PAYMENT_LATE_MONEY_WINDOW_HOURS.
+    'poll-expired-checkouts': {
+        'task': 'subscription.poll_expired_checkouts',
+        'schedule': crontab(minute='*/10'),
+    },
+    # The backstop PaymentService, wallet/signals.py and PaymentAdmin all describe for a
+    # payout the on-commit receiver lost. It was registered and scheduled nowhere, so it
+    # never ran (SIDE_BUGS S-076). Every ten minutes, matching its PAYOUT_GRACE.
+    'settle-owed-payouts': {
+        'task': 'subscription.settle_owed_payouts',
+        'schedule': crontab(minute='5-59/10'),
     },
     # The platform plan: "ends soon" 3 days ahead, then "ended" on the cadence in
     # SUBSCRIPTION_LAPSED_REMINDER_DAYS (subscription/tasks.py). Daily at 17:00 UTC,
