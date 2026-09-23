@@ -190,6 +190,8 @@ so parse ids client-side.
 | `subscription_expiring` | `subscription_id`, `ends_at` (ISO 8601) |
 | `subscription_expired` | `subscription_id`, `ended_at` (ISO 8601) |
 | `checkout_expired` | `payment_id` — the checkout was not completed in time |
+| `payment_needs_review` | `payment_id` — a transfer arrived for it that is not exactly what it asked for; a person is checking it (B-051) |
+| `payment_rejected` | `payment_id` — the transfer held for it could not be accepted; it goes back to its sender by hand (B-051) |
 | `personal_record` | `exercise_id`, `set_log_id` — the set that beat the previous best |
 | `weekly_recap` | `week` (the ISO week key), `missed_sets` |
 | `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
