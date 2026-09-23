@@ -634,14 +634,15 @@ def challenge_rank(person) -> dict | None:
     """Where this person stands in the challenge they are in, or nothing.
 
     The challenge ending soonest of the ones they have joined and not dropped, and
-    their place in it — counted as "how many are ahead of me" with the SAME tiebreaker
-    `GET /api/social/challenges/{id}/leaderboard/` uses (`-current_value`, then
-    `joined_at`, then `id`), over the same field (nobody who dropped out), so the card
-    and the leaderboard cannot disagree.
+    their place in it — `social/standing.py place()`, the ONE rule
+    `GET /api/social/challenges/{id}/leaderboard/` and the challenge's
+    `user_progress.rank` also read (BACKEND_BUGS B-086): 1 + the participants strictly
+    ahead (more progress, then an earlier join, then a lower participation id), over
+    the same field (nobody who dropped out). It counted with a subquery of its own
+    before, which agreed with the board only for as long as nobody changed one of them.
 
-    `ChallengeParticipation.rank` is NOT read: it is only ever written by
-    `update_progress` (`social/views.py`), so it is null for anyone who has joined and
-    logged nothing, and stale for everyone else the moment somebody else moves.
+    `ChallengeParticipation.rank` is NOT read: it is a stored copy, as fresh as its last
+    write.
 
     One query. The title is read from both language columns and picked here, because
     `ChallengeParticipation` is not a modeltranslation model and would otherwise hand
@@ -650,42 +651,28 @@ def challenge_rank(person) -> dict | None:
     from django.db.models import Count, IntegerField, OuterRef, Q, Subquery, Value
     from django.db.models.functions import Coalesce
     from social.models import Challenge, ChallengeParticipation
+    from social.standing import in_standing, place
 
     now = timezone.now()
     # Someone who dropped out holds no place, on this card as on the leaderboard and
-    # in the stored `rank` (`ChallengeParticipation.NOT_IN_STANDING`, SIDE_BUGS S-045):
-    # the viewer's own dropped row was left out below and a dropped RIVAL was still
-    # counted ahead of them here.
-    ahead = (ChallengeParticipation.objects
-             .filter(challenge_id=OuterRef('challenge_id'))
-             .exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
-             .filter(Q(current_value__gt=OuterRef('current_value'))
-                     | Q(current_value=OuterRef('current_value'),
-                         joined_at__lt=OuterRef('joined_at'))
-                     | Q(current_value=OuterRef('current_value'),
-                         joined_at=OuterRef('joined_at'), id__lt=OuterRef('id')))
-             .order_by().values('challenge_id').annotate(n=Count('id')).values('n'))
-
-    standing = (ChallengeParticipation.objects
-                .filter(challenge_id=OuterRef('challenge_id'))
-                .exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
+    # in the stored `rank` (`ChallengeParticipation.NOT_IN_STANDING`, SIDE_BUGS S-045).
+    standing = (in_standing(ChallengeParticipation.objects
+                            .filter(challenge_id=OuterRef('challenge_id')))
                 .order_by().values('challenge_id').annotate(n=Count('id')).values('n'))
 
-    row = (ChallengeParticipation.objects
-           .filter(user=person)
-           .exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
+    row = (in_standing(ChallengeParticipation.objects.filter(user=person))
            .filter(~Q(challenge__status__in=Challenge.TERMINAL_STATUSES),
                    challenge__start_date__lte=now, challenge__end_date__gte=now,
                    challenge__is_hidden=False)
-           .annotate(ahead=Coalesce(Subquery(ahead, output_field=IntegerField()), Value(0)),
-                     # Counted by the SAME rule as `ahead`: the denormalised
+           .annotate(place=place(),
+                     # Counted by the SAME rule as `place`: the denormalised
                      # `Challenge.participants_count` could say "rank 4 of 58" while
                      # the ordering held a different number (BACKEND_BUGS B-046).
                      standing=Coalesce(Subquery(standing, output_field=IntegerField()),
                                        Value(0)))
-           # `ahead` is named here on purpose: a `values()` after an `annotate()`
+           # `place` is named here on purpose: a `values()` after an `annotate()`
            # returns only the columns it lists, annotations included.
-           .values('ahead', 'standing', 'challenge_id', 'current_value', 'progress_percentage',
+           .values('place', 'standing', 'challenge_id', 'current_value', 'progress_percentage',
                    'challenge__end_date', 'challenge__unit', 'challenge__target_value',
                    'challenge__participants_count',
                    'challenge__title_ar', 'challenge__title_en')
@@ -699,7 +686,7 @@ def challenge_rank(person) -> dict | None:
     return {
         'challenge_id': row['challenge_id'],
         'title': title,
-        'rank': row['ahead'] + 1,
+        'rank': row['place'],
         'participants': row['standing'],
         'value': row['current_value'],
         'target': row['challenge__target_value'],

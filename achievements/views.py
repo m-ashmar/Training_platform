@@ -30,6 +30,11 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
     GET /api/achievements/progress/     - Get progress towards unearned achievements
     GET /api/achievements/leaderboard/  - Get top achievers
     POST /api/achievements/check/       - Manually trigger achievement check
+    POST /api/achievements/{id}/feature/ - Feature/unfeature an earned badge
+
+    Auth required; nothing differs by build. `{id}` is always the ACHIEVEMENT's id.
+    Catalogue rows (list and detail) carry `is_featured` for the caller, and `my/` rows
+    carry `achievement_id` beside their own `id` (2026-09-24, BACKEND_BUGS B-078).
     """
     permission_classes = [permissions.IsAuthenticated]
     
@@ -76,6 +81,13 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         List all available achievements with user's progress.
         
         Returns achievements grouped by category with progress data.
+
+        `{"achievements": [...], "by_category": {category: [...]},
+        "total_available": int}`; a row is `AchievementWithProgressSerializer`:
+        `id, key, name, description, category, category_display, criteria, points,
+        icon_url, badge_color, is_rare, is_secret, created_at, progress, is_earned,
+        earned_at, is_featured` — `is_featured` whether the caller features it (false
+        when not earned; B-078). A secret badge is listed only to someone who earned it.
         """
         queryset = self.get_queryset()
         # Built once and handed to the serializer, which used to issue an EXISTS, a
@@ -112,6 +124,12 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         - Rank among all users
         - Category breakdown
         - Recent achievements
+
+        A row of `achievements` is `UserAchievementDetailSerializer`: `id` is the EARNED
+        row's id, `achievement_id` the badge's — the id the catalogue lists and
+        `feature/` takes (B-078) — then `name, description, category,
+        category_display, points, badge_color, is_rare, icon_url, earned_at,
+        is_featured`.
         """
         user = request.user
         
@@ -276,6 +294,14 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         POST /api/achievements/{id}/feature/
         
         Users can feature up to 3 achievements.
+
+        `{id}` is the ACHIEVEMENT's id (`achievement_id` on a `my/` row). No body. A
+        toggle: `200 {"is_featured", "message"}`. `404 {"error", "code":
+        "achievement_not_earned"}` — you have not earned it (or no such badge);
+        `400 {"error", "code": "featured_limit_reached"}` — three are featured already.
+        Both answered only their status default before (2026-09-24). The featured
+        badges are what another member sees on your profile
+        (`GET /api/social/users/public-profile/{id}/` `featured_achievements`).
         """
         user = request.user
         
@@ -284,9 +310,10 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
                 user=user,
                 achievement_id=pk
             )
-        except UserAchievement.DoesNotExist:
+        except (UserAchievement.DoesNotExist, ValueError, TypeError):
+            # A non-numeric `{id}` reached the lookup and was a 500.
             return Response(
-                {'error': 'Achievement not earned'},
+                {'error': _('Achievement not earned'), 'code': 'achievement_not_earned'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -299,7 +326,8 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
             
             if featured_count >= 3:
                 return Response(
-                    {'error': 'Maximum 3 featured achievements allowed'},
+                    {'error': _('Maximum 3 featured achievements allowed'),
+                     'code': 'featured_limit_reached'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         

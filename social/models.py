@@ -11,6 +11,7 @@ from django.db import models
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.utils import timezone
+from django.utils.translation import gettext_lazy
 from users.models import CustomUser
 from training_platform.model_validation import RowValidationMixin
 
@@ -369,6 +370,23 @@ class Challenge(models.Model):
     target_value = models.FloatField(null=True, blank=True)
     unit = models.CharField(max_length=20, blank=True)
     rules = models.TextField(blank=True)
+
+    #: What the challenge measures, and so whether the server counts it. `manual` (the
+    #: default, and every challenge written before this column): the participant logs
+    #: their number through `update_progress`. Anything else is counted from the
+    #: training they log (`social/challenge_progress.py`), and `update_progress` refuses
+    #: it (`progress_auto_counted`). The 09-community design counts progress
+    #: automatically wherever it can be measured (BACKEND_BUGS B-075); `challenge_type`
+    #: and `unit` are free descriptions and cannot say which number that is.
+    METRIC_MANUAL = 'manual'
+    METRIC_CHOICES = [
+        (METRIC_MANUAL, gettext_lazy('Logged by hand')),
+        ('volume_kg', gettext_lazy('Weight lifted (kg)')),
+        ('sets', gettext_lazy('Sets logged')),
+        ('workouts', gettext_lazy('Workouts finished')),
+        ('training_days', gettext_lazy('Days trained')),
+    ]
+    metric = models.CharField(max_length=20, choices=METRIC_CHOICES, default=METRIC_MANUAL)
     
     # Participation
     max_participants = models.PositiveIntegerField(null=True, blank=True)
@@ -439,6 +457,11 @@ class Challenge(models.Model):
     def is_active(self):
         """Is the challenge running right now?"""
         return self.lifecycle_status == 'active'
+
+    @property
+    def auto_counted(self):
+        """Does the server count this challenge's progress from logged training?"""
+        return self.metric != self.METRIC_MANUAL
 
     @classmethod
     def advance_stored_phases(cls, now=None):

@@ -34,15 +34,21 @@ class AchievementSerializer(serializers.ModelSerializer):
 
 
 class AchievementWithProgressSerializer(AchievementSerializer):
-    """Achievement with user's progress data."""
+    """Achievement with user's progress data.
+
+    `is_featured` (2026-09-24, BACKEND_BUGS B-078): whether the CALLER features this
+    badge on their profile — false when they have not earned it. It was readable only on
+    `my/` rows, which are keyed differently, so the app matched the two by name.
+    """
     
     progress = serializers.SerializerMethodField()
     is_earned = serializers.SerializerMethodField()
     earned_at = serializers.SerializerMethodField()
+    is_featured = serializers.SerializerMethodField()
     
     class Meta(AchievementSerializer.Meta):
         fields = AchievementSerializer.Meta.fields + [
-            'progress', 'is_earned', 'earned_at'
+            'progress', 'is_earned', 'earned_at', 'is_featured'
         ]
     
     # These three fields are evaluated once per achievement. Left to query on their
@@ -99,6 +105,17 @@ class AchievementWithProgressSerializer(AchievementSerializer):
         except UserAchievement.DoesNotExist:
             return None
 
+    def get_is_featured(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        earned = self._earned_map
+        if earned is not None:
+            record = earned.get(obj.id)
+            return bool(record and record.is_featured)
+        return UserAchievement.objects.filter(
+            user=request.user, achievement=obj, is_featured=True).exists()
+
 
 class UserAchievementSerializer(serializers.ModelSerializer):
     """Serializer for user's earned achievements."""
@@ -114,8 +131,15 @@ class UserAchievementSerializer(serializers.ModelSerializer):
 
 
 class UserAchievementDetailSerializer(serializers.ModelSerializer):
-    """Detailed serializer for a single earned achievement."""
+    """Detailed serializer for a single earned achievement.
+
+    `id` is the EARNED row's id. `achievement_id` (2026-09-24, BACKEND_BUGS B-078) is
+    the badge's — the id `GET /api/achievements/` lists and
+    `POST /api/achievements/{id}/feature/` takes; match rows on it, never on `name`,
+    which is not unique.
+    """
     
+    achievement_id = serializers.IntegerField(read_only=True)
     name = serializers.CharField(source='achievement.name', read_only=True)
     description = serializers.CharField(source='achievement.description', read_only=True)
     category = serializers.CharField(source='achievement.category', read_only=True)
@@ -131,7 +155,7 @@ class UserAchievementDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserAchievement
         fields = [
-            'id', 'name', 'description', 'category', 'category_display',
+            'id', 'achievement_id', 'name', 'description', 'category', 'category_display',
             'points', 'badge_color', 'is_rare', 'icon_url',
             'earned_at', 'is_featured'
         ]

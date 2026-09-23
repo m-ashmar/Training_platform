@@ -1413,6 +1413,77 @@ docstrings carry the full contract.
   details}` — `deleted_records` 0 is still 200 — in one transaction; refusals `401
   not_authenticated`, `405 method_not_allowed`. Unchanged behaviour.
 
+**What wiring the community screens found** (BACKEND_BUGS B-074..B-081, B-086, 2026-09-24).
+Additive under §6: new fields and one new route; every new `code` replaces a status
+default (`bad_request`, `not_found`), never a code a view named. Three statuses move, on
+requests the app does not send: an absent or non-numeric `user_id` on
+`follows/follow_user/` and `follows/unfollow_user/` is `400 invalid_user_id` (a 404, and
+a 500 for `"abc"`); following an INACTIVE account is `404 user_not_found` (it
+succeeded); a non-numeric `{id}` on `POST /api/achievements/{id}/feature/` is `404
+achievement_not_earned` (a 500). The views' docstrings carry the full contract.
+
+- **One place, one rule** (B-086). `GET /api/social/challenges/` and `{id}/`
+  `user_progress.rank`, every `leaderboard/` row and the home card's `challenge_rank.rank`
+  now all annotate ONE function (`social/standing.py place()`), counted live: 1 + the
+  participants strictly ahead — more progress, then an earlier join, then a lower
+  participation id. `user_progress.rank` read the stored column and could disagree with
+  the other two. Two people on the same number still hold different places (the
+  earlier joiner first): the owner's decision of 2026-09-24 — ties share a place — is
+  owed its change in that one function and in the tests that pin the current rule, and
+  has not been made.
+- **The leaderboard** (B-074). `leaderboard/` rows' `user` gains `first_name`,
+  `last_name`, `user_type` (the trainer's ring) and `profile_picture` (absolute URL or
+  null); the response gains `me` — the caller's own row, same shape, whether or not it
+  made the list; null when they have not joined or dropped out — and `auto_counted`.
+  `?limit=` 1..50 (default 10, the old cap). Blocked accounts still leave the list after
+  the places are counted.
+- **Counted progress** (B-075). A challenge gains `metric` — `manual` (default) |
+  `volume_kg` | `sets` | `workouts` | `training_days`, writable on create and update —
+  and read-only `auto_counted` (`metric != "manual"`). An auto-counted challenge's
+  `current_value` is counted from the training the participant logs inside its window:
+  on `join`, after every commit that writes or deletes a set, a progress row or a
+  workout session, and for everyone when its `metric` or dates change while it runs
+  (`social/challenge_progress.py`). `update_progress` refuses it: `400
+  progress_auto_counted`. A manual challenge works as before.
+- **Challenge codes** (B-076). `join/`: `400 challenge_full`. `update_progress/`:
+  `400 not_participating`, `challenge_closed` (the codes `leave`/`join` already answer),
+  `progress_auto_counted`, `progress_required`, `invalid_progress`; `negative_progress`
+  and `progress_out_of_range` unchanged. `leave/` unchanged.
+- **Another member's profile** (B-077). `GET /api/social/users/public-profile/{id}/`
+  (and `by_username/`) gains `featured_achievements` (at most three badges the person
+  featured: `{id, key, name, category, points, icon_url, badge_color, is_rare,
+  earned_at}`, `id` the achievement's; a secret badge only on your own profile),
+  `community_points` (the points of every badge earned — what
+  `GET /api/achievements/leaderboard/` ranks) and `member_since` (`"YYYY-MM-01"`, month
+  precision on purpose). Blocked and inactive accounts are still not served.
+- **Badges keyed by the badge** (B-078). `GET /api/achievements/` rows (and `{id}/`)
+  gain `is_featured` for the caller (false when not earned); `GET /api/achievements/my/`
+  rows gain `achievement_id` beside their own `id` (the earned row's) — the id
+  `feature/` takes. `feature/`: `404 achievement_not_earned`, `400
+  featured_limit_reached`.
+- **Follow codes** (B-079). `follows/follow_user/`: `400 invalid_user_id`, `400
+  cannot_follow_yourself`, `404 user_not_found` (also for an inactive account),
+  `403 user_blocked` unchanged. `follows/unfollow_user/`: `400 invalid_user_id`, `404
+  user_not_found`; it still works on an inactive account. `POST /api/social/follows/`
+  refuses an inactive `following_id` like a missing one (`validation_error`).
+- **The share card** (B-080). `POST/PATCH /api/social/posts/` take
+  `share_workout_session` (one of YOUR finished sessions) or `share_achievement` (a badge
+  you earned, `/api/achievements/` id) — write-only, null clears; with no `post_type` the
+  post becomes `workout` / `achievement`. Refusals: `validation_error` with field code
+  `share_not_yours`, `share_workout_unfinished`, `share_badge_not_earned` or
+  `share_one_thing`. Every post gains read-only `share`: null, `{"kind": "workout",
+  "workout": {title, volume_kg, minutes}}` or `{"kind": "achievement", "achievement":
+  {id, key, name, category, points, icon_url, badge_color, is_rare}}` — only what the
+  card draws.
+- **Find people** (B-081). New: `GET /api/social/users/public-profile/search/?q=` — case-
+  insensitive prefix of the username, first name, last name or "first last"; `q` at
+  least 2 characters (`400 query_too_short` with `min_length`). Lists active, verified
+  `client` and `trainer` accounts other than the caller, never anyone blocked in either
+  direction; exact username first, then username prefixes, then names. Paginated
+  `{count, next, previous, results}`; a row is a subset of the public profile: `{id,
+  username, user_type, first_name, last_name, profile_picture_url, followers_count,
+  is_following, member_since}`. `by_username/` is unchanged (exact, case-sensitive).
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 
@@ -1731,6 +1802,7 @@ It therefore equals the row count of `GET comments/?post={id}` for the same view
 | `POST` | `/api/social/posts/{id}/like/` | IsOwnerOrReadOnly | `PostViewSet` |
 | `GET` | `/api/social/users/public-profile/` | auth | `PublicUserProfileViewSet` |
 | `GET` | `/api/social/users/public-profile/by_username/` | auth | `PublicUserProfileViewSet` |
+| `GET` | `/api/social/users/public-profile/search/` | auth | `PublicUserProfileViewSet` |
 | `GET` | `/api/social/users/public-profile/{id}/` | auth | `PublicUserProfileViewSet` |
 
 ### Subscriptions & Payments

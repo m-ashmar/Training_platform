@@ -4,7 +4,7 @@ Social Features Serializers
 Serializers for social models to handle API data conversion.
 """
 
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from .models import (
@@ -62,13 +62,81 @@ class UserMinimalSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'user_type', 'profile_picture']
 
 
+def member_since(user):
+    """The month someone joined, as the first day of it (`"2026-05-01"`).
+
+    A MONTH, on purpose: the profile says «منذ أيار» and Find «انضم في آب», and the day
+    and hour an account was opened is more than a stranger needs (BACKEND_BUGS B-077).
+    """
+    joined = getattr(user, 'date_joined', None)
+    if joined is None:
+        return None
+    from django.utils import timezone
+
+    day = timezone.localtime(joined).date() if timezone.is_aware(joined) else joined.date()
+    return day.replace(day=1).isoformat()
+
+
+def badge_card(badge, request=None):
+    """A badge as a profile or a share card draws it — nothing about who holds it.
+
+    `id` is the ACHIEVEMENT's id — the one `/api/achievements/` lists and
+    `/api/achievements/{id}/feature/` takes — never an earned row's.
+    """
+    icon = None
+    if badge.icon:
+        icon = (request.build_absolute_uri(badge.icon.url) if request is not None
+                else badge.icon.url)
+    return {'id': badge.id, 'key': badge.key, 'name': badge.name,
+            'category': badge.category, 'points': badge.points, 'icon_url': icon,
+            'badge_color': badge.badge_color, 'is_rare': badge.is_rare}
+
+
+def featured_badge_rows(earned, request=None):
+    """The rows of a profile's «أبرز إنجازاته»: the badges its owner chose to feature,
+    each `badge_card` plus when they earned it."""
+    return [{**badge_card(record.achievement, request), 'earned_at': record.earned_at}
+            for record in earned]
+
+
+def featured_badges_queryset(viewer):
+    """The earned rows a viewer is shown on someone's profile: featured, of a badge still
+    in the catalogue, and not a SECRET badge unless the profile is the viewer's own —
+    the catalogue lists a secret badge only to someone who has earned it, and a profile
+    must not be the way around that."""
+    from achievements.models import UserAchievement as Earned
+
+    shown = Q(achievement__is_secret=False)
+    if viewer is not None and getattr(viewer, 'is_authenticated', False):
+        shown |= Q(user=viewer)
+    return (Earned.objects.filter(is_featured=True, achievement__is_active=True)
+            .filter(shown).select_related('achievement').order_by('-earned_at', '-id'))
+
+
 class PublicUserProfileSerializer(serializers.ModelSerializer):
-    """Public-facing user profile serializer with non-sensitive fields and social counts."""
+    """Public-facing user profile serializer with non-sensitive fields and social counts.
+
+    Since 2026-09-24 (BACKEND_BUGS B-077), additively:
+
+    * `featured_achievements` — at most three rows, the badges the person chose to
+      feature (`featured_badge_rows`): `{id, key, name, category, points, icon_url,
+      badge_color, is_rare, earned_at}`, `id` being the achievement's. A secret badge
+      is left out for everyone but its owner.
+    * `community_points` — the points of every badge they have earned: the number the
+      community-points leaderboard (`GET /api/achievements/leaderboard/`) ranks by.
+    * `member_since` — the first day of the month they joined, `"YYYY-MM-01"`.
+
+    The profile of an account the viewer has blocked, or that has blocked them, is not
+    served at all (`PublicUserProfileViewSet`), so none of this reaches them.
+    """
     followers_count = serializers.SerializerMethodField()
     following_count = serializers.SerializerMethodField()
     posts_count = serializers.SerializerMethodField()
     is_following = serializers.SerializerMethodField()
     profile_picture_url = serializers.SerializerMethodField()
+    featured_achievements = serializers.SerializerMethodField()
+    community_points = serializers.SerializerMethodField()
+    member_since = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomUser
@@ -78,9 +146,33 @@ class PublicUserProfileSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'username', 'user_type', 'first_name', 'last_name',
             'profile_picture_url', 'followers_count', 'following_count', 'posts_count',
-            'is_following'
+            'is_following', 'featured_achievements', 'community_points', 'member_since',
         ]
         read_only_fields = fields
+
+    # `PublicUserProfileViewSet` prefetches the featured rows and annotates the points
+    # for the whole page; the fallbacks below are one query per row, outside it.
+
+    def get_featured_achievements(self, obj):
+        request = self.context.get('request')
+        earned = getattr(obj, 'featured_badges', None)
+        if earned is None:
+            earned = featured_badges_queryset(getattr(request, 'user', None)).filter(
+                user=obj)[:3]
+        return featured_badge_rows(list(earned)[:3], request)
+
+    def get_community_points(self, obj):
+        annotated = getattr(obj, 'community_points_anno', None)
+        if annotated is not None:
+            return annotated
+        from django.db.models import Sum
+        from achievements.models import UserAchievement as Earned
+
+        return Earned.objects.filter(user=obj).aggregate(
+            total=Sum('achievement__points'))['total'] or 0
+
+    def get_member_since(self, obj):
+        return member_since(obj)
 
     # The three counts agree with the rows this viewer can actually fetch. They were
     # unfiltered, so a profile said "12 followers" to someone whose follower list
@@ -144,6 +236,32 @@ class PublicUserProfileSerializer(serializers.ModelSerializer):
             return url
         return None
 
+
+class PublicUserSearchSerializer(serializers.ModelSerializer):
+    """One row of `GET /api/social/users/public-profile/search/` (BACKEND_BUGS B-081).
+
+    A SUBSET of the public profile — every field here is also on
+    `PublicUserProfileSerializer`, read the same way — so a search can never tell anyone
+    more about a person than opening their profile would.
+    """
+    followers_count = serializers.SerializerMethodField()
+    is_following = serializers.SerializerMethodField()
+    profile_picture_url = serializers.SerializerMethodField()
+    member_since = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomUser
+        fields = ['id', 'username', 'user_type', 'first_name', 'last_name',
+                  'profile_picture_url', 'followers_count', 'is_following',
+                  'member_since']
+        read_only_fields = fields
+
+    get_followers_count = PublicUserProfileSerializer.get_followers_count
+    get_is_following = PublicUserProfileSerializer.get_is_following
+    get_profile_picture_url = PublicUserProfileSerializer.get_profile_picture_url
+    get_member_since = PublicUserProfileSerializer.get_member_since
+
+
 class UserFollowSerializer(serializers.ModelSerializer):
     """Serializer for user following relationships"""
     
@@ -152,8 +270,12 @@ class UserFollowSerializer(serializers.ModelSerializer):
     # Both sides were read-only, so `following` could never be supplied and every POST
     # to /api/social/follows/ died with a NOT NULL violation (500). This write-only
     # companion field accepts the target id while keeping the nested read output.
+    # Active accounts only, the rule `follow_user/` applies (BACKEND_BUGS B-079): an
+    # inactive (suspended or erased) account answers the same `does_not_exist` field
+    # error a missing id does.
     following_id = serializers.PrimaryKeyRelatedField(
-        queryset=CustomUser.objects.all(), source='following', write_only=True
+        queryset=CustomUser.objects.filter(is_active=True), source='following',
+        write_only=True
     )
 
     class Meta:
@@ -168,8 +290,112 @@ class UserFollowSerializer(serializers.ModelSerializer):
         return value
 
 
+def _share_types():
+    """(ContentType of a workout session, ContentType of a badge) — the two things a post
+    can share. `get_for_model` is cached per process."""
+    from django.contrib.contenttypes.models import ContentType
+    from routine.models import WorkoutSession
+
+    return (ContentType.objects.get_for_model(WorkoutSession),
+            ContentType.objects.get_for_model(Achievement))
+
+
+def load_shares(posts, request=None) -> dict:
+    """{post_id: share} for a page of posts, in at most TWO queries whatever its size.
+
+    A share is what the card draws and nothing else (BACKEND_BUGS B-080):
+
+        {"kind": "workout",
+         "workout": {"title": "<routine name>", "volume_kg": 6240.0, "minutes": 52}}
+        {"kind": "achievement",
+         "achievement": {"id", "key", "name", "category", "points", "icon_url",
+                         "badge_color", "is_rare"}}
+
+    `volume_kg` is Σ weight × reps of the session's sets that have both, the figure the
+    session's own detail answers as `total_volume`; `minutes` its length, rounded, null
+    when it has no end. A share whose session or badge no longer exists is null.
+    """
+    from django.db.models import ExpressionWrapper, FloatField, Sum
+    from routine.models import WorkoutSession
+
+    session_type, badge_type = _share_types()
+    wanted = {session_type.pk: set(), badge_type.pk: set()}
+    for post in posts:
+        if post.content_type_id in wanted and post.object_id:
+            wanted[post.content_type_id].add(post.object_id)
+
+    sessions = {}
+    if wanted[session_type.pk]:
+        volume = Sum(ExpressionWrapper(F('set_logs__weight') * F('set_logs__reps'),
+                                       output_field=FloatField()),
+                     filter=Q(set_logs__weight__gt=0, set_logs__reps__gt=0))
+        for session in (WorkoutSession.objects.filter(pk__in=wanted[session_type.pk])
+                        .select_related('routine').annotate(volume=volume)):
+            minutes = None
+            if session.start_time and session.end_time:
+                minutes = int(round((session.end_time - session.start_time)
+                                    .total_seconds() / 60))
+            sessions[session.pk] = {
+                'kind': 'workout',
+                'workout': {'title': session.routine.name,
+                            'volume_kg': round(session.volume or 0.0, 1),
+                            'minutes': minutes},
+            }
+    badges = {}
+    if wanted[badge_type.pk]:
+        for badge in Achievement.objects.filter(pk__in=wanted[badge_type.pk]):
+            badges[badge.pk] = {'kind': 'achievement',
+                                'achievement': badge_card(badge, request)}
+
+    shares = {}
+    for post in posts:
+        found = None
+        if post.content_type_id == session_type.pk:
+            found = sessions.get(post.object_id)
+        elif post.content_type_id == badge_type.pk:
+            found = badges.get(post.object_id)
+        shares[post.pk] = found
+    return shares
+
+
+class PostListSerializer(serializers.ListSerializer):
+    """A page of posts: their shares are loaded for the whole page before any row is
+    drawn, so a feed of 50 shared workouts costs two queries, not fifty."""
+
+    def to_representation(self, data):
+        from django.db import models as db_models
+
+        items = list(data.all() if isinstance(data, db_models.manager.BaseManager)
+                     else data)
+        self.child._shares = load_shares(items, self.context.get('request'))
+        try:
+            return [self.child.to_representation(item) for item in items]
+        finally:
+            self.child._shares = None
+
+
 class PostSerializer(serializers.ModelSerializer):
-    """Serializer for social posts"""
+    """Serializer for social posts
+
+    **The share card** (2026-09-24, BACKEND_BUGS B-080). A post can carry the finished
+    workout or the badge it shares — the card Write attaches and the Feed draws.
+
+    Write (create or PATCH, both optional, at most one of them non-null):
+      `share_workout_session` — the id of one of YOUR workout sessions, finished
+          (`status: "completed"`); null clears the share.
+      `share_achievement` — the id of a badge (`/api/achievements/` id) YOU have
+          earned; null clears it.
+    When a share is set and the request names no `post_type`, it becomes `workout` /
+    `achievement`. Refusals are `400 validation_error` with the field's code in
+    `field_errors`: `share_not_yours` (no such session of yours — another person's is
+    answered the same), `share_workout_unfinished`, `share_badge_not_earned` (or no such
+    badge), `share_one_thing` (both sent).
+
+    Read: `share` — null, or `{"kind": "workout", "workout": {title, volume_kg,
+    minutes}}` or `{"kind": "achievement", "achievement": {id, key, name, category,
+    points, icon_url, badge_color, is_rare}}` (`load_shares`). Only what the card draws:
+    no session id, no sets, nothing about the routine beyond its name.
+    """
 
     image = SecureImageField(required=False, allow_null=True, max_bytes=5 * 1024 * 1024)
     author = UserMinimalSerializer(read_only=True)
@@ -179,6 +405,11 @@ class PostSerializer(serializers.ModelSerializer):
     likes_count = serializers.SerializerMethodField()
     comments_count = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
+    share = serializers.SerializerMethodField()
+    share_workout_session = serializers.IntegerField(
+        write_only=True, required=False, allow_null=True, min_value=1)
+    share_achievement = serializers.IntegerField(
+        write_only=True, required=False, allow_null=True, min_value=1)
 
     class Meta:
         model = Post
@@ -186,9 +417,69 @@ class PostSerializer(serializers.ModelSerializer):
             'id', 'author', 'post_type', 'title', 'content',
             'image', 'visibility', 'created_at', 'updated_at',
             'likes_count', 'comments_count', 'is_liked', 'views_count',
-            'shares_count'
+            'shares_count', 'share', 'share_workout_session', 'share_achievement',
         ]
         read_only_fields = ['id', 'author', 'created_at', 'updated_at']
+        list_serializer_class = PostListSerializer
+
+    def validate(self, attrs):
+        """Turn a requested share into the post's generic relation, and check it is the
+        poster's own to share (B-080)."""
+        attrs = super().validate(attrs)
+        wants_session = 'share_workout_session' in attrs
+        wants_badge = 'share_achievement' in attrs
+        session_id = attrs.pop('share_workout_session', None)
+        badge_id = attrs.pop('share_achievement', None)
+        if not (wants_session or wants_badge):
+            return attrs
+        if session_id is not None and badge_id is not None:
+            raise serializers.ValidationError(
+                {'share_achievement': _('A post shares one thing: a workout or a badge.')},
+                code='share_one_thing')
+
+        request = self.context.get('request')
+        poster = getattr(request, 'user', None)
+        session_type, badge_type = _share_types()
+        if session_id is not None:
+            from routine.models import WorkoutSession
+
+            session = (WorkoutSession.objects.filter(pk=session_id, user=poster)
+                       .only('id', 'status').first()) if poster is not None else None
+            if session is None:
+                raise serializers.ValidationError(
+                    {'share_workout_session': _('You can only share a workout of your own.')},
+                    code='share_not_yours')
+            if session.status != 'completed':
+                raise serializers.ValidationError(
+                    {'share_workout_session': _('Only a finished workout can be shared.')},
+                    code='share_workout_unfinished')
+            attrs['content_type'], attrs['object_id'] = session_type, session.pk
+            kind = 'workout'
+        elif badge_id is not None:
+            earned = poster is not None and UserAchievement.objects.filter(
+                user=poster, achievement_id=badge_id,
+                achievement__is_active=True).exists()
+            if not earned:
+                raise serializers.ValidationError(
+                    {'share_achievement': _('You can only share a badge you have earned.')},
+                    code='share_badge_not_earned')
+            attrs['content_type'], attrs['object_id'] = badge_type, badge_id
+            kind = 'achievement'
+        else:
+            # Explicit nulls: take the share off the post.
+            attrs['content_type'], attrs['object_id'] = None, None
+            kind = None
+        if kind is not None and 'post_type' not in attrs and self.instance is None:
+            attrs['post_type'] = kind
+        return attrs
+
+    def get_share(self, obj):
+        shares = getattr(self, '_shares', None)
+        if shares is not None and obj.pk in shares:
+            return shares[obj.pk]
+        if not obj.content_type_id or not obj.object_id:
+            return None
+        return load_shares([obj], self.context.get('request')).get(obj.pk)
     
     def get_likes_count(self, obj):
         """The stored counter, less the likes from accounts this viewer cannot see.
@@ -342,7 +633,11 @@ class ChallengeSerializer(serializers.ModelSerializer):
     is_joined = serializers.SerializerMethodField()
     user_progress = serializers.SerializerMethodField()
     is_active = serializers.ReadOnlyField()
-    
+    #: The server counts this challenge's progress from logged training (`metric` is
+    #: not `manual`), so the app offers «ابدأ تمرين اليوم» and no manual log
+    #: (BACKEND_BUGS B-075). `metric` itself is writable, default `manual`.
+    auto_counted = serializers.ReadOnlyField()
+
     class Meta:
         model = Challenge
         fields = [
@@ -350,7 +645,7 @@ class ChallengeSerializer(serializers.ModelSerializer):
             'target_value', 'unit', 'start_date', 'end_date',
             'max_participants', 'participants_count', 'status',
             'created_at', 'rules', 'reward_description', 'image',
-            'is_joined', 'user_progress', 'is_active'
+            'is_joined', 'user_progress', 'is_active', 'metric', 'auto_counted',
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'participants_count']
 
@@ -395,15 +690,17 @@ class ChallengeSerializer(serializers.ModelSerializer):
             }
         request = self.context.get('request')
         if request and request.user.is_authenticated:
+            # `rank` by the one rule every standing surface reads, counted live, as the
+            # annotated path above does (`social/standing.py`, BACKEND_BUGS B-086).
+            from .standing import place_or_none
+
             try:
-                participation = ChallengeParticipation.objects.get(
-                    user=request.user,
-                    challenge=obj
-                )
+                participation = ChallengeParticipation.objects.annotate(
+                    place=place_or_none()).get(user=request.user, challenge=obj)
                 return {
                     'current_value': participation.current_value,
                     'progress_percentage': participation.progress_percentage,
-                    'rank': participation.rank
+                    'rank': participation.place
                 }
             except ChallengeParticipation.DoesNotExist:
                 # Optional side effect: swallowing this silently is what made the
