@@ -71,12 +71,12 @@ def test_a_cached_home_reports_the_time_left_not_a_fresh_120(make_user, api):
     from home import views as home_views
 
     trainer, client, routine, rows = _program(make_user, "b043")
-    first = _home(api, client).json()
+    first = _home(api, client)
     assert first["refresh_after_seconds"] == home_views.CACHE_SECONDS
 
     later = timezone.now() + timedelta(seconds=100)
     with mock.patch("home.views.timezone.now", return_value=later):
-        second = _home(api, client).json()
+        second = _home(api, client)
     assert second["as_of"] == first["as_of"], "served from the cache"
     assert 1 <= second["refresh_after_seconds"] <= 20
 
@@ -96,12 +96,16 @@ def test_days_before_the_program_starts_are_not_planned(make_user, api):
 
     trainer, client, routine, rows = _program(make_user, "b045", days=1)
     today = timezone.localdate()
-    Routine.objects.filter(pk=routine.pk).update(start_date=today, is_active=True)
+    # A program that runs for today only: every other day of the strip is before it
+    # starts or after it ends, on whichever weekday this runs (the strip begins on
+    # Saturday, so "the days before today" alone is empty one day in seven).
+    Routine.objects.filter(pk=routine.pk).update(start_date=today, end_date=today,
+                                                 is_active=True)
 
-    hero = _data(_home(api, client).json(), "workout_hero")
-    before = [d for d in hero["week_strip"] if d["date"] < today.isoformat()]
-    assert before, "the week has days before today"
-    assert {d["state"] for d in before} <= {"rest", "done"}, before
+    hero = _data(_home(api, client), "workout_hero")
+    outside = [d for d in hero["week_strip"] if d["date"] != today.isoformat()]
+    assert len(outside) == 6
+    assert {d["state"] for d in outside} <= {"rest", "done"}, outside
 
 
 # ------------------------------------------------------------------------ B-046
@@ -113,6 +117,6 @@ def test_participants_are_counted_by_the_rule_that_ranks_them(make_user, api):
     challenge = _challenge(client, "b046", others=2)
     Challenge.objects.filter(pk=challenge.pk).update(participants_count=58)
 
-    rank = _data(_home(api, client).json(), "challenge_rank")
+    rank = _data(_home(api, client), "challenge_rank")
     assert rank["participants"] == 3, "the three people actually in the standing"
     assert rank["rank"] <= rank["participants"]
