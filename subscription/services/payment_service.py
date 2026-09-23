@@ -622,7 +622,7 @@ class PaymentService:
                             .filter(subscription=subscription, status='completed',
                                     metadata__plan__id=subscription.plan_id)
                             .exclude(pk=payment.pk)
-                            .order_by('-completed_at')
+                            .order_by('-completed_at', '-id')
                             .values_list('amount', 'currency').first())
         if paid_for_current is None:
             return bought

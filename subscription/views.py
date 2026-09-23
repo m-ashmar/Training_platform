@@ -534,7 +534,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                              .filter(subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
                              .exclude(gateway_transaction_reference__isnull=True)
                              .exclude(gateway_transaction_reference='')
-                             .order_by('created_at').first())
+                             .order_by('created_at', 'id').first())
             if open_checkout is not None:
                 return Response(
                     {'error': _('A payment is already open for this subscription. '
