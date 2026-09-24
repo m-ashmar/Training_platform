@@ -108,29 +108,48 @@ class ChatMessage(models.Model):
         exists only for the few who opted into training data, and answered "Feedback
         saved" for everyone else with nothing saved (SIDE_BUGS S-061).
 
-        Returns how many training rows were updated (0 for a user without training
-        consent, or before the row is written — it copies the value from the message
-        when it is).
+        Returns how many training copies were updated (0 for a user without training
+        consent, or before the copy is written, which copies the value from the message
+        when it is written).
         """
         self.feedback = feedback
         self.save(update_fields=['feedback'])
-        updated = AITrainingData.objects.filter(
-            user=user, message=self).update(user_feedback=feedback)
-        if not updated:
-            # A turn logged before the FK existed: fall back to the session and the
-            # full response text, which is at least an exact comparison.
-            updated = AITrainingData.objects.filter(
-                user=user, session=self.session, message__isnull=True,
-                ai_response=self.content).update(user_feedback=feedback)
+        # By the two keyed pseudonyms: the copy has no FK to the reply or the person
+        # (the owner's decision of 2026-09-24).
+        from ai_assistant.anonymise import reply_key_for
+
+        updated = AITrainingData.copies_of(user).filter(
+            reply_key=reply_key_for(self)).update(user_feedback=feedback)
         return updated
 
 
-class AITrainingData(models.Model):
-    """
-    Complete interaction snapshot for future model training.
+def training_copy_deadline():
+    """When a training copy written now must be gone: `AI_TRAINING_RETENTION_DAYS` from
+    now, never more than `AI_TRAINING_RETENTION_MAX_DAYS` (365)."""
+    from datetime import timedelta
 
-    Every chat turn is logged here with full context, tools used,
-    and user feedback.  Outcome-based fields are deferred to v2.
+    return timezone.now() + timedelta(days=settings.AI_TRAINING_RETENTION_DAYS)
+
+
+class AITrainingData(models.Model):
+    """An anonymous copy of one answered turn, kept to improve the coach.
+
+    Written only while the person has "help us improve" on
+    (`POST /api/ai/training-consent/`), by `services/data_collector.py`. The owner's
+    decision of 2026-09-24: a copy holds nothing that identifies the person
+    (`ai_assistant/anonymise.py` says exactly what it holds):
+
+    * no user, chat or message FK. `subject_key` is the only link to the person: a
+      keyed pseudonym (HMAC-SHA256 over the user id with a server secret that is not in
+      the database). It is here so that switching "help us improve" off, `DELETE
+      /api/ai/data/`, account erasure and deleting the account can find the copies and
+      delete them. `reply_key` is the same kind of key for the reply, so a later 👍/👎
+      reaches the copy.
+    * `user_context_snapshot` holds bands and codes (`anonymise.SNAPSHOT_KEYS`), never a
+      measurement, a name or free text.
+    * the text and the tool output have direct identifiers removed.
+    * `retain_until` is always set, and the copy is deleted when it passes
+      (`tasks.purge_expired_training_data`, daily).
     """
 
     FEEDBACK_CHOICES = [
@@ -138,35 +157,23 @@ class AITrainingData(models.Model):
         ('negative', '👎'),
     ]
 
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='ai_training_data',
-    )
-    session = models.ForeignKey(
-        ChatSession, on_delete=models.CASCADE, related_name='training_data',
-    )
-    # The assistant reply this row records. Feedback used to be matched by comparing the
-    # first 100 characters of `ai_response`, and replies routinely share an opening line,
-    # so a single thumbs-up mislabelled several unrelated rows.
-    message = models.ForeignKey(
-        'ai_assistant.ChatMessage', on_delete=models.CASCADE,
-        related_name='training_data', null=True, blank=True, db_index=True,
-    )
-    # Consent + retention. Health data (injury, weight, goals) ends up in the snapshot
-    # below, so it is only collected when the user has opted in, and only kept until
-    # `retain_until`.
+    #: The keyed pseudonym of the person (`anonymise.subject_key_for`).
+    subject_key = models.CharField(max_length=64, db_index=True)
+    #: The keyed pseudonym of the reply this copy records (`anonymise.reply_key_for`);
+    #: null for a copy written before replies were keyed.
+    reply_key = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    # Written only when the person had opted in.
     consented = models.BooleanField(
         default=False, db_index=True,
         help_text="User opted in to their data being retained for model training.",
     )
     retain_until = models.DateTimeField(
-        null=True, blank=True, db_index=True,
+        default=training_copy_deadline, db_index=True,
         help_text="Purge date. Rows past this are deleted by purge_expired_training_data.",
     )
-    # Snapshot of user profile/state at interaction time
+    # Bands and codes only (`anonymise.SNAPSHOT_KEYS`).
     user_context_snapshot = models.JSONField(
-        help_text="Profile + plan state at interaction time",
+        help_text="Profile bands and codes at interaction time",
     )
     user_message = models.TextField()
     tools_called = models.JSONField(default=list)
@@ -190,16 +197,22 @@ class AITrainingData(models.Model):
         # paging repeated and hid rows whenever two records shared the value.
         ordering = ['-created_at', '-id']
         indexes = [
-            models.Index(fields=['user', 'created_at']),
             models.Index(fields=['user_feedback']),
-            # Matches the real access pattern: WHERE <owner>=? ORDER BY created_at DESC, id DESC.
-            # A single-column created_at index cannot serve that; this one can.
-            models.Index(fields=['user', '-created_at', '-id'], name='aitraindata_recent_idx'),
         ]
+
+    @classmethod
+    def copies_of(cls, user):
+        """Every training copy kept for `user` (a user or a user id), by `subject_key`.
+
+        The only way to find a person's copies. Switching "help us improve" off, `GET` and
+        `DELETE /api/ai/data/`, account erasure and deleting the account all use it."""
+        from ai_assistant.anonymise import subject_key_for
+
+        return cls.objects.filter(subject_key=subject_key_for(user))
 
     def __str__(self):
         fb = self.user_feedback or "no feedback"
-        return f"[{self.user.username}] {fb} — {self.response_tokens} tokens"
+        return f"[training copy {self.pk}] {fb} — {self.response_tokens} tokens"
 
 
 class UserBehaviorEvent(models.Model):

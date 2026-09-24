@@ -20,6 +20,10 @@ class PersonalDataSource:
                      A tuple names SEVERAL paths, for a model that reaches its owner by
                      more than one nullable route; a row matching any of them belongs to
                      that user.
+    ``user_value``   what ``user_field`` is compared with, as ``user_value(user)``; None
+                     (the default) means the user itself (its pk for "pk"/"id"). For a
+                     source keyed by a pseudonym instead of a FK, such as the anonymous
+                     AI training copies (``subject_key``, a keyed hash of the user id)
     ``fields``       what to include in an export; None means every concrete field
     ``on_erase``     "delete" | "anonymise" | "keep"
     ``anonymise``    field -> value (or callable) applied when on_erase="anonymise"
@@ -74,6 +78,8 @@ class PersonalDataSource:
     #: privacy/erase/` is the preview), and "blocks: 2" to someone who made none says
     #: they were blocked twice.
     erase_also: Callable | None = None
+    #: See ``user_value`` in the class docstring. Last, so no positional use shifts.
+    user_value: Callable | None = None
 
     def get_model(self):
         from django.apps import apps
@@ -89,7 +95,10 @@ class PersonalDataSource:
         # the instance to `pk` raises "Field 'id' expected a number".
         query = Q()
         for path in paths:
-            query |= Q(**{path: user.pk if path in ("pk", "id") else user})
+            if self.user_value is not None:
+                query |= Q(**{path: self.user_value(user)})
+            else:
+                query |= Q(**{path: user.pk if path in ("pk", "id") else user})
         return self.get_model()._default_manager.filter(query).distinct()
 
 

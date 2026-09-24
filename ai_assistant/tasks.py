@@ -164,6 +164,7 @@ def check_daily_cost():
 
 
 @shared_task(
+    name='ai_assistant.tasks.purge_expired_training_data',
     autoretry_for=TRANSIENT_ERRORS,
     retry_backoff=True,
     retry_backoff_max=600,
@@ -171,18 +172,20 @@ def check_daily_cost():
     max_retries=3,
 )
 def purge_expired_training_data():
-    """Delete training rows past their retention date.
+    """Delete every AI training copy whose `retain_until` has passed.
 
-    Nothing previously removed AITrainingData, so health-context snapshots accumulated
-    forever. Rows are written with `retain_until`; this drops them once it passes.
+    Scheduled daily (`CELERY_BEAT_SCHEDULE['purge-expired-ai-training-data']`). Every
+    copy is written with a deadline at most `AI_TRAINING_RETENTION_MAX_DAYS` (365) days
+    out, and the column is NOT NULL, so no copy can outlive it (the owner, 2026-09-24:
+    the second safeguard behind "help us improve" off). The copies have no FK and nothing
+    points at them, so this is one bulk DELETE.
     """
     from django.utils import timezone
 
     from ai_assistant.models import AITrainingData
 
     deleted, _detail = AITrainingData.objects.filter(
-        retain_until__isnull=False, retain_until__lt=timezone.now(),
-    ).delete()
+        retain_until__lt=timezone.now()).delete()
     if deleted:
         logger.info("Purged %s expired AI training records", deleted)
     return f"Purged {deleted} expired training records"

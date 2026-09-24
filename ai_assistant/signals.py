@@ -7,7 +7,7 @@ UserBehaviorEvent records for the training data pipeline.
 
 import logging
 from functools import wraps
-from django.db.models.signals import post_save
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
 logger = logging.getLogger(__name__)
@@ -163,3 +163,19 @@ def on_meal_completed(sender, instance, **kwargs):
             'actual_quantity': instance.actual_quantity_consumed,
         },
     )
+
+
+@receiver(post_delete, sender='users.CustomUser')
+def delete_training_copies_with_the_account(sender, instance, **kwargs):
+    """A deleted account takes its anonymous AI training copies with it.
+
+    They used to go by CASCADE on the user FK. Since the owner's decision of 2026-09-24
+    a copy has no FK to its person, only the keyed pseudonym `subject_key`, so nothing
+    cascades any more and this finds them instead. Not wrapped in `_track`: a failure
+    here must roll the deletion back, not leave the copies behind. (Erasure through
+    `DELETE /api/privacy/erase/` keeps the account row and deletes the copies itself,
+    through the privacy registry.)
+    """
+    from ai_assistant.models import AITrainingData
+
+    AITrainingData.copies_of(instance.pk).delete()

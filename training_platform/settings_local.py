@@ -138,3 +138,9 @@ WALLET_DEV_MODE = get_bool_env_optional("WALLET_DEV_MODE", default=False)
 # Production loads its own from the environment and refuses to boot without one; this
 # value guards nothing real and is not a secret.
 FIELD_ENCRYPTION_KEY = os.environ.get("FIELD_ENCRYPTION_KEY", "07DLC_JTJpDiu578mrD6xH4t4Hz_0FgKnKYEhUdCsz0=")
+
+# Development-only key for the AI training copies' pseudonym (`settings_base`
+# AI_TRAINING_PSEUDONYM_KEY). Guards nothing real and is not a secret; production
+# requires its own and refuses to boot without one.
+AI_TRAINING_PSEUDONYM_KEY = os.environ.get(
+    "AI_TRAINING_PSEUDONYM_KEY", "local-dev-ai-training-pseudonym-key-not-a-secret")

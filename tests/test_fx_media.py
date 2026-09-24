@@ -20,6 +20,7 @@ One test (or a small group) per row, each failing against the code that was ther
 import io
 import json
 import os
+import secrets
 import struct
 import subprocess
 import sys
@@ -624,6 +625,9 @@ def _prod_env():
         "JWT_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----",
         "JWT_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nnot-a-key\n-----END PUBLIC KEY-----",
         "FIELD_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+        # Required since the owner's decision of 2026-09-24 (anonymous AI training
+        # copies are keyed with it); generated, never a literal.
+        "AI_TRAINING_PSEUDONYM_KEY": secrets.token_hex(32),
         "MEDIA_BACKEND": "gcs", "GS_BUCKET_NAME": "yalla-gym-media",
     }
 

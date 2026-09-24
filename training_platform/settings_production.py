@@ -28,6 +28,11 @@ DEBUG = False  # Hardcoded. NEVER configurable in production.
 
 ALLOWED_HOSTS = require_env("DJANGO_ALLOWED_HOSTS").split(",")
 
+# The key AI training copies are pseudonymised with (`settings_base`, `ai_assistant/
+# anonymise.py`). Required, from the secret store or the environment like every other
+# secret: without it no copy could be keyed, and none could be found again to be deleted.
+AI_TRAINING_PSEUDONYM_KEY = get_secret("AI_TRAINING_PSEUDONYM_KEY")
+
 # ========================
 # Database — credentials from environment
 # ========================
@@ -374,6 +379,15 @@ def enforce_production_safety():
                 Fernet(_k.encode("utf-8"))
         except Exception:
             errors.append("FIELD_ENCRYPTION_KEY is not a valid Fernet key")
+
+    # --- AI training pseudonym key ---
+    # A short key is guessable, and one shared with SECRET_KEY rotates with it: every
+    # training copy would then be orphaned, and "help us improve" off could not delete it.
+    _aik = (globals().get("AI_TRAINING_PSEUDONYM_KEY") or "").strip()
+    if len(_aik) < 32:
+        errors.append("AI_TRAINING_PSEUDONYM_KEY is too short (min 32 chars)")
+    elif _aik == (SECRET_KEY or ""):
+        errors.append("AI_TRAINING_PSEUDONYM_KEY must not be SECRET_KEY")
 
     # --- SECRET_KEY strength ---
     if ('django-insecure' in (SECRET_KEY or '')) or (len(SECRET_KEY or '') < 32):
