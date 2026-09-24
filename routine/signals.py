@@ -42,3 +42,50 @@ def adopt_exercises_before_owner_is_deleted(sender, instance, **kwargs):
             "Adopted %d exercise(s) into the platform catalogue from deleted user %s",
             adopted, instance.pk,
         )
+
+
+# ------------------------------------------------------ template usage (B-108)
+def _bump_template_cache():
+    from training_platform.signals import bump_cache_version
+
+    bump_cache_version("ROUTINETEMPLATE")
+
+
+def template_usage_saved(sender, instance, **kwargs):
+    """`templates/` is served from the response cache, versioned by template writes
+    (training_platform/cache_config.py), and `used_by_count` is not a template column:
+    it moves when a routine generated from a template is written, deleted, or gains or
+    loses a client. Without this a trainer who had just generated a client's program
+    read the old count for up to the cache's five minutes. Only routines that came from
+    a template bump it."""
+    if getattr(instance, "source_template_id", None) is not None:
+        _bump_template_cache()
+
+
+def template_usage_assigned(sender, instance, action, reverse, pk_set, **kwargs):
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+    from routine.models import Routine
+
+    if not reverse:
+        if getattr(instance, "source_template_id", None) is not None:
+            _bump_template_cache()
+    elif action == "post_clear" or Routine.objects.filter(
+            pk__in=pk_set or (), source_template__isnull=False).exists():
+        _bump_template_cache()
+
+
+def connect_template_usage():
+    from django.db.models.signals import m2m_changed, post_delete, post_save
+
+    from routine.models import Routine
+
+    post_save.connect(template_usage_saved, sender=Routine,
+                      dispatch_uid="routine.template_usage_saved")
+    post_delete.connect(template_usage_saved, sender=Routine,
+                        dispatch_uid="routine.template_usage_deleted")
+    m2m_changed.connect(template_usage_assigned, sender=Routine.assigned_to.through,
+                        dispatch_uid="routine.template_usage_assigned")
+
+
+connect_template_usage()

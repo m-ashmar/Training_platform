@@ -24,6 +24,91 @@ logger = logging.getLogger(__name__)
 _recalc_state = _threading.local()
 
 
+#: What an exercise is done with (BACKEND_BUGS B-107): the five chips TrainerNewExercise
+#: draws («دمبل · بار · كابل · آلة · وزن الجسم»). The code is the contract and never
+#: changes; the label goes through the catalogue. Null is "not said" — every exercise
+#: written before the field, and anything the list does not name. Additive: a new code
+#: may be appended, none renamed.
+EQUIPMENT_CHOICES = [
+    ('barbell', _('Barbell')),
+    ('dumbbell', _('Dumbbell')),
+    ('cable', _('Cable')),
+    ('machine', _('Machine')),
+    ('bodyweight', _('Bodyweight')),
+]
+
+#: How a row's load is written (BACKEND_BUGS B-104; TrainerScheme «kg · % من الأقصى ·
+#: RPE»). `RoutineExercise.weight` keeps its meaning in every mode — the kilograms to
+#: lift, or null — and `load_value` is what the trainer typed in the other two:
+#:   kg       `load_value` is null; `weight` is the whole prescription.
+#:   percent  `load_value` is the percent of the client's one-rep max (1-100); `weight`
+#:            is that percentage in kg as the trainer resolved it against the client's
+#:            record when writing it (null when there is no record). The server does not
+#:            re-resolve it when the record moves: a prescription does not change under
+#:            the client's feet.
+#:   rpe      `load_value` is the target effort, 1-10 in steps of 0.5; `weight` is an
+#:            optional starting load, usually null.
+LOAD_MODE_CHOICES = [
+    ('kg', _('Kilograms')),
+    ('percent', _('Percent of one-rep max')),
+    ('rpe', _('RPE')),
+]
+#: Inclusive bounds of `load_value` per mode, and of a superset number within a day.
+LOAD_VALUE_BOUNDS = {'percent': (1, 100), 'rpe': (1, 10)}
+SUPERSET_GROUP_MAX = 20
+#: The longest day name («دفع · صدر وأكتاف»), after trimming.
+DAY_NAME_MAX_LENGTH = 40
+
+
+def day_names_problem(value):
+    """`(code, message)` when `value` is not a stored `Routine.day_names`, else None.
+
+    Stored shape: an object whose keys are day numbers written as strings ("1", "2",
+    ...) and whose values are non-empty names of at most `DAY_NAME_MAX_LENGTH`
+    characters. Whether a day is inside the routine's `days` is the serializer's
+    question (see `Routine.clean`).
+    """
+    if not isinstance(value, dict):
+        return 'day_names_invalid', _("Day names must be an object of day number to name.")
+    for key, name in value.items():
+        # "3", never "03" or "٣": one day, one spelling.
+        if not (isinstance(key, str) and key.isascii() and key.isdigit()
+                and key == str(int(key)) and int(key) >= 1):
+            return 'day_names_invalid', _("Day names must be an object of day number to name.")
+        if not isinstance(name, str) or not name.strip():
+            return 'day_names_invalid', _("Day names must be an object of day number to name.")
+        if len(name) > DAY_NAME_MAX_LENGTH:
+            return 'too_long', _("Keep this to %(n)s characters.") % {"n": DAY_NAME_MAX_LENGTH}
+    return None
+
+
+def merge_day_names(current, changes, days, *, overwrite=True):
+    """`current` with `changes` applied, keeping only days 1..`days`, in day order.
+
+    `changes` is `{"<day>": name}`: a name sets that day, None or "" removes it, a day
+    not named is left as it is. With `overwrite=False` a day that already has a name
+    keeps it (a week's copy never renames a day the trainer named). A key that is not a
+    day number is dropped rather than trusted.
+    """
+    def day(key):
+        try:
+            return int(key)
+        except (TypeError, ValueError):
+            return None
+
+    merged = {k: v for k, v in (current or {}).items()
+              if isinstance(v, str) and v and day(k) is not None}
+    for key, name in (changes or {}).items():
+        if day(key) is None:
+            continue
+        if not name:
+            if overwrite:
+                merged.pop(str(key), None)
+        elif overwrite or str(key) not in merged:
+            merged[str(key)] = name
+    return {k: merged[k] for k in sorted(merged, key=day) if 1 <= day(k) <= days}
+
+
 def exercise_image_upload_path(instance, filename):
     ext = filename.split('.')[-1]
     # Use uuid4 for unique filenames
@@ -37,8 +122,11 @@ class Exercise(RowValidationMixin, models.Model):
     TODO: Add exercise categories and difficulty levels
     TODO: Implement exercise search and filtering
     TODO: Add exercise popularity metrics
-    TODO: Consider adding exercise equipment requirements
     TODO: Consider allowing custom user-defined muscle groups in the future.
+
+    `name` is translated (routine/translation.py): `name_ar` and `name_en` are the two
+    columns, and `name` reads the active language with the other as a fallback and
+    writes the active language. `equipment` is a code from `EQUIPMENT_CHOICES` (B-107).
     """
     name = models.CharField(max_length=255, help_text="Exercise name")
     description = models.TextField(blank=True, null=True, help_text="Description of the exercise")
@@ -99,7 +187,12 @@ class Exercise(RowValidationMixin, models.Model):
         default='beginner',
         help_text="Exercise difficulty level"
     )
-    
+
+    # What it is done with (B-107): a code from EQUIPMENT_CHOICES, or null.
+    equipment = models.CharField(
+        max_length=20, choices=EQUIPMENT_CHOICES, null=True, blank=True,
+        help_text="Equipment the exercise is done with (a code), or empty when not said")
+
     # Trainer scoping - exercises can be global or trainer-specific
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -400,7 +493,17 @@ class Routine(RowValidationMixin, models.Model):
         help_text="The routine-product purchase this is the buyer's copy of, if any")
     start_date = models.DateField(default=date.today, help_text="Start date for the routine")
     end_date = models.DateField(blank=True, null=True, db_index=True, help_text="End date for the routine")
-    
+
+    #: A name per day of the routine (BACKEND_BUGS B-104; «دفع · صدر وأكتاف»):
+    #: `{"<day>": "<name>"}`, the day as a string, only named days present. One object
+    #: on the row rather than a table, because a day's name is a label of the day number
+    #: exactly as `RoutineExercise.day` is — it moves with nothing else — and every write
+    #: MERGES into it under a lock on the routine (`RoutineSerializer.update`), so two
+    #: phones naming two different days cannot erase each other's name.
+    day_names = models.JSONField(
+        default=dict, blank=True,
+        help_text='Names of the routine\'s days, e.g. {"1": "Push", "3": "Pull"}')
+
     # Routine metadata
     difficulty_level = models.CharField(
         max_length=20,
@@ -464,6 +567,12 @@ class Routine(RowValidationMixin, models.Model):
         """
         if not self.created_by.is_trainer and self.purchase_id is None:
             raise ValidationError(_("Only trainers can create routines"), code="trainer_required")
+        # The SHAPE of `day_names` is this row's own business; whether a day is still
+        # inside `days` is not checked here, so shortening a routine never makes it
+        # unsaveable (the serializer drops the names it no longer has).
+        problem = day_names_problem(self.day_names)
+        if problem is not None:
+            raise ValidationError({"day_names": ValidationError(problem[1], code=problem[0])})
 
     def get_assigned_users(self):
         """Return a comma-separated list of usernames assigned to this routine."""
@@ -583,7 +692,23 @@ class RoutineExercise(RowValidationMixin, models.Model):
     
     # Notes and instructions
     notes = models.TextField(blank=True, help_text="Additional notes or instructions")
-    
+
+    # The design's superset bracket (B-104): rows of the same routine AND day that share
+    # a number are one superset, done back to back in `order`. The number means nothing
+    # across days — day 2's group 1 is another superset. Null: not in a superset.
+    superset_group = models.PositiveSmallIntegerField(
+        null=True, blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(SUPERSET_GROUP_MAX)],
+        help_text="Superset number within the day (1-20); rows sharing it are one superset")
+    # How the load is written (B-104). See `LOAD_MODE_CHOICES` for how `load_value`
+    # relates to `weight`, which keeps its meaning — the kilograms — in every mode.
+    load_mode = models.CharField(
+        max_length=10, choices=LOAD_MODE_CHOICES, default='kg',
+        help_text="kg, percent (of the client's one-rep max) or rpe")
+    load_value = models.FloatField(
+        null=True, blank=True,
+        help_text="The percent (1-100) or RPE (1-10, steps of 0.5); empty in kg mode")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -591,6 +716,17 @@ class RoutineExercise(RowValidationMixin, models.Model):
         verbose_name = "Routine Exercise"
         verbose_name_plural = "Routine Exercises"
         unique_together = [['routine', 'exercise', 'day', 'order']]
+        constraints = [
+            # A percentage or an RPE without its number is not a prescription, and a
+            # number beside kg is a second, disagreeing one. `bulk_create` (a template's
+            # generate, a week's copy) skips `clean()`, so the pair is held here too.
+            models.CheckConstraint(
+                condition=(models.Q(load_mode='kg', load_value__isnull=True)
+                           | models.Q(load_mode__in=['percent', 'rpe'],
+                                      load_value__isnull=False)),
+                name='routineexercise_load_value_follows_mode',
+            ),
+        ]
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
         # paging repeated and hid rows whenever two records shared the value.
         ordering = ['day', 'order', 'id']
@@ -616,10 +752,33 @@ class RoutineExercise(RowValidationMixin, models.Model):
         """
         if self.day is not None and self.day < 1:
             raise ValidationError({"day": _("Day is 1-based.")}, code="day_invalid")
+        problem = load_value_problem(self.load_mode, self.load_value)
+        if problem is not None:
+            raise ValidationError({"load_value": ValidationError(problem[1], code=problem[0])})
 
     def save(self, *args, **kwargs):
         self.validate_row()
         super().save(*args, **kwargs)
+
+
+def load_value_problem(mode, value):
+    """`(code, message)` when `value` cannot be the `load_value` of a row in `mode`,
+    else None. One rule for the serializer, the model and a week's copy (B-104)."""
+    if mode == 'kg':
+        if value is not None:
+            return 'load_value_not_allowed', _(
+                "A load in kg is the weight itself; send load_value only with percent or rpe.")
+        return None
+    if value is None:
+        return 'load_value_required', _("Say the percent or the RPE this load is.")
+    low, high = LOAD_VALUE_BOUNDS.get(mode, (None, None))
+    if low is None:
+        return None     # an unknown mode is the choice field's refusal, not this one
+    if not low <= value <= high or (mode == 'rpe' and (value * 2) != int(value * 2)):
+        if mode == 'rpe':
+            return 'load_value_out_of_range', _("An RPE is from 1 to 10, in steps of 0.5.")
+        return 'load_value_out_of_range', _("A percent of the one-rep max is from 1 to 100.")
+    return None
 
 
 class UserExerciseProgress(models.Model):

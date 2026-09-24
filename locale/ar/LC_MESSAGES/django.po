@@ -5256,3 +5256,109 @@ msgstr "شراء برنامج"
 #: wallet/activity.py
 msgid "Program sale"
 msgstr "بيع برنامج"
+
+#: routine/models.py
+msgid "Barbell"
+msgstr "بار"
+
+#: routine/models.py
+msgid "Dumbbell"
+msgstr "دمبل"
+
+#: routine/models.py
+msgid "Cable"
+msgstr "كابل"
+
+#: routine/models.py
+msgid "Machine"
+msgstr "آلة"
+
+#: routine/models.py
+msgid "Bodyweight"
+msgstr "وزن الجسم"
+
+#: routine/models.py
+msgid "Kilograms"
+msgstr "كيلوغرام"
+
+#: routine/models.py
+msgid "Percent of one-rep max"
+msgstr "% من الأقصى"
+
+#: routine/models.py
+msgid "RPE"
+msgstr "RPE"
+
+#: routine/models.py routine/serializers.py
+msgid "Day names must be an object of day number to name."
+msgstr "أسماء الأيام يجب أن تكون قائمة من رقم اليوم إلى اسمه."
+
+#: routine/models.py
+msgid ""
+"A load in kg is the weight itself; send load_value only with percent or rpe."
+msgstr ""
+"الحمل بالكيلوغرام هو الوزن نفسه؛ أرسل load_value فقط مع النسبة المئوية أو "
+"RPE."
+
+#: routine/models.py
+msgid "Say the percent or the RPE this load is."
+msgstr "حدّد النسبة المئوية أو قيمة RPE لهذا الحمل."
+
+#: routine/models.py
+msgid "An RPE is from 1 to 10, in steps of 0.5."
+msgstr "قيمة RPE من 1 إلى 10، بخطوات مقدارها 0.5."
+
+#: routine/models.py
+msgid "A percent of the one-rep max is from 1 to 100."
+msgstr "النسبة من الحد الأقصى لتكرار واحد تكون من 1 إلى 100."
+
+#: routine/serializers.py
+msgid "A superset number is from 1 to %(n)s."
+msgstr "رقم السوبر سِت من 1 إلى %(n)s."
+
+#: routine/serializers.py
+msgid "Day %(day)s is outside the routine's %(days)s days."
+msgstr "اليوم %(day)s خارج أيام البرنامج البالغة %(days)s."
+
+#: routine/views.py
+msgid "Equipment must be one of: %(options)s"
+msgstr "يجب أن تكون المعدات واحدة من: %(options)s"
+
+#: routine/views.py
+msgid "Only the trainer who wrote this routine can change it."
+msgstr "لا يمكن تعديل هذا البرنامج إلا من قِبل المدرب الذي كتبه."
+
+#: routine/weeks.py
+msgid "%(field)s must be a week number from 1."
+msgstr "يجب أن يكون %(field)s رقم أسبوع يبدأ من 1."
+
+#: routine/weeks.py
+msgid "load_factor must be a number, such as 1.025."
+msgstr "يجب أن يكون load_factor رقماً، مثل 1.025."
+
+#: routine/weeks.py
+msgid "load_factor must be from %(low)s to %(high)s."
+msgstr "يجب أن يكون load_factor بين %(low)s و%(high)s."
+
+#: routine/weeks.py
+msgid "Choose two different weeks."
+msgstr "اختر أسبوعين مختلفين."
+
+#: routine/weeks.py
+msgid "This routine has %(weeks)s whole weeks."
+msgstr "عدد الأسابيع الكاملة في هذا البرنامج %(weeks)s."
+
+#: routine/weeks.py
+msgid "Week %(week)s has no exercises to copy."
+msgstr "لا توجد تمارين في الأسبوع %(week)s لنسخها."
+
+#: routine/weeks.py
+msgid "Week %(week)s already has exercises. Clear it first."
+msgstr "الأسبوع %(week)s يحتوي على تمارين. أفرغه أولاً."
+
+#: routine/weeks.py
+msgid ""
+"Day %(day)s: the new load is more than an exercise may hold. Use a smaller "
+"increase."
+msgstr ""
+"اليوم %(day)s: الحمل الجديد أكبر مما يحتمله التمرين. استخدم زيادة أصغر."
