@@ -77,6 +77,16 @@ from users.visibility import FIELD as VISIBILITY_FIELD, hidden_q
 #: first, then the lower id.
 STANDING_ORDER = ('-current_value', 'joined_at', 'id')
 
+#: The owner's decision of 2026-09-24: the Challenge Winner badge (or anything a first
+#: place earns) needs at least this many ACTIVE participants at the settlement —
+#: `active_participants`: in the standing AND with a counted number above zero. A
+#: joiner who never trained does not count, so a trainer cannot make a winner by
+#: padding a challenge with idle accounts. Fewer, and the challenge settles with no
+#: winner (`social/tasks.py _settle_winner`); the badge engine asks the same of the
+#: settled record (`achievements/engine.py challenge_wins`). Served on every
+#: challenge row as `winner_min_participants`, beside the live `active_participants`.
+MIN_PARTICIPANTS_FOR_WINNER = 5
+
 #: Rows per UPDATE. `bulk_update` builds one CASE arm per row, so a challenge with
 #: thousands of participants is split rather than sent as one enormous statement.
 WRITE_BATCH = 500
@@ -118,6 +128,26 @@ def in_standing(queryset):
     """`queryset` of participations less the ones that hold no place: dropped,
     disqualified, or of an account that is not publicly visible."""
     return queryset.exclude(holds_no_place_q())
+
+
+def active_participants(queryset):
+    """`queryset` of participations that count toward `MIN_PARTICIPANTS_FOR_WINNER`: in
+    the standing (not dropped, not disqualified, the account publicly visible) and with
+    a counted `current_value` above zero — someone who joined and never trained is not
+    a participant a winner can be made from."""
+    return in_standing(queryset).filter(current_value__gt=0)
+
+
+def active_participants_count():
+    """The number of `active_participants` of the `Challenge` row this is annotated on:
+    `.annotate(active_participants_anno=active_participants_count())` — one correlated
+    COUNT inside the query that reads the rows, never a query per row."""
+    from .models import ChallengeParticipation
+
+    active = (active_participants(ChallengeParticipation.objects
+                                  .filter(challenge_id=OuterRef('pk')))
+              .order_by().values('challenge_id').annotate(n=Count('id')).values('n'))
+    return Coalesce(Subquery(active, output_field=IntegerField()), Value(0))
 
 
 def _strictly_ahead():

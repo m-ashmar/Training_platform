@@ -418,6 +418,15 @@ class Challenge(models.Model):
     #: review, and while the person at place 1 is flagged and no operator has decided.
     winner_checked_at = models.DateTimeField(null=True, blank=True)
 
+    #: How many ACTIVE participants (`social/standing.py active_participants`) the
+    #: challenge had when it was settled — the settlement's verdict on the owner's
+    #: minimum (2026-09-24, `MIN_PARTICIPANTS_FOR_WINNER`), written in the same UPDATE as
+    #: `winner_checked_at`, under the challenge lock. The badge engine reads THIS
+    #: (`achievements/engine.py challenge_wins`), never a recount: an erased rival's
+    #: participation row is deleted, so a recount after the settlement would take back a
+    #: win that was valid when it was settled. Null until settled.
+    settled_active_participants = models.PositiveIntegerField(null=True, blank=True)
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)

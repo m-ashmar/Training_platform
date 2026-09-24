@@ -327,6 +327,16 @@ class AchievementEngine:
                 # Never for an account that is not active (the owner's decision 8,
                 # 2026-09-24): a suspended or erased account holds no place.
                 from users.visibility import public_q
+                # And never below MIN_PARTICIPANTS_FOR_WINNER active participants (the
+                # owner, 2026-09-24). The settlement already refuses to check a winner
+                # there (`social/tasks.py _settle_winner`); the engine asks the same of
+                # the settlement's RECORDED verdict (`Challenge.
+                # settled_active_participants`, written with `winner_checked_at`), so
+                # it awards nothing below the minimum even when called directly — and a
+                # challenge the settlement never recorded (null) awards nothing. Never a
+                # recount of the participation rows: an erased rival's row is deleted,
+                # so a recount would take back a win that was valid when it was settled.
+                from social import standing
 
                 return ChallengeParticipation.objects.filter(
                     ended,
@@ -336,6 +346,8 @@ class AchievementEngine:
                     status='completed',
                     rank=1,
                     review_state=ChallengeParticipation.REVIEW_CLEAR,
+                    challenge__settled_active_participants__gte=(
+                        standing.MIN_PARTICIPANTS_FOR_WINNER),
                     challenge__winner_checked_at__isnull=False,
                 ).count()
             

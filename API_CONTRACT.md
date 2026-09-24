@@ -2090,6 +2090,18 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
     flags the person again. A creator closing a challenge early (`status: "completed"`) moves
     its `end_date` to the moment of the close. Operators clear or disqualify from the
     console (`ChallengeParticipation`, filter by `review_state`).
+  - **A winner needs 5 active participants** (the owner, 2026-09-24). Challenge rows
+    (list, detail, create, update) gain, read-only: `winner_min_participants` (int, 5 —
+    `social/standing.py MIN_PARTICIPANTS_FOR_WINNER`) and `active_participants` (int,
+    live: participants in the standing — not dropped, not disqualified, the account
+    visible — whose counted number is above zero; a joiner who never trained does not
+    count). A challenge with fewer active participants at the settlement settles with
+    no winner: `winner_final` still becomes true, and nobody earns the Challenge Winner
+    badge (or anything a first place earns) from it, even flagged first places are not
+    waited on. The settlement records the count it decided on (the server-side column
+    `Challenge.settled_active_participants`, not served), and the badge engine reads that
+    record, so the badge is never awarded below the minimum, and a rival erasing their
+    account after the settlement does not take a win back. No new code.
 - **Another member's profile** (B-077). `GET /api/social/users/public-profile/{id}/`
   (and `by_username/`) gains `featured_achievements` (at most three badges the person
   featured: `{id, key, name, category, points, icon_url, badge_color, is_rare,

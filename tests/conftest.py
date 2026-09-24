@@ -96,6 +96,25 @@ def make_user(db):
 
 
 @pytest.fixture
+def winner_minimum_of_one(monkeypatch):
+    """Lower `social/standing.py MIN_PARTICIPANTS_FOR_WINNER` to 1 for a test.
+
+    Deliberate contract change (the owner, 2026-09-24): a Challenge Winner needs at least
+    5 active participants. The settlement tests written before it (S-044, F20's flag,
+    once-only and batch tests, decision 8's suspended winner, and the three tests that an
+    UNRANKED challenge — a client's manual one, a finished manual one switched to counted,
+    an unverified trainer's — awards nothing) seed one or two people and protect OTHER
+    rules: when a winner is checked, that a flagged or suspended first place or an
+    unranked challenge wins nothing. Without the fixture the minimum alone would make
+    those tests pass with their own rule deleted. They take this fixture so they keep asserting exactly those rules; the
+    minimum itself is tested in `tests/test_owner_decisions_0924b.py`. Every reader takes
+    the constant off the module, so patching it there reaches them all."""
+    from social import standing
+
+    monkeypatch.setattr(standing, "MIN_PARTICIPANTS_FOR_WINNER", 1)
+
+
+@pytest.fixture
 def api(make_user):
     """An authenticated DRF client for a given user."""
     from django.test import Client

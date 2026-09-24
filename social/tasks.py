@@ -234,6 +234,14 @@ def _settle_winner(challenge_id, now=None):
       `ranked` (auto-counted, created by a trainer or staff), not cancelled, and they
       are `clear` and reached the target (`status='completed'`).
 
+    **At least `MIN_PARTICIPANTS_FOR_WINNER` (5) active participants** (the owner's
+    decision of 2026-09-24, `social/standing.py active_participants`: in the standing
+    and with a counted number above zero). Fewer, and the challenge can award nothing:
+    it settles at once (`winner_checked_at` written, `winner_final` true, even when its
+    first place is flagged) and no badge is checked. Every settlement records the count
+    it decided on (`Challenge.settled_active_participants`, in the same UPDATE as
+    `winner_checked_at`), and the badge engine reads that record, never a recount.
+
     A participant whose account is not publicly visible at the settlement (suspended or
     erased, the owner's decision 8, 2026-09-24) holds no place in it, exactly like a
     disqualified one (`social/standing.py in_standing`): place 1 is the first visible
@@ -249,7 +257,8 @@ def _settle_winner(challenge_id, now=None):
     from django.utils import timezone
 
     from .models import Challenge, ChallengeParticipation
-    from .standing import STANDING_ORDER, in_standing, write_places
+    from . import standing
+    from .standing import STANDING_ORDER, active_participants, in_standing, write_places
 
     now = now or timezone.now()
     winner = None
@@ -265,10 +274,21 @@ def _settle_winner(challenge_id, now=None):
         first = (in_standing(ChallengeParticipation.objects.filter(challenge=challenge))
                  .select_related('user').order_by(*STANDING_ORDER).first())
         can_award = challenge.ranked and challenge.status != 'cancelled'
+        # Too few people actually took part for a first place to mean anything (owner,
+        # 2026-09-24). Counted after the last re-rank, under the same lock, by the rule
+        # the challenge row serves as `active_participants`, and RECORDED with the
+        # settlement: the badge engine reads the recorded number, so nothing that
+        # happens to other people's rows later (an erasure deletes them) moves it. Read
+        # off the module so the one constant is the one place the number lives.
+        active = active_participants(ChallengeParticipation.objects
+                                     .filter(challenge=challenge)).count()
+        if active < standing.MIN_PARTICIPANTS_FOR_WINNER:
+            can_award = False
         if (can_award and first is not None
                 and first.review_state == ChallengeParticipation.REVIEW_FLAGGED):
             return False, False
-        Challenge.objects.filter(pk=challenge.pk).update(winner_checked_at=now)
+        Challenge.objects.filter(pk=challenge.pk).update(
+            winner_checked_at=now, settled_active_participants=active)
         if (first is not None and can_award and first.status == 'completed'
                 and first.review_state == ChallengeParticipation.REVIEW_CLEAR):
             winner = first
