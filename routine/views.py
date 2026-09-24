@@ -276,7 +276,10 @@ class ExerciseCreateWithImageView(APIView):
     - name (required): Exercise name
     - description (required): Exercise description
     - target_muscle (required): Target muscle group — a missing one of these three
-      answers 400 `field_required` with `field` naming it (the owner, 2026-09-24)
+      answers 400 `missing_fields` with `fields: [<name>]` and `field` naming it (the
+      owner, 2026-09-24; `missing_fields`, the code every other route answers for a
+      missing required field, since BACKEND_BUGS B-092 — it was `field_required`,
+      minted that day and never shipped)
     - difficulty_level (optional): beginner/intermediate/advanced/expert
     - image (optional): Main demonstration image file
     - media_photos (optional): Additional photo files (multiple)
@@ -331,7 +334,7 @@ class ExerciseCreateWithImageView(APIView):
                 if not request.data.get(field):
                     return Response(
                         {'error': _('Missing required field: %(field)s') % {'field': field},
-                         'code': 'field_required', 'field': field},
+                         'code': 'missing_fields', 'fields': [field], 'field': field},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 

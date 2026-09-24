@@ -13,7 +13,7 @@ a code of its own; none of these changes a status or what the request does.
 | `test_role_refusals_...` | agent and operator endpoints | `agents_only`, `admins_only` |
 | `test_the_signed_top_up_...` | `POST wallet/agent/topup/` | `agent_auth_invalid`, `agent_ip_not_allowed` |
 | `test_the_agent_app_top_up_...` | `POST wallet/agent/topup/proxy/` | `target_not_a_client`, `agent_not_active`, `daily_limit_exceeded`, `monthly_limit_exceeded` |
-| `test_an_idempotency_clash_...` | top-up, transfer | `request_in_flight`, `idempotency_key_reused` |
+| `test_an_idempotency_clash_...` | top-up, transfer | `request_in_flight`, `idempotency_conflict` (see KEY_ON_ANOTHER_WRITE) |
 | `test_a_transfer_...` | `POST wallet/client/transfer/` | `clients_only`, `transfer_refused` |
 | `test_a_reversal_...` | `POST wallet/admin/reversal/` | `insufficient_balance`, `currency_mismatch`, `reversal_refused` |
 | `test_a_second_subscription_...` | `POST subscription/v1/subscriptions/` | `subscription_exists`; field code `invalid_plan` |
@@ -75,6 +75,16 @@ def _plan(tag, price="5000.00"):
 
 def _code(resp):
     return resp.status_code, resp.json().get("code")
+
+
+#: An idempotency key already spent on a different request. A deliberate, pre-release
+#: contract change (BACKEND_BUGS B-092, 2026-09-24): minted here that day as
+#: `idempotency_key_reused`, it named the refusal the older `idempotency_conflict` (the
+#: set, workout and chat writes: "this id already names another write, pick a new one")
+#: already names, so it was unified onto that one before it shipped (API_CONTRACT.md
+#: §6). The status stays 422, and the test still asserts what it protects: the two
+#: clashes answer two different codes.
+KEY_ON_ANOTHER_WRITE = "idempotency_conflict"
 
 
 # ======================================================================= wallet
@@ -173,7 +183,7 @@ def test_an_idempotency_clash_says_whether_retrying_helps(make_user, api):
     first = _post(api(agent), url, {**body, "amount": "10.00"})
     assert first.status_code == 200, first.content
     assert _code(_post(api(agent), url, {**body, "amount": "20.00"})) == \
-        (422, "idempotency_key_reused")
+        (422, KEY_ON_ANOTHER_WRITE)
 
     # A first attempt still running: the row is claimed and not yet finished.
     trainer = make_user("c0924_idem_t", user_type="trainer")

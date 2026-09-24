@@ -272,6 +272,34 @@ per-address limits above have `code: "throttled"`.
   default it replaces. A code a view NAMED is never changed. CONFIRMED by the owner on
   2026-09-24, and applied to every refusal (decision 9); first recorded 2026-09-23, when
   the app session asked for codes on eleven such refusals — BACKEND_BUGS B-054..B-061.)
+- **One refusal, one code (BACKEND_BUGS B-092, 2026-09-24).** Decision 9's builders minted
+  79 codes after the last pushed commit (`4cbb522`). Each was checked against the codes
+  that existed at `4cbb522`; the four that named a refusal an OLDER code already named
+  were moved onto the older code before anything shipped. No code that existed at
+  `4cbb522` was renamed.
+
+  | Minted 2026-09-24 (never shipped) | Now | Where | Why the older one |
+  |---|---|---|---|
+  | `trainers_only` | `not_a_trainer` | every `/api/auth/trainer/*` route (403) | the routine and mediakit trainer routes' code for "the caller is not a trainer" |
+  | `already_your_client` | `already_with_this_trainer` | `POST /api/auth/trainer/assign-client/` (400) | `client/request-trainer/`'s code for the same state, an approved pair; the sibling `request_already_pending` was already shared by both sides |
+  | `idempotency_key_reused` | `idempotency_conflict` | top-ups, `wallet/client/transfer/`, `wallet/admin/reversal/` (422, unchanged) | the set, workout and chat writes' code for "this id already names a different write; pick a new one" |
+  | `field_required` (+ `field`) | `missing_fields` (+ `fields`, `field` kept) | `POST /api/routine/exercises/create-with-image/` (400) | the diet and subscription routes' code for a missing required field |
+
+  Checked and kept, because the older code names a different fact: `client_not_found`
+  (404 on the routine assign routes: the id names no CLIENT, perhaps an existing trainer;
+  `user_not_found` means no active account at all), `user_not_accessible` (covers a client
+  reading someone else, where `not_your_client` is the trainer-side case only),
+  `no_pending_request` (400, no id sent; `request_not_found` is a 404 for an id),
+  `no_assigned_trainer` (`no_relation` is chat's "not a pair"), `trainers_cannot_generate`
+  (admins may generate; it is not `clients_only`), `target_not_a_client` (the TARGET of a
+  top-up; `clients_only` / `not_client` are about the caller), `daily_limit_exceeded` /
+  `monthly_limit_exceeded` (a money cap per currency and period; `quota_exhausted` is the AI
+  allowance), `subscription_exists` (`subscription_active` is running cover), the object-
+  specific `*_not_yours` / `not_owner` codes, and the `<field>_required` codes, which follow
+  the older `trainer_id_required` / `request_id_required` / `token_required` pattern.
+  Two OLDER synonym pairs remain because both existed at `4cbb522`: `not_trainer` (diet
+  trainer routes) beside `not_a_trainer`, and `not_client` (diet service) beside
+  `clients_only`.
 - Adding a new push `event_type` is additive — the app must ignore `data.type` values it
   does not recognise rather than crash.
 
@@ -414,7 +442,29 @@ A trainer's email address is never sent to a client: `email` on
 (email, picture, age, gender, goals, activity level, note) only for a request the client
 sent, and not once either of the two has blocked the other — that row keeps the short
 shape (`request_id`, `client_id`, `client_name`, `client_username`, `initiated_by`,
-`created_at`) so it can still be declined. `client/request-trainer/` answers 404
+`created_at`) so it can still be declined.
+
+What wiring the trainer shell found (BACKEND_BUGS B-089, B-093, 2026-09-24; additive):
+
+- `trainer/pending-requests/`: every row gains the QUOTE — `agreed_rate` /
+  `agreed_currency` (the price quoted with the request, in the trainer's currency when
+  the operator's rate converts it), `trainer_net` (that price less the platform's
+  commission, split by the code that splits a paid month) and `commission_rate` (a
+  fraction, `0.2`); all four null on a build that may not show a coaching fee, the first
+  three when no price was quoted. The full row (a request the client sent, no block)
+  gains `training_goal`, `training_place`, `training_days_per_week` (as the profile
+  payloads send them: a code, or `""` / null while unanswered). A trainer's own
+  invitation row gains `note`, what they wrote with it. Health notes, injury areas and
+  training history are never on a pending row. The row is one function,
+  `users.trainer_requests.pending_request_row`.
+- `trainer/assign-client/` takes `message` (or `note`), optional: the invitation's note,
+  the client's request-note rule (text, stripped, at most 500 characters; 400
+  `invalid_note` / `note_too_long`). The client reads it as `note` on
+  `client/trainer-invites/` and as `trainer_note` on `client/request-status/`, which also
+  gains `initiated_by`; `note` there stays the client's own (`""` on an invitation). A
+  note is `""` while either of the two has blocked the other.
+
+`client/request-trainer/` answers 404
 `not_found` for no such trainer and for a `trainer_id` that is not a number, and both
 unassign routes answer 409 `refund_failed` when a held month cannot be returned.
 
@@ -688,6 +738,16 @@ nothing already shipped moves.
 |---|---|---|---|
 | `GET, POST` | `/api/v1/trainer/exercise-media/` | auth (trainer, or admin with `trainer_id`) | `TrainerExerciseMediaView` |
 | `DELETE` | `/api/v1/trainer/exercise-media/{id}/` | auth (the asset's trainer, or admin) | `TrainerExerciseMediaDetailView` |
+| `GET` | `/api/v1/trainer/media-kit/` | auth (trainer, or admin with `?trainer_id=`) | `TrainerMediaKitView` |
+
+`GET media-kit/` (BACKEND_BUGS B-094) is the trainer's OWN kit, whether or not the
+directory lists them (the public card `/api/v1/trainers/{id}/` answers 404 for a trainer
+it does not show): `{trainer_id, kit_status: {complete, filled, required, missing},
+filled, total, slots: [{slot, kind, required, done, media}], media}`. `slots` is the eight
+`trainer.*` slots in slot-list order; `media` is the public card's `{slot: payload}`, an
+empty slot absent; `kit_status` counts the required slots (what featuring and first place
+need), `filled` / `total` all eight. `403 not_a_trainer` for anyone else. Same on every
+build.
 
 `GET ?exercise_id=` answers `{exercise_id, trainer_id, count, limit, media}` — what THIS
 trainer has on that exercise, never the catalogue's and never another coach's.
@@ -1638,7 +1698,7 @@ English). Prefix `/api/routine/`.
 | Endpoint | New codes |
 |---|---|
 | `DELETE exercises/{id}/` | 409 `exercise_has_history` |
-| `POST exercises/create-with-image/` | 400 `field_required` (+ `field`) |
+| `POST exercises/create-with-image/` | 400 `missing_fields` (+ `fields`, `field`; minted as `field_required` and unified before it shipped, B-092) |
 | `DELETE routines/{id}/` | 409 `routine_has_history` |
 | `POST routines/{id}/assign_to_client/` | 400 `client_id_required`, `not_your_client`, `already_assigned`; 404 `client_not_found`; 500 `routine_assign_failed` |
 | `POST routines/{id}/unassign_from_client/` | 400 `client_id_required`, `not_your_client`, `not_assigned`; 404 `client_not_found`; 500 `routine_unassign_failed` |
@@ -1691,9 +1751,9 @@ docstrings carry the full tables.
 | `POST /api/auth/resend-otp/` | 400 `email_required` (with `field`) |
 | `POST /api/auth/forgot-password/confirm/` | 400 `reset_token_invalid` (no such token), 400 `reset_token_expired` (used, or its 15 minutes are over) |
 | `POST /api/auth/device-token/` | 400 `token_required` (with `field`) — the code `DELETE` already answers |
-| `trainer/profile/` (GET, POST), `trainer/clients/`, `trainer/assign-client/`, `trainer/unassign-client/`, `trainer/pending-requests/`, `trainer/respond-to-request/`, `trainer/client-profile/` (list and `{id}/`) | 403 `trainers_only` for a caller who is not a trainer (`client-profile/`: nor an admin) |
+| `trainer/profile/` (GET, POST), `trainer/clients/`, `trainer/assign-client/`, `trainer/unassign-client/`, `trainer/pending-requests/`, `trainer/respond-to-request/`, `trainer/client-profile/` (list and `{id}/`) | 403 `not_a_trainer` for a caller who is not a trainer (`client-profile/`: nor an admin) — the code the routine and mediakit trainer routes answer (minted as `trainers_only` and unified before it shipped, B-092) |
 | `client/profile/` (GET, POST), `client/available-trainers/`, `client/request-trainer/`, `client/unassign-trainer/`, `client/cancel-trainer-request/`, `client/respond-to-invite/`, `client/trainer-invites/`, `client/request-status/` | 403 `clients_only` for a caller who is not a client — the code `/api/v1/coaching/current/` and `/api/v1/trainers/matches` already answer |
-| `POST /api/auth/trainer/assign-client/` | 400 `client_id_required` (with `field`), 400 `already_your_client`, 400 / 409 `request_already_pending` (the code the client side answers for the same state), 404 `not_found` |
+| `POST /api/auth/trainer/assign-client/` | 400 `client_id_required` (with `field`), 400 `invalid_note` / `note_too_long` (the invitation note, B-093), 400 `already_with_this_trainer` (the code the client side answers for an approved pair; minted as `already_your_client` and unified before it shipped, B-092), 400 / 409 `request_already_pending` (the code the client side answers for the same state), 404 `not_found` |
 | `POST /api/auth/trainer/unassign-client/` | 400 `client_id_required` (with `field`), 400 `not_your_client`, 404 `not_found` |
 | `GET /api/auth/trainer/client-profile/{id}/` | 403 `not_your_client`, 404 `not_found` |
 | `POST /api/auth/client/unassign-trainer/` | 400 `no_assigned_trainer` |
@@ -1730,7 +1790,7 @@ kept beside the code. The views' docstrings carry the full tables.
 | `wallet/admin/*`, `subscription/v1/admin/management/` | `403 admins_only` (not an operator) |
 | `POST wallet/agent/topup/` (signed) | `401 agent_auth_invalid` — one code for a missing, stale or mismatched `X-Agent-Auth`, an unknown key and a bad signature; `403 agent_ip_not_allowed` |
 | `POST wallet/agent/topup/`, `.../topup/proxy/` | `403 agent_not_active`; `400 target_not_a_client`; `429 daily_limit_exceeded` / `monthly_limit_exceeded` (the agent's cap in that currency — not the rate limiter, and `Retry-After` does not lift it) |
-| top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_key_reused` (the key belongs to a different request; retrying never helps) |
+| top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_conflict` (the key belongs to a different request; retrying never helps — the code the set, workout and chat writes answer for the same fact; minted as `idempotency_key_reused` and unified before it shipped, B-092) |
 | `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved) |
 | `POST wallet/admin/reversal/` | `400 insufficient_balance` (the wallet that received the money no longer holds it), `400 currency_mismatch` (a wallet changed currency), `400 reversal_refused` — these three were one `bad_request` |
 | `POST subscription/v1/subscriptions/` | `400 subscription_exists` (one per user: `change-plan/`, `upgrade/` or `renew/` instead); a `plan_id` naming no active plan stays `validation_error`, its field code now `invalid_plan` (was `invalid`) |
@@ -1937,6 +1997,10 @@ nobody knows when the person stopped.
   previous}`, 25 a page, `?page_size=` up to 100. `dashboard` keeps its key and row shape.
 - `trainer/client-progress/{id}/` `recent_activity[].routine_name` is in the coach's
   language (`Routine.translations`), as every other routine name.
+- `trainer/client-progress/recent/` `last_session` gains `duration_seconds` (BACKEND_BUGS
+  B-095, additive): seconds as a decimal string, exactly `client-progress/{id}/`
+  `recent_activity[].duration`. `last_session.duration` stays as legacy display text
+  (`"47.0 minutes"`), now in the reader's language; never parse it.
 - A day that completed itself from its sets moves back from `completed` in
   `routine-progress/` when those sets are deleted; a day the person closed (`completed`,
   `confirmed_unlogged`, `bulk_complete`, or `routine-progress/`) stays completed. The

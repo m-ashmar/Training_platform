@@ -4655,3 +4655,8 @@ msgstr "هذا البرنامج التدريبي غير مُسنَد إليك."
 #: users/views.py
 msgid "That client is no longer available"
 msgstr "هذا العميل لم يعد متاحاً"
+
+#: routine/serializers.py
+#, python-format
+msgid "%(minutes)s minutes"
+msgstr "%(minutes)s دقيقة"

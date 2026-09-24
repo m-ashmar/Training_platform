@@ -6,7 +6,8 @@ so.
 """
 from django.urls import path
 
-from .trainer_views import TrainerExerciseMediaDetailView, TrainerExerciseMediaView
+from .trainer_views import (TrainerExerciseMediaDetailView, TrainerExerciseMediaView,
+                            TrainerMediaKitView)
 
 app_name = "trainer_media"
 
@@ -22,4 +23,6 @@ urlpatterns = [
     path("exercise-media/", TrainerExerciseMediaView.as_view(), name="exercise-media"),
     path("exercise-media/<int:asset_id>/", TrainerExerciseMediaDetailView.as_view(),
          name="exercise-media-detail"),
+    # The trainer's own kit, read (BACKEND_BUGS B-094). A GET, so one spelling.
+    path("media-kit/", TrainerMediaKitView.as_view(), name="media-kit"),
 ]
