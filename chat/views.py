@@ -169,8 +169,9 @@ class ConversationMessagesView(APIView):
     optional). `body` is capped at 4000 characters and is stored exactly as typed.
     201 with the message. A repeat of a `client_uuid` already used answers **200** with
     the FIRST message and writes nothing, so a retry after a lost answer is safe.
-    400 `validation_error` (an empty or whitespace-only body: `blank_message`),
-    `invalid_client_uuid`.
+    400 `validation_error` (an empty or whitespace-only body: `blank_message` on
+    `field_errors.body`). 400 `invalid_client_uuid` — a `client_uuid` that is not a
+    UUID; that is the top-level `code`, and `field_errors.client_uuid` carries it too.
     409 `idempotency_conflict` — that id is already the other person's message here.
     403 `no_relation` — the two are not an approved trainer and client, and never had a
     paid coaching month.
@@ -221,36 +222,55 @@ class MediaMessageView(APIView):
     `CommonMiddleware` could redirect a POST, and a redirected POST loses its body.
 
     Each kind goes through the platform's existing guard (`chat/media.py`): a photo is
-    content-checked, capped at 5 MB and RE-ENCODED (no EXIF, no GPS reaches the other
-    person); a video or voice note is identified from its own bytes and capped at
+    capped at 5 MB (checked first), content-checked and RE-ENCODED (no EXIF, no GPS
+    reaches the other person), and a REFUSED photo is not kept anywhere — no sample of
+    it is quarantined; a video is identified from its own bytes and capped at
     `MEDIA_VIDEO_MAX_BYTES` (64 MB) and `MEDIA_VIDEO_MAX_SECONDS` (90 s) — the media
-    kit's numbers. The stored file is private: its URL is signed, expires, and appears
+    kit's numbers; a voice note the same way, under `CHAT_VOICE_MAX_BYTES` (10 MB) and
+    the same 90 s. The stored file is private: its URL is signed, expires, and appears
     only in answers the two people in this conversation receive.
+
+    A DAILY ALLOWANCE per sender: `CHAT_MEDIA_DAILY_COUNT` files (60) and
+    `CHAT_MEDIA_DAILY_BYTES` (512 MB) over any rolling 24 hours, counting every photo,
+    voice note and video the sender sent in that window — taken-back ones too, since
+    their files are kept — and the file being sent. Past either, 429
+    `media_quota_exceeded` with `retry_after` and `retry_after_seconds` (and a
+    `Retry-After` header): the seconds until the OLDEST of those files leaves the
+    window, the earliest moment the answer can change. It is decided from the upload's
+    size, before its bytes are read. Text messages never count and are never refused
+    by it. (Numbers proposed, not yet confirmed by the owner.)
 
     201 with the message (the `MessageSerializer` shape: `kind`, `body`, `media`,
     `exercise`, ...). A repeat of a `client_uuid` answers **200** with the FIRST message
-    and stores nothing. The other side hears `message.new` on the socket and gets the
-    `chat_message` push (the caption, or "Photo" / "Voice note" / "Video" in their
-    language — never a link).
+    and stores nothing — it is answered even past the daily allowance. The other side
+    hears `message.new` on the socket and gets the `chat_message` push (the caption, or
+    "Photo" / "Voice note" / "Video" in their language — never a link).
 
-    Every refusal, and its `code`, in the order it is decided:
+    Every refusal, and its `code`, in the order it is decided — this is every code the
+    route can answer:
 
     | status | `code` | when |
     |---|---|---|
+    | 411 | `length_required` | a chunked body with no `Content-Length` (every POST of the API) |
+    | 413 | `payload_too_large` | the body is over the route's ceiling, `MEDIA_VIDEO_MAX_BYTES` + 1 MB |
+    | 429 | `rate_limited` | the hourly allowance every route shares (`retry_after`) |
+    | 401 | `not_authenticated`, `token_not_valid` | no token; a token that is expired, forged or not an access token |
+    | 415 | `unsupported_media_type` | the body is not `multipart/form-data` (or a urlencoded form, which carries no file) |
+    | 400 | `parse_error` | a multipart body that cannot be parsed (no boundary, say) |
     | 404 | `not_found` | no such conversation, or not the caller's (never 403) |
+    | 400 | `invalid_client_uuid` | `client_uuid` is not a UUID — the top-level `code`, and `field_errors.client_uuid` |
     | 409 | `idempotency_conflict` | `client_uuid` is the other person's message here |
-    | 400 | `invalid_client_uuid` | `client_uuid` is not a UUID |
     | 400 | `validation_error` | a form field is wrong (`field_errors` names it: a `kind` that is not `image`/`voice`/`video`, a caption over 4000 characters, a non-numeric `exercise_id`) |
     | 400 | `exercise_only_on_video` | `exercise_id` on a photo or a voice note |
     | 400 | `unknown_exercise` | an exercise the sender may not see, or none by that id |
     | 403 | `no_relation`, `blocked` | the pair rule, exactly as a text send |
     | 403 | `coaching_frozen`, `coaching_unpaid`, `coaching_ended` | the coaching cannot be used (with `trainer_id`); the thread stays readable |
+    | 429 | `media_quota_exceeded` | the sender's daily allowance is spent (above) |
     | 400 | `media_file_required` | no `file` part |
-    | 400 | `media_not_a_video`, `media_video_too_large`, `media_video_too_long` | a video the guard refused |
-    | 400 | `media_not_audio`, `media_audio_too_large`, `media_audio_too_long` | a voice note the guard refused |
-    | 400 | `invalid_mime_type`, `file_too_large`, `unreadable_image`, `unsupported_format`, `image_too_many_pixels`, `image_dimensions_too_large`, `empty_file`, `dangerous_extension`, `file_validation_error` | a photo the platform's image guard refused (its own codes) |
-    | 413 | `payload_too_large` | the body itself is over the route's ceiling |
-    | 429 | `rate_limited` | the hourly allowance every route shares |
+    | 400 | `media_not_a_video`, `media_video_too_large`, `media_video_too_long`, `empty_file` | a video the guard refused: not MP4/MOV/WebM by its bytes, over 64 MB, declaring over 90 s, or empty |
+    | 400 | `media_not_audio`, `media_audio_too_large`, `media_audio_too_long`, `empty_file` | a voice note the guard refused: not M4A/Ogg/WebM by its bytes, over 10 MB, declaring over 90 s, or empty |
+    | 400 | `file_too_large`, `empty_file`, `dangerous_extension`, `invalid_mime_type`, `corrupt_image`, `invalid_aspect_ratio`, `unreadable_image`, `unsupported_format`, `image_dimensions_too_large`, `image_too_many_pixels` | a photo the platform's image guard refused, respectively: over 5 MB; empty; a file name ending in an executable's extension; not JPEG/PNG/GIF/WebP by its bytes (a HEIC is refused here); broken at its header; longer than 10:1 on one side; broken past its header (a truncated or half-downloaded photo); a format the re-encoder does not write; over 10,000 px a side; over 40 MP (or an animation over its frame budget) |
+    | 400 | `mime_detection_failed`, `file_validation_error` | the image guard itself failed on the file |
 
     Nothing here differs by build: a message is not a product.
     """

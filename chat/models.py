@@ -141,9 +141,15 @@ class Message(models.Model):
     A media message keeps its file for as long as the row lives, tombstone included —
     the same rule as the text, which stays in the column after the sender takes it
     back: the row is a record (a report may need it), and no endpoint serves either
-    once `deleted_at` is set. The file goes when the ROW goes: erasure deletes the
-    conversation, the messages cascade, and `training_platform/signals.py` removes each
-    stored file once that commits.
+    once `deleted_at` is set. The file goes when the ROW goes, removed once the delete
+    commits — but NOT by a per-row delete receiver. Such a receiver switches off
+    Django's fast delete for this table, so erasing a coach would load every message
+    of every thread into memory to delete it (review 2026-09-24). The files are swept
+    by the two paths that delete messages in bulk instead: a conversation's own delete
+    (`chat.media.delete_conversation_files`, a `pre_delete` on `Conversation`, which
+    the cascade from an erased or deleted account also fires) and the erasure of the
+    messages a person sent (`training_platform/privacy/sources.py`). Deleting a
+    Message row on its own — nothing in the product does — leaves its file.
     """
     conversation = models.ForeignKey(
         Conversation, on_delete=models.CASCADE, related_name='messages')
@@ -165,6 +171,12 @@ class Message(models.Model):
     #: A photo's pixel size, so the app can lay the bubble out before it loads.
     width = models.PositiveIntegerField(null=True, blank=True)
     height = models.PositiveIntegerField(null=True, blank=True)
+    #: What this message keeps in storage, in bytes: the stored file's size (a photo's
+    #: re-encode, a voice note or video as uploaded). Null on text, and on a media row
+    #: written before this column existed. Summed by the sender's daily media quota
+    #: (`chat.media.require_media_quota`) so the sum is exact, not read back from the
+    #: bucket.
+    size_bytes = models.PositiveBigIntegerField(null=True, blank=True)
     #: The move a video shows. A client's video that names one is a form check.
     exercise = models.ForeignKey(
         'routine.Exercise', on_delete=models.SET_NULL, null=True, blank=True,
@@ -201,6 +213,10 @@ class Message(models.Model):
             models.Index(fields=['conversation', 'id'], name='chat_msg_formcheck_idx',
                          condition=Q(kind='video', exercise__isnull=False,
                                      deleted_at__isnull=True)),
+            # The sender's daily media quota: their media in the last 24 hours. Partial,
+            # so a coach's thousands of text messages are not in it.
+            models.Index(fields=['sender', 'created_at'], name='chat_msg_media_quota_idx',
+                         condition=Q(kind__in=MEDIA_KINDS)),
         ]
 
     def __str__(self):

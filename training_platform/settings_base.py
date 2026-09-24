@@ -1034,6 +1034,21 @@ LARGE_UPLOAD_PATHS = {
     '/api/v1/chat/media/': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
 }
 
+# Chat media: how much one person may put into storage (review 2026-09-24). A chat file
+# is kept for as long as its message row, tombstone included, so without a bound one
+# account could write 64 MB per request at the hourly rate limit into the paid bucket.
+# Per SENDER, over a ROLLING 24 hours, counting every photo, voice note and video they
+# sent in that window (taken-back ones too: their files stay) — decided before the upload
+# is decoded or stored, answered 429 `media_quota_exceeded` (chat/media.py
+# `require_media_quota`). Bytes are what each message keeps in storage
+# (`chat.Message.size_bytes`).
+# PROPOSED NUMBERS — the owner has not confirmed them: 60 files and 512 MB a day, and a
+# voice note capped at 10 MB (a 90 s AAC note is ~1.5 MB; the 64 MB video cap made a
+# voice note a way to store anything the audio sniffer accepts).
+CHAT_MEDIA_DAILY_COUNT = int(get_env('CHAT_MEDIA_DAILY_COUNT', 60))
+CHAT_MEDIA_DAILY_BYTES = int(get_env('CHAT_MEDIA_DAILY_BYTES', 512 * 1024 * 1024))
+CHAT_VOICE_MAX_BYTES = int(get_env('CHAT_VOICE_MAX_BYTES', 10 * 1024 * 1024))
+
 # WHERE an exercise's video/photo media may point (routine/views.py
 # ExerciseAddMediaView). Any http(s) URL was accepted, so one coach could aim every
 # one of their clients' players at a host nobody here controls — a tracker, a paywall,

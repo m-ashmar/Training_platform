@@ -254,7 +254,13 @@ def _rate_limited(user):
 
 
 def _code_of(exc):
-    """The `code` the app branches on, whatever shape the exception carries."""
+    """The `code` the app branches on, whatever shape the exception carries.
+
+    A `service_code` first, as the REST exception handler reads it, so a refusal names
+    the same code on both doors (`invalid_client_uuid`, `chat.services`)."""
+    service_code = getattr(exc, 'service_code', None)
+    if isinstance(service_code, str) and service_code:
+        return service_code
     codes = exc.get_codes()
     while isinstance(codes, (list, tuple)) and codes:
         codes = codes[0]

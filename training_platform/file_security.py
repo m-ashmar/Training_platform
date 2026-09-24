@@ -57,17 +57,25 @@ class FileSecurityValidator:
         '.jar', '.app', '.deb', '.pkg', '.dmg', '.php', '.asp', '.jsp'
     ]
     
-    def validate_file(self, file, file_type='image', scan_content=True) -> Dict[str, Any]:
+    def validate_file(self, file, file_type='image', scan_content=True,
+                      quarantine=True) -> Dict[str, Any]:
         """
         Comprehensive file validation
-        
+
         Args:
             file: Django UploadedFile object
             file_type: Type of file ('image', 'document')
-            
+            quarantine: keep a sample of a refused file (`_quarantine_file`). True
+                everywhere except where the upload is a private message: a refused
+                chat photo is a person's own picture — its first 64 KB carry the EXIF,
+                the GPS tag and the embedded thumbnail — and a sample of it would sit
+                under `quarantine/`, outside the conversation and outside every erasure
+                (review 2026-09-24). There the refusal and its `code` are the whole
+                answer, and nothing of the file is kept.
+
         Returns:
             Dict with validation results
-            
+
         Raises:
             ValidationError: If file is invalid or dangerous
         """
@@ -117,11 +125,13 @@ class FileSecurityValidator:
             
         except ValidationError as e:
             logger.warning(f"File validation failed: {file.name} - {e}")
-            self._quarantine_file(file)
+            if quarantine:
+                self._quarantine_file(file)
             raise
         except Exception as e:
             logger.error(f"File validation error: {file.name} - {e}")
-            self._quarantine_file(file)
+            if quarantine:
+                self._quarantine_file(file)
             raise ValidationError(_("File validation failed."), code="file_validation_error")
     
     def _validate_file_existence(self, file):
@@ -551,7 +561,7 @@ FORMAT_ALIASES = {'MPO': 'JPEG'}
 MAX_ANIMATION_FRAMES = 300
 
 
-def process_uploaded_image(file, max_bytes=None):
+def process_uploaded_image(file, max_bytes=None, quarantine=True):
     """
     Validate and normalise an uploaded image. This is the ONLY function upload
     views should use.
@@ -565,10 +575,19 @@ def process_uploaded_image(file, max_bytes=None):
       * no pixel-dimension cap, so a decompression bomb could OOM the container;
       * files were stored byte-identical, retaining EXIF/GPS metadata.
 
+    `max_bytes` is checked FIRST, before the validator runs, so an oversize file is
+    refused (`file_too_large`) without a quarantine sample being taken. `quarantine`
+    is passed to `FileSecurityValidator.validate_file`: False for a private upload
+    whose refused bytes must not be kept anywhere (the chat's photos).
+
+    A file that passes the validator and then cannot be decoded — a JPEG cut short
+    (a half-downloaded gallery photo passes `verify()`, which reads no scan data),
+    a malformed frame, a decompression bomb Pillow itself refuses — is refused as
+    `unreadable_image`. It used to escape as Pillow's OSError: a 500 on every route.
+
     Returns (ContentFile, extension) — a re-encoded image safe to store.
     Raises ValidationError on anything suspicious.
     """
-    import io
     from django.core.files.base import ContentFile
 
     if file is None:
@@ -583,7 +602,8 @@ def process_uploaded_image(file, max_bytes=None):
     # Magic-byte + MIME + extension checks. No byte-pattern scan: the file is decoded and
     # re-encoded below, so no payload in it can reach storage, and the scan matched
     # ordinary JPEG data — 36 of 40 genuine 512 px photos were refused (B-002).
-    FileSecurityValidator().validate_file(file, 'image', scan_content=False)
+    FileSecurityValidator().validate_file(file, 'image', scan_content=False,
+                                          quarantine=quarantine)
 
     # Decode with a guard against decompression bombs.
     file.seek(0)
@@ -620,7 +640,28 @@ def process_uploaded_image(file, max_bytes=None):
         raise ValidationError(_("Image has too many pixels."), code="image_too_many_pixels")
 
     # Re-encode. This strips EXIF/GPS and any appended payload (polyglots), because
-    # only decoded pixel data is written back out.
+    # only decoded pixel data is written back out. The first full DECODE happens here,
+    # so a file that is broken past its header fails here and not before.
+    try:
+        encoded = _reencode(file, fmt, n_frames)
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+        # OSError: "image file is truncated", a broken scan or frame. SyntaxError and
+        # ValueError: what Pillow's plugins raise for a malformed chunk or frame.
+        # DecompressionBombError: Pillow's own limit (not an OSError subclass).
+        logger.info("image refused at decode", exc_info=True)
+        raise ValidationError(_("File is not a readable image."), code="unreadable_image")
+
+    return ContentFile(encoded), FORMAT_TO_EXTENSION[fmt]
+
+
+def _reencode(file, fmt, n_frames) -> bytes:
+    """Decode `file` and write it back out as `fmt`, with no metadata. The bytes.
+
+    Raises whatever Pillow raises on a file it cannot decode; `process_uploaded_image`
+    is the only caller and turns that into `unreadable_image`.
+    """
+    import io
+
     file.seek(0)
     img = Image.open(file)
     img.load()
@@ -655,9 +696,7 @@ def process_uploaded_image(file, max_bytes=None):
         save_kwargs.update(save_all=True, append_images=frames[1:],
                            duration=gif_duration, loop=gif_loop, disposal=2)
     img.save(out, **save_kwargs)
-    out.seek(0)
-
-    return ContentFile(out.read()), FORMAT_TO_EXTENSION[fmt]
+    return out.getvalue()
 
 
 class SecureImageField(serializers.ImageField):

@@ -73,15 +73,26 @@ def replay(conversation, sender, client_uuid):
 
 
 def parse_client_uuid(raw):
-    """The app's id as DRF's UUIDField reads it, or None. A malformed one is a 400."""
+    """The app's id as DRF's UUIDField reads it, or None. A malformed one is a 400
+    whose top-level `code` is `invalid_client_uuid`, with the same code on
+    `field_errors.client_uuid`.
+
+    DRF's ValidationError, because the socket catches `APIException` and nothing else
+    (`chat/consumers.py`). DRF's alone reached the response as `code:
+    validation_error` — the exception handler names a DRF ValidationError by its
+    `service_code` — so the code the contract documents never reached the app on the
+    text route or the media route (review 2026-09-24). `service_code` carries it.
+    """
     if raw in (None, ''):
         return None
     try:
         return (_uuid.UUID(int=raw) if isinstance(raw, int) and not isinstance(raw, bool)
                 else _uuid.UUID(str(raw)))
     except (ValueError, TypeError, AttributeError):
-        raise ValidationError({'client_uuid': [_('Not a valid UUID.')]},
-                              code='invalid_client_uuid')
+        refused = ValidationError({'client_uuid': [_('Not a valid UUID.')]},
+                                  code='invalid_client_uuid')
+        refused.service_code = 'invalid_client_uuid'
+        raise refused
 
 
 def send_message(conversation, sender, data):
@@ -154,14 +165,16 @@ def send_media_message(sender, data, upload):
     `data` is the multipart form: `{conversation, kind, body?, exercise_id?,
     client_uuid?}`; `upload` is the file. The order is the text send's, with the file
     LAST: membership (404), the replay (a retry answers the first message and stores
-    nothing), the form (400), the pair rule (403 — the same `may_message` as text), and
-    only then the bytes, so a refused sender costs no decode and no storage. The file
-    and the row are written together; if the row cannot be written, the file is removed
-    again (`chat.media.discard`), so a refusal or a race never leaves bytes that nothing
-    points at.
+    nothing), the form (400), the pair rule (403 — the same `may_message` as text), the
+    sender's daily media quota (429 `media_quota_exceeded`, from the upload's size
+    alone: `chat.media.require_media_quota`), and only then the bytes, so a refused
+    sender costs no decode and no storage. The file and the row are written together;
+    if the row cannot be written, the file is removed again (`chat.media.discard`), so
+    a refusal or a race never leaves bytes that nothing points at.
 
-    Raises DRF exceptions for the refusals the text send shares, and Django's
-    `ValidationError` (with its `code`) for the upload's own — the view renders both.
+    Raises DRF exceptions for the refusals the text send shares and for the quota, and
+    Django's `ValidationError` (with its `code`) for the upload's own — the view
+    renders both.
     """
     from rest_framework.exceptions import NotFound
 
@@ -193,6 +206,7 @@ def send_media_message(sender, data, upload):
                  else conversation.trainer)
     require_may_message(sender, recipient)
 
+    media.require_media_quota(sender, upload)
     prepared = media.prepare(kind, upload)
     message = Message(conversation=conversation, sender=sender, kind=kind,
                       body=form.validated_data.get('body') or '', exercise=exercise,
