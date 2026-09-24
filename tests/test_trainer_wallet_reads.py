@@ -403,7 +403,7 @@ def test_b101_kind_filters_exactly_as_every_row_is_labelled(make_user, api):
     ({"kind": "salary"}, "bad_kind"),
 ])
 def test_b101_every_refusal_names_its_code(make_user, api, path, params, code):
-    user = make_user(f"twr_ref_{abs(hash((path, code, tuple(params.items())))) % 10**8}")
+    user = make_user("twr_ref")
     response = api(user).get(path, params)
     assert response.status_code == 400, response.content
     body = response.json()
@@ -530,8 +530,11 @@ def test_b101_the_summary_is_the_same_on_every_build(make_user, api):
     (_c, theirs) = clients[0]
     _row(theirs, mine, "5.00", _at(datetime.date(2026, 9, 1)), money_type="PLATFORM_SUB")
     params = {"since": "2026-09-01", "until": "2026-09-30"}
-    apk = api(trainer).get("/api/wallet/transactions/summary/", params,
-                           HTTP_X_APP_CHANNEL="apk").json()
+    answer = api(trainer).get("/api/wallet/transactions/summary/", params,
+                              HTTP_X_APP_CHANNEL="apk")
+    assert answer.status_code == 200, answer.content
+    apk = answer.json()
+    assert apk["totals"]["by_money_type"]["PLATFORM_SUB"]["in"] == "5.00"
     for channel in ("play", "ios", "web", ""):
         assert api(trainer).get("/api/wallet/transactions/summary/", params,
                                 HTTP_X_APP_CHANNEL=channel).json() == apk, channel
