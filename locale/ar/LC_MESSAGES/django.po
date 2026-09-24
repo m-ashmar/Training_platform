@@ -5091,3 +5091,17 @@ msgstr "يجب أن يكون وقت الراحة عدداً صحيحاً من ا
 #, python-format
 msgid "Cannot expand %(names)s. What can be expanded: %(known)s."
 msgstr "لا يمكن توسيع %(names)s. ما يمكن توسيعه: %(known)s."
+
+#: wallet/views.py
+msgid ""
+"This is one leg of a trainer's withdrawal and cannot be reversed on its own. "
+"Fail or cancel the withdrawal instead."
+msgstr ""
+"هذه إحدى حركات طلب سحب لمدرب ولا يمكن عكسها وحدها. أفشِل طلب السحب أو ألغِه "
+"بدلًا من ذلك."
+
+#: payouts/services.py
+msgid ""
+"This withdrawal's money is already back in your balance. Contact support to "
+"close it."
+msgstr "أُعيد مبلغ طلب السحب هذا إلى رصيدك بالفعل. تواصل مع الدعم لإغلاقه."
