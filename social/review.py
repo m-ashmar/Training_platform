@@ -50,8 +50,13 @@ def apply_review(participations, state) -> int:
             if challenge is None:
                 continue
             ids = [pk for pk, _user in by_challenge[challenge_id]]
-            changed += ChallengeParticipation.objects.filter(pk__in=ids).update(
-                review_state=state, review_reason=ChallengeParticipation.REASON_OPERATOR)
+            # Row by row through `save()`, as every console action here: a bulk
+            # UPDATE skips the model (tests/test_regression_gate.py).
+            for row in ChallengeParticipation.objects.filter(pk__in=ids).order_by('id'):
+                row.review_state = state
+                row.review_reason = ChallengeParticipation.REASON_OPERATOR
+                row.save(update_fields=['review_state', 'review_reason'])
+                changed += 1
             touched.update(user for _pk, user in by_challenge[challenge_id])
             write_places(challenge, moved_users=touched, settling=True)
     for user_id in sorted(touched):
