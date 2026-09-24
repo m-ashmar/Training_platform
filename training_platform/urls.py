@@ -64,6 +64,9 @@ urlpatterns = [
     # rather than a stock clip. See mediakit/trainer_views.py; whose media a given
     # viewer is shown is mediakit/resolution.py and nowhere else.
     path('api/v1/trainer/', include('mediakit.urls_trainer', namespace='trainer_media')),
+    # The trainer's home queue: requests, form checks, idle and slipping clients and
+    # programmes ending, in one ordered list (users/attention_queue.py, B-091).
+    path('api/v1/trainer/', include('users.urls_trainer_home', namespace='trainer_home')),
 
     # The design-v2 trainer screens: roster, profile, matches. See users/trainer_views.py.
     path('api/v1/trainers/', include('users.urls_v1', namespace='trainers')),
