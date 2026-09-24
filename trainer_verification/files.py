@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from django.conf import settings
 from django.utils.translation import gettext as _
 
+from training_platform import image_budget
+
 from .slots import IMAGE, PDF, DocumentSlot
 
 JPEG_MAGIC = b"\xff\xd8\xff"
@@ -68,17 +70,18 @@ THUMBNAIL_SIDE = 480
 #: (`verification_image_too_large`).
 DOCUMENT_MAX_PIXELS = 16_000_000
 #: The most one image may cost at its peak, estimated from the header before a pixel is
-#: decoded (`_peak_bytes`). A web machine has 512 MB and Django already holds about
-#: 110 MB of it; the worst accepted input of every kind measures under 135 MB
-#: (`tests/test_review_verification_0924`). Before this, one 170 KB PNG took 540 MB.
-DECODE_BUDGET_BYTES = 128 * 1024 * 1024
+#: decoded — the platform's one estimator (`training_platform.image_budget`), which the
+#: image guard and the media kit use too. A web machine has 512 MB and Django already
+#: holds about 110 MB of it; the worst accepted input of every kind measures under
+#: 135 MB (`tests/test_review_verification_0924`). Before this, one 170 KB PNG took
+#: 540 MB.
+DECODE_BUDGET_BYTES = image_budget.DECODE_BUDGET_BYTES
 #: Pillow keeps 4 bytes a pixel for RGB as for RGBA, and after decoding the path holds at
 #: most ONE working copy beside the image (a flatten, a mode conversion or a turn).
 WORKING_BYTES_PER_PIXEL = 8
-#: What a WebP costs a pixel beyond that: libwebp decodes into two canvases of its own and
-#: hands Pillow a copy of the frame, 4 bytes a pixel each, and the decoder object keeps
-#: its canvases until the image it made is let go (measured: 19 bytes a pixel in all).
-WEBP_EXTRA_BYTES_PER_PIXEL = 12
+#: What a WebP costs a pixel beyond that (`image_budget`: its decoder's canvases and
+#: the frame copy; measured: 19 bytes a pixel in all).
+WEBP_EXTRA_BYTES_PER_PIXEL = image_budget.WEBP_EXTRA_BYTES_PER_PIXEL
 
 #: PDF names that make a document do something when it is opened.
 ACTIVE_PDF_NAMES = {b"JavaScript", b"JS", b"Launch", b"EmbeddedFile", b"EmbeddedFiles",
@@ -192,68 +195,6 @@ def _too_large(max_pixels: int, *, side: bool = False) -> DocumentRefused:
                            max_pixels=max_pixels, max_side=MAX_IMAGE_DIMENSION)
 
 
-def _progressive(img) -> bool:
-    return img.format in ("JPEG", "MPO") and bool(img.info.get("progressive"))
-
-
-def _coefficient_bytes(img, width: int, height: int) -> int:
-    """The table a PROGRESSIVE JPEG is decoded into: every DCT coefficient of the whole
-    image, 64 of 2 bytes for each 8x8 block of each component, in rows and columns
-    padded to whole MCUs. libjpeg keeps it at FULL size whatever `draft` reduces the
-    output to, because every scan refines every block: 3 bytes a pixel for ordinary
-    4:2:0 colour, 6 for unsubsampled colour, 8 for CMYK. The allocator does not hand it
-    back before the working copy is made, so it counts for the whole path."""
-    layers = list(getattr(img, "layer", None) or [])
-    if not layers:
-        return width * height * 8                    # unknown: the worst there is
-    across_max = max(layer[1] for layer in layers) or 1
-    down_max = max(layer[2] for layer in layers) or 1
-    total = 0
-    for _component, across, down, _table in layers:
-        # ceil(ceil(side * sampling / max sampling) / 8) blocks, then whole MCUs.
-        blocks_across = -(-(-(-width * across // across_max)) // 8)
-        blocks_down = -(-(-(-height * down // down_max)) // 8)
-        blocks_across = -(-blocks_across // across) * across
-        blocks_down = -(-blocks_down // down) * down
-        total += blocks_across * blocks_down * 128
-    return total
-
-
-def _peak_bytes(fmt: str, size, coefficients: int) -> int:
-    """What the whole path holds at its peak for an image decoded at `size`, from the
-    header alone: the image and one working copy, and what its decoder adds."""
-    pixels = size[0] * size[1]
-    extra = pixels * WEBP_EXTRA_BYTES_PER_PIXEL if fmt == "WEBP" else coefficients
-    return pixels * WORKING_BYTES_PER_PIXEL + extra
-
-
-def _pixel_limit(fmt: str, coefficients: int, width: int, height: int) -> int:
-    """The most pixels a file of this kind may have: what a refusal tells the trainer."""
-    from training_platform.file_security import MAX_IMAGE_PIXELS
-
-    if fmt == "JPEG" and not coefficients:
-        return MAX_IMAGE_PIXELS                       # a baseline JPEG is decoded smaller
-    per_pixel = WORKING_BYTES_PER_PIXEL
-    if fmt == "WEBP":
-        per_pixel += WEBP_EXTRA_BYTES_PER_PIXEL
-    elif coefficients:                                # progressive: decoded at full size
-        per_pixel += coefficients / max(1, width * height)
-    return min(DOCUMENT_MAX_PIXELS, int(DECODE_BUDGET_BYTES / per_pixel))
-
-
-def _draft_factor(width: int, height: int) -> int:
-    """1, 2, 4 or 8: the least reduction that brings a JPEG within the cap."""
-    for factor in (1, 2, 4, 8):
-        if -(-width // factor) * -(-height // factor) <= DOCUMENT_MAX_PIXELS:
-            return factor
-    return 8
-
-
-#: EXIF orientation -> the turn that makes the picture upright (as `ImageOps.exif_transpose`).
-_UPRIGHT = {2: "FLIP_LEFT_RIGHT", 3: "ROTATE_180", 4: "FLIP_TOP_BOTTOM", 5: "TRANSPOSE",
-            6: "ROTATE_270", 7: "TRANSVERSE", 8: "ROTATE_90"}
-
-
 def _image(data: bytes, digest: str) -> ProcessedDocument:
     """Decode, turn upright, flatten and re-encode, never decoding more than the caps
     allow and never holding more than the image and ONE working copy of it.
@@ -267,7 +208,7 @@ def _image(data: bytes, digest: str) -> ProcessedDocument:
     """
     from PIL import ExifTags, Image
 
-    from training_platform.file_security import MAX_IMAGE_DIMENSION
+    from training_platform.file_security import MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS
 
     try:
         # Opening reads the header only; nothing is decoded before the checks below.
@@ -281,27 +222,28 @@ def _image(data: bytes, digest: str) -> ProcessedDocument:
     if fmt not in {"JPEG", "PNG", "WEBP"}:
         raise _unreadable()
 
-    coefficients = _coefficient_bytes(img, width, height) if _progressive(img) else 0
-    limit = _pixel_limit(fmt, coefficients, width, height)
-    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
-        raise _too_large(limit, side=True)
-    if width * height > limit:
-        raise _too_large(limit)
+    # The caps and the budget, from the header (`image_budget.check`): a baseline JPEG
+    # may have the platform's `MAX_IMAGE_PIXELS`, because it is decoded smaller; a PNG,
+    # a WebP or a progressive JPEG only what it can be decoded in at full size.
+    try:
+        plan = image_budget.check(img, fmt, per_pixel=WORKING_BYTES_PER_PIXEL,
+                                  max_pixels=MAX_IMAGE_PIXELS, max_side=MAX_IMAGE_DIMENSION,
+                                  max_decoded=DOCUMENT_MAX_PIXELS,
+                                  budget=DECODE_BUDGET_BYTES)
+    except image_budget.OverBudget as over:
+        raise _too_large(over.max_pixels, side=over.side)
     if min(width, height) < MIN_IMAGE_SIDE:
         raise DocumentRefused(
             "verification_image_too_small",
             _("This photo is too small to read. It needs at least %(px)s pixels on each side.")
             % {"px": MIN_IMAGE_SIDE}, min_side=MIN_IMAGE_SIDE)
 
-    if fmt == "JPEG":
-        factor = _draft_factor(width, height)
-        if factor > 1:
-            img.draft(None, (width // factor, height // factor))
-    # What will actually be decoded: `draft` may have declined (then nothing shrank).
-    decoded = img.size
-    if decoded[0] * decoded[1] > DOCUMENT_MAX_PIXELS \
-            or _peak_bytes(fmt, decoded, coefficients) > DECODE_BUDGET_BYTES:
-        raise _too_large(limit)
+    # A baseline JPEG over the cap is drafted to the least reduction within it; what
+    # will actually be decoded is checked again (`draft` may decline).
+    try:
+        image_budget.shrink(img, plan)
+    except image_budget.OverBudget as over:
+        raise _too_large(over.max_pixels)
 
     try:
         img.load()
@@ -315,7 +257,7 @@ def _image(data: bytes, digest: str) -> ProcessedDocument:
             img, flat = flat, None
         elif img.mode != "RGB":
             img = img.convert("RGB")
-        turn = _UPRIGHT.get(orientation)
+        turn = image_budget.UPRIGHT.get(orientation)
         if turn is not None:
             img = img.transpose(getattr(Image.Transpose, turn))
     except Exception:
