@@ -190,10 +190,17 @@ def test_challenge_progress_is_counted_from_logged_training(
                                 content_type=JSON).status_code == 201
     with django_capture_on_commit_callbacks(execute=True):
         _log_sets(client, api, rows[0], 1, reps=10, weight=40, start=3)
-        WorkoutSession.objects.create(user=client, routine=routine, day=1,
-                                      status="completed",
-                                      start_time=timezone.now() - timedelta(hours=1),
-                                      end_time=timezone.now())
+        session = WorkoutSession.objects.create(
+            user=client, routine=routine, day=1, status="completed",
+            start_time=timezone.now() - timedelta(hours=1), end_time=timezone.now())
+        # Setup, not assertion (owner, 2026-09-24, F20): a workout counts only with
+        # `MIN_SETS_PER_WORKOUT` credible sets in it (`social/challenge_progress.py`),
+        # so the session carries the three sets this client logged — an empty one
+        # counts nothing (tests/test_owner_decisions_0924_challenges.py).
+        from routine.models import ExerciseSetLog
+
+        ExerciseSetLog.objects.filter(
+            user_exercise_progress__user=client).update(workout_session=session)
     assert {metric: ChallengeParticipation.objects.get(
         user=client, challenge=counted[metric]).current_value for metric in counted} == \
         {"sets": 3.0, "training_days": 1.0, "workouts": 1.0}
