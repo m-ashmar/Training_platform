@@ -82,6 +82,33 @@ def day_names_problem(value):
     return None
 
 
+def merge_day_names(current, changes, days, *, overwrite=True):
+    """`current` with `changes` applied, keeping only days 1..`days`, in day order.
+
+    `changes` is `{"<day>": name}`: a name sets that day, None or "" removes it, a day
+    not named is left as it is. With `overwrite=False` a day that already has a name
+    keeps it (a week's copy never renames a day the trainer named). A key that is not a
+    day number is dropped rather than trusted.
+    """
+    def day(key):
+        try:
+            return int(key)
+        except (TypeError, ValueError):
+            return None
+
+    merged = {k: v for k, v in (current or {}).items()
+              if isinstance(v, str) and v and day(k) is not None}
+    for key, name in (changes or {}).items():
+        if day(key) is None:
+            continue
+        if not name:
+            if overwrite:
+                merged.pop(str(key), None)
+        elif overwrite or str(key) not in merged:
+            merged[str(key)] = name
+    return {k: merged[k] for k in sorted(merged, key=day) if 1 <= day(k) <= days}
+
+
 def exercise_image_upload_path(instance, filename):
     ext = filename.split('.')[-1]
     # Use uuid4 for unique filenames

@@ -240,7 +240,9 @@ def routine_from_template(template, *, created_by, days, customizations=None,
 
 
 def copy_routine(original, **overrides):
-    """A fresh, unassigned copy of `original`: same days, rows and translations.
+    """A fresh, unassigned copy of `original`: same days, rows and translations, with
+    the day names, supersets and load modes (B-104) — «ابدأ من برنامجه الحالي» must not
+    flatten the program it starts from.
 
     For `routines/{id}/copy/` and the console's "duplicate" action, which copied only
     the vestigial `exercises` list and so produced a routine with no days at all.
@@ -251,7 +253,8 @@ def copy_routine(original, **overrides):
                   translations=original.translations, created_by=original.created_by,
                   days=original.days, difficulty_level=original.difficulty_level,
                   estimated_duration=original.estimated_duration, is_active=True,
-                  source_template=original.source_template)
+                  source_template=original.source_template,
+                  day_names=dict(original.day_names or {}))
     values.update(overrides)
     values['translations'] = Routine.forget_translations(
         values.get('translations'), *[f for f in ('name', 'description') if f in overrides])
@@ -261,7 +264,9 @@ def copy_routine(original, **overrides):
             RoutineExercise(routine=copy, exercise_id=rex.exercise_id, sets=rex.sets,
                             reps=rex.reps, rest_time=rex.rest_time, day=rex.day,
                             order=rex.order, weight=rex.weight, duration=rex.duration,
-                            distance=rex.distance, notes=rex.notes)
+                            distance=rex.distance, notes=rex.notes,
+                            superset_group=rex.superset_group, load_mode=rex.load_mode,
+                            load_value=rex.load_value)
             for rex in original.routine_exercises.all()])
         copy.exercises.set(original.exercises.all())
     return copy

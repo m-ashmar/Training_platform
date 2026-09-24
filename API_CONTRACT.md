@@ -2231,6 +2231,44 @@ nobody knows when the person stopped.
   `confirmed_unlogged`, `bulk_complete`, or `routine-progress/`) stays completed. The
   nightly sweep records a day as `unclosed` only when that routine day itself has work.
 
+**The trainer's program builder** (BACKEND_BUGS B-102..B-105, B-107, B-108, B-111;
+design `13-trainer-programs`, 2026-09-24). Additive: every key below is new, no key
+changed meaning, no code renamed. The docstrings named are the contract.
+
+- Exercise rows (`exercises/`, `exercises/create-with-image/`, and every nested
+  `exercise`) gain `is_mine` (the READER wrote it), `created_by_id` (null for the shared
+  catalogue), `name_ar`, `name_en` (both readable and writable; `name` still reads the
+  reader's language with the other as fallback and still writes the reader's
+  language), `equipment` (`barbell` · `dumbbell` · `cable` · `machine` · `bodyweight`,
+  or null) and `equipment_display`. A create needs a name in any of `name`, `name_ar`,
+  `name_en`. A bad `equipment` is 400 `invalid_choice` on the field
+  (`exercises/`) or 400 `equipment_invalid` (`create-with-image/`).
+  `ExerciseSerializer`, `ExerciseCreateWithImageView`.
+- `routine-exercises/` rows gain `superset_group` (1-20 or null; same number, same
+  routine and day = one superset), `load_mode` (`kg` default · `percent` · `rpe`) and
+  `load_value` (null in kg; 1-100 in percent; 1-10 in steps of 0.5 in rpe). `weight`
+  keeps its meaning, the kilograms. Codes on the field: `superset_group_out_of_range`,
+  `load_value_required`, `load_value_out_of_range`, `load_value_not_allowed`,
+  `invalid_choice`. `RoutineExerciseSerializer`.
+- Routines gain `created_by_id` (the author; `created_by` stays display text) and
+  `day_names` (`{"<day>": "<name>"}`, writable, MERGED by day: null or "" removes one
+  day's name, a day not sent keeps it). Codes on `day_names`: `day_names_invalid`,
+  `day_out_of_range`, `too_long`. `routines/{id}/copy/` keeps day names, supersets and
+  load modes. `RoutineSerializer`.
+- `POST routines/{id}/copy_week/ {from_week, to_week, load_factor}` — one week written
+  onto another EMPTY week in one transaction, loads x factor rounded to 0.5 kg (a
+  percentage too; an RPE copied as written; factor 1 copies exactly). A filled target
+  week is refused, never replaced (409 `week_not_empty`). Only the routine's author:
+  403 `not_routine_owner`. Codes: `week_invalid`, `week_out_of_range`, `same_week`,
+  `week_empty`, `load_factor_invalid`, `load_factor_out_of_range`, `load_out_of_range`.
+  `RoutineViewSet.copy_week`.
+- Templates gain `used_by_count`: distinct clients on routines generated from the
+  template, for its author and an admin; null for anyone else.
+  `RoutineTemplateSerializer`.
+- `GET injury-map/` — `{version, areas: [{code, muscles}]}`: each `injury_areas` code
+  with the `target_muscle` keys it argues with. A warning, never a refusal; no
+  lighter-load number. `InjuryMapView`.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/routine/` | auth | `APIRootView` |
@@ -2246,6 +2284,7 @@ nobody knows when the person stopped.
 | `DELETE, GET, POST` | `/api/routine/exercises/{exercise_id}/add-media/` | auth | `ExerciseAddMediaView` |
 | `DELETE, POST` | `/api/routine/exercises/{exercise_id}/image/` | auth | `ExerciseImageUploadView` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/exercises/{id}/` | IsAdminOrOwnerOrReadOnly | `ExerciseViewSet` |
+| `GET` | `/api/routine/injury-map/` | auth | `InjuryMapView` |
 | `GET, POST` | `/api/routine/routine-exercises/` | IsAdminOrOwnerOrReadOnly | `RoutineExerciseViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/routine/routine-exercises/{id}/` | IsAdminOrOwnerOrReadOnly | `RoutineExerciseViewSet` |
 | `GET, POST` | `/api/routine/routine-progress/` | (IsTrainerOrAdmin&IsClientOrAssignedTrainer) | `RoutineProgressViewSet` |
@@ -2255,6 +2294,7 @@ nobody knows when the person stopped.
 | `DELETE, GET, PATCH, PUT` | `/api/routine/routines/{id}/` | IsTrainerOrAdmin | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/assign_to_client/` | IsTrainerOrAdminForAssignment | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/copy/` | auth (the routine's trainer) | `RoutineViewSet` |
+| `POST` | `/api/routine/routines/{id}/copy_week/` | auth (the routine's trainer) | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/unassign_from_client/` | IsTrainerOrAdminForAssignment | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/update_progress/` | auth | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{pk}/assign_to_client/` | IsTrainerOrAdmin | `RoutineViewSet` |

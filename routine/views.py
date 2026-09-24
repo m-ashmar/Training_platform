@@ -13,6 +13,7 @@ from .models import (
     Routine, Exercise, RoutineExercise, RoutineProgress, ExerciseSetLog, WorkoutSession,
     RoutineTemplate, RoutineTemplateExercise, UserExerciseProgress, ExerciseMedia
 )
+from .models import EQUIPMENT_CHOICES
 from .serializers import (
     ExerciseSerializer, ExerciseCreateWithImageSerializer, RoutineSerializer, 
     RoutineExerciseSerializer, UserExerciseProgressSerializer, RoutineProgressSerializer,
@@ -146,6 +147,33 @@ class RecentActivityProgressView(APIView):
         return Response(cached_recent_progress(request.user))
 
 
+class InjuryMapView(APIView):
+    """GET /api/routine/injury-map/ — which exercises each injury argues with
+    (BACKEND_BUGS B-105; TrainerDayEditor's amber chip).
+
+    200 `{version, areas: [{code, muscles}]}`: every `injury_areas` code a client can
+    hold (users `INJURY_AREAS`, in that order), each with the `Exercise.target_muscle`
+    keys whose exercises load that joint directly. An exercise conflicts with a client
+    when its `target_muscle` is in the list of one of the client's `injury_areas`.
+    `other` (a condition described in words) maps to no muscle. The map is narrow on
+    purpose — a shoulder flags the overhead press, not the bench press beside it — and
+    the reasons are in `routine/injuries.py`. `version` rises whenever the map changes:
+    keep a copy and read it again when it does.
+
+    A warning for the trainer, never a refusal: no write consults it. No lighter-load
+    number is served; the trainer chooses the load.
+
+    Any signed-in account (a client's own screens may show the same chip); 401
+    `not_authenticated` signed out. Identical on every build.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .injuries import injury_map
+
+        return Response(injury_map())
+
+
 def _int_or_none(value):
     """An id from a request body or query string, or None if it is not one.
 
@@ -273,13 +301,19 @@ class ExerciseCreateWithImageView(APIView):
     - Text descriptions (additional text content)
     
     Request format:
-    - name (required): Exercise name
+    - name (required, or `name_ar` / `name_en` in its place): Exercise name
     - description (required): Exercise description
     - target_muscle (required): Target muscle group — a missing one of these three
       answers 400 `missing_fields` with `fields: [<name>]` and `field` naming it (the
       owner, 2026-09-24; `missing_fields`, the code every other route answers for a
       missing required field, since BACKEND_BUGS B-092 — it was `field_required`,
       minted that day and never shipped)
+    - name_ar, name_en (optional, B-107): the Arabic and English names. Either one
+      answers for `name`; `name` alone writes the reader's language (Accept-Language),
+      and beside that language's own column the column wins. The answer carries both.
+    - equipment (optional, B-107): `barbell`, `dumbbell`, `cable`, `machine` or
+      `bodyweight`; any other value answers 400 `equipment_invalid` with
+      `field: "equipment"`
     - difficulty_level (optional): beginner/intermediate/advanced/expert
     - image (optional): Main demonstration image file
     - media_photos (optional): Additional photo files (multiple)
@@ -328,15 +362,27 @@ class ExerciseCreateWithImageView(APIView):
         # rollback undoes the rows, and nothing undoes a file but this list.
         stored = []
         try:
-            # Validate required fields
+            # Validate required fields. A name in either language answers for `name`
+            # (B-107): TrainerNewExercise sends `name_ar` and `name_en`.
+            names = {f: str(request.data.get(f) or '').strip()
+                     for f in ('name', 'name_ar', 'name_en')}
             required_fields = ['name', 'description', 'target_muscle']
             for field in required_fields:
-                if not request.data.get(field):
+                present = any(names.values()) if field == 'name' else request.data.get(field)
+                if not present:
                     return Response(
                         {'error': _('Missing required field: %(field)s') % {'field': field},
                          'code': 'missing_fields', 'fields': [field], 'field': field},
                         status=status.HTTP_400_BAD_REQUEST
                     )
+
+            equipment = str(request.data.get('equipment') or '').strip() or None
+            if equipment is not None and equipment not in dict(EQUIPMENT_CHOICES):
+                return Response(
+                    {'error': _('Equipment must be one of: %(options)s')
+                     % {'options': ', '.join(code for code, _label in EQUIPMENT_CHOICES)},
+                     'code': 'equipment_invalid', 'field': 'equipment'},
+                    status=status.HTTP_400_BAD_REQUEST)
 
             # Get the main exercise image
             image_file = request.FILES.get('image')
@@ -411,13 +457,27 @@ class ExerciseCreateWithImageView(APIView):
             if media_texts:
                 text_contents = [text.strip() for text in media_texts.split('||') if text.strip()]
 
-            # Create exercise data
+            # Create exercise data. Names as `ExerciseSerializer` writes them (B-107):
+            # `name` is the reader's language unless that language's own column is
+            # sent too; the untranslated `name` column keeps a name either way, the
+            # default language's first; and the reader's column is named explicitly so
+            # the constructor never copies the other language's name into it.
+            from modeltranslation.utils import get_language as model_language
+
+            own = f"name_{model_language()}"
             exercise_data = {
-                'name': request.data.get('name'),
                 'description': request.data.get('description'),
                 'target_muscle': request.data.get('target_muscle'),
                 'difficulty_level': request.data.get('difficulty_level', 'beginner'),
+                'equipment': equipment,
             }
+            for field in ('name_ar', 'name_en'):
+                if names[field]:
+                    exercise_data[field] = names[field]
+            if names['name'] and own not in exercise_data:
+                exercise_data[own] = names['name']
+            exercise_data.setdefault(own, None)
+            exercise_data['name'] = names['name_en'] or names['name_ar'] or names['name']
 
             # Create the exercise
             exercise = Exercise.objects.create(
@@ -659,6 +719,86 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         copy = copy_routine(original)
         return Response(RoutineSerializer(copy, context={'request': request}).data,
                         status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def copy_week(self, request, pk=None):
+        """POST /api/routine/routines/{id}/copy_week/ — one week of this routine written
+        onto another week of it, loads multiplied (BACKEND_BUGS B-103; TrainerWeek's
+        «التدرّج التلقائي»: +2.5 %, +5 %, or the same loads).
+
+        Body: `from_week`, `to_week` (whole numbers from 1; week `w` is days
+        `(w-1)*7+1 .. w*7`, and only whole weeks count — a 10-day routine has one) and
+        `load_factor` (optional, 0.5-1.5, default 1: `1.025` is +2.5 %).
+
+        What is written, in ONE transaction — the whole week or nothing: every row of
+        `from_week`, moved to the same weekday of `to_week`, with its sets, reps, rest,
+        note, `superset_group` and `load_mode`. `weight` is multiplied and rounded to
+        the nearest 0.5 kg; `load_value` too in `percent` mode (to 0.5 %); an `rpe` is
+        copied as written. A factor of exactly 1 copies every number unrounded. Day
+        names travel with their days and never replace a name the target day has.
+
+        A FILLED target week is refused, never replaced: 409 `week_not_empty`. A week
+        the trainer already wrote is work that one tap must not delete; to redo it,
+        delete its rows (`DELETE routine-exercises/{id}/`) and copy again.
+
+        201 `{copied, from_week, to_week, load_factor, routine_exercises, day_names}` —
+        `routine_exercises` are the new rows exactly as `routine-exercises/` answers
+        them, ready to merge into the grid; `day_names` is the routine's whole map.
+
+        Only the trainer who WROTE the routine. Seen through the one predicate that
+        decides what a trainer sees (`accessible_user_ids`, via this viewset's queryset):
+        a routine the caller cannot see is 404; one they can see and did not write —
+        the client it is for, the trainer of a client on it, an admin — is 403
+        `not_routine_owner`. The coaching freeze does not refuse it, exactly as it
+        refuses no other routine write: a freeze stops the CLIENT training
+        (`users/coaching.training_refusal`), and a trainer may still prepare a frozen
+        client's next weeks.
+
+        | Status | `code` | When |
+        |---|---|---|
+        | 400 | `week_invalid` | `from_week` / `to_week` missing or not a whole number from 1; `field` names it |
+        | 400 | `week_out_of_range` | a week past the routine's whole weeks; with `field` and `weeks` |
+        | 400 | `same_week` | `from_week` equals `to_week` |
+        | 400 | `week_empty` | `from_week` has no exercises; with `from_week` |
+        | 400 | `load_factor_invalid` | `load_factor` is not a number |
+        | 400 | `load_factor_out_of_range` | `load_factor` outside 0.5-1.5 |
+        | 400 | `load_out_of_range` | a multiplied load would pass 1000 kg or 100 %; with `day`. Nothing is written |
+        | 401 | `not_authenticated` | signed out |
+        | 403 | `not_routine_owner` | you can see the routine and did not write it |
+        | 404 | `not_found` | no such routine, or not one you can see |
+        | 409 | `week_not_empty` | `to_week` already has exercises; with `to_week`. Nothing is written |
+
+        Identical on every build.
+        """
+        from .media_context import prepare
+        from .weeks import WeekCopyRefused, copy_week, parse_load_factor, parse_week
+
+        routine = self.get_object()
+        if routine.created_by_id != request.user.id:
+            return Response({'error': _('Only the trainer who wrote this routine can change it.'),
+                             'code': 'not_routine_owner'}, status=status.HTTP_403_FORBIDDEN)
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            from_week = parse_week(data.get('from_week'), 'from_week')
+            to_week = parse_week(data.get('to_week'), 'to_week')
+            factor = parse_load_factor(data.get('load_factor'))
+            created, day_names = copy_week(routine, from_week, to_week, factor)
+        except WeekCopyRefused as refusal:
+            return Response(refusal.body(), status=refusal.status)
+
+        rows = list(RoutineExercise.objects.filter(pk__in=[r.pk for r in created])
+                    .select_related('exercise', 'exercise__created_by')
+                    .prefetch_related('exercise__media')
+                    .order_by('day', 'order', 'id'))
+        context = {'request': request, **prepare(request, rows)}
+        return Response({
+            'copied': len(rows),
+            'from_week': from_week,
+            'to_week': to_week,
+            'load_factor': float(factor),
+            'routine_exercises': RoutineExerciseSerializer(rows, many=True, context=context).data,
+            'day_names': day_names,
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], permission_classes=[IsTrainerOrAdminForAssignment])
     def assign_to_client(self, request, pk=None):
@@ -3363,8 +3503,12 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                 models.Q(description__icontains=search) |
                 models.Q(goal__icontains=search)
             )
-        
-        return qs.distinct()
+
+        # `used_by_count` (B-108) counted in this query, as a subquery — an aggregate
+        # here would add a GROUP BY and drop the model's ordering.
+        from .serializers import annotate_used_by_count
+
+        return annotate_used_by_count(qs.distinct())
 
     def perform_create(self, serializer):
         """Override to assign the template to the creator."""
