@@ -202,6 +202,12 @@ so parse ids client-side.
 | `payment_rejected` | `payment_id` — the transfer held for it could not be accepted; it goes back to its sender by hand (B-051) |
 | `trainer_verification_approved` | `application_id` — an operator accepted the trainer's documents; the account is verified |
 | `trainer_verification_rejected` | `application_id`, `reason` — the application needs changes (or a verification was revoked); `reason` is the operator's words, also in the body |
+| `routine_product_approved` | `product_id` — an operator published the trainer's program (plan step 10). Like every routine-product notice: the fact only, no price, button or link, on every build |
+| `routine_product_rejected` | `product_id`, `reason` — the program went back to draft; `reason` is the operator's words, also in the body |
+| `routine_product_sold` | `product_id`, `purchase_id` — to the trainer; the buyer is never named |
+| `routine_product_purchased` | `product_id`, `purchase_id`, `routine_id` — to the buyer; `routine_id` is their own copy |
+| `routine_product_refunded` | `product_id`, `purchase_id` — to the buyer: the price is back in the wallet and the copy is gone |
+| `routine_product_sale_refunded` | `product_id`, `purchase_id` — to the trainer: a sale was refunded and their share went back |
 | `personal_record` | `exercise_id`, `set_log_id` — the set that beat the previous best |
 | `weekly_recap` | `week` (the ISO week key), `missed_sets` |
 | `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
@@ -879,6 +885,74 @@ changes nothing an unverified trainer may do today (see BACKEND_DELTA decision 5
 `trainer_is_verified`, which the roster ranks and the paywall exemption reads.
 `GET /api/auth/trainer/profile/` and `GET /api/auth/user/update/` also carry a read-only
 `verification_status` (null for anyone who is not a trainer).
+
+### Routine products (plan step 10, BACKEND_BUGS B-099, B-100)
+
+A trainer lists one of their templates for anyone to buy (`15-trainer-money/TrainerProducts`,
+`TrainerProductForm`); an operator reviews it in the console (`/dj-admin/`, "Routine
+products": approve, or reject with a reason the trainer is shown); a client buys it from
+the wallet and gets their OWN copy, an ordinary routine of theirs. This is
+`ROUTINE_PRODUCT` money, on the other side of the store rules from coaching (payments
+spec §3): separate models (`routine.RoutineProduct`, `routine.RoutinePurchase`), these
+separate routes, and a buyer's copy that belongs to the buyer (`created_by` is the buyer;
+the trainer never sees it, and no coaching ever freezes it). The views' docstrings
+(`routine/product_views.py`) are the full contract; the money is `routine/products.py`.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET, POST` | `/api/v1/trainer/products/` | auth (trainer) | `TrainerProductsView` |
+| `GET, PATCH` | `/api/v1/trainer/products/{id}/` | auth (trainer) | `TrainerProductDetailView` |
+| `POST` | `/api/v1/trainer/products/{id}/submit/` | auth (trainer) | `TrainerProductSubmitView` |
+| `POST` | `/api/v1/trainer/products/{id}/retire/` | auth (trainer) | `TrainerProductRetireView` |
+| `GET` | `/api/v1/products/` | auth | `ProductCatalogueView` |
+| `GET` | `/api/v1/products/{id}/` | auth | `ProductDetailView` |
+| `POST` | `/api/v1/products/{id}/buy/` | auth (client) | `ProductBuyView` |
+
+**States:** `draft` → (submit, a VERIFIED trainer) `in_review` → (operator) `published`,
+or back to `draft` with `review.reason`; `retired` from any state (the trainer). Only a
+`draft` is edited (`PATCH`). A published product whose template is edited afterwards is
+off sale (`on_sale: false`, `template_changed: true`) until it is submitted again and
+approved — the review saw a version of the program, and only that version is sold.
+
+**The sale** (`buy/`, one atomic step, idempotent on `idempotency_key`): the price
+leaves the buyer's wallet, `COACHING_COMMISSION_RATE` of it (20%) goes to the platform
+and the rest to the trainer, all three ledger rows `ROUTINE_PRODUCT`; the rate is
+snapshotted on the purchase. A price in the other currency is converted at the
+operator's rate (snapshotted too); a stale or missing rate refuses with
+`exchange_rate_stale` / `exchange_rate_missing` before anything moves. The ledger reads
+the buyer's row as `kind: routine_product_purchase` (counterparty: the trainer) and the
+trainer's as `routine_product_sale` (no counterparty: the buyer is not named).
+**Refund** is operator-only (console, "Routine purchases" → refund, with a reason): every
+leg is reversed at the sale's amounts and rate, and the buyer's copy is revoked
+(unassigned, retired; their training history on it is kept). A training write that
+still names a refunded copy answers 403 `product_refunded`.
+
+**Differs by build.** Buying: `apk` and `web` only — `play` / `ios` are refused in code
+(403 `not_available_on_channel`; no channel: 400 `app_channel_required`). Prices: a build
+whose `can_show_prices` is off is sent NO price key (catalogue, detail, and the trainer's
+own product), `can_buy` is false, and a `price` in a trainer's body from such a build is
+refused 403 `not_available_on_channel`. Listing, reading, the free preview (`preview`: the
+first `preview_days` days of the program), owning and training on a bought copy work on
+every build.
+
+Codes: `not_a_trainer` (403), `not_found` (404), `validation_error` (400;
+`field_errors.<field>[0].code`: `template_not_yours`, `price_out_of_range`,
+`preview_days_out_of_range`, `cover_not_yours`), `product_not_editable` (409, `status`),
+`trainer_not_verified` (403), `product_not_submittable` (409, `status`),
+`product_incomplete` (409, `missing`), `program_too_long` (409, `max_days`,
+`program_days`), `preview_covers_program` (409, `program_days`),
+`product_already_retired` (409), `bad_trainer_id` (400), `own_product` (403),
+`clients_only` (403), `already_owned` (409, `purchase_id`, `routine_id`),
+`product_not_for_sale` (409), `exchange_rate_missing` / `exchange_rate_stale` (409),
+`insufficient_balance` (402, `amount`, `currency`), `idempotency_key_reused` (422),
+`purchase_refused` (400), `throttled` (429). Pushes: `routine_product_approved`,
+`_rejected`, `_sold`, `_purchased`, `_refunded`, `_sale_refunded` (§4).
+
+**Templates (B-100, additive).** `RoutineTemplateSerializer` (every `templates/` route)
+gains `weeks` (writable, 1-52, or null while the trainer has not said how many weeks the
+program runs) and `session_count` (read-only: `days` x `weeks`, null while `weeks` is).
+`DELETE templates/{id}/` answers 409 `template_listed_for_sale` while a product of yours
+is in review or published on it.
 
 ### Trainer home: the attention queue (B-091)
 
@@ -1901,6 +1975,7 @@ English). Prefix `/api/routine/`.
 | `POST templates/{id}/generate/` | 400 `client_id_required`, `bad_date`, `end_before_start`, `bad_days`, `days_out_of_range` (+ `max`); 403 `not_your_client` (single `client_id` too); 404 `client_not_found` |
 | `POST templates/{id}/copy/` | 400 `template_not_public` |
 | `GET templates/my_templates/` | 403 `not_a_trainer` |
+| `DELETE templates/{id}/` | 409 `template_listed_for_sale` — a routine product of yours is in review or published on it; retire it first (plan step 10) |
 | `POST/DELETE exercises/{id}/image/` | 400 `image_required`; 404 `no_image` (DELETE, the exercise has no picture; gains `error`) |
 | `POST/DELETE exercises/{id}/add-media/` | 400 `media_items_required` / `media_ids_required`; a 207 DELETE gains `errors_detail[] = [{media_id, code, message}]`, `code` `media_not_on_exercise` or `media_delete_failed` |
 | `GET trainer/client-progress/{id}/` | 403 `not_your_client` |
