@@ -390,6 +390,24 @@ register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", 
 # Kept like the ledger rows it names.
 register(PersonalDataSource(label="coaching_periods", model="users.CoachingPeriod",
                             user_field=("trainer", "client"), on_erase="keep"))
+# Routine products (plan step 10). A trainer's listing is authored content that buyers'
+# purchases point at, and a purchase is a record of money like the ledger rows it names:
+# both kept on erasure. A purchase is exported to its BUYER only — the trainer's own
+# export carries their listings and their sales totals are in their ledger, never who
+# bought (a purchase is not a coaching). The operator who reviewed or refunded is named
+# on the row and in no one's export.
+register(PersonalDataSource(
+    label="routine_products", model="routine.RoutineProduct", user_field="trainer",
+    fields=["id", "title_ar", "title_en", "description_ar", "description_en", "price",
+            "currency", "preview_days", "status", "review_decision", "review_reason",
+            "submitted_at", "published_at", "retired_at", "created_at"],
+    on_erase="keep"))
+register(PersonalDataSource(
+    label="routine_purchases", model="routine.RoutinePurchase", user_field="buyer",
+    fields=["id", "product", "status", "money_type", "price_amount", "price_currency", "amount",
+            "currency", "exchange_rate_value", "charge_reference", "paid_with",
+            "refunded_at", "refund_reason", "created_at"],
+    on_erase="keep"))
 register(PersonalDataSource(label="transactions", model="wallet.Transaction", user_field="actor", on_erase="keep"))
 # Which operator set which USD/SYP rate, and when. Names an operator, never a customer,
 # and it is the evidence that every converted purchase was struck at a rate a named

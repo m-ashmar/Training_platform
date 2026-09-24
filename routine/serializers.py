@@ -391,6 +391,7 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
     created_by = serializers.StringRelatedField(read_only=True)
     estimated_duration_minutes = serializers.SerializerMethodField()
     target_muscles = serializers.SerializerMethodField()
+    product = serializers.SerializerMethodField()
 
     translated_fields = ['name', 'description']
 
@@ -400,11 +401,27 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
             'id', 'name', 'description', 'difficulty_level', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
             'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles',
-            'source_template',
+            'source_template', 'product',
         ]
         # `source_template`: the template this private copy was generated from, or null.
         # A copy, not a link — set by `templates/{id}/generate/`, never by a write here.
         read_only_fields = ['created_at', 'updated_at', 'created_by', 'source_template']
+
+    def get_product(self, obj):
+        """The routine product this routine is the reader's bought copy of (plan step
+        10), or null for every other routine: `{id, title, trainer: {id, name}}`.
+        Additive. `created_by` of a bought copy is the buyer (the copy is theirs, not a
+        coaching); the program's author is `product.trainer`. Costs nothing for a
+        routine that was not bought (`purchase_id` is on the row)."""
+        if getattr(obj, 'purchase_id', None) is None:
+            return None
+        from django.utils.translation import get_language
+
+        product = obj.purchase.product
+        trainer = product.trainer
+        return {'id': product.pk, 'title': product.title_in(get_language() or 'ar'),
+                'trainer': {'id': trainer.pk,
+                            'name': trainer.full_name or trainer.username}}
 
     def get_estimated_duration_minutes(self, obj):
         """
@@ -1663,6 +1680,12 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     """
     exercises = RoutineTemplateExerciseSerializer(source='routinetemplateexercise_set', many=True)
     created_by = serializers.SerializerMethodField()
+    #: BACKEND_BUGS B-100 (additive). `weeks` is writable: how many weeks the program
+    #: runs, 1-52, or null while the trainer has not said — `days` is its week, and the
+    #: rows cannot say how often that week repeats. `session_count` is read-only:
+    #: `days` x `weeks`, null while `weeks` is (never a guess). The product form's line
+    #: «4 أسابيع · 3 أيام · 12 جلسة» is `weeks` · `days` · `session_count`.
+    session_count = serializers.IntegerField(read_only=True, allow_null=True)
 
     def get_created_by(self, obj):
         """Who wrote it, as before (`str(user)`) — null once that account is suspended or
@@ -1675,7 +1698,8 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = RoutineTemplate
-        fields = ['id', 'name', 'description', 'goal', 'days', 'is_public', 'created_by', 'created_at', 'exercises']
+        fields = ['id', 'name', 'description', 'goal', 'days', 'weeks', 'session_count',
+                  'is_public', 'created_by', 'created_at', 'exercises']
 
     def validate(self, attrs):
         """Every row must be one a client's routine can hold.

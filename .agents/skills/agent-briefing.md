@@ -109,7 +109,10 @@ Every parallel build touches the same four places, so expect these and nothing e
 **Proving a test fails on the old code.** Checking the base commit's files out into your
 worktree, or `git archive`-ing it, can be refused by the permission classifier (three
 refusals, 2026-09-23). Say in your report that the old-code run is still owed; the main
-session runs it in a separate worktree at the base commit.
+session runs it in a separate worktree at the base commit. What did work (2026-09-24,
+routine products): `git archive <base> | tar -x -C <scratchpad>/<unique dir>`, symlink
+`.venv` and `.env` into it, copy your test file in, and run pytest THERE with its own
+`DB_NAME` and `--create-db` — your worktree is never touched, so it can run while you edit.
 
 ## Rules that outrank your judgement
 

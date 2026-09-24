@@ -383,6 +383,21 @@ class Routine(RowValidationMixin, models.Model):
         'RoutineTemplate', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='generated_routines',
         help_text="The template this routine was generated from (a copy, not a link)")
+    #: Set on exactly one kind of routine: a BUYER's copy of a routine product
+    #: (`routine/products.py`, plan step 10). That copy belongs to the buyer —
+    #: `created_by` is the buyer, not the trainer who wrote the program — because a
+    #: purchase is not a coaching: keyed on the trainer, every trainer-side read that
+    #: follows authorship (their routine list, their clients' progress, set logs and
+    #: sessions, the attention queue, the proof numbers) would show the trainer a
+    #: stranger's training, and the coaching freeze (`users/coaching.training_refusal`)
+    #: would stop a paid program when an unrelated coaching with the same trainer ended.
+    #: The trainer is `purchase.product.trainer`. The spec's line that must never blur
+    #: (section 3): a routine written for one client inside coaching is COACHING_1TO1,
+    #: this is ROUTINE_PRODUCT, and the two never share a row.
+    purchase = models.OneToOneField(
+        'RoutinePurchase', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='routine', editable=False,
+        help_text="The routine-product purchase this is the buyer's copy of, if any")
     start_date = models.DateField(default=date.today, help_text="Start date for the routine")
     end_date = models.DateField(blank=True, null=True, db_index=True, help_text="End date for the routine")
     
@@ -443,8 +458,11 @@ class Routine(RowValidationMixin, models.Model):
         database alone. Membership is settled where the link is made, by
         `RoutineSerializer._validate_client_assignments`, against the approved
         trainer-client relation rather than a mutable pointer on the user.
+
+        The one routine a non-trainer holds as `created_by` is their own copy of a
+        routine product they bought (`purchase` is set; see that field).
         """
-        if not self.created_by.is_trainer:
+        if not self.created_by.is_trainer and self.purchase_id is None:
             raise ValidationError(_("Only trainers can create routines"), code="trainer_required")
 
     def get_assigned_users(self):
@@ -1100,9 +1118,24 @@ class RoutineTemplate(RowValidationMixin, models.Model):
     description = models.TextField(blank=True)
     goal = models.CharField(max_length=100, help_text="e.g. Hypertrophy, Strength, Endurance")
     days = models.PositiveIntegerField(default=3, help_text="Number of days in the template plan")
+    #: How many weeks the program runs, as the trainer declares it (BACKEND_BUGS B-100).
+    #: `days` is the week the program repeats — its training days, in order — and
+    #: nothing in the rows says how many times it repeats, so the number is the
+    #: trainer's to give. Null until they give it: the product form's «8 أسابيع · 3 أيام ·
+    #: 24 جلسة» cannot be filled from a guess. See `session_count`.
+    weeks = models.PositiveSmallIntegerField(
+        null=True, blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(52)],
+        help_text="How many weeks the program runs (1-52); empty when not declared")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='created_templates')
     is_public = models.BooleanField(default=False, help_text="Whether this template is visible to all users")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    #: Moves on every save — the API's, the console's — and a template is saved
+    #: whenever its rows are rewritten (`RoutineTemplateSerializer.update`). A routine
+    #: product records the value its review saw (`RoutineProduct.template_version`), so
+    #: a program edited after an operator approved it is not sold until it is reviewed
+    #: again (`routine/products.py`).
+    updated_at = models.DateTimeField(auto_now=True)
     # ManyToMany to Exercise through RoutineTemplateExercise
     exercises = models.ManyToManyField('Exercise', through='RoutineTemplateExercise', related_name='templates')
 
@@ -1118,6 +1151,15 @@ class RoutineTemplate(RowValidationMixin, models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.goal}) by {self.created_by.username}"
+
+    @property
+    def session_count(self):
+        """Training sessions in the whole program: `days` x `weeks`, or None while the
+        trainer has not said how many weeks it runs (B-100). A routine written from it
+        for a buyer has exactly this many days (`routine/products.py program_days`)."""
+        if not self.weeks or not self.days:
+            return None
+        return self.days * self.weeks
 
     def can_be_accessed_by(self, user):
         """
@@ -1570,3 +1612,11 @@ def create_routine_progress_on_assignment(sender, instance, action, pk_set, **kw
         pass
 
 
+
+
+# Routine products (plan step 10) live in their own module and are registered here, in
+# the `routine` app, beside the template they are written from.
+from .product_models import (  # noqa: E402,F401
+    PaidWith, ProductStatus, PurchaseStatus, ReviewDecision, RoutineProduct,
+    RoutinePurchase,
+)

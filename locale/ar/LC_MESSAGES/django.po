@@ -5105,3 +5105,154 @@ msgid ""
 "This withdrawal's money is already back in your balance. Contact support to "
 "close it."
 msgstr "أُعيد مبلغ طلب السحب هذا إلى رصيدك بالفعل. تواصل مع الدعم لإغلاقه."
+
+#: notifications/domain/product_events.py
+msgid "Your program is published"
+msgstr "نُشر برنامجك"
+
+#: notifications/domain/product_events.py
+#, python-format
+msgid "%(title)s passed review and is now listed."
+msgstr "اجتاز %(title)s المراجعة وأصبح معروضًا الآن."
+
+#: notifications/domain/product_events.py
+msgid "Your program needs changes"
+msgstr "برنامجك يحتاج إلى تعديلات"
+
+#: notifications/domain/product_events.py
+#, python-format
+msgid "%(title)s was not published: %(reason)s"
+msgstr "لم يُنشر %(title)s: %(reason)s"
+
+#: notifications/domain/product_events.py
+msgid "You sold a program"
+msgstr "بعتَ برنامجًا"
+
+#: notifications/domain/product_events.py
+#, python-format
+msgid "Someone bought %(title)s."
+msgstr "اشترى أحدهم %(title)s."
+
+#: notifications/domain/product_events.py
+msgid "Your program is ready"
+msgstr "برنامجك جاهز"
+
+#: notifications/domain/product_events.py
+#, python-format
+msgid "%(title)s is in your routines now."
+msgstr "أصبح %(title)s ضمن برامجك التدريبية الآن."
+
+#: notifications/domain/product_events.py
+msgid "Your program purchase was refunded"
+msgstr "استُرد ثمن البرنامج الذي اشتريته"
+
+#: notifications/domain/product_events.py
+#, python-format
+msgid "%(title)s was refunded to your wallet and removed from your routines."
+msgstr "أُعيد ثمن %(title)s إلى محفظتك وأُزيل من برامجك التدريبية."
+
+#: notifications/domain/product_events.py
+msgid "A program sale was refunded"
+msgstr "استُرد ثمن بيع أحد برامجك"
+
+#: notifications/domain/product_events.py
+#, python-format
+msgid "A purchase of %(title)s was refunded, and your share of it returned."
+msgstr "استُرد ثمن شراء %(title)s، وأُعيدت حصتك منه."
+
+#: routine/product_serializers.py
+msgid "Choose the template this program is sold from."
+msgstr "اختر القالب الذي يُباع منه هذا البرنامج."
+
+#: routine/product_serializers.py
+msgid "Choose one of your own templates."
+msgstr "اختر قالبًا من قوالبك."
+
+#: routine/product_serializers.py
+#, python-format
+msgid "The price must be more than zero and at most %(max)s."
+msgstr "يجب أن يكون السعر أكبر من صفر وألا يتجاوز %(max)s."
+
+#: routine/product_serializers.py
+#, python-format
+msgid "Free preview days must be between 0 and %(max)s."
+msgstr "يجب أن تكون أيام المعاينة المجانية بين 0 و%(max)s."
+
+#: routine/product_serializers.py
+msgid "Choose a picture from your own media kit."
+msgstr "اختر صورة من ملفك الإعلامي."
+
+#: routine/product_views.py
+msgid "trainer_id must be a whole number."
+msgstr "يجب أن يكون trainer_id عددًا صحيحًا."
+
+#: routine/product_views.py
+msgid "You cannot buy your own program."
+msgstr "لا يمكنك شراء برنامجك."
+
+#: routine/product_views.py
+msgid "Only clients can buy programs."
+msgstr "شراء البرامج متاح للمتدربين فقط."
+
+#: routine/product_views.py
+msgid "This program can only be edited while it is a draft."
+msgstr "لا يمكن تعديل هذا البرنامج إلا وهو مسودة."
+
+#: routine/product_views.py
+msgid "This program cannot be sent for review in its current state."
+msgstr "لا يمكن إرسال هذا البرنامج للمراجعة في حالته الحالية."
+
+#: routine/product_views.py
+msgid "Only verified trainers can publish programs. Your drafts are kept."
+msgstr "نشر البرامج متاح للمدربين الموثّقين فقط. مسوداتك محفوظة."
+
+#: routine/product_views.py
+msgid "Fill in the missing details before sending this program for review."
+msgstr "أكمل البيانات الناقصة قبل إرسال هذا البرنامج للمراجعة."
+
+#: routine/product_views.py
+msgid "This program is too long to sell."
+msgstr "هذا البرنامج أطول من أن يُباع."
+
+#: routine/product_views.py
+msgid "The free preview cannot cover the whole program."
+msgstr "لا يمكن أن تشمل المعاينة المجانية البرنامج كله."
+
+#: routine/product_views.py
+msgid "This program is already retired."
+msgstr "هذا البرنامج موقوف بالفعل."
+
+#: routine/product_views.py
+msgid "This program is not for sale right now."
+msgstr "هذا البرنامج غير معروض للبيع حاليًا."
+
+#: routine/product_views.py
+msgid "You already own this program."
+msgstr "أنت تملك هذا البرنامج بالفعل."
+
+#: routine/product_views.py
+msgid "Program not found."
+msgstr "البرنامج غير موجود."
+
+#: routine/product_views.py
+msgid "Only trainers can sell programs."
+msgstr "بيع البرامج متاح للمدربين فقط."
+
+#: routine/views.py
+msgid ""
+"This template is behind a program in review or on sale. Retire the program "
+"first."
+msgstr ""
+"هذا القالب يقوم عليه برنامج قيد المراجعة أو معروض للبيع. أوقف البرنامج أولًا."
+
+#: users/exceptions.py
+msgid "This program was refunded, so it can no longer be trained on."
+msgstr "استُرد ثمن هذا البرنامج، فلم يعد التدريب عليه ممكنًا."
+
+#: wallet/activity.py
+msgid "Program purchase"
+msgstr "شراء برنامج"
+
+#: wallet/activity.py
+msgid "Program sale"
+msgstr "بيع برنامج"

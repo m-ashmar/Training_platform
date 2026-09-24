@@ -61,6 +61,14 @@ EVENT_CLASS_REGISTRY = {
     'withdrawal_requested': 'notifications.domain.payout_events.WithdrawalRequestedEvent',
     'withdrawal_paid': 'notifications.domain.payout_events.WithdrawalPaidEvent',
     'withdrawal_failed': 'notifications.domain.payout_events.WithdrawalFailedEvent',
+    # Routine products (routine/products.py, plan step 10). Fact only on every build:
+    # no price, button or link (payments spec, section 7).
+    'routine_product_approved': 'notifications.domain.product_events.RoutineProductApprovedEvent',
+    'routine_product_rejected': 'notifications.domain.product_events.RoutineProductRejectedEvent',
+    'routine_product_sold': 'notifications.domain.product_events.RoutineProductSoldEvent',
+    'routine_product_purchased': 'notifications.domain.product_events.RoutineProductPurchasedEvent',
+    'routine_product_refunded': 'notifications.domain.product_events.RoutineProductRefundedEvent',
+    'routine_product_sale_refunded': 'notifications.domain.product_events.RoutineProductSaleRefundedEvent',
     # Trainer-client chat (chat/events.py). One nudge until the thread is opened.
     'chat_message': 'notifications.domain.chat_events.ChatMessageEvent',
     # Progress (routine/strength.py, routine/tasks.py). Fact-only, no claims.

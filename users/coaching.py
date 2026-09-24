@@ -621,13 +621,35 @@ def training_refusal(user, routine, at=None):
     from before months existed — is not affected. Neither is a trainer or admin acting,
     nor a routine the user wrote themselves. The check reads the relation and the
     months, never the `assigned_trainer` pointer.
+
+    A routine PRODUCT the client bought is theirs (`created_by` is the buyer —
+    `routine.Routine.purchase`), so no coaching ever freezes it; it answers
+    'product_refunded' once an operator refunded the purchase (`routine/products.py`
+    revokes the copy, and this stops a training write that still names it). The
+    purchase is read only for a routine the user holds as `created_by`, which is never a
+    coached client's routine, so a coaching check costs nothing more.
     """
     if routine is None or not getattr(user, 'is_client', False):
         return None
     trainer_id = routine.created_by_id
-    if trainer_id is None or trainer_id == user.pk:
+    if trainer_id is None:
         return None
+    if trainer_id == user.pk:
+        return _bought_copy_refusal(routine)
     return _trainer_refusal(user.pk, trainer_id, at)
+
+
+def _bought_copy_refusal(routine):
+    """'product_refunded' for the copy of a routine product whose purchase was refunded,
+    None for anything else the user holds as its author."""
+    purchase_id = getattr(routine, 'purchase_id', None)
+    if purchase_id is None:
+        return None
+    from routine.models import PurchaseStatus, RoutinePurchase
+
+    refunded = RoutinePurchase.objects.filter(
+        pk=purchase_id, status=PurchaseStatus.REFUNDED).exists()
+    return 'product_refunded' if refunded else None
 
 
 def _trainer_refusal(client_id, trainer_id, at):
@@ -752,16 +774,18 @@ def refusals_for(trainer_id, client_ids, at=None) -> dict:
 
 def require_can_train(user, routine, at=None):
     """Raise the refusal `training_refusal` finds (403 `coaching_frozen` /
-    `coaching_unpaid` / `coaching_ended`), naming the trainer. Call it after validation
-    and after an idempotent replay, so a retry of training that landed while paid is
-    answered."""
+    `coaching_unpaid` / `coaching_ended`, naming the trainer; or 403 `product_refunded`
+    for a refunded routine product). Call it after validation and after an idempotent
+    replay, so a retry of training that landed while paid is answered."""
     raise_refusal(training_refusal(user, routine, at), routine.created_by_id if routine else None)
 
 
 def raise_refusal(refusal, trainer_id):
     """Raise the 403 for a `training_refusal` answer; nothing for None."""
-    from .exceptions import CoachingEnded, CoachingFrozen, CoachingUnpaid
+    from .exceptions import CoachingEnded, CoachingFrozen, CoachingUnpaid, ProductRefunded
 
+    if refusal == 'product_refunded':
+        raise ProductRefunded()
     if refusal == 'coaching_frozen':
         raise CoachingFrozen(trainer_id)
     if refusal == 'coaching_unpaid':

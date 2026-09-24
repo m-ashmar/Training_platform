@@ -9,7 +9,8 @@ template or one client's copy never changes another's.
 Two ways in, one rule:
   * `routine_from_template` writes the private copy (the routine and its rows; no
     assignee, no notification, no money). `templates/{id}/generate/` calls it once per
-    client, and so will routine products (plan step 10).
+    client, and `routine/products.py` once per purchase of a routine product (the
+    buyer's own copy, which the buyer — not the trainer — holds).
   * `assign_routine` puts ONE client on a routine and settles the coaching's first
     month, for `routines/{id}/assign_to_client/` and for `generate` alike. Before,
     only assign_to_client settled, so a first program delivered from a template left
@@ -168,13 +169,19 @@ def _template_text(template, field, language):
 
 
 def routine_from_template(template, *, created_by, days, customizations=None,
-                          name=None, start_date=None, end_date=None, source=True):
+                          name=None, start_date=None, end_date=None, source=True,
+                          purchase=None):
     """Write a private copy of `template` as a new routine with no assignee.
 
     `days` may be longer than the template: client day N uses template day
     ((N-1) % template.days) + 1. `customizations` must come from `clean_customizations`.
     Both languages of the template's name and description go into
     `Routine.translations`; `name` overrides the name in both.
+
+    `purchase`: the `RoutinePurchase` this is the buyer's copy of, when a routine
+    product was bought (`routine/products.py`). It is PROVENANCE only — the link that
+    lets a buyer, not a trainer, be `created_by` (`Routine.clean`). Nothing here reads a
+    price or moves money: the sale is made, and paid for, before this is called.
     """
     from django.conf import settings
 
@@ -225,6 +232,7 @@ def routine_from_template(template, *, created_by, days, customizations=None,
         'days': days,
         'created_by': created_by,
         'source_template': template if source else None,
+        'purchase': purchase,
     }
     if start_date:
         values['start_date'] = start_date

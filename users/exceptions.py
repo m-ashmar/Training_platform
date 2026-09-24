@@ -93,3 +93,13 @@ def disabled_account_with_password(email, password):
         make_password(password)
         return None
     return user if user.check_password(password) else None
+
+
+class ProductRefunded(APIException):
+    """A training write against the buyer's copy of a routine product whose purchase an
+    operator refunded (`routine/products.py refund`, which also takes the copy away).
+    `{detail, error, code: "product_refunded"}` — no trainer: a purchase is not a
+    coaching, and no price, so the body is the same on every build."""
+    status_code = status.HTTP_403_FORBIDDEN
+    default_code = 'product_refunded'
+    default_detail = _("This program was refunded, so it can no longer be trained on.")

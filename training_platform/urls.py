@@ -69,6 +69,12 @@ urlpatterns = [
     # The operator side is the console at /dj-admin/.
     path('api/v1/trainer/verification/',
          include('trainer_verification.urls', namespace='trainer_verification')),
+    # Routine products (plan step 10): the trainer's listings, and the buyer's catalogue
+    # and purchase. The operator's review and refunds are the console. See
+    # routine/product_views.py.
+    path('api/v1/trainer/products/',
+         include('routine.urls_products_trainer', namespace='trainer_products')),
+    path('api/v1/products/', include('routine.urls_products', namespace='products')),
     # The trainer's home queue: requests, form checks, idle and slipping clients and
     # programmes ending, in one ordered list (users/attention_queue.py, B-091).
     path('api/v1/trainer/', include('users.urls_trainer_home', namespace='trainer_home')),
