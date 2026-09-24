@@ -24,6 +24,30 @@ rows `routine/strength.py` and the adherence figures read); training logged befo
 person joined counts if it falls inside the window — the challenge is about the month,
 not about the moment of joining.
 
+**What counts** (owner, 2026-09-24, F20: challenges must not be scammable). Only
+credible work reaches a challenge; the constants below are the rules, served to the
+app as `counting` on every auto-counted challenge row:
+
+* a SET counts only with 1 <= reps <= `MAX_REPS_PER_SET` and 0 <= weight <=
+  `MAX_WEIGHT_KG_PER_SET` (a set without a weight is bodyweight: it counts as a set and
+  a day, and adds no volume). A 1000 kg x 1000 reps set counts nothing at all;
+* a set RECEIVED (`ExerciseSetLog.created_at`) more than `LATE_HOURS` after the end of
+  its training day (server time zone) does not count. The journal still takes it — a
+  person may back-date a year (`routine/views.py MAX_BACKLOG_DAYS`) — the challenge
+  simply does not count it. Rows older than the column (null) count as on time;
+* per person per day at most `MAX_SETS_PER_DAY` sets count (the first ones received)
+  and at most `MAX_VOLUME_KG_PER_DAY` of volume;
+* a TRAINING DAY counts only with at least `MIN_SETS_PER_DAY` counted sets;
+* a WORKOUT counts only when completed with at least `MIN_SETS_PER_WORKOUT` counted
+  sets, lasting at least `MIN_WORKOUT_MINUTES` (`end_time - start_time`), and at most
+  `MAX_WORKOUTS_PER_DAY` per day.
+
+A day above `REVIEW_THRESHOLDS` (read before the caps) flags the participant for an
+operator's review (`ChallengeParticipation.review_state`); see `recount`.
+
+Known edge, deliberately left: editing an on-time set later (the set routes allow it)
+keeps its `created_at`; the per-set limits and the review thresholds still bound it.
+
 **When the number moves.**
 
 * On `join`, for the person joining, before the standing is ranked.
@@ -42,8 +66,11 @@ lock reads every committed set — writes the value, the percentage and the comp
 (`social/standing.py write_places`) and drops the person's cached challenge list.
 
 **Cost.** Nothing for someone in no running auto-counted challenge beyond one indexed
-query per commit. Otherwise one aggregate per challenge they are in, and the ranking
-pass. Never one query per participant: a whole-challenge recount is one grouped query.
+query per commit. Otherwise one query per challenge they are in, and the ranking pass.
+Never one query per participant: a whole-challenge recount is one query, which hands
+back at most `MAX_SETS_PER_DAY` rows per person per day (or one row per qualifying
+workout); the caps and the sum over days are a bounded Python pass over those rows
+(`measure_for_review`).
 
 **Not done, deliberately.** No push per recount — `ChallengeProgressEvent` notifies the
 person themselves, and counting on every set would send one per set; the manual log
@@ -57,13 +84,90 @@ import logging
 import threading
 from contextlib import contextmanager
 
+from datetime import timedelta
+
+from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, ExpressionWrapper, F, FloatField, Q, Sum
+from django.db.models import (Case, Count, DateTimeField, ExpressionWrapper, F, FloatField,
+                              Func, IntegerField, OuterRef, Q, Subquery, Sum, Value, When,
+                              Window)
+from django.db.models.functions import RowNumber
 from django.dispatch import receiver
 from django.db.models.signals import post_delete, post_save
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------ what counts (F20)
+#: The credible-work rules (owner, 2026-09-24, F20: "challenges must not be scammable").
+#: They filter what a CHALLENGE counts, nothing else: the person's own journal, strength
+#: charts and adherence read every set they logged. Served to the app as `counting` on
+#: every auto-counted challenge row (`COUNTING`), so the rules are stated, not hidden.
+MAX_REPS_PER_SET = 30          # a set counts only with 1 <= reps <= this
+MAX_WEIGHT_KG_PER_SET = 400    # ... and 0 <= weight <= this (no weight = bodyweight = 0)
+MIN_SETS_PER_DAY = 3           # a TRAINING DAY needs at least this many counted sets
+MAX_SETS_PER_DAY = 60          # per person per day, at most this many sets count
+MAX_VOLUME_KG_PER_DAY = 30000  # ... and at most this much volume (weight x reps)
+MIN_SETS_PER_WORKOUT = 3       # a WORKOUT counts only with this many counted sets,
+MIN_WORKOUT_MINUTES = 10       # ... lasting this long (end_time - start_time),
+MAX_WORKOUTS_PER_DAY = 2       # ... and at most this many per day
+LATE_HOURS = 72                # a set received more than this after its day ended: no
+
+COUNTING = {
+    'max_reps_per_set': MAX_REPS_PER_SET,
+    'max_weight_kg_per_set': MAX_WEIGHT_KG_PER_SET,
+    'min_sets_per_day': MIN_SETS_PER_DAY,
+    'max_sets_per_day': MAX_SETS_PER_DAY,
+    'max_volume_kg_per_day': MAX_VOLUME_KG_PER_DAY,
+    'min_sets_per_workout': MIN_SETS_PER_WORKOUT,
+    'min_workout_minutes': MIN_WORKOUT_MINUTES,
+    'max_workouts_per_day': MAX_WORKOUTS_PER_DAY,
+    'late_hours': LATE_HOURS,
+}
+
+#: A participant whose credible work on any SINGLE day of the window is above one of
+#: these (for the challenge's metric, read BEFORE the per-day caps) is flagged for
+#: review, reason `day_over_threshold`. Flagged people keep their place; a flagged
+#: first place wins nothing until an operator clears it. Never un-flagged
+#: automatically. `training_days` has no threshold: a day is one day.
+REVIEW_THRESHOLDS = {
+    'sets': 45,
+    'volume_kg': 20000,
+    'workouts': MAX_WORKOUTS_PER_DAY,
+}
+
+
+class _CountsUntil(Func):
+    """The last moment a set trained on `date` may ARRIVE and still count: the end of
+    that day in the server's time zone, plus `LATE_HOURS`."""
+
+    output_field = DateTimeField()
+
+    def as_sql(self, compiler, connection, **extra_context):
+        sql, params = compiler.compile(self.source_expressions[0])
+        return (f"(({sql} + interval '1 day' + interval '{int(LATE_HOURS)} hours') "
+                f"AT TIME ZONE %s)", [*params, settings.TIME_ZONE])
+
+
+def credible_sets(logged):
+    """The sets of `logged` a challenge counts. See the module docstring, "What counts".
+
+    On time first (the version of a set the server had in time), then one row per set
+    (the latest of the rows sharing a number), then the per-set limits.
+    """
+    logged = logged.filter(user_exercise_progress__isnull=False)
+    on_time = logged.filter(Q(created_at__isnull=True)
+                            | Q(created_at__lte=_CountsUntil(F('date'))))
+    # One row per SET: of the rows carrying the same number for the same exercise and
+    # day (the progress row), the latest. Unnumbered rows are each a set.
+    latest = (on_time.filter(set_number__isnull=False)
+              .order_by('user_exercise_progress_id', 'set_number', '-id')
+              .distinct('user_exercise_progress_id', 'set_number')
+              .values('id'))
+    kept = on_time.filter(Q(set_number__isnull=True) | Q(pk__in=latest))
+    return kept.filter(reps__gte=1, reps__lte=MAX_REPS_PER_SET).filter(
+        Q(weight__isnull=True) | Q(weight__gte=0, weight__lte=MAX_WEIGHT_KG_PER_SET))
 
 
 # ------------------------------------------------------------------ the number itself
@@ -72,45 +176,83 @@ def measure(metric, user_ids, start, end) -> dict:
 
     People with nothing in the window are absent from the answer (read them as 0).
     """
+    return measure_for_review(metric, user_ids, start, end)[0]
+
+
+def measure_for_review(metric, user_ids, start, end) -> tuple[dict, set]:
+    """({user_id: value}, {user_ids with a day over `REVIEW_THRESHOLDS`}), ONE query.
+
+    The query hands back per-day rows, at most `MAX_SETS_PER_DAY` sets per person per
+    day (a window function numbers them; the SQL drops the rest), or one row per
+    qualifying workout; the per-day caps and the sum over days are a Python pass over
+    those rows — bounded by 60 x the window's days per person, however many rows a
+    cheat wrote.
+    """
     from routine.models import ExerciseSetLog, WorkoutSession
     from .models import Challenge
 
     ids = sorted({uid for uid in user_ids if uid is not None})
     if not ids or metric == Challenge.METRIC_MANUAL:
-        return {}
+        return {}, set()
 
+    values, flagged = {}, set()
     if metric == 'workouts':
-        rows = (WorkoutSession.objects
-                .filter(user_id__in=ids, status='completed',
-                        start_time__gte=start, start_time__lte=end)
-                .order_by().values('user_id').annotate(value=Count('id'))
-                .values_list('user_id', 'value'))
-        return {uid: float(value or 0) for uid, value in rows}
+        sessions = WorkoutSession.objects.filter(
+            user_id__in=ids, status='completed', start_time__gte=start,
+            start_time__lte=end, end_time__isnull=False,
+            end_time__gte=F('start_time') + timedelta(minutes=MIN_WORKOUT_MINUTES))
+        counted = (credible_sets(ExerciseSetLog.objects.filter(
+                       workout_session__in=sessions.values('pk')))
+                   .filter(workout_session_id=OuterRef('pk'))
+                   .order_by().values('workout_session_id')
+                   .annotate(n=Count('id')).values('n'))
+        per_day = {}
+        for uid, started in (sessions
+                             .annotate(sets=Subquery(counted, output_field=IntegerField()))
+                             .filter(sets__gte=MIN_SETS_PER_WORKOUT)
+                             .order_by().values_list('user_id', 'start_time')):
+            key = (uid, timezone.localdate(started))
+            per_day[key] = per_day.get(key, 0) + 1
+        for (uid, _day), workouts in per_day.items():
+            values[uid] = values.get(uid, 0.0) + min(workouts, MAX_WORKOUTS_PER_DAY)
+            if workouts > REVIEW_THRESHOLDS['workouts']:
+                flagged.add(uid)
+        return {uid: float(value) for uid, value in values.items()}, flagged
 
-    logged = ExerciseSetLog.objects.filter(
+    if metric not in ('volume_kg', 'sets', 'training_days'):
+        return {}, set()
+    credible = credible_sets(ExerciseSetLog.objects.filter(
         user_exercise_progress__user_id__in=ids,
-        date__gte=timezone.localdate(start), date__lte=timezone.localdate(end))
-    # One row per SET: of the rows carrying the same number for the same exercise and
-    # day (the progress row), the latest. Unnumbered rows are each a set.
-    latest = (logged.filter(set_number__isnull=False)
-              .order_by('user_exercise_progress_id', 'set_number', '-id')
-              .distinct('user_exercise_progress_id', 'set_number')
-              .values('id'))
-    kept = logged.filter(Q(set_number__isnull=True) | Q(pk__in=latest))
-
-    if metric == 'volume_kg':
-        value = Sum(ExpressionWrapper(F('weight') * F('reps'), output_field=FloatField()),
-                    filter=Q(weight__gt=0, reps__gt=0))
-    elif metric == 'sets':
-        value = Count('id')
-    elif metric == 'training_days':
-        value = Count('date', distinct=True)
-    else:
-        return {}
-    rows = (kept.order_by().values('user_exercise_progress__user_id')
-            .annotate(value=value)
-            .values_list('user_exercise_progress__user_id', 'value'))
-    return {uid: round(float(value or 0), 2) for uid, value in rows}
+        date__gte=timezone.localdate(start), date__lte=timezone.localdate(end)))
+    volume = Case(When(weight__gt=0, then=ExpressionWrapper(
+                      F('weight') * F('reps'), output_field=FloatField())),
+                  default=Value(0.0), output_field=FloatField())
+    day = [F('user_exercise_progress__user_id'), F('date')]
+    rows = (credible
+            .annotate(owner=F('user_exercise_progress__user_id'), kg=volume,
+                      nth=Window(RowNumber(), partition_by=day, order_by=F('id').asc()),
+                      day_sets=Window(Count('id'), partition_by=day),
+                      day_kg=Window(Sum(volume), partition_by=day))
+            .filter(nth__lte=MAX_SETS_PER_DAY)
+            .order_by()
+            .values_list('owner', 'date', 'kg', 'day_sets', 'day_kg'))
+    days = {}
+    for uid, date, kg, day_sets, day_kg in rows:
+        entry = days.setdefault((uid, date), [0, 0.0, day_sets or 0, float(day_kg or 0)])
+        entry[0] += 1
+        entry[1] += float(kg or 0)
+    for (uid, _date), (sets, kg, all_sets, all_kg) in days.items():
+        if metric == 'sets':
+            value, over = sets, all_sets > REVIEW_THRESHOLDS['sets']
+        elif metric == 'volume_kg':
+            value = min(kg, MAX_VOLUME_KG_PER_DAY)
+            over = all_kg > REVIEW_THRESHOLDS['volume_kg']
+        else:
+            value, over = (1 if sets >= MIN_SETS_PER_DAY else 0), False
+        values[uid] = values.get(uid, 0.0) + value
+        if over:
+            flagged.add(uid)
+    return {uid: round(float(value), 2) for uid, value in values.items()}, flagged
 
 
 def apply_value(participation, challenge, value):
@@ -150,14 +292,14 @@ def reapply_target(challenge) -> int:
     challenges alike. Returns how many rows changed.
     """
     from .models import Challenge, ChallengeParticipation
-    from .standing import in_standing
+    from .standing import counted_rows
 
     with transaction.atomic():
         locked = Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
         if locked is None:
             return 0
         changed, fields = [], []
-        for row in in_standing(ChallengeParticipation.objects.filter(challenge=locked)):
+        for row in counted_rows(ChallengeParticipation.objects.filter(challenge=locked)):
             before = (row.progress_percentage, row.status, row.completed_at)
             fields = apply_value(row, locked, row.current_value)
             if (row.progress_percentage, row.status, row.completed_at) != before:
@@ -168,32 +310,51 @@ def reapply_target(challenge) -> int:
 
 
 def recount(challenge, user_ids=None) -> bool:
-    """Recount `user_ids` (default: everyone in the standing) of one running challenge.
+    """Recount `user_ids` (default: everyone counted) of one running challenge.
 
     Under the challenge's row lock, measuring inside it. Writes only the rows whose
-    number moved (one bulk UPDATE) and does NOT re-rank: the caller does, once, after
-    whatever else it changed (`social/standing.py write_places`). Returns whether any
-    row moved. A manual, hidden or not-running challenge is left alone.
+    number or review moved (one bulk UPDATE) and does NOT re-rank: the caller does,
+    once, after whatever else it changed (`social/standing.py write_places`). Returns
+    whether any row moved. A manual, hidden or not-running challenge is left alone.
+
+    Everyone who has not dropped out is counted, a DISQUALIFIED participant included
+    (their number stays true for the operator who may clear them). A participant with
+    a day over `REVIEW_THRESHOLDS` who is `clear` becomes `flagged` /
+    `day_over_threshold`; nobody is un-flagged here, and a disqualified person stays so.
+    Someone an operator CLEARED (`clear` / `operator`) is not flagged again: the
+    operator looked at their training, and the same day would re-flag them on every
+    set they log.
     """
     from .models import Challenge, ChallengeParticipation
-    from .standing import in_standing
+    from .standing import counted_rows
 
     with transaction.atomic():
         locked = Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
         if (locked is None or not locked.auto_counted or locked.is_hidden
                 or not locked.is_active):
             return False
-        rows = in_standing(ChallengeParticipation.objects.filter(challenge=locked))
+        rows = counted_rows(ChallengeParticipation.objects.filter(challenge=locked))
         if user_ids is not None:
             rows = rows.filter(user_id__in=list(user_ids))
         rows = list(rows)
-        values = measure(locked.metric, [row.user_id for row in rows],
-                         locked.start_date, locked.end_date)
-        moved, fields = [], []
+        values, over = measure_for_review(locked.metric, [row.user_id for row in rows],
+                                          locked.start_date, locked.end_date)
+        moved = []
+        fields = ['current_value', 'progress_percentage', 'status', 'completed_at',
+                  'review_state', 'review_reason']
         for row in rows:
             value = values.get(row.user_id, 0.0)
+            changed = False
             if value != row.current_value:
-                fields = apply_value(row, locked, value)
+                apply_value(row, locked, value)
+                changed = True
+            if (row.user_id in over
+                    and row.review_state == ChallengeParticipation.REVIEW_CLEAR
+                    and row.review_reason is None):
+                row.review_state = ChallengeParticipation.REVIEW_FLAGGED
+                row.review_reason = ChallengeParticipation.REASON_DAY_OVER_THRESHOLD
+                changed = True
+            if changed:
                 moved.append(row)
         if moved:
             ChallengeParticipation.objects.bulk_update(moved, fields)
@@ -204,11 +365,11 @@ def recount_for_user(user_id) -> int:
     """Recount one person in every running auto-counted challenge they are in, re-rank
     each one that moved, and drop their cached challenge list. Returns how many moved."""
     from .models import Challenge, ChallengeParticipation
-    from .standing import in_standing, write_places
+    from .standing import counted_rows, write_places
 
     now = timezone.now()
     challenges = [row.challenge for row in (
-        in_standing(ChallengeParticipation.objects.filter(user_id=user_id))
+        counted_rows(ChallengeParticipation.objects.filter(user_id=user_id))
         .exclude(challenge__metric=Challenge.METRIC_MANUAL)
         .exclude(challenge__status__in=Challenge.TERMINAL_STATUSES)
         .filter(challenge__is_hidden=False, challenge__start_date__lte=now,

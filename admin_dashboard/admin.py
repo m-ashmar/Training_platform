@@ -567,6 +567,23 @@ class ChallengeAdmin(admin.ModelAdmin):
         # 30-row routine page. `list_select_related` fixes FKs, not reverse counts.
         return super().get_queryset(request).annotate(_participant_count=Count('participations', distinct=True))
 
+class ChallengeParticipationAdmin(admin.ModelAdmin):
+    """A participation, and the operator's review of it (owner, 2026-09-24, F20).
+
+    A recount flags a participant with a day of training above a review threshold;
+    here an operator filters by `review_state` and clears or disqualifies. Each action
+    re-ranks the standing and settles a winner whose review window closed
+    (`social/review.py`)."""
+    from social import review as _review
+
+    list_select_related = ('user', 'challenge')
+    list_display = _review.PARTICIPATION_LIST_DISPLAY
+    list_filter = _review.PARTICIPATION_LIST_FILTER
+    search_fields = ('user__username', 'challenge__title')
+    actions = [_review.clear_review, _review.disqualify]
+    del _review
+
+
 class AchievementAdmin(admin.ModelAdmin):
     """Achievement management"""
     
@@ -741,7 +758,7 @@ admin_site.register(Post, PostAdmin)
 admin_site.register(Comment)
 admin_site.register(UserFollow)
 admin_site.register(Challenge, ChallengeAdmin)
-admin_site.register(ChallengeParticipation)
+admin_site.register(ChallengeParticipation, ChallengeParticipationAdmin)
 admin_site.register(Achievement, AchievementAdmin)
 admin_site.register(UserAchievement)
 admin_site.register(Leaderboard)

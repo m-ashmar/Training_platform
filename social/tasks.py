@@ -145,7 +145,8 @@ def dispatch_notification(user_id, title, body, data=None):
     max_retries=3,
 )
 def advance_challenge_phases():
-    """Hourly: move stored challenge status with the clock.
+    """Hourly: move stored challenge status with the clock, and settle the winners of
+    the challenges whose review window has closed (`settle_winners`).
 
     The API reads the phase from the dates; the admin reads the column. Without this
     they disagree from the moment a challenge starts.
@@ -155,48 +156,117 @@ def advance_challenge_phases():
     from .models import Challenge
 
     now = timezone.now()
-    # The challenges this run closes, read BEFORE the UPDATE closes them: their winners
-    # are checked for the Challenge Winner badge below, which counts only a challenge
-    # that is over (SIDE_BUGS S-044). The same predicate `advance_stored_phases` ends.
-    closing = list(Challenge.objects
-                   .filter(status__in=('upcoming', 'active'), end_date__lt=now)
-                   .values_list('pk', flat=True))
     started, ended = Challenge.advance_stored_phases(now=now)
     if started or ended:
         logger.info("challenges started: %s, ended: %s", started, ended)
-    award_challenge_winners(closing)
-    return f"started={started} ended={ended}"
+    # The Challenge Winner badge counts a first place only once the challenge is over
+    # (SIDE_BUGS S-044), and since the owner's F20 (2026-09-24) only once the standing
+    # has been open for review for `Challenge.REVIEW_HOURS` after the end.
+    settled = settle_winners(now=now)
+    return f"started={started} ended={ended} settled={settled}"
 
 
-def award_challenge_winners(challenge_ids) -> int:
-    """Run the badge check for whoever finished first in each of these challenges.
+#: Challenges settled per hourly run. The rest wait an hour: a settlement is a re-rank
+#: and a badge check, and a backlog must not hold the worker.
+SETTLE_BATCH = 200
 
-    `challenge_wins` (`achievements/engine.py`) counts a first place only once the
-    challenge is over, so the check has to run when it closes — the hourly phase task
-    above, or a person closing it (`ChallengeViewSet.perform_update`). Nothing else
-    re-runs a winner's check at that moment: the badge was otherwise earned only if
-    some unrelated event happened to trigger one later.
 
-    The winner is the participation with `rank=1` that reached the target
-    (`status='completed'`), the definition the metric counts. Returns how many were
-    checked. Never raises: a badge is a reward, and must not fail the close.
+def settle_winners(now=None, challenge_ids=None) -> int:
+    """Settle every challenge whose review window has closed and whose winner is not
+    settled yet (`Challenge.winner_checked_at` null) — or only `challenge_ids`.
+
+    Returns how many were settled. See `settle_winner` for what settling is.
     """
-    ids = [pk for pk in challenge_ids or () if pk is not None]
-    if not ids:
-        return 0
-    from .models import ChallengeParticipation
+    from datetime import timedelta
 
-    checked = 0
-    for row in (ChallengeParticipation.objects
-                .filter(challenge_id__in=ids, rank=1, status='completed')
-                .select_related('user').order_by('challenge_id', 'id')):
+    from django.utils import timezone
+
+    from .models import Challenge
+
+    now = now or timezone.now()
+    due = Challenge.objects.filter(
+        winner_checked_at__isnull=True,
+        end_date__lte=now - timedelta(hours=Challenge.REVIEW_HOURS))
+    if challenge_ids is not None:
+        due = due.filter(pk__in=[pk for pk in challenge_ids if pk is not None])
+    settled = 0
+    for pk in due.order_by('end_date', 'id').values_list('pk', flat=True)[:SETTLE_BATCH]:
+        try:
+            if settle_winner(pk, now=now):
+                settled += 1
+        except Exception:
+            # A badge is a reward: one challenge must not stop the others settling.
+            logger.warning("could not settle the winner of challenge %s", pk,
+                           exc_info=True)
+    return settled
+
+
+def settle_winner(challenge_id, now=None) -> bool:
+    """Settle ONE challenge's winner, once (owner, 2026-09-24, F20).
+
+    Only a challenge that ended at least `Challenge.REVIEW_HOURS` ago and is not
+    settled yet. Under the challenge's row lock: the standing is re-ranked one last
+    time (`write_places(settling=True)`, so a participant disqualified during the
+    review holds no place), then the participant at place 1 decides:
+
+    * FLAGGED and not yet decided by an operator: nothing is settled. The hourly task
+      looks again; an operator's "clear review" or "disqualify" settles it at once.
+    * otherwise the challenge is settled (`winner_checked_at` = now, written once), and
+      the Challenge Winner badge is checked for that person only if the challenge is
+      `ranked` (auto-counted, created by a trainer or staff), not cancelled, and they
+      are `clear` and reached the target (`status='completed'`).
+
+    Returns whether it settled. The badge check runs after the settlement is written
+    (`achievements/engine.py challenge_wins` counts only a settled challenge).
+    """
+    from datetime import timedelta
+
+    from django.db import transaction
+    from django.utils import timezone
+
+    from .models import Challenge, ChallengeParticipation
+    from .standing import STANDING_ORDER, in_standing, write_places
+
+    now = now or timezone.now()
+    winner = None
+    with transaction.atomic():
+        challenge = (Challenge.objects.select_for_update(of=('self',))
+                     .select_related('creator')
+                     .filter(pk=challenge_id, winner_checked_at__isnull=True,
+                             end_date__lte=now - timedelta(hours=Challenge.REVIEW_HOURS))
+                     .first())
+        if challenge is None:
+            return False
+        write_places(challenge, settling=True)
+        first = (in_standing(ChallengeParticipation.objects.filter(challenge=challenge))
+                 .select_related('user').order_by(*STANDING_ORDER).first())
+        if first is not None and first.review_state == ChallengeParticipation.REVIEW_FLAGGED:
+            return False
+        Challenge.objects.filter(pk=challenge.pk).update(winner_checked_at=now)
+        if (first is not None and challenge.ranked and challenge.status != 'cancelled'
+                and first.status == 'completed'
+                and first.review_state == ChallengeParticipation.REVIEW_CLEAR):
+            winner = first
+    if winner is not None:
         try:
             from achievements.engine import trigger_achievement_check
 
-            trigger_achievement_check(row.user, 'challenge_completed',
-                                      challenge_id=row.challenge_id)
-            checked += 1
+            trigger_achievement_check(winner.user, 'challenge_completed',
+                                      challenge_id=winner.challenge_id)
         except Exception:
             logger.warning("could not check the winner of challenge %s",
-                           row.challenge_id, exc_info=True)
-    return checked
+                           winner.challenge_id, exc_info=True)
+    return True
+
+
+def award_challenge_winners(challenge_ids) -> int:
+    """The name this lived under before F20: settle these challenges if their review
+    window has closed (`settle_winners`); nothing before that. Never raises."""
+    ids = [pk for pk in challenge_ids or () if pk is not None]
+    if not ids:
+        return 0
+    try:
+        return settle_winners(challenge_ids=ids)
+    except Exception:
+        logger.warning("could not settle challenges %s", ids, exc_info=True)
+        return 0

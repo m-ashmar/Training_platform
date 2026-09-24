@@ -312,8 +312,12 @@ class AchievementEngine:
                 # and it was not cancelled: `Challenge.lifecycle_status` as a query.
                 # From that moment the standing is frozen (`_update_challenge_rankings`
                 # does not re-rank a finished board), so the count cannot move again.
-                # The check that awards it runs when the challenge closes
-                # (`social/tasks.py award_challenge_winners`).
+                # Owner, 2026-09-24 (F20): a win also needs the challenge RANKED
+                # (counted by the server, created by a trainer or staff — no prize
+                # for a self-reported number), its winner SETTLED after the review
+                # window (`winner_checked_at`), and the person CLEAR of review. The
+                # check that awards it runs at settlement
+                # (`social/tasks.py settle_winner`).
                 from django.db.models import Q
                 from social.models import Challenge
 
@@ -322,9 +326,12 @@ class AchievementEngine:
                             & ~Q(challenge__status__in=Challenge.TERMINAL_STATUSES)))
                 return ChallengeParticipation.objects.filter(
                     ended,
+                    Challenge.ranked_q('challenge__'),
                     user=user,
                     status='completed',
                     rank=1,
+                    review_state=ChallengeParticipation.REVIEW_CLEAR,
+                    challenge__winner_checked_at__isnull=False,
                 ).count()
             
             # Goal metrics
