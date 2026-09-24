@@ -5082,3 +5082,12 @@ msgstr "نوع الحركة هذا غير معروف."
 #, python-format
 msgid "The summary covers at most %(months)d months."
 msgstr "يغطي الملخص %(months)d شهرًا على الأكثر."
+
+#: routine/views.py
+msgid "rest_time must be a whole number of seconds."
+msgstr "يجب أن يكون وقت الراحة عدداً صحيحاً من الثواني."
+
+#: routine/views.py
+#, python-format
+msgid "Cannot expand %(names)s. What can be expanded: %(known)s."
+msgstr "لا يمكن توسيع %(names)s. ما يمكن توسيعه: %(known)s."

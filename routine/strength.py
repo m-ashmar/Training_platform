@@ -389,23 +389,38 @@ def personal_best(user, exercise_id, *, before=None):
             'estimated_1rm': one_rep_max(best['weight'], best['reps'])}
 
 
+def record_beaten(log):
+    """The best this set beat — `personal_best(..., before=log.pk)` — when the set is a
+    personal record; None when it is not one.
+
+    ONE judgement, so the verdict and the number the app prints beside it
+    (`previous_best`, BACKEND_BUGS B-112) can never disagree: the set is a record
+    exactly when it is heavier than that best, and that best is exactly what it beat —
+    the heaviest earlier set, among equal weights the one with the most reps, then the
+    latest. "Earlier" is written earlier (`pk`), so a lighter set of the same batch
+    counts. The very first set of an exercise beat nothing, and a set with no weight or
+    no reps is not a lift.
+    """
+    if not log.weight or not log.reps:
+        return None
+    progress = log.user_exercise_progress
+    if progress is None:
+        return None
+    previous = personal_best(progress.user_id, progress.exercise_id, before=log.pk)
+    if previous is None or not float(log.weight) > previous['weight']:
+        return None
+    return previous
+
+
 def is_personal_record(log) -> bool:
     """True when this set is heavier than everything this person has logged for that
-    exercise.
+    exercise (`record_beaten`).
 
     The very first set of an exercise is not a record — there is nothing to beat, and a
     "new best!" on a first attempt is noise. The day's other sets count, so the heaviest
     set of a session is the only one that can claim it.
     """
-    if not log.weight or not log.reps:
-        return False
-    progress = log.user_exercise_progress
-    if progress is None:
-        return False
-    previous = personal_best(progress.user, progress.exercise_id, before=log.pk)
-    if previous is None:
-        return False
-    return float(log.weight) > previous['weight']
+    return record_beaten(log) is not None
 
 
 # ------------------------------------------------------------------ many exercises
