@@ -1036,9 +1036,55 @@ def test_the_flag_is_read_only_in_the_user_admin_and_the_bulk_action_is_gone(mak
     assert b'name="trainer_is_verified"' not in form.content
 
 
+#: Calls that READ the flag when it is passed as a keyword: a lookup, not a write.
+_LOOKUPS = {"filter", "exclude", "get", "Q", "first", "exists", "count"}
+
+
+def _flag_writes(text):
+    """Line numbers where `trainer_is_verified` is given a value: an assignment
+    (`user.trainer_is_verified = ...`) or a keyword handed to anything but a lookup
+    (`bulk_apply(..., trainer_is_verified=True)`, `.update(trainer_is_verified=...)`).
+    The model field's own definition is not a write."""
+    lines = []
+    for match in re.finditer(r"\btrainer_is_verified\s*=(?!=)", text):
+        before = text[:match.start()]
+        if re.search(r"(^|\n)\s*$", before) and text[match.end():].lstrip().startswith("models."):
+            continue                                  # the field definition
+        depth, i = 0, len(before) - 1
+        while i >= 0:                                 # the innermost call still open
+            ch = before[i]
+            if ch == ")":
+                depth += 1
+            elif ch == "(":
+                if depth == 0:
+                    break
+                depth -= 1
+            i -= 1
+        if i >= 0:
+            name = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*$", before[:i])
+            if name and name.group(1) in _LOOKUPS:
+                continue
+        lines.append(text.count("\n", 0, match.start()) + 1)
+    return lines
+
+
+def test_the_flag_write_scan_sees_the_old_bulk_action():
+    """The scan below is only worth something if it would have caught what this build
+    removed: the console's "mark as verified" bulk action (users/admin.py at bb80490)."""
+    old = (
+        "def make_verified(modeladmin, request, queryset):\n"
+        "    count = bulk_apply(request, queryset.filter(user_type='trainer'),\n"
+        "                       \"Trainer verified via bulk admin action\", "
+        "trainer_is_verified=True)\n")
+    assert _flag_writes(old) == [3]
+    assert _flag_writes("trainers.filter(trainer_is_verified=True)") == []
+    assert _flag_writes("    trainer_is_verified = models.BooleanField(\n") == []
+    assert _flag_writes("user.trainer_is_verified = True") == [1]
+
+
 def test_nothing_but_the_decision_writes_the_flag():
-    """A source scan: `trainer_is_verified` is ASSIGNED only in
-    trainer_verification/services.py (and the data migration only reads it)."""
+    """A source scan: `trainer_is_verified` is WRITTEN only in
+    trainer_verification/services.py (the data migration only reads it)."""
     offenders = []
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT)
@@ -1046,11 +1092,7 @@ def test_nothing_but_the_decision_writes_the_flag():
                 "flutter", "yalla_gym"} & set(rel.parts) or "site-packages" in str(rel):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        # An attribute assignment, or the flag handed to a writer as a keyword.
-        for match in re.finditer(
-                r"\.trainer_is_verified\s*=(?!=)"
-                r"|(?:update|bulk_apply|create|update_or_create|get_or_create)\("
-                r"[^)]*\btrainer_is_verified\s*=", text):
-            offenders.append(f"{rel}:{text.count(chr(10), 0, match.start()) + 1}")
+        offenders += [f"{rel}:{line}" for line in _flag_writes(text)]
     allowed = {p for p in offenders if p.startswith("trainer_verification/services.py")}
+    assert len(allowed) == 2, allowed               # decide() and revoke()
     assert set(offenders) - allowed == set(), sorted(set(offenders) - allowed)
