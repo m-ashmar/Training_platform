@@ -700,6 +700,25 @@ def test_an_event_is_never_changed(make_user, api):
     assert WithdrawalEvent.objects.get(pk=event.pk).to_state == "requested"
 
 
+def test_the_export_carries_payouts_and_erasure_keeps_the_money_record(make_user, api):
+    from payouts.models import PayoutMethod, Withdrawal
+    from training_platform.privacy.registry import erase_user_data, export_user_data
+
+    trainer, _method = _ready(make_user, api)
+    made = _request(api, trainer, "20000").json()
+    sections = export_user_data(trainer)["sections"]
+    assert sections["payout_methods"][0]["shamcash_address"] == "0a3f91c27be455d0"
+    assert sections["withdrawals"][0]["destination_address"] == "0a3f91c27be455d0"
+    assert [e["to_state"] for e in sections["withdrawal_events"]] == ["requested"]
+    assert "evidence" not in sections["withdrawal_events"][0]
+
+    api(trainer).post(f"{WITHDRAWALS}{made['id']}/cancel/")
+    report = erase_user_data(trainer)
+    assert report["payout_methods"]["action"] == "delete"
+    assert not PayoutMethod.objects.filter(trainer=trainer).exists()
+    assert Withdrawal.objects.filter(pk=made["id"]).exists()   # a record of money
+
+
 def test_payout_clearing_is_the_platform_not_a_person(db):
     from wallet.utils import (get_payout_clearing_wallet, is_reserved_username,
                               ledger_owner_emails)
