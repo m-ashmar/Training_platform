@@ -293,6 +293,16 @@ def test_only_the_two_people_in_the_thread_ever_get_the_media(api, make_user, pa
         assert '/media/' not in str(note.metadata)
 
 
+def test_a_conversation_that_cannot_exist_is_the_same_404(api, pair):
+    """A missing, malformed or out-of-range id answers the stranger's 404, not a 500."""
+    _trainer, client = pair
+    for conversation_id in ('', 'abc', '99999999', str(2 ** 70)):
+        response = api(client).post(MEDIA, {'conversation': conversation_id,
+                                            'kind': 'video', 'file': video()})
+        assert response.status_code == 404, (conversation_id, response.content)
+        assert response.json()['code'] == 'not_found'
+
+
 def test_a_message_taken_back_stops_serving_its_media(api, pair, conversation):
     trainer, client = pair
     sent = _post(api, client, conversation, 'image', photo_with_gps()).json()
