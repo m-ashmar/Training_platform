@@ -4,6 +4,8 @@ from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditL
 # The settling window (BACKEND_BUGS B-097), as mixins so its fields stay out of the two
 # `Meta.fields` lists below: see wallet/settling.py.
 from .settling import TransactionSettlingFields, WalletSettlingFields
+# `withdrawal` on a ledger row (B-125); the module imports nothing of `wallet` at load.
+from payouts.ledger_fields import TransactionWithdrawalFields
 
 _MIN_AMOUNT = Decimal("0.01")
 
@@ -280,10 +282,15 @@ class _TransactionListSerializer(serializers.ListSerializer):
         prime = getattr(self.child, "prime_counterparties", None)
         if prime is not None:
             prime(rows)
+        # The withdrawals the page's rows name (B-125), in one query too.
+        prime_withdrawals = getattr(self.child, "prime_withdrawals", None)
+        if prime_withdrawals is not None:
+            prime_withdrawals(rows)
         return super().to_representation(rows)
 
 
-class TransactionSerializer(TransactionSettlingFields, serializers.ModelSerializer):
+class TransactionSerializer(TransactionWithdrawalFields, TransactionSettlingFields,
+                            serializers.ModelSerializer):
     """One row of "الحركات" on the Wallet screen.
 
     The stored columns say what the database did; `kind`, `reason`, `direction`,

@@ -405,6 +405,12 @@ class WalletTransactionsView(generics.ListAPIView):
     no next link and nothing said the list had been truncated. It is a financial
     ledger; silently hiding rows is not acceptable.
 
+    A row that moved a trainer's withdrawal money, read by that trainer, carries
+    `withdrawal`: `{id, number, state, arrived, destination_kind, destination_label}` —
+    the withdrawal's state NOW and where the money went (the last four characters of a
+    ShamCash address, or the agent's shop name); `null` on every other row
+    (`payouts/ledger_fields.py`, BACKEND_BUGS B-125). One query per page.
+
     Each row also carries `available_at` and `settling` (BACKEND_BUGS B-097;
     `wallet.settling.TransactionSettlingFields`): on a `trainer_fee_payout` row read by
     the trainer, when its money becomes withdrawable and whether that is still ahead;

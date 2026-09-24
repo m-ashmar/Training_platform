@@ -1624,6 +1624,18 @@ already moved, spec §3: balance and history are visible everywhere).
   + `max_months: 12`), `bad_money_type` (+ `money_type_options`), `bad_kind`
   (+ `kind_options`; the code diet's meal events answer for an unknown `kind`).
 
+**A withdrawal's ledger row says where the money went and whether it arrived**
+(BACKEND_BUGS B-125, 2026-09-24). Additive; identical on every build. Each row of
+`GET /api/wallet/transactions/` (and its detail route) gains `withdrawal`: on a
+`withdrawal` / `withdrawal_returned` row read by the trainer whose withdrawal it is,
+`{id, number, state, arrived, destination_kind, destination_label}` — `state` is the
+withdrawal's state NOW, `arrived` is `state == "confirmed"`, `destination_kind` is
+`shamcash` or `agent_cash`, `destination_label` the last four characters of the ShamCash
+address (`•••• 1234`) or the agent's shop name; `null` on every other row. The
+withdrawal routes' refusal tables now say the BUILD is checked before the role
+(B-126): anyone on a build that may not move wallet money is answered
+`not_available_on_channel`.
+
 **What the payouts review found** (2026-09-24). Additive; identical on every build.
 
 - `GET /api/wallet/balance/` gains, for a TRAINER, what the platform OWES them:

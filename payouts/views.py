@@ -130,6 +130,11 @@ class WithdrawalListView(generics.ListAPIView):
     withdrawal body (`state: "requested"`, a number like `WD-2026-09-23-041`), and the
     push `withdrawal_requested`.
 
+    The checks run in the order of this table: the BUILD first (CLAUDE.md: any endpoint
+    that moves wallet money calls `require_purchase_allowed` before anything else), then
+    the role — so anyone, trainer or not, on a build that may not move wallet money is
+    answered `not_available_on_channel` (BACKEND_BUGS B-126).
+
     | Status | `code` | Meaning |
     |---|---|---|
     | 400 | `app_channel_required` | no known `X-App-Channel` |
@@ -225,6 +230,11 @@ class WithdrawalCancelView(APIView):
 
     200 with the withdrawal body (`state: "cancelled"`); cancelling one already
     cancelled answers the same 200 and moves nothing.
+
+    The checks run in the order of this table: the BUILD first (CLAUDE.md: any endpoint
+    that moves wallet money calls `require_purchase_allowed` before anything else), then
+    the role — so anyone, trainer or not, on a build that may not move wallet money is
+    answered `not_available_on_channel` (BACKEND_BUGS B-126).
 
     | Status | `code` | Meaning |
     |---|---|---|
