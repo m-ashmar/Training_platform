@@ -313,6 +313,7 @@ def test_a_purchase_pays_the_trainer_net_and_the_platform_its_commission(
     assert resp.status_code == 200, resp.content
     body = resp.json()["purchase"]
     assert (body["status"], body["amount"], body["currency"]) == ("confirmed", "2500.00", "SYP")
+    assert body["money_type"] == "ROUTINE_PRODUCT"
 
     assert _balance(buyer) == D("500.00")
     assert _balance(trainer) == D("2000.00")
@@ -544,6 +545,37 @@ def test_a_price_in_the_other_currency_is_converted_at_the_operators_rate(make_u
     assert _platform("USD") - usd_platform == D("0.20")
     credit = Transaction.objects.get(reference_id=purchase.payout_reference)
     assert credit.exchange_reference and credit.money_type == "ROUTINE_PRODUCT"
+
+
+def test_a_refund_across_currencies_undoes_the_exchange_at_its_own_rate(make_user, api):
+    """The trainer's share crossed currencies as an exchange (a debit out of escrow in
+    dollars, a credit into the trainer's pounds). The refund takes back exactly the
+    pounds the trainer received and returns exactly the dollars that left escrow — at
+    the sale's rate, whatever the rate is today."""
+    from routine import products
+    from routine.models import RoutinePurchase
+    from wallet.models import ExchangeRate, Transaction, set_currency_for
+
+    ExchangeRate.objects.create(base="USD", quote="SYP", rate=RATE,
+                                effective_from=timezone.now() - timedelta(hours=2), note="gate")
+    trainer, _template_, product_id = _published(make_user, api, "fxrefund", price="13000.00")
+    buyer = make_user("rp_c_fxrefund")
+    set_currency_for(buyer, "USD", "client")
+    _fund(buyer, "5.00")
+    usd_platform, usd_escrow = _platform("USD"), _escrow("USD")
+    body = _buy(api, buyer, product_id).json()["purchase"]
+    # The operator moves the rate before the refund: the refund must not use it.
+    ExchangeRate.objects.create(base="USD", quote="SYP", rate=D("15000.000000"),
+                                effective_from=timezone.now() - timedelta(minutes=5), note="new")
+
+    products.refund(body["id"], _operator(make_user, "fxrefund_op"), "wrong program")
+    assert RoutinePurchase.objects.get(pk=body["id"]).status == "refunded"
+    assert _balance(buyer) == D("5.00")
+    assert _balance(trainer) == D("0.00")
+    assert (_platform("USD"), _escrow("USD")) == (usd_platform, usd_escrow)
+    reversals = Transaction.objects.filter(metadata__purchase_id=body["id"], tx_type="reversal")
+    assert sorted((t.amount, t.currency) for t in reversals) == [
+        (D("0.20"), "USD"), (D("0.80"), "USD"), (D("1.00"), "USD"), (D("10400.00"), "SYP")]
 
 
 def test_a_stale_rate_refuses_the_sale_before_anything_moves(make_user, api):

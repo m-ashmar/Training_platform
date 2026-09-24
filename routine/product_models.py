@@ -23,6 +23,8 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Q
 
+from policy.money import MoneyType
+
 
 class ProductStatus(models.TextChoices):
     DRAFT = "draft", "Draft"
@@ -170,6 +172,12 @@ class RoutinePurchase(models.Model):
                                 related_name="purchases")
     status = models.CharField(max_length=16, choices=PurchaseStatus.choices,
                               default=PurchaseStatus.CONFIRMED, db_index=True)
+    #: Every payment carries its kind of money (the spec, section 3; CLAUDE.md). A
+    #: purchase is only ever ROUTINE_PRODUCT, and the database says so
+    #: (`routine_purchase_is_routine_product`), so a report over payments of every kind
+    #: never has to know which table implies what.
+    money_type = models.CharField(max_length=16, choices=MoneyType.choices,
+                                  default=MoneyType.ROUTINE_PRODUCT, editable=False)
     #: The product's price of record at the sale.
     price_amount = models.DecimalField(max_digits=12, decimal_places=2)
     price_currency = models.CharField(max_length=8)
@@ -222,6 +230,8 @@ class RoutinePurchase(models.Model):
             models.UniqueConstraint(fields=["buyer", "product"],
                                     condition=Q(status="confirmed"),
                                     name="routine_purchase_one_confirmed"),
+            models.CheckConstraint(condition=Q(money_type=MoneyType.ROUTINE_PRODUCT),
+                                   name="routine_purchase_is_routine_product"),
         ]
         indexes = [models.Index(fields=["product", "status"],
                                 name="routinepurchase_product_idx")]

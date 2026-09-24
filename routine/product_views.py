@@ -452,7 +452,8 @@ class ProductBuyView(APIView):
     operator's rate, which is snapshotted too. The same key again answers the same
     purchase (200, nothing moves twice).
 
-    200: `{purchase: {id, product_id, status: "confirmed", amount, currency,
+    200: `{purchase: {id, product_id, status: "confirmed", money_type:
+    "ROUTINE_PRODUCT", amount, currency,
     price_of_record, price_of_record_currency, exchange_rate, routine_id,
     charge_reference, created_at}}` — `routine_id` is the buyer's copy (read and train
     it with the routine routes, on every build); `charge_reference` is the wallet row
@@ -535,6 +536,7 @@ def purchase_payload(purchase) -> dict:
         "id": purchase.pk,
         "product_id": purchase.product_id,
         "status": purchase.status,
+        "money_type": purchase.money_type,
         "amount": str(purchase.amount),
         "currency": purchase.currency,
         "price_of_record": str(purchase.price_amount) if converted else None,

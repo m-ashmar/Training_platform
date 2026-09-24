@@ -345,7 +345,7 @@ register(PersonalDataSource(
     on_erase="keep"))
 register(PersonalDataSource(
     label="routine_purchases", model="routine.RoutinePurchase", user_field="buyer",
-    fields=["id", "product", "status", "price_amount", "price_currency", "amount",
+    fields=["id", "product", "status", "money_type", "price_amount", "price_currency", "amount",
             "currency", "exchange_rate_value", "charge_reference", "paid_with",
             "refunded_at", "refund_reason", "created_at"],
     on_erase="keep"))

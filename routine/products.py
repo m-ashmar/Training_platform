@@ -547,8 +547,9 @@ def refund(purchase_id, operator, reason) -> RoutinePurchase:
                               money_type=kind,
                               metadata={"original_reference": charge.reference_id, **common})
         except InsufficientBalance as exc:
-            raise ReviewConflict("The trainer's wallet no longer holds their share of this "
-                                 "sale, so it cannot be taken back. Nothing was moved.") from exc
+            raise ReviewConflict("A wallet this sale paid into — the trainer's, as a rule — "
+                                 "no longer holds its part, so it cannot be taken back. "
+                                 "Nothing was moved.") from exc
         except AlreadyReversed as exc:
             raise ReviewConflict(f"Ledger row {exc.reference_id} of this purchase was already "
                                  f"reversed by hand. Nothing was moved.") from exc
