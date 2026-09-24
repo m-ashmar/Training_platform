@@ -58,7 +58,9 @@ operator's review (`ChallengeParticipation.review_state`); see `recount`.
   transaction, however many sets it wrote (`schedule_recount`), after commit, so it
   reads committed rows.
 * When the creator changes a running challenge's `metric` or dates: every participant,
-  in one grouped query (`ChallengeViewSet.perform_update`).
+  in one grouped query (`ChallengeViewSet.perform_update`). Once the challenge is over
+  its `metric`, dates and target are fixed (`challenge_over`), since nothing recounts
+  it then.
 
 A recount takes the challenge's row lock (the one `join`, `leave` and `update_progress`
 take, so the lock order is unchanged), measures INSIDE it — the last writer to take the

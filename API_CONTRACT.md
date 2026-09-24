@@ -1453,7 +1453,8 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   no new route. The views' docstrings (`ChallengeViewSet`, `join`, `leave`,
   `leaderboard`) carry the full contract.
   - Challenge rows (list, detail, create, update) gain, read-only: `ranked` (bool —
-    `auto_counted` AND the creator is a trainer or staff; only a ranked challenge can
+    `auto_counted` AND the creator is staff or a VERIFIED trainer (`trainer_is_verified`,
+    set by an operator: anyone may sign up as a trainer); only a ranked challenge can
     award the Challenge Winner badge or anything a first place earns; a manual,
     self-reported challenge is never ranked), `counting` (null for a manual challenge,
     else the rules the count applies: `{"max_reps_per_set": 30,
@@ -1466,8 +1467,10 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   - What an auto-counted challenge counts: a set with 1..30 reps and 0..400 kg; at most
     60 sets and 30 000 kg per person per day; a training day needs 3 counted sets; a
     workout needs to be completed, with 3 counted sets, lasting 10 minutes, at most 2 a
-    day; a set the server received more than 72 h after its training day ended does not
-    count (`ExerciseSetLog.created_at`, new; older rows count). The person's own
+    day, and only its sets trained on the session's start day count toward it; a set
+    the server received, or whose weight or reps changed, more than 72 h after its
+    training day ended does not count (`ExerciseSetLog.created_at` and
+    `values_changed_at`, new; older rows count). The person's own
     journal, strength charts and adherence are unchanged: only the challenge filters.
   - `user_progress` and the `leaderboard/` `me` row gain `review_state` (`"clear"` |
     `"flagged"` | `"disqualified"`) and `review_reason` (null | `"day_over_threshold"`
@@ -1479,11 +1482,17 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
     `challenge_rank`, the stored rank; places run 1..N over the rest — their `me` row
     is served with `rank: null`, and their number is still counted.
   - Codes: `join/` and `leave/` by a disqualified person: `403
-    challenge_disqualified`. `update_progress/` unchanged.
+    challenge_disqualified`. `update_progress/` unchanged. `PUT/PATCH` answers `400`
+    with the top-level `code` (and the field error in `field_errors`):
+    `challenge_over` — `metric`, `start_date`, `end_date` or `target_value` of a
+    challenge that is over (ended or closed); `end_date_in_past` — an `end_date`
+    earlier than now (to end early, close it with `status: "completed"`).
   - The winner is settled once, by the hourly phase task, 48 h after the end: the
     standing is re-ranked, and the person at place 1 is checked for the badge if the
-    challenge is ranked and they are clear and reached the target (flagged: wait for
-    the operator). A creator closing a challenge early (`status: "completed"`) moves
+    challenge is ranked and they are clear and reached the target (flagged in a ranked
+    challenge: wait for the operator; an unranked or cancelled challenge never waits).
+    An operator's clear covers the days above a threshold up to then; a later such day
+    flags the person again. A creator closing a challenge early (`status: "completed"`) moves
     its `end_date` to the moment of the close. Operators clear or disqualify from the
     console (`ChallengeParticipation`, filter by `review_state`).
 - **Another member's profile** (B-077). `GET /api/social/users/public-profile/{id}/`
