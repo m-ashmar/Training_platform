@@ -4569,3 +4569,12 @@ msgstr "بقرار من الإدارة"
 #: social/views.py
 msgid "You were disqualified from this challenge."
 msgstr "تم استبعادك من هذا التحدي."
+
+#: social/views.py
+msgid ""
+"This challenge is over: what it measured and its dates can no longer change."
+msgstr "انتهى هذا التحدي: لم يعد بالإمكان تغيير ما يقيسه أو تواريخه."
+
+#: social/views.py
+msgid "The end of a challenge cannot be in the past. To end it now, close it."
+msgstr "لا يمكن أن يكون موعد انتهاء التحدي في الماضي. لإنهائه الآن، أغلقه."

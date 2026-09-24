@@ -7,7 +7,9 @@ from the console — `/dj-admin/challenges/challengeparticipationproxy/` (the cl
 `challenges/admin.py`) and `/admin/social/challengeparticipation/` (`social/admin.py`):
 
 * **clear review** — `review_state='clear'`, `review_reason='operator'`: the person
-  keeps their place and can win; recounts do not flag them again;
+  keeps their place and can win. `review_cleared_through` records the latest day
+  above a threshold at the moment of the clear: recounts flag them again only for a
+  LATER day above a threshold;
 * **disqualify** — `review_state='disqualified'`, `review_reason='operator'`: the
   person holds no place anywhere (`social/standing.py in_standing`), cannot rejoin or
   leave (`challenge_disqualified`), and their number is still recounted.
@@ -50,12 +52,23 @@ def apply_review(participations, state) -> int:
             if challenge is None:
                 continue
             ids = [pk for pk, _user in by_challenge[challenge_id]]
+            over = {}
+            if state == ChallengeParticipation.REVIEW_CLEAR and challenge.auto_counted:
+                from .challenge_progress import measure_for_review
+
+                over = measure_for_review(
+                    challenge.metric, [user for _pk, user in by_challenge[challenge_id]],
+                    challenge.start_date, challenge.end_date)[1]
             # Row by row through `save()`, as every console action here: a bulk
             # UPDATE skips the model (tests/test_regression_gate.py).
             for row in ChallengeParticipation.objects.filter(pk__in=ids).order_by('id'):
                 row.review_state = state
                 row.review_reason = ChallengeParticipation.REASON_OPERATOR
-                row.save(update_fields=['review_state', 'review_reason'])
+                fields = ['review_state', 'review_reason']
+                if state == ChallengeParticipation.REVIEW_CLEAR:
+                    row.review_cleared_through = over.get(row.user_id)
+                    fields.append('review_cleared_through')
+                row.save(update_fields=fields)
                 changed += 1
             touched.update(user for _pk, user in by_challenge[challenge_id])
             write_places(challenge, moved_users=touched, settling=True)
@@ -94,3 +107,10 @@ disqualify = _review_action(
 PARTICIPATION_LIST_DISPLAY = ('user', 'challenge', 'current_value', 'progress_percentage',
                               'rank', 'review_state', 'review_reason')
 PARTICIPATION_LIST_FILTER = ('review_state', 'review_reason', 'challenge')
+#: Read-only on both change forms. A form save takes no challenge lock, re-ranks
+#: nothing and settles nothing, and a recount running beside it would overwrite the
+#: review with its own copy: review decisions go through the two actions above
+#: (`apply_review`), and the number, place and completion follow from the count.
+PARTICIPATION_READONLY = ('status', 'current_value', 'progress_percentage', 'rank',
+                          'completed_at', 'review_state', 'review_reason',
+                          'review_cleared_through')

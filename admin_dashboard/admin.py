@@ -580,6 +580,7 @@ class ChallengeParticipationAdmin(admin.ModelAdmin):
     list_display = _review.PARTICIPATION_LIST_DISPLAY
     list_filter = _review.PARTICIPATION_LIST_FILTER
     search_fields = ('user__username', 'challenge__title')
+    readonly_fields = _review.PARTICIPATION_READONLY
     actions = [_review.clear_review, _review.disqualify]
     del _review
 

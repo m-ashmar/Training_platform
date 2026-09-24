@@ -756,7 +756,8 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     who dropped out or was disqualified.
 
     Anti-cheat (owner, 2026-09-24, F20), all read-only on the row:
-      `ranked` — bool: `auto_counted` AND the creator is a trainer or staff. Only a
+      `ranked` — bool: `auto_counted` AND the creator is staff or a VERIFIED trainer
+          (`trainer_is_verified`; anyone may sign up as a trainer). Only a
           ranked challenge can award the Challenge Winner badge (or anything a first
           place earns); a manual (self-reported) challenge is never ranked.
       `counting` — null for a manual challenge, else the credible-work rules the count
@@ -774,7 +775,22 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           person themselves sees them. Flagged: listed and placed normally, but a
           flagged first place wins nothing until an operator clears it. Disqualified:
           no place anywhere, `join` and `leave` answer 403 `challenge_disqualified`.
+
+    PUT/PATCH (the creator, or staff) — what decides a standing is fixed where
+    changing it would let a result be picked after the fact (F20). Both answer 400
+    with the top-level `code` and the field error beside it (`field_errors`):
+      `challenge_over` — `metric`, `start_date`, `end_date` or `target_value` of a
+          challenge that is over (ended or closed). Nothing recounts a finished
+          challenge, so switching a manual one to an auto-counted metric after the
+          end would have ranked its self-reported numbers.
+      `end_date_in_past` — an `end_date` earlier than now. Ending early is a close
+          (`status: "completed"`), which moves the end to the moment of the close, so
+          the 48 h review runs from when it really ended.
+    Changing `metric` or the dates of a RUNNING challenge still recounts everyone.
     """
+    #: What a finished challenge keeps: `challenge_over` if a PATCH changes one.
+    FIXED_ONCE_OVER = ('metric', 'start_date', 'end_date', 'target_value')
+
     serializer_class = ChallengeSerializer
     permission_classes = [IsOwnerOrReadOnly]
     interaction_actions = ('join', 'leave', 'update_progress')
@@ -927,6 +943,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         so the review window runs from when it really ended.
         """
         before = serializer.instance
+        self._refuse_changes_that_pick_a_result(before, serializer.validated_data)
         was_over = before.lifecycle_status == 'completed'
         measured = (before.metric, before.start_date, before.end_date)
         target = before.target_value
@@ -951,6 +968,25 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 recount(challenge)
                 self._update_challenge_rankings(challenge)
+
+    def _refuse_changes_that_pick_a_result(self, before, data):
+        """`challenge_over` / `end_date_in_past`; see the class docstring."""
+        from rest_framework.exceptions import ErrorDetail
+
+        def refuse(field, message, code):
+            refusal = DRFValidationError({field: [ErrorDetail(message, code=code)]})
+            refusal.service_code = code
+            raise refusal
+
+        if before.lifecycle_status in Challenge.TERMINAL_STATUSES:
+            for field in self.FIXED_ONCE_OVER:
+                if field in data and data[field] != getattr(before, field):
+                    refuse(field, _('This challenge is over: what it measured and its '
+                                    'dates can no longer change.'), 'challenge_over')
+        end = data.get('end_date')
+        if end is not None and end != before.end_date and end < timezone.now():
+            refuse('end_date', _('The end of a challenge cannot be in the past. To end '
+                                 'it now, close it.'), 'end_date_in_past')
 
     @action(detail=True, methods=['post'])
     def join(self, request, pk=None):

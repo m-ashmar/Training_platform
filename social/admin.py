@@ -50,6 +50,7 @@ class ChallengeParticipationAdmin(admin.ModelAdmin):
     list_display = list(review.PARTICIPATION_LIST_DISPLAY)
     list_filter = list(review.PARTICIPATION_LIST_FILTER)
     list_select_related = ('user', 'challenge')
+    readonly_fields = review.PARTICIPATION_READONLY
     actions = [review.clear_review, review.disqualify]
 
 

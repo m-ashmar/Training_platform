@@ -475,7 +475,7 @@ class Challenge(models.Model):
         """Does the server count this challenge's progress from logged training?"""
         return self.metric != self.METRIC_MANUAL
 
-    #: Creators whose auto-counted challenges are RANKED: a trainer, or staff.
+    #: Creators whose auto-counted challenges are RANKED: a VERIFIED trainer, or staff.
     RANKED_CREATOR_TYPES = ('trainer',)
 
     @property
@@ -483,21 +483,25 @@ class Challenge(models.Model):
         """Can a first place in this challenge earn anything (owner, 2026-09-24, F20)?
 
         Only when the server counts it (`auto_counted`: no self-reported number wins a
-        prize) AND a trainer or staff created it (a client cannot open a challenge of
-        their own and crown themselves). The Challenge Winner badge, and anything else
+        prize) AND staff or a VERIFIED trainer (`trainer_is_verified`, set by an
+        operator) created it. A client cannot open a challenge of their own and crown
+        themselves, and since anyone may sign up as a trainer, neither can a throwaway
+        trainer account made to crown a friend. The Challenge Winner badge, and anything else
         a first place earns, is awarded only for a ranked challenge. `ranked_q` is the
         same rule as a query.
         """
         creator = self.creator
         return bool(self.auto_counted and creator is not None and (
-            creator.user_type in self.RANKED_CREATOR_TYPES or creator.is_staff))
+            creator.is_staff or (creator.user_type in self.RANKED_CREATOR_TYPES
+                                 and creator.trainer_is_verified)))
 
     @classmethod
     def ranked_q(cls, prefix=''):
         """`ranked` as a query, over `<prefix>` (e.g. `'challenge__'`)."""
         return (~models.Q(**{f'{prefix}metric': cls.METRIC_MANUAL})
-                & (models.Q(**{f'{prefix}creator__user_type__in': cls.RANKED_CREATOR_TYPES})
-                   | models.Q(**{f'{prefix}creator__is_staff': True})))
+                & (models.Q(**{f'{prefix}creator__is_staff': True})
+                   | models.Q(**{f'{prefix}creator__user_type__in': cls.RANKED_CREATOR_TYPES,
+                                 f'{prefix}creator__trainer_is_verified': True})))
 
     @property
     def review_ends_at(self):
@@ -616,6 +620,12 @@ class ChallengeParticipation(models.Model):
                                     default=REVIEW_CLEAR, db_index=True)
     review_reason = models.CharField(max_length=24, choices=REVIEW_REASONS,
                                      null=True, blank=True)
+    #: The last training day an operator's CLEAR covered: the latest day above a review
+    #: threshold when they cleared (`social/review.py apply_review`). A recount flags a
+    #: cleared participant again only for a day above a threshold AFTER this one, so
+    #: one clear is not a licence to log the daily maximum from then on. Null: the
+    #: operator cleared nothing, and any day above a threshold flags.
+    review_cleared_through = models.DateField(null=True, blank=True)
 
     class Meta:
         unique_together = ['user', 'challenge']

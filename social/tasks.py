@@ -176,21 +176,32 @@ def settle_winners(now=None, challenge_ids=None) -> int:
     settled yet (`Challenge.winner_checked_at` null) — or only `challenge_ids`.
 
     Returns how many were settled. See `settle_winner` for what settling is.
+
+    The batch takes the challenges with NO flagged participant first: a ranked
+    challenge whose first place waits for an operator is looked at again every hour,
+    and 200 of them left unreviewed at the front of an oldest-first queue would have
+    stopped every later challenge from ever settling. An unranked challenge never
+    waits (`settle_winner`).
     """
     from datetime import timedelta
 
     from django.utils import timezone
 
-    from .models import Challenge
+    from django.db.models import Exists, OuterRef
+
+    from .models import Challenge, ChallengeParticipation
 
     now = now or timezone.now()
+    flagged = ChallengeParticipation.objects.filter(
+        challenge=OuterRef('pk'), review_state=ChallengeParticipation.REVIEW_FLAGGED)
     due = Challenge.objects.filter(
         winner_checked_at__isnull=True,
         end_date__lte=now - timedelta(hours=Challenge.REVIEW_HOURS))
     if challenge_ids is not None:
         due = due.filter(pk__in=[pk for pk in challenge_ids if pk is not None])
     settled = 0
-    for pk in due.order_by('end_date', 'id').values_list('pk', flat=True)[:SETTLE_BATCH]:
+    due = due.annotate(waiting=Exists(flagged)).order_by('waiting', 'end_date', 'id')
+    for pk in due.values_list('pk', flat=True)[:SETTLE_BATCH]:
         try:
             if settle_winner(pk, now=now):
                 settled += 1
@@ -209,8 +220,10 @@ def settle_winner(challenge_id, now=None) -> bool:
     time (`write_places(settling=True)`, so a participant disqualified during the
     review holds no place), then the participant at place 1 decides:
 
-    * FLAGGED and not yet decided by an operator: nothing is settled. The hourly task
-      looks again; an operator's "clear review" or "disqualify" settles it at once.
+    * FLAGGED and not yet decided by an operator, in a RANKED challenge that is not
+      cancelled: nothing is settled. The hourly task looks again; an operator's "clear
+      review" or "disqualify" settles it at once. A challenge that can award nothing
+      (unranked or cancelled) settles at once, whoever is first.
     * otherwise the challenge is settled (`winner_checked_at` = now, written once), and
       the Challenge Winner badge is checked for that person only if the challenge is
       `ranked` (auto-counted, created by a trainer or staff), not cancelled, and they
@@ -240,11 +253,12 @@ def settle_winner(challenge_id, now=None) -> bool:
         write_places(challenge, settling=True)
         first = (in_standing(ChallengeParticipation.objects.filter(challenge=challenge))
                  .select_related('user').order_by(*STANDING_ORDER).first())
-        if first is not None and first.review_state == ChallengeParticipation.REVIEW_FLAGGED:
+        can_award = challenge.ranked and challenge.status != 'cancelled'
+        if (can_award and first is not None
+                and first.review_state == ChallengeParticipation.REVIEW_FLAGGED):
             return False
         Challenge.objects.filter(pk=challenge.pk).update(winner_checked_at=now)
-        if (first is not None and challenge.ranked and challenge.status != 'cancelled'
-                and first.status == 'completed'
+        if (first is not None and can_award and first.status == 'completed'
                 and first.review_state == ChallengeParticipation.REVIEW_CLEAR):
             winner = first
     if winner is not None:
