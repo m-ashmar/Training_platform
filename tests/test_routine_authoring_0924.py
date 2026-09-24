@@ -615,3 +615,129 @@ def test_b105_the_injury_map_is_served(make_user, api):
     # A client may read it too; nobody signed out may.
     assert api(make_user("ra_c_b105")).get("/api/routine/injury-map/").status_code == 200
     assert api().get("/api/routine/injury-map/").status_code == 401
+
+
+# ============================================ added while finishing the rows (0924)
+def test_b103_a_trainer_may_copy_a_week_for_a_frozen_client(make_user, api, settings):
+    """The freeze stops the CLIENT training, never the trainer writing
+    (users/coaching.py; tests/test_coaching_freeze.py
+    `test_a_trainer_may_still_prepare_work_for_a_frozen_client`): a week's copy is a
+    routine write like any other, so the trainer prepares the next weeks while unpaid."""
+    from routine.models import Routine, RoutineExercise
+    from tests.test_coaching_freeze import _coached, _freeze
+    from tests.test_coaching_months import OWNER_RATE
+    from users.coaching import training_refusal
+
+    settings.COACHING_COMMISSION_RATE = OWNER_RATE
+    settings.COACHING_PERIOD_DAYS = 30
+    settings.COACHING_RENEWAL_REMINDER_DAYS = 3
+    settings.COACHING_FROZEN_REMINDER_DAYS = (3, 7, 14, 30)
+    trainer, client, relation, routine, *_ = _coached(make_user, api, "ra_frz")
+    Routine.objects.filter(pk=routine.pk).update(days=14)
+    _freeze(relation)
+    routine.refresh_from_db()
+    assert training_refusal(client, routine) == "coaching_frozen"
+
+    resp = api(trainer).post(f"/api/routine/routines/{routine.pk}/copy_week/",
+                             {"from_week": 1, "to_week": 2}, content_type=JSON)
+    assert resp.status_code == 201, resp.content
+    assert RoutineExercise.objects.filter(routine=routine, day=8).count() == 1
+    # The client still reads it and still may not copy it.
+    refused = api(client).post(f"/api/routine/routines/{routine.pk}/copy_week/",
+                               {"from_week": 1, "to_week": 2}, content_type=JSON)
+    assert (refused.status_code, refused.json()["code"]) == (403, "not_routine_owner")
+
+
+def test_b103_a_trainer_who_sees_the_routine_but_did_not_write_it_is_refused(make_user, api):
+    """The one predicate decides what a trainer SEES (an approved relation with the
+    client on it); writing a week is the author's alone. The client left the author for
+    a second coach, who now sees the old program and may not rewrite it."""
+    from users.models import TrainerClientRelation
+
+    first, client, routine = _two_week_program(make_user, "b103seen")
+    TrainerClientRelation.objects.filter(trainer=first, client=client).update(
+        status="rejected")
+    second = make_user("ra_t_b103seen_second", user_type="trainer")
+    TrainerClientRelation.objects.create(trainer=second, client=client, status="approved")
+    assert api(second).get(f"/api/routine/routines/{routine.pk}/").status_code == 200
+    resp = api(second).post(f"/api/routine/routines/{routine.pk}/copy_week/",
+                            {"from_week": 1, "to_week": 2}, content_type=JSON)
+    assert (resp.status_code, resp.json()["code"]) == (403, "not_routine_owner")
+
+
+def test_b103_a_percentage_the_copy_would_push_past_100_is_refused_whole(make_user, api):
+    from routine.models import RoutineExercise
+
+    trainer, _client, routine = _two_week_program(make_user, "b103pct")
+    RoutineExercise.objects.filter(routine=routine, day=1, order=1).update(load_value=98)
+    before = RoutineExercise.objects.filter(routine=routine).count()
+    resp = api(trainer).post(f"/api/routine/routines/{routine.pk}/copy_week/",
+                             {"from_week": 1, "to_week": 2, "load_factor": "1.05"},
+                             content_type=JSON)
+    assert resp.status_code == 400, resp.content
+    assert (resp.json()["code"], resp.json()["day"]) == ("load_out_of_range", 8)
+    assert RoutineExercise.objects.filter(routine=routine).count() == before
+
+
+def test_b104_a_new_routine_takes_its_day_names(make_user, api):
+    trainer = make_user("ra_t_b104new", user_type="trainer")
+    resp = api(trainer).post("/api/routine/routines/", {
+        "name": "ra b104new", "days": 4, "day_names": {"1": " دفع ", "2": None, "4": "أرجل"},
+    }, content_type=JSON)
+    assert resp.status_code == 201, resp.content
+    assert resp.json()["day_names"] == {"1": "دفع", "4": "أرجل"}
+    assert resp.json()["created_by_id"] == trainer.pk
+    bad = api(trainer).post("/api/routine/routines/", {
+        "name": "ra b104new bad", "days": 2, "day_names": {"3": "x"}}, content_type=JSON)
+    assert bad.status_code == 400 and _field_code(bad, "day_names") == "day_out_of_range"
+
+
+def test_b107_names_sent_alone_still_fill_the_untranslated_column(make_user, api):
+    """`.values('exercise__name')` reads the raw column (the analyzers group by it): an
+    exercise written only as `name_ar` / `name_en` must not leave it empty, and an
+    Arabic reader's English name must not land in `name_ar`."""
+    from routine.models import Exercise
+
+    trainer = make_user("ra_t_b107raw", user_type="trainer")
+    resp = api(trainer).post("/api/routine/exercises/", {
+        "name_en": "Hack squat", "target_muscle": "Front Quads"}, content_type=JSON,
+        HTTP_ACCEPT_LANGUAGE="ar")
+    assert resp.status_code == 201, resp.content
+    raw = Exercise.objects.filter(pk=resp.json()["id"]).values_list(
+        "name", "name_ar", "name_en").get()
+    assert raw == ("Hack squat", None, "Hack squat")
+
+    upload = api(trainer).post("/api/routine/exercises/create-with-image/", {
+        "name_ar": "سكوات أمامي", "description": "d", "target_muscle": "Front Quads",
+    }, HTTP_ACCEPT_LANGUAGE="en")
+    assert upload.status_code == 201, upload.content
+    made = upload.json()["exercise"]
+    assert (made["name_ar"], made["name_en"], made["name"]) == ("سكوات أمامي", None,
+                                                                "سكوات أمامي")
+    assert Exercise.objects.filter(pk=made["id"]).values_list("name", flat=True).get() \
+        == "سكوات أمامي"
+    nameless = api(trainer).post("/api/routine/exercises/create-with-image/", {
+        "description": "d", "target_muscle": "Biceps"})
+    assert (nameless.status_code, nameless.json()["code"]) == (400, "missing_fields")
+
+
+def test_b108_the_count_is_fresh_after_a_program_is_generated(make_user, api):
+    """`templates/` is served from the response cache, versioned by template writes;
+    the count moves on ROUTINE writes, so a trainer who had just generated a client's
+    program read the old number for up to five minutes."""
+    from routine.models import RoutineTemplate, RoutineTemplateExercise
+
+    trainer, client = _trainer_and_client(make_user, "b108fresh")
+    template = RoutineTemplate.objects.create(name="ra b108 fresh", goal="x", days=1,
+                                              created_by=trainer)
+    RoutineTemplateExercise.objects.create(template=template, day=1, order=1,
+                                           exercise=_exercise(trainer, "ra b108 fresh"))
+    caller = api(trainer)
+    url = f"/api/routine/templates/{template.pk}/"
+    assert caller.get(url).json()["used_by_count"] == 0
+    made = caller.post(f"/api/routine/templates/{template.pk}/generate/",
+                       {"client_id": client.pk}, content_type=JSON)
+    assert made.status_code == 201, made.content
+    assert caller.get(url).json()["used_by_count"] == 1
+    listed = _results(caller.get("/api/routine/templates/my_templates/"))
+    assert [t["used_by_count"] for t in listed if t["id"] == template.pk] == [1]
