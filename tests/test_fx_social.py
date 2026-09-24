@@ -166,7 +166,9 @@ def test_s044_the_winner_badge_waits_for_the_challenge_to_end(make_user, api,
 
     badge = _badge("fx44_winner", points=100,
                    criteria={"type": "challenge_wins", "target": 1})
-    owner = make_user("fx44_owner", user_type="trainer")
+    # A VERIFIED trainer (F20 review: anyone can sign up as a trainer, so only one an
+    # operator verified — or staff — makes a ranked challenge).
+    owner = make_user("fx44_owner", user_type="trainer", trainer_is_verified=True)
     leader = make_user("fx44_leader")
     runner = make_user("fx44_runner")
     # Setup (owner, 2026-09-24, F20): only a RANKED challenge — counted by the server,

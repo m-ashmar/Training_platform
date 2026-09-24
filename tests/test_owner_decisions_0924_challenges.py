@@ -20,6 +20,10 @@ from tests.test_home import _data, _home
 
 pytestmark = pytest.mark.django_db
 
+# Every trainer below is VERIFIED (`trainer_is_verified`): since the review of F20 only
+# staff or a verified trainer makes a ranked challenge, because anyone can sign up as a
+# trainer. An unverified trainer is tested on its own.
+
 JSON = "application/json"
 
 
@@ -113,7 +117,7 @@ def _holds(person, badge):
 
 # ------------------------------------------------------------ what counts
 def test_an_impossible_set_counts_nothing(make_user):
-    trainer = make_user("f20_imp_t", user_type="trainer")
+    trainer = make_user("f20_imp_t", user_type="trainer", trainer_is_verified=True)
     cheat = make_user("f20_imp_c")
     ex = _exercise(trainer, "imp")
     volume = _challenge(trainer, "imp_v", metric="volume_kg", target_value=100_000)
@@ -138,7 +142,7 @@ def test_an_impossible_set_counts_nothing(make_user):
 def test_two_hundred_sets_in_a_day_count_sixty_and_flag_the_day(make_user):
     from social.challenge_progress import MAX_SETS_PER_DAY, MAX_VOLUME_KG_PER_DAY
 
-    trainer = make_user("f20_flood_t", user_type="trainer")
+    trainer = make_user("f20_flood_t", user_type="trainer", trainer_is_verified=True)
     cheat = make_user("f20_flood_c")
     ex = _exercise(trainer, "flood")
     sets = _challenge(trainer, "flood_s", metric="sets", target_value=500)
@@ -162,7 +166,7 @@ def test_a_set_synced_five_days_late_does_not_count(make_user):
     from routine.models import ExerciseSetLog
     from social.challenge_progress import LATE_HOURS
 
-    trainer = make_user("f20_late_t", user_type="trainer")
+    trainer = make_user("f20_late_t", user_type="trainer", trainer_is_verified=True)
     person = make_user("f20_late_c")
     ex = _exercise(trainer, "late")
     challenge = _challenge(trainer, "late")
@@ -186,7 +190,7 @@ def test_a_set_synced_five_days_late_does_not_count(make_user):
 
 
 def test_empty_short_and_excess_workouts_do_not_count(make_user):
-    trainer = make_user("f20_wo_t", user_type="trainer")
+    trainer = make_user("f20_wo_t", user_type="trainer", trainer_is_verified=True)
     person = make_user("f20_wo_c")
     ex = _exercise(trainer, "wo")
     routine = _routine(trainer, "wo")
@@ -214,7 +218,7 @@ def test_empty_short_and_excess_workouts_do_not_count(make_user):
 
 
 def test_a_day_with_two_sets_is_not_a_training_day(make_user):
-    trainer = make_user("f20_days_t", user_type="trainer")
+    trainer = make_user("f20_days_t", user_type="trainer", trainer_is_verified=True)
     person = make_user("f20_days_c")
     ex = _exercise(trainer, "days")
     challenge = _challenge(trainer, "days", metric="training_days")
@@ -228,7 +232,7 @@ def test_a_day_with_two_sets_is_not_a_training_day(make_user):
 
 
 def test_a_legit_week_still_counts_exactly(make_user):
-    trainer = make_user("f20_week_t", user_type="trainer")
+    trainer = make_user("f20_week_t", user_type="trainer", trainer_is_verified=True)
     person = make_user("f20_week_c")
     ex = _exercise(trainer, "week")
     routine = _routine(trainer, "week")
@@ -257,7 +261,7 @@ def test_a_flagged_leader_keeps_the_place_but_wins_nothing_until_cleared(make_us
 
     badge = _badge("f20_flag_win", points=50, criteria={"type": "challenge_wins",
                                                         "target": 1})
-    trainer = make_user("f20_flag_t", user_type="trainer")
+    trainer = make_user("f20_flag_t", user_type="trainer", trainer_is_verified=True)
     cheat = make_user("f20_flag_c")
     honest = make_user("f20_flag_h")
     ex = _exercise(trainer, "flag")
@@ -300,7 +304,7 @@ def test_a_disqualified_person_vanishes_from_every_place_and_cannot_rejoin(make_
     from social.models import ChallengeParticipation
     from social.review import apply_review
 
-    trainer = make_user("f20_dq_t", user_type="trainer")
+    trainer = make_user("f20_dq_t", user_type="trainer", trainer_is_verified=True)
     cheat = make_user("f20_dq_c")
     second = make_user("f20_dq_2")
     third = make_user("f20_dq_3")
@@ -379,7 +383,7 @@ def test_a_manual_challenge_of_a_client_is_not_ranked_and_awards_nothing(make_us
 
     # Auto-counted but created by a client: not ranked either. Staff or a trainer: ranked.
     assert _challenge(client, "client_auto").ranked is False
-    trainer = make_user("f20_manual_t", user_type="trainer")
+    trainer = make_user("f20_manual_t", user_type="trainer", trainer_is_verified=True)
     assert _challenge(trainer, "trainer_manual", metric="manual").ranked is False
     staff = make_user("f20_manual_s", is_staff=True)
     assert _challenge(staff, "staff_auto").ranked is True
@@ -399,7 +403,7 @@ def test_the_winner_is_checked_once_and_only_after_the_review_window(make_user):
 
     badge = _badge("f20_once_win", points=50, criteria={"type": "challenge_wins",
                                                         "target": 1})
-    trainer = make_user("f20_once_t", user_type="trainer")
+    trainer = make_user("f20_once_t", user_type="trainer", trainer_is_verified=True)
     winner = make_user("f20_once_w")
     ex = _exercise(trainer, "once")
     challenge = _challenge(trainer, "once", target_value=6)
@@ -431,7 +435,7 @@ def test_the_console_filters_by_review_and_disqualifies_or_clears(make_user):
     from social.models import ChallengeParticipation
 
     operator = make_user("f20_ops", user_type="admin")
-    trainer = make_user("f20_ops_t", user_type="trainer")
+    trainer = make_user("f20_ops_t", user_type="trainer", trainer_is_verified=True)
     cheat = make_user("f20_ops_c")
     honest = make_user("f20_ops_h")
     ex = _exercise(trainer, "ops")
@@ -466,3 +470,230 @@ def test_the_console_filters_by_review_and_disqualifies_or_clears(make_user):
     assert (cheat_row.review_state, cheat_row.rank) == ("clear", 1)
     # Cleared by an operator: the same day does not flag them again.
     assert _count(challenge, cheat) == (50.0, "clear")
+
+
+# ------------------------------------------------ the review of F20: the cheats it found
+def test_a_finished_manual_challenge_cannot_become_counted_and_pay_its_self_report(
+        make_user, api):
+    """Switching a finished manual challenge to `sets` ranked its hand-typed numbers."""
+    from social.models import Challenge, ChallengeParticipation
+    from social.tasks import advance_challenge_phases
+
+    badge = _badge("f20_rv_sw", points=50, criteria={"type": "challenge_wins",
+                                                     "target": 1})
+    trainer = make_user("f20_rv_sw_t", user_type="trainer", trainer_is_verified=True)
+    friend = make_user("f20_rv_sw_f")
+    challenge = _challenge(trainer, "rv_sw", metric="manual", target_value=5)
+    assert api(friend).post(f"/api/social/challenges/{challenge.pk}/join/", {},
+                            content_type=JSON).status_code == 201
+    assert api(friend).post(f"/api/social/challenges/{challenge.pk}/update_progress/",
+                            {"current_value": 5}, content_type=JSON).status_code == 200
+    Challenge.objects.filter(pk=challenge.pk).update(
+        end_date=timezone.now() - timedelta(hours=1))
+
+    for change in ({"metric": "sets"}, {"target_value": 1},
+                   {"start_date": (timezone.now() - timedelta(days=30)).isoformat()},
+                   {"end_date": (timezone.now() + timedelta(days=5)).isoformat()}):
+        refused = api(trainer).patch(f"/api/social/challenges/{challenge.pk}/", change,
+                                     content_type=JSON)
+        assert refused.status_code == 400, (change, refused.content)
+        assert refused.json()["code"] == "challenge_over", change
+    # The title of a finished challenge is still the creator's.
+    assert api(trainer).patch(f"/api/social/challenges/{challenge.pk}/",
+                              {"title": "renamed"}, content_type=JSON).status_code == 200
+    assert Challenge.objects.get(pk=challenge.pk).metric == "manual"
+
+    _end_review_window(challenge)
+    advance_challenge_phases()
+    assert ChallengeParticipation.objects.get(challenge=challenge, user=friend).rank == 1
+    assert not _holds(friend, badge), "a self-reported number won a prize"
+
+
+def test_a_workout_back_dated_and_filled_with_todays_sets_counts_nothing(make_user):
+    trainer = make_user("f20_rv_bd_t", user_type="trainer", trainer_is_verified=True)
+    cheat = make_user("f20_rv_bd_c")
+    ex = _exercise(trainer, "rv_bd")
+    routine = _routine(trainer, "rv_bd")
+    challenge = _challenge(trainer, "rv_bd", metric="workouts", target_value=100)
+    _enter(challenge, cheat)
+    now = timezone.now()
+    number = 1
+    for back in range(1, 8):
+        for k in range(2):
+            session = _session(cheat, routine, now - timedelta(days=back, hours=k * 2), 30)
+            _sets(cheat, ex, _today(0), 3, session=session, received=now, first=number)
+            number += 3
+    assert _count(challenge, cheat) == (0.0, "clear")
+
+    # A real workout yesterday, its sets trained that day and synced that evening.
+    start = timezone.make_aware(datetime.combine(_today(1), time(10)))
+    real = _session(cheat, routine, start, 45)
+    _sets(cheat, ex, _today(1), 3, session=real, first=number)
+    assert _count(challenge, cheat) == (1.0, "clear")
+
+
+def test_an_unverified_trainer_cannot_crown_a_friend(make_user, api):
+    """Anyone can sign up as a trainer: a throwaway trainer account's challenge is not
+    ranked, and its first place wins nothing."""
+    from social.models import Challenge
+    from social.tasks import advance_challenge_phases
+
+    badge = _badge("f20_rv_tt", points=50, criteria={"type": "challenge_wins",
+                                                     "target": 1})
+    throwaway = make_user("f20_rv_tt_t", user_type="trainer")
+    friend = make_user("f20_rv_tt_f")
+    ex = _exercise(throwaway, "rv_tt")
+    challenge = _challenge(throwaway, "rv_tt", target_value=3)
+    assert challenge.ranked is False
+    assert not Challenge.objects.filter(Challenge.ranked_q(), pk=challenge.pk).exists()
+    assert api(friend).get(f"/api/social/challenges/{challenge.pk}/").json()[
+        "ranked"] is False
+    _enter(challenge, friend)
+    _sets(friend, ex, _today(1), 3)
+    assert _count(challenge, friend) == (3.0, "clear")
+
+    _end_review_window(challenge)
+    advance_challenge_phases()
+    assert Challenge.objects.get(pk=challenge.pk).winner_checked_at is not None
+    assert not _holds(friend, badge)
+
+    verified = make_user("f20_rv_tt_v", user_type="trainer", trainer_is_verified=True)
+    assert _challenge(verified, "rv_tt_v").ranked is True
+
+
+def test_a_creator_cannot_end_a_challenge_in_the_past_and_skip_the_review(make_user, api):
+    from social.models import Challenge
+    from social.tasks import advance_challenge_phases
+
+    trainer = make_user("f20_rv_ed_t", user_type="trainer", trainer_is_verified=True)
+    friend = make_user("f20_rv_ed_f")
+    challenge = _challenge(trainer, "rv_ed", target_value=1)
+    _enter(challenge, friend, value=5.0, status="completed")
+    refused = api(trainer).patch(
+        f"/api/social/challenges/{challenge.pk}/",
+        {"end_date": (timezone.now() - timedelta(days=3)).isoformat()}, content_type=JSON)
+    assert refused.status_code == 400, refused.content
+    assert refused.json()["code"] == "end_date_in_past"
+    advance_challenge_phases()
+    assert Challenge.objects.get(pk=challenge.pk).winner_checked_at is None
+
+    # Moving the end later still works; closing ends it now and the review runs from now.
+    later = timezone.now() + timedelta(days=3)
+    assert api(trainer).patch(f"/api/social/challenges/{challenge.pk}/",
+                              {"end_date": later.isoformat()},
+                              content_type=JSON).status_code == 200
+    assert api(trainer).patch(f"/api/social/challenges/{challenge.pk}/",
+                              {"status": "completed"},
+                              content_type=JSON).status_code == 200
+    advance_challenge_phases()
+    closed = Challenge.objects.get(pk=challenge.pk)
+    assert closed.winner_checked_at is None
+    assert closed.end_date <= timezone.now()
+
+
+def test_a_cleared_participant_is_flagged_again_for_a_new_day_over_the_threshold(
+        make_user):
+    from social.models import ChallengeParticipation
+    from social.review import apply_review
+
+    trainer = make_user("f20_rv_cl_t", user_type="trainer", trainer_is_verified=True)
+    cheat = make_user("f20_rv_cl_c")
+    ex = _exercise(trainer, "rv_cl")
+    challenge = _challenge(trainer, "rv_cl", target_value=10_000)
+    _enter(challenge, cheat)
+    _sets(cheat, ex, _today(5), 50)
+    assert _count(challenge, cheat) == (50.0, "flagged")
+    apply_review(ChallengeParticipation.objects.filter(challenge=challenge, user=cheat),
+                 "clear")
+    row = ChallengeParticipation.objects.get(challenge=challenge, user=cheat)
+    assert (row.review_state, row.review_reason, row.review_cleared_through) == \
+        ("clear", "operator", _today(5))
+
+    # The day the operator looked at does not flag again...
+    _sets(cheat, ex, _today(5), 5, first=51)
+    assert _count(challenge, cheat) == (55.0, "clear")
+    # ... a later day over the threshold does.
+    _sets(cheat, ex, _today(2), 60)
+    assert _count(challenge, cheat) == (115.0, "flagged")
+    row.refresh_from_db()
+    assert row.review_reason == "day_over_threshold"
+
+
+def test_stuck_flagged_challenges_do_not_starve_settlement(make_user, monkeypatch):
+    from social import tasks
+    from social.models import Challenge
+
+    monkeypatch.setattr(tasks, "SETTLE_BATCH", 1)
+    badge = _badge("f20_rv_st", points=50, criteria={"type": "challenge_wins",
+                                                     "target": 1})
+    client = make_user("f20_rv_st_c")
+    trainer = make_user("f20_rv_st_t", user_type="trainer", trainer_is_verified=True)
+    waiting, winner = make_user("f20_rv_st_w"), make_user("f20_rv_st_x")
+    unranked = _challenge(client, "rv_st_u")
+    _enter(unranked, client, value=50, review_state="flagged",
+           review_reason="day_over_threshold")
+    held = _challenge(trainer, "rv_st_h", target_value=1)
+    _enter(held, waiting, value=50, status="completed", review_state="flagged",
+           review_reason="day_over_threshold")
+    ranked = _challenge(trainer, "rv_st_r", target_value=1)
+    _enter(ranked, winner, value=5, status="completed")
+    for challenge, days in ((unranked, 10), (held, 9), (ranked, 3)):
+        Challenge.objects.filter(pk=challenge.pk).update(
+            end_date=timezone.now() - timedelta(days=days))
+
+    tasks.settle_winners()        # the clean ranked one first, however much older the rest
+    assert Challenge.objects.get(pk=ranked.pk).winner_checked_at is not None
+    assert _holds(winner, badge)
+    tasks.settle_winners()        # an unranked one never waits for an operator
+    assert Challenge.objects.get(pk=unranked.pk).winner_checked_at is not None
+    tasks.settle_winners()        # a ranked one with a flagged first place still does
+    assert Challenge.objects.get(pk=held.pk).winner_checked_at is None
+    assert not _holds(waiting, badge)
+
+
+def test_an_on_time_set_raised_after_the_late_window_does_not_count(make_user):
+    from routine.models import ExerciseSetLog
+
+    trainer = make_user("f20_rv_ed2_t", user_type="trainer", trainer_is_verified=True)
+    cheat = make_user("f20_rv_ed2_c")
+    ex = _exercise(trainer, "rv_ed2")
+    challenge = _challenge(trainer, "rv_ed2", metric="volume_kg", target_value=100_000)
+    _enter(challenge, cheat)
+    rows = _sets(cheat, ex, _today(6), 3, reps=5, weight=20.0)
+    assert _count(challenge, cheat) == (300.0, "clear")
+
+    # Raised today, six days on, the way the "log the whole day" route edits a set.
+    log = ExerciseSetLog.objects.get(pk=rows[0].pk)
+    log.weight, log.reps = 400.0, 30
+    log.save(update_fields=["weight", "reps"])
+    log.refresh_from_db()
+    assert log.values_changed_at is not None
+    assert _count(challenge, cheat) == (200.0, "clear")
+
+    # Saving a set without changing its values stamps nothing.
+    other = ExerciseSetLog.objects.get(pk=rows[1].pk)
+    other.notes = "felt good"
+    other.save()
+    other.refresh_from_db()
+    assert other.values_changed_at is None
+
+    # Corrected on its own day (inside the window), it counts at its new values.
+    fresh = _sets(cheat, ex, _today(0), 3, reps=5, weight=20.0, first=10)
+    fixed = ExerciseSetLog.objects.get(pk=fresh[0].pk)
+    fixed.weight = 30.0
+    fixed.save()
+    assert _count(challenge, cheat) == (200.0 + 350.0, "clear")
+
+
+def test_the_consoles_leave_the_review_and_the_standing_read_only(make_user):
+    from django.contrib import admin as django_admin
+
+    from admin_dashboard.admin import ChallengeParticipationAdmin as ConsoleAdmin
+    from social.admin import ChallengeParticipationAdmin as SocialAdmin
+    from social.models import ChallengeParticipation
+
+    must = {"review_state", "review_reason", "review_cleared_through", "rank",
+            "current_value", "status"}
+    for admin_class in (ConsoleAdmin, SocialAdmin):
+        model_admin = admin_class(ChallengeParticipation, django_admin.site)
+        assert must <= set(model_admin.get_readonly_fields(None)), admin_class
