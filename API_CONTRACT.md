@@ -133,6 +133,14 @@ the top level for compatibility.
 | 429 | `rate_limited` | back off; honour the `Retry-After` header |
 | 500 | `server_error` | retry with backoff; do not loop |
 
+**These are the status DEFAULTS, not what a refusal answers.** Since the owner's decision
+of 2026-09-24 every refusal a view writes names its OWN `code` (listed in that view's
+docstring and in §7): `bad_request`, `permission_denied` and `conflict` are what the
+envelope fills in only where nothing more specific exists — a framework refusal, or a
+code that is new to the app. Branch on the specific code; treat one you do not know as
+its status default (§6). A gate test fails any refusal written in a view without its own
+`code` (`tests/test_every_refusal_names_its_code.py`).
+
 `403` is also returned when the user's **subscription plan** does not include a feature
 (diet, AI advice). Same code — check the user's plan before assuming an auth problem.
 
@@ -261,7 +269,8 @@ per-address limits above have `code: "throttled"`.
   fills in when a view names none (`bad_request`, `not_found`, `conflict`,
   `permission_denied`; §2) — may gain a code of its own. That is a new `code` value, not
   a changed one: a client that follows the rule above reads the new value as exactly the
-  default it replaces. A code a view NAMED is never changed. (Recorded 2026-09-23, when
+  default it replaces. A code a view NAMED is never changed. CONFIRMED by the owner on
+  2026-09-24, and applied to every refusal (decision 9); first recorded 2026-09-23, when
   the app session asked for codes on eleven such refusals — BACKEND_BUGS B-054..B-061.)
 - Adding a new push `event_type` is additive — the app must ignore `data.type` values it
   does not recognise rather than crash.
@@ -1280,7 +1289,8 @@ now answer their own code, which §6 reads as that default; no code a view named
   from the database — plus `message`, which it answered alone before (B-057).
 - `DELETE /api/auth/device-token/` — no `token`: 400 `token_required` with `field`; a
   token this account does not hold: 404 `token_not_found`. Both were the generic
-  `bad_request` / `not_found` (B-054). The POST side is unchanged.
+  `bad_request` / `not_found` (B-054). The POST side answers `token_required` too since the
+  owner's decision 9 (2026-09-24).
 - `POST /api/auth/user/profile-picture/` without the `profile_picture` part: 400
   `profile_picture_required` with `field`, was the generic `bad_request` (B-055).
   `DELETE` with no picture to remove: 404 `profile_picture_not_found`, keeping

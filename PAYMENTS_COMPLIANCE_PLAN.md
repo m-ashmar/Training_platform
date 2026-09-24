@@ -165,6 +165,25 @@ is locked (spec §8); the numbers above are the defaults.
    leave every public surface (leaderboards, search, lists); history stays internal.
    (9) P0: every refusal names its own `code` (API_CONTRACT §6 confirmed) — done now,
    before the Flutter integration goes deeper.
+7. **Left by building the decisions of 2026-09-24** (recorded, reversible):
+   (a) DEPLOY BLOCKER: set `AI_TRAINING_PSEUDONYM_KEY` in the fly secrets (e.g.
+   `openssl rand -hex 32`) — production refuses to boot without it, and it must NEVER be
+   rotated while training copies exist (a new key cannot find them, so opt-out could no
+   longer delete them). (b) Training copies keep what the person typed minus names,
+   e-mails, phones and links; a health detail typed in a message stays — the owner may
+   want health terms scrubbed too. (c) Retention stays 365 days (the maximum the server
+   accepts); lowering `AI_TRAINING_RETENTION_DAYS` needs the app wording to follow. (d)
+   The account export includes the person's anonymous copies (content, without the keys).
+   (e) A late 👍/👎 still labels its copy through a second keyed pseudonym of the reply.
+   (f) A challenge winner suspended after the challenge closed keeps the record but gets
+   no badge; nobody else is awarded it. (g) Login keeps the top-level `validation_error`
+   (a gate test pins it) with the reason in `field_errors.non_field_errors[0].code`
+   (`invalid_credentials`, `email_not_verified`, `credentials_required`). (h) Role
+   refusals from permission classes stay `permission_denied` (§2 defines it). (i)
+   `gateway_error` still covers three causes (gateway refused / amount out of bounds /
+   account missing e-mail or phone). (j) Agent top-up caps answer 429 with
+   `daily_limit_exceeded` / `monthly_limit_exceeded`.
+
 ## Traps this branch cost a session to find
 
 - **Testing async code that touches the ORM.** Inside a `django_db` test, an ORM read

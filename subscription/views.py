@@ -660,7 +660,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         | 404 | `not_found` | not the caller's subscription |
         | 400 | `invalid_plan` | `plan_id` missing, or names no active plan |
         | 409 | `plan_change_while_active` | cover is running: a DEARER plan is `subscriptions/{id}/upgrade/` (the credit for the days left comes off its price); a cheaper one waits until the period ends |
-        | 409 | `checkout_open` | a checkout is open for this subscription; `payment_id` and `expires_at` say which, and when it closes |
+        | 409 | `checkout_open` | a checkout is open for this subscription; `payment_id`, `status` and `expires_at` say which, and when it closes (null while it is held for review) |
         | 400 | `validation_error` | the body is not a JSON object |
         | 500 | `server_error` | unexpected fault |
 
@@ -711,13 +711,9 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                              .exclude(gateway_transaction_reference='')
                              .order_by('created_at', 'id').first())
             if open_checkout is not None:
-                return Response(
-                    {'error': _('A payment is already open for this subscription. '
-                                'Complete it, or change the plan once it closes.'),
-                     'code': 'checkout_open',
-                     'payment_id': str(open_checkout.id),
-                     'expires_at': checkout_expires_at(open_checkout)},
-                    status=status.HTTP_409_CONFLICT)
+                # The same shape as renew/, gateways/ and upgrade/ answer it, `status`
+                # included — one code, one shape (BACKEND_BUGS B-087).
+                return _checkout_open(open_checkout)
             previous = locked.plan_id
             locked.plan = plan
             # `save()` re-inherits the plan's five access flags on a plan change.

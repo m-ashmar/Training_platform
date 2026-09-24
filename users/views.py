@@ -1940,6 +1940,7 @@ class ClientRespondToTrainerInviteView(APIView):
       wrong_party_to_answer     403  you sent this one; the trainer accepts it
       request_already_answered  409  answered while you were answering it
       trainer_unavailable       409  the trainer was deactivated in the meantime
+      client_unavailable        409  the client was suspended or erased in the meantime
       user_blocked              403  one of you blocked the other after it was sent
       refund_failed             409  the hold could not be returned; nothing changed
       client_has_other_trainer  400  you are already another trainer's client
@@ -2154,6 +2155,13 @@ def approve_trainer_relation(relation, actor):
             return Response({'error': _('That trainer is no longer available'),
                              'code': 'trainer_unavailable'},
                             status=http.HTTP_409_CONFLICT), relation
+        # Nor a client who has since been suspended or erased: approving took month 1
+        # out of a suspended account's wallet (the owner's decision 8, 2026-09-24 —
+        # a suspended account takes part in nothing new).
+        if not client.is_active:
+            return Response({'error': _('That client is no longer available'),
+                             'code': 'client_unavailable'},
+                            status=http.HTTP_409_CONFLICT), relation
         # Nor can a request that was sent before one of them blocked the other be
         # accepted afterwards. Refusing only the SEND would make a block trivial to
         # walk around: send the request, wait to be blocked, accept anyway. The row
@@ -2305,6 +2313,7 @@ class TrainerRespondToRequestView(APIView):
       wrong_party_to_answer     403  you invited them; the client accepts it
       request_already_answered  409  answered while you were answering it
       trainer_unavailable       409  the trainer was deactivated in the meantime
+      client_unavailable        409  the client was suspended or erased in the meantime
       user_blocked              403  one of you blocked the other after it was sent
       refund_failed             409  the hold could not be returned; nothing changed
       insufficient_balance      402  approving: the client's wallet does not cover month 1

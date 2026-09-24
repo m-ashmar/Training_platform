@@ -4651,3 +4651,7 @@ msgstr "لا يمكن تعديل هذا التمرين أو حذفه إلا من
 #: routine/serializers.py
 msgid "That routine is not assigned to you."
 msgstr "هذا البرنامج التدريبي غير مُسنَد إليك."
+
+#: users/views.py
+msgid "That client is no longer available"
+msgstr "هذا العميل لم يعد متاحاً"
