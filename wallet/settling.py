@@ -119,8 +119,9 @@ class WalletSettlingFields(serializers.Serializer):
     (`balance - settling`), `settling` the coaching payouts still inside the
     `PAYOUT_HOLD_DAYS` window, `settling_until` when the next of them becomes available
     (ISO 8601, null when nothing settles), and `in_withdrawal` the money of the
-    trainer's open withdrawal, which has already left `balance`. For anyone else the
-    hold does not apply: `available` is the balance, the others `0.00` / null.
+    trainer's open withdrawal, which has already left `balance`. For anyone else
+    nothing settles and nothing is withdrawn: `available` is the balance, the others
+    `0.00` / null.
     """
 
     SETTLING_FIELDS = ("available", "settling", "settling_until", "in_withdrawal")
@@ -135,13 +136,13 @@ class WalletSettlingFields(serializers.Serializer):
         return names + [n for n in self.SETTLING_FIELDS if n not in names]
 
     def _window(self, obj) -> Window:
+        # Read for every wallet, not only `owner_type == "trainer"`: that column is
+        # written once, when the wallet is created, from the account's role AT THAT
+        # MOMENT, so a trainer's wallet can say "client". A wallet no payout ever reached
+        # simply has nothing settling — one indexed query.
         cache = self.__dict__.setdefault("_settling_windows", {})
         if obj.pk not in cache:
-            if obj.owner_type == "trainer":
-                cache[obj.pk] = window(obj)
-            else:
-                balance = Decimal(obj.balance or 0)
-                cache[obj.pk] = Window(balance, ZERO, balance, None)
+            cache[obj.pk] = window(obj)
         return cache[obj.pk]
 
     def get_available(self, obj):
@@ -155,8 +156,6 @@ class WalletSettlingFields(serializers.Serializer):
         return until.isoformat() if until else None
 
     def get_in_withdrawal(self, obj):
-        if obj.owner_type != "trainer":
-            return "0.00"
         from payouts.services import open_amount
 
         return str(open_amount(obj.owner_id).quantize(Decimal("0.01")))

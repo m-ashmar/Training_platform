@@ -740,7 +740,7 @@ def test_the_console_queue_is_operator_only_and_decides_from_the_page(make_user,
     url = f"/dj-admin/payouts/withdrawalqueueentry/{older['id']}/change/"
     assert console.get(url).status_code == 200
     assert console.post(url, {"decision": "approve", "note": ""}).status_code == 302
-    assert console.post(url, {"decision": "sent", "shamcash_transaction_id": "SC-PAGE-1",
+    assert console.post(url, {"decision": "sent", "transfer_id": "SC-PAGE-1",
                               "note": ""}).status_code == 302
     withdrawal = Withdrawal.objects.get(pk=older["id"])
     assert (withdrawal.state, withdrawal.shamcash_transaction_id) == ("sent", "SC-PAGE-1")

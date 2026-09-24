@@ -63,7 +63,7 @@ class WithdrawalDecisionForm(forms.ModelForm):
     """Nothing on the withdrawal is typed here: only the decision and what it rests
     on."""
     decision = forms.ChoiceField(choices=DECISIONS, required=False)
-    shamcash_transaction_id = forms.CharField(
+    transfer_id = forms.CharField(
         required=False, max_length=64, label="ShamCash transaction id",
         help_text="For 'Mark sent': the id of the transfer it went out with. One "
                   "transfer pays one withdrawal.")
@@ -164,7 +164,7 @@ class _WithdrawalAdmin(admin.ModelAdmin):
         if decision == "approve":
             self._run(request, obj, lambda: services.approve(obj.pk, user, note), "approved")
         elif decision == "sent":
-            txid = form.cleaned_data.get("shamcash_transaction_id", "")
+            txid = form.cleaned_data.get("transfer_id", "")
             self._run(request, obj, lambda: services.mark_sent(obj.pk, user, txid, note),
                       "marked sent")
         elif decision == "confirm":
