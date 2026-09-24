@@ -216,10 +216,14 @@ def _jpeg(img, *, quality: int) -> bytes:
 
 _PDF_NAME = re.compile(rb"/([A-Za-z0-9#_.+\-]{2,40})")
 _HEX_ESCAPE = re.compile(rb"#([0-9A-Fa-f]{2})")
+#: A stream's body is data (a page's drawing, an image, a font), not structure. Read as
+#: names, a few megabytes of compressed bytes would sooner or later spell `/JS` by chance
+#: and refuse an honest certificate, so the bodies are left out of the scan.
+_STREAM_BODY = re.compile(rb"stream\r?\n.*?endstream", re.S)
 
 
 def _pdf_names(data: bytes):
-    for match in _PDF_NAME.finditer(data):
+    for match in _PDF_NAME.finditer(_STREAM_BODY.sub(b"stream endstream", data)):
         name = match.group(1)
         if b"#" in name:
             name = _HEX_ESCAPE.sub(lambda m: bytes([int(m.group(1), 16)]), name)
