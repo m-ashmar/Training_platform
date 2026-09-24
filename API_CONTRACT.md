@@ -1485,6 +1485,40 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   username, user_type, first_name, last_name, profile_picture_url, followers_count,
   is_following, member_since}`. `by_username/` is unchanged (exact, case-sensitive).
 
+**Every diet, analytics and erasure refusal names its own code** (the owner, 2026-09-24,
+decision 9: "give generic API refusals their own specific error codes"). Each refusal
+below answered only its status default (`bad_request`, `permission_denied`,
+`unprocessable`) and now names the reason, beside the same `error` / `detail`; §6 makes
+each a new code, not a changed one, so an app that does not know it yet reads it as the
+default it replaces. A 404 that means "no such object, or not yours" stays `not_found`,
+now written by the view; a serializer's field errors stay `validation_error` with
+`field_errors`. No code a view already named has changed. Each view's docstring lists all
+of its codes.
+
+| Endpoint | New `code`s |
+|---|---|
+| `diet/v1/food/list/` | 400 `bad_category`, `bad_search` (a NUL character in it) |
+| `diet/v1/food/search/` | 400 `missing_fields` (`fields: ["q"]`), `bad_q`, `bad_query` |
+| `diet/v1/food/import/` | 400 `missing_fields` (`fields: ["api_id"]`), `bad_body`; 403 `admins_only` |
+| `diet/v1/preferences/` | 400 `missing_fields` (`fields: ["food_id"]`), `invalid_action`, `bad_food_id`, `bad_local_ratio`, `bad_allergies`, `bad_body`, `bad_<list>` for `liked_foods` / `disliked_foods` / the five `*_choices`; 404 `no_preferences` (DELETE with nothing ever saved; it was `not_found`) |
+| `diet/v1/preferences/food-category/` | 400 `missing_fields` (with `fields`), `bad_meal`, `bad_macro`, `bad_food_id`, `bad_body` |
+| `diet/v1/preferences/food-category/{food_id}/` | 400 `missing_fields` (`fields: ["meal", "macro"]`), `bad_meal`, `bad_macro`, `ambiguous_slot`, `bad_body` |
+| `diet/v1/plans/generate/` | 400 `bad_date`; 403 `trainers_cannot_generate` |
+| `diet/v1/plans/generate-rule/` | 400 `bad_date`; 403 `trainers_cannot_generate`; 422 `infeasible_calories` (the async route's code for the same refusal) |
+| `diet/v1/trainer/templates/` | 403 `not_trainer` |
+| `diet/v1/trainer/diet-plans/` | 400 `missing_fields` (with `fields`), `bad_client_id`, `bad_template_id`, `bad_date`, `bad_body`; 403 `not_trainer` |
+| `diet/v1/trainer/meals/`, `.../{meal_id}/` | 400 `missing_fields` (with `fields`), `bad_diet_plan_id`, `bad_date`, `bad_body`; 403 `not_trainer` |
+| `diet/v1/nutrition/plan/{plan_id}/`, `diet/v1/meals/{meal_id}/components/`, `diet/v1/plan/{plan_id}/meals-with-ingredients/` | 403 to a trainer: `not_plan_owner`, `not_assigned_client` or `plan_superseded` (the trainer service's own reason), `not_assigned_view` for any other |
+| `diet/v1/client/meals/{meal_id}/` | 403 `clients_only` |
+| `analytics/sessions/end_session/` | 400 `missing_session_id` |
+| `analytics/dashboard/platform_stats/` | 403 `admins_only` |
+| `privacy/erase/` (DELETE) | 400 `confirmation_required` (the `preview` rides along as before) |
+
+Also: a non-numeric `client_id` / `template_id` / `diet_plan_id` on the trainer routes,
+and a non-numeric `food_id` on `DELETE preferences/`, answered 500; each is now 400
+`bad_<field>`. The three analytics sentences above were English-only and are now
+translated.
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 

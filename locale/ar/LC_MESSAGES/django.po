@@ -4545,3 +4545,19 @@ msgstr "يمكنك إبراز 3 إنجازات كحدّ أقصى"
 #: social/serializers.py
 msgid "A secret badge cannot be shared."
 msgstr "لا يمكن مشاركة شارة سرية."
+
+#: diet/views.py analytics/views.py
+msgid "Only an administrator can do this."
+msgstr "لا يستطيع القيام بهذا إلا مسؤول."
+
+#: diet/views.py
+msgid "You have no food preferences to clear yet."
+msgstr "ليس لديك تفضيلات طعام لمسحها بعد."
+
+#: analytics/views.py
+msgid "Session not found"
+msgstr "لم يتم العثور على الجلسة"
+
+#: analytics/views.py
+msgid "session_id is required"
+msgstr "حقل session_id مطلوب"

@@ -14,7 +14,7 @@ from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.db.models import Count
-from django.utils.translation import gettext as _
+from django.utils.translation import gettext as _, gettext_lazy
 from .tasks import generate_rule_based_plan
 from .exceptions import ConstraintViolationError, PersistenceError
 from .engine.rule_based_planner import RuleBasedPlanner
@@ -104,9 +104,14 @@ class BadInput(ValueError, DRFValidationError):
     (`bad_component_id`, `bad_body`, ...; BACKEND_BUGS B-060). It is kept OFF the DRF
     detail on purpose: a handler that lets this reach DRF keeps answering the code it
     always did, because a shipped code never changes.
+
+    Required, not defaulted (the owner, 2026-09-24: every refusal names its own code).
+    It defaulted to `bad_request`, so a NUL character in `search`, a list of ids that was
+    not one and an over-long `allergies` all reached the app as the same status default.
+    Every `except BadInput` in this module answers `{"error", "code": refusal_code}`.
     """
 
-    def __init__(self, message, code: str = "bad_request"):
+    def __init__(self, message, code: str):
         DRFValidationError.__init__(self, message)
         ValueError.__init__(self, message)
         self.refusal_code = code
@@ -128,13 +133,13 @@ def _id_list(value, field: str):
     if isinstance(value, (int, float)):
         value = [value]
     if not isinstance(value, (list, tuple)):
-        raise BadInput(f"{field} must be a list of ids")
+        raise BadInput(f"{field} must be a list of ids", f"bad_{field}")
     try:
         ids = [int(v) for v in value]
     except (TypeError, ValueError):
-        raise BadInput(f"{field} must be a list of ids")
+        raise BadInput(f"{field} must be a list of ids", f"bad_{field}")
     if any(i <= 0 for i in ids):
-        raise BadInput(f"{field} must be a list of ids")
+        raise BadInput(f"{field} must be a list of ids", f"bad_{field}")
     return ids
 
 
@@ -174,7 +179,7 @@ def _refuse_nul(params, *names) -> None:
     for name in names:
         value = params.get(name)
         if value and "\x00" in str(value):
-            raise BadInput(f"{name} must not contain a null character")
+            raise BadInput(f"{name} must not contain a null character", f"bad_{name}")
 
 
 def _body(request) -> dict:
@@ -211,13 +216,13 @@ def _text(value, field: str, *, limit: int = 500) -> str:
         return ""
     if isinstance(value, (list, tuple)):
         if any(isinstance(v, bool) or not isinstance(v, (str, int, float)) for v in value):
-            raise BadInput(f"{field} must be text, or a list of text")
+            raise BadInput(f"{field} must be text, or a list of text", f"bad_{field}")
         value = ", ".join(str(v).strip() for v in value if str(v).strip())
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        raise BadInput(f"{field} must be text")
+        raise BadInput(f"{field} must be text", f"bad_{field}")
     out = str(value).strip()
     if len(out) > limit:
-        raise BadInput(f"{field} must be at most {limit} characters")
+        raise BadInput(f"{field} must be at most {limit} characters", f"bad_{field}")
     return out
 
 
@@ -271,8 +276,10 @@ class FoodListView(APIView):
     a vegetarian flag, 2026-09-23) and no sugar tag, and a tag is never guessed from a
     name.
 
-    Refusals: 400 `validation_error` (a bad `page`/`page_size`), 400 `bad_request` (a
-    NUL character in `category`/`search`), 403 `no_entitlement` / `feature_not_in_plan`.
+    Refusals: 400 `validation_error` (a bad `page`/`page_size`, with `field_errors`),
+    400 `bad_category` / `bad_search` (a NUL character in that parameter; it answered the
+    status default `bad_request` until the owner's decision of 2026-09-24), 403
+    `no_entitlement` / `feature_not_in_plan`, 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
@@ -379,7 +386,7 @@ class FoodListView(APIView):
             }))
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -388,7 +395,7 @@ class FoodListView(APIView):
         except Exception as e:
             logger.error(f"Food list error: {str(e)}")
             return Response(
-                {"error": _("Failed to retrieve food items")},
+                {"error": _("Failed to retrieve food items"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -396,6 +403,8 @@ class FoodCategoryListView(APIView):
     """
     API endpoint to get all food categories from the database.
     Returns a list of all available food categories for filtering.
+
+    Refusals: 403 `no_entitlement` / `feature_not_in_plan`; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     
@@ -428,7 +437,7 @@ class FoodCategoryListView(APIView):
             return Response(listing(results))
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -437,7 +446,7 @@ class FoodCategoryListView(APIView):
         except Exception as e:
             logger.error(f"Food category list error: {str(e)}")
             return Response(
-                {"error": _("Failed to retrieve food categories")},
+                {"error": _("Failed to retrieve food categories"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -449,6 +458,13 @@ class FoodSearchView(APIView):
     """
     API endpoint to search for food items from both local database and Edamam API.
     Returns combined results with indication of source.
+
+    `GET v1/food/search/?q=` (or `?query=`), `&page=&page_size=`.
+
+    Refusals, each with its `code`: 400 `missing_fields` (with `fields: ["q"]`) — no
+    query; 400 `bad_q` / `bad_query` — a NUL character in it; 400 `validation_error` — a
+    bad `page`/`page_size`; 403 `no_entitlement` / `feature_not_in_plan`; 500
+    `server_error`.
     """
     # `HasDietAccess`, like every other diet route. "Relaxed to authenticated-only to
     # match tests" was a comment about the tests, not about who may search the paid
@@ -464,7 +480,8 @@ class FoodSearchView(APIView):
             query = (request.GET.get('q') or request.GET.get('query') or '').strip()
             if not query:
                 return Response(
-                    {"error": _("Query parameter 'q' is required")},
+                    {"error": _("Query parameter 'q' is required"),
+                     "code": "missing_fields", "fields": ["q"]},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -552,7 +569,7 @@ class FoodSearchView(APIView):
             }))
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -561,12 +578,23 @@ class FoodSearchView(APIView):
         except Exception as e:
             logger.error(f"Food search error: {str(e)}")
             return Response(
-                {"error": _("Failed to search food items")},
+                {"error": _("Failed to search food items"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class UserFoodCategoryPreferenceView(APIView):
-    """Set or list per-user meal categorization for liked foods."""
+    """Set or list per-user meal categorization for liked foods.
+
+    `GET` — `{count, next, previous, results, mappings, uncategorized_liked_foods,
+    choices}`. `POST` — body `food_id`, `meal`, `macro` (all required; `meal` and
+    `macro` from `choices`); 201 when the slot is new, 200 when it was already set.
+
+    Refusals, each with its `code`: 400 `missing_fields` (with `fields`, the names
+    absent); 400 `bad_meal` / `bad_macro` — not one of `choices`; 400 `bad_food_id` —
+    not a positive whole number; 400 `bad_body` — the body is not a JSON object; 404
+    `not_found` — no such food; 403 `no_entitlement` / `feature_not_in_plan`; 500
+    `server_error`.
+    """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
     def get(self, request):
@@ -612,7 +640,7 @@ class UserFoodCategoryPreferenceView(APIView):
                 }
             }))
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -620,7 +648,7 @@ class UserFoodCategoryPreferenceView(APIView):
             raise
         except Exception as e:
             logger.error(f"UserFoodCategoryPreference list error: {str(e)}")
-            return Response({"error": _("Failed to load category preferences")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": _("Failed to load category preferences"), "code": "server_error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def post(self, request):
         try:
@@ -628,14 +656,21 @@ class UserFoodCategoryPreferenceView(APIView):
             meal = _body(request).get('meal')
             macro = _body(request).get('macro')
 
-            if not all([food_id, meal, macro]):
-                return Response({"error": _("food_id, meal, and macro are required")}, status=status.HTTP_400_BAD_REQUEST)
+            missing = [name for name, value in (('food_id', food_id), ('meal', meal),
+                                                ('macro', macro)) if not value]
+            if missing:
+                return Response({"error": _("food_id, meal, and macro are required"),
+                                 "code": "missing_fields", "fields": missing},
+                                status=status.HTTP_400_BAD_REQUEST)
 
             # Validate choices
             meal_values = {c[0] for c in UserFoodCategoryPreference.MEAL_CHOICES}
             macro_values = {c[0] for c in UserFoodCategoryPreference.MACRO_CHOICES}
             if meal not in meal_values or macro not in macro_values:
-                return Response({"error": _("Invalid meal or macro")}, status=status.HTTP_400_BAD_REQUEST)
+                # One sentence for either, and the code names which one is wrong.
+                return Response({"error": _("Invalid meal or macro"),
+                                 "code": "bad_meal" if meal not in meal_values else "bad_macro"},
+                                status=status.HTTP_400_BAD_REQUEST)
 
             food = get_object_or_404(FoodItem, id=_id(food_id, 'food_id'))
 
@@ -664,7 +699,7 @@ class UserFoodCategoryPreferenceView(APIView):
                 'macro': obj.macro,
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -672,10 +707,23 @@ class UserFoodCategoryPreferenceView(APIView):
             raise
         except Exception as e:
             logger.error(f"UserFoodCategoryPreference create error: {str(e)}")
-            return Response({"error": _("Failed to set category preference")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": _("Failed to set category preference"), "code": "server_error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class UserFoodCategoryPreferenceDetailView(APIView):
-    """Update or delete a specific food's categorization for the user."""
+    """Update or delete a specific food's categorization for the user.
+
+    `PUT v1/preferences/food-category/<food_id>/` — body `meal` and/or `macro` (the new
+    slot), and `from_meal` / `from_macro` naming the slot to move when the food sits in
+    more than one. `DELETE` — optional `meal` / `macro` naming one slot; without them
+    every slot of the food goes.
+
+    Refusals, each with its `code`: 400 `missing_fields` (with `fields: ["meal",
+    "macro"]`) — a PUT with neither; 400 `bad_meal` / `bad_macro` — not one of the
+    choices; 400 `ambiguous_slot` — the food is in several slots and `from_meal` /
+    `from_macro` do not narrow it to one; 400 `bad_body` — the body is not a JSON object;
+    404 `not_found` — this food is in no slot of yours (or not in the one named); 403
+    `no_entitlement` / `feature_not_in_plan`; 500 `server_error`.
+    """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
     def put(self, request, food_id):
@@ -683,14 +731,18 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             meal = _body(request).get('meal')
             macro = _body(request).get('macro')
             if not any([meal, macro]):
-                return Response({"error": _("Provide meal and/or macro to update")}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": _("Provide meal and/or macro to update"),
+                                 "code": "missing_fields", "fields": ["meal", "macro"]},
+                                status=status.HTTP_400_BAD_REQUEST)
 
             meal_values = {c[0] for c in UserFoodCategoryPreference.MEAL_CHOICES}
             macro_values = {c[0] for c in UserFoodCategoryPreference.MACRO_CHOICES}
             if meal and meal not in meal_values:
-                return Response({"error": _("Invalid meal")}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": _("Invalid meal"), "code": "bad_meal"},
+                                status=status.HTTP_400_BAD_REQUEST)
             if macro and macro not in macro_values:
-                return Response({"error": _("Invalid macro")}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": _("Invalid macro"), "code": "bad_macro"},
+                                status=status.HTTP_400_BAD_REQUEST)
 
             # A food may now sit in several slots, so the row to change is named by
             # the slot it is in (`from_meal`, `from_macro`) and moved to the new one.
@@ -703,11 +755,13 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             if from_macro:
                 rows = rows.filter(macro=from_macro)
             if rows.count() > 1:
-                return Response({"error": _("This food is in several slots; pass from_meal and from_macro")},
+                return Response({"error": _("This food is in several slots; pass from_meal and from_macro"),
+                                 "code": "ambiguous_slot"},
                                 status=status.HTTP_400_BAD_REQUEST)
             obj = rows.first()
             if obj is None:
-                return Response({"error": _("Not found")}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"error": _("Not found"), "code": "not_found"},
+                                status=status.HTTP_404_NOT_FOUND)
             if meal:
                 obj.meal = meal
             if macro:
@@ -721,7 +775,7 @@ class UserFoodCategoryPreferenceDetailView(APIView):
                 'macro': obj.macro,
             })
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -729,7 +783,7 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             raise
         except Exception as e:
             logger.error(f"UserFoodCategoryPreference update error: {str(e)}")
-            return Response({"error": _("Failed to update category preference")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": _("Failed to update category preference"), "code": "server_error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def delete(self, request, food_id):
         try:
@@ -745,10 +799,11 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             # variable that killed the recipe path.
             deleted, _per_model = rows.delete()
             if not deleted:
-                return Response({"error": _("Not found")}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"error": _("Not found"), "code": "not_found"},
+                                status=status.HTTP_404_NOT_FOUND)
             return Response({"message": _("Category preference deleted"), "deleted": deleted})
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -756,17 +811,36 @@ class UserFoodCategoryPreferenceDetailView(APIView):
             raise
         except Exception as e:
             logger.error(f"UserFoodCategoryPreference delete error: {str(e)}")
-            return Response({"error": _("Failed to delete category preference")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": _("Failed to delete category preference"), "code": "server_error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class AdminsOnly(IsAdminUser):
+    """`IsAdminUser`, refusing with its own code: 403 `admins_only`.
+
+    DRF's class names no code, so the error envelope filled in the status default
+    `permission_denied` (the owner, 2026-09-24: every refusal names its own code).
+    `check_permissions` passes a permission's `code` and `message` to `PermissionDenied`.
+    """
+    code = "admins_only"
+    message = gettext_lazy("Only an administrator can do this.")
+
 
 class FoodImportView(APIView):
     """
     API endpoint to import food items from Edamam API into local database.
+
+    Staff only. `POST v1/food/import/` — body `api_id` (required) and the food's
+    figures, flat or under `food_data`. 201 `{message, food_id, food_name}`, or 200 with
+    the existing row when `api_id` is already imported.
+
+    Refusals, each with its `code`: 400 `missing_fields` (with `fields: ["api_id"]`);
+    400 `bad_body` — the body is not a JSON object; 403 `admins_only` — the caller is
+    not staff; 500 `server_error`.
     """
     # Staff only. Any authenticated account could insert rows into the SHARED
     # catalogue, unbounded and unrated — which is how the previous database
     # reached 327 rows of noise. `needs_review` keeps them off plates; it does
     # not stop the table growing. Curation is an admin job.
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, AdminsOnly]
     
     # Atomic: these writes were independent, so a failure part-way left the
     # records inconsistent (a half-applied password reset either locks the
@@ -777,7 +851,9 @@ class FoodImportView(APIView):
             # Accept either nested 'food_data' or flat body per tests
             food_data = _body(request).get('food_data') or request.data
             if not food_data or not food_data.get('api_id'):
-                return Response({"error": _("api_id is required")}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": _("api_id is required"), "code": "missing_fields",
+                                 "fields": ["api_id"]},
+                                status=status.HTTP_400_BAD_REQUEST)
             
             # Check if food already exists
             existing_food = FoodItem.objects.filter(api_id=food_data.get('api_id')).first()
@@ -831,7 +907,7 @@ class FoodImportView(APIView):
             }, status=status.HTTP_201_CREATED)
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -841,7 +917,7 @@ class FoodImportView(APIView):
             logger.error(f"Food import error: {str(e)}")
             print('FOOD_IMPORT_EXCEPTION:', repr(e))
             return Response(
-                {"error": _("Failed to import food item")},
+                {"error": _("Failed to import food item"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -907,6 +983,34 @@ class FoodImportView(APIView):
 class UserPreferencesView(APIView):
     """
     API endpoint to manage user food preferences (liked/disliked foods).
+
+    `GET v1/preferences/` — the caller's liked/disliked foods, the five macro-choice
+    lists, `allergies` and `local_ratio`.
+
+    `POST` — either one food (`action`: `like` | `dislike`, `food_id`), or any of the
+    bulk fields: `liked_foods`, `disliked_foods`, `protein_choices`, `carb_choices`,
+    `fat_choices`, `vegetable_choices`, `fruit_choices` (lists of food ids),
+    `allergies` (text, or a list of text, at most 500 characters), `local_ratio` (0-1).
+
+    `DELETE` — `action` + `food_id` removes one like/dislike; otherwise `liked_foods` /
+    `disliked_foods` present in the body clears that list.
+
+    Refusals, each with its `code`:
+
+    - 400 `missing_fields` (with `fields: ["food_id"]`) — an `action` without `food_id`.
+    - 400 `invalid_action` — `action` is not `like` / `dislike`.
+    - 400 `bad_food_id` — not a positive whole number.
+    - 400 `bad_liked_foods` | `bad_disliked_foods` | `bad_protein_choices` |
+      `bad_carb_choices` | `bad_fat_choices` | `bad_vegetable_choices` |
+      `bad_fruit_choices` — not a list of ids.
+    - 400 `bad_allergies` — not text, or longer than 500 characters.
+    - 400 `bad_local_ratio` — not a number from 0 to 1.
+    - 400 `bad_body` — the body is not a JSON object.
+    - 403 `no_entitlement` / `feature_not_in_plan`.
+    - 404 `not_found` — no such food.
+    - 404 `no_preferences` — a DELETE by a client who has never saved a preference:
+      there is nothing to clear.
+    - 500 `server_error`.
     """
     # `HasDietAccess`. This endpoint reads AND WRITES `allergies` — the string the plan
     # generator, the trainer's write and the swap path all consult — and an `agent`
@@ -960,7 +1064,7 @@ class UserPreferencesView(APIView):
             })
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -969,7 +1073,7 @@ class UserPreferencesView(APIView):
         except Exception as e:
             logger.error(f"User preferences error: {str(e)}")
             return Response(
-                {"error": _("Failed to retrieve user preferences")},
+                {"error": _("Failed to retrieve user preferences"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -984,11 +1088,14 @@ class UserPreferencesView(APIView):
             if action:
                 food_id = _body(request).get('food_id')
                 if not food_id:
-                    return Response({"error": _("food_id is required")}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({"error": _("food_id is required"), "code": "missing_fields",
+                                     "fields": ["food_id"]},
+                                    status=status.HTTP_400_BAD_REQUEST)
                 # BUG FIX: Use select_related for better performance
                 food = FoodItem.objects.select_related('category').filter(id=_id(food_id, 'food_id')).first()
                 if not food:
-                    return Response({"error": _("Food not found")}, status=status.HTTP_404_NOT_FOUND)
+                    return Response({"error": _("Food not found"), "code": "not_found"},
+                                    status=status.HTTP_404_NOT_FOUND)
                 if action == 'like':
                     preferences.liked_foods.add(food)
                     preferences.disliked_foods.remove(food)
@@ -997,7 +1104,8 @@ class UserPreferencesView(APIView):
                     preferences.disliked_foods.add(food)
                     preferences.liked_foods.remove(food)
                     return Response({"message": _("Preference updated"), "action": "dislike"})
-                return Response({"error": _("Invalid action")}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": _("Invalid action"), "code": "invalid_action"},
+                                status=status.HTTP_400_BAD_REQUEST)
 
             # Bulk update path (retain old behavior)
             if 'liked_foods' in request.data:
@@ -1028,10 +1136,12 @@ class UserPreferencesView(APIView):
                 try:
                     ratio = float(_body(request)['local_ratio'])
                 except (TypeError, ValueError):
-                    return Response({"error": _("local_ratio must be a number from 0 to 1")},
+                    return Response({"error": _("local_ratio must be a number from 0 to 1"),
+                                     "code": "bad_local_ratio"},
                                     status=status.HTTP_400_BAD_REQUEST)
                 if not 0.0 <= ratio <= 1.0:
-                    return Response({"error": _("local_ratio must be a number from 0 to 1")},
+                    return Response({"error": _("local_ratio must be a number from 0 to 1"),
+                                     "code": "bad_local_ratio"},
                                     status=status.HTTP_400_BAD_REQUEST)
                 preferences.local_ratio = ratio
                 changed.append('local_ratio')
@@ -1039,7 +1149,7 @@ class UserPreferencesView(APIView):
                 preferences.save(update_fields=changed)
             return Response({"message": _("Preferences updated successfully")})
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -1047,7 +1157,7 @@ class UserPreferencesView(APIView):
             raise
         except Exception as e:
             logger.error(f"User preferences update error: {str(e)}")
-            return Response({"error": _("Failed to update preferences")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": _("Failed to update preferences"), "code": "server_error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     # Atomic: these writes were independent, so a failure part-way left the
     # records inconsistent (a half-applied password reset either locks the
@@ -1055,20 +1165,31 @@ class UserPreferencesView(APIView):
     @transaction.atomic
     def delete(self, request):
         try:
-            preferences = get_object_or_404(UserFoodPreference, user=request.user)
+            preferences = UserFoodPreference.objects.filter(user=request.user).first()
+            if preferences is None:
+                # Its own code: this 404 is not "no such object" — the caller has never
+                # saved a preference, so there is nothing to clear (the owner,
+                # 2026-09-24: every refusal names its own code).
+                return Response({"error": _("You have no food preferences to clear yet."),
+                                 "code": "no_preferences"},
+                                status=status.HTTP_404_NOT_FOUND)
             action = _body(request).get('action')
             food_id = _body(request).get('food_id')
             if action and food_id:
-                food = FoodItem.objects.filter(id=food_id).first()
+                # Through `_id`, like the POST beside it: a raw `"abc"` reached the ORM,
+                # raised ValueError and answered 500.
+                food = FoodItem.objects.filter(id=_id(food_id, 'food_id')).first()
                 if not food:
-                    return Response({"error": _("Food not found")}, status=status.HTTP_404_NOT_FOUND)
+                    return Response({"error": _("Food not found"), "code": "not_found"},
+                                    status=status.HTTP_404_NOT_FOUND)
                 if action == 'like':
                     preferences.liked_foods.remove(food)
                     return Response({"message": _("Removed from likes")})
                 if action == 'dislike':
                     preferences.disliked_foods.remove(food)
                     return Response({"message": _("Removed from dislikes")})
-                return Response({"error": _("Invalid action")}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": _("Invalid action"), "code": "invalid_action"},
+                                status=status.HTTP_400_BAD_REQUEST)
 
             # Clear specific preferences (bulk)
             if 'liked_foods' in request.data:
@@ -1077,7 +1198,7 @@ class UserPreferencesView(APIView):
                 preferences.disliked_foods.clear()
             return Response({"message": _("Preferences cleared successfully")})
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -1085,7 +1206,7 @@ class UserPreferencesView(APIView):
             raise
         except Exception as e:
             logger.error(f"User preferences clear error: {str(e)}")
-            return Response({"error": _("Failed to clear preferences")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": _("Failed to clear preferences"), "code": "server_error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 #: How long a caller may poll for a task they started. Longer than any generation.
 TASK_OWNER_TTL = 60 * 60
@@ -1159,9 +1280,23 @@ class GenerateDietPlanView(APIView):
 
     Read the outcome at plans/tasks/<task_id>/.
 
-    400 `activity_level_required` (with `field: "activity_level"`) until the client has
-    chosen an activity level: show the selector, then ask again. Checked before the
-    daily allowance is claimed.
+    `POST v1/plans/generate/` — optional `meal_count` (1-10), `snack_count` (0-10),
+    `duration_days`, `start_date` (YYYY-MM-DD). 200 `{message, task_id, engine,
+    estimated_time}`.
+
+    Refusals, each with its `code`:
+
+    - 400 `activity_level_required` (with `field: "activity_level"`) until the client
+      has chosen an activity level: show the selector, then ask again. Checked before
+      the daily allowance is claimed.
+    - 400 `bad_date` — `start_date` is not YYYY-MM-DD.
+    - 400 `validation_error` — a count that is not a whole number, or a body that is not
+      a JSON object (`field_errors`).
+    - 403 `trainers_cannot_generate` — a trainer; trainers write plans through
+      `v1/trainer/diet-plans/`.
+    - 403 `no_entitlement` / `feature_not_in_plan` — no diet access.
+    - 429 `quota_exhausted` — today's allowance is spent.
+    - 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
@@ -1169,7 +1304,8 @@ class GenerateDietPlanView(APIView):
         try:
             if request.user.is_trainer:
                 return Response(
-                    {"error": _("Trainers cannot generate client plans here. Use trainer diet plan creation instead.")},
+                    {"error": _("Trainers cannot generate client plans here. Use trainer diet plan creation instead."),
+                     "code": "trainers_cannot_generate"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             refusal = _activity_level_refusal(request.user)
@@ -1187,7 +1323,8 @@ class GenerateDietPlanView(APIView):
                 parsed = parse_date(start_date_str)
                 if not parsed:
                     return Response(
-                        {"error": _("Invalid start_date format. Use YYYY-MM-DD.")},
+                        {"error": _("Invalid start_date format. Use YYYY-MM-DD."),
+                         "code": "bad_date"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 # Normalize to ISO string for Celery serialization
@@ -1238,7 +1375,7 @@ class GenerateDietPlanView(APIView):
             })
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -1247,7 +1384,7 @@ class GenerateDietPlanView(APIView):
         except Exception as e:
             logger.error(f"Diet plan generation error: {str(e)}")
             return Response(
-                {"error": _("Failed to start diet plan generation")},
+                {"error": _("Failed to start diet plan generation"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1314,16 +1451,40 @@ class GenerateDietPlanRuleBasedView(APIView):
     """
     Generate a deterministic plan using RuleBasedPlanner (no GPT, no Celery).
 
-    400 `activity_level_required` (with `field: "activity_level"`) until the client has
-    chosen an activity level: show the selector, then ask again. Checked before the
-    daily allowance is claimed.
+    `POST v1/plans/generate-rule/` — optional `meal_count` (1-10), `snack_count` (0-10),
+    `duration_days` (up to 7), `start_date` (YYYY-MM-DD). 201 with the plan, or 201
+    `{status: "created_but_not_rendered", diet_plan_id, message}` with `code`
+    `payload_unavailable` when the plan was saved and its payload could not be built
+    (not a refusal: the plan exists; open it by id).
+
+    Refusals, each with its `code`:
+
+    - 400 `activity_level_required` (with `field: "activity_level"`) until the client
+      has chosen an activity level: show the selector, then ask again. Checked before
+      the daily allowance is claimed.
+    - 400 `bad_date` — `start_date` is not YYYY-MM-DD.
+    - 400 `invalid_request` — the profile cannot give a calorie target.
+    - 400 `validation_error` — a count that is not a whole number, or a body that is not
+      a JSON object (`field_errors`).
+    - 403 `trainers_cannot_generate` — a trainer; trainers write plans through
+      `v1/trainer/diet-plans/`.
+    - 403 `no_entitlement` / `feature_not_in_plan` — no diet access.
+    - 409 `plan_already_exists` — a plan already covers those dates.
+    - 409 `preferences_changed` — the food preferences changed mid-build; generate again.
+    - 422 `infeasible_calories` (with `requested_kcal`, `max_feasible_kcal`,
+      `suggestion`) — the meal structure cannot carry that many calories.
+    - 422 `no_servable_meal` — one meal cannot be built from the foods allowed.
+    - 429 `quota_exhausted` — today's allowance is spent.
+    - 500 `persistence_failed` — the plan could not be saved; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
     def post(self, request):
         try:
             if request.user.is_trainer:
-                return Response({"error": _("Trainers cannot generate client plans here.")}, status=status.HTTP_403_FORBIDDEN)
+                return Response({"error": _("Trainers cannot generate client plans here."),
+                                 "code": "trainers_cannot_generate"},
+                                status=status.HTTP_403_FORBIDDEN)
             refusal = _activity_level_refusal(request.user)
             if refusal is not None:
                 return refusal
@@ -1340,7 +1501,8 @@ class GenerateDietPlanRuleBasedView(APIView):
             if start_date:
                 parsed = parse_date(str(start_date))
                 if not parsed:
-                    return Response({"error": _("Invalid start_date format. Use YYYY-MM-DD.")},
+                    return Response({"error": _("Invalid start_date format. Use YYYY-MM-DD."),
+                                     "code": "bad_date"},
                                     status=status.HTTP_400_BAD_REQUEST)
                 start_date = parsed.isoformat()
 
@@ -1372,6 +1534,10 @@ class GenerateDietPlanRuleBasedView(APIView):
                 return Response({
                     "error": _("This many calories cannot be served in %(m)d meals and %(s)d snacks.")
                              % {"m": e.meal_count, "s": e.snack_count},
+                    # The code the asynchronous route's task outcome already answers for
+                    # the same refusal (PlanTaskStatusView); this one answered the status
+                    # default `unprocessable` until the owner's decision of 2026-09-24.
+                    "code": "infeasible_calories",
                     "requested_kcal": round(e.requested),
                     "max_feasible_kcal": round(e.ceiling),
                     "suggestion": e.suggestion,
@@ -1499,7 +1665,7 @@ class GenerateDietPlanRuleBasedView(APIView):
                              "code": "persistence_failed"},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -1507,7 +1673,7 @@ class GenerateDietPlanRuleBasedView(APIView):
             raise
         except Exception as e:
             logger.error(f"Rule-based generation error: {str(e)}")
-            return Response({"error": _("Failed to generate rule-based plan")}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": _("Failed to generate rule-based plan"), "code": "server_error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class DailyAdviceView(APIView):
     """
@@ -1580,7 +1746,7 @@ class DailyAdviceView(APIView):
             })
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -1623,19 +1789,29 @@ TRAINER_REFUSALS = {
 }
 
 
-def _trainer_may_read_plan(trainer, diet_plan) -> bool:
-    """One rule for every trainer read of a plan, matching the write rule.
+def _trainer_read_refusal(trainer, diet_plan):
+    """None when `trainer` may read `diet_plan`, else the code of the reason they may not.
 
-    Ownership was tested inline in two views and in the service separately, and the
-    inline copies were the ones that stayed weak.
+    One rule for every trainer read of a plan, matching the write rule. Ownership was
+    tested inline in two views and in the service separately, and the inline copies were
+    the ones that stayed weak.
+
+    The reason is the service's own code (the owner, 2026-09-24: every refusal names its
+    own code): `not_plan_owner` (another trainer wrote it), `not_assigned_client` (no
+    longer this client's trainer) or `plan_superseded` (the client follows a newer plan).
+    It was a bare True/False, and the three reads answered the status default
+    `permission_denied` for all three. `not_assigned_view` — the service's code for "you
+    can only view your assigned clients' plans" — for anything else it refuses.
     """
     from .trainer_services import TrainerDietPlanService
 
     try:
         TrainerDietPlanService(trainer)._authorize_plan(diet_plan)
+    except DjangoValidationError as e:
+        return getattr(e, 'code', None) or 'not_assigned_view'
     except Exception:
-        return False
-    return True
+        return 'not_assigned_view'
+    return None
 
 
 def service_refusal(exc):
@@ -1660,6 +1836,12 @@ def service_refusal(exc):
 class TrainerTemplatesView(APIView):
     """
     API endpoint for trainers to get available diet plan templates.
+
+    `GET v1/trainer/templates/` — `{count, next, previous, results}`, each `{id, name,
+    description, meals_per_day, snacks_per_day, days_variation, total_meals_per_cycle}`.
+
+    Refusals, each with its `code`: 403 `not_trainer` — the caller is neither a trainer
+    nor an admin; 403 `no_entitlement` / `feature_not_in_plan`; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     
@@ -1670,7 +1852,7 @@ class TrainerTemplatesView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can access diet plan templates")},
+                    {"error": _("Only trainers can access diet plan templates"), "code": "not_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1692,7 +1874,7 @@ class TrainerTemplatesView(APIView):
             return Response(listing(results))
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # Control-flow exceptions carry their own correct status (404/403/401/400).
             # The broad handler below turned every one of them into a 500, which is the
@@ -1706,7 +1888,7 @@ class TrainerTemplatesView(APIView):
         except Exception as e:
             logger.error(f"Trainer templates error: {str(e)}")
             return Response(
-                {"error": _("Failed to retrieve templates")},
+                {"error": _("Failed to retrieve templates"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1717,6 +1899,27 @@ class TrainerDietPlanView(APIView):
     POST without `daily_calories` computes them from the client's profile, and answers
     400 `client_activity_level_required` while the client has not chosen an activity
     level: ask the client, or send `daily_calories` yourself.
+
+    `POST v1/trainer/diet-plans/` — `client_id`, `template_id`, `start_date`
+    (YYYY-MM-DD), all required; optional `duration_weeks` (1-52, default 4), `goal`,
+    `daily_calories`. 200 `{message, superseded_plan_ids, diet_plan}`.
+    `GET ?client_id=` — that client's plans, `{count, next, previous, results}`.
+
+    Refusals, each with its `code`:
+
+    - 400 `missing_fields` (with `fields`, the names absent).
+    - 400 `bad_client_id` | `bad_template_id` — not a positive whole number.
+    - 400 `bad_date` — `start_date` is not YYYY-MM-DD.
+    - 400 `bad_duration` — `duration_weeks` not a whole number from 1 to 52.
+    - 400 `client_activity_level_required` — see above.
+    - 400 `bad_body` — the body is not a JSON object.
+    - 400 `validation_error` — `duration_weeks` is not a number (`field_errors`).
+    - 403 `not_trainer` — the caller is neither a trainer nor an admin.
+    - 403 `not_assigned_client` — POST for someone who is not your client;
+      `not_assigned_view` — GET for someone who is not your client.
+    - 403 `no_entitlement` / `feature_not_in_plan`.
+    - 404 `not_found` — no such client or template.
+    - 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     
@@ -1728,7 +1931,7 @@ class TrainerDietPlanView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can create diet plans")},
+                    {"error": _("Only trainers can create diet plans"), "code": "not_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1737,21 +1940,26 @@ class TrainerDietPlanView(APIView):
             template_id = _body(request).get('template_id')
             start_date_str = _body(request).get('start_date')
             
-            if not all([client_id, template_id, start_date_str]):
+            missing = [name for name, value in (('client_id', client_id),
+                                                ('template_id', template_id),
+                                                ('start_date', start_date_str)) if not value]
+            if missing:
                 return Response(
-                    {"error": _("client_id, template_id, and start_date are required")},
+                    {"error": _("client_id, template_id, and start_date are required"),
+                     "code": "missing_fields", "fields": missing},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-            # Parse data
+            # Parse data. Through `_id`: a raw `"abc"` reached the ORM, raised
+            # ValueError and answered 500.
             from users.models import CustomUser
-            client = get_object_or_404(CustomUser, id=client_id)
-            template = get_object_or_404(DietPlanTemplate, id=template_id)
+            client = get_object_or_404(CustomUser, id=_id(client_id, 'client_id'))
+            template = get_object_or_404(DietPlanTemplate, id=_id(template_id, 'template_id'))
             start_date = parse_date(start_date_str)
             
             if not start_date:
                 return Response(
-                    {"error": _("Invalid start_date format")},
+                    {"error": _("Invalid start_date format"), "code": "bad_date"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1785,7 +1993,7 @@ class TrainerDietPlanView(APIView):
             })
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -1811,19 +2019,20 @@ class TrainerDietPlanView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can access client diet plans")},
+                    {"error": _("Only trainers can access client diet plans"), "code": "not_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
             client_id = request.GET.get('client_id')
             if not client_id:
                 return Response(
-                    {"error": _("client_id parameter is required")},
+                    {"error": _("client_id parameter is required"),
+                     "code": "missing_fields", "fields": ["client_id"]},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
             from users.models import CustomUser
-            client = get_object_or_404(CustomUser, id=client_id)
+            client = get_object_or_404(CustomUser, id=_id(client_id, 'client_id'))
             
             trainer_service = TrainerDietPlanService(request.user)
             diet_plans = trainer_service.get_client_diet_plans(client)
@@ -1846,7 +2055,7 @@ class TrainerDietPlanView(APIView):
             return Response(listing(results))
                 
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -1867,6 +2076,35 @@ class TrainerDietPlanView(APIView):
 class TrainerMealView(APIView):
     """
     API endpoint for trainers to add, update, and delete meals in diet plans.
+
+    `POST v1/trainer/meals/` — one meal: `diet_plan_id`, `meal_type`, `target_date`
+    (YYYY-MM-DD), `food_items` (a list of `{food_id, quantity}`), all required; optional
+    `scheduled_time` (HH:MM), `description`. 200 `{message, meal}`. Or a JSON LIST of
+    such objects (at most 100), all or nothing: 201 `{message, created, created_count}`;
+    a refusal inside the list carries `index`, the position of the item refused.
+    `PUT v1/trainer/meals/<meal_id>/` — optional `food_items`, `scheduled_time`,
+    `description`. `DELETE v1/trainer/meals/<meal_id>/`.
+
+    Refusals, each with its `code`:
+
+    - 400 `missing_fields` (with `fields` for one meal; `index` in a list).
+    - 400 `bad_diet_plan_id` — not a positive whole number.
+    - 400 `bad_date` — `target_date` is not YYYY-MM-DD; 400 `bad_time` — nor
+      `scheduled_time` HH:MM.
+    - 400 `batch_too_large` — more than 100 meals in one list.
+    - 400 `bad_meal_type`, `date_outside_plan`, `meal_already_happened`,
+      `no_food_items`, `bad_food_items`, `bad_food_item`, `bad_quantity`,
+      `duplicate_food`, `unknown_food`, `declared_allergen`, `plan_superseded` — the
+      trainer service's refusals, `error` says which.
+    - 400 `bad_body` — the body is not a JSON object.
+    - 403 `not_trainer` — the caller is neither a trainer nor an admin.
+    - 403 `not_plan_owner` / `not_assigned_client` — another trainer wrote the plan,
+      or the client is no longer yours.
+    - 403 `no_entitlement` / `feature_not_in_plan`.
+    - 404 `not_found` — no such plan or meal.
+    - 405 `method_not_allowed` — PUT or DELETE without a meal id.
+    - 409 `duplicate_meal` — that slot already holds a meal.
+    - 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     
@@ -1878,7 +2116,7 @@ class TrainerMealView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can manage meals")},
+                    {"error": _("Only trainers can manage meals"), "code": "not_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
 
@@ -1973,14 +2211,19 @@ class TrainerMealView(APIView):
             target_date_str = _body(request).get('target_date')
             food_items = _body(request).get('food_items', [])
             
-            if not all([diet_plan_id, meal_type, target_date_str, food_items]):
+            missing = [name for name, value in (('diet_plan_id', diet_plan_id),
+                                                ('meal_type', meal_type),
+                                                ('target_date', target_date_str),
+                                                ('food_items', food_items)) if not value]
+            if missing:
                 return Response(
-                    {"error": _("diet_plan_id, meal_type, target_date, and food_items are required")},
+                    {"error": _("diet_plan_id, meal_type, target_date, and food_items are required"),
+                     "code": "missing_fields", "fields": missing},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
             # Parse data
-            diet_plan = get_object_or_404(DietPlan, id=diet_plan_id)
+            diet_plan = get_object_or_404(DietPlan, id=_id(diet_plan_id, 'diet_plan_id'))
             target_date = parse_date(target_date_str)
             scheduled_time = None
             if _body(request).get('scheduled_time'):
@@ -1998,7 +2241,7 @@ class TrainerMealView(APIView):
             
             if not target_date:
                 return Response(
-                    {"error": _("Invalid target_date format")},
+                    {"error": _("Invalid target_date format"), "code": "bad_date"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -2026,7 +2269,7 @@ class TrainerMealView(APIView):
             })
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -2050,7 +2293,8 @@ class TrainerMealView(APIView):
         # broad handler and reported as a 400, where the honest answer is
         # that the method is not allowed on the collection.
         if meal_id is None:
-            return Response({"error": _("A meal id is required")},
+            return Response({"error": _("A meal id is required"),
+                             "code": "method_not_allowed"},
                             status=status.HTTP_405_METHOD_NOT_ALLOWED)
         """Update a meal."""
         try:
@@ -2059,7 +2303,7 @@ class TrainerMealView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can update meals")},
+                    {"error": _("Only trainers can update meals"), "code": "not_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2102,7 +2346,7 @@ class TrainerMealView(APIView):
             })
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -2126,7 +2370,8 @@ class TrainerMealView(APIView):
         # broad handler and reported as a 400, where the honest answer is
         # that the method is not allowed on the collection.
         if meal_id is None:
-            return Response({"error": _("A meal id is required")},
+            return Response({"error": _("A meal id is required"),
+                             "code": "method_not_allowed"},
                             status=status.HTTP_405_METHOD_NOT_ALLOWED)
         """Delete a meal."""
         try:
@@ -2135,7 +2380,7 @@ class TrainerMealView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can delete meals")},
+                    {"error": _("Only trainers can delete meals"), "code": "not_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2150,7 +2395,7 @@ class TrainerMealView(APIView):
             })
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -2177,10 +2422,19 @@ class DietPlanNutritionView(APIView):
     Enhanced API endpoint to get detailed nutritional information for a diet plan.
     Shows total proteins, carbs, fats for the whole plan and each meal.
 
+    `GET v1/nutrition/plan/<plan_id>/?date=` (YYYY-MM-DD, default today).
+
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
     `feature_not_in_plan`.
+
+    Refusals, each with its `code`: 400 `bad_date` — `date` is not YYYY-MM-DD;
+    403 `not_plan_owner` / `not_assigned_client` / `plan_superseded` — a trainer
+    reading a plan another trainer wrote, of a client no longer theirs, or one the client
+    no longer follows (it answered the status default `permission_denied` until the
+    owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    404 `not_found` — no such plan, or not yours (a client, an agent); 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -2194,9 +2448,11 @@ class DietPlanNutritionView(APIView):
                 # Authorship AND still this client's trainer. Authorship alone let a
                 # dismissed trainer keep reading the plan they had written: the write
                 # path was fixed and this read path was not.
-                if not _trainer_may_read_plan(request.user, diet_plan):
+                refusal = _trainer_read_refusal(request.user, diet_plan)
+                if refusal is not None:
                     return Response(
-                        {"error": _("You can only view plans for your current clients")},
+                        {"error": _("You can only view plans for your current clients"),
+                         "code": refusal},
                         status=status.HTTP_403_FORBIDDEN
                     )
             elif request.user.is_client:
@@ -2206,11 +2462,11 @@ class DietPlanNutritionView(APIView):
                     # answered 403, which says "it exists and is not yours" and turns the
                     # id space into a census of the platform. A client has no legitimate
                     # knowledge that another client's plan exists.
-                    raise NotFound()
+                    raise NotFound(code="not_found")
             elif not request.user.is_admin:
                 # Default-deny. An `agent` or any future role has no claim here either,
                 # and no reason to learn that this id is live.
-                raise NotFound()
+                raise NotFound(code="not_found")
             
             # Get target date from query params (fallback to plan start date if no meals for today)
             target_date_str = request.GET.get('date')
@@ -2336,7 +2592,7 @@ class DietPlanNutritionView(APIView):
             })
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -2354,10 +2610,19 @@ class MealComponentsView(APIView):
     Enhanced API endpoint to get detailed components of any meal in a diet plan.
     Shows all food items, quantities, and nutritional breakdown.
 
+    `GET v1/meals/<meal_id>/components/`.
+
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
     `feature_not_in_plan`.
+
+    Refusals, each with its `code`:
+    403 `not_plan_owner` / `not_assigned_client` / `plan_superseded` — a trainer
+    reading a plan another trainer wrote, of a client no longer theirs, or one the client
+    no longer follows (it answered the status default `permission_denied` until the
+    owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    404 `not_found` — no such meal, or not yours; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -2380,9 +2645,11 @@ class MealComponentsView(APIView):
 
             # Check permissions
             if request.user.is_trainer:
-                if not _trainer_may_read_plan(request.user, meal.diet_plan):
+                refusal = _trainer_read_refusal(request.user, meal.diet_plan)
+                if refusal is not None:
                     return Response(
-                        {"error": _("You can only view meals for your current clients")},
+                        {"error": _("You can only view meals for your current clients"),
+                         "code": refusal},
                         status=status.HTTP_403_FORBIDDEN
                     )
             elif request.user.is_client:
@@ -2392,11 +2659,11 @@ class MealComponentsView(APIView):
                     # answered 403, which says "it exists and is not yours" and turns the
                     # id space into a census of the platform. A client has no legitimate
                     # knowledge that another client's meal exists.
-                    raise NotFound()
+                    raise NotFound(code="not_found")
             elif not request.user.is_admin:
                 # Default-deny. An `agent` or any future role has no claim here either,
                 # and no reason to learn that this id is live.
-                raise NotFound()
+                raise NotFound(code="not_found")
             
             # Get meal components - No new DB query due to prefetch
             components = meal.components.all()
@@ -2516,9 +2783,10 @@ class MealComponentsView(APIView):
             })
             
         except Meal.DoesNotExist:
-            return Response({"error": _("Meal not found")}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"error": _("Meal not found"), "code": "not_found"},
+                            status=status.HTTP_404_NOT_FOUND)
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             raise
         except Exception as e:
@@ -2536,7 +2804,8 @@ class EnhancedClientProgressView(APIView):
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client.
+    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client; 400
+    `bad_date` — the date parameter is not YYYY-MM-DD; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -2754,7 +3023,8 @@ class ClientProgressView(APIView):
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client.
+    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client; 400
+    `bad_date` — the date parameter is not YYYY-MM-DD; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -2818,7 +3088,8 @@ class ClientWeeklyProgressView(APIView):
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client.
+    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client; 400
+    `bad_date` — the date parameter is not YYYY-MM-DD; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -3297,10 +3568,14 @@ class ClientMealDetailsView(APIView):
     """
     API endpoint for clients to get detailed meal information.
 
+    `GET v1/client/meals/<meal_id>/`.
+
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`.
+    `feature_not_in_plan`; 403 `clients_only` when the caller is not a client (the
+    status default `permission_denied` until the owner's decision of 2026-09-24); 404
+    `not_found` — no such meal, or not yours; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -3309,8 +3584,11 @@ class ClientMealDetailsView(APIView):
         try:
             # Check if user is a client
             if not request.user.is_client:
+                # `clients_only`, the code the sibling client routes answer for the same
+                # refusal; the envelope filled in `permission_denied` (the owner,
+                # 2026-09-24: every refusal names its own code).
                 return Response(
-                    {"error": _("Only clients can access meal details")},
+                    {"error": _("Only clients can access meal details"), "code": "clients_only"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -3324,7 +3602,7 @@ class ClientMealDetailsView(APIView):
             return Response(meal_details)
             
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
@@ -3366,7 +3644,8 @@ class MyDietPlansView(APIView):
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
-    `feature_not_in_plan`; 404 `not_found` for a page past the end.
+    `feature_not_in_plan`; 404 `not_found` for a page past the end (DRF's paginator,
+    the same answer every paginated list on the platform gives); 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
 
@@ -3449,10 +3728,20 @@ class DietPlanMealsWithIngredientsView(APIView):
     Fetch all meals and ingredients for a given diet plan.
     Clients can access their own plans; trainers can access plans they created.
 
+    `GET v1/plan/<plan_id>/meals-with-ingredients/?from=&to=` (YYYY-MM-DD, both
+    optional); at most 60 meals, `truncated: true` when the plan holds more.
+
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
     `feature_not_in_plan`.
+
+    Refusals, each with its `code`: 400 `bad_date` — `from` or `to` is not YYYY-MM-DD;
+    403 `not_plan_owner` / `not_assigned_client` / `plan_superseded` — a trainer
+    reading a plan another trainer wrote, of a client no longer theirs, or one the client
+    no longer follows (it answered the status default `permission_denied` until the
+    owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    404 `not_found` — no such plan, or not yours; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -3467,18 +3756,20 @@ class DietPlanMealsWithIngredientsView(APIView):
                 if plan.user_id != request.user.id:
                     # 404 — see DietPlanNutritionView. Another client's plan does not
                     # exist as far as this caller is concerned.
-                    raise NotFound()
+                    raise NotFound(code="not_found")
             elif request.user.is_trainer:
                 # Authorship AND still this client's trainer, the same rule the other
                 # two plan reads use. This tested authorship alone, so a dismissed
                 # trainer kept reading every meal, ingredient and target through it.
-                if not _trainer_may_read_plan(request.user, plan):
-                    return Response({'error': _('You can only view plans for your current clients')},
+                refusal = _trainer_read_refusal(request.user, plan)
+                if refusal is not None:
+                    return Response({'error': _('You can only view plans for your current clients'),
+                                     'code': refusal},
                                     status=status.HTTP_403_FORBIDDEN)
             elif not getattr(request.user, 'is_admin', False):
                 # 404 for anyone with no claim — a client who does not own it, an agent,
                 # any future role. See DietPlanNutritionView for why this is not a 403.
-                raise NotFound()
+                raise NotFound(code="not_found")
             
             # Bounded, and filterable by date. A 30-day plan is 120 meals and 600
             # components, each carrying two servings, two names and its nutrition —
@@ -3548,7 +3839,7 @@ class DietPlanMealsWithIngredientsView(APIView):
             }
             return Response(payload)
         except BadInput as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
             # get_object() signals 404/403 by raising. The broad handler below
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
