@@ -274,6 +274,8 @@ LOCAL_APPS_FOR_FILE_CLEANUP = {
     'users', 'wallet', 'diet', 'routine', 'subscription', 'social',
     'ai_assistant', 'achievements', 'analytics', 'notifications', 'challenges',
     'mediakit',
+    # Identity documents: a deleted or replaced row must take its file with it.
+    'trainer_verification',
 }
 
 _FILE_FIELD_CACHE = {}

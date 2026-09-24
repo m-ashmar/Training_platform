@@ -111,3 +111,26 @@ class SignedGoogleCloudStorage(GoogleCloudStorage):
         returns a URL that answers 403 — which is the safe direction to be wrong in.
         """
         return f"https://storage.googleapis.com/{self.bucket_name}/{self._normalize_name(name)}"
+
+
+class PrivateDocumentGoogleCloudStorage(SignedGoogleCloudStorage):
+    """Trainer verification documents (identity cards, certificates) on GCS.
+
+    `trainer_verification/storage.py` says why these are kept apart from every other
+    upload. Here that means: `VERIFICATION_GS_BUCKET_NAME` when one is named (else the
+    media bucket), every object under the `private/` prefix, signed URLs that live
+    `VERIFICATION_DOCUMENT_URL_TTL` seconds (five minutes) instead of the media hour, and
+    NO public URL at all — `public_url()` raises, so nothing can hand one out by mistake.
+    """
+
+    def __init__(self, **options):
+        bucket = (getattr(settings, 'VERIFICATION_GS_BUCKET_NAME', '')
+                  or getattr(settings, 'GS_BUCKET_NAME', ''))
+        options.setdefault('bucket_name', bucket)
+        options.setdefault('location', 'private')
+        ttl = int(getattr(settings, 'VERIFICATION_DOCUMENT_URL_TTL', 300))
+        options.setdefault('expiration', timedelta(seconds=ttl))
+        super().__init__(**options)
+
+    def public_url(self, name):
+        raise PermissionError("verification documents have no public URL")

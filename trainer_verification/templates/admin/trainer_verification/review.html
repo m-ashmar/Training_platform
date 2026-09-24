@@ -1,0 +1,96 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div id="content-main">
+  <p>
+    <strong>{{ trainer.first_name }} {{ trainer.last_name }}</strong> &lt;{{ trainer.email }}&gt; (#{{ trainer.pk }})
+    &middot; state: <strong>{{ application.state }}</strong>
+    &middot; round {{ application.round }}
+    {% if application.submitted_at %}&middot; submitted {{ application.submitted_at }}{% endif %}
+    {% if application.decided_at %}&middot; decided {{ application.decided_at }}{% if application.decided_by %} by {{ application.decided_by.email }}{% endif %}{% endif %}
+  </p>
+  {% if application.rejection_reason %}
+    <p>Reason the trainer was given: <em>{{ application.rejection_reason }}</em></p>
+  {% endif %}
+  <p class="help">Document links are signed and expire in {{ url_ttl_minutes }} minute(s). Reload
+    this page for fresh ones. Never copy a link out of the console.</p>
+
+  <h2>Current documents</h2>
+  {% if missing %}<p>Missing required: {{ missing|join:", " }}</p>{% endif %}
+  <form method="post">{% csrf_token %}
+    <input type="hidden" name="seen" value="{{ seen }}">
+    <table>
+      <thead><tr><th>Document</th><th>Preview</th><th>State</th><th>Uploaded</th>
+        {% if can_decide %}<th>Reason to refuse this document (leave empty to accept it)</th>{% endif %}</tr></thead>
+      <tbody>
+      {% for row in current %}
+        <tr>
+          <td>{{ row.label }}<br><small>{{ row.doc.kind }}, {{ row.doc.size|filesizeformat }}{% if row.doc.width %}, {{ row.doc.width }}&times;{{ row.doc.height }}{% endif %}</small></td>
+          <td>
+            {% if row.thumbnail_url %}<a href="{{ row.file_url }}" target="_blank" rel="noopener noreferrer"><img src="{{ row.thumbnail_url }}" alt="{{ row.label }}" style="max-width:240px;max-height:240px"></a>
+            {% else %}<a href="{{ row.file_url }}" target="_blank" rel="noopener noreferrer">Open the {{ row.doc.kind }}</a>{% endif %}
+          </td>
+          <td>{{ row.doc.state }}{% if row.doc.rejection_reason %}<br><em>{{ row.doc.rejection_reason }}</em>{% endif %}</td>
+          <td>{{ row.doc.uploaded_at }}</td>
+          {% if can_decide %}<td><textarea name="doc_reason_{{ row.doc.pk }}" rows="2" cols="36" maxlength="{{ max_reason }}"></textarea></td>{% endif %}
+        </tr>
+      {% empty %}
+        <tr><td colspan="5">No documents.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    {% if can_decide or can_revoke %}
+      <h2>Decision</h2>
+      <p><label for="reason">Reason (required to reject or revoke; the trainer reads it, in the
+        language you write it in):</label><br>
+        <textarea id="reason" name="reason" rows="3" cols="80" maxlength="{{ max_reason }}"></textarea></p>
+      {% if can_decide %}
+        <button type="submit" name="action" value="approve" class="default">Approve: the trainer is verified</button>
+        <button type="submit" name="action" value="reject">Reject with the reason above</button>
+      {% endif %}
+      {% if can_revoke %}
+        <button type="submit" name="action" value="revoke">Revoke the verification</button>
+      {% endif %}
+    {% endif %}
+  </form>
+
+  {% if replaced %}
+    <h2>Documents the trainer replaced</h2>
+    <p class="help">Kept for comparison, then deleted with their files after their retention.</p>
+    <table>
+      <thead><tr><th>Document</th><th>Preview</th><th>Decided</th><th>Uploaded</th><th>Replaced</th><th>Deleted after</th></tr></thead>
+      <tbody>
+      {% for row in replaced %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td>{% if row.thumbnail_url %}<a href="{{ row.file_url }}" target="_blank" rel="noopener noreferrer"><img src="{{ row.thumbnail_url }}" alt="{{ row.label }}" style="max-width:120px;max-height:120px"></a>{% else %}<a href="{{ row.file_url }}" target="_blank" rel="noopener noreferrer">Open</a>{% endif %}</td>
+          <td>{{ row.doc.state }}{% if row.doc.rejection_reason %}<br><em>{{ row.doc.rejection_reason }}</em>{% endif %}</td>
+          <td>{{ row.doc.uploaded_at }}</td>
+          <td>{{ row.doc.replaced_at }}</td>
+          <td>{{ row.doc.purge_after }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  <h2>Decisions</h2>
+  <table>
+    <thead><tr><th>When</th><th>Round</th><th>Outcome</th><th>Reason</th><th>By</th><th>Documents</th></tr></thead>
+    <tbody>
+    {% for decision in decisions %}
+      <tr>
+        <td>{{ decision.decided_at }}</td>
+        <td>{{ decision.round }}</td>
+        <td>{{ decision.outcome }}</td>
+        <td>{{ decision.reason|default:"-" }}</td>
+        <td>{{ decision.decided_by.email|default:"-" }}</td>
+        <td>{% for d in decision.documents %}{{ d.slot }}: {{ d.state }}{% if d.reason %} ({{ d.reason }}){% endif %}{% if not forloop.last %}; {% endif %}{% empty %}-{% endfor %}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="6">No decision yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

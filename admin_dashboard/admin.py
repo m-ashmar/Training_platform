@@ -796,6 +796,17 @@ admin_site.register(Report, ReportAdmin)
 admin_site.register(Block, BlockAdmin)
 admin_site.register(AIConsent, AIConsentAdmin)
 
+# Trainer verification: the queue of pending applications (oldest first) and every
+# application with its history. Operator-only, and a decision needs the change
+# permission — see trainer_verification/admin.py. The documents are shown through
+# five-minute signed links and nowhere else.
+from trainer_verification.admin import (  # noqa: E402
+    VerificationApplicationAdmin, VerificationQueueAdmin)
+from trainer_verification.models import (  # noqa: E402
+    VerificationApplication, VerificationQueueEntry)
+admin_site.register(VerificationQueueEntry, VerificationQueueAdmin)
+admin_site.register(VerificationApplication, VerificationApplicationAdmin)
+
 admin_site.register(UserActivity, UserActivityAdmin)
 admin_site.register(PerformanceMetric, PerformanceMetricAdmin)
 admin_site.register(UserSession)

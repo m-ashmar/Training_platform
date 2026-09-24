@@ -41,14 +41,14 @@ class ClientInline(admin.TabularInline):
 
 # Each goes through `CustomUser.save()` and writes an admin log entry per row.
 # `queryset.update()` skipped both: activating a `user_type='admin'` account in bulk never
-# gave it `is_staff`, so it could not reach the admin, and verifying every trainer at once
-# left no record of who did it. See training_platform/admin_utils.py.
-@admin.action(description="Mark selected trainers as verified")
-def make_verified(modeladmin, request, queryset):
-    count = bulk_apply(request, queryset.filter(user_type='trainer'),
-                       "Trainer verified via bulk admin action", trainer_is_verified=True)
-    messages.success(request, f"Marked {count} trainers as verified.")
-
+# gave it `is_staff`, so it could not reach the admin. See training_platform/admin_utils.py.
+#
+# There is no "mark as verified" action any more, and `trainer_is_verified` is read-only
+# on the form below. A trainer is verified by an operator deciding their application —
+# the documents they sent, looked at — in the verification queue
+# (trainer_verification/admin.py), and that decision is the ONE place the flag is written
+# (`trainer_verification.services.decide` / `revoke`). One tick in a bulk action verified
+# people nobody had checked, with no documents and no record of what was looked at.
 @admin.action(description="Mark selected trainers as available")
 def make_available(modeladmin, request, queryset):
     count = bulk_apply(request, queryset.filter(user_type='trainer'),
@@ -105,7 +105,6 @@ class CustomUserAdmin(UserAdmin):
     inlines = [ClientInline]
     
     actions = [
-        make_verified, 
         make_available, 
         activate_users,
         deactivate_users
@@ -157,7 +156,8 @@ class CustomUserAdmin(UserAdmin):
         }),
     )
     
-    readonly_fields = ('date_joined', 'last_login', 'password_status')
+    # `trainer_is_verified`: changed only by a decision in the verification queue.
+    readonly_fields = ('date_joined', 'last_login', 'password_status', 'trainer_is_verified')
     
     def password_status(self, obj):
         """Display password status in admin list"""
