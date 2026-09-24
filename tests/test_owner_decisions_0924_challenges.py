@@ -423,3 +423,46 @@ def test_the_winner_is_checked_once_and_only_after_the_review_window(make_user):
     assert settle_winners() == 0
     advance_challenge_phases()
     assert Challenge.objects.get(pk=challenge.pk).winner_checked_at == settled_at
+
+
+def test_the_console_filters_by_review_and_disqualifies_or_clears(make_user):
+    from django.test import Client
+
+    from social.models import ChallengeParticipation
+
+    operator = make_user("f20_ops", user_type="admin")
+    trainer = make_user("f20_ops_t", user_type="trainer")
+    cheat = make_user("f20_ops_c")
+    honest = make_user("f20_ops_h")
+    ex = _exercise(trainer, "ops")
+    challenge = _challenge(trainer, "ops", target_value=100)
+    for person, count in ((cheat, 50), (honest, 9)):
+        _enter(challenge, person)
+        _sets(person, ex, _today(1), count)
+    assert _count(challenge, cheat) == (50.0, "flagged")
+    console = Client()
+    console.force_login(operator)
+    # The console lists participations under the Challenges group (the proxy of
+    # `challenges/admin.py`).
+    changelist = "/dj-admin/challenges/challengeparticipationproxy/"
+
+    listed = console.get(changelist, {"review_state__exact": "flagged"})
+    assert listed.status_code == 200
+    assert "f20_ops_c" in listed.content.decode() and \
+        "f20_ops_h" not in listed.content.decode()
+
+    cheat_row = ChallengeParticipation.objects.get(challenge=challenge, user=cheat)
+    done = console.post(changelist, {"action": "disqualify_from_challenge",
+                                     "_selected_action": [cheat_row.pk]})
+    assert done.status_code == 302, done.content[:300]
+    cheat_row.refresh_from_db()
+    assert (cheat_row.review_state, cheat_row.review_reason, cheat_row.rank) == \
+        ("disqualified", "operator", None)
+    assert ChallengeParticipation.objects.get(challenge=challenge, user=honest).rank == 1
+
+    console.post(changelist, {"action": "clear_challenge_review",
+                              "_selected_action": [cheat_row.pk]})
+    cheat_row.refresh_from_db()
+    assert (cheat_row.review_state, cheat_row.rank) == ("clear", 1)
+    # Cleared by an operator: the same day does not flag them again.
+    assert _count(challenge, cheat) == (50.0, "clear")

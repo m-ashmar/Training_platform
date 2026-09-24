@@ -6,6 +6,7 @@ logger = logging.getLogger(__name__)
 from admin_dashboard.admin import (
     admin_site,
     ChallengeAdmin,
+    ChallengeParticipationAdmin,
     AchievementAdmin,
 )
 from social.models import (
@@ -57,7 +58,10 @@ except Exception:
 # Register proxies under custom admin site (dj-admin/)
 admin_site.register(ChallengeProxy, ChallengeAdmin)
 admin_site.register(AchievementProxy, AchievementAdmin)
-admin_site.register(ChallengeParticipationProxy)
+# The operator's review of a participation (owner, 2026-09-24, F20): filter by
+# `review_state`, clear or disqualify (`social/review.py`). This proxy is where the
+# console shows participations, so it carries the review actions.
+admin_site.register(ChallengeParticipationProxy, ChallengeParticipationAdmin)
 admin_site.register(UserAchievementProxy)
 admin_site.register(LeaderboardProxy)
 
@@ -70,7 +74,7 @@ except admin.sites.AlreadyRegistered:
     # surrounding failures invisible in logs. Control flow is unchanged.
     logger.debug('suppressed non-fatal error', exc_info=True)
 try:
-    admin.site.register(ChallengeParticipationProxy)
+    admin.site.register(ChallengeParticipationProxy, ChallengeParticipationAdmin)
     admin.site.register(UserAchievementProxy)
     admin.site.register(LeaderboardProxy)
 except admin.sites.AlreadyRegistered:

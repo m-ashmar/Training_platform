@@ -2,8 +2,9 @@
 
 A recount flags a participant whose training on a single day is above a review
 threshold (`social/challenge_progress.py REVIEW_THRESHOLDS`). An operator then decides,
-from the console (`social/admin.py`, `admin_dashboard/admin.py`, both on
-`ChallengeParticipation`):
+from the console — `/dj-admin/challenges/challengeparticipationproxy/` (the class is
+`admin_dashboard/admin.py ChallengeParticipationAdmin`, registered on the proxy by
+`challenges/admin.py`) and `/admin/social/challengeparticipation/` (`social/admin.py`):
 
 * **clear review** — `review_state='clear'`, `review_reason='operator'`: the person
   keeps their place and can win; recounts do not flag them again;
