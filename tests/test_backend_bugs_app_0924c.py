@@ -159,8 +159,12 @@ def test_b089_the_view_answers_the_one_row_function(make_user, api, rf):
 #: the older code each was unified onto (API_CONTRACT.md §6).
 RETIRED = {"trainers_only": "not_a_trainer",
            "already_your_client": "already_with_this_trainer",
-           "idempotency_key_reused": "idempotency_conflict",
-           "field_required": "missing_fields"}
+           "field_required": "missing_fields",
+           # The review of B-092: the diet trainer routes' never-shipped synonym.
+           "not_trainer": "not_a_trainer"}
+# `idempotency_key_reused` was on this list and came off it in the same review: it is
+# not a synonym of `idempotency_conflict` (the caller's own key vs the other person's
+# id), see wallet/views.py `_idempotency_conflict`.
 
 
 @pytest.mark.parametrize("path", ["trainer/profile/", "trainer/clients/",

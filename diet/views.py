@@ -1783,7 +1783,7 @@ TRAINER_REFUSALS = {
     'not_meal_delete_owner': status.HTTP_403_FORBIDDEN,
     'not_assigned_client': status.HTTP_403_FORBIDDEN,
     'not_assigned_view': status.HTTP_403_FORBIDDEN,
-    'not_trainer': status.HTTP_403_FORBIDDEN,
+    'not_a_trainer': status.HTTP_403_FORBIDDEN,
     'not_meal_viewer': status.HTTP_403_FORBIDDEN,
     'duplicate_meal': status.HTTP_409_CONFLICT,
 }
@@ -1840,7 +1840,7 @@ class TrainerTemplatesView(APIView):
     `GET v1/trainer/templates/` — `{count, next, previous, results}`, each `{id, name,
     description, meals_per_day, snacks_per_day, days_variation, total_meals_per_cycle}`.
 
-    Refusals, each with its `code`: 403 `not_trainer` — the caller is neither a trainer
+    Refusals, each with its `code`: 403 `not_a_trainer` — the caller is neither a trainer
     nor an admin; 403 `no_entitlement` / `feature_not_in_plan`; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
@@ -1852,7 +1852,7 @@ class TrainerTemplatesView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can access diet plan templates"), "code": "not_trainer"},
+                    {"error": _("Only trainers can access diet plan templates"), "code": "not_a_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1914,7 +1914,7 @@ class TrainerDietPlanView(APIView):
     - 400 `client_activity_level_required` — see above.
     - 400 `bad_body` — the body is not a JSON object.
     - 400 `validation_error` — `duration_weeks` is not a number (`field_errors`).
-    - 403 `not_trainer` — the caller is neither a trainer nor an admin.
+    - 403 `not_a_trainer` — the caller is neither a trainer nor an admin.
     - 403 `not_assigned_client` — POST for someone who is not your client;
       `not_assigned_view` — GET for someone who is not your client.
     - 403 `no_entitlement` / `feature_not_in_plan`.
@@ -1931,7 +1931,7 @@ class TrainerDietPlanView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can create diet plans"), "code": "not_trainer"},
+                    {"error": _("Only trainers can create diet plans"), "code": "not_a_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2019,7 +2019,7 @@ class TrainerDietPlanView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can access client diet plans"), "code": "not_trainer"},
+                    {"error": _("Only trainers can access client diet plans"), "code": "not_a_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2097,7 +2097,7 @@ class TrainerMealView(APIView):
       `duplicate_food`, `unknown_food`, `declared_allergen`, `plan_superseded` — the
       trainer service's refusals, `error` says which.
     - 400 `bad_body` — the body is not a JSON object.
-    - 403 `not_trainer` — the caller is neither a trainer nor an admin.
+    - 403 `not_a_trainer` — the caller is neither a trainer nor an admin.
     - 403 `not_plan_owner` / `not_assigned_client` — another trainer wrote the plan,
       or the client is no longer yours.
     - 403 `no_entitlement` / `feature_not_in_plan`.
@@ -2116,7 +2116,7 @@ class TrainerMealView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can manage meals"), "code": "not_trainer"},
+                    {"error": _("Only trainers can manage meals"), "code": "not_a_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
 
@@ -2303,7 +2303,7 @@ class TrainerMealView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can update meals"), "code": "not_trainer"},
+                    {"error": _("Only trainers can update meals"), "code": "not_a_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2380,7 +2380,7 @@ class TrainerMealView(APIView):
             # the client-side plan views have admitted admins all along.
             if not (request.user.is_trainer or request.user.is_admin):
                 return Response(
-                    {"error": _("Only trainers can delete meals"), "code": "not_trainer"},
+                    {"error": _("Only trainers can delete meals"), "code": "not_a_trainer"},
                     status=status.HTTP_403_FORBIDDEN
                 )
             

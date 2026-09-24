@@ -203,10 +203,14 @@ class CustomUserAdmin(UserAdmin):
         if 'assigned_trainer' not in getattr(form, 'changed_data', []):
             return
         if obj.assigned_trainer_id:
+            # An operator's assignment carries nobody's note: `client_note` is read as
+            # the words of whoever `initiated_by` names, so rewriting the author and
+            # keeping the text served the client's own note back to them as the
+            # trainer's (the review of B-093).
             TrainerClientRelation.objects.update_or_create(
                 trainer_id=obj.assigned_trainer_id, client=obj,
                 defaults={'status': 'approved', 'initiated_by': 'trainer',
-                          'ends_at_period_end': False})
+                          'client_note': '', 'ends_at_period_end': False})
             TrainerClientRelation.objects.filter(client=obj, status='approved').exclude(
                 trainer_id=obj.assigned_trainer_id).update(status='rejected')
         else:

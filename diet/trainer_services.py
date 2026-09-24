@@ -38,7 +38,7 @@ class TrainerDietPlanService:
             trainer: The trainer user instance
         """
         if not (trainer.is_trainer or trainer.is_admin):
-            raise ValidationError(_("User must be a trainer to use this service"), code="not_trainer")
+            raise ValidationError(_("User must be a trainer to use this service"), code="not_a_trainer")
         self.trainer = trainer
         #: An admin acts on behalf of support and is not anybody's assigned trainer,
         #: so the assignment tests below would refuse them. Widening the view gate

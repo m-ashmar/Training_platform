@@ -154,18 +154,21 @@ def _idempotency_conflict(exc):
     none did.
 
     409 `request_in_flight` (the code `users` answers for the same fact) and 422
-    `idempotency_conflict`. Both answered only their status defaults, `conflict` and
-    `unprocessable`, until the owner's decision of 2026-09-24. The second is the code
-    the set, workout and chat writes answer for the same fact — this id already names a
-    different write; pick a new one — so the app has one branch for it (BACKEND_BUGS
-    B-092: it was minted as `idempotency_key_reused` on 2026-09-24 and never shipped).
+    `idempotency_key_reused`. Both answered only their status defaults, `conflict` and
+    `unprocessable`, until the owner's decision of 2026-09-24. `idempotency_key_reused`
+    is NOT the set, workout and chat writes' 409 `idempotency_conflict`, although both
+    are about an id: there the id is the OTHER person's record, so the caller's write
+    never happened and the app sends again under a new id; here the key is the caller's
+    OWN, already spent on a different request of theirs that may have moved money, so
+    sending again under a new key could move it twice. Two facts, two recoveries, two
+    codes (the review of B-092 undid a merge of the two before it shipped).
     """
     if exc.in_flight:
         return Response({"error": _("Duplicate request"), "code": "request_in_flight"},
                         status=status.HTTP_409_CONFLICT)
     return Response(
         {"error": _("This idempotency key was already used for a different request."),
-         "code": "idempotency_conflict"},
+         "code": "idempotency_key_reused"},
         status=status.HTTP_422_UNPROCESSABLE_ENTITY,
     )
 
@@ -475,7 +478,7 @@ class AgentTopUpView(APIView):
     | 409 | `currency_mismatch` | the client trades in the other currency; `client_currency` and `topup_currency` say which |
     | 429 | `daily_limit_exceeded` / `monthly_limit_exceeded` | the agent's cap FOR THAT CURRENCY; waiting does not lift it before the day or month turns |
     | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running; retry when it finishes |
-    | 422 | `idempotency_conflict` | the key was used for a different request; retrying never helps |
+    | 422 | `idempotency_key_reused` | the key was used for a different request; retrying never helps |
     | 429 | `throttled` | the rate limiter (`Retry-After`) |
 
     Every code above that is not the framework's was the status default (`bad_request`,
@@ -620,10 +623,10 @@ class ClientTransferToTrainerView(APIView):
     | 402 | `insufficient_balance` | the client's wallet holds less than `amount`; `currency` is its currency |
     | 400 | `transfer_refused` | the ledger refused the movement for any other reason; nothing moved |
     | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running |
-    | 422 | `idempotency_conflict` | the key was used for a different request |
+    | 422 | `idempotency_key_reused` | the key was used for a different request |
     | 429 | `throttled` | the rate limiter (`Retry-After`) |
 
-    `clients_only`, `transfer_refused`, `request_in_flight` and `idempotency_conflict`
+    `clients_only`, `transfer_refused`, `request_in_flight` and `idempotency_key_reused`
     answered only their status defaults until the owner's decision of 2026-09-24.
     """
     permission_classes = [IsAuthenticated]
@@ -726,7 +729,7 @@ class AdminReversalView(APIView):
     | 400 | `currency_mismatch` | a wallet on either side changed currency since the row was written |
     | 400 | `reversal_refused` | the ledger refused the reversal for any other reason; nothing moved |
     | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running |
-    | 422 | `idempotency_conflict` | the key was used for a different request |
+    | 422 | `idempotency_key_reused` | the key was used for a different request |
 
     The three 400s were one `bad_request` until the owner's decision of 2026-09-24,
     which gave each reason its own code; nothing else about them changed.
@@ -922,7 +925,7 @@ class AgentTopUpProxyView(APIView):
     | 409 | `currency_mismatch` | the client trades in the other currency; `client_currency` and `topup_currency` say which |
     | 429 | `daily_limit_exceeded` / `monthly_limit_exceeded` | the agent's cap FOR THAT CURRENCY |
     | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running |
-    | 422 | `idempotency_conflict` | the key was used for a different request |
+    | 422 | `idempotency_key_reused` | the key was used for a different request |
     | 429 | `throttled` | the rate limiter (`Retry-After`) |
 
     `agents_only`, `agent_not_active`, `target_not_a_client`, the two cap codes and the

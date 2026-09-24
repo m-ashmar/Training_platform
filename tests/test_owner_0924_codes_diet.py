@@ -214,6 +214,15 @@ def test_the_generation_routes_name_each_refusal(make_user, api):
             403, "trainers_cannot_generate"), path
 
 
+#: "The caller is not a trainer" on the diet trainer routes. A deliberate, pre-release
+#: contract change (the review of BACKEND_BUGS B-092, 2026-09-24): minted here as
+#: `not_trainer` that day — at 4cbb522 these routes answered a code-less 403 before the
+#: service's `not_trainer` could ever be reached — it named the refusal the users,
+#: routine and mediakit trainer routes answer `not_a_trainer`, so it was unified onto
+#: that one before it shipped (API_CONTRACT.md §6).
+NOT_A_TRAINER = "not_a_trainer"
+
+
 def test_the_trainer_routes_name_each_refusal(make_user, api):
     c = api(_client(make_user, "codes-not-a-coach"))
     for method, path in (("get", "/api/diet/v1/trainer/templates/"),
@@ -223,7 +232,7 @@ def test_the_trainer_routes_name_each_refusal(make_user, api):
                          ("put", "/api/diet/v1/trainer/meals/1/"),
                          ("delete", "/api/diet/v1/trainer/meals/1/")):
         refused = getattr(c, method)(path, {}, content_type=JSON)
-        assert _refused(refused) == (403, "not_trainer"), (method, path, refused.content)
+        assert _refused(refused) == (403, NOT_A_TRAINER), (method, path, refused.content)
 
     coach = api(make_user("codes-coach", user_type="trainer", trainer_is_verified=True))
     missing = coach.post("/api/diet/v1/trainer/diet-plans/", {"client_id": 5}, content_type=JSON)

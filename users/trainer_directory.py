@@ -190,9 +190,19 @@ class CoachingPriceBook:
                           self.currency_of(trainer.pk))
 
     def agreed(self, relation):
-        """What this relation agreed to, in its own quoted currency, for this reader."""
-        return self.price(relation.agreed_rate,
-                          relation.agreed_currency or self.currency_of(relation.trainer_id))
+        """What this relation agreed to, in its own quoted currency, for this reader.
+
+        Exactly what the charge reads (`users/trainer_relations.py price_of_record`),
+        so a row can never show one price and approve another: the quote with its unit,
+        or — only for a row from before `agreed_rate` existed — the trainer's rate in
+        the trainer's currency. Read here without a query per row.
+        """
+        if relation.agreed_rate is not None and relation.agreed_currency:
+            return self.price(relation.agreed_rate, relation.agreed_currency)
+        if relation.agreed_rate is not None:
+            return self.price(relation.agreed_rate, self.currency_of(relation.trainer_id))
+        return self.price(getattr(relation.trainer, 'trainer_hourly_rate', None) or 0,
+                          self.currency_of(relation.trainer_id))
 
 
 def _absolute(request, url):

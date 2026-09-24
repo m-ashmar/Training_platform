@@ -128,11 +128,18 @@ def quote_agreed_price(relation, trainer) -> None:
 
     Everywhere a request or an invitation writes `agreed_rate` it writes this, so the
     number never exists without the currency it was quoted in.
+
+    A trainer with no price set is quoted at ZERO, not left empty: an empty
+    `agreed_rate` is read as "a row from before the column" and falls back to the
+    trainer's LIVE rate (`price_of`), so a request made to an unpriced trainer — which
+    skipped the build's purchase check and the balance check because it cost nothing —
+    was charged whatever rate the trainer set before approving, a price nobody quoted
+    (the review of B-089). What was free when asked stays free, like any other price.
     """
     from wallet import currency_for
 
-    relation.agreed_rate = getattr(trainer, 'trainer_hourly_rate', None)
-    relation.agreed_currency = currency_for(trainer) if relation.agreed_rate is not None else ''
+    relation.agreed_rate = Decimal(getattr(trainer, 'trainer_hourly_rate', None) or 0)
+    relation.agreed_currency = currency_for(trainer)
 
 
 def priced_for_client(relation):

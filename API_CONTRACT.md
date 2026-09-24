@@ -277,14 +277,14 @@ per-address limits above have `code: "throttled"`.
 - **One refusal, one code (BACKEND_BUGS B-092, 2026-09-24).** Decision 9's builders minted
   79 codes after the last pushed commit (`4cbb522`). Each was checked against the codes
   that existed at `4cbb522`; the four that named a refusal an OLDER code already named
-  were moved onto the older code before anything shipped. No code that existed at
+  were moved onto the older code before anything shipped. No code the app could receive at
   `4cbb522` was renamed.
 
   | Minted 2026-09-24 (never shipped) | Now | Where | Why the older one |
   |---|---|---|---|
   | `trainers_only` | `not_a_trainer` | every `/api/auth/trainer/*` route (403) | the routine and mediakit trainer routes' code for "the caller is not a trainer" |
   | `already_your_client` | `already_with_this_trainer` | `POST /api/auth/trainer/assign-client/` (400) | `client/request-trainer/`'s code for the same state, an approved pair; the sibling `request_already_pending` was already shared by both sides |
-  | `idempotency_key_reused` | `idempotency_conflict` | top-ups, `wallet/client/transfer/`, `wallet/admin/reversal/` (422, unchanged) | the set, workout and chat writes' code for "this id already names a different write; pick a new one" |
+  | `not_trainer` | `not_a_trainer` | the diet trainer routes (`diet/v1/trainer/templates/`, `diet-plans/`, `meals/`; 403) | the users, routine and mediakit trainer routes' code for "the caller is not a trainer"; at `4cbb522` these routes answered a code-less 403 before the service's `not_trainer` could be reached, so the app never received it (the review of B-092) |
   | `field_required` (+ `field`) | `missing_fields` (+ `fields`, `field` kept) | `POST /api/routine/exercises/create-with-image/` (400) | the diet and subscription routes' code for a missing required field |
 
   Checked and kept, because the older code names a different fact: `client_not_found`
@@ -299,9 +299,15 @@ per-address limits above have `code: "throttled"`.
   allowance), `subscription_exists` (`subscription_active` is running cover), the object-
   specific `*_not_yours` / `not_owner` codes, and the `<field>_required` codes, which follow
   the older `trainer_id_required` / `request_id_required` / `token_required` pattern.
-  Two OLDER synonym pairs remain because both existed at `4cbb522`: `not_trainer` (diet
-  trainer routes) beside `not_a_trainer`, and `not_client` (diet service) beside
-  `clients_only`.
+  Also kept: wallet's 422 `idempotency_key_reused` beside the 409 `idempotency_conflict`
+  of the set, workout and chat writes. Both are about an id, but they are different
+  facts with opposite recoveries: `idempotency_conflict` says the id is the OTHER
+  person's record, so the write never happened and a new id is the fix;
+  `idempotency_key_reused` says the caller's OWN key was already spent on a different
+  request of theirs, which may have moved money, so sending again under a new key could
+  move it twice. (It was briefly unified onto `idempotency_conflict` and restored by the
+  review, before anything shipped.) One older pair remains because the app could
+  receive both at `4cbb522`: `not_client` (diet service) beside `clients_only`.
 - Adding a new push `event_type` is additive — the app must ignore `data.type` values it
   does not recognise rather than crash.
 
@@ -1851,9 +1857,9 @@ of its codes.
 | `diet/v1/preferences/food-category/{food_id}/` | 400 `missing_fields` (`fields: ["meal", "macro"]`), `bad_meal`, `bad_macro`, `ambiguous_slot`, `bad_body` |
 | `diet/v1/plans/generate/` | 400 `bad_date`; 403 `trainers_cannot_generate` |
 | `diet/v1/plans/generate-rule/` | 400 `bad_date`; 403 `trainers_cannot_generate`; 422 `infeasible_calories` (the async route's code for the same refusal) |
-| `diet/v1/trainer/templates/` | 403 `not_trainer` |
-| `diet/v1/trainer/diet-plans/` | 400 `missing_fields` (with `fields`), `bad_client_id`, `bad_template_id`, `bad_date`, `bad_body`; 403 `not_trainer` |
-| `diet/v1/trainer/meals/`, `.../{meal_id}/` | 400 `missing_fields` (with `fields`), `bad_diet_plan_id`, `bad_date`, `bad_body`; 403 `not_trainer` |
+| `diet/v1/trainer/templates/` | 403 `not_a_trainer` |
+| `diet/v1/trainer/diet-plans/` | 400 `missing_fields` (with `fields`), `bad_client_id`, `bad_template_id`, `bad_date`, `bad_body`; 403 `not_a_trainer` |
+| `diet/v1/trainer/meals/`, `.../{meal_id}/` | 400 `missing_fields` (with `fields`), `bad_diet_plan_id`, `bad_date`, `bad_body`; 403 `not_a_trainer` |
 | `diet/v1/nutrition/plan/{plan_id}/`, `diet/v1/meals/{meal_id}/components/`, `diet/v1/plan/{plan_id}/meals-with-ingredients/` | 403 to a trainer: `not_plan_owner`, `not_assigned_client` or `plan_superseded` (the trainer service's own reason), `not_assigned_view` for any other |
 | `diet/v1/client/meals/{meal_id}/` | 403 `clients_only` |
 | `analytics/sessions/end_session/` | 400 `missing_session_id` |
@@ -1967,7 +1973,7 @@ kept beside the code. The views' docstrings carry the full tables.
 | `wallet/admin/*`, `subscription/v1/admin/management/` | `403 admins_only` (not an operator) |
 | `POST wallet/agent/topup/` (signed) | `401 agent_auth_invalid` — one code for a missing, stale or mismatched `X-Agent-Auth`, an unknown key and a bad signature; `403 agent_ip_not_allowed` |
 | `POST wallet/agent/topup/`, `.../topup/proxy/` | `403 agent_not_active`; `400 target_not_a_client`; `429 daily_limit_exceeded` / `monthly_limit_exceeded` (the agent's cap in that currency — not the rate limiter, and `Retry-After` does not lift it) |
-| top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_conflict` (the key belongs to a different request; retrying never helps — the code the set, workout and chat writes answer for the same fact; minted as `idempotency_key_reused` and unified before it shipped, B-092) |
+| top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_key_reused` (the caller's own key was already spent on a different request of theirs; retrying never helps, and resending under a new key could move money twice — NOT the set, workout and chat writes' 409 `idempotency_conflict`, where the id is the other person's and a new id is the fix) |
 | `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved) |
 | `POST wallet/admin/reversal/` | `400 insufficient_balance` (the wallet that received the money no longer holds it), `400 currency_mismatch` (a wallet changed currency), `400 reversal_refused` — these three were one `bad_request` |
 | `POST subscription/v1/subscriptions/` | `400 subscription_exists` (one per user: `change-plan/`, `upgrade/` or `renew/` instead); a `plan_id` naming no active plan stays `validation_error`, its field code now `invalid_plan` (was `invalid`) |
