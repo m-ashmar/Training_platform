@@ -4920,3 +4920,12 @@ msgid ""
 msgstr ""
 "لقد أرسلت أقصى عدد من الصور والرسائل الصوتية ومقاطع الفيديو المسموح به في "
 "اليوم. حاول مرة أخرى لاحقًا."
+
+#: routine/views.py
+msgid "rest_time must be a whole number of seconds."
+msgstr "يجب أن يكون وقت الراحة عدداً صحيحاً من الثواني."
+
+#: routine/views.py
+#, python-format
+msgid "Cannot expand %(names)s. What can be expanded: %(known)s."
+msgstr "لا يمكن توسيع %(names)s. ما يمكن توسيعه: %(known)s."

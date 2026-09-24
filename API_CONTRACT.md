@@ -1772,6 +1772,42 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   username, user_type, first_name, last_name, profile_picture_url, followers_count,
   is_following, member_since}`. `by_username/` is unchanged (exact, case-sensitive).
 
+**What wiring the train screens found** (BACKEND_BUGS B-106, B-109, B-110, B-112,
+2026-09-24). Additive under §6: new keys on existing answers, one query parameter, two
+new codes; no route, key or `code` changed. One new column (`routine/0028`,
+`ExerciseSetLog.personal_record`, the verdict a set was answered with; false on rows
+written before it). The views' and serializers' docstrings carry the full contract.
+Prefix `/api/routine/`.
+
+- **The coach's review in one read** (B-106). `GET workout-sessions/{id}/?expand=sets`
+  answers the session as before plus `sets`, `planned` and `routine_name`. `sets[]`:
+  `{id, set_number, weight, reps, rest_time, rpe, notes, date, personal_record,
+  exercise: {id, name}, prescription}`, grouped by exercise in the day's order, then
+  by `set_number`; `prescription` is that exercise's row of the day, `{id, sets, reps,
+  weight, rest_time, order}`, or null when the day does not prescribe it.
+  `personal_record` is the verdict the client was answered with when the set was
+  logged. `planned[]` is the whole day's prescription, untouched exercises included:
+  `{id, exercise: {id, name}, sets, reps, weight, rest_time, order, notes}`. The cost
+  is fixed — one query more than the plain detail, whatever the sets. Readable by the
+  person who trained, an admin and a trainer with an APPROVED relation (the one
+  predicate; 404 `not_found` otherwise, as the plain detail). Any other `expand` value:
+  400 `bad_expand` with `field: "expand"`. Without `expand` the detail is unchanged;
+  the list is never expanded.
+- **A synced set keeps its rest** (B-109). `set-logs/sync/` rows take `rest_time`
+  (seconds) and store it exactly as `POST set-logs/` does, read by that route's own
+  field. A value the single POST refuses (not a whole number) is the row's error
+  `rest_time_out_of_range`.
+- **A re-sent batch learns what landed** (B-110). `set-logs/sync/` `created` and
+  `duplicate` rows gain `weight` and `reps` as STORED, and a `duplicate` row's
+  `personal_record` is now the verdict the first answer gave (it was always false); a
+  key sent twice in one batch answers its twin's verdict. Nothing is celebrated again.
+- **The best a record beat** (B-112). Beside `personal_record: true`, `POST set-logs/`,
+  the `set-logs/sync/` rows and the `set-logs/bulk-create/` rows carry `previous_best:
+  {weight, reps, date}` — the heaviest set logged before it (among equal weights the
+  most reps, then the latest; an earlier set of the same batch counts): exactly the
+  record it beat (`strength.record_beaten`). Null when the set is not a record, and on
+  a replay, a PATCH or a list read.
+
 **Anonymous AI training copies** (the owner's decisions 1-3 of 2026-09-24, P0). No
 route, field or `code` changes. What "help us improve" keeps is now what the app says it
 keeps, and each view's docstring states it in full.
@@ -2117,18 +2153,20 @@ already holds changes nothing and is allowed, so a PUT of the whole object still
 `sets_required` for a body with no list. A phone with no signal has no server
 `UserExerciseProgress` id, so each entry names what it does know: `client_uuid`
 (required — the retry key), `exercise_id` (required), `date`, `set_number`, `weight`,
-`reps` (or `as_prescribed`), `routine_id`, `day`, `workout_session_id`, `notes`, `rpe`.
-The server resolves or creates the progress row from `(you, exercise, date)`. Idempotent
+`reps` (or `as_prescribed`), `routine_id`, `day`, `workout_session_id`, `notes`, `rpe`,
+`rest_time` (B-109). The server resolves or creates the progress row from `(you, exercise, date)`. Idempotent
 per `client_uuid`, exactly as the single POST: a re-sent batch writes nothing and answers
 the same ids. Partial success — each entry answers `status` `created`, `duplicate` or
 `error` with a `code` (`bad_row`, `client_uuid_required`, `idempotency_conflict`,
 `bad_date`, `date_in_future`, `date_too_old`, `exercise_required`, `exercise_not_found`,
 `session_not_found`, `routine_not_found`, `reps_required`, `reps_out_of_range`,
 `no_prescribed_reps`, `weight_out_of_range`, `set_number_out_of_range`,
-`rpe_out_of_range`, `invalid_set`, or the coaching refusal with `trainer_id`) — and one
-bad row never fails the batch. The whole answer is `{results, count, created,
-duplicates, errors}`, and a set that beat everything before it carries
-`personal_record: true` and sends the push.
+`rpe_out_of_range`, `rest_time_out_of_range`, `invalid_set`, or the coaching refusal
+with `trainer_id`) — and one bad row never fails the batch. The whole answer is
+`{results, count, created, duplicates, errors}`, and a set that beat everything before
+it carries `personal_record: true` (with `previous_best`, B-112) and sends the push. A
+`created` or `duplicate` row carries the stored `weight` and `reps`, and a `duplicate`
+the verdict its first answer gave (B-110).
 
 **`exercisesetlogs/` is gone.** `ExerciseSetLogViewSet` was registered under two
 prefixes and is now registered under `set-logs/` only, the spelling the app and the rest
