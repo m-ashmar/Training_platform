@@ -272,7 +272,44 @@ class UserDetailsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Retrieve the authenticated user's details."""
+        """`GET /api/auth/user/details/` — who is signed in, in the short shape every
+        role reads (the agent and operator shells read nothing else).
+
+        Needs `Authorization: Bearer <access token>`. No body, no query parameters.
+        Identical on every build (`X-App-Channel` / `X-App-Version` change nothing).
+
+        200:
+
+            id                the account's id
+            username
+            email
+            first_name, last_name   "" when not given
+            user_type         `client` | `trainer` | `agent` | `admin` — the role, the
+                              name every other payload gives it (BACKEND_BUGS B-121)
+            profile_picture   the picture as an ABSOLUTE url, the way every other
+                              endpoint answers a person's picture (B-121: it was the
+                              bare storage path, `/media/...`); still a string, or
+                              null with no picture. Signed where storage signs, so
+                              draw it from this answer and never store it
+            media             the person's media map, `{slot: {url_1x, url_2x, blur,
+                              focal, brightness, alt_ar, alt_en}}` — the shape the
+                              trainer cards and `trainer/media-kit/` answer
+                              (`mediakit.services.payload`). A trainer's kit slots
+                              (`trainer.portrait`, `trainer.avatar`, ...) when filled;
+                              `{}` for every other role, which has no kit, and for a
+                              trainer with nothing uploaded. A slot with nothing in it
+                              is absent, never null
+
+        `user_type` and `media` are additive (B-121); no key changed its type.
+
+        | status | `code` | when |
+        |---|---|---|
+        | `401` | `not_authenticated` | no token |
+        | `401` | `token_not_valid` | an expired, rotated or blacklisted token: refresh, then sign in |
+        """
+        from mediakit.services import media_for
+        from mediakit.slots import OwnerType
+
         user = request.user
         user_data = {
             'id': user.id,
@@ -280,9 +317,25 @@ class UserDetailsView(APIView):
             'email': user.email,
             'first_name': user.first_name,
             'last_name': user.last_name,
-            'profile_picture': user.profile_picture.url if user.profile_picture else None,
+            'user_type': user.user_type,
+            # Absolute, as `UserDetailsSerializer` (`user/update/`), chat and the
+            # attention queue answer the same field (routine `_absolute_picture`).
+            'profile_picture': _absolute_picture_url(user, request),
+            'media': (media_for(OwnerType.TRAINER, user.pk, request)
+                      if user.is_trainer else {}),
         }
         return Response(user_data, status=status.HTTP_200_OK)
+
+
+def _absolute_picture_url(user, request):
+    """The person's profile picture as an absolute url, or None without one."""
+    picture = getattr(user, 'profile_picture', None)
+    if not picture:
+        return None
+    url = picture.url
+    if request is not None and url.startswith('/'):
+        return request.build_absolute_uri(url)
+    return url
 
 class CustomRegisterView(RegisterView):
     serializer_class = CustomRegisterSerializer

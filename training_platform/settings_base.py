@@ -200,6 +200,17 @@ ACCOUNT_AUTHENTICATION_METHOD = 'email'
 ACCOUNT_USERNAME_REQUIRED = False
 ACCOUNT_ADAPTER = "users.adapters.CustomAccountAdapter"
 
+# Signing in to the web console on a computer with a link made on the operator's phone
+# (OperatorPhone, BACKEND_BUGS B-120; admin_dashboard/console_login.py). A NEW WAY INTO
+# THE CONSOLE, so it is off until the owner approves it: while False every route of it
+# answers `console_login_disabled` and nothing is written. Turning it on is the owner's
+# decision, not a deploy detail.
+OPS_QR_LOGIN_ENABLED = get_bool_env_optional("OPS_QR_LOGIN_ENABLED", False)
+# The console's own origin (e.g. https://ops.yallagym.com) when it is served under a
+# host of its own; empty means the host the API request came to. Used for the links the
+# operator's phone is given (B-119 queue pages, the B-120 sign-in link).
+OPS_CONSOLE_BASE_URL = get_env("OPS_CONSOLE_BASE_URL", "")
+
 # REST Auth
 REST_AUTH_SERIALIZERS = {
     'REGISTER_SERIALIZER': 'users.serializers.CustomRegisterSerializer',

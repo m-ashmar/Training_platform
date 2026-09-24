@@ -5385,3 +5385,43 @@ msgstr "تم شحن رصيدك"
 #, python-format
 msgid "A cash top-up from %(agent)s was added to your balance."
 msgstr "أُضيف إلى رصيدك شحن نقدي من %(agent)s."
+
+#: routine/serializers.py
+msgid "rest_time must be a whole number of seconds, 0 or more."
+msgstr "يجب أن يكون وقت الراحة عدداً صحيحاً من الثواني، صفراً أو أكثر."
+
+#: admin_dashboard/ops_api.py
+msgid "Signing in to the console from the phone is not switched on."
+msgstr "تسجيل الدخول إلى لوحة التشغيل من الهاتف غير مفعّل."
+
+#: admin_dashboard/ops_api.py
+msgid "Verify your email address before signing in to the console."
+msgstr "أكّد بريدك الإلكتروني قبل تسجيل الدخول إلى لوحة التشغيل."
+
+#: admin_dashboard/console_login.py
+msgid "Too many sign-in links. Wait a few minutes and try again."
+msgstr "طلبت روابط دخول كثيرة. انتظر بضع دقائق ثم حاول مجدداً."
+
+#: admin_dashboard/console_login.py
+msgid "This sign-in link is not yours or does not exist."
+msgstr "رابط الدخول هذا ليس لك أو غير موجود."
+
+#: admin_dashboard/console_login.py
+msgid "This sign-in link has expired. Make a new one."
+msgstr "انتهت صلاحية رابط الدخول هذا. أنشئ رابطاً جديداً."
+
+#: admin_dashboard/console_login.py
+msgid "Open the link on your computer first."
+msgstr "افتح الرابط على حاسوبك أولاً."
+
+#: admin_dashboard/console_login.py
+msgid "This sign-in link can no longer be used."
+msgstr "لم يعد من الممكن استخدام رابط الدخول هذا."
+
+#: admin_dashboard/console_login.py
+msgid "Type the number your computer shows."
+msgstr "اكتب الرقم الظاهر على حاسوبك."
+
+#: admin_dashboard/console_login.py
+msgid "That is not the number your computer shows."
+msgstr "هذا ليس الرقم الظاهر على حاسوبك."
