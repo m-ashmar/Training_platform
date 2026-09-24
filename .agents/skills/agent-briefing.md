@@ -33,6 +33,11 @@ After adding a migration, the run needs `--create-db` or it dies with `Duplicate
 | The Arabic catalogue | **Every string you pass to `_()` — and every `{% trans %}` — must be IN `django.po` with Arabic, and in the compiled `django.mo`.** Not "every entry already in the file": the gate used to check only those, so a string that never reached the catalogue was invisible and shipped in English (SIDE_BUGS S-019 — 152 of them). None fuzzy. Add the entry, then `msgfmt --check-format -o locale/ar/LC_MESSAGES/django.mo locale/ar/LC_MESSAGES/django.po` and commit the `.mo` |
 | One predicate decides what a trainer sees | A source scan forbids reading `assigned_trainer` directly — use the approved relation |
 
+Not a gate, and just as silent: **a new app with a `FileField` must be added to
+`LOCAL_APPS_FOR_FILE_CLEANUP` in `training_platform/signals.py`**, or a deleted or
+replaced row leaves its file in storage for ever — account erasure included. Nothing
+fails; the bytes simply stay (found building `trainer_verification`, 2026-09-24).
+
 ## Working in a worktree
 
 Worktrees are how several agents build at once. The setup is done for you; what bites is:

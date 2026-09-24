@@ -32,6 +32,7 @@ from django.contrib.admin.utils import unquote
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponseRedirect
 from django.template.response import TemplateResponse
+from django.urls import reverse
 from django.utils import timezone
 
 from training_platform.admin_utils import log_admin_action
@@ -100,7 +101,11 @@ class _ReviewAdmin(admin.ModelAdmin):
             if not self.has_change_permission(request, application):
                 raise PermissionDenied
             self._decide(request, application)
-            return HttpResponseRedirect(request.path)
+            # To the application's own page, not back here: once decided it has left the
+            # queue, and the queue's page for it would answer "does not exist".
+            return HttpResponseRedirect(reverse(
+                f"{self.admin_site.name}:trainer_verification_verificationapplication_change",
+                args=[application.pk]))
         return TemplateResponse(request, "admin/trainer_verification/review.html",
                                 self._context(request, application))
 

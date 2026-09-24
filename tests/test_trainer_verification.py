@@ -994,7 +994,8 @@ def test_an_operator_reviews_with_signed_links_and_decides_from_the_page(
     photo = application.documents.get(slot="photo")
     operator = _operator(make_user)
     console = _console(operator)
-    url = f"/dj-admin/trainer_verification/verificationapplication/{application.pk}/change/"
+    # Opened from the queue, as an operator would.
+    url = f"/dj-admin/trainer_verification/verificationqueueentry/{application.pk}/change/"
 
     page = console.get(url)
     assert page.status_code == 200
@@ -1006,6 +1007,8 @@ def test_an_operator_reviews_with_signed_links_and_decides_from_the_page(
         decided = console.post(url, {"action": "reject", "reason": "the photo is blurred",
                                      f"doc_reason_{photo.pk}": "blurred", "seen": seen})
     assert decided.status_code == 302
+    shown = console.get(decided["Location"])
+    assert shown.status_code == 200 and b"the photo is blurred" in shown.content
     application.refresh_from_db()
     photo.refresh_from_db()
     assert application.state == "rejected" and application.decided_by == operator
