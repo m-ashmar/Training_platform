@@ -68,7 +68,10 @@ def _lock_agent_profile(agent_profile):
 def _topup_limit_error(agent_profile, actor, amount, request, currency):
     """
     Enforce agent daily/monthly top-up caps FAIL-CLOSED. A limit of 0 means
-    "no top-ups permitted", not unlimited. Returns a Response on breach, else None.
+    "no top-ups permitted", not unlimited. Returns a Response on breach, else None:
+    429 `daily_limit_exceeded` or `monthly_limit_exceeded`. A cap is not the rate
+    limiter — waiting out a `Retry-After` does not lift it — so it does not answer the
+    limiter's `throttled` (the owner, 2026-09-24: every refusal names its own code).
 
     PER CURRENCY (SIDE_BUGS S-059). The totals count only this currency's top-ups and
     are held against this currency's caps (`AgentProfile.limits_for`). They used to add
@@ -110,10 +113,12 @@ def _topup_limit_error(agent_profile, actor, amount, request, currency):
     ).aggregate(Sum("amount"))["amount__sum"] or 0
     if day_total + amount > daily_limit:
         audit("wallet.topup.limit_block", request, {"scope": "daily", "currency": currency, "attempt": float(amount), "used": float(day_total)})
-        return Response({"error": _("Daily limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        return Response({"error": _("Daily limit exceeded"), "code": "daily_limit_exceeded"},
+                        status=status.HTTP_429_TOO_MANY_REQUESTS)
     if month_total + amount > monthly_limit:
         audit("wallet.topup.limit_block", request, {"scope": "monthly", "currency": currency, "attempt": float(amount), "used": float(month_total)})
-        return Response({"error": _("Monthly limit exceeded")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        return Response({"error": _("Monthly limit exceeded"), "code": "monthly_limit_exceeded"},
+                        status=status.HTTP_429_TOO_MANY_REQUESTS)
     return None
 
 
@@ -147,13 +152,31 @@ def _idempotency_conflict(exc):
     retrying will never help, and answering it with the earlier request's stored
     receipt — which is what this code used to do — tells the caller money moved when
     none did.
+
+    409 `request_in_flight` (the code `users` answers for the same fact) and 422
+    `idempotency_key_reused`. Both answered only their status defaults, `conflict` and
+    `unprocessable`, until the owner's decision of 2026-09-24.
     """
     if exc.in_flight:
-        return Response({"error": _("Duplicate request")}, status=status.HTTP_409_CONFLICT)
+        return Response({"error": _("Duplicate request"), "code": "request_in_flight"},
+                        status=status.HTTP_409_CONFLICT)
     return Response(
-        {"error": _("This idempotency key was already used for a different request.")},
+        {"error": _("This idempotency key was already used for a different request."),
+         "code": "idempotency_key_reused"},
         status=status.HTTP_422_UNPROCESSABLE_ENTITY,
     )
+
+
+def _agent_auth_refused(message):
+    """401 `agent_auth_invalid`: the `X-Agent-Auth` signature did not authenticate.
+
+    Each failure keeps the message it always had; the CODE is one for all of them, so it
+    adds no way for a caller without the key to tell an unknown key from a bad signature.
+    The status default it replaces, `not_authenticated`, tells the app to send the user
+    to the login screen, which cannot fix a signature (the owner, 2026-09-24).
+    """
+    return Response({"error": message, "code": "agent_auth_invalid"},
+                    status=status.HTTP_401_UNAUTHORIZED)
 
 
 def _client_named(identifier) -> "User":
@@ -434,11 +457,27 @@ class AgentTopUpView(APIView):
     `idempotency_key`, `timestamp`, `signature`. The signed message is
     `client_identifier|amount|timestamp|idempotency_key|currency`.
 
-    200 `{reference_id, balance, currency}`. Refusals: 400 `validation_error` (a
-    missing or unknown `currency` is `field_errors.currency`), 401 (auth), 403 (IP,
-    agent not active), 404 (no such client), 409 `currency_mismatch` with
-    `client_currency` and `topup_currency` when the client trades in the other
-    currency, 429 (the daily or monthly cap FOR THAT CURRENCY), 409/422 idempotency.
+    200 `{reference_id, balance, currency}`. Refusals (branch on `code`):
+
+    | Status | `code` | Meaning |
+    |---|---|---|
+    | 400 | `validation_error` | a body field is missing or malformed; a missing or unknown `currency` is `field_errors.currency` |
+    | 401 | `not_authenticated` / `token_not_valid` | no JWT, or a JWT that is not valid (the framework's answer) |
+    | 401 | `agent_auth_invalid` | `X-Agent-Auth` is missing, malformed, stale, names no active key, or its timestamp or signature does not match the body. One code for all of them, on purpose: the code adds no way to tell an unknown key from a bad signature |
+    | 403 | `agents_only` | the caller is not an agent |
+    | 403 | `agent_ip_not_allowed` | the request did not come from an address on the agent's allow-list |
+    | 403 | `agent_not_active` | the agent's profile is suspended |
+    | 404 | `not_found` | `client_identifier` names nobody |
+    | 400 | `target_not_a_client` | it names an account that is not a client |
+    | 409 | `currency_mismatch` | the client trades in the other currency; `client_currency` and `topup_currency` say which |
+    | 429 | `daily_limit_exceeded` / `monthly_limit_exceeded` | the agent's cap FOR THAT CURRENCY; waiting does not lift it before the day or month turns |
+    | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running; retry when it finishes |
+    | 422 | `idempotency_key_reused` | the key was used for a different request; retrying never helps |
+    | 429 | `throttled` | the rate limiter (`Retry-After`) |
+
+    Every code above that is not the framework's was the status default (`bad_request`,
+    `not_authenticated`, `permission_denied`, `conflict`, `unprocessable`, `throttled`)
+    until the owner's decision of 2026-09-24.
 
     Server-to-server: no build is involved, so nothing here depends on one.
     """
@@ -453,7 +492,7 @@ class AgentTopUpView(APIView):
         parsed = parse_agent_auth_header(auth_header)
         if not parsed:
             audit("wallet.topup.auth_failed", request, {"reason": "invalid_or_stale_auth"})
-            return Response({"error": _("Invalid agent auth")}, status=status.HTTP_401_UNAUTHORIZED)
+            return _agent_auth_refused(_("Invalid agent auth"))
 
         # Freshness is checked on the SIGNED timestamp, and the two must be the same one.
         # The header's timestamp was the one checked and the body's was the one signed, so
@@ -466,21 +505,22 @@ class AgentTopUpView(APIView):
         signed_timestamp = str(serializer.validated_data["timestamp"])
         if str(parsed.timestamp) != signed_timestamp:
             audit("wallet.topup.auth_failed", request, {"reason": "timestamp_mismatch"})
-            return Response({"error": _("Invalid agent auth")}, status=status.HTTP_401_UNAUTHORIZED)
+            return _agent_auth_refused(_("Invalid agent auth"))
         if not is_fresh_timestamp(signed_timestamp):
             audit("wallet.topup.auth_failed", request, {"reason": "invalid_or_stale_auth"})
-            return Response({"error": _("Invalid agent auth")}, status=status.HTTP_401_UNAUTHORIZED)
+            return _agent_auth_refused(_("Invalid agent auth"))
 
         try:
             api_key = AgentAPIKey.objects.select_related("agent").get(key_id=parsed.key_id, is_active=True)
         except AgentAPIKey.DoesNotExist:
             audit("wallet.topup.auth_failed", request, {"reason": "unknown_key"})
-            return Response({"error": _("Invalid credentials")}, status=status.HTTP_401_UNAUTHORIZED)
+            return _agent_auth_refused(_("Invalid credentials"))
 
         ip = request.META.get("REMOTE_ADDR")
         if api_key.agent.ip_allowlist and ip not in api_key.agent.ip_allowlist:
             audit("wallet.topup.denied_ip", request, {"ip": ip})
-            return Response({"error": _("IP not allowed")}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": _("IP not allowed"), "code": "agent_ip_not_allowed"},
+                            status=status.HTTP_403_FORBIDDEN)
 
         # Verify HMAC against the RAW secret (recovered from encrypted storage) —
         # never against the stored digest, which would itself be a bearer signer.
@@ -490,14 +530,16 @@ class AgentTopUpView(APIView):
         message = f"{serializer.validated_data['client_identifier']}|{serializer.validated_data['amount']}|{serializer.validated_data['timestamp']}|{serializer.validated_data['idempotency_key']}|{serializer.validated_data['currency']}"
         if not raw_secret or not verify_hmac_signature(raw_secret, message, parsed.signature):
             audit("wallet.topup.auth_failed", request, {"reason": "bad_signature"})
-            return Response({"error": _("Signature verification failed")}, status=status.HTTP_401_UNAUTHORIZED)
+            return _agent_auth_refused(_("Signature verification failed"))
 
         # --- Pre-side-effect validation (runs BEFORE reserving the idempotency
         #     key, so a validation failure never permanently bricks retries) ---
         ident = serializer.validated_data["client_identifier"]
         client = _client_named(ident)
         if getattr(client, "user_type", None) != "client":
-            return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": _("Target must be a client"),
+                             "code": "target_not_a_client"},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         agent_profile = ensure_agent_profile(request.user)
         amount = serializer.validated_data["amount"]
@@ -512,7 +554,8 @@ class AgentTopUpView(APIView):
         with transaction.atomic():
             agent_profile = _lock_agent_profile(agent_profile)
             if agent_profile.status != "active":
-                return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
+                return Response({"error": _("Agent not active"), "code": "agent_not_active"},
+                                status=status.HTTP_403_FORBIDDEN)
 
             limit_error = _topup_limit_error(agent_profile, request.user, amount, request,
                                              currency)
@@ -561,12 +604,24 @@ class ClientTransferToTrainerView(APIView):
 
     Body: `trainer_id`, `amount`, `idempotency_key`. Headers: `X-App-Channel`.
 
-    200 `{reference_id, client_balance, trainer_balance}`. Refusals: 403
-    `not_available_on_channel` and "only clients", 404 (no such trainer), 409
-    `currency_mismatch` with `client_currency` and `trainer_currency` when the two trade
-    in different currencies (nothing is converted on a transfer), 402
-    `insufficient_balance` with `currency`, 400 (any other refusal), 409/422
-    idempotency.
+    200 `{reference_id, client_balance, trainer_balance}`. Refusals (branch on `code`):
+
+    | Status | `code` | Meaning |
+    |---|---|---|
+    | 400 | `app_channel_required` | no known `X-App-Channel` |
+    | 403 | `not_available_on_channel` | this build may not move wallet money |
+    | 400 | `validation_error` | a body field is missing or malformed (`field_errors`) |
+    | 403 | `clients_only` | the caller is not a client (the code the coaching and diet routes answer for the same fact) |
+    | 404 | `not_found` | `trainer_id` names no trainer |
+    | 409 | `currency_mismatch` | the two trade in different currencies (nothing is converted on a transfer); `client_currency` and `trainer_currency` say which |
+    | 402 | `insufficient_balance` | the client's wallet holds less than `amount`; `currency` is its currency |
+    | 400 | `transfer_refused` | the ledger refused the movement for any other reason; nothing moved |
+    | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running |
+    | 422 | `idempotency_key_reused` | the key was used for a different request |
+    | 429 | `throttled` | the rate limiter (`Retry-After`) |
+
+    `clients_only`, `transfer_refused`, `request_in_flight` and `idempotency_key_reused`
+    answered only their status defaults until the owner's decision of 2026-09-24.
     """
     permission_classes = [IsAuthenticated]
     throttle_classes = [ChargingRateThrottle]
@@ -581,7 +636,8 @@ class ClientTransferToTrainerView(APIView):
 
         # --- Pre-side-effect validation before reserving the idempotency key ---
         if getattr(request.user, "user_type", None) != "client":
-            return Response({"error": _("Only clients can initiate transfers")}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": _("Only clients can initiate transfers"),
+                             "code": "clients_only"}, status=status.HTTP_403_FORBIDDEN)
 
         trainer = get_object_or_404(User, id=serializer.validated_data["trainer_id"], user_type="trainer")
 
@@ -638,7 +694,8 @@ class ClientTransferToTrainerView(APIView):
         except ValueError as e:
             # No funds moved (atomic rollback) — release the key so the caller can retry.
             idempotency.release(idem)
-            return Response({"error": _("Request could not be completed.")}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": _("Request could not be completed."),
+                             "code": "transfer_refused"}, status=status.HTTP_400_BAD_REQUEST)
         client_wallet.refresh_from_db()
         trainer_wallet.refresh_from_db()
         resp = {"reference_id": tx.reference_id, "client_balance": str(client_wallet.balance), "trainer_balance": str(trainer_wallet.balance)}
@@ -652,9 +709,24 @@ class AdminReversalView(APIView):
     """`POST /api/wallet/admin/reversal/` — support puts one ledger row back.
 
     Body: `reference_id`, `idempotency_key`, optional `reason`. 200 `{reference_id}`.
-    Refusals: 404, 409 `already_reversed`, 409 `not_reversible` (a reversal), 409
-    `exchange_leg` (one half of a currency exchange — see below), 400, 409/422
-    idempotency.
+    Refusals (branch on `code`):
+
+    | Status | `code` | Meaning |
+    |---|---|---|
+    | 403 | `admins_only` | the caller is not an operator |
+    | 400 | `validation_error` | a body field is missing or malformed (`field_errors`) |
+    | 404 | `not_found` | no transaction has that `reference_id` |
+    | 409 | `already_reversed` | it has been reversed already |
+    | 409 | `not_reversible` | it is itself a reversal |
+    | 409 | `exchange_leg` | it is one half of a currency exchange (see below); `exchange_reference` names the pair |
+    | 400 | `insufficient_balance` | the wallet that received the money no longer holds it, so it cannot be taken back |
+    | 400 | `currency_mismatch` | a wallet on either side changed currency since the row was written |
+    | 400 | `reversal_refused` | the ledger refused the reversal for any other reason; nothing moved |
+    | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running |
+    | 422 | `idempotency_key_reused` | the key was used for a different request |
+
+    The three 400s were one `bad_request` until the owner's decision of 2026-09-24,
+    which gave each reason its own code; nothing else about them changed.
 
     ONE LEG OF AN EXCHANGE IS REFUSED (SIDE_BUGS S-161). A cross-currency coaching
     payout is two rows — a debit out of escrow in the client's currency and a credit
@@ -720,8 +792,16 @@ class AdminReversalView(APIView):
             return Response({"error": _("Transaction has already been reversed"),
                              "code": "already_reversed"}, status=status.HTTP_409_CONFLICT)
         except ValueError as e:
+            # `InsufficientBalance` and `CurrencyMismatch` are ValueErrors: the same 400
+            # as ever, each with the code that says which (the owner, 2026-09-24).
+            from .models import CurrencyMismatch, InsufficientBalance
+
             idempotency.release(idem)
-            return Response({"error": _("Request could not be completed.")}, status=status.HTTP_400_BAD_REQUEST)
+            code = ("insufficient_balance" if isinstance(e, InsufficientBalance)
+                    else "currency_mismatch" if isinstance(e, CurrencyMismatch)
+                    else "reversal_refused")
+            return Response({"error": _("Request could not be completed."), "code": code},
+                            status=status.HTTP_400_BAD_REQUEST)
         resp = {"reference_id": tx.reference_id}
         idempotency.complete(idem, resp)
         audit("wallet.reversal.success", request, {"reference_id": tx.reference_id, "original": original.reference_id})
@@ -736,6 +816,8 @@ class AgentApiKeyCreateView(APIView):
         Allows an authenticated agent to create a new API key.
         Returns key_id and secret (shown ONCE — never stored in plaintext).
         The SHA-256 hash of the secret is stored in DB for HMAC verification.
+
+        Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
         """
         import hashlib
         agent_profile = ensure_agent_profile(request.user)
@@ -774,6 +856,8 @@ class AgentApiKeyStatusView(APIView):
     """Returns whether the authenticated agent has at least one active API key.
 
     Does not expose secrets. Useful for onboarding flow in mobile app.
+
+    Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
     """
     permission_classes = [IsAuthenticated, IsAgent]
 
@@ -787,6 +871,8 @@ class AgentApiKeyEnsureView(APIView):
     """Ensures the authenticated agent has an active API key.
 
     If none exists, creates one and returns key_id (not secret). If exists, returns the current active key_id.
+
+    Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
     """
     permission_classes = [IsAuthenticated, IsAgent]
 
@@ -818,12 +904,27 @@ class AgentTopUpProxyView(APIView):
     Body: `client_identifier`, `amount`, `currency` ("SYP" | "USD" — the currency of the
     CASH the agent took, required), `idempotency_key`. Headers: `X-App-Channel`.
 
-    200 `{reference_id, balance, currency}`. Refusals: 400 `validation_error` (a missing
-    or unknown `currency` is `field_errors.currency`), 403 `not_available_on_channel`,
-    agent not active, 404 (no such client), 409 `currency_mismatch` with
-    `client_currency` and `topup_currency` when the client trades in the other
-    currency, 429 (the cap FOR THAT CURRENCY), 409/422 idempotency. Same rules as
-    `AgentTopUpView`.
+    200 `{reference_id, balance, currency}`. Refusals (branch on `code`) — the same
+    rules as `AgentTopUpView`, less the signature:
+
+    | Status | `code` | Meaning |
+    |---|---|---|
+    | 400 | `app_channel_required` | no known `X-App-Channel` |
+    | 403 | `not_available_on_channel` | this build may not move wallet money |
+    | 400 | `validation_error` | a body field is missing or malformed; a missing or unknown `currency` is `field_errors.currency` |
+    | 403 | `agents_only` | the caller is not an agent |
+    | 403 | `agent_not_active` | the agent's profile is suspended |
+    | 404 | `not_found` | `client_identifier` names nobody |
+    | 400 | `target_not_a_client` | it names an account that is not a client |
+    | 409 | `currency_mismatch` | the client trades in the other currency; `client_currency` and `topup_currency` say which |
+    | 429 | `daily_limit_exceeded` / `monthly_limit_exceeded` | the agent's cap FOR THAT CURRENCY |
+    | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running |
+    | 422 | `idempotency_key_reused` | the key was used for a different request |
+    | 429 | `throttled` | the rate limiter (`Retry-After`) |
+
+    `agents_only`, `agent_not_active`, `target_not_a_client`, the two cap codes and the
+    two idempotency codes answered only their status defaults until the owner's
+    decision of 2026-09-24.
     """
     permission_classes = [IsAuthenticated, IsAgent]
     throttle_classes = [ChargingRateThrottle]
@@ -852,7 +953,9 @@ class AgentTopUpProxyView(APIView):
         # --- Pre-side-effect validation before reserving the idempotency key ---
         client = _client_named(client_identifier)
         if getattr(client, "user_type", None) != "client":
-            return Response({"error": _("Target must be a client")}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": _("Target must be a client"),
+                             "code": "target_not_a_client"},
+                            status=status.HTTP_400_BAD_REQUEST)
         mismatch = _topup_currency_mismatch(client, currency)
         if mismatch is not None:
             return mismatch
@@ -863,7 +966,8 @@ class AgentTopUpProxyView(APIView):
         with transaction.atomic():
             agent_profile = _lock_agent_profile(agent_profile)
             if agent_profile.status != "active":
-                return Response({"error": _("Agent not active")}, status=status.HTTP_403_FORBIDDEN)
+                return Response({"error": _("Agent not active"), "code": "agent_not_active"},
+                                status=status.HTTP_403_FORBIDDEN)
 
             limit_error = _topup_limit_error(agent_profile, request.user, amount, request,
                                              currency)
@@ -896,6 +1000,12 @@ class AgentTopUpProxyView(APIView):
         return Response(resp, status=status.HTTP_200_OK)
 
 class AdminAuditExportView(APIView):
+    """`GET /api/wallet/admin/audit/export/?start=&end=&agent_id=&user_id=&verify=1`.
+
+    Refusals: 401 (the framework's), 403 `admins_only` — the caller is not an operator,
+    400 `validation_error` — `agent_id` or `user_id` is not a whole number
+    (`field_errors` names it).
+    """
     permission_classes = [IsAuthenticated, IsAdmin]
 
     def get(self, request):
@@ -949,6 +1059,10 @@ class AdminSuspiciousActivityView(APIView):
     payment is also a `topup` row, and counting it flagged every client who bought a
     plan, while one threshold for both currencies let a dollar top-up worth millions of
     pounds through unflagged (SIDE_BUGS S-162).
+
+    Refusals: 401 (the framework's), 403 `admins_only` — the caller is not an operator,
+    400 `validation_error` — `days` is not a whole number (one outside 1..365 is
+    clamped, not refused).
     """
     permission_classes = [IsAuthenticated, IsAdmin]
 

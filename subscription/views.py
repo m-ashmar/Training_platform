@@ -47,6 +47,7 @@ from .services.payment_service import (
     PaymentVerificationError, PlanChanged, SubscriptionAlreadyActive, UpgradePriceMoved,
 )
 from .upgrade import UpgradeNotPayable, UpgradeRefused, quote_upgrade
+from .permissions import AdminsOnly
 # NOTE: use PaymentGatewayManager.get_available_gateways() (returns a dict of
 # gateway_name -> info). The same-named helper in settings.gateway_config returns
 # a plain LIST of names; calling .items() on it raised
@@ -295,6 +296,24 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         return SubscriptionSerializer
     
     def create(self, request, *args, **kwargs):
+        """`POST v1/subscriptions/` — choose a plan: a `pending` subscription, no payment.
+
+        Headers: `X-App-Channel` (required when the plan is paid), `X-App-Version`.
+        Body: `{"plan_id": <int>}`. 201 `{id, plan_id, auto_renew, status}`; the next
+        step is the Pay button, `POST v1/gateways/`.
+
+        Codes it can answer (branch on `code`, never on the text):
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 400 | `app_channel_required` | no known `X-App-Channel` (the plan is paid, or `plan_id` names none) |
+        | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
+        | 400 | `validation_error` | `plan_id` is missing (`field_errors.plan_id` code `required`), not an integer (`invalid`) or names no active plan (`invalid_plan`) |
+        | 400 | `subscription_exists` | the caller already has a subscription (one per user): move it with `change-plan/` or `upgrade/`, or `renew/` it |
+
+        `subscription_exists` was `validation_error`, and the field code `invalid_plan` was
+        `invalid`, until the owner's decision of 2026-09-24.
+        """
         # Choosing a paid plan is the first step of buying one, so a build that may not
         # sell plans is refused here, before a pending subscription and its payment
         # exist. A free plan is not a purchase and stays open to every build. An id that
@@ -347,7 +366,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         | Status | `code` | Meaning |
         |---|---|---|
         | 400 | `auto_renew_read_only` | the body carries `auto_renew`; renewal is never automatic. `field_errors.auto_renew` repeats it |
-        | 400 | `validation_error` | the subscription is not active or on trial |
+        | 400 | `validation_error` | the subscription is not active or on trial; `field_errors.non_field_errors[0].code` is `subscription_inactive` (since the owner's decision of 2026-09-24; it was `invalid`) |
         | 404 | `not_found` | not the caller's subscription |
         """
         partial = kwargs.pop('partial', False)
@@ -377,7 +396,26 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
-        """Cancel a subscription with proper validation and logging"""
+        """`POST v1/subscriptions/{id}/cancel/` — stop the caller's subscription renewing.
+
+        Body: `{"reason": "<text, up to 500>", "immediate": false}`, both optional.
+        `immediate: true` ends it now (`status: "cancelled"`); otherwise it only turns
+        `auto_renew` off and the cover runs to its end. 200 `{"message", "status"}`.
+
+        Codes it can answer (branch on `code`, never on the text):
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 404 | `not_found` | not the caller's subscription |
+        | 400 | `not_cancellable` | it is already `cancelled` or `expired` |
+        | 400 | `validation_error` | `reason` is longer than 500 or `immediate` is not a boolean (`field_errors`) |
+        | 500 | `server_error` | unexpected fault |
+
+        Both 400s were the bare serializer errors with the status default `bad_request`
+        — no `detail`, no `field_errors` — until the owner's decision of 2026-09-24. The
+        serializer's own keys (`non_field_errors`, `reason`, ...) are still at the top
+        level beside the envelope.
+        """
         try:
             subscription = self.get_object()
             with transaction.atomic():
@@ -392,8 +430,18 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                     data=request.data,
                     context={'subscription': subscription}
                 )
-                if not serializer.is_valid():
-                    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    serializer.is_valid(raise_exception=True)
+                except serializers.ValidationError as refusal:
+                    # Raised, not returned: a returned `serializer.errors` bypassed the
+                    # exception handler, so the app got no `detail` and no `field_errors`,
+                    # and the one refusal it can act on answered `bad_request`. The same
+                    # 400, nothing written (the owner, 2026-09-24).
+                    codes = refusal.get_codes()
+                    if 'not_cancellable' in (codes.get('non_field_errors', [])
+                                             if isinstance(codes, dict) else []):
+                        refusal.service_code = 'not_cancellable'
+                    raise
 
                 reason = serializer.validated_data.get('reason', '')
                 immediate = serializer.validated_data.get('immediate', False)
@@ -1051,8 +1099,12 @@ class SubscriptionUsageViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({'quotas': quotas})
 
 class SubscriptionManagementView(APIView):
-    """Admin view for subscription management with comprehensive error handling"""
-    permission_classes = [permissions.IsAdminUser]
+    """Admin view for subscription management with comprehensive error handling.
+
+    Staff only: anyone else is refused 403 `admins_only` (the status default
+    `permission_denied` until the owner's decision of 2026-09-24).
+    """
+    permission_classes = [AdminsOnly]
     
     def get(self, request):
         """Get subscription statistics with proper error handling"""
@@ -1081,7 +1133,23 @@ class SubscriptionManagementView(APIView):
             )
     
     def post(self, request):
-        """Create a trial subscription for a user with proper validation"""
+        """Create a trial subscription for a user.
+
+        Body: `{"user_id": <int>, "plan_id": <int>, "trial_days": 7}`. 201 is the new
+        subscription (`SubscriptionSerializer`), `status: "trial"`.
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 403 | `admins_only` | the caller is not staff |
+        | 400 | `missing_fields` | `user_id` or `plan_id` missing |
+        | 400 | `invalid_user_or_plan` | either id names nothing |
+        | 400 | `subscription_exists` | that user already has a subscription (one per user) |
+        | 400 | `invalid_trial_days` | the trial would not end after it starts (`trial_days` not positive) |
+        | 500 | `server_error` | unexpected fault |
+
+        Each 400 answered only the status default, `bad_request`, until the owner's
+        decision of 2026-09-24.
+        """
         try:
             body = body_dict(request)
             user_id = body.get('user_id')
@@ -1090,7 +1158,8 @@ class SubscriptionManagementView(APIView):
             
             if not user_id or not plan_id:
                 return Response(
-                    {'error': _('user_id and plan_id are required')},
+                    {'error': _('user_id and plan_id are required'),
+                     'code': 'missing_fields'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1099,14 +1168,15 @@ class SubscriptionManagementView(APIView):
                 plan = SubscriptionPlan.objects.get(id=plan_id)
             except (CustomUser.DoesNotExist, SubscriptionPlan.DoesNotExist):
                 return Response(
-                    {'error': _('Invalid user or plan ID')},
+                    {'error': _('Invalid user or plan ID'), 'code': 'invalid_user_or_plan'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
             # Check if user already has subscription
             if hasattr(user, 'subscription'):
                 return Response(
-                    {'error': 'User already has a subscription'},
+                    {'error': _('User already has a subscription'),
+                     'code': 'subscription_exists'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1127,8 +1197,11 @@ class SubscriptionManagementView(APIView):
             
         except ValidationError as e:
             logger.error(f"Validation error creating trial subscription: {str(e)}")
+            # `Subscription.clean`: with the plan's end derived from a positive
+            # duration, the one row it can refuse here is a trial that does not end
+            # after it starts.
             return Response(
-                {'error': _('Request could not be completed.')},
+                {'error': _('Request could not be completed.'), 'code': 'invalid_trial_days'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         except PASSTHROUGH_EXCEPTIONS:
@@ -1148,14 +1221,27 @@ class SubscriptionAccessView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     
     def post(self, request):
-        """Check if user has access to specific features with proper error handling"""
+        """Check if user has access to specific features.
+
+        Body: `{"features": ["diet", "routine", "challenges", "ai_advice",
+        "priority_support"]}`. 200 `{has_access, access_details, subscription_status,
+        days_remaining}`; with no live subscription 200 `{has_access: false, message,
+        subscription_status, frozen}` (or `{has_access: false, message}` with none at
+        all).
+
+        | Status | `code` | Meaning |
+        |---|---|---|
+        | 400 | `invalid_features` | `features` is not a list (the status default `bad_request` until the owner's decision of 2026-09-24) |
+        | 400 | `validation_error` | the body is not a JSON object |
+        | 500 | `server_error` | unexpected fault |
+        """
         try:
             features = body_dict(request).get('features', [])
             user = request.user
             
             if not isinstance(features, list):
                 return Response(
-                    {'error': _('features must be a list')},
+                    {'error': _('features must be a list'), 'code': 'invalid_features'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1234,6 +1320,18 @@ class PaymentWebhookView(APIView):
     Unauthenticated by design (called by the external gateway) but protected by
     signature + timestamp verification inside the gateway's verify_webhook, and
     idempotent completion via PaymentService. Route: /webhook/<gateway_name>/
+
+    200 with an empty body: accepted, stop retrying. Anything else is a failed delivery
+    the gateway sends again:
+
+    | Status | `code` | Meaning |
+    |---|---|---|
+    | 400 | `webhook_not_verified` | the signature or timestamp did not verify, or the payload lacks `reference`/`status`/`amount` |
+    | 400 | `webhook_rejected` | not applied: no payment has that reference, the status is one we do not handle, the amount/currency/transition failed the payment service's checks, or the gateway could not be loaded or its verification failed with an error |
+    | 500 | (empty body) | unexpected fault |
+
+    Both 400s were empty bodies until the owner's decision of 2026-09-24; the status —
+    all a gateway reads — is unchanged.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -1275,7 +1373,9 @@ class PaymentWebhookView(APIView):
             
             if not is_valid:
                 logger.warning(f"Invalid webhook from {gateway_name}")
-                return HttpResponse(status=400)
+                return Response({'error': _('Signature verification failed'),
+                                 'code': 'webhook_not_verified'},
+                                status=status.HTTP_400_BAD_REQUEST)
             
             # Process payment status update
             with transaction.atomic():
@@ -1286,7 +1386,9 @@ class PaymentWebhookView(APIView):
             
         except PaymentGatewayError as e:
             logger.error(f"Payment gateway error in webhook: {str(e)}")
-            return HttpResponse(status=400)
+            return Response({'error': _('Request could not be completed.'),
+                             'code': 'webhook_rejected'},
+                            status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Unexpected error in webhook: {str(e)}")
             return HttpResponse(status=500)

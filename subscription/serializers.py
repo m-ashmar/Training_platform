@@ -298,20 +298,30 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'status', 'auto_renew']
     
     def validate_plan_id(self, value):
+        # `invalid_plan` as the FIELD code: the meaning `change-plan/` and `upgrade/`
+        # answer at the top level (the owner, 2026-09-24). It was DRF's `invalid`.
         try:
             plan = SubscriptionPlan.objects.get(id=value, is_active=True)
             return value
         except SubscriptionPlan.DoesNotExist:
-            raise serializers.ValidationError(_("Invalid or inactive plan"))
+            raise serializers.ValidationError(_("Invalid or inactive plan"),
+                                              code='invalid_plan')
     
     def create(self, validated_data):
         plan_id = validated_data.pop('plan_id')
         plan = SubscriptionPlan.objects.get(id=plan_id)
         user = self.context['request'].user
         
-        # Check if user already has a subscription
+        # Check if user already has a subscription. One per user: the next step for a
+        # customer who has one is `change-plan/`, `upgrade/` or `renew/`, so the app
+        # needs to know THIS refusal from a bad `plan_id` — it answered the handler's
+        # `validation_error` for both. Raised from `save()`, not `is_valid()`, so the
+        # attribute survives to the exception handler (the owner, 2026-09-24).
         if hasattr(user, 'subscription'):
-            raise serializers.ValidationError(_("User already has a subscription"))
+            refusal = serializers.ValidationError(_("User already has a subscription"),
+                                                  code='subscription_exists')
+            refusal.service_code = 'subscription_exists'
+            raise refusal
         
         validated_data['user'] = user
         validated_data['plan'] = plan
@@ -343,7 +353,10 @@ class SubscriptionUpdateSerializer(serializers.ModelSerializer):
     def validate(self, data):
         # Only allow updating auto_renew for active subscriptions
         if self.instance and self.instance.status not in ['active', 'trial']:
-            raise serializers.ValidationError(_("Cannot update inactive subscription"))
+            # The top-level code stays `validation_error`, which the view's contract
+            # names; the specific reason is the field code (the owner, 2026-09-24).
+            raise serializers.ValidationError(_("Cannot update inactive subscription"),
+                                              code='subscription_inactive')
         if 'auto_renew' in getattr(self, 'initial_data', {}) or {}:
             raise serializers.ValidationError({'auto_renew': serializers.ErrorDetail(
                 self.AUTO_RENEW_READ_ONLY, code='auto_renew_read_only')})
@@ -360,7 +373,9 @@ class SubscriptionCancelSerializer(serializers.Serializer):
             raise serializers.ValidationError(_("No subscription found"))
         
         if subscription.status in ['cancelled', 'expired']:
-            raise serializers.ValidationError(_("Subscription is already cancelled or expired"))
+            # The view lifts this code to the top level: 400 `not_cancellable`.
+            raise serializers.ValidationError(
+                _("Subscription is already cancelled or expired"), code='not_cancellable')
         
         return data
 
