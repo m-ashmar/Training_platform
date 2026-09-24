@@ -242,12 +242,18 @@ REDACTED_HANDLE = "[handle]"
 REDACTED_NAME = "[name]"
 
 _URL = re.compile(r"(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
+#: A link written without its scheme: a host on a common top-level domain, with or
+#: without a path — "t.me/ahmadfit", "instagram.com/ahmad.fit" (the review, D4).
+_BARE_LINK = re.compile(
+    r"(?<![\w@.])(?:[a-z0-9-]+\.)+(?:com|net|org|me|io|sy|app|co|info|tv|ly|gg|link|page)"
+    r"(?:/[^\s<>\"']*)?(?![\w])", re.IGNORECASE)
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HANDLE = re.compile(r"(?<![\w@])@\w{2,}")
 #: 7 to 19 digits (any script's digits: Arabic-Indic ones included), with at most one
 #: space, dot, dash or bracket between them. Whether it is a phone number is decided
 #: below, so a list of weights ("60 70 80 90") or a date ("2026-09-24") is left alone.
-_PHONE_CANDIDATE = re.compile(r"(?<![\w+])\+?\d(?:[\s.\-()]?\d){6,18}(?!\w)")
+_PHONE_CANDIDATE = re.compile(
+    r"(?<![\w+])\+?\(?\d(?:[\s.\-\u2013\u2014/()]{0,3}\d){6,18}(?!\w)")
 #: Minimum digits for a phone number, and the unbroken run that counts as one anyway.
 PHONE_MIN_DIGITS = 8
 #: A one-letter Arabic proclitic joined to a name (و ف ب ل ك: "and", "so", "with",
@@ -264,7 +270,11 @@ def _phone(match):
     for c in text:
         run = run + 1 if c.isdigit() else 0
         longest = max(longest, run)
-    if (text.startswith("+") or unicodedata.decimal(digits[0], None) == 0
+    plain = "".join(str(unicodedata.decimal(c, 0)) for c in digits)
+    # A Syrian number however it is written: +963 / 963 9xx xxx xxx, 09xx xxx xxx, or
+    # the nine digits of a mobile without its 0 (the review, D4).
+    syrian = plain.startswith("963") or (len(plain) == 9 and plain.startswith("9"))
+    if (text.lstrip("(").startswith("+") or plain.startswith("0") or syrian
             or longest >= PHONE_MIN_DIGITS):
         return REDACTED_PHONE
     return text
@@ -296,15 +306,54 @@ def scrub_text(text, names=()):
         return text
     text = _URL.sub(REDACTED_LINK, text)
     text = _EMAIL.sub(REDACTED_EMAIL, text)
+    text = _BARE_LINK.sub(REDACTED_LINK, text)
     text = _HANDLE.sub(REDACTED_HANDLE, text)
     text = _PHONE_CANDIDATE.sub(_phone, text)
-    parts = _name_parts(names)
+    parts = sorted({_fold(p) for p in _name_parts(names)} - {""},
+                   key=lambda p: (-len(p), p))
     if parts:
+        # Matched on FOLDED text: hamza forms, ة/ه, ى/ي, diacritics and tatweel are how
+        # the same name is typed every day ("اسامه" for "أسامة"), and an exact match
+        # let the person's name through (the review, D2). The spans found in the
+        # folded text are cut out of the original.
+        folded, where = _fold_with_map(text)
         pattern = re.compile(
-            rf"(?<!\w)({_PROCLITIC}?)(?:{'|'.join(re.escape(p) for p in parts)})(?!\w)",
-            re.IGNORECASE)
-        text = pattern.sub(lambda m: m.group(1) + REDACTED_NAME, text)
+            rf"(?<!\w)({_PROCLITIC}?)(?:{'|'.join(re.escape(p) for p in parts)})(?!\w)")
+        spans = []
+        for m in pattern.finditer(folded):
+            start = m.start() + len(m.group(1))
+            if start >= m.end():
+                continue
+            begin, end = where[start], where[m.end() - 1] + 1
+            while end < len(text) and _MARKS.match(text[end]):
+                end += 1                      # the name's own trailing marks go too
+            spans.append((begin, end))
+        for begin, end in reversed(spans):
+            text = text[:begin] + REDACTED_NAME + text[end:]
     return text
+
+
+#: Arabic diacritics (tashkeel), the superscript alef and tatweel: dropped when folding.
+_MARKS = re.compile("[\u064B-\u065F\u0670\u0640]")
+_FOLD_TABLE = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ة": "ه", "ى": "ي",
+                             "ؤ": "و", "ئ": "ي"})
+
+
+def _fold(text: str) -> str:
+    """A name or a text as it is compared: marks dropped, letters folded, case folded."""
+    return _MARKS.sub("", text).translate(_FOLD_TABLE).casefold()
+
+
+def _fold_with_map(text: str):
+    """`_fold(text)`, and for each folded character the index it came from."""
+    out, where = [], []
+    for index, char in enumerate(text):
+        if _MARKS.match(char):
+            continue
+        for piece in char.translate(_FOLD_TABLE).casefold():
+            out.append(piece)
+            where.append(index)
+    return "".join(out), where
 
 
 # ------------------------------------------------------------------ tool output
@@ -400,6 +449,13 @@ def anonymise_turn(names, *, user_message, ai_response, tools_called, tool_resul
     results = []
     for index, result in enumerate(tool_results):
         tool = tools_called[index] if index < len(tools_called) else None
+        if isinstance(result, dict) and result.get("_truncated"):
+            # A result cut to its token budget is JSON TEXT, cut mid-way, with every
+            # Arabic letter escaped: nothing can walk its keys or match a name in it,
+            # so ids and names inside it survived (the review, D3). It is left out of
+            # the copy; the marker says a tool answered.
+            results.append({"_truncated": True})
+            continue
         results.append(_profile_result(result) if tool in PROFILE_TOOLS
                        else _scrub_value(result, found))
     return {
@@ -413,6 +469,27 @@ def anonymise_turn(names, *, user_message, ai_response, tools_called, tool_resul
 
 
 def person_names(user) -> list[str]:
-    """The names a person's own chat text is scrubbed of."""
-    return [getattr(user, "first_name", "") or "", getattr(user, "last_name", "") or "",
-            getattr(user, "username", "") or ""]
+    """The names a person's chat text is scrubbed of: their own, and every trainer the
+    assistant's prompt can name to them.
+
+    The system prompt carries "- Trainer: <full name>" for a coached client on every
+    turn (`services/context_compiler.py`), so the coach says the trainer's name without
+    any tool being called; scrubbing only the person's own names let it through, and a
+    trainer has few clients (the review, D1). The trainer the prompt names
+    (`assigned_trainer`) and every trainer with an approved relation are included.
+    """
+    names = [getattr(user, "first_name", "") or "", getattr(user, "last_name", "") or "",
+             getattr(user, "username", "") or ""]
+    trainers = []
+    pointer = getattr(user, "assigned_trainer", None) if getattr(user, "pk", None) else None
+    if pointer is not None:
+        trainers.append(pointer)
+    if getattr(user, "pk", None):
+        from users.models import TrainerClientRelation
+
+        trainers += [relation.trainer for relation in TrainerClientRelation.objects
+                     .filter(client_id=user.pk, status="approved").select_related("trainer")]
+    for trainer in trainers:
+        names += [trainer.first_name or "", trainer.last_name or "", trainer.username or "",
+                  getattr(trainer, "full_name", "") or ""]
+    return names

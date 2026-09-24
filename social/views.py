@@ -1581,6 +1581,11 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
             recipient=self.request.user
         ).exclude(
             actor_id__in=blocked_ids(self.request.user)
+        ).filter(
+            # A suspended actor's name, photo and words leave the list too, as they left
+            # the thread (the owner's decision 8; the review, D6). System notices have
+            # no actor and stay; reinstating the account brings the rows back.
+            Q(actor__isnull=True) | public_q('actor')
         ).order_by('-created_at', '-id')
         
         # Optional filter by notification type

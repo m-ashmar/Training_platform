@@ -326,15 +326,24 @@ class UserGoalSerializer(serializers.ModelSerializer):
         there is no program and no stated training days, for a new goal or a sent
         target — `goal_target_unavailable`. Otherwise the calculated number is stored.
         """
-        from .goals import GoalTargetRefused, weekly_target
+        from .goals import COUNTED_TYPES, GoalTargetRefused, weekly_target
 
         request = self.context.get('request')
         owner_id = (self.instance.user_id if self.instance is not None
                     else getattr(getattr(request, 'user', None), 'pk', None))
         target, source = weekly_target(owner_id)
         sent = attrs.get('target_value')
+        # A goal BECOMING weekly is a new weekly goal: its saved target was typed for
+        # another kind of goal, and keeping it let a typed number stand as the plan's
+        # (the review, D8). Echoing the target the server itself served is not a
+        # conflicting number and is accepted.
+        becoming = (self.instance is not None
+                    and self.instance.goal_type not in COUNTED_TYPES)
+        echoed = (self.instance is not None and sent is not None
+                  and self.instance.target_value is not None
+                  and float(sent) == float(self.instance.target_value))
         if target is None:
-            if self.instance is None or sent is not None:
+            if self.instance is None or becoming or (sent is not None and not echoed):
                 raise GoalTargetRefused(
                     'goal_target_unavailable',
                     str(_('A weekly workout goal follows your plan. Set how many days a '

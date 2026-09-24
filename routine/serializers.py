@@ -1648,7 +1648,16 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     Output: Nested template with exercises
     """
     exercises = RoutineTemplateExerciseSerializer(source='routinetemplateexercise_set', many=True)
-    created_by = serializers.StringRelatedField(read_only=True)
+    created_by = serializers.SerializerMethodField()
+
+    def get_created_by(self, obj):
+        """Who wrote it, as before (`str(user)`) — null once that account is suspended or
+        erased: a public template must not keep naming someone who left every other
+        public surface (the owner's decision 8; the review, D9)."""
+        from users.visibility import is_public
+
+        author = obj.created_by
+        return str(author) if author is not None and is_public(author) else None
     
     class Meta:
         model = RoutineTemplate

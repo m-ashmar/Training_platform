@@ -150,14 +150,14 @@ def reapply_target(challenge) -> int:
     challenges alike. Returns how many rows changed.
     """
     from .models import Challenge, ChallengeParticipation
-    from .standing import in_standing
+    from .standing import in_standing, participating
 
     with transaction.atomic():
         locked = Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
         if locked is None:
             return 0
         changed, fields = [], []
-        for row in in_standing(ChallengeParticipation.objects.filter(challenge=locked)):
+        for row in participating(ChallengeParticipation.objects.filter(challenge=locked)):
             before = (row.progress_percentage, row.status, row.completed_at)
             fields = apply_value(row, locked, row.current_value)
             if (row.progress_percentage, row.status, row.completed_at) != before:
@@ -176,14 +176,14 @@ def recount(challenge, user_ids=None) -> bool:
     row moved. A manual, hidden or not-running challenge is left alone.
     """
     from .models import Challenge, ChallengeParticipation
-    from .standing import in_standing
+    from .standing import in_standing, participating
 
     with transaction.atomic():
         locked = Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
         if (locked is None or not locked.auto_counted or locked.is_hidden
                 or not locked.is_active):
             return False
-        rows = in_standing(ChallengeParticipation.objects.filter(challenge=locked))
+        rows = participating(ChallengeParticipation.objects.filter(challenge=locked))
         if user_ids is not None:
             rows = rows.filter(user_id__in=list(user_ids))
         rows = list(rows)
