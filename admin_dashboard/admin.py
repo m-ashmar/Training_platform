@@ -798,6 +798,17 @@ from wallet.admin import ExchangeRateAdmin  # noqa: E402
 from wallet.models import ExchangeRate  # noqa: E402
 admin_site.register(ExchangeRate, ExchangeRateAdmin)
 
+# Agents (plan step 9; wallet/admin.py): their caps, ceilings and next settlement date;
+# the cash each one holds for the platform, unsettled, with the form that records a
+# settlement (operator-only, the change permission, idempotent, immutable); and every
+# settlement recorded.
+from wallet.admin import (  # noqa: E402
+    AgentProfileAdmin, AgentReceivableAdmin, AgentSettlementAdmin)
+from wallet.models import AgentProfile, AgentReceivable, AgentSettlement  # noqa: E402
+admin_site.register(AgentProfile, AgentProfileAdmin)
+admin_site.register(AgentReceivable, AgentReceivableAdmin)
+admin_site.register(AgentSettlement, AgentSettlementAdmin)
+
 # Media kit: every picture the app draws, by slot. `Media slots > kits/` lists each
 # trainer's completeness.
 from mediakit.admin import MediaAssetAdmin  # noqa: E402

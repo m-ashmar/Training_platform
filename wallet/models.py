@@ -66,6 +66,35 @@ class AgentProfile(models.Model):
     public_phone = models.CharField(max_length=32, blank=True, default="")
     is_listed = models.BooleanField(default=False, db_index=True)
 
+    # --- Plan step 9 (the spec, section 8 "Agents"; `wallet/agents.py`) -----------------
+    #: The most ONE top-up may be, per currency. NULL = no per-top-up cap of its own (the
+    #: daily and monthly caps still bound every top-up); `0` = no top-ups, like the others.
+    per_transaction_limit = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(Decimal('0'))])
+    per_transaction_limit_usd = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(Decimal('0'))])
+    #: The CEILING on the cash this agent holds for the platform, unsettled, per currency
+    #: (the `agent_receivable` account, `AgentReceivableEntry`). A top-up that would take
+    #: the unsettled total past it is refused until an operator records a settlement.
+    #: NULL = the agent's monthly cap in that currency — never "no ceiling".
+    receivable_ceiling = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(Decimal('0'))])
+    receivable_ceiling_usd = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(Decimal('0'))])
+    #: The next settlement, AS AN OPERATOR SET IT in the console (AgentHome «التسوية
+    #: الخميس»). Nothing schedules settlements, so nothing computes this: it is null until
+    #: someone writes a date, and `GET wallet/agent/me/` serves null once it has passed.
+    next_settlement_on = models.DateField(null=True, blank=True)
+    #: When the agent revoked their signing key WITHOUT a replacement (`POST
+    #: wallet/agent/apikey/revoke/`): top-ups stop until a new key is paired (`create/` or
+    #: `ensure/` clear it). NULL for an agent who never revoked, so an agent who has not
+    #: paired a device yet tops up exactly as before.
+    key_revoked_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -75,6 +104,10 @@ class AgentProfile(models.Model):
     #: currency -> the (daily, monthly) columns that cap top-ups in it.
     LIMIT_FIELDS = {"SYP": ("daily_limit", "monthly_limit"),
                     "USD": ("daily_limit_usd", "monthly_limit_usd")}
+    #: currency -> the per-top-up cap column, and the receivable ceiling column.
+    PER_TRANSACTION_FIELDS = {"SYP": "per_transaction_limit",
+                              "USD": "per_transaction_limit_usd"}
+    CEILING_FIELDS = {"SYP": "receivable_ceiling", "USD": "receivable_ceiling_usd"}
 
     def limits_for(self, currency):
         """`(daily, monthly)` caps for top-ups in `currency`, or None for a currency
@@ -83,6 +116,17 @@ class AgentProfile(models.Model):
         if fields is None:
             return None
         return tuple(getattr(self, name) for name in fields)
+
+    def per_transaction_limit_for(self, currency):
+        """The per-top-up cap in `currency`, or None when none is set."""
+        name = self.PER_TRANSACTION_FIELDS.get(currency)
+        return getattr(self, name) if name else None
+
+    def receivable_ceiling_for(self, currency):
+        """The ceiling SET for `currency`, or None (the caller falls back to the monthly
+        cap: `wallet.agents.usage_of`)."""
+        name = self.CEILING_FIELDS.get(currency)
+        return getattr(self, name) if name else None
 
     class Meta:
         # Deterministic total order. Without it Postgres returns rows in whatever order it
@@ -104,6 +148,22 @@ class AgentAPIKey(models.Model):
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     last_rotated_at = models.DateTimeField(auto_now=True)
+    #: The pairing AgentKey draws (BACKEND_BUGS B-117): the device the app says it is on
+    #: when it pairs (`create/`, `ensure/`: optional `device_name`), and when this key last
+    #: signed a top-up — the signed endpoint's `X-Agent-Auth`, or the app's own top-up,
+    #: which the server signs with the agent's active key. `created_at` is `paired_at`.
+    device_name = models.CharField(max_length=80, blank=True, default="")
+    last_signature_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def fingerprint(self) -> str:
+        """"7F3A · 91C2 · 0B4E": the first twelve hex characters of `key_id`, upper case,
+        in threes of four — what AgentKey draws, and exactly what the app derived from
+        `key_id` before the server said it (BACKEND_BUGS B-116), so a pairing reads the
+        same before and after."""
+        hexed = "".join(ch for ch in (self.key_id or "").upper() if ch in "0123456789ABCDEF")
+        return " · ".join(hexed[i:i + 4] for i in range(0, min(len(hexed), 12), 4)
+                          if len(hexed[i:i + 4]) == 4)
 
     class Meta:
         # Deterministic total order. Without it Postgres returns rows in whatever order it
@@ -483,6 +543,170 @@ class WalletAuditLog(models.Model):
                 return False, entry.id
             prev = entry.entry_hash
         return True, None
+
+
+class ImmutableRecord(PermissionError):
+    """An append-only record was asked to change or disappear."""
+
+
+class AgentSettlement(models.Model):
+    """An operator recorded that an agent handed over cash they held for the platform.
+    APPEND-ONLY (the spec, section 8: "let operators record settlements against it").
+
+    Written only by `wallet.agents.record_settlement`, from the console, under the
+    agent's profile lock and idempotently on `idempotency_key` (the console form's own
+    token, so a double submit records one settlement). Each one posts its negative
+    `AgentReceivableEntry` in the same transaction. Never edited, never deleted: a
+    settlement recorded by mistake is answered by the operator with the truth in a new
+    record, not by rewriting this one — and migration wallet/0020 refuses UPDATE and
+    DELETE at the database, as 0012 does for the audit log, except `recorded_by`
+    becoming NULL when that operator's account is deleted.
+    """
+    agent = models.ForeignKey(AgentProfile, on_delete=models.PROTECT,
+                              related_name="settlements")
+    currency = models.CharField(max_length=3, choices=SUPPORTED_CURRENCIES)
+    amount = models.DecimalField(max_digits=14, decimal_places=2,
+                                 validators=[MinValueValidator(Decimal('0.01'))])
+    #: The unsettled total just before and just after, for the console and the agent.
+    receivable_before = models.DecimalField(max_digits=14, decimal_places=2)
+    receivable_after = models.DecimalField(max_digits=14, decimal_places=2)
+    #: The operator's words. The agent reads it on their settlement feed.
+    note = models.CharField(max_length=300, blank=True, default="")
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True,
+                                    on_delete=models.SET_NULL,
+                                    related_name="agent_settlements_recorded")
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    #: `default`, not `auto_now_add`, only so the backfill can be dated; nothing else
+    #: passes it.
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0),
+                                   name="agent_settlement_amount_positive"),
+        ]
+
+    def __str__(self):
+        return f"{self.number} {self.amount} {self.currency}"
+
+    @property
+    def number(self) -> str:
+        """"ST-2026-09-23-0007": the local date and the row's id. Derived, so it can
+        never drift from the record it names."""
+        return f"ST-{timezone.localtime(self.created_at):%Y-%m-%d}-{self.pk:04d}"
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ImmutableRecord("a settlement is never edited; record a new one")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecord("a settlement is never deleted")
+
+
+class AgentReceivableEntry(models.Model):
+    """The spec's `agent_receivable` account: one row per movement of it. APPEND-ONLY.
+
+    "Top-ups do not draw on the agent's own balance, so every top-up is cash the agent
+    holds for us. Post each one to agent_receivable ... let operators record settlements
+    against it" (the spec, section 8). WHY A RECORD AND NOT A LEDGER WALLET: a top-up is
+    written `None -> client wallet` — money entering the platform's books from outside —
+    and a ledger wallet cannot hold what an agent OWES, because `Wallet.balance` is money
+    the platform owes its holder and is never negative. This record is the other half of
+    that entry, so the double entry stays honest:
+
+        top-up      client wallet  +X   (Transaction, tx_type "topup")
+                    agent owes     +X   (this, kind "topup", same transaction)
+        settlement  agent owes     -X   (this, kind "settlement"; the cash is now the
+                                         platform's, off the ledger, like a payout's
+                                         last leg)
+        reversal    client wallet  -X   (Transaction, tx_type "reversal")
+                    agent owes     -X   (this, kind "reversal": the agent hands the cash
+                                         back to the client)
+
+    so, per agent and currency, the agent top-ups less their reversals equal this
+    account's balance plus every settlement. `amount` is SIGNED (+ owed, - discharged)
+    and `balance_after` is the running total after the row. `money_type` is WALLET_MOVE,
+    the kind of every top-up.
+
+    Written only by `wallet.agents`, inside the transaction that moves the money and
+    under the agent's profile lock, so `balance_after` is true when written. One row per
+    transaction (`OneToOne`), so a replayed top-up cannot post twice. Migration
+    wallet/0020 refuses UPDATE and DELETE at the database.
+    """
+    KIND_TOPUP = "topup"
+    KIND_SETTLEMENT = "settlement"
+    KIND_REVERSAL = "reversal"
+    KINDS = [(KIND_TOPUP, "Top-up"), (KIND_SETTLEMENT, "Settlement"),
+             (KIND_REVERSAL, "Top-up reversed")]
+
+    agent = models.ForeignKey(AgentProfile, on_delete=models.PROTECT,
+                              related_name="receivable_entries")
+    kind = models.CharField(max_length=16, choices=KINDS)
+    currency = models.CharField(max_length=3, choices=SUPPORTED_CURRENCIES)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    balance_after = models.DecimalField(max_digits=14, decimal_places=2)
+    money_type = models.CharField(max_length=16, choices=MoneyType.choices,
+                                  default=MoneyType.WALLET_MOVE)
+    #: The top-up (kind "topup") or the reversal of one (kind "reversal").
+    transaction = models.OneToOneField(Transaction, null=True, blank=True,
+                                       on_delete=models.PROTECT,
+                                       related_name="agent_receivable")
+    settlement = models.OneToOneField(AgentSettlement, null=True, blank=True,
+                                      on_delete=models.PROTECT, related_name="entry")
+    #: `default`, not `auto_now_add`, only so the backfill can carry the top-up's own
+    #: time; nothing else passes it.
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        verbose_name_plural = "agent receivable entries"
+        indexes = [models.Index(fields=["agent", "currency", "-created_at", "-id"],
+                                name="agent_receivable_recent_idx")]
+        constraints = [
+            models.CheckConstraint(condition=Q(money_type__in=MoneyType.values),
+                                   name="agent_receivable_money_type_known"),
+            # Each row names exactly what moved it, and its sign follows its kind.
+            models.CheckConstraint(
+                condition=(Q(kind="topup", amount__gt=0, transaction__isnull=False,
+                             settlement__isnull=True)
+                           | Q(kind="reversal", amount__lt=0, transaction__isnull=False,
+                               settlement__isnull=True)
+                           | Q(kind="settlement", amount__lt=0, transaction__isnull=True,
+                               settlement__isnull=False)),
+                name="agent_receivable_entry_shape"),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} {self.amount} {self.currency} (agent {self.agent_id})"
+
+    @property
+    def receipt_number(self) -> str | None:
+        """"TP-2026-09-23-0091" (AgentReceipt «رقم الإيصال») for a top-up: the local date
+        and the row's id, so it is unique, stable and needs no counter. None otherwise."""
+        if self.kind != self.KIND_TOPUP or self.pk is None:
+            return None
+        return f"TP-{timezone.localtime(self.created_at):%Y-%m-%d}-{self.pk:04d}"
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ImmutableRecord("a receivable entry is never edited; post a new one")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecord("a receivable entry is never deleted")
+
+
+class AgentReceivable(AgentProfile):
+    """The console's page for what agents owe: one row per agent with the unsettled
+    total in each currency and its ceiling, and the form that records a settlement
+    (`wallet.admin.AgentReceivableAdmin`). A proxy: no table of its own."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "agent receivable"
+        verbose_name_plural = "agent receivables (cash held for the platform)"
 
 
 class AlreadyReversed(Exception):
@@ -912,7 +1136,15 @@ def ensure_agent_profile(user) -> "AgentProfile":
     AGENT_DEFAULT_DAILY_LIMIT_USD / AGENT_DEFAULT_MONTHLY_LIMIT_USD, which nobody has
     set yet: until the owner names a number they are 0, and an agent tops up no dollars
     (SIDE_BUGS S-059 — a cap in pounds used to allow the same number of dollars).
+
+    The per-top-up cap and the receivable ceiling (plan step 9) likewise:
+    AGENT_DEFAULT_PER_TRANSACTION_LIMIT / AGENT_DEFAULT_RECEIVABLE_CEILING in pounds, and
+    their `_USD` twins — unset, so empty — in dollars.
     """
+    def _optional(name):
+        value = getattr(settings, name, None)
+        return None if value in (None, "") else Decimal(str(value))
+
     profile, _created = AgentProfile.objects.get_or_create(
         user=user,
         defaults={
@@ -924,6 +1156,10 @@ def ensure_agent_profile(user) -> "AgentProfile":
                 settings, "AGENT_DEFAULT_DAILY_LIMIT_USD", "0"))),
             "monthly_limit_usd": Decimal(str(getattr(
                 settings, "AGENT_DEFAULT_MONTHLY_LIMIT_USD", "0"))),
+            "per_transaction_limit": _optional("AGENT_DEFAULT_PER_TRANSACTION_LIMIT"),
+            "per_transaction_limit_usd": _optional("AGENT_DEFAULT_PER_TRANSACTION_LIMIT_USD"),
+            "receivable_ceiling": _optional("AGENT_DEFAULT_RECEIVABLE_CEILING"),
+            "receivable_ceiling_usd": _optional("AGENT_DEFAULT_RECEIVABLE_CEILING_USD"),
         },
     )
     return profile

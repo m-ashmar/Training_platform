@@ -14,7 +14,12 @@ from .views import (
     AgentApiKeyCreateView,
     AgentApiKeyStatusView,
     AgentApiKeyEnsureView,
+    AgentApiKeyRevokeView,
     AgentTopUpProxyView,
+    AgentMeView,
+    AgentLedgerView,
+    AgentReceiptView,
+    AgentSettlementListView,
 )
 
 
@@ -47,6 +52,16 @@ urlpatterns = [
     path("agent/apikey/create/", AgentApiKeyCreateView.as_view(), name="agent-apikey-create"),
     path("agent/apikey/status/", AgentApiKeyStatusView.as_view(), name="agent-apikey-status"),
     path("agent/apikey/ensure/", AgentApiKeyEnsureView.as_view(), name="agent-apikey-ensure"),
+    # Revoke the signing key without a replacement: top-ups stop until a new key is
+    # paired (BACKEND_BUGS B-117).
+    path("agent/apikey/revoke/", AgentApiKeyRevokeView.as_view(), name="agent-apikey-revoke"),
+    # The agent's own account, ledger, receipts and settlements (plan step 9;
+    # BACKEND_BUGS B-113, B-114).
+    path("agent/me/", AgentMeView.as_view(), name="agent-me"),
+    path("agent/ledger/", AgentLedgerView.as_view(), name="agent-ledger"),
+    path("agent/receipts/<str:reference_id>/", AgentReceiptView.as_view(),
+         name="agent-receipt"),
+    path("agent/settlements/", AgentSettlementListView.as_view(), name="agent-settlements"),
     path("client/transfer/", ClientTransferToTrainerView.as_view(), name="client-transfer"),
     path("admin/reversal/", AdminReversalView.as_view(), name="admin-reversal"),
     path("admin/audit/export/", AdminAuditExportView.as_view(), name="admin-audit-export"),

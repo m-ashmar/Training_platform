@@ -211,6 +211,7 @@ so parse ids client-side.
 | `routine_product_purchased` | `product_id`, `purchase_id`, `routine_id` — to the buyer; `routine_id` is their own copy |
 | `routine_product_refunded` | `product_id`, `purchase_id` — to the buyer: the price is back in the wallet and the copy is gone |
 | `routine_product_sale_refunded` | `product_id`, `purchase_id` — to the trainer: a sale was refunded and their share went back |
+| `wallet_topped_up` | `reference_id`, `amount`, `currency` — an agent credited the client's wallet with cash; `reference_id` opens the row (`GET wallet/transactions/{reference_id}/`). Every build: a cash top-up is WALLET_MOVE, and the text names the shop, never the amount (BACKEND_BUGS B-115) |
 | `personal_record` | `exercise_id`, `set_log_id` — the set that beat the previous best |
 | `weekly_recap` | `week` (the ISO week key), `missed_sets` |
 | `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
@@ -1564,6 +1565,46 @@ operator maintains in the console. Four things the app needs:
   purchase (spec §4: "top-up is done with an agent in person, so there is nothing to
   hide").
 
+**The agent shell** (plan step 9; the spec, section 8 "Agents"; BACKEND_BUGS B-113..B-118,
+B-124, 2026-09-24). The screens are `16-agent-operator/`. The view docstrings carry every
+field and code; in short:
+
+- **Caps per agent and per currency, fail closed** (`wallet/agents.py`): one top-up
+  (`per_transaction_limit`; empty = none of its own), a local day, a calendar month, and
+  the CEILING on the cash the agent holds for the platform, unsettled (empty = the
+  monthly cap). Refusals `429 per_transaction_limit_exceeded`, `daily_limit_exceeded`,
+  `monthly_limit_exceeded`, `receivable_ceiling_exceeded`, each with `limit`, `used`,
+  `remaining`, `currency`. The defaults for a NEW agent are 50,000 / 250,000 / 5,000,000
+  SYP and a 600,000 ceiling (settings `AGENT_DEFAULT_*`; the owner confirms them); dollar
+  caps stay 0 until an operator sets them. A replay of a finished top-up (same
+  `idempotency_key`, same body) is answered with its receipt before any cap is read.
+- **The receivable**: every agent top-up posts the cash the agent now holds for the
+  platform to `wallet.AgentReceivableEntry` (the spec's `agent_receivable` account; +
+  top-up, - settlement, - reversed top-up), in the top-up's own transaction. Operators
+  record settlements in the console (`/dj-admin/wallet/agentreceivable/`), idempotently,
+  as immutable `AgentSettlement` rows.
+- `GET /api/wallet/agent/me/` — the agent's profile, `status`, `can_top_up`,
+  `blocked_reason`, `next_settlement_on` (null unless an operator set one — nothing
+  schedules settlements) and, per currency, caps, used today / this month, counts,
+  remaining, `receivable`, `receivable_ceiling`, `receivable_room`, `max_topup`,
+  `blocked_reason`, `last_settlement`.
+- `GET /api/wallet/agent/ledger/` — the agent's own top-ups, settlements and reversed
+  top-ups, newest first (`?since=&until=&kind=&currency=`); `GET
+  /api/wallet/agent/settlements/`; `GET /api/wallet/agent/receipts/{reference_id}/` — a
+  top-up this agent made (`404 not_found` for anyone else's), with `receipt_number`,
+  the client, the shop, `remaining_today`, `client_notified`, `reversed`.
+- Both top-up endpoints answer `receipt_number` and `remaining_today` beside
+  `{reference_id, balance, currency}`, and push the client `wallet_topped_up` (§4).
+- **The key**: `apikey/ensure/` answers `key_id` and `fingerprint` ("7F3A · 91C2 · 0B4E");
+  `create/` and `ensure/` take an optional `device_name`; `apikey/status/` gains
+  `key_id`, `fingerprint`, `device_name`, `paired_at`, `last_signature_at`,
+  `revoked_at`, `topups_stopped`; `POST apikey/revoke/` deactivates the key without a
+  replacement and stops the app's top-ups (`403 agent_key_revoked`) until a new key is
+  paired. The signed endpoint refuses a key that is not the caller's (`401
+  agent_auth_invalid`).
+- A top-up to a suspended or erased account answers `404 not_found`, exactly as a
+  missing one (`users.visibility`).
+
 **What wiring the money screens found** (BACKEND_BUGS B-047..B-052, 2026-09-23).
 
 - `POST /api/subscription/v1/subscriptions/{id}/change-plan/` `{plan_id}` moves a
@@ -2322,6 +2363,7 @@ kept beside the code. The views' docstrings carry the full tables.
 | `wallet/admin/*`, `subscription/v1/admin/management/` | `403 admins_only` (not an operator) |
 | `POST wallet/agent/topup/` (signed) | `401 agent_auth_invalid` — one code for a missing, stale or mismatched `X-Agent-Auth`, an unknown key and a bad signature; `403 agent_ip_not_allowed` |
 | `POST wallet/agent/topup/`, `.../topup/proxy/` | `403 agent_not_active`; `400 target_not_a_client`; `429 daily_limit_exceeded` / `monthly_limit_exceeded` (the agent's cap in that currency — not the rate limiter, and `Retry-After` does not lift it) |
+| `POST wallet/agent/topup/`, `.../topup/proxy/` (plan step 9) | `429 per_transaction_limit_exceeded` (more than one top-up may be), `429 receivable_ceiling_exceeded` (the cash the agent holds for the platform, unsettled, would pass their ceiling; a settlement lifts it); all four cap refusals carry `limit`, `used` (null for the per-top-up cap), `remaining`, `currency` (B-124); `.../topup/proxy/` also `403 agent_key_revoked` (the agent revoked their key and has not paired a new one, B-117). A suspended or erased client is `404 not_found`, as a missing one (B-118) |
 | top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_key_reused` (the caller's own key was already spent on a different request of theirs; retrying never helps, and resending under a new key could move money twice — NOT the set, workout and chat writes' 409 `idempotency_conflict`, where the id is the other person's and a new id is the fix) |
 | `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved) |
 | `POST wallet/admin/reversal/` | `400 insufficient_balance` (the wallet that received the money no longer holds it), `400 currency_mismatch` (a wallet changed currency), `400 reversal_refused` — these three were one `bad_request` |
@@ -2752,7 +2794,12 @@ It therefore equals the row count of `GET comments/?post={id}` for the same view
 | `POST` | `/api/wallet/admin/reversal/` | auth, IsAdmin | `AdminReversalView` |
 | `POST` | `/api/wallet/agent/apikey/create/` | auth, IsAgent | `AgentApiKeyCreateView` |
 | `POST` | `/api/wallet/agent/apikey/ensure/` | auth, IsAgent | `AgentApiKeyEnsureView` |
+| `POST` | `/api/wallet/agent/apikey/revoke/` | auth, IsAgent | `AgentApiKeyRevokeView` |
 | `GET` | `/api/wallet/agent/apikey/status/` | auth, IsAgent | `AgentApiKeyStatusView` |
+| `GET` | `/api/wallet/agent/ledger/` | auth, IsAgent | `AgentLedgerView` |
+| `GET` | `/api/wallet/agent/me/` | auth, IsAgent | `AgentMeView` |
+| `GET` | `/api/wallet/agent/receipts/{reference_id}/` | auth, IsAgent | `AgentReceiptView` |
+| `GET` | `/api/wallet/agent/settlements/` | auth, IsAgent | `AgentSettlementListView` |
 | `POST` | `/api/wallet/agent/topup/` | auth, IsAgent | `AgentTopUpView` |
 | `POST` | `/api/wallet/agent/topup/proxy` | auth, IsAgent | `AgentTopUpProxyView` |
 | `GET` | `/api/wallet/agents/` | auth | `AgentDirectoryView` |

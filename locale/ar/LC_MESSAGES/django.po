@@ -5362,3 +5362,26 @@ msgid ""
 "increase."
 msgstr ""
 "اليوم %(day)s: الحمل الجديد أكبر مما يحتمله التمرين. استخدم زيادة أصغر."
+
+#: wallet/views.py
+msgid "This amount is more than one top-up may be."
+msgstr "هذا المبلغ أكبر من الحد المسموح للشحنة الواحدة."
+
+#: wallet/views.py
+msgid ""
+"You hold as much cash for the platform as your ceiling allows. Settle with "
+"the platform to top up again."
+msgstr "بلغ النقد الذي بحوزتك للمنصة سقفك. سوِّ حسابك مع المنصة لتعود إلى الشحن."
+
+#: wallet/views.py
+msgid "Your signing key was revoked. Pair this device again to top up."
+msgstr "أُبطل مفتاح التوقيع. اقرن هذا الجهاز من جديد لتتمكن من الشحن."
+
+#: notifications/domain/wallet_events.py
+msgid "Your balance was topped up"
+msgstr "تم شحن رصيدك"
+
+#: notifications/domain/wallet_events.py
+#, python-format
+msgid "A cash top-up from %(agent)s was added to your balance."
+msgstr "أُضيف إلى رصيدك شحن نقدي من %(agent)s."

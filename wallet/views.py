@@ -55,23 +55,37 @@ def audit(event_type: str, request, payload: dict):
     )
 
 
-def _lock_agent_profile(agent_profile):
-    """Take a row lock on the agent's profile.
-
-    Serializes one agent's concurrent top-ups against each other. Raises
-    TransactionManagementError if the caller forgot the enclosing atomic block,
-    which is the loud failure we want rather than a silently unlocked read.
-    """
-    return AgentProfile.objects.select_for_update().get(pk=agent_profile.pk)
+#: What each cap refusal says, by `wallet.agents.CapRefusal.scope`. The first two are
+#: the words they always had.
+def _cap_message(scope):
+    return {
+        "per_transaction": _("This amount is more than one top-up may be."),
+        "daily": _("Daily limit exceeded"),
+        "monthly": _("Monthly limit exceeded"),
+        "receivable": _("You hold as much cash for the platform as your ceiling allows. "
+                        "Settle with the platform to top up again."),
+    }[scope]
 
 
 def _topup_limit_error(agent_profile, actor, amount, request, currency):
     """
-    Enforce agent daily/monthly top-up caps FAIL-CLOSED. A limit of 0 means
-    "no top-ups permitted", not unlimited. Returns a Response on breach, else None:
-    429 `daily_limit_exceeded` or `monthly_limit_exceeded`. A cap is not the rate
-    limiter — waiting out a `Retry-After` does not lift it — so it does not answer the
-    limiter's `throttled` (the owner, 2026-09-24: every refusal names its own code).
+    Enforce the agent's top-up caps FAIL-CLOSED. A limit of 0 means "no top-ups
+    permitted", not unlimited. Returns a Response on breach, else None: 429 with
+    `per_transaction_limit_exceeded`, `daily_limit_exceeded`, `monthly_limit_exceeded`
+    or `receivable_ceiling_exceeded`, checked in that order (`wallet.agents`). A cap is
+    not the rate limiter — waiting out a `Retry-After` does not lift it — so it does not
+    answer the limiter's `throttled` (the owner, 2026-09-24: every refusal names its own
+    code).
+
+    Every one of the four carries `limit`, `used`, `remaining` and `currency` beside
+    `error` and `code` (BACKEND_BUGS B-124; additive): the cap, what is already used
+    against it (today, this month, or the cash held unsettled; null for the per-top-up
+    cap, which nothing uses up), what is left of it, and its currency — so the app can
+    tell "you reached your cap" from "this amount is more than what is left".
+
+    The per-top-up cap and the receivable ceiling are plan step 9 (the spec, section 8
+    "Agents"): a top-up that would take the cash the agent holds for the platform past
+    their ceiling is refused until an operator records a settlement.
 
     PER CURRENCY (SIDE_BUGS S-059). The totals count only this currency's top-ups and
     are held against this currency's caps (`AgentProfile.limits_for`). They used to add
@@ -79,47 +93,31 @@ def _topup_limit_error(agent_profile, actor, amount, request, currency):
     let the same number of dollars through — about 13,000 times the value.
 
     CONCURRENCY CONTRACT: `agent_profile` must already be locked by
-    `_lock_agent_profile`, and the ledger write this guards must happen in the SAME
+    `wallet.agents.lock_profile`, and the ledger write this guards must happen in the SAME
     transaction. These two aggregates are a read; on their own they are a
     check-then-act. Ten concurrent top-ups of 400 against a 1000/day cap each read a
     total that predated the other nine, all passed, and minted 3200 — 3.2x the cap.
     Holding the profile lock from here through move_funds_atomic is what makes the
     aggregate below true at the moment the money moves.
+
+    The counting is `wallet.agents.usage_of` — RANGES on `created_at`, never a function
+    of it, so `tx_actor_type_time_idx` serves them (a filter on the column's date
+    scanned every row the agent had ever written) — and `GET wallet/agent/me/` reads the
+    same function, so the screen and the refusal never disagree. `actor` is the agent's user,
+    whose rows `usage_of` counts through the profile.
     """
-    limits = agent_profile.limits_for(currency)
-    if limits is None:
-        # A currency this agent has no caps for is refused, never treated as open.
-        limits = (0, 0)
-    daily_limit, monthly_limit = limits
-    today = timezone.localdate()
-    month_start = today.replace(day=1)
-    # RANGES on the column, not a function of it. `created_at__date=` compiles to
-    # `(created_at AT TIME ZONE 'Asia/Damascus')::date = ...`, which no btree on
-    # `created_at` can serve — so both of these, which run on every top-up, scanned every
-    # row the agent had ever written: one agent with 10,000 ledger rows read all 10,000
-    # to find 500, and the scan never resets, so it gets slower for the agent's whole
-    # lifetime. A half-open range over the same instants uses `tx_actor_type_time_idx`.
-    day_start = timezone.make_aware(
-        datetime.datetime.combine(today, datetime.time.min))
-    tomorrow = day_start + datetime.timedelta(days=1)
-    month_from = timezone.make_aware(
-        datetime.datetime.combine(month_start, datetime.time.min))
-    day_total = Transaction.objects.filter(
-        actor=actor, tx_type="topup", currency=currency,
-        created_at__gte=day_start, created_at__lt=tomorrow,
-    ).aggregate(Sum("amount"))["amount__sum"] or 0
-    month_total = Transaction.objects.filter(
-        actor=actor, tx_type="topup", currency=currency, created_at__gte=month_from,
-    ).aggregate(Sum("amount"))["amount__sum"] or 0
-    if day_total + amount > daily_limit:
-        audit("wallet.topup.limit_block", request, {"scope": "daily", "currency": currency, "attempt": float(amount), "used": float(day_total)})
-        return Response({"error": _("Daily limit exceeded"), "code": "daily_limit_exceeded"},
-                        status=status.HTTP_429_TOO_MANY_REQUESTS)
-    if month_total + amount > monthly_limit:
-        audit("wallet.topup.limit_block", request, {"scope": "monthly", "currency": currency, "attempt": float(amount), "used": float(month_total)})
-        return Response({"error": _("Monthly limit exceeded"), "code": "monthly_limit_exceeded"},
-                        status=status.HTTP_429_TOO_MANY_REQUESTS)
-    return None
+    from . import agents
+
+    usage = agents.usage_of(agent_profile, currency)
+    refusal = usage.refusal(amount)
+    if refusal is None:
+        return None
+    audit("wallet.topup.limit_block", request,
+          {"scope": refusal.scope, "currency": currency, "attempt": float(amount),
+           "limit": float(refusal.limit),
+           "used": float(refusal.used) if refusal.used is not None else None})
+    return Response(refusal.body(_cap_message(refusal.scope)),
+                    status=status.HTTP_429_TOO_MANY_REQUESTS)
 
 
 def _topup_currency_mismatch(client, currency):
@@ -199,13 +197,107 @@ def _client_named(identifier) -> "User":
     calls it replaces did, so the agent endpoints' behaviour on a bad identifier is
     unchanged. The identifier is inside the signed message on the HMAC path, so
     widening what it may say does not widen what an unauthenticated caller can do.
+
+    A SUSPENDED OR ERASED account names nobody here (BACKEND_BUGS B-118): it is found
+    only among the people `users.visibility` lets anyone see — the one predicate every
+    public surface asks — and answers the same `404 not_found` a missing account does,
+    so a top-up never credits it and the answer does not reveal that it exists. It used
+    to be credited: the lookup had no `is_active` filter, while the public profile the
+    app confirms the match through hides those accounts.
     """
+    from users.visibility import public_people
+
     from .utils import user_id_from_account_number
 
+    people = public_people(User.objects.all())
     user_id = user_id_from_account_number(identifier)
     if user_id is not None:
-        return get_object_or_404(User, id=user_id)
-    return get_object_or_404(User, email=identifier)
+        return get_object_or_404(people, id=user_id)
+    return get_object_or_404(people, email=identifier)
+
+
+def _perform_topup(request, agent_profile, *, client, amount, currency, idem_key,
+                   api_key=None):
+    """The part of an agent top-up both endpoints share: ONE transaction, the agent's
+    profile locked for its whole span (see `_topup_limit_error`'s concurrency contract).
+
+    `api_key` is the key that signed the request on the signed endpoint. On the app's
+    endpoint it is None and the agent's active key stands in: the server signs for the
+    app, and a key the agent revoked stops the top-up (403 `agent_key_revoked`,
+    BACKEND_BUGS B-117) until a new one is paired.
+
+    In order: a replay of a FINISHED top-up is answered with its receipt before any cap
+    is read (the cap its own money filled must not refuse it); then the agent's status,
+    the revoked key, the caps and the receivable ceiling; then the key is reserved and
+    the money moves. With the money, in the same transaction: the receivable entry (the
+    cash the agent now holds for the platform), the key's last signature, and — once it
+    commits — the client's push (BACKEND_BUGS B-115).
+
+    200 `{reference_id, balance, currency, receipt_number, remaining_today}`: the last
+    two are additive (plan step 9) — the receipt's number (AgentReceipt «رقم الإيصال»)
+    and what is left of today's cap in this currency after this top-up.
+    """
+    from . import agents
+
+    digest = idempotency.fingerprint(op="topup", client=client.id, amount=amount,
+                                     currency=currency)
+    with transaction.atomic():
+        agent_profile = agents.lock_profile(agent_profile)
+        replay = idempotency.finished(request.user, idem_key, digest)
+        if replay is not None:
+            audit("wallet.topup.idempotent_hit", request, {"key": idem_key})
+            return Response(replay, status=status.HTTP_200_OK)
+        if agent_profile.status != "active":
+            return Response({"error": _("Agent not active"), "code": "agent_not_active"},
+                            status=status.HTTP_403_FORBIDDEN)
+        if api_key is None:
+            if agents.key_revoked(agent_profile):
+                return Response(
+                    {"error": _("Your signing key was revoked. Pair this device again "
+                                "to top up."),
+                     "code": "agent_key_revoked"},
+                    status=status.HTTP_403_FORBIDDEN)
+            api_key = agents.active_key(agent_profile)
+
+        limit_error = _topup_limit_error(agent_profile, request.user, amount, request,
+                                         currency)
+        if limit_error:
+            return limit_error
+
+        # --- Reserve idempotency key only after validation passes ---
+        try:
+            idem, replay = idempotency.reserve(request.user, idem_key, digest)
+        except idempotency.IdempotencyConflict as exc:
+            return _idempotency_conflict(exc)
+        if replay is not None:
+            audit("wallet.topup.idempotent_hit", request, {"key": idem_key})
+            return Response(replay, status=status.HTTP_200_OK)
+
+        # Never `wallet_for(..., currency)`: arriving money does not choose a person's
+        # currency. `currency=` makes the ledger refuse a wallet that changed unit since
+        # the view's check.
+        client_wallet = wallet_for(client, "client")
+        metadata = {"agent_id": request.user.id}
+        if api_key is not None:
+            metadata["api_key_id"] = api_key.key_id
+        tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id,
+                               tx_type="topup", currency=currency,
+                               money_type=MoneyType.WALLET_MOVE, metadata=metadata)
+        entry = agents.post_topup(agent_profile, tx)
+        if api_key is not None:
+            agents.mark_signed(api_key)
+        client_wallet.refresh_from_db()
+        resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance),
+                "currency": tx.currency, "receipt_number": entry.receipt_number,
+                "remaining_today": agents.money(
+                    agents.usage_of(agent_profile, currency).remaining_today)}
+        idempotency.complete(idem, resp)
+        agents.notify_client_on_commit(tx, client, agent_profile)
+
+    audit("wallet.topup.success", request, {"reference_id": tx.reference_id,
+                                             "client_id": client.id,
+                                             "amount": float(amount), "currency": currency})
+    return Response(resp, status=status.HTTP_200_OK)
 
 
 class WalletBalanceView(APIView):
@@ -609,27 +701,37 @@ class AgentTopUpView(APIView):
     `idempotency_key`, `timestamp`, `signature`. The signed message is
     `client_identifier|amount|timestamp|idempotency_key|currency`.
 
-    200 `{reference_id, balance, currency}`. Refusals (branch on `code`):
+    200 `{reference_id, balance, currency, receipt_number, remaining_today}` (the last
+    two since plan step 9: see `_perform_topup`). A replay of a finished request with
+    the same `idempotency_key` and body answers the same 200 again, before any cap is
+    read. Refusals (branch on `code`):
 
     | Status | `code` | Meaning |
     |---|---|---|
     | 400 | `validation_error` | a body field is missing or malformed; a missing or unknown `currency` is `field_errors.currency` |
     | 401 | `not_authenticated` / `token_not_valid` | no JWT, or a JWT that is not valid (the framework's answer) |
-    | 401 | `agent_auth_invalid` | `X-Agent-Auth` is missing, malformed, stale, names no active key, or its timestamp or signature does not match the body. One code for all of them, on purpose: the code adds no way to tell an unknown key from a bad signature |
+    | 401 | `agent_auth_invalid` | `X-Agent-Auth` is missing, malformed, stale, names no active key (a revoked key is not active), names a key that is not the caller's, or its timestamp or signature does not match the body. One code for all of them, on purpose: the code adds no way to tell an unknown key from a bad signature |
     | 403 | `agents_only` | the caller is not an agent |
     | 403 | `agent_ip_not_allowed` | the request did not come from an address on the agent's allow-list |
     | 403 | `agent_not_active` | the agent's profile is suspended |
-    | 404 | `not_found` | `client_identifier` names nobody |
+    | 404 | `not_found` | `client_identifier` names nobody — or a suspended or erased account, which answers exactly as a missing one (BACKEND_BUGS B-118) |
     | 400 | `target_not_a_client` | it names an account that is not a client |
     | 409 | `currency_mismatch` | the client trades in the other currency; `client_currency` and `topup_currency` say which |
+    | 429 | `per_transaction_limit_exceeded` | more than one top-up may be in that currency |
     | 429 | `daily_limit_exceeded` / `monthly_limit_exceeded` | the agent's cap FOR THAT CURRENCY; waiting does not lift it before the day or month turns |
+    | 429 | `receivable_ceiling_exceeded` | the cash the agent holds for the platform, unsettled, would pass their ceiling; an operator's settlement lifts it |
     | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running; retry when it finishes |
     | 422 | `idempotency_key_reused` | the key was used for a different request; retrying never helps |
     | 429 | `throttled` | the rate limiter (`Retry-After`) |
 
-    Every code above that is not the framework's was the status default (`bad_request`,
-    `not_authenticated`, `permission_denied`, `conflict`, `unprocessable`, `throttled`)
-    until the owner's decision of 2026-09-24.
+    The four cap refusals also carry `limit`, `used` (null for the per-top-up cap),
+    `remaining` and `currency` (BACKEND_BUGS B-124). Every code above that is not the
+    framework's was the status default (`bad_request`, `not_authenticated`,
+    `permission_denied`, `conflict`, `unprocessable`, `throttled`) until the owner's
+    decision of 2026-09-24.
+
+    A top-up posts the cash to the agent's receivable, stamps the signing key's
+    `last_signature_at`, and pushes the client `wallet_topped_up` (API_CONTRACT §4).
 
     Server-to-server: no build is involved, so nothing here depends on one.
     """
@@ -667,6 +769,12 @@ class AgentTopUpView(APIView):
         except AgentAPIKey.DoesNotExist:
             audit("wallet.topup.auth_failed", request, {"reason": "unknown_key"})
             return _agent_auth_refused(_("Invalid credentials"))
+        # The key must be the CALLER's. It was looked up by id alone, so one agent's JWT
+        # with another agent's key and secret topped up under the first agent's caps and
+        # receivable while stamping the other's key as having signed (plan step 9).
+        if api_key.agent.user_id != request.user.id:
+            audit("wallet.topup.auth_failed", request, {"reason": "key_not_callers"})
+            return _agent_auth_refused(_("Invalid credentials"))
 
         ip = request.META.get("REMOTE_ADDR")
         if api_key.agent.ip_allowlist and ip not in api_key.agent.ip_allowlist:
@@ -703,52 +811,8 @@ class AgentTopUpView(APIView):
 
         # Cap check and ledger write share ONE transaction, with the agent's profile
         # locked for its whole span. See _topup_limit_error's concurrency contract.
-        with transaction.atomic():
-            agent_profile = _lock_agent_profile(agent_profile)
-            if agent_profile.status != "active":
-                return Response({"error": _("Agent not active"), "code": "agent_not_active"},
-                                status=status.HTTP_403_FORBIDDEN)
-
-            limit_error = _topup_limit_error(agent_profile, request.user, amount, request,
-                                             currency)
-            if limit_error:
-                return limit_error
-
-            # --- Reserve idempotency key only after validation passes ---
-            try:
-                idem, replay = idempotency.reserve(
-                    request.user, idem_key,
-                    idempotency.fingerprint(op="topup", client=client.id, amount=amount,
-                                            currency=currency),
-                )
-            except idempotency.IdempotencyConflict as exc:
-                return _idempotency_conflict(exc)
-            if replay is not None:
-                audit("wallet.topup.idempotent_hit", request, {"key": idem_key})
-                return Response(replay, status=status.HTTP_200_OK)
-
-            # Never `wallet_for(..., currency)`: arriving money does not choose a
-            # person's currency. `currency=` makes the ledger refuse a wallet that
-            # changed unit since the check above.
-            client_wallet = wallet_for(client, "client")
-            tx = move_funds_atomic(
-                None,
-                client_wallet,
-                amount,
-                actor_id=request.user.id,
-                tx_type="topup",
-                currency=currency,
-                money_type=MoneyType.WALLET_MOVE,
-                metadata={"agent_id": request.user.id, "api_key_id": getattr(api_key, "key_id", None)},
-            )
-            # refresh balance from DB to reflect updated value
-            client_wallet.refresh_from_db()
-            resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance),
-                    "currency": tx.currency}
-            idempotency.complete(idem, resp)
-
-        audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount), "currency": currency})
-        return Response(resp, status=status.HTTP_200_OK)
+        return _perform_topup(request, agent_profile, client=client, amount=amount,
+                              currency=currency, idem_key=idem_key, api_key=api_key)
 
 
 class ClientTransferToTrainerView(APIView):
@@ -899,6 +963,10 @@ class AdminReversalView(APIView):
     the payout minted money into clearing. Undoing a withdrawal is `fail` (or the
     trainer's `cancel`) in the payouts console, which moves the money once and records
     it on the withdrawal.
+
+    A reversed AGENT top-up also comes off the agent's receivable (the cash they hold
+    for the platform; plan step 9), in the same transaction: the agent hands the cash
+    back to the client, and their ledger shows a `reversal` row.
     """
     permission_classes = [IsAuthenticated, IsAdmin]
 
@@ -954,15 +1022,28 @@ class AdminReversalView(APIView):
             audit("wallet.reversal.idempotent_hit", request, {"key": idem_key})
             return Response(replay, status=status.HTTP_200_OK)
 
+        # An AGENT top-up that is reversed comes off the cash the agent holds for the
+        # platform (plan step 9): the agent hands it back to the client. The agent's
+        # profile is locked BEFORE the money moves, in the order a top-up takes the same
+        # rows (profile, then user row and wallets), and the entry is written in the same
+        # transaction as the reversal.
+        from . import agents
+
+        agent_profile = agents.profile_of_topup(original)
         try:
-            tx = move_funds_atomic(
-                original.destination_wallet, original.source_wallet, original.amount,
-                actor_id=request.user.id, tx_type="reversal",
-                # The kind of money that is going back is the kind that came.
-                money_type=original.money_type,
-                metadata={"original_reference": original.reference_id,
-                          "reason": serializer.validated_data.get("reason", "")},
-                reverses=original)
+            with transaction.atomic():
+                if agent_profile is not None:
+                    agent_profile = agents.lock_profile(agent_profile)
+                tx = move_funds_atomic(
+                    original.destination_wallet, original.source_wallet, original.amount,
+                    actor_id=request.user.id, tx_type="reversal",
+                    # The kind of money that is going back is the kind that came.
+                    money_type=original.money_type,
+                    metadata={"original_reference": original.reference_id,
+                              "reason": serializer.validated_data.get("reason", "")},
+                    reverses=original)
+                if agent_profile is not None:
+                    agents.post_reversal(agent_profile, tx)
         except AlreadyReversed:
             # The other caller won the lock. No money moved here.
             idempotency.release(idem)
@@ -986,24 +1067,54 @@ class AdminReversalView(APIView):
         return Response(resp, status=status.HTTP_200_OK)
 
 
+def _device_name(request) -> str:
+    """The optional `device_name` a pairing call may carry ("Samsung A54"), trimmed to
+    what the column holds. A label, never checked against anything."""
+    value = body_dict(request).get("device_name")
+    return str(value).strip()[:80] if isinstance(value, (str, int, float)) else ""
+
+
+def _mint_key(agent_profile, device_name=""):
+    """A new active key for `agent_profile`: `(row, secret)`. The caller holds the
+    profile lock and has deactivated any other active key. Pairing again lifts a revoke
+    (`key_revoked_at`): top-ups resume with the new key."""
+    import hashlib
+
+    key_id = uuid.uuid4().hex[:16]
+    # High-entropy secret (64 hex chars = 256 bits).
+    secret = uuid.uuid4().hex + uuid.uuid4().hex
+    # Non-signing lookup/compat digest; the raw secret is stored encrypted (Fernet).
+    hashed_key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    row = AgentAPIKey.objects.create(
+        agent=agent_profile, key_id=key_id, hashed_key=hashed_key,
+        secret_ciphertext=encrypt_secret(secret), is_active=True, device_name=device_name)
+    if agent_profile.key_revoked_at is not None:
+        AgentProfile.objects.filter(pk=agent_profile.pk).update(key_revoked_at=None)
+        agent_profile.key_revoked_at = None
+    return row, secret
+
+
 class AgentApiKeyCreateView(APIView):
+    """`POST /api/wallet/agent/apikey/create/` — pair (or re-pair) this device: a NEW
+    signing key, the old one deactivated (AgentKey «جدّد المفتاح»).
+
+    Body (optional): `device_name` — the device, as AgentKey shows it ("Samsung A54").
+
+    201 `{key_id, secret, fingerprint, device_name, paired_at}`. `secret` is shown ONCE
+    and never stored in plaintext (Fernet at rest). `fingerprint` is "7F3A · 91C2 ·
+    0B4E" (the first twelve hex characters of `key_id`), `paired_at` ISO 8601. Creating
+    a key after `revoke/` lets top-ups resume.
+
+    Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
+    Identical on every build.
+    """
     permission_classes = [IsAuthenticated, IsAgent]
 
     def post(self, request):
-        """
-        Allows an authenticated agent to create a new API key.
-        Returns key_id and secret (shown ONCE — never stored in plaintext).
-        The SHA-256 hash of the secret is stored in DB for HMAC verification.
+        from . import agents
 
-        Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
-        """
-        import hashlib
         agent_profile = ensure_agent_profile(request.user)
-        key_id = uuid.uuid4().hex[:16]
-        # Generate high-entropy secret (64 hex chars = 256 bits)
-        secret = uuid.uuid4().hex + uuid.uuid4().hex
-        # Non-signing lookup/compat digest; the raw secret is stored encrypted (Fernet).
-        hashed_key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+        device_name = _device_name(request)
 
         # Deactivate, then create, ATOMICALLY and under the agent's own row lock. The
         # "single active key policy" this comment describes was enforced by nothing: an
@@ -1012,78 +1123,138 @@ class AgentApiKeyCreateView(APIView):
         # then held two valid signing credentials, and revoking the one they knew about
         # left the other live. A partial unique index now makes the database say it too.
         with transaction.atomic():
-            AgentProfile.objects.select_for_update().filter(pk=agent_profile.pk).first()
+            agent_profile = agents.lock_profile(agent_profile)
             prev_ids = list(AgentAPIKey.objects.filter(
                 agent=agent_profile, is_active=True).values_list("key_id", flat=True))
             if prev_ids:
                 AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).update(
                     is_active=False)
-
-            AgentAPIKey.objects.create(
-                agent=agent_profile, key_id=key_id, hashed_key=hashed_key,
-                secret_ciphertext=encrypt_secret(secret), is_active=True,
-            )
+            row, secret = _mint_key(agent_profile, device_name)
         if prev_ids:
             audit("wallet.agent.apikey.rotated", request, {"deactivated": prev_ids})
-        audit("wallet.agent.apikey.create", request, {"key_id": key_id})
+        audit("wallet.agent.apikey.create", request, {"key_id": row.key_id})
         # Return secret ONCE — client must store it securely
-        return Response({"key_id": key_id, "secret": secret}, status=status.HTTP_201_CREATED)
+        body = agents.key_body(row)
+        body.pop("last_signature_at")
+        return Response({**body, "secret": secret}, status=status.HTTP_201_CREATED)
 
 
 class AgentApiKeyStatusView(APIView):
-    """Returns whether the authenticated agent has at least one active API key.
+    """`GET /api/wallet/agent/apikey/status/` — the pairing AgentKey draws.
 
-    Does not expose secrets. Useful for onboarding flow in mobile app.
+    200 `{has_active, key_id, fingerprint, device_name, paired_at, last_signature_at,
+    revoked_at, topups_stopped}` (all but `has_active` since BACKEND_BUGS B-117,
+    additive). The key fields describe the ACTIVE key and are null when there is none:
+    `fingerprint` "7F3A · 91C2 · 0B4E", `device_name` as the app sent it when pairing,
+    `paired_at` when the key was made, `last_signature_at` when it last signed a top-up
+    (the signed endpoint, or the app's own top-up, which the server signs with it).
+    `revoked_at` is when the agent revoked without a replacement (null once a new key is
+    paired); `topups_stopped` is true while that stops top-ups (`403 agent_key_revoked`).
+    Never a secret.
 
     Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
+    Identical on every build.
     """
     permission_classes = [IsAuthenticated, IsAgent]
 
     def get(self, request):
+        from . import agents
+
         agent_profile = ensure_agent_profile(request.user)
-        has_active = AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).exists()
-        return Response({"has_active": has_active})
+        key = agents.active_key(agent_profile)
+        return Response({"has_active": key is not None, **agents.key_body(key),
+                         "revoked_at": (agent_profile.key_revoked_at.isoformat()
+                                        if agent_profile.key_revoked_at else None),
+                         "topups_stopped": agents.key_revoked(agent_profile)})
 
 
 class AgentApiKeyEnsureView(APIView):
-    """Ensures the authenticated agent has an active API key.
+    """`POST /api/wallet/agent/apikey/ensure/` — make sure the agent has an active key.
 
-    If none exists, creates one and returns key_id (not secret). If exists, returns the current active key_id.
+    Body (optional): `device_name`, recorded on a key that has none yet.
+
+    201 `{created: true, key_id, fingerprint, device_name, paired_at}` when it made one
+    (the secret stays server-side, encrypted, for the app's top-ups the server signs);
+    200 `{created: false, key_id, fingerprint, device_name, paired_at}` naming the
+    current active key otherwise. `key_id` and `fingerprint` since BACKEND_BUGS B-116:
+    the docstring promised `key_id` and the code answered only `created`. Making a key
+    after `revoke/` lets top-ups resume.
 
     Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
+    Identical on every build.
     """
     permission_classes = [IsAuthenticated, IsAgent]
 
     def post(self, request):
-        import hashlib
+        from . import agents
+
         agent_profile = ensure_agent_profile(request.user)
-        # `-created_at, -id`: which key counts as current must not depend on
-        # which row Postgres happens to return when two share a timestamp.
-        api_key = AgentAPIKey.objects.filter(
-            agent=agent_profile, is_active=True).order_by("-created_at", "-id").first()
-        if api_key:
-            return Response({"created": False})
-        # Create without returning secret (kept server-side only, encrypted at rest)
-        key_id = uuid.uuid4().hex[:16]
-        secret = uuid.uuid4().hex + uuid.uuid4().hex
-        hashed_key = hashlib.sha256(secret.encode("utf-8")).hexdigest()
-        AgentAPIKey.objects.create(
-            agent=agent_profile, key_id=key_id, hashed_key=hashed_key,
-            secret_ciphertext=encrypt_secret(secret), is_active=True,
-        )
-        audit("wallet.agent.apikey.ensure", request, {"key_id": key_id})
-        return Response({"created": True}, status=status.HTTP_201_CREATED)
+        device_name = _device_name(request)
+        # Under the profile lock, so two first calls cannot both create (the partial
+        # unique index would turn the loser into a 500).
+        with transaction.atomic():
+            agent_profile = agents.lock_profile(agent_profile)
+            api_key = agents.active_key(agent_profile)
+            created = api_key is None
+            if created:
+                api_key, _secret = _mint_key(agent_profile, device_name)
+            elif device_name and not api_key.device_name:
+                AgentAPIKey.objects.filter(pk=api_key.pk).update(device_name=device_name)
+                api_key.device_name = device_name
+        body = agents.key_body(api_key)
+        body.pop("last_signature_at")
+        if created:
+            audit("wallet.agent.apikey.ensure", request, {"key_id": api_key.key_id})
+            return Response({"created": True, **body}, status=status.HTTP_201_CREATED)
+        return Response({"created": False, **body})
+
+
+class AgentApiKeyRevokeView(APIView):
+    """`POST /api/wallet/agent/apikey/revoke/` — AgentKey «أبطل المفتاح وأوقف الشحن»:
+    revoke the signing key WITHOUT a replacement, and stop top-ups (BACKEND_BUGS B-117).
+
+    No body. Every active key of the agent is deactivated (the signed endpoint then
+    answers `401 agent_auth_invalid` for it) and the app's own top-ups answer `403
+    agent_key_revoked` until a new key is paired with `create/` or `ensure/`. For a lost
+    or stolen phone: whoever holds it can no longer top up in the agent's name. Revoking
+    again changes nothing but the time.
+
+    200 `{has_active: false, revoked_at, revoked_key_ids}`.
+
+    Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
+    Identical on every build.
+    """
+    permission_classes = [IsAuthenticated, IsAgent]
+
+    def post(self, request):
+        from . import agents
+
+        agent_profile = ensure_agent_profile(request.user)
+        now = timezone.now()
+        with transaction.atomic():
+            agent_profile = agents.lock_profile(agent_profile)
+            revoked = list(AgentAPIKey.objects.filter(
+                agent=agent_profile, is_active=True).values_list("key_id", flat=True))
+            AgentAPIKey.objects.filter(agent=agent_profile, is_active=True).update(
+                is_active=False)
+            AgentProfile.objects.filter(pk=agent_profile.pk).update(key_revoked_at=now)
+        audit("wallet.agent.apikey.revoked", request, {"deactivated": revoked})
+        return Response({"has_active": False, "revoked_at": now.isoformat(),
+                         "revoked_key_ids": revoked})
+
 
 class AgentTopUpProxyView(APIView):
-    """Server-side signing proxy for agent top-ups.
-
-    Mobile calls this endpoint with JWT; the server signs using the stored secret and executes the top-up flow directly.
+    """`POST /api/wallet/agent/topup/proxy/` — the agent APP's top-up (AgentTopUp): JWT
+    only; the server signs with the agent's stored key and runs the top-up flow.
 
     Body: `client_identifier`, `amount`, `currency` ("SYP" | "USD" — the currency of the
     CASH the agent took, required), `idempotency_key`. Headers: `X-App-Channel`.
 
-    200 `{reference_id, balance, currency}`. Refusals (branch on `code`) — the same
-    rules as `AgentTopUpView`, less the signature:
+    200 `{reference_id, balance, currency, receipt_number, remaining_today}` (the last
+    two since plan step 9: the receipt's number, and what is left of today's cap in this
+    currency). A replay of a finished request with the same `idempotency_key` and body
+    answers the same 200 again, before any cap is read. Refusals (branch on `code`) —
+    the same rules as `AgentTopUpView`, less the signature:
 
     | Status | `code` | Meaning |
     |---|---|---|
@@ -1092,17 +1263,26 @@ class AgentTopUpProxyView(APIView):
     | 400 | `validation_error` | a body field is missing or malformed; a missing or unknown `currency` is `field_errors.currency` |
     | 403 | `agents_only` | the caller is not an agent |
     | 403 | `agent_not_active` | the agent's profile is suspended |
-    | 404 | `not_found` | `client_identifier` names nobody |
+    | 403 | `agent_key_revoked` | the agent revoked their signing key (`apikey/revoke/`) and has not paired a new one; `apikey/create/` or `ensure/` lifts it |
+    | 404 | `not_found` | `client_identifier` names nobody — or a suspended or erased account, which answers exactly as a missing one (BACKEND_BUGS B-118) |
     | 400 | `target_not_a_client` | it names an account that is not a client |
     | 409 | `currency_mismatch` | the client trades in the other currency; `client_currency` and `topup_currency` say which |
+    | 429 | `per_transaction_limit_exceeded` | more than one top-up may be in that currency |
     | 429 | `daily_limit_exceeded` / `monthly_limit_exceeded` | the agent's cap FOR THAT CURRENCY |
+    | 429 | `receivable_ceiling_exceeded` | the cash the agent holds for the platform, unsettled, would pass their ceiling; an operator's settlement lifts it |
     | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running |
     | 422 | `idempotency_key_reused` | the key was used for a different request |
     | 429 | `throttled` | the rate limiter (`Retry-After`) |
 
-    `agents_only`, `agent_not_active`, `target_not_a_client`, the two cap codes and the
-    two idempotency codes answered only their status defaults until the owner's
-    decision of 2026-09-24.
+    The four cap refusals also carry `limit`, `used` (null for the per-top-up cap),
+    `remaining` and `currency` (BACKEND_BUGS B-124): the cap, what is used against it,
+    what is left, in which currency. `agents_only`, `agent_not_active`,
+    `target_not_a_client`, the two older cap codes and the two idempotency codes answered
+    only their status defaults until the owner's decision of 2026-09-24.
+
+    A top-up posts the cash to the agent's receivable, stamps the active key's
+    `last_signature_at`, and pushes the client `wallet_topped_up` (API_CONTRACT §4).
+    WALLET_MOVE: `require_purchase_allowed` decides by build, and every build allows it.
     """
     permission_classes = [IsAuthenticated, IsAgent]
     throttle_classes = [ChargingRateThrottle]
@@ -1119,8 +1299,8 @@ class AgentTopUpProxyView(APIView):
         # flow, by design: the signing secret stays server-side and is never placed
         # on the device. No client-supplied HMAC is involved here (previously this
         # endpoint self-signed a request and never verified it — that dead code is
-        # removed). Security rests on JWT auth, agent status, the fail-closed
-        # top-up caps, and idempotency.
+        # removed). Security rests on JWT auth, agent status, the revoke switch, the
+        # fail-closed top-up caps and ceiling, and idempotency.
         agent_profile = ensure_agent_profile(request.user)
 
         client_identifier = serializer.validated_data["client_identifier"]
@@ -1141,41 +1321,218 @@ class AgentTopUpProxyView(APIView):
         # Same serialization as the signed endpoint. This path needs only a JWT, so it
         # is the easier of the two to race: an agent's own app can fire ten parallel
         # requests with no signing at all.
-        with transaction.atomic():
-            agent_profile = _lock_agent_profile(agent_profile)
-            if agent_profile.status != "active":
-                return Response({"error": _("Agent not active"), "code": "agent_not_active"},
-                                status=status.HTTP_403_FORBIDDEN)
+        return _perform_topup(request, agent_profile, client=client, amount=amount,
+                              currency=currency, idem_key=idempotency_key)
 
-            limit_error = _topup_limit_error(agent_profile, request.user, amount, request,
-                                             currency)
-            if limit_error:
-                return limit_error
 
-            # --- Reserve idempotency key only after validation passes ---
-            try:
-                idem, replay = idempotency.reserve(
-                    request.user, idempotency_key,
-                    idempotency.fingerprint(op="topup", client=client.id, amount=amount,
-                                            currency=currency),
-                )
-            except idempotency.IdempotencyConflict as exc:
-                return _idempotency_conflict(exc)
-            if replay is not None:
-                audit("wallet.topup.idempotent_hit", request, {"key": idempotency_key})
-                return Response(replay, status=status.HTTP_200_OK)
+# ----------------------------------------------------------------------------------
+# The agent's own reads (plan step 9; BACKEND_BUGS B-113, B-114). Records of money that
+# already moved and the agent's own caps: no price, nothing to buy, so no channel header
+# and identical on every build.
+# ----------------------------------------------------------------------------------
 
-            client_wallet = wallet_for(client, "client")   # see AgentTopUpView
-            tx = move_funds_atomic(None, client_wallet, amount, actor_id=request.user.id, tx_type="topup",
-                                   currency=currency,
-                                   money_type=MoneyType.WALLET_MOVE, metadata={"agent_id": request.user.id})
-            client_wallet.refresh_from_db()
-            resp = {"reference_id": tx.reference_id, "balance": str(client_wallet.balance),
-                    "currency": tx.currency}
-            idempotency.complete(idem, resp)
+class AgentMeView(APIView):
+    """`GET /api/wallet/agent/me/` — the agent's own account (AgentHome, AgentHistory's
+    «حدودك», AgentMe; BACKEND_BUGS B-113).
 
-        audit("wallet.topup.success", request, {"reference_id": tx.reference_id, "client_id": client.id, "amount": float(amount), "currency": currency})
-        return Response(resp, status=status.HTTP_200_OK)
+    Headers: `Authorization: Bearer <access>`. No body, no query.
+
+    200:
+
+        {user_id,
+         profile: {display_name, city, area, opening_hours, public_phone, status,
+                   is_listed},
+         status, can_top_up, blocked_reason, next_settlement_on,
+         currencies: {"SYP": {...}, "USD": {...}}}
+
+    `status` is the account's (`active`, `suspended`, `banned`). `can_top_up` is false
+    and `blocked_reason` names the code a top-up would be refused with when the ACCOUNT
+    stops it: `agent_not_active`, or `agent_key_revoked` (revoked, no new key yet); null
+    otherwise. `next_settlement_on` (YYYY-MM-DD) is the next settlement as an operator
+    set it in the console, while it is today or later — NOTHING SCHEDULES SETTLEMENTS,
+    so it is null unless a person wrote one; the app shows no date then.
+
+    One object per currency the platform trades in, every amount a string in that
+    currency: `per_transaction_limit` (null: none of its own), `daily_limit`,
+    `monthly_limit`, `used_today`, `used_this_month`, `count_today`,
+    `count_this_month` (top-ups), `remaining_today`, `remaining_this_month`,
+    `receivable` (cash the agent holds for the platform, unsettled), `receivable_ceiling`
+    (past it top-ups stop; the monthly cap when none is set), `receivable_room`,
+    `max_topup` (the largest top-up allowed right now; `0.00` when anything stops it),
+    `blocked_reason` (the code even the smallest top-up in this currency would get:
+    the account's, or `per_transaction_limit_exceeded`, `daily_limit_exceeded`,
+    `monthly_limit_exceeded`, `receivable_ceiling_exceeded`; null when one could go
+    through), `last_settlement` (`{number, amount, currency, receivable_before,
+    receivable_after, note, settled_at}` or null). The counts are the same rows the caps
+    count, so this never disagrees with a refusal. A currency with a `0` daily cap (no
+    dollar caps are set by default) reads `blocked_reason: daily_limit_exceeded`.
+
+    Refusals: 401 `not_authenticated` / `token_not_valid`; 403 `agents_only` (not an
+    agent — the code every agent route answers).
+    """
+    permission_classes = [IsAuthenticated, IsAgent]
+
+    def get(self, request):
+        from . import agents
+
+        profile = ensure_agent_profile(request.user)
+        return Response(agents.account_body(profile))
+
+
+#: The `kind` values of the agent's ledger.
+AGENT_LEDGER_KINDS = ("topup", "settlement", "reversal")
+
+
+def _agent_ledger_filters(params):
+    """`(since, until, kinds, currencies)` from the query, or `LedgerFilterRefused`.
+
+    The rules of `wallet.ledger_reads` (inclusive `YYYY-MM-DD` days in the server's
+    zone; repeat a parameter or separate values with commas; several mean any)."""
+    from .currencies import CURRENCY_CODES
+    from .ledger_reads import LedgerFilterRefused, _date, _values
+
+    since, until = _date(params, "since"), _date(params, "until")
+    if since is not None and until is not None and since > until:
+        raise LedgerFilterRefused("date_range_reversed", _("since must not be after until."))
+    kinds = _values(params, "kind")
+    for value in kinds:
+        if value not in AGENT_LEDGER_KINDS:
+            raise LedgerFilterRefused("bad_kind", _("That kind of activity is unknown."),
+                                      kind_options=list(AGENT_LEDGER_KINDS))
+    currencies = [value.upper() for value in _values(params, "currency")]
+    for value in currencies:
+        if value not in CURRENCY_CODES:
+            raise LedgerFilterRefused("currency_unsupported",
+                                      _("That currency is not available."),
+                                      currency_options=list(CURRENCY_CODES))
+    return since, until, kinds, currencies
+
+
+class AgentLedgerView(generics.ListAPIView):
+    """`GET /api/wallet/agent/ledger/` — the agent's own ledger: the top-ups it made,
+    the settlements recorded against the cash it holds, and any top-up reversed
+    (AgentHistory «حركات أيلول»; BACKEND_BUGS B-114). Newest first, in a total order.
+
+    A top-up is written to the CLIENT's wallet, so `wallet/transactions/` (the caller's
+    own wallet) never showed an agent its own work; this reads the agent's
+    `agent_receivable` account instead, where every one of them is posted.
+
+    Headers: `Authorization: Bearer <access>`. Query, all optional and ANDed:
+    `since=YYYY-MM-DD`, `until=YYYY-MM-DD` (inclusive, server's zone), `kind=`
+    (`topup`, `settlement`, `reversal`), `currency=` (`SYP`, `USD`); `?page=`,
+    `?page_size=` (§3).
+
+    200 `{count, next, previous, results}`, each row `{id, kind, amount, currency,
+    receivable_after, created_at, reference_id, receipt_number, client, settlement}`:
+    `amount` SIGNED — `+` a top-up (cash the agent now holds for the platform), `-` a
+    settlement or a reversed top-up; `receivable_after` the cash held after the row;
+    `reference_id` the ledger reference of a top-up or reversal (null for a settlement);
+    `receipt_number` "TP-2026-09-23-0091" on a top-up (null otherwise); `client` `{id,
+    name, account_number}` on a top-up or reversal (null on a settlement); `settlement`
+    `{number, amount, currency, receivable_before, receivable_after, note, settled_at}`
+    on a settlement (null otherwise).
+
+    Refusals: 400 `bad_date` (+ `field`), `date_range_reversed`, `bad_kind`
+    (+ `kind_options`), `currency_unsupported` (+ `currency_options`; the code
+    `wallet/currency/` answers for the same fact); 401; 403 `agents_only`.
+    """
+    permission_classes = [IsAuthenticated, IsAgent]
+
+    def get_serializer_class(self):
+        from .serializers import AgentLedgerEntrySerializer
+
+        return AgentLedgerEntrySerializer
+
+    def get_queryset(self):
+        from .ledger_reads import start_of
+        from .models import AgentReceivableEntry
+
+        profile = ensure_agent_profile(self.request.user)
+        rows = (AgentReceivableEntry.objects.filter(agent=profile)
+                .select_related("transaction__destination_wallet__owner",
+                                "transaction__source_wallet__owner", "settlement")
+                .order_by("-created_at", "-id"))
+        since, until, kinds, currencies = getattr(self, "_filters", (None, None, [], []))
+        if since is not None:
+            rows = rows.filter(created_at__gte=start_of(since))
+        if until is not None:
+            rows = rows.filter(created_at__lt=start_of(until + datetime.timedelta(days=1)))
+        if kinds:
+            rows = rows.filter(kind__in=kinds)
+        if currencies:
+            rows = rows.filter(currency__in=currencies)
+        return rows
+
+    def list(self, request, *args, **kwargs):
+        from .ledger_reads import LedgerFilterRefused
+
+        try:
+            self._filters = _agent_ledger_filters(request.query_params)
+        except LedgerFilterRefused as exc:
+            return _ledger_filter_refused(exc)
+        return super().list(request, *args, **kwargs)
+
+
+class AgentSettlementListView(generics.ListAPIView):
+    """`GET /api/wallet/agent/settlements/` — the settlements an operator recorded
+    against the cash this agent held for the platform (AgentMe «التسويات مع المنصة»;
+    BACKEND_BUGS B-114). Newest first, in a total order; `?page=`, `?page_size=`.
+
+    Each row `{number, amount, currency, receivable_before, receivable_after, note,
+    settled_at}`: "ST-2026-09-19-0007", what was handed over, the cash held before and
+    after, the operator's note, and when. The same settlements appear as `settlement`
+    rows of `agent/ledger/`.
+
+    Refusals: 401; 403 `agents_only`.
+    """
+    permission_classes = [IsAuthenticated, IsAgent]
+
+    def get_serializer_class(self):
+        from .serializers import AgentSettlementSerializer
+
+        return AgentSettlementSerializer
+
+    def get_queryset(self):
+        from .models import AgentSettlement
+
+        profile = ensure_agent_profile(self.request.user)
+        return AgentSettlement.objects.filter(agent=profile).order_by("-created_at", "-id")
+
+
+class AgentReceiptView(APIView):
+    """`GET /api/wallet/agent/receipts/{reference_id}/` — the receipt of one top-up THIS
+    agent made (AgentReceipt; BACKEND_BUGS B-114), by the ledger reference its top-up
+    answered.
+
+    200 `{receipt_number, reference_id, amount, currency, created_at, client, agent,
+    remaining_today, client_notified, reversed}`: `receipt_number` "TP-2026-09-23-0091";
+    `client` `{id, name, account_number}` (who was credited — never their balance);
+    `agent` `{id, name, city, area}` (the shop, «مكتب الفرات · المزة»);
+    `remaining_today` what is left of today's cap in the receipt's currency NOW;
+    `client_notified` whether the client's `wallet_topped_up` notice was written
+    («ووصله إشعار»; BACKEND_BUGS B-115) — false until the worker has run; `reversed`
+    whether support has since reversed the top-up.
+
+    Refusals: 404 `not_found` — a reference that is not a top-up this agent made,
+    byte-identical to one that does not exist (another agent's receipt is never shown);
+    401; 403 `agents_only`.
+    """
+    permission_classes = [IsAuthenticated, IsAgent]
+
+    def get(self, request, reference_id):
+        from . import agents
+        from .models import AgentReceivableEntry
+
+        profile = ensure_agent_profile(request.user)
+        entry = (AgentReceivableEntry.objects
+                 .select_related("agent__user", "transaction__destination_wallet__owner")
+                 .filter(agent=profile, kind="topup",
+                         transaction__reference_id=reference_id).first())
+        if entry is None:
+            return Response({"error": _("No such transaction"), "code": "not_found"},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response(agents.receipt_body(entry))
+
 
 class AdminAuditExportView(APIView):
     """`GET /api/wallet/admin/audit/export/?start=&end=&agent_id=&user_id=&verify=1`.

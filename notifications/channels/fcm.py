@@ -69,6 +69,9 @@ EVENT_CLASS_REGISTRY = {
     'routine_product_purchased': 'notifications.domain.product_events.RoutineProductPurchasedEvent',
     'routine_product_refunded': 'notifications.domain.product_events.RoutineProductRefundedEvent',
     'routine_product_sale_refunded': 'notifications.domain.product_events.RoutineProductSaleRefundedEvent',
+    # An agent credited a client's wallet with cash (wallet/views.py, both top-up
+    # endpoints; BACKEND_BUGS B-115).
+    'wallet_topped_up': 'notifications.domain.wallet_events.WalletToppedUpEvent',
     # Trainer-client chat (chat/events.py). One nudge until the thread is opened.
     'chat_message': 'notifications.domain.chat_events.ChatMessageEvent',
     # Progress (routine/strength.py, routine/tasks.py). Fact-only, no claims.
