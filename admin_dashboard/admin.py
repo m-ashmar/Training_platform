@@ -834,6 +834,40 @@ from payouts.models import Withdrawal, WithdrawalQueueEntry  # noqa: E402
 admin_site.register(WithdrawalQueueEntry, WithdrawalQueueAdmin)
 admin_site.register(Withdrawal, WithdrawalAdmin)
 
+# Console sign-ins from the operator's phone (B-120, admin_dashboard/console_login.py):
+# the audit trail — who made each link, which computer opened it, when it was approved
+# and used, or why not. Read-only, operators only; nothing here signs anyone in.
+from .models import ConsoleLogin  # noqa: E402
+from .operators import is_console_operator  # noqa: E402
+
+
+class ConsoleLoginAdmin(admin.ModelAdmin):
+    list_select_related = ('user',)
+    list_display = ('created_at', 'user', 'state', 'cancel_reason', 'claimed_ip',
+                    'approved_at', 'used_at')
+    list_filter = ('state', 'cancel_reason')
+    search_fields = ('user__email', 'user__username')
+    ordering = ('-created_at', '-id')
+    exclude = ('token_digest', 'browser_digest', 'match_code')
+
+    def has_module_permission(self, request):
+        return is_console_operator(request.user)
+
+    def has_view_permission(self, request, obj=None):
+        return is_console_operator(request.user)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+admin_site.register(ConsoleLogin, ConsoleLoginAdmin)
+
 admin_site.register(UserActivity, UserActivityAdmin)
 admin_site.register(PerformanceMetric, PerformanceMetricAdmin)
 admin_site.register(UserSession)

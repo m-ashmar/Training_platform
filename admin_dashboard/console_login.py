@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import secrets
 from datetime import timedelta
 
@@ -101,7 +102,8 @@ def seconds_left(ticket, now=None) -> int:
     now = now or timezone.now()
     if state_of(ticket, now) not in ConsoleLogin.LIVE:
         return 0
-    return max(0, int((ticket.expires_at - now).total_seconds()))
+    # Rounded UP: a link made this instant has all of its 120 seconds left, not 119.
+    return max(0, math.ceil((ticket.expires_at - now).total_seconds()))
 
 
 def _cancel(ticket, reason, now):

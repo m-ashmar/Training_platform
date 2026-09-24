@@ -487,6 +487,15 @@ What wiring the trainer shell found (BACKEND_BUGS B-089, B-093, 2026-09-24; addi
 `not_found` for no such trainer and for a `trainer_id` that is not a number, and both
 unassign routes answer 409 `refund_failed` when a held month cannot be returned.
 
+**`user/details/` names the role** (BACKEND_BUGS B-121, 2026-09-24; additive). The answer
+gains `user_type` (`client` | `trainer` | `agent` | `admin`) and `media` — the person's
+media map in the trainer cards' shape, `{slot: {url_1x, url_2x, blur, focal, brightness,
+alt_ar, alt_en}}`: a trainer's filled kit slots, `{}` for every other role.
+`profile_picture` stays a string or null and is now ABSOLUTE, as every other endpoint
+answers a person's picture (it was the bare `/media/...` path). The view's docstring is
+its contract: `Authorization: Bearer`, the fields, 401 `not_authenticated` /
+`token_not_valid`.
+
 ### Chat
 
 Messages between a trainer and the client they coach: text, and (B-091, 2026-09-24) a
@@ -1023,6 +1032,57 @@ every other row. Two new `kind`s: `withdrawal` (out, to payout clearing) and
 Pushes (§4): `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed`. The spec's
 table also lists email for these; there is no email notification channel in this
 codebase, so none is sent.
+
+### The operator's phone (BACKEND_BUGS B-119, B-120)
+
+`16-agent-operator/OperatorPhone`: what is waiting in the console, and a link that opens
+the console on a computer. Everything else operators do stays on the web console
+(`/dj-admin/`). Console operators only — an active staff account that is a superuser or
+has `user_type` `admin`, exactly who the console's queue pages let in; anyone else is
+403 `admins_only`. The views' docstrings (`admin_dashboard/ops_api.py`) are the full
+contract. Identical on every build. New: one table (`admin_dashboard/0001`,
+`ConsoleLogin`), two settings (`OPS_QR_LOGIN_ENABLED`, `OPS_CONSOLE_BASE_URL`).
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/ops/queue-counts/` | auth (console operator) | `QueueCountsView` |
+| `POST` | `/api/v1/ops/console-login/` | auth (console operator) | `ConsoleLoginView` |
+| `GET` | `/api/v1/ops/console-login/{id}/` | auth (console operator) | `ConsoleLoginDetailView` |
+| `POST` | `/api/v1/ops/console-login/{id}/approve/` | auth (console operator) | `ConsoleLoginApproveView` |
+| `POST` | `/api/v1/ops/console-login/{id}/cancel/` | auth (console operator) | `ConsoleLoginCancelView` |
+
+**The four queues** (B-119). `queue-counts/` answers `{queues, total, console_url}`;
+`queues` is four `{key, count, console_url}` in the design's order: `transfer_reviews`
+(open transfer reviews, «دفعات بانتظار المطابقة»), `trainer_verifications` (applications
+`pending`), `community_reports` (reports `open` or `reviewing`), `withdrawals`
+(`requested`, `approved` or `sent`). `console_url` is the absolute url of that queue's
+console page (`OPS_CONSOLE_BASE_URL` when set, else this server's host). One COUNT per
+queue; live, not cached.
+
+**Signing in to the console from the phone** (B-120). **Off until the owner switches
+`OPS_QR_LOGIN_ENABLED` on**: while off, all four `console-login` routes answer 403
+`console_login_disabled` and write nothing. The design draws the QR on the phone, so the
+phone makes the link — and the link alone signs nobody in:
+
+1. `POST console-login/` → 201 `{id, state: "issued", url, expires_at, expires_in: 120,
+   …}`. Draw `url` as the QR (or offer to mail it). Two minutes, one computer; the server
+   keeps only a hash of its secret; a new link cancels the caller's earlier one. 403
+   `email_not_verified` for an operator whose address the OTP flow never verified; 429
+   `throttled` past 5 links in 10 minutes (`retry_after_seconds`).
+2. A computer opens `url` (`/dj-admin/qr-login/…/`), presses Continue, and shows a
+   three-digit number. The link is then bound to that browser; no other can open it.
+3. The phone polls `GET console-login/{id}/` (every 2 s): `state` `issued` → `claimed`
+   (with `computer: {opened_at, user_agent}`). The operator types the number:
+   `POST …/approve/` `{"code": "472"}` → `approved`. 400 `console_login_code_required`,
+   400 `console_login_code_mismatch` (with `attempts_left`; the third wrong number
+   cancels the link), 409 `console_login_not_claimed`, 409 `console_login_closed`, 410
+   `console_login_expired`, 404 `console_login_not_found` (not the caller's).
+4. The computer signs itself in on its next check (a console session, once) and the
+   phone reads `used`. `POST …/cancel/` ("not my computer") → `cancelled`; 409
+   `console_login_closed` once `used`.
+
+States: `issued`, `claimed`, `approved`, `used`, `cancelled`, `expired`. The number is
+never in an API answer.
 
 ### Trainers (design v2)
 
@@ -2316,6 +2376,21 @@ value is a no-op). Both are refused with 403 `coaching_frozen` / `coaching_unpai
 delete recomputes what the set was counted in — the exercise's completed sets, the day's
 `RoutineProgress`, and a closed day's `DayOutcome` — so deleting a set can turn a
 complete day short and break a streak.
+
+**What wiring the review and the rest found** (BACKEND_BUGS B-122, B-123, 2026-09-24).
+Additive under §6: two keys on an existing answer and one refusal; no route, key or
+`code` changed. Prefix `/api/routine/`.
+
+- **A rest is never negative** (B-122). `rest_time` is a whole number of seconds, 0 or
+  more: a negative answers 400 `validation_error` with `field_errors.rest_time[0].code`
+  `rest_time_out_of_range` on `POST set-logs/` and `PATCH set-logs/{id}/`, and the row's
+  error `rest_time_out_of_range` on `set-logs/sync/` (one field, read by both routes).
+  No upper bound beyond the column's own: a measured rest is not capped.
+- **What a reviewed record beat** (B-123). Each `sets[]` row of
+  `workout-sessions/{id}/?expand=sets` gains `previous_best` — `{weight, reps, date}` of
+  the best the record beat, as stored on the set with the verdict (`routine/0029`), the
+  same value the logging answer gave; null when the set is not a record — and
+  `client_uuid`, the app's own key for the set (null for a set logged without one).
 
 **A progress row cannot be moved.** `PATCH user-exercise-progress/{id}/` answers 400
 `progress_immutable` on `exercise` or `date`, and `PATCH routine-progress/{id}/` answers
