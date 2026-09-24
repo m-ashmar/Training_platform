@@ -186,7 +186,9 @@ class UpdateUserDetailsView(APIView):
     `/api/auth/user/profile-picture/`), `phone_number` (the number given at registration,
     or null when none is on file; changed through support, BACKEND_BUGS B-053),
     `user_type`, `trainer_is_verified`, `is_active`, `onboarding_completed`,
-    `onboarding_missing` and `assigned_trainer`.
+    `onboarding_missing`, `assigned_trainer` and `verification_status` (a trainer's
+    `not_started` | `pending` | `rejected` | `verified`; null for anyone else — the
+    documents are at `GET /api/v1/trainer/verification/`).
     """
     serializer_class = UserDetailsSerializer
     permission_classes = [IsAuthenticated]
@@ -499,8 +501,10 @@ class ResendOTPView(APIView):
 class TrainerProfileView(APIView):
     """`/api/auth/trainer/profile/` — the signed-in trainer's own profile. Auth: Bearer JWT.
 
-    `GET` 200: the profile (`TrainerProfileSerializer`). `POST` (JSON or multipart, a
-    partial update of the writable fields) 200 `{message}`.
+    `GET` 200: the profile (`TrainerProfileSerializer`), including the read-only
+    `verification_status` (`not_started` | `pending` | `rejected` | `verified`; the
+    application itself is `GET /api/v1/trainer/verification/`). `POST` (JSON or
+    multipart, a partial update of the writable fields) 200 `{message}`.
 
     | status | `code` | when |
     |---|---|---|

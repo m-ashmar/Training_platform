@@ -4688,3 +4688,167 @@ msgstr "انتهى هذا التحدي: لم يعد بالإمكان تغيير 
 #: social/views.py
 msgid "The end of a challenge cannot be in the past. To end it now, close it."
 msgstr "لا يمكن أن يكون موعد انتهاء التحدي في الماضي. لإنهائه الآن، أغلقه."
+
+#: trainer_verification/slots.py
+msgid "Identity card, front"
+msgstr "الهوية الشخصية، الوجه الأمامي"
+
+#: trainer_verification/slots.py
+msgid "Identity card, back"
+msgstr "الهوية الشخصية، الوجه الخلفي"
+
+#: trainer_verification/slots.py
+msgid "Personal trainer certificate"
+msgstr "شهادة مدرب شخصي"
+
+#: trainer_verification/slots.py
+msgid "Sports nutrition certificate"
+msgstr "شهادة تغذية رياضية"
+
+#: trainer_verification/slots.py
+msgid "A recent photo of you"
+msgstr "صورة حديثة لك"
+
+#: trainer_verification/models.py
+msgid "Not started"
+msgstr "لم يبدأ"
+
+#: trainer_verification/models.py
+msgid "In review"
+msgstr "قيد المراجعة"
+
+#: trainer_verification/models.py
+msgid "Needs changes"
+msgstr "يحتاج إلى تعديل"
+
+#: trainer_verification/models.py
+msgid "Verified"
+msgstr "موثّق"
+
+#: trainer_verification/models.py
+msgid "Uploaded"
+msgstr "مرفوعة"
+
+#: trainer_verification/models.py
+msgid "Accepted"
+msgstr "مقبولة"
+
+#: trainer_verification/models.py
+msgid "Rejected"
+msgstr "مرفوض"
+
+#: trainer_verification/models.py
+msgid "Revoked"
+msgstr "أُلغي التوثيق"
+
+#: trainer_verification/models.py
+msgid "Say why, so the trainer can fix it."
+msgstr "اذكر السبب ليتمكن المدرب من التصحيح."
+
+#: trainer_verification/files.py
+msgid "Choose a file to upload."
+msgstr "اختر ملفاً لرفعه."
+
+#: trainer_verification/files.py
+#, python-format
+msgid "The file is too large. The most is %(mb)s MB."
+msgstr "الملف كبير جداً. الحد الأقصى %(mb)s ميغابايت."
+
+#: trainer_verification/files.py
+msgid "The file is empty."
+msgstr "الملف فارغ."
+
+#: trainer_verification/files.py
+msgid "HEIC photos cannot be read here. Send the photo as JPEG."
+msgstr "لا يمكن قراءة صور HEIC هنا. أرسل الصورة بصيغة JPEG."
+
+#: trainer_verification/files.py
+msgid "Upload a photo (JPEG, PNG or WebP) or a PDF."
+msgstr "ارفع صورة (JPEG أو PNG أو WebP) أو ملف PDF."
+
+#: trainer_verification/files.py
+msgid "Upload a photo (JPEG, PNG or WebP)."
+msgstr "ارفع صورة (JPEG أو PNG أو WebP)."
+
+#: trainer_verification/files.py
+msgid "This file could not be read. Try another photo or file."
+msgstr "تعذّرت قراءة هذا الملف. جرّب صورة أو ملفاً آخر."
+
+#: trainer_verification/files.py
+#, python-format
+msgid "This photo is too large to open. The most is %(px)s pixels on a side."
+msgstr "هذه الصورة كبيرة جداً ولا يمكن فتحها. الحد الأقصى %(px)s بكسل لكل ضلع."
+
+#: trainer_verification/files.py
+#, python-format
+msgid ""
+"This photo is too small to read. It needs at least %(px)s pixels on each "
+"side."
+msgstr ""
+"هذه الصورة صغيرة جداً ولا يمكن قراءتها. تحتاج إلى %(px)s بكسل على الأقل لكل "
+"ضلع."
+
+#: trainer_verification/files.py
+msgid "This PDF is protected with a password. Upload a copy without one."
+msgstr "ملف PDF هذا محميّ بكلمة مرور. ارفع نسخة من دونها."
+
+#: trainer_verification/files.py
+msgid ""
+"This PDF contains scripts or attachments. Upload a plain copy, or a photo of "
+"the certificate."
+msgstr ""
+"يحتوي ملف PDF هذا على نصوص برمجية أو مرفقات. ارفع نسخة عادية أو صورة للشهادة."
+
+#: trainer_verification/services.py
+msgid "There is no such document to upload."
+msgstr "لا يوجد مستند بهذا الاسم لرفعه."
+
+#: trainer_verification/services.py
+msgid "Your account is already verified."
+msgstr "حسابك موثّق بالفعل."
+
+#: trainer_verification/services.py
+msgid ""
+"Your documents are being reviewed. You can change them if we ask you to."
+msgstr "مستنداتك قيد المراجعة. يمكنك تعديلها إذا طلبنا منك ذلك."
+
+#: trainer_verification/services.py
+msgid "You already uploaded this same file for another document."
+msgstr "رفعتَ هذا الملف نفسه لمستند آخر."
+
+#: trainer_verification/services.py
+msgid "Your application is already being reviewed."
+msgstr "طلبك قيد المراجعة بالفعل."
+
+#: trainer_verification/services.py
+msgid "Upload every required document before you send the application."
+msgstr "ارفع كل المستندات المطلوبة قبل إرسال الطلب."
+
+#: trainer_verification/services.py
+msgid ""
+"Replace the documents we could not accept before you send the application "
+"again."
+msgstr "استبدل المستندات التي لم نقبلها قبل أن ترسل الطلب مجدداً."
+
+#: trainer_verification/views.py
+msgid "Only a trainer can be verified."
+msgstr "التوثيق متاح للمدربين فقط."
+
+#: notifications/domain/verification_events.py
+msgid "Your account is verified"
+msgstr "تمّ توثيق حسابك"
+
+#: notifications/domain/verification_events.py
+msgid ""
+"We accepted your documents. The verified trainer mark now shows next to your "
+"name."
+msgstr "قبلنا مستنداتك، وتظهر الآن علامة المدرب الموثّق بجانب اسمك."
+
+#: notifications/domain/verification_events.py
+msgid "Your verification needs changes"
+msgstr "طلب التوثيق يحتاج إلى تعديل"
+
+#: notifications/domain/verification_events.py
+#, python-format
+msgid "We could not verify your account: %(reason)s"
+msgstr "لم نتمكن من توثيق حسابك: %(reason)s"

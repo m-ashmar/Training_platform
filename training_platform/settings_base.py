@@ -71,6 +71,9 @@ INSTALLED_APPS = [
     "chat",
     # Reporting, blocking, the moderation queue and AI consent (moderation/models.py).
     "moderation",
+    # A trainer's verification: documents, review states, the console queue
+    # (trainer_verification/models.py).
+    "trainer_verification",
 
     # Third-party
     "rest_framework",
@@ -573,6 +576,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'training_platform.privacy.purge_expired_personal_data',
         'schedule': crontab(hour=3, minute=15),
     },
+    # A replaced identity document is kept 90 days for comparison at the next review,
+    # then deleted with its files (trainer_verification/services.py).
+    'purge-replaced-verification-documents': {
+        'task': 'trainer_verification.purge_replaced_documents',
+        'schedule': crontab(hour=3, minute=25),
+    },
     # Paid access has to be able to lapse. subscription.utils.expire_subscriptions
     # said "This should be run as a scheduled task" and never was, so 64 of 72 rows
     # marked 'active' were already past their end_date. Hourly rather than daily: the
@@ -1067,6 +1076,33 @@ QUARANTINE_LOCATION = get_env('QUARANTINE_LOCATION', 'quarantine').strip('/')
 # poster, the loop and one cue — which is the demonstration the designs ask for.
 MEDIA_TRAINER_EXERCISE_MAX_ASSETS = int(get_env('MEDIA_TRAINER_EXERCISE_MAX_ASSETS', 3))
 
+# Trainer verification documents (trainer_verification/). An identity card is the most
+# sensitive file the platform holds, so it has its own storage, below in STORAGES.
+#
+# PRIVATE_MEDIA_ROOT: the filesystem backend's root. OUTSIDE MEDIA_ROOT on purpose, so
+# the public media route (`/media/...`) can never reach a document; they are read only
+# through `/private-media/` with a signature that expires.
+PRIVATE_MEDIA_ROOT = get_env('PRIVATE_MEDIA_ROOT', str(BASE_DIR / 'private_media'))
+PRIVATE_MEDIA_URL = '/private-media/'
+# The bucket on GCS. Empty means the media bucket, under a `private/` prefix; production
+# refuses that combination when the media bucket serves public app content
+# (settings_production.enforce_production_safety), because a bucket-level public grant
+# would cover identity cards too.
+VERIFICATION_GS_BUCKET_NAME = get_env('VERIFICATION_GS_BUCKET_NAME', '')
+# How long one signed document URL lives, in seconds. Short: the app and the console ask
+# for a fresh one every time they draw the page.
+VERIFICATION_DOCUMENT_URL_TTL = int(get_env('VERIFICATION_DOCUMENT_URL_TTL', 300))
+# The largest document accepted (a phone photo of a card, or a certificate's PDF). Under
+# MAX_REQUEST_BODY_BYTES, so no route needs a larger body ceiling.
+VERIFICATION_DOCUMENT_MAX_BYTES = int(get_env('VERIFICATION_DOCUMENT_MAX_BYTES',
+                                              10 * 1024 * 1024))
+# A document the trainer replaced after an operator decided on it is kept this long for
+# comparison, then deleted with its files (trainer_verification.purge_replaced_documents).
+VERIFICATION_REPLACED_DOCUMENT_RETENTION_DAYS = int(get_env(
+    'VERIFICATION_REPLACED_DOCUMENT_RETENTION_DAYS', 90))
+# What the pending card promises ("usually within 3 business days").
+VERIFICATION_REVIEW_BUSINESS_DAYS = int(get_env('VERIFICATION_REVIEW_BUSINESS_DAYS', 3))
+
 STORAGES = {
     # Only signs when Django itself serves the files. With an external backend the
     # signature would be meaningless — that provider issues (and secures) its own URLs.
@@ -1076,6 +1112,14 @@ STORAGES = {
         else 'django.core.files.storage.FileSystemStorage'
         if USE_EXTERNAL_MEDIA_STORAGE
         else 'training_platform.media_storage.SignedMediaStorage'
+    )},
+    # Identity documents and certificates (trainer_verification/storage.py). NEVER the
+    # media storage above: a private root outside MEDIA_ROOT on the filesystem, a private
+    # prefix in VERIFICATION_GS_BUCKET_NAME on GCS, and five-minute signed URLs on both.
+    'verification_documents': {'BACKEND': (
+        'training_platform.gcs_storage.PrivateDocumentGoogleCloudStorage'
+        if MEDIA_BACKEND == 'gcs'
+        else 'trainer_verification.storage.PrivateDocumentStorage'
     )},
     # Compressed + hashed filenames, so static assets can be cached immutably and a
     # deploy cannot serve a stale mix of old and new files. The manifest is generated

@@ -363,6 +363,18 @@ def enforce_production_safety():
         _cred_problem = _gcs_key_problem(_cred_name)
         if _cred_problem:
             errors.append(_cred_problem)
+        # Identity documents (trainer_verification/). With uniform bucket-level access a
+        # public grant covers the WHOLE bucket, so a media bucket that serves the app's
+        # own pictures publicly would serve every trainer's identity card too. They need
+        # a bucket of their own in that configuration.
+        _docs_bucket = (globals().get("VERIFICATION_GS_BUCKET_NAME")
+                        or globals().get("GS_BUCKET_NAME"))
+        if (globals().get("MEDIA_PUBLIC_APP_CONTENT")
+                and _docs_bucket == globals().get("GS_BUCKET_NAME")):
+            errors.append(
+                "MEDIA_PUBLIC_APP_CONTENT makes the media bucket public, and trainer "
+                "identity documents would be stored in it — set "
+                "VERIFICATION_GS_BUCKET_NAME to a private bucket")
 
     # --- Field encryption key ---
     # Without it EncryptedTextField writes health data in plain text, and it does so

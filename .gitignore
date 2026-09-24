@@ -23,6 +23,8 @@ ENV/
 
 # Django/Logs/Runtime
 media/
+# Identity documents on the filesystem backend (trainer_verification/storage.py).
+private_media/
 *.log
 *.sqlite3
 

@@ -58,6 +58,33 @@ register(PersonalDataSource(
     fields=["owner_type", "owner_id", "slot", "alt_ar", "alt_en", "created_at"],
     on_erase="delete"))
 
+# A trainer's verification (trainer_verification/): identity cards, certificates, a
+# photo, and what operators decided about them. Deleted with the account, files included
+# — the rows go through `delete()`, and training_platform/signals.py removes each row's
+# files once the erasure commits. Documents first, so each source's count is its own.
+# While the account lives: current documents and decisions are kept (they are the
+# evidence the verification rests on); a REPLACED document is deleted 90 days after it
+# was replaced (`trainer_verification.purge_replaced_documents`, daily), and what was
+# decided about it survives in the decision's snapshot. The export lists the rows, not
+# the files and not the operator who decided.
+register(PersonalDataSource(
+    label="verification_documents", model="trainer_verification.VerificationDocument",
+    user_field="application__trainer",
+    fields=["id", "slot", "kind", "content_type", "size", "state", "rejection_reason",
+            "uploaded_at", "replaced_at", "purge_after"],
+    on_erase="delete"))
+register(PersonalDataSource(
+    label="verification_decisions", model="trainer_verification.VerificationDecision",
+    user_field="application__trainer",
+    fields=["id", "round", "outcome", "reason", "documents", "decided_at"],
+    on_erase="delete"))
+register(PersonalDataSource(
+    label="verification_application", model="trainer_verification.VerificationApplication",
+    user_field="trainer",
+    fields=["id", "state", "round", "submitted_at", "decided_at", "rejection_reason",
+            "created_at"],
+    on_erase="delete"))
+
 # --- training -----------------------------------------------------------------
 register(PersonalDataSource(label="workout_sessions", model="routine.WorkoutSession", user_field="user"))
 register(PersonalDataSource(label="exercise_progress", model="routine.UserExerciseProgress", user_field="user"))

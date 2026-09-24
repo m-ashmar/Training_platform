@@ -359,6 +359,10 @@ class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
     # a client echoing back the profile it read is not refused.
     phone_number = serializers.SerializerMethodField()
     onboarding_completed = serializers.BooleanField(source='is_onboarding_completed', read_only=True)
+    # The trainer's verification state (`trainer_verification`): `not_started`, `pending`,
+    # `rejected` or `verified`; null for anyone who is not a trainer. Read-only, additive:
+    # `trainer_is_verified` stays as it was.
+    verification_status = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomUser
@@ -381,6 +385,7 @@ class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
             'preferred_language',
             # The EditProfile "login details" group draws it with a lock (B-053).
             'phone_number',
+            'verification_status',
         ]
         # assigned_trainer is read-only here: trainer assignment must go through
         # the request/approval + wallet-escrow flow, never self-service update.
@@ -394,6 +399,12 @@ class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
                 return request.build_absolute_uri(url)
             return url
         return None
+
+    def get_verification_status(self, obj):
+        if not obj.is_trainer:
+            return None
+        from trainer_verification.services import status_for
+        return status_for(obj)
 
     def get_phone_number(self, obj):
         """The number given at registration (Western digits), or null when none is on
@@ -438,6 +449,10 @@ class TrainerProfileSerializer(TrainerMatchingFieldsMixin, serializers.ModelSeri
     profile_picture = serializers.SerializerMethodField()
     
     onboarding_completed = serializers.BooleanField(source='is_onboarding_completed', read_only=True)
+    # `not_started` | `pending` | `rejected` | `verified` — the trainer's own application
+    # (`GET /api/v1/trainer/verification/` has the documents). Additive and read-only;
+    # `trainer_is_verified` is unchanged.
+    verification_status = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomUser
@@ -446,12 +461,16 @@ class TrainerProfileSerializer(TrainerMatchingFieldsMixin, serializers.ModelSeri
             'trainer_bio', 'trainer_specializations', 'trainer_certifications',
             'trainer_experience_years', 'trainer_hourly_rate', 'trainer_is_verified',
             'trainer_is_available', 'client_count', 'is_active', 'onboarding_completed',
-            *TRAINER_MATCHING_FIELDS,
+            *TRAINER_MATCHING_FIELDS, 'verification_status',
         ]
         read_only_fields = ['id', 'username', 'email', 'trainer_is_verified', 'is_active', 'onboarding_completed']
 
     def get_client_count(self, obj):
         return obj.get_client_count()
+
+    def get_verification_status(self, obj):
+        from trainer_verification.services import status_for
+        return status_for(obj)
 
     def get_profile_picture(self, obj):
         request = self.context.get('request')

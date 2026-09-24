@@ -200,6 +200,8 @@ so parse ids client-side.
 | `checkout_expired` | `payment_id` — the checkout was not completed in time |
 | `payment_needs_review` | `payment_id` — a transfer arrived for it that is not exactly what it asked for; a person is checking it (B-051) |
 | `payment_rejected` | `payment_id` — the transfer held for it could not be accepted; it goes back to its sender by hand (B-051) |
+| `trainer_verification_approved` | `application_id` — an operator accepted the trainer's documents; the account is verified |
+| `trainer_verification_rejected` | `application_id`, `reason` — the application needs changes (or a verification was revoked); `reason` is the operator's words, also in the body |
 | `personal_record` | `exercise_id`, `set_log_id` — the set that beat the previous best |
 | `weekly_recap` | `week` (the ISO week key), `missed_sets` |
 | `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
@@ -726,6 +728,61 @@ byte for byte.
 
 `POST /api/v1/content/media/video/` refuses `owner_type=trainer_exercise` with 403: the
 coach's library has one way in, so the cap lives in one place.
+
+### Trainer verification (plan step 6, BACKEND_BUGS B-090)
+
+A trainer sends five documents — the identity card's front and back, a personal-trainer
+certificate, a recent photo (all required) and a sports-nutrition certificate
+(optional) — and an operator reviews them in the console (`/dj-admin/`, the
+"Verification queue", oldest submission first). The design is
+`12-trainer-shell/TrainerVerify` and `TrainerLocked`. The views' docstrings
+(`trainer_verification/views.py`) are the full contract: the body, every `code`, and what
+each state allows.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/trainer/verification/` | auth (trainer) | `MyVerificationView` |
+| `DELETE, POST` | `/api/v1/trainer/verification/documents/{slot}/` | auth (trainer) | `DocumentView` |
+| `POST` | `/api/v1/trainer/verification/submit/` | auth (trainer) | `SubmitView` |
+
+**States:** `not_started` → (submit) `pending` → `verified`, or `rejected` with a
+`rejection_reason` → fix and submit again (a new `round`; nothing the operator decided
+before is erased). An operator can also revoke a verification, which answers
+`rejected` with the reason. `status` is `verified` for every verified trainer,
+including those verified by hand before this existed (no documents on file).
+
+**Each document** is listed for every slot, filled or not: `state` `missing` |
+`uploaded` | `accepted` | `rejected` (with `rejection_reason`), a `thumbnail_url` (images)
+and a `file_url`. `{slot}` is `identity_front`, `identity_back`, `trainer_certificate`,
+`nutrition_certificate` or `photo`. `POST` is multipart with one `file`; posting into a
+filled slot replaces it, and after a rejection every change resets that document to
+`uploaded`. `can_change` says per slot what is allowed now: anything while `not_started`
+or `rejected`, only an empty optional slot while `pending`, nothing once `verified`.
+
+**The files are private.** They are stored apart from every other upload, never under
+`/media/`, and every URL is signed and expires after `url_expires_in` seconds (five
+minutes): read the route again rather than storing a URL. Only the trainer (their own)
+and operators are ever given one. On the development backend they are served at
+`/private-media/...?e=&s=`; on GCS the bucket signs them. A photo is stored re-encoded,
+upright, with its metadata (GPS included) removed; the bytes decide the format — JPEG,
+PNG or WebP photos, or a PDF for the two certificates — never the name. HEIC is refused.
+
+Codes (every one listed in the view docstrings): `not_a_trainer` (403),
+`verification_unknown_slot` (404), `verification_file_required`,
+`verification_unsupported_format` (`accepted`), `verification_unreadable_file`,
+`verification_file_too_large` (`max_bytes`), `verification_image_too_large`,
+`verification_image_too_small` (`min_side`), `verification_pdf_encrypted`,
+`verification_pdf_active_content`, `verification_duplicate_document` (`slot`) — all 400;
+`verification_in_review`, `verification_already_verified`,
+`verification_already_pending`, `verification_documents_missing` (`missing`),
+`verification_documents_rejected` (`rejected`) — all 409.
+
+The decision arrives as the push `trainer_verification_approved` or
+`trainer_verification_rejected` (§4; the rejection carries the reason). Verification
+changes nothing an unverified trainer may do today (see BACKEND_DELTA decision 5): it sets
+`trainer_is_verified`, which the roster ranks and the paywall exemption reads.
+`GET /api/auth/trainer/profile/` and `GET /api/auth/user/update/` also carry a read-only
+`verification_status` (null for anyone who is not a trainer).
 
 ### Trainers (design v2)
 

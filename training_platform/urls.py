@@ -6,6 +6,7 @@ from django.conf import settings
 from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 
 from training_platform.media_views import serve_media
+from trainer_verification.storage import serve_private_document
 
 # drf-yasg imports
 from rest_framework import permissions
@@ -64,6 +65,10 @@ urlpatterns = [
     # rather than a stock clip. See mediakit/trainer_views.py; whose media a given
     # viewer is shown is mediakit/resolution.py and nowhere else.
     path('api/v1/trainer/', include('mediakit.urls_trainer', namespace='trainer_media')),
+    # The trainer's own verification: documents, submit, state (trainer_verification/).
+    # The operator side is the console at /dj-admin/.
+    path('api/v1/trainer/verification/',
+         include('trainer_verification.urls', namespace='trainer_verification')),
 
     # The design-v2 trainer screens: roster, profile, matches. See users/trainer_views.py.
     path('api/v1/trainers/', include('users.urls_v1', namespace='trainers')),
@@ -113,6 +118,14 @@ if not _SERVES_ITS_OWN_URLS:
             r'^%s(?P<path>.*)$' % re.escape(settings.MEDIA_URL.lstrip('/')),
             serve_media,
             name='serve-media',
+        ),
+        # Identity documents on the filesystem backend: a signed, expiring URL is the
+        # only way in (trainer_verification/storage.py). On GCS the bucket signs its own.
+        re_path(
+            r'^%s(?P<path>.*)$' % re.escape(
+                getattr(settings, 'PRIVATE_MEDIA_URL', '/private-media/').lstrip('/')),
+            serve_private_document,
+            name='serve-private-document',
         ),
     ]
 
