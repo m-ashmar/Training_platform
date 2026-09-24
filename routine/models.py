@@ -995,6 +995,13 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
     #: The app's own id for this set: a retried POST (the write landed, the answer was
     #: lost) returns the first row instead of logging the set twice (B-003).
     client_uuid = models.UUIDField(null=True, blank=True, unique=True)
+    #: When the SERVER received this set. Not the day it was trained (`date`): a set may
+    #: be logged up to `routine/views.py MAX_BACKLOG_DAYS` late for the person's own
+    #: journal, and nothing here changes that. A challenge refuses to COUNT a set that
+    #: arrived more than `social/challenge_progress.py LATE_HOURS` after its training
+    #: day ended (owner, 2026-09-24, F20). Null on every row written before the column
+    #: existed: those count as on time.
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
 
     class Meta:
         verbose_name = "Exercise Set Log"

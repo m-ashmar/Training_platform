@@ -30,8 +30,15 @@ would change the contract and those tests, and the owner has not asked for it.
 
 **Who is in the standing.** Everyone who joined, including those still at zero, except
 a participation whose `status` is in `ChallengeParticipation.NOT_IN_STANDING`
-(`dropped`): it holds no place (its `place` and stored `rank` are null), it is not
-listed, and it is behind nobody and ahead of nobody (SIDE_BUGS S-045).
+(`dropped`), or whose `review_state` is `disqualified` (an operator's decision, owner
+2026-09-24, F20): it holds no place (its `place` and stored `rank` are null), it is not
+listed, and it is behind nobody and ahead of nobody (SIDE_BUGS S-045). A FLAGGED
+participant is in the standing like anyone else; only a flagged first place wins
+nothing until an operator clears it (`social/tasks.py settle_winners`).
+
+A disqualified participation is still COUNTED (`counted_rows`, read by
+`social/challenge_progress.py recount`): its `current_value` stays true, so clearing it
+puts the person back exactly where their training puts them.
 
 **Cost.** `place()` is one correlated COUNT per row it is annotated on, inside the
 query that reads the rows: one extra subquery for a home card, at most `limit` (50) for
@@ -54,11 +61,36 @@ STANDING_ORDER = ('-current_value', 'joined_at', 'id')
 WRITE_BATCH = 500
 
 
-def in_standing(queryset):
-    """`queryset` of participations less the ones that hold no place."""
+def counted_rows(queryset):
+    """`queryset` of participations whose number the server keeps: all but `dropped`.
+
+    Disqualified ones included — see the module docstring."""
     from .models import ChallengeParticipation
 
     return queryset.exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
+
+
+def holds_no_place_q(prefix=''):
+    """The participations that hold no place, as a query: dropped, or disqualified."""
+    from django.db.models import Q
+
+    from .models import ChallengeParticipation
+
+    return (Q(**{f'{prefix}status__in': ChallengeParticipation.NOT_IN_STANDING})
+            | Q(**{f'{prefix}review_state': ChallengeParticipation.REVIEW_DISQUALIFIED}))
+
+
+def holds_place(row) -> bool:
+    """`in_standing` for one loaded row."""
+    from .models import ChallengeParticipation
+
+    return (row.status not in ChallengeParticipation.NOT_IN_STANDING
+            and row.review_state != ChallengeParticipation.REVIEW_DISQUALIFIED)
+
+
+def in_standing(queryset):
+    """`queryset` of participations less the ones that hold no place."""
+    return queryset.exclude(holds_no_place_q())
 
 
 def _strictly_ahead():
@@ -86,14 +118,13 @@ def place():
 
 
 def place_or_none():
-    """`place()` for a row in the standing, null for one that is not (`dropped`)."""
-    from .models import ChallengeParticipation
-
-    return Case(When(status__in=ChallengeParticipation.NOT_IN_STANDING, then=Value(None)),
+    """`place()` for a row in the standing, null for one that is not (dropped or
+    disqualified)."""
+    return Case(When(holds_no_place_q(), then=Value(None)),
                 default=place(), output_field=IntegerField())
 
 
-def write_places(challenge, moved_users: set | None = None) -> dict:
+def write_places(challenge, moved_users: set | None = None, *, settling=False) -> dict:
     """Write the stored `rank` of every participant from `place()`; return {id: rank}.
 
     `moved_users`, when given, receives the user id of every participant whose place
@@ -101,27 +132,32 @@ def write_places(challenge, moved_users: set | None = None) -> dict:
 
     One SELECT (every row of the challenge, in `STANDING_ORDER`, numbered in that order —
     the same places `place()` answers) and one bulk UPDATE of the rows whose place
-    moved. A dropped participation is written NULL.
+    moved. A dropped or disqualified participation is written NULL.
 
     **A challenge that is over is not re-ranked.** `lifecycle_status` is terminal once
     the end date has passed or someone closed it; from that moment the standing is a
     record, and the last ranks written while it ran are the final ones — the Challenge
-    Winner badge keys on `rank=1` (SIDE_BUGS S-021, S-044).
+    Winner badge keys on `rank=1` (SIDE_BUGS S-021, S-044). With ONE exception,
+    `settling=True`: an operator's review decision (disqualify, clear) and the
+    settlement of the winner after the review window (`social/tasks.py
+    settle_winners`, owner 2026-09-24, F20) re-rank a finished standing, because
+    taking a disqualified person out of it is the point of the review.
     """
     from .models import Challenge, ChallengeParticipation
 
     rows = ChallengeParticipation.objects.filter(challenge=challenge)
-    if challenge.lifecycle_status in Challenge.TERMINAL_STATUSES:
+    if challenge.lifecycle_status in Challenge.TERMINAL_STATUSES and not settling:
         return dict(rows.values_list('id', 'rank'))
 
     # ONE ordered pass. `place()` is a correlated count per row — N x N row visits,
     # held under the challenge lock on every recount (the review, M4). The order is
     # total, so numbering the rows in it gives exactly the places `place()` answers.
-    rows = list(rows.only('id', 'rank', 'status', 'current_value', 'joined_at', 'user_id')
+    rows = list(rows.only('id', 'rank', 'status', 'review_state', 'current_value',
+                          'joined_at', 'user_id')
                 .order_by(*STANDING_ORDER))
     moved, number = [], 0
     for row in rows:
-        if row.status in ChallengeParticipation.NOT_IN_STANDING:
+        if not holds_place(row):
             wanted = None
         else:
             number += 1
