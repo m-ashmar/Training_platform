@@ -1812,8 +1812,11 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     B-112); null when the set is not a record. Both are judged only on the POST that
     creates the set: a replay (200), a PATCH and a list row answer null for both.
 
-    `rest_time` (seconds of rest before the set) is stored as sent; `set-logs/sync/`
-    reads it with this route's own field (B-109).
+    `rest_time` (seconds of rest before the set) is stored as sent, a whole number, 0
+    or more: a negative answers 400 `validation_error` with
+    `field_errors.rest_time[0].code` `rest_time_out_of_range`, on a POST and a PATCH
+    (B-122). `set-logs/sync/` reads it with this route's own field (B-109), so a sync
+    row refuses the same values with the same code.
 
     POST, PATCH and DELETE belong to the PERSON WHOSE SET IT IS (BACKEND_DELTA item 15),
     and to an admin; a trainer may read a client's sets and no longer create, edit or
@@ -2305,11 +2308,12 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             routine_id, day     which day this belongs to; also found from the session
             workout_session_id  the session it was logged in, when there was one
             notes, rpe          as on a single set (rpe 1-10)
-            rest_time           seconds of rest before this set, kept exactly as the
-                                single `POST set-logs/` keeps it — read by that
-                                route's own field, so both accept and refuse the same
-                                values (BACKEND_BUGS B-109; it was dropped until
-                                2026-09-24)
+            rest_time           seconds of rest before this set, a whole number, 0
+                                or more — kept exactly as the single `POST
+                                set-logs/` keeps it, read by that route's own field,
+                                so both accept and refuse the same values
+                                (BACKEND_BUGS B-109; it was dropped until 2026-09-24;
+                                a negative is refused since B-122)
 
         IDEMPOTENT per `client_uuid`, exactly as the single POST is: re-sending the
         same batch writes nothing and answers the same ids. PARTIAL SUCCESS: one bad
@@ -2340,7 +2344,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                         `reps_required`, `reps_out_of_range`, `no_prescribed_reps`,
                         `weight_out_of_range`, `set_number_out_of_range`,
                         `rpe_out_of_range`, `rest_time_out_of_range` (a `rest_time`
-                        the single POST refuses: not a whole number of seconds),
+                        the single POST refuses: not a whole number of seconds, or below 0),
                         `invalid_set`, or the coaching refusal
                         `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
                         `trainer_id`) — per row, because one frozen coaching must not
@@ -2581,6 +2585,11 @@ def _session_review(session, reader):
             'reps': log.reps, 'rest_time': log.rest_time, 'rpe': log.rpe,
             'notes': log.notes, 'date': log.date.isoformat() if log.date else None,
             'personal_record': bool(log.personal_record),
+            # What the record beat, as stored with the verdict (`routine/0029`), and
+            # the app's own key for the set (B-123): a phone that lost the answer to a
+            # record recovers the «+x kg» and matches its set by its key from here.
+            'previous_best': log.previous_best if log.personal_record else None,
+            'client_uuid': str(log.client_uuid) if log.client_uuid else None,
             'exercise': (None if exercise is None
                          else {'id': exercise.pk, 'name': exercise.name}),
             'prescription': None if planned is None else _prescription_payload(planned),
@@ -2717,10 +2726,18 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                           prescribe after, in the order they were first logged), and by
                           `set_number` within one. Each:
                           `{id, set_number, weight, reps, rest_time, rpe, notes, date,
-                            personal_record, exercise: {id, name}, prescription}` —
+                            personal_record, previous_best, client_uuid,
+                            exercise: {id, name}, prescription}` —
                           what was DONE, as stored. `personal_record` is the verdict the
                           client was answered with when the set was logged (kept on the
-                          set; false on sets logged before 2026-09-24). `exercise` is
+                          set; false on sets logged before 2026-09-24). `previous_best`
+                          is `{weight, reps, date}` of the best that record beat, as
+                          stored with the verdict and never recomputed — exactly what
+                          the logging answer said — and null when the set is not a
+                          record (and on records kept before the column existed).
+                          `client_uuid` is the app's own key for the set, the one it
+                          sent when logging it, or null for a set logged without one
+                          (BACKEND_BUGS B-123). `exercise` is
                           null for a legacy set with no progress row.
                           `prescription` is the day's row for that exercise — `{id,
                           sets, reps, weight, rest_time, order}`, the first by `order`

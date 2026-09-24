@@ -1,3 +1,4 @@
+from django.core.validators import MinValueValidator
 from django.db import transaction
 from rest_framework import serializers
 from django.conf import settings
@@ -907,6 +908,12 @@ class DayOutcomeSummarySerializer(DayOutcomeSerializer):
         read_only_fields = fields
 
 
+class RestTimeNotNegative(MinValueValidator):
+    """`MinValueValidator` answering the code both logging routes name for a rest they
+    refuse, `rest_time_out_of_range` (B-109, B-122), instead of Django's `min_value`."""
+    code = 'rest_time_out_of_range'
+
+
 class ExerciseSetLogSerializer(serializers.ModelSerializer):
     """
     Serializer for exercise set logs.
@@ -937,7 +944,10 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     That is about a NEW set: an edit keeps the date the set was stored with, so a set
     from any earlier day can be corrected (SIDE_BUGS S-068).
 
-    `reps` is 1-1000 on every route (S-115). A TRAINER may not create a set on a
+    `reps` is 1-1000 on every route (S-115). `rest_time` is a whole number of seconds,
+    0 or more: a negative answers 400 `validation_error` with
+    `field_errors.rest_time[0].code` `rest_time_out_of_range` on a POST and a PATCH, and
+    the same code on a `set-logs/sync/` row (B-122). A TRAINER may not create a set on a
     client's progress row or session: 403 `set_not_yours` (S-114, see
     `ExerciseSetLogViewSet.perform_create`).
 
@@ -964,6 +974,17 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     #: `no_prescribed_reps`: no prescription this caller may read, for whatever reason.
     routine = serializers.IntegerField(write_only=True, required=False, min_value=1)
     day = serializers.IntegerField(write_only=True, required=False, min_value=1)
+    #: Seconds of rest before this set, 0 or more (BACKEND_BUGS B-122). The column is a
+    #: signed integer, so `-5` was stored by both routes and reached the coach's review
+    #: and every rest figure. A negative is refused ON THE FIELD, with its own code,
+    #: because `set-logs/sync/` reads a row's rest through this very field
+    #: (`routine/views.py _sync_rest_time`, B-109): one field, so both routes refuse the
+    #: same values. No upper bound beyond the column's own: a rest is measured, not
+    #: prescribed, and nothing in the product caps a measured one.
+    rest_time = serializers.IntegerField(
+        required=False, allow_null=True, max_value=2147483647,
+        validators=[RestTimeNotNegative(
+            0, message=_("rest_time must be a whole number of seconds, 0 or more."))])
 
     def validate_user_exercise_progress(self, value):
         """
