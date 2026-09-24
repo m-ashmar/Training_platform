@@ -140,8 +140,17 @@ def check(img, fmt: str, *, per_pixel: float, max_pixels: int, max_side: int,
     `max_decoded` if the path caps the decoded size itself (verification does).
     """
     width, height = img.size
+    return check_size(fmt, (width, height), per_pixel=per_pixel, max_pixels=max_pixels,
+                      max_side=max_side, max_decoded=max_decoded, budget=budget,
+                      coefficients=coefficient_bytes(img, width, height))
+
+
+def check_size(fmt: str, size, *, per_pixel: float, max_pixels: int, max_side: int,
+               max_decoded: int | None = None, budget: int = DECODE_BUDGET_BYTES,
+               coefficients: int = 0) -> Plan:
+    """`check`, from a size read without opening the image (`webp_canvas`)."""
+    width, height = size
     max_decoded = max_pixels if max_decoded is None else max_decoded
-    coefficients = coefficient_bytes(img, width, height)
     if draftable(fmt, coefficients):
         limit = max_pixels
     else:
@@ -155,6 +164,32 @@ def check(img, fmt: str, *, per_pixel: float, max_pixels: int, max_side: int,
     return Plan(fmt=fmt, width=width, height=height, per_pixel=per_pixel,
                 coefficients=coefficients, max_pixels=limit, max_decoded=max_decoded,
                 budget=budget)
+
+
+def webp_canvas(head: bytes):
+    """A WebP's canvas (width, height), read from the first 30 bytes of its RIFF
+    container, or None when `head` is not a WebP.
+
+    Read here and not through Pillow because OPENING a WebP already allocates what it
+    will be decoded into: Pillow creates libwebp's animation decoder at `Image.open`,
+    and it callocs its two canvases of the full size there and then. Where the
+    allocator hands back memory it has used before (macOS; glibc below its 32 MB mmap
+    threshold), calloc writes zeros over all of it, so a 106 KB WebP of 6320 x 6320
+    became 300 MB resident before a pixel was decoded or a check had run.
+    """
+    if len(head) < 30 or head[:4] != b"RIFF" or head[8:12] != b"WEBP":
+        return None
+    chunk = head[12:16]
+    if chunk == b"VP8X":                    # extended: the canvas, 24 bits a side, less 1
+        return (int.from_bytes(head[24:27], "little") + 1,
+                int.from_bytes(head[27:30], "little") + 1)
+    if chunk == b"VP8L" and head[20] == 0x2F:          # lossless: 14 bits a side, less 1
+        bits = int.from_bytes(head[21:25], "little")
+        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    if chunk == b"VP8 " and head[23:26] == b"\x9d\x01\x2a":  # lossy key frame: 14 bits
+        return (int.from_bytes(head[26:28], "little") & 0x3FFF,
+                int.from_bytes(head[28:30], "little") & 0x3FFF)
+    return None
 
 
 def draft_factor(plan: Plan) -> int:
