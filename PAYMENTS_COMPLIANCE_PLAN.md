@@ -20,11 +20,11 @@ and order live in `BACKEND_DELTA.md`, not here.
 | 3 | Merge the unmerged payments fix | DONE | `c9-fix-payments` merged here; full suite on a fresh DB is the gate |
 | 4 | Double-entry ledger, commission settings + snapshot, remove the 100% forward | DONE | Coaching commission DONE with the monthly coaching (`users/coaching.py`, `BACKEND_DELTA.md` item 16): 20% of every month, rate copied onto each `CoachingPeriod`, to a platform revenue wallet. The 100% forward is GONE (2026-09-20): a plan payment is minted into the client's wallet and moved straight out to the platform's revenue wallet, whether or not anyone coaches them — `SUBSCRIPTION_TRAINER_SHARE` is kept at 0 so the owner can price a trainer's share later rather than the code having to grow one back. A client with no trainer used to get NO ledger rows at all, so the platform's largest revenue line was invisible in its own ledger; it is recorded now. Left for a later pass, neither blocking: the rates are settings rather than operator-editable rows, and escrow/revenue are still wallets rather than named ledger accounts |
 | 5 | Payment lifecycle: states, 60s poller, review queue, idempotency, notifications, PDF receipts, saved-language fix | PART DONE | **Receipts + the money screens' fields: DONE on branch `build/money`, unmerged** (see below). Done earlier on this branch: the 60s poller (`subscription.poll_open_payments`), checkout TTL, idempotency, `auto_renew` read-only. DONE 2026-09-23 (BACKEND_BUGS B-051): the review queue — payment states `needs_review` and `rejected`, `subscription.TransferReview`, holds from the pollers, reconcile and the webhook, a ten-minute sweep for transfers no checkout claimed (`subscription.sweep_unmatched_transfers`), operator approve / reject / attach / dismiss in the console, and the `payment_needs_review` / `payment_rejected` pushes. STILL TODO: the checkout-session model as its own table (today the `Payment` row is the session) with an immutable event row for EVERY transition (today only the review decisions record who and when), the notification matrix of spec §7 (including the receipt emailed on confirmation), and the saved-language fix. `preferred_language` is settable since BACKEND_BUGS B-005 (`POST /api/auth/user/update/`). Plan expiry notices EXIST (owner, 2026-09-19; `BACKEND_DELTA.md` item 18): `subscription_expiring` 3 days ahead and `subscription_expired` on days 0/3/7/14/30 from `subscription.send_renewal_reminders`, store-safe text, `access`/`renewal_due` on `subscriptions/current/`; extend these, never add parallel expiry notices |
-| 6 | Trainer verification, then withdrawals | TODO | |
+| 6 | Trainer verification, then withdrawals | PART DONE | Verification DONE 2026-09-24 (BACKEND_BUGS B-090, merged): the `trainer_verification` app — five document slots, rounds with immutable decisions, private storage with five-minute signed URLs, the console queue as the ONLY writer of `trainer_is_verified`, the `trainer_verification_approved` / `_rejected` pushes, 90-day purge of replaced documents. Withdrawals + payout methods (B-098) and the settling window (B-097) are being built on `build/payouts` per spec §8: only verified trainers withdraw, money moves to a clearing wallet at request, REQUESTED → APPROVED → SENT → CONFIRMED / FAILED, operator-executed in the console, a 3-day hold on newly released escrow |
 | 7 | Reports, blocking, moderation queue, AI consent, date of birth + minimum age 14 | DONE (branch `build/moderation`, unmerged) | Date of birth + minimum age 14 was already done with the design-v2 work (`BACKEND_DELTA.md` item 3). B1/B2/B5 are the new `moderation/` app: `Report`, `Block`, `AIConsent`; `POST/GET /api/v1/reports/`, `reports/mine/`, `GET/POST/DELETE /api/v1/blocks/`, `GET/POST /api/v1/ai-consent/`; the queue at `/dj-admin/moderation/report/` (operator-only, two closing actions). Enforcement: `moderation.services.blocked_ids` filters posts, comments, follows, profiles, notifications, the challenge leaderboard, available-trainers and trainer matches; `is_blocked` refuses sending AND accepting a trainer request; `require_ai_consent`/`HasAIConsent` gate the AI coach on REST and in `chat_service.chat_stream`. Tests: `tests/test_moderation.py`. Left for step 8: the report/block hooks on the two-way chat |
-| 8 | Two-way trainer–client chat with report/block hooks | TODO | Makes the 1:1 coaching claim real-time in fact |
+| 8 | Two-way trainer–client chat with report/block hooks | PART DONE | Text chat (`chat/`), blocks enforced on every send, reports on a message (`moderation` target `coach_message`); photo, voice and video messages DONE 2026-09-24 (BACKEND_BUGS B-091: `POST /api/v1/chat/media/`, private signed URLs; a client's video naming an exercise is a form check in the trainer's queue `GET /api/v1/trainer/attention/`). Left: program cards in the thread, a voice note's transcript, video poster frames (no ffmpeg in the image) |
 | 9 | Agent limits, receivable tracking, agent history/status | TODO | Defaults (200/day) are below the cheapest plan |
-| 10 | Routine products | TODO | Refusal for `ROUTINE_PRODUCT` on store channels already exists in `policy/services.py` — call `require_purchase_allowed` first in the purchase endpoint. Make the buyer's copy with `routine/assignment.py` `routine_from_template` (the same private copy a trainer's generate writes); keep payment out of that function |
+| 10 | Routine products | BUILDING (`build/routine-products`, BACKEND_BUGS B-099/B-100) | Refusal for `ROUTINE_PRODUCT` on store channels already exists in `policy/services.py` — call `require_purchase_allowed` first in the purchase endpoint. Make the buyer's copy with `routine/assignment.py` `routine_from_template` (the same private copy a trainer's generate writes); keep payment out of that function |
 | 11 | Web hub, deep links, APK hosting, `GET /api/v1/app/latest` | TODO | Next.js, separate deploy |
 | 12 | Demo seeding command, review notes, privacy + data inventory docs | TODO | `training_platform/privacy/registry.py` already lists every personal-data model — generate the inventory from it |
 
@@ -175,14 +175,45 @@ is locked (spec §8); the numbers above are the defaults.
    accepts); lowering `AI_TRAINING_RETENTION_DAYS` needs the app wording to follow. (d)
    The account export includes the person's anonymous copies (content, without the keys).
    (e) A late 👍/👎 still labels its copy through a second keyed pseudonym of the reply.
-   (f) A challenge winner suspended after the challenge closed keeps the record but gets
-   no badge; nobody else is awarded it. (g) Login keeps the top-level `validation_error`
+   (f) A challenge's winner is settled `Challenge.REVIEW_HOURS` (72) after it ends (F20,
+   merged from Opus's `build/anticheat`): a first place suspended BEFORE the settlement
+   holds no place, like a disqualified one, and the next visible participant wins; after
+   the settlement the stored ranks are the record and nothing moves them — not a
+   suspension, not a later review decision (fixed in `67f829e`). (g) Login keeps the top-level `validation_error`
    (a gate test pins it) with the reason in `field_errors.non_field_errors[0].code`
    (`invalid_credentials`, `email_not_verified`, `credentials_required`). (h) Role
    refusals from permission classes stay `permission_denied` (§2 defines it). (i)
    `gateway_error` still covers three causes (gateway refused / amount out of bounds /
    account missing e-mail or phone). (j) Agent top-up caps answer 429 with
    `daily_limit_exceeded` / `monthly_limit_exceeded`.
+
+8. **Left by the trainer shell, 2026-09-24** (BACKEND_BUGS B-089..B-095 and the reviews
+   of each branch; built one way, reversible, the owner confirms or changes):
+   (a) VERIFICATION vs decision 5: the design says verification unlocks the directory,
+   matching and requests; BACKEND_DELTA decision 5 keeps unverified trainers matched
+   (ranked below). Built: verification only sets `trainer_is_verified` (ranking, the
+   paywall exemption, ranked challenges, withdrawals per spec §8), so the app's "what
+   verification unlocks" card over-promises until the owner picks. (b) A pending trainer
+   keeps routines and templates but not the diet tools (paywall) — should they get them?
+   (c) The nutrition certificate "raises your ranking" in the design; nothing reads it.
+   (d) Documents of an application never submitted, or rejected and never resubmitted,
+   are kept until the account is deleted — pick a window. (e) HEIC is refused (the app
+   sends JPEG). (f) Review reasons are free text shown to the trainer; no reason codes.
+   (g) One trainer-certificate slot meets "at least one"; a second is an additive slot.
+   (h) CHAT MEDIA: videos and voice notes use the media kit's caps (64 MB, 90 s); a voice
+   note gets its own 10 MB cap and each sender a rolling-24h quota of 60 files / 512 MB
+   (`media_quota_exceeded`) — numbers for the owner. (i) Only a video that names an
+   exercise is a form check. (j) "Program ending" appears 7 days ahead (the app's own
+   window; the 3-day reminder is the client's paid month). (k) A client whose coaching is
+   frozen, unpaid or ended is left out of the attention queue. (l) A photo, voice note or
+   video the sender takes back is kept in storage like taken-back text (for reports), never
+   served again. (m) PRICES: coaching fees show on `apk` AND `play` (the existing rule
+   hides them on `ios` and on requests without a channel) — confirm `play`. (n) A request
+   to a trainer who set no price is quoted at 0 and stays free when approved (it used to
+   charge the rate set later). (o) Height and weight are not on a pending request (the
+   TrainerRequestDetail design shows them before acceptance). (p) Opus asks: should a
+   first place need a minimum number of participants (a verified trainer with one client
+   can hand them the badge), and has the AI provider's terms for Syria been checked?
 
 ## Traps this branch cost a session to find
 
