@@ -1681,6 +1681,20 @@ now answer their own code, which §6 reads as that default; no code a view named
   owner's decision 9 (2026-09-24).
 - `POST /api/auth/user/profile-picture/` without the `profile_picture` part: 400
   `profile_picture_required` with `field`, was the generic `bad_request` (B-055).
+- **How large an uploaded image may be** — on every route the image guard serves
+  (profile picture, chat photos, exercise images and photos, social posts, the media
+  kit) — is what a 512 MB server can decode, priced from the file's header before
+  anything is decoded (SIDE_BUGS S-210; one 106 KB WebP took 983 MB before). Always at
+  most 10,000 px a side and 40 MP. A camera (baseline) JPEG is taken up to 40 MP, and one
+  too large to decode whole — colour over about 19 MP, CMYK over 12 — is decoded and
+  STORED at half (or a quarter of) its width and height: a 24 MP phone photo comes back
+  2856 x 2142. Anything else is refused over its own limit: a PNG about 33 MP (grey or
+  palette 40, grey with alpha 11), a WebP 6.7 MP (4.8 with transparency), a progressive
+  JPEG 10 to 13 MP in colour, an animated GIF 5.6 MP of canvas for two frames and less as
+  frames are added; the media kit, which decodes again to grade and turn the picture,
+  about 11 MP (WebP 5.6). The codes do not change: `image_too_many_pixels` (over a
+  kind's own limit its sentence names that limit in megapixels) and
+  `image_dimensions_too_large`.
   `DELETE` with no picture to remove: 404 `profile_picture_not_found`, keeping
   `message` and gaining `error` / `detail`; it was `not_found`, which a routing 404 also
   is (B-056).

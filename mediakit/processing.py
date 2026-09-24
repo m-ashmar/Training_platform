@@ -8,6 +8,16 @@ brightness the app sets its text scrim from.
 
 Every output is re-encoded from decoded pixels, so no metadata from the upload (EXIF,
 GPS, an appended payload) survives into anything that is served.
+
+The upload is decoded here a second time, after the platform's guard (which drops the
+EXIF orientation this path needs), and that decode is priced from the header first,
+like the guard's (`training_platform.image_budget`, SIDE_BUGS S-210): a web machine has
+512 MB, and this path used to hold the decoded image four times over at full size — a
+40 MP PNG of 170 KB would have taken over 600 MB. A baseline JPEG too large for the
+budget is decoded smaller (`draft`) and its master stored at that size; anything else
+is refused (`image_too_many_pixels`, the guard's code). Each step lets go of the image
+it replaces, so the path holds the image, at most one full-size working copy of it,
+and its grey and alpha bands (`MEDIA_BYTES_PER_PIXEL`).
 """
 from __future__ import annotations
 
@@ -30,6 +40,14 @@ ACCEPTED_FORMATS = frozenset({"JPEG", "MPO", "PNG", "WEBP"})
 #: Width of the blur preview. Twenty pixels of WebP is a few hundred bytes, which is
 #: what lets the app paint something the instant a card scrolls into view.
 BLUR_WIDTH = 20
+
+#: What this path holds for each decoded pixel at its peak: the image (4 bytes), one
+#: full-size working copy of it (the turn upright, the conversion, the grade or a
+#: resize's intermediate: 4), its grey and alpha bands (2), and the coefficients the
+#: JPEG master's `optimize` keeps (3) once the rest is let go. A WebP's decoder canvases
+#: and a progressive JPEG's coefficient table are added by `image_budget`. Measured by
+#: `tests/test_image_guard_memory.py`.
+MEDIA_BYTES_PER_PIXEL = 12
 
 
 @dataclass
@@ -78,8 +96,7 @@ def process_upload(upload, slot: Slot) -> ProcessedImage:
     img = Image.open(upload)
     if (img.format or "").upper() not in ACCEPTED_FORMATS:
         _refuse(_("Upload a JPEG, PNG or WebP image."), "media_unsupported_format")
-    img = ImageOps.exif_transpose(img)
-    img.load()
+    img = _decode_upright(img)
 
     width, height = img.size
     expected = slot.ratio[0] / slot.ratio[1]
@@ -98,17 +115,27 @@ def process_upload(upload, slot: Slot) -> ProcessedImage:
 
     # The grade. Alpha slots keep their transparency; nothing else carries one.
     # Brightness is measured on the grey version either way: it drives the text scrim.
+    # A mode is converted only when it differs (`convert` to the same mode is a copy),
+    # and each image is let go as soon as the next one is made from it.
     if slot.alpha:
-        rgba = img.convert("RGBA")
-        alpha = rgba.getchannel("A")
-        gray = ImageOps.grayscale(rgba)
-        graded = Image.merge("RGBA", (gray, gray, gray, alpha)) if slot.mono else rgba
+        graded = img if img.mode == "RGBA" else img.convert("RGBA")
+        del img
+        alpha = graded.getchannel("A")
+        gray = ImageOps.grayscale(graded)
         brightness = _brightness(gray, mask=alpha)
+        if slot.mono:
+            del graded
+            graded = Image.merge("RGBA", (gray, gray, gray, alpha))
+        del alpha, gray
     else:
-        rgb = img.convert("RGB")
-        gray = ImageOps.grayscale(rgb)
-        graded = gray.convert("RGB") if slot.mono else rgb
+        graded = img if img.mode == "RGB" else img.convert("RGB")
+        del img
+        gray = ImageOps.grayscale(graded)
         brightness = _brightness(gray)
+        if slot.mono:
+            del graded
+            graded = gray.convert("RGB")
+        del gray
     # `convert` copies `info`, and the encoders re-emit what it holds (EXIF included).
     graded.info = {}
 
@@ -122,6 +149,28 @@ def process_upload(upload, slot: Slot) -> ProcessedImage:
         width=width,
         height=height,
     )
+
+
+def _decode_upright(img):
+    """`img` (opened, not yet loaded) decoded within the budget and turned upright.
+    Raises `ValidationError` (`image_too_many_pixels`) when it cannot be."""
+    from training_platform import image_budget
+    from training_platform.file_security import (MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS,
+                                                 _too_many_pixels)
+
+    fmt = (img.format or "").upper()
+    try:
+        plan = image_budget.check(img, "JPEG" if fmt == "MPO" else fmt,
+                                  per_pixel=MEDIA_BYTES_PER_PIXEL,
+                                  max_pixels=MAX_IMAGE_PIXELS,
+                                  max_side=MAX_IMAGE_DIMENSION)
+        image_budget.shrink(img, plan)
+    except image_budget.OverBudget as over:
+        raise _too_many_pixels(over.max_pixels, budget=True)
+    img.load()
+    # One `transpose` when the EXIF says to turn, and none otherwise:
+    # `ImageOps.exif_transpose` copies the whole image even when nothing turns.
+    return image_budget.upright(img)
 
 
 def _header_format(upload):

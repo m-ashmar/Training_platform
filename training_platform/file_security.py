@@ -18,6 +18,8 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from typing import Dict, Any
 
+from training_platform import image_budget
+
 # Try to import magic, with fallback
 try:
     import magic
@@ -560,6 +562,76 @@ FORMAT_ALIASES = {'MPO': 'JPEG'}
 #: sticker or a short loop — and, at the pixel budget, a 480x270 animation.
 MAX_ANIMATION_FRAMES = 300
 
+# What decoding COSTS. The caps above count pixels, whatever the format, and pixels
+# are not what a web machine runs out of: bytes are. It has 512 MB (`fly.toml`) and
+# Django holds about 110 MB of it, and through this guard a 106 KB WebP of 6320 x 6320
+# added 983 MB, an animated GIF of two 20 MP frames 370 MB and a 40 MP progressive
+# JPEG 476 MB (SIDE_BUGS S-210). So what `_reencode` will hold is estimated from the
+# header before a pixel is decoded (`training_platform.image_budget`, the estimator the
+# verification documents use too), and an image whose peak would pass
+# `image_budget.DECODE_BUDGET_BYTES` is not decoded: a baseline JPEG is decoded smaller
+# (libjpeg's DCT scaling, `draft`), and anything else is refused with the most pixels an
+# image of its kind may have. The figures below are bytes a decoded pixel costs on this
+# path, beyond what the decoder itself keeps (which `image_budget` adds: a WebP's
+# canvases, a progressive JPEG's coefficient table). Every one is measured by
+# `tests/test_image_guard_memory.py`, which runs the worst accepted input of each kind.
+
+#: libjpeg's `optimize` keeps every coefficient of the image it writes, to build its
+#: Huffman tables: 2 bytes a pixel for grey, 3 for colour at Pillow's 4:2:0.
+JPEG_OPTIMIZE_BYTES_PER_PIXEL = {'L': 2, 'RGB': 3}
+#: A PNG mode `_reencode` converts to RGBA is a second full-size image while the first
+#: is let go, and Pillow reaches RGBA from some modes (16-bit grey) through an
+#: intermediate one. (A CMYK JPEG becomes RGB in one step: 4 bytes.)
+CONVERT_BYTES_PER_PIXEL = 8
+#: libwebp's encoder reads the image into its own YUV planes, and it compresses an
+#: alpha plane losslessly, through buffers of its own the size of the image — while
+#: the decoder still holds its canvases (measured on Linux: 2 and 10 bytes a pixel).
+WEBP_ENCODE_BYTES_PER_PIXEL = {'RGB': 4, 'RGBA': 12}
+#: An animated GIF, per pixel of its canvas: Pillow decodes every frame after the first
+#: to RGB(A) and keeps the frame before it, `_reencode` converts each frame to RGBA and
+#: quantises it, and the encoder compares consecutive frames in RGBA...
+GIF_CANVAS_BYTES_PER_PIXEL = 20
+#: ...and for each frame, the quantised frame kept until the animation is written and
+#: the copy the encoder keeps of it. Measured on 2 to 40 frames: 19 to 62 bytes a
+#: canvas pixel in all, under this model's 24 to 100.
+GIF_FRAME_BYTES_PER_PIXEL = 2
+
+
+def _guard_bytes_per_pixel(fmt, mode, n_frames):
+    """What `_reencode` holds for each pixel of an image of `fmt` decoded as `mode`:
+    the decoded image, the conversion it makes, and what its encoder buffers."""
+    held = image_budget.mode_bytes(mode)
+    if fmt == 'JPEG':
+        target = mode if mode in ('RGB', 'L') else 'RGB'
+        if target != mode:
+            held += image_budget.mode_bytes(target)      # CMYK -> RGB, in one step
+        held += JPEG_OPTIMIZE_BYTES_PER_PIXEL[target]
+    elif fmt == 'PNG':
+        if mode not in ('RGB', 'RGBA', 'L', 'P'):
+            held += CONVERT_BYTES_PER_PIXEL
+    elif fmt == 'WEBP':
+        held += WEBP_ENCODE_BYTES_PER_PIXEL['RGBA' if mode == 'RGBA' else 'RGB']
+    elif fmt == 'GIF':
+        if n_frames > 1:
+            held = GIF_CANVAS_BYTES_PER_PIXEL + GIF_FRAME_BYTES_PER_PIXEL * n_frames
+        else:
+            held += 1                  # the encoder's normalised copy of the palette image
+    return held
+
+
+def _too_many_pixels(max_pixels, *, budget=False):
+    """`image_too_many_pixels`, naming the limit that applied (`max_pixels`, `max_side`
+    in its params, beside the sentence). `budget`: the limit is what an image of this
+    kind can be decoded within, below the platform's `MAX_IMAGE_PIXELS`."""
+    params = {'max_pixels': max_pixels, 'max_side': MAX_IMAGE_DIMENSION,
+              'mp': max(1, max_pixels // 1_000_000)}
+    if budget:
+        return ValidationError(
+            _("This photo is too large to open. The most is %(mp)s megapixels for this "
+              "kind of file."), code="image_too_many_pixels", params=params)
+    return ValidationError(_("Image has too many pixels."), code="image_too_many_pixels",
+                           params=params)
+
 
 def process_uploaded_image(file, max_bytes=None, quarantine=True):
     """
@@ -585,6 +657,19 @@ def process_uploaded_image(file, max_bytes=None, quarantine=True):
     a malformed frame, a decompression bomb Pillow itself refuses — is refused as
     `unreadable_image`. It used to escape as Pillow's OSError: a 500 on every route.
 
+    How large an image may be is what decoding it costs, priced from its header before
+    a pixel is decoded (SIDE_BUGS S-210): at most `MAX_IMAGE_DIMENSION` (10,000 px) a
+    side and `MAX_IMAGE_PIXELS` (40 MP) in all, and within
+    `image_budget.DECODE_BUDGET_BYTES` (128 MB) at its peak. A baseline JPEG is taken up
+    to 40 MP: one too large to decode whole (colour over about 19 MP, CMYK over 12) is
+    decoded, and stored, at half or a quarter of its width and height. Anything else is
+    refused over its own limit: a PNG about 33 MP (RGB or RGBA; grey or palette 40,
+    grey with alpha 11), a WebP 6.7 MP (4.8 with transparency), a progressive JPEG 10 to
+    13 MP in colour, an animated GIF 5.6 MP of canvas for two frames and less as frames
+    are added. Over any of them: `image_too_many_pixels` (or
+    `image_dimensions_too_large` for a side), with `max_pixels` / `max_side` in the
+    error's `params`; over a kind's own limit the sentence names it in megapixels.
+
     Returns (ContentFile, extension) — a re-encoded image safe to store.
     Raises ValidationError on anything suspicious.
     """
@@ -598,6 +683,15 @@ def process_uploaded_image(file, max_bytes=None, quarantine=True):
             _("File too large. Maximum size is %(mb)s MB.") % {"mb": round(max_bytes / (1024 * 1024), 1)},
             code="file_too_large",
         )
+
+    # A WebP too large to decode is refused before anything opens it: opening one
+    # already allocates its canvases (`image_budget.webp_header`).
+    file.seek(0)
+    webp = image_budget.webp_header(file.read(32))
+    file.seek(0)
+    if webp is not None:
+        width, height, alpha = webp
+        _refuse_over_budget('WEBP', 'RGBA' if alpha else 'RGB', (width, height), 1)
 
     # Magic-byte + MIME + extension checks. No byte-pattern scan: the file is decoded and
     # re-encoded below, so no payload in it can reach storage, and the scan matched
@@ -622,28 +716,18 @@ def process_uploaded_image(file, max_bytes=None, quarantine=True):
             _("Unsupported image format: %(fmt)s") % {"fmt": fmt or "unknown"},
             code="unsupported_format",
         )
-    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
-        raise ValidationError(
-            _("Image dimensions too large (max %(d)spx per side).") % {"d": MAX_IMAGE_DIMENSION},
-            code="image_dimensions_too_large",
-        )
-    if width * height > MAX_IMAGE_PIXELS:
-        raise ValidationError(_("Image has too many pixels."), code="image_too_many_pixels")
-    # An animation is decoded frame by frame onto the whole canvas, so what it costs is
-    # frames x canvas, not one canvas. A few-KB GIF of 100 tiny frames on a 4096x4096
-    # canvas held ~1.6 GB before this: one request, one OOM-killed container. It gets
-    # the same pixel budget a still image does, and the same code.
-    if n_frames > MAX_ANIMATION_FRAMES:
-        raise ValidationError(_("This animation has too many frames."),
-                              code="image_too_many_pixels")
-    if n_frames * width * height > MAX_IMAGE_PIXELS:
-        raise ValidationError(_("Image has too many pixels."), code="image_too_many_pixels")
+    # Every cap, and what decoding would cost, from the header: nothing is decoded yet.
+    plan = _refuse_over_budget(fmt, probe.mode, (width, height), n_frames, img=probe)
 
     # Re-encode. This strips EXIF/GPS and any appended payload (polyglots), because
     # only decoded pixel data is written back out. The first full DECODE happens here,
-    # so a file that is broken past its header fails here and not before.
+    # so a file that is broken past its header fails here and not before. The image
+    # decoded is the one the checks read: a second `Image.open` of a WebP would be a
+    # second decoder, with canvases of its own.
     try:
-        encoded = _reencode(file, fmt, n_frames)
+        encoded = _reencode(probe, fmt, n_frames, plan)
+    except image_budget.OverBudget as over:
+        raise _too_many_pixels(over.max_pixels, budget=True)
     except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
         # OSError: "image file is truncated", a broken scan or frame. SyntaxError and
         # ValueError: what Pillow's plugins raise for a malformed chunk or frame.
@@ -654,16 +738,60 @@ def process_uploaded_image(file, max_bytes=None, quarantine=True):
     return ContentFile(encoded), FORMAT_TO_EXTENSION[fmt]
 
 
-def _reencode(file, fmt, n_frames) -> bytes:
-    """Decode `file` and write it back out as `fmt`, with no metadata. The bytes.
+def _refuse_over_budget(fmt, mode, size, n_frames, img=None):
+    """Every size cap on an image of `fmt` and `mode`, of `size` and `n_frames`, and
+    the plan its decode keeps to (`image_budget`). Raises the refusal's
+    `ValidationError`. `img`, when the image is open, tells a progressive JPEG apart."""
+    width, height = size
+    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+        raise ValidationError(
+            _("Image dimensions too large (max %(d)spx per side)."),
+            code="image_dimensions_too_large",
+            params={"d": MAX_IMAGE_DIMENSION, "max_side": MAX_IMAGE_DIMENSION,
+                    "max_pixels": MAX_IMAGE_PIXELS},
+        )
+    if width * height > MAX_IMAGE_PIXELS:
+        raise _too_many_pixels(MAX_IMAGE_PIXELS)
+    # An animation is decoded frame by frame onto the whole canvas, so what it costs is
+    # frames x canvas, not one canvas. A few-KB GIF of 100 tiny frames on a 4096x4096
+    # canvas held ~1.6 GB before this: one request, one OOM-killed container. It gets
+    # the same pixel budget a still image does, and the same code.
+    if n_frames > MAX_ANIMATION_FRAMES:
+        raise ValidationError(_("This animation has too many frames."),
+                              code="image_too_many_pixels")
+    if n_frames * width * height > MAX_IMAGE_PIXELS:
+        raise _too_many_pixels(MAX_IMAGE_PIXELS)
+    per_pixel = _guard_bytes_per_pixel(fmt, mode, n_frames)
+    try:
+        if img is None:
+            return image_budget.check_size(fmt, size, per_pixel=per_pixel,
+                                           max_pixels=MAX_IMAGE_PIXELS,
+                                           max_side=MAX_IMAGE_DIMENSION)
+        return image_budget.check(img, fmt, per_pixel=per_pixel,
+                                  max_pixels=MAX_IMAGE_PIXELS,
+                                  max_side=MAX_IMAGE_DIMENSION)
+    except image_budget.OverBudget as over:
+        raise _too_many_pixels(over.max_pixels, budget=True)
 
-    Raises whatever Pillow raises on a file it cannot decode; `process_uploaded_image`
-    is the only caller and turns that into `unreadable_image`.
+
+def _reencode(img, fmt, n_frames, plan) -> bytes:
+    """Decode `img` (opened, not yet loaded) within `plan` and write it back out as
+    `fmt`, with no metadata. The bytes.
+
+    A baseline JPEG whose full size would pass the plan's budget is decoded straight to
+    a half, a quarter or an eighth of its width and height (`image_budget.shrink`), and
+    stored at that size: an iPhone's 24 MP colour photo becomes 2856 x 2142. The image
+    it replaces is let go at every step (`img` is rebound), so the path holds the image,
+    at most one conversion of it, and what its encoder buffers — what
+    `_guard_bytes_per_pixel` counts.
+
+    Raises `image_budget.OverBudget` if the decode would still not fit, and whatever
+    Pillow raises on a file it cannot decode; `process_uploaded_image` is the only
+    caller and turns those into `image_too_many_pixels` and `unreadable_image`.
     """
     import io
 
-    file.seek(0)
-    img = Image.open(file)
+    image_budget.shrink(img, plan)
     img.load()
     if fmt == 'JPEG' and img.mode not in ('RGB', 'L'):
         img = img.convert('RGB')
