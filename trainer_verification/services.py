@@ -590,7 +590,9 @@ def purge_replaced_documents(now=None) -> int:
     decided about it survives in the `VerificationDecision` snapshot.
 
     The files go before the row (`delete_documents`). When storage refuses, the row is
-    KEPT, logged, and the next daily run tries again; the count is of what went.
+    KEPT, logged, and the next daily run tries again; the count is of what went. A
+    document nobody reviewed is due the moment it is replaced (`_retire`), so this is
+    also where one whose files storage refused after that commit is tried again.
     """
     now = now or timezone.now()
     expired = (VerificationDocument.objects
