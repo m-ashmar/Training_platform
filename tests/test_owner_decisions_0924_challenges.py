@@ -351,7 +351,8 @@ def test_a_disqualified_person_vanishes_from_every_place_and_cannot_rejoin(make_
     assert _count(challenge, cheat) == (45.0, "disqualified")
 
 
-def test_a_manual_challenge_of_a_client_is_not_ranked_and_awards_nothing(make_user, api):
+def test_a_manual_challenge_of_a_client_is_not_ranked_and_awards_nothing(make_user, api,
+                                                                        winner_minimum_of_one):
     from social.models import Challenge, ChallengeParticipation
     from social.tasks import advance_challenge_phases
 
@@ -476,7 +477,7 @@ def test_the_console_filters_by_review_and_disqualifies_or_clears(make_user):
 
 # ------------------------------------------------ the review of F20: the cheats it found
 def test_a_finished_manual_challenge_cannot_become_counted_and_pay_its_self_report(
-        make_user, api):
+        make_user, api, winner_minimum_of_one):
     """Switching a finished manual challenge to `sets` ranked its hand-typed numbers."""
     from social.models import Challenge, ChallengeParticipation
     from social.tasks import advance_challenge_phases
@@ -534,7 +535,7 @@ def test_a_workout_back_dated_and_filled_with_todays_sets_counts_nothing(make_us
     assert _count(challenge, cheat) == (1.0, "clear")
 
 
-def test_an_unverified_trainer_cannot_crown_a_friend(make_user, api):
+def test_an_unverified_trainer_cannot_crown_a_friend(make_user, api, winner_minimum_of_one):
     """Anyone can sign up as a trainer: a throwaway trainer account's challenge is not
     ranked, and its first place wins nothing."""
     from social.models import Challenge

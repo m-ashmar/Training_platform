@@ -4,9 +4,9 @@
 "Active" (`social/standing.py active_participants`): in the standing — not dropped, not
 disqualified, the account publicly visible — AND a counted number above zero at the
 settlement, so a trainer cannot make a winner by padding a challenge with idle accounts.
-Fewer, and the challenge settles with no winner (`social/tasks.py _settle_winner`); the
-badge engine asks the same of the settled standing (`achievements/engine.py
-challenge_wins`). Challenge rows serve `winner_min_participants` and the live
+Fewer, and the challenge settles with no winner (`social/tasks.py _settle_winner`),
+which records the count it decided on (`Challenge.settled_active_participants`); the badge
+engine reads that record (`achievements/engine.py challenge_wins`), never a recount. Challenge rows serve `winner_min_participants` and the live
 `active_participants`, annotated once per list page.
 
 Each test fails on the code before this change.
@@ -161,23 +161,55 @@ def test_a_suspended_participant_does_not_count(make_user, django_capture_on_com
 
 
 def test_challenge_wins_awards_nothing_below_the_minimum_even_called_directly(make_user):
-    """A settled record the settlement never produced (four ranked, rank 1 clear and
-    completed): the badge engine itself refuses it; a fifth active place makes it a win."""
+    """A settled record whose first place is clear and completed: the badge engine reads
+    the settlement's recorded count (`Challenge.settled_active_participants`) and refuses
+    it below the minimum, and refuses a record the settlement never wrote (null) —
+    whatever the participation rows say."""
     from achievements.engine import AchievementEngine
     from social.models import Challenge, ChallengeParticipation
 
     challenge = _challenge(_trainer(make_user, "direct"), "direct")
-    winner, others = _field(make_user, challenge, "direct", [5.0, 4.0, 3.0, 0.0])
+    winner, others = _field(make_user, challenge, "direct", [5.0, 4.0, 3.0, 2.0])
     _past_review(challenge)
-    Challenge.objects.filter(pk=challenge.pk).update(winner_checked_at=timezone.now())
     for place, person in enumerate([winner, *others], start=1):
         ChallengeParticipation.objects.filter(challenge=challenge, user=person).update(
             rank=place)
 
+    # Five ranked rows above zero, but no settlement recorded a count.
+    Challenge.objects.filter(pk=challenge.pk).update(winner_checked_at=timezone.now())
     assert AchievementEngine._get_metric_value(winner, "challenge_wins", {}) == 0
-    ChallengeParticipation.objects.filter(challenge=challenge, user=others[-1]).update(
-        current_value=1.0)
+    Challenge.objects.filter(pk=challenge.pk).update(settled_active_participants=4)
+    assert AchievementEngine._get_metric_value(winner, "challenge_wins", {}) == 0
+    Challenge.objects.filter(pk=challenge.pk).update(settled_active_participants=5)
     assert AchievementEngine._get_metric_value(winner, "challenge_wins", {}) == 1
+
+
+def test_the_settlement_records_its_count_and_a_later_erasure_keeps_the_win(make_user):
+    """The verdict is taken once, at the settlement. An erased rival's participation row
+    is deleted (privacy source `challenge_participation`); a recount after it would take
+    back a win that was valid when it was settled."""
+    from achievements.engine import AchievementEngine
+    from social.models import Challenge
+    from training_platform.privacy.registry import erase_user_data
+
+    badge = _win_badge("min_erase")
+    challenge = _challenge(_trainer(make_user, "erase"), "erase")
+    winner, others = _field(make_user, challenge, "erase", [5.0, 4.0, 3.0, 2.0, 0.0])
+
+    assert _settle(challenge) == 1
+    assert Challenge.objects.get(pk=challenge.pk).settled_active_participants == 5
+    assert _holds(winner, badge)
+    assert AchievementEngine._get_metric_value(winner, "challenge_wins", {}) == 1
+
+    erase_user_data(others[-2])            # a rival leaves after the settlement
+    assert Challenge.objects.get(pk=challenge.pk).settled_active_participants == 5
+    assert AchievementEngine._get_metric_value(winner, "challenge_wins", {}) == 1
+
+    # Below the minimum the count is recorded too, and it is what the engine refuses.
+    small = _challenge(_trainer(make_user, "erase2"), "erase2")
+    _field(make_user, small, "erase2", [5.0, 0.0])
+    assert _settle(small) == 1
+    assert Challenge.objects.get(pk=small.pk).settled_active_participants == 2
 
 
 # ------------------------------------------------------------------ the list

@@ -1862,8 +1862,10 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
     count). A challenge with fewer active participants at the settlement settles with
     no winner: `winner_final` still becomes true, and nobody earns the Challenge Winner
     badge (or anything a first place earns) from it, even flagged first places are not
-    waited on. The badge engine asks the same of the settled standing, so the badge is
-    never awarded below the minimum. No new code.
+    waited on. The settlement records the count it decided on (the server-side column
+    `Challenge.settled_active_participants`, not served), and the badge engine reads that
+    record, so the badge is never awarded below the minimum, and a rival erasing their
+    account after the settlement does not take a win back. No new code.
 - **Another member's profile** (B-077). `GET /api/social/users/public-profile/{id}/`
   (and `by_username/`) gains `featured_achievements` (at most three badges the person
   featured: `{id, key, name, category, points, icon_url, badge_color, is_rare,
