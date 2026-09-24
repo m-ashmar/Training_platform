@@ -9,9 +9,11 @@ are unchanged; this is one more, built from the same definitions:
 
     new_request      a pending request the CLIENT sent (`TrainerClientRelation`)
     form_check       a client's video in the chat that names an exercise
-                     (`chat.Message`, B-091 part 1), until the trainer writes after it
+                     (`chat.Message`, B-091 part 1), sent since the CURRENT coaching
+                     began, until the trainer writes after it
     idle_client      `routine.outcomes.attention` says `quiet` (nothing trained for
-                     `QUIET_DAYS`, or never) or `never_started`
+                     `QUIET_DAYS`, or never) or `never_started` (assigned a routine
+                     and never trained)
     slipping_client  `attention` says `slipping` — this week well under their own
                      four-week average — and the client is not idle
     program_ending   an active routine this trainer wrote for the client ends within
@@ -23,17 +25,19 @@ account is active (`users.visibility.public_q`: a suspended account is not shown
 with no block between the two (`moderation.services.blocked_ids`, either direction).
 A request needs only the last two: its client is not approved yet. A client whose
 coaching the platform refuses (frozen, unpaid, ended — `users.coaching.refusals_for`,
-read inside `attention`) contributes NOTHING except a request: the chat refuses both
-sides while the coaching is paused, so a form check could never be answered, and the
-freeze rule says their routines cannot be used; the old attention read still lists
-them, with the reason.
+asked at the moment of the call: the instant the chat's `may_message` asks, not the
+whole day `attention` judges a date by) contributes NOTHING except a request: the chat
+refuses both sides while the coaching is paused, so a form check could never be
+answered, and the freeze rule says their routines cannot be used; the old attention
+read still lists them, with the reason.
 """
 from __future__ import annotations
 
 import math
 from datetime import datetime, time, timedelta
 
-from django.db.models import Exists, F, OuterRef
+from django.db.models import Exists, F, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext as _
 from rest_framework import status
@@ -90,8 +94,8 @@ def _midnight(day) -> datetime:
 def build_queue(trainer, *, request=None, today=None) -> list[dict]:
     """Every item needing this trainer's attention, in the one order (see the view).
 
-    A bounded number of queries whatever the roster's size (about seventeen): nothing
-    below reads per client or per item.
+    A bounded number of queries whatever the roster's size (about twenty, measured
+    2026-09-24): nothing below reads per client or per item.
     """
     from chat.media import payload as media_payload
     from chat.models import KIND_VIDEO, Message
@@ -100,10 +104,12 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
     from routine.outcomes import QUIET_DAYS, attention
     from routine.permissions import accessible_user_ids
 
+    from .coaching import refusals_for
     from .models import CustomUser, TrainerClientRelation
     from .visibility import public_q
 
-    today = today or timezone.localdate()
+    now = timezone.now()
+    today = today or timezone.localdate(now)
     hidden = blocked_ids(trainer)
     items = []
 
@@ -129,11 +135,16 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
     clients = {c.pk: c for c in (CustomUser.objects
                                  .filter(pk__in=ids, user_type='client')
                                  .filter(public_q()))}
-    rows = attention(trainer, sorted(clients), today=today) if clients else []
-    by_client = {row['client_id']: row for row in rows}
-    refused = {row['client_id'] for row in rows
-               if any(r['code'] in ('frozen', 'unpaid', 'ended') for r in row['reasons'])}
+    # Refused NOW — the instant the chat's `may_message` asks, not the whole day that
+    # `attention` judges a date by. A month frozen at 09:00 still "covers" today as a
+    # date, so reading the refusal from `attention` queued a form check until midnight
+    # whose reply the chat already answered 403 `coaching_frozen`.
+    refused = {client_id for client_id, refusal
+               in refusals_for(trainer.pk, list(clients)).items() if refusal}
     usable = sorted(set(clients) - refused)
+    # `attention` only for what it alone decides: who is idle, who is slipping.
+    rows = attention(trainer, usable, today=today) if usable else []
+    by_client = {row['client_id']: row for row in rows}
 
     # Every active routine this trainer wrote for a usable client, in one query: the
     # idle and slipping cards name the programme, and the ending ones are among these.
@@ -152,17 +163,27 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
         if routine.end_date and today <= routine.end_date <= horizon:
             ending.append((client_id, routine))
 
-    # --- form checks: a usable client's video naming a move, not taken back, with no
-    # message from the trainer AFTER it in that thread (a reply the trainer took back
-    # does not count: the client has no answer).
+    # --- form checks: a usable client's video naming a move, sent during THIS coaching,
+    # not taken back, with no message from the trainer AFTER it in that thread (a reply
+    # the trainer took back does not count: the client has no answer).
     answered = Message.objects.filter(conversation=OuterRef('conversation'),
                                       sender_id=trainer.pk, deleted_at__isnull=True,
                                       pk__gt=OuterRef('pk'))
+    # When the current approved relation began. A pair has one conversation for life, so
+    # a video left unanswered when an EARLIER coaching ended (the chat then refused the
+    # trainer) would come back as the oldest form check the day the client returns.
+    began = (TrainerClientRelation.objects
+             .filter(trainer=trainer, client_id=OuterRef('conversation__client_id'),
+                     status='approved')
+             .annotate(began=Coalesce('responded_at', 'created_at'))
+             .order_by('-id')
+             .values('began')[:1])
     checks = (Message.objects
               .filter(conversation__trainer=trainer,
                       conversation__client_id__in=usable,
                       kind=KIND_VIDEO, exercise__isnull=False, deleted_at__isnull=True,
-                      sender_id=F('conversation__client_id'))
+                      sender_id=F('conversation__client_id'),
+                      created_at__gte=Subquery(began))
               .filter(~Exists(answered))
               .select_related('exercise')
               .order_by('created_at', 'id'))
@@ -281,6 +302,10 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
             },
         })
 
+    # `at` is when an item BECAME due: never later than the moment of this answer,
+    # whatever a date-based rule above computes.
+    for item in items:
+        item['at'] = min(item['at'], now)
     items.sort(key=_sort_key)
     for item in items:
         item.pop('_score', None)
@@ -324,9 +349,14 @@ class AttentionQueueView(APIView):
     """GET /api/v1/trainer/attention/ — what needs this trainer, most urgent first.
 
     Trainers only: anyone else — a client, an agent, an admin — answers
-    `403 {"code": "not_a_trainer"}`. No query parameters, no body. Nothing here differs
-    by build (`X-App-Channel`): it sells nothing and shows no price of its own (a
-    request row carries the quoted fee the pending-requests read carries).
+    `403 {"code": "not_a_trainer"}`. No query parameters, no body.
+
+    WHAT DIFFERS BY BUILD (`X-App-Channel`, `X-App-Version`): only the quote on a
+    `new_request` row. `agreed_rate`, `agreed_currency`, `trainer_net` and
+    `commission_rate` are null — the keys stay — on a build that may not show a coaching
+    fee (`policy.services.can_show_price` for `coaching_1to1`: `ios` today, and a request
+    that declares no channel). Every other field, every item and the order are the same
+    on every build: the queue sells nothing.
 
     200::
 
@@ -336,7 +366,8 @@ class AttentionQueueView(APIView):
                     | "program_ending",
             "id": "form_check:812",          stable per item: kind + the row's own id(s)
             "client": {"id", "name", "first_name", "last_name", "profile_picture"},
-            "at": datetime,                  when the item became due (below)
+            "at": datetime,                  when the item became due (below); never
+                                             later than the response
             "<kind>": {...}}                 the kind's own fields, under its own name
          ]}
 
@@ -344,9 +375,9 @@ class AttentionQueueView(APIView):
 
     | kind | `at` | fields |
     |---|---|---|
-    | `new_request` | the request was sent | the pending-requests row, exactly as `GET /api/auth/trainer/pending-requests/` answers it (`request_id` is what `trainer/respond-to-request/` takes) |
+    | `new_request` | the request was sent | the pending-requests row, exactly as `GET /api/auth/trainer/pending-requests/` answers a request the CLIENT sent (one builder, `users.trainer_requests.pending_request_row`): `request_id` (what `trainer/respond-to-request/` takes), `client_id`, `client_name`, `client_username`, `initiated_by` (always `client` here), `status` (`pending`), `created_at`, `requested_at`, `note` (the client's own words), `client_email`, `client_profile_picture`, `client_age`, `client_gender`, `client_goals`, `client_activity_level`, the v2 answers `training_goal`, `training_place`, `training_days_per_week` (a code, or "" / null while unanswered), and the QUOTE: `agreed_rate` + `agreed_currency` (the fee quoted with the request, in the trainer's currency when it converts, the unit always beside it), `trainer_net` (that fee less the platform's commission), `commission_rate` (that commission as a fraction, `0.2`) — the four null on a build that may not show a coaching fee (above), the first three also when no fee was quoted. Never a health note: those come after acceptance |
     | `form_check` | the video was sent | `message_id`, `conversation_id`, `exercise` `{id, name}`, `caption`, `duration_seconds` (null when the container declared none), `sent_at`, `media` (the thread's signed, expiring `{url, ...}`) |
-    | `idle_client` | the day they became quiet (last trained + `QUIET_DAYS`), or when the coaching began for a client who never trained | `reason` (`quiet` / `never_started`), `days` (null = never trained), `last_trained_on`, `last_workout` `{at, day, routine: {id, name}}` or null, `program` `{id, name}` or null |
+    | `idle_client` | the day they became quiet (last trained + `QUIET_DAYS`), or when the coaching began for a client who never trained | `reason` (`quiet` / `never_started`), `days` (null = never trained), `last_trained_on`, `last_workout` `{at, day, routine: {id, name}}` or null, `program` `{id, name}` or null. `never_started` only for a client who has never trained (`days` null); a client who has trained is idle only after `QUIET_DAYS` without, as `quiet` |
     | `slipping_client` | today | `this_week_percent`, `usual_percent` (their own four-week share of planned sets), `planned_sets`, `missed_sets`, `last_trained_on`, `program` |
     | `program_ending` | `PROGRAM_ENDING_WITHIN_DAYS` (7) before `end_date` | `routine_id`, `name`, `week`, `weeks` (week N of M, from `start_date` / `end_date`), `end_date`, `days_left` |
 
@@ -360,17 +391,21 @@ class AttentionQueueView(APIView):
     WHO appears: this trainer's APPROVED clients (`accessible_user_ids`), never a
     suspended account (`users.visibility`), never a pair where either has blocked the
     other; a request from any active client not blocked. A client whose coaching is
-    frozen, unpaid or ended appears in none of the kinds (the chat refuses both sides
-    while it lasts, and their routines cannot be used); `GET
-    /api/routine/trainer/client-progress/attention/` still lists them, with the reason.
-    A client is idle OR slipping, never both: idle wins. `idle` and `slipping` are
-    `routine.outcomes.attention`'s own `quiet` / `never_started` and `slipping`, with
-    its threshold (`QUIET_DAYS`, 5), so the two reads cannot disagree.
+    frozen, unpaid or ended at the moment of the call appears in none of the kinds —
+    from the minute it froze, the same instant the chat starts refusing both sides
+    (`chat.permissions.may_message`), not from the next day — and their routines cannot
+    be used; `GET /api/routine/trainer/client-progress/attention/` still lists them,
+    with the reason. A client is idle OR slipping, never both: idle wins. `idle` and
+    `slipping` are `routine.outcomes.attention`'s own `quiet` / `never_started` and
+    `slipping`, with its threshold (`QUIET_DAYS`, 5), so the two reads cannot disagree.
 
     A FORM CHECK is a video the CLIENT sent in the chat with an `exercise_id`
-    (`POST /api/v1/chat/media/`). It leaves the queue as soon as the trainer sends any
-    message in that conversation after it; a reply the trainer then took back does not
-    count. A video the client took back leaves with it.
+    (`POST /api/v1/chat/media/`) since the CURRENT coaching began (the approved
+    relation's `responded_at`, else its `created_at`): a pair keeps one conversation
+    for life, and a video left from an earlier coaching is not asked of this one. It
+    leaves the queue as soon as the trainer sends any message in that conversation after
+    it; a reply the trainer then took back does not count. A video the client took back
+    leaves with it.
 
     The four older reads (pending requests, attention, recent activity, routines) are
     unchanged. A bounded number of queries whatever the roster's size.

@@ -878,14 +878,17 @@ changes nothing an unverified trainer may do today (see BACKEND_DELTA decision 5
 
 The trainer's home is a queue, not a dashboard (`12-trainer-shell/TrainerHome`): one
 ordered list of what needs them, each item with its own actions. `GET` only, trainers
-only (403 `not_a_trainer` for anyone else), identical on every build. The view's
+only (403 `not_a_trainer` for anyone else). Identical on every build except the quote
+on a request row: `agreed_rate`, `agreed_currency`, `trainer_net`, `commission_rate` are
+null where `can_show_price` forbids a coaching fee (`ios`, no channel). The view's
 docstring (`users/attention_queue.py AttentionQueueView`) is the full contract.
 
 `{count, items: [{kind, id, client: {id, name, first_name, last_name,
 profile_picture}, at, <kind>: {...}}]}` — `kind` is `new_request`, `form_check`,
 `idle_client`, `slipping_client` or `program_ending`; `id` is stable (`form_check:812`);
-`at` is when the item became due; the kind's own fields sit under a key named after it:
-the pending-requests row; the form check's `message_id`, `conversation_id`, `exercise`,
+`at` is when the item became due, never later than the response; the kind's own fields
+sit under a key named after it: the pending-requests row (`pending_request_row`, the
+quote and the client's v2 answers included); the form check's `message_id`, `conversation_id`, `exercise`,
 `caption`, `duration_seconds`, `sent_at` and signed `media`; the idle client's `reason`
 (`quiet` / `never_started`), `days`, `last_trained_on`, `last_workout`, `program`; the
 slipping client's `this_week_percent`, `usual_percent`, `planned_sets`, `missed_sets`,
@@ -896,9 +899,11 @@ One total order: requests, form checks, idle, slipping, programmes ending; withi
 kind the longest-waiting request, the oldest unanswered video, the highest `attention`
 urgency score, the biggest drop against the client's own average, the fewest days
 left — ties broken by a unique id. Only approved, active, unblocked clients; a client
-whose coaching is frozen, unpaid or ended appears in none of the kinds. A form check
-leaves the queue when the trainer sends any message in that thread after it. The
-threshold for idle is `attention`'s own (`QUIET_DAYS`, 5 days). The four older reads
+whose coaching is frozen, unpaid or ended at that moment (the instant the chat refuses)
+appears in none of the kinds. A form check is a video sent since the current coaching
+began, and leaves the queue when the trainer sends any message in that thread after it.
+The threshold for idle is `attention`'s own (`QUIET_DAYS`, 5 days); `never_started` is
+only for a client who has never trained. The four older reads
 are unchanged.
 
 | Method | Path | Auth | View |

@@ -556,8 +556,10 @@ def attention(trainer, client_ids, *, today=None, quiet_days=QUIET_DAYS):
 
     Signals, each with the numbers behind it so the coach can judge rather than trust:
       `frozen` / `ended`     the coaching is paused or over (users/coaching.py)
-      `never_started`        assigned a routine and has never closed a day
-      `quiet`                nothing trained for `quiet_days`
+      `never_started`        assigned a routine and has never trained — no finished
+                             session and no closed day
+      `quiet`                nothing trained for `quiet_days` (`days`), or never trained
+                             and nothing assigned (`days` null)
       `slipping`             this week's share of planned sets is well below their own
                              four-week average — measured against themselves, because a
                              client who always does 70% is steady, not slipping
@@ -584,8 +586,6 @@ def attention(trainer, client_ids, *, today=None, quiet_days=QUIET_DAYS):
         seen_date = timezone.localdate(seen) if seen else None
         if seen_date is None or (last and last > seen_date):
             last_trained[user_id] = last
-    ever_closed = set(DayOutcome.objects.filter(user_id__in=ids)
-                      .values_list('user_id', flat=True).distinct())
     assigned = {row['assigned_to'] for row in Routine.objects
                 .filter(assigned_to__in=ids, is_active=True)
                 .values('assigned_to')}
@@ -626,15 +626,19 @@ def attention(trainer, client_ids, *, today=None, quiet_days=QUIET_DAYS):
                 'usual_set_completion_percent': usual,
             })
             continue
-        if user_id in assigned and user_id not in ever_closed:
+        # Idle is decided by the last training, whatever wrote it. A client whose
+        # workouts carry no day has no `DayOutcome` yet trained yesterday: "never closed
+        # a day" called them `never_started` (score 50) and the queue then dated their
+        # idle card days ahead (review of users/attention_queue.py, 2026-09-24).
+        if quiet is None and user_id in assigned:
             reasons.append({'code': 'never_started'})
             score += 50
-        elif quiet is not None and quiet >= quiet_days:
-            reasons.append({'code': 'quiet', 'days': quiet})
-            score += min(10 + quiet * 4, 50)
         elif quiet is None:
             reasons.append({'code': 'quiet', 'days': None})
             score += 30
+        elif quiet >= quiet_days:
+            reasons.append({'code': 'quiet', 'days': quiet})
+            score += min(10 + quiet * 4, 50)
         if share is not None and usual is not None and usual - share >= 20:
             reasons.append({'code': 'slipping', 'this_week': share, 'usual': usual})
             score += 30

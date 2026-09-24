@@ -4827,7 +4827,9 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
 
         `{trainer_id, count, clients: [{client_id, client_name, score, reasons,
         last_trained, this_week, usual_set_completion_percent}]}`. Each reason carries
-        its numbers: `frozen`, `ended`, `unpaid`, `never_started`, `quiet` (+`days`),
+        its numbers: `frozen`, `ended`, `unpaid`, `never_started` (assigned a routine
+        and never trained: no finished session, no closed day), `quiet` (+`days`, null
+        for a client who never trained and has nothing assigned),
         `slipping` (+`this_week`, `usual` — measured against that client's own four-week
         average, so a steady 70% is not an alarm), `missing_sets` (+`missed`,
         `planned`). A client with nothing to report is left out. Identical on every

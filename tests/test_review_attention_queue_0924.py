@@ -27,8 +27,10 @@ pytestmark = pytest.mark.django_db
 
 QUEUE = '/api/v1/trainer/attention/'
 #: A build that may show a coaching fee, and one that may not (BACKEND_DELTA decision 4).
+#: The conftest client says `apk` unless told otherwise, so "no channel" is an empty one.
 SHOWN = {"HTTP_X_APP_CHANNEL": "apk"}
 HIDDEN = {"HTTP_X_APP_CHANNEL": "ios"}
+UNDECLARED = {"HTTP_X_APP_CHANNEL": ""}
 FEE = ('agreed_rate', 'agreed_currency', 'trainer_net', 'commission_rate')
 
 
@@ -296,7 +298,7 @@ def test_the_request_rows_fee_depends_on_the_build(api, make_user, trainer):
     assert shown['agreed_currency'] and shown['trainer_net'] is not None
     assert shown['training_place'] == 'home' and shown['training_days_per_week'] == 3
 
-    for headers in (HIDDEN, {}):
+    for headers in (HIDDEN, UNDECLARED):
         [hidden] = [i['new_request'] for i in _queue(api, trainer, **headers)
                     if i['kind'] == 'new_request']
         assert {key: hidden[key] for key in FEE} == dict.fromkeys(FEE), headers
