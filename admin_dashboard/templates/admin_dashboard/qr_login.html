@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Operator console sign-in</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         background: #0B0C0E; color: #F3F1EC; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { width: min(420px, calc(100% - 32px)); padding: 32px; border-radius: 16px;
+         background: #14161A; border: 1px solid #2A2E36; }
+  h1 { margin: 0 0 12px; font-size: 22px; }
+  p { margin: 0 0 16px; color: #A3A8B3; }
+  .code { font-size: 56px; font-weight: 700; letter-spacing: 0.12em; text-align: center;
+          margin: 8px 0 16px; color: #F5B83D; font-variant-numeric: tabular-nums; }
+  button { font: inherit; padding: 12px 20px; border-radius: 10px; border: 0;
+           background: #FF6B35; color: #0B0C0E; font-weight: 600; cursor: pointer; width: 100%; }
+  #note { min-height: 24px; }
+</style>
+</head>
+<body>
+<main>
+{% if state == "start" %}
+  <h1>Sign in to the operator console</h1>
+  <p>You opened a sign-in link made on your phone. Continue, then type the number this page shows into the phone.</p>
+  <form method="post">{% csrf_token %}<button type="submit">Continue</button></form>
+{% elif state == "claimed" %}
+  <h1>Type this number on your phone</h1>
+  <div class="code" id="code">{{ match_code }}</div>
+  <p id="note">Waiting for your phone. This page signs you in by itself once the number is typed there.</p>
+  <form id="poll">{% csrf_token %}</form>
+  {{ status_url|json_script:"status-url" }}
+  <script>
+  (function () {
+    var url = JSON.parse(document.getElementById("status-url").textContent);
+    var token = document.querySelector("#poll input[name=csrfmiddlewaretoken]").value;
+    var note = document.getElementById("note");
+    var deadline = Date.now() + ({{ seconds|default:120 }} + 5) * 1000;
+    var messages = {
+      expired: "The two minutes ran out. Make a new link on your phone.",
+      cancelled: "This sign-in was cancelled. Make a new link on your phone.",
+      used: "This link was already used."
+    };
+    function stop(text) { note.textContent = text; document.getElementById("code").style.opacity = 0.3; }
+    function ask() {
+      if (Date.now() > deadline) { stop(messages.expired); return; }
+      fetch(url, { method: "POST", credentials: "same-origin", headers: { "X-CSRFToken": token } })
+        .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          if (!res.ok) { stop("This link was opened in another browser, or no longer exists."); return; }
+          if (res.body.state === "signed_in") { window.location.replace(res.body.next); return; }
+          if (res.body.state === "waiting") { setTimeout(ask, 2000); return; }
+          stop(messages[res.body.state] || messages.expired);
+        })
+        .catch(function () { setTimeout(ask, 4000); });
+    }
+    setTimeout(ask, 2000);
+  })();
+  </script>
+{% elif state == "closed" %}
+  <h1>This link can no longer be used</h1>
+  <p>It expired, was cancelled, or was already opened on another computer. Make a new one on your phone.</p>
+{% elif state == "throttled" %}
+  <h1>Too many attempts</h1>
+  <p>Too many sign-in links were opened from this address. Wait a few minutes and try again.</p>
+{% else %}
+  <h1>Not found</h1>
+  <p>There is no such sign-in link.</p>
+{% endif %}
+</main>
+</body>
+</html>

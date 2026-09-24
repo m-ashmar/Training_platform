@@ -124,6 +124,18 @@ register(PersonalDataSource(
     fields=["id", "withdrawal", "from_state", "to_state", "actor_role", "created_at"],
     on_erase="keep"))
 
+# An operator's console sign-ins from the phone (admin_dashboard/console_login.py,
+# B-120): when each link was made, opened, approved and used, and the address and
+# browser of the computer that opened it. The row is the operator's own audit trail;
+# it goes with the account and is kept 90 days. The secrets are hashes and the number
+# the computer showed means nothing once the link is closed, so none is exported.
+register(PersonalDataSource(
+    label="console_logins", model="admin_dashboard.ConsoleLogin", user_field="user",
+    fields=["id", "state", "created_at", "expires_at", "claimed_at", "claimed_ip",
+            "claimed_user_agent", "approved_at", "used_at", "cancelled_at",
+            "cancel_reason"],
+    on_erase="delete", retention_days=90))
+
 # --- training -----------------------------------------------------------------
 register(PersonalDataSource(label="workout_sessions", model="routine.WorkoutSession", user_field="user"))
 register(PersonalDataSource(label="exercise_progress", model="routine.UserExerciseProgress", user_field="user"))

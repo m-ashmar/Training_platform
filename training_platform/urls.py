@@ -76,6 +76,11 @@ urlpatterns = [
     # is the withdrawal queue in the console at /dj-admin/.
     path('api/v1/trainer/', include('payouts.urls', namespace='payouts')),
 
+    # The operator's phone (16-agent-operator/OperatorPhone): the four queue counts and
+    # a sign-in link for the web console, off unless OPS_QR_LOGIN_ENABLED (B-119, B-120).
+    # Everything else operators do is the console at /dj-admin/. See admin_dashboard/.
+    path('api/v1/ops/', include('admin_dashboard.api_urls', namespace='ops')),
+
     # The design-v2 trainer screens: roster, profile, matches. See users/trainer_views.py.
     path('api/v1/trainers/', include('users.urls_v1', namespace='trainers')),
     # The client's monthly coaching (users/coaching.py).
