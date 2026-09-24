@@ -57,6 +57,14 @@ EVENT_CLASS_REGISTRY = {
     # A trainer's verification was decided (trainer_verification/services.py).
     'trainer_verification_approved': 'notifications.domain.verification_events.TrainerVerificationApprovedEvent',
     'trainer_verification_rejected': 'notifications.domain.verification_events.TrainerVerificationRejectedEvent',
+    # Routine products (routine/products.py, plan step 10). Fact only on every build:
+    # no price, button or link (payments spec, section 7).
+    'routine_product_approved': 'notifications.domain.product_events.RoutineProductApprovedEvent',
+    'routine_product_rejected': 'notifications.domain.product_events.RoutineProductRejectedEvent',
+    'routine_product_sold': 'notifications.domain.product_events.RoutineProductSoldEvent',
+    'routine_product_purchased': 'notifications.domain.product_events.RoutineProductPurchasedEvent',
+    'routine_product_refunded': 'notifications.domain.product_events.RoutineProductRefundedEvent',
+    'routine_product_sale_refunded': 'notifications.domain.product_events.RoutineProductSaleRefundedEvent',
     # Trainer-client chat (chat/events.py). One nudge until the thread is opened.
     'chat_message': 'notifications.domain.chat_events.ChatMessageEvent',
     # Progress (routine/strength.py, routine/tasks.py). Fact-only, no claims.

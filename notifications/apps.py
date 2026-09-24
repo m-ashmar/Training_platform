@@ -19,6 +19,7 @@ class NotificationsConfig(AppConfig):
         import notifications.listeners.progress_listeners  # noqa: F401
         import notifications.listeners.chat_listeners  # noqa: F401
         import notifications.listeners.verification_listeners  # noqa: F401
+        import notifications.listeners.product_listeners  # noqa: F401
 
         # Security Check: Initialize Firebase
         self._initialize_firebase()

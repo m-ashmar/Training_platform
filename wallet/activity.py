@@ -33,7 +33,19 @@ PURPOSE_KINDS = {
     'coaching_commission': 'platform_commission',
     'subscription_trainer_share': 'plan_trainer_share',
     'subscription_revenue': 'plan_payment',
+    # A routine product (routine/products.py, B-099): the buyer's one row (buyer ->
+    # escrow, the whole price), the trainer's one row (escrow -> trainer, their share)
+    # and the platform's commission. A sale used to be readable only as
+    # `transfer_received`.
+    'routine_product_charge': 'routine_product_purchase',
+    'routine_product_sale': 'routine_product_sale',
+    'routine_product_commission': 'platform_commission',
 }
+
+#: Purposes whose row must not name the BUYER to the trainer: a purchase is not a
+#: coaching, and the buyer is not the trainer's client (`counterparty_id`).
+PRODUCT_PURPOSES = frozenset({'routine_product_charge', 'routine_product_sale',
+                              'routine_product_commission'})
 
 #: kind -> what the row is called, in the reader's language. One line, no amounts and
 #: no names in the string itself: the name is a separate field, because Arabic and
@@ -46,6 +58,8 @@ KIND_LABELS = {
     'plan_trainer_share': _("Your trainer's share of the plan"),
     'plan_payment': _("Plan payment"),
     'plan_credit': _("Plan payment received"),
+    'routine_product_purchase': _("Program purchase"),
+    'routine_product_sale': _("Program sale"),
     'agent_topup': _("Cash top-up"),
     'trainer_transfer': _("Sent to a trainer"),
     'transfer_received': _("Transfer received"),
@@ -135,6 +149,11 @@ def counterparty_id(tx, wallet, *, owner_ids=None):
 
     if metadata.get('trainer_id') and metadata.get('trainer_id') != wallet.owner_id:
         return metadata['trainer_id']
+    if (metadata.get('purpose') in PRODUCT_PURPOSES or metadata.get('purchase_id')) \
+            and metadata.get('trainer_id') == wallet.owner_id:
+        # The trainer's side of a routine-product sale or its refund: the other wallet
+        # is escrow or, for an exchange leg, nobody, and the buyer is never named.
+        return None
     if metadata.get('client_id') and metadata.get('client_id') != wallet.owner_id:
         return metadata['client_id']
     if metadata.get('agent_id'):
