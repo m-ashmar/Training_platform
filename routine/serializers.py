@@ -109,6 +109,11 @@ class ExerciseAuthoringFieldsMixin(serializers.Serializer):
         user_id = getattr(getattr(request, 'user', None), 'pk', None)
         return user_id is not None and obj.created_by_id == user_id
 
+    def validate_equipment(self, value):
+        """An empty string is "not said": stored as null, like every exercise written
+        before the field."""
+        return value or None
+
 
 class ExerciseSerializer(ExerciseAuthoringFieldsMixin, ExerciseMediaSlotsMixin,
                          serializers.ModelSerializer):

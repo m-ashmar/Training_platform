@@ -741,3 +741,11 @@ def test_b108_the_count_is_fresh_after_a_program_is_generated(make_user, api):
     assert caller.get(url).json()["used_by_count"] == 1
     listed = _results(caller.get("/api/routine/templates/my_templates/"))
     assert [t["used_by_count"] for t in listed if t["id"] == template.pk] == [1]
+
+
+def test_b107_an_empty_equipment_is_not_said(make_user, api):
+    trainer = make_user("ra_t_b107empty", user_type="trainer")
+    resp = api(trainer).post("/api/routine/exercises/", {
+        "name": "Plank", "target_muscle": "Abdominals", "equipment": ""}, content_type=JSON)
+    assert resp.status_code == 201, resp.content
+    assert (resp.json()["equipment"], resp.json()["equipment_display"]) == (None, None)
