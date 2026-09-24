@@ -74,6 +74,9 @@ INSTALLED_APPS = [
     # A trainer's verification: documents, review states, the console queue
     # (trainer_verification/models.py).
     "trainer_verification",
+    # A trainer's withdrawals and payout methods, and the operator's queue
+    # (payouts/models.py).
+    "payouts",
 
     # Third-party
     "rest_framework",
@@ -786,6 +789,32 @@ PLATFORM_ESCROW_USERNAME = get_env('PLATFORM_ESCROW_USERNAME', 'platform_escrow'
 # Where the platform's commission lands (wallet.utils.get_platform_revenue_wallet).
 PLATFORM_REVENUE_EMAIL = get_env('PLATFORM_REVENUE_EMAIL', 'platform_revenue@local')
 PLATFORM_REVENUE_USERNAME = get_env('PLATFORM_REVENUE_USERNAME', 'platform_revenue')
+# Where a trainer's withdrawal waits between the request and the operator's transfer
+# (wallet.utils.get_payout_clearing_wallet; the spec's `payout_clearing` account). Its
+# balance is the sum of every open withdrawal in that currency.
+PLATFORM_PAYOUT_CLEARING_EMAIL = get_env('PLATFORM_PAYOUT_CLEARING_EMAIL',
+                                         'platform_payout_clearing@local')
+PLATFORM_PAYOUT_CLEARING_USERNAME = get_env('PLATFORM_PAYOUT_CLEARING_USERNAME',
+                                            'platform_payout_clearing')
+
+# ========================
+# Trainer withdrawals (payouts/; the spec, section 8 "Trainer payouts"). Every number
+# here is a PROPOSAL THE OWNER CONFIRMS: the hold and the SYP minimum are the design's
+# (`15-trainer-money/TrainerEarnings` «يتاح خلال 3 أيام», `TrainerWithdraw` «الحد
+# الأدنى 10,000»); the daily cap, the USD figures and the method count are nobody's yet.
+# Per currency, like the agent caps (SIDE_BUGS S-059): one number for both would let a
+# dollar trainer withdraw the pound figure in dollars.
+# ========================
+#: Money released from escrow to a trainer (a coaching payout) is "settling", not
+#: withdrawable, for this many days after the release, to cover disputes. 0 = no hold.
+PAYOUT_HOLD_DAYS = int(get_env('PAYOUT_HOLD_DAYS', '3'))
+#: The smallest withdrawal, per currency.
+PAYOUT_MIN_AMOUNT = {"SYP": _Decimal("10000"), "USD": _Decimal("100")}
+#: The most one trainer may withdraw in one local day, per currency (requests not
+#: cancelled or failed). A currency missing here withdraws nothing: fail closed.
+PAYOUT_DAILY_CAP = {"SYP": _Decimal("500000"), "USD": _Decimal("5000")}
+#: How many payout methods one trainer may keep.
+PAYOUT_METHODS_MAX = 5
 
 # ========================
 # Who the receipt says issued it (spec §7: invoice number, date, item, amount,
@@ -957,6 +986,9 @@ CACHALOT_UNCACHABLE_TABLES = frozenset([
     # Auth/security — token revocation & permission boundaries must not be stale
     'token_blacklist_blacklistedtoken', 'token_blacklist_outstandingtoken',
     'users_trainerclientrelation', 'users_otpverification', 'users_passwordresettoken',
+    # Withdrawals: "one open request" and the daily cap are read to decide whether money
+    # may move, so a cached read is a second withdrawal (payouts/services.py).
+    'payouts_withdrawal', 'payouts_withdrawalevent', 'payouts_payoutmethod',
 ])
 
 # Multipart bodies are buffered here before a view ever sees them. Unset, this is the

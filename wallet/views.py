@@ -220,6 +220,13 @@ class WalletBalanceView(APIView):
 
     A read of what the caller already has, with no price and no way to buy anything,
     so it takes no `X-App-Channel` and is identical on every build.
+
+    Also `available`, `settling`, `settling_until` and `in_withdrawal` (BACKEND_BUGS
+    B-097; `wallet.settling.WalletSettlingFields`): a coaching payout is `settling` for
+    `PAYOUT_HOLD_DAYS` after its release, `available` is `balance - settling` (what a
+    withdrawal may take), `settling_until` is when the next settling payout becomes
+    available (ISO 8601, or null), and `in_withdrawal` is the money of the trainer's
+    open withdrawal, which has already left `balance`.
     """
     permission_classes = [IsAuthenticated]
 
@@ -319,6 +326,12 @@ class WalletTransactionsView(generics.ListAPIView):
     user with more than 200 transactions could never reach the older ones — there was
     no next link and nothing said the list had been truncated. It is a financial
     ledger; silently hiding rows is not acceptable.
+
+    Each row also carries `available_at` and `settling` (BACKEND_BUGS B-097;
+    `wallet.settling.TransactionSettlingFields`): on a `trainer_fee_payout` row read by
+    the trainer, when its money becomes withdrawable and whether that is still ahead;
+    `null` / `false` on every other row. A trainer's withdrawal reads as `kind`
+    `withdrawal`, and its money coming back as `withdrawal_returned`.
     """
     permission_classes = [IsAuthenticated]
     serializer_class = TransactionSerializer

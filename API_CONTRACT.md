@@ -202,6 +202,9 @@ so parse ids client-side.
 | `payment_rejected` | `payment_id` — the transfer held for it could not be accepted; it goes back to its sender by hand (B-051) |
 | `trainer_verification_approved` | `application_id` — an operator accepted the trainer's documents; the account is verified |
 | `trainer_verification_rejected` | `application_id`, `reason` — the application needs changes (or a verification was revoked); `reason` is the operator's words, also in the body |
+| `withdrawal_requested` | `withdrawal_id`, `number` — the trainer's withdrawal was received; the money is held for it |
+| `withdrawal_paid` | `withdrawal_id`, `number` — the operator confirmed it arrived |
+| `withdrawal_failed` | `withdrawal_id`, `number`, `reason` — it could not be paid and the money is back in the balance; `reason` is the operator's words, also in the body |
 | `personal_record` | `exercise_id`, `set_log_id` — the set that beat the previous best |
 | `weekly_recap` | `week` (the ISO week key), `missed_sets` |
 | `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
@@ -944,6 +947,81 @@ are unchanged.
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/v1/trainer/attention/` | auth (trainer) | `AttentionQueueView` |
+
+### Trainer withdrawals and payout methods (plan step 6, BACKEND_BUGS B-097, B-098)
+
+The trainer's money out (`15-trainer-money/TrainerWithdraw`, `TrainerWithdrawStatus`,
+`TrainerPayoutMethod`; the spec, section 8 "Trainer payouts"). Trainers only: anyone
+else is 403 `not_a_trainer`. The views' docstrings (`payouts/views.py`) are the full
+contract: every body, every `code`, what differs by build.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/trainer/withdrawals/setup/` | auth (trainer) | `WithdrawalSetupView` |
+| `GET, POST` | `/api/v1/trainer/withdrawals/` | auth (trainer) | `WithdrawalListView` |
+| `GET` | `/api/v1/trainer/withdrawals/{id}/` | auth (trainer) | `WithdrawalDetailView` |
+| `POST` | `/api/v1/trainer/withdrawals/{id}/cancel/` | auth (trainer) | `WithdrawalCancelView` |
+| `GET, POST` | `/api/v1/trainer/payout-methods/` | auth (trainer) | `PayoutMethodListView` |
+| `DELETE` | `/api/v1/trainer/payout-methods/{id}/` | auth (trainer) | `PayoutMethodDetailView` |
+| `POST` | `/api/v1/trainer/payout-methods/{id}/default/` | auth (trainer) | `PayoutMethodDefaultView` |
+
+**Payout methods.** `shamcash` — `{kind, address, address_confirm, holder_name}`: the
+account ADDRESS typed twice (spaces, dashes and case do not matter) and the name on the
+account; or `agent_cash` — `{kind, agent_id}`, cash collected from an agent of
+`GET /api/wallet/agents/`. Never a password, PIN or code. The first is the default;
+`is_default: true`, or `POST …/{id}/default/`, moves it. A method reads `{id, kind,
+address, holder_name, agent, is_default, verified, verified_at, created_at}`;
+`verified` is the design's «محقّق» (money sent there arrived). Codes:
+`payout_method_kind_invalid`, `payout_address_required`, `payout_address_invalid`,
+`payout_address_mismatch`, `payout_holder_name_required`, `payout_holder_name_too_long`,
+`payout_agent_unavailable` (400); `payout_method_exists` (with `id`),
+`payout_methods_limit` (with `max`) (409); `payout_method_not_found` (404).
+
+**A withdrawal.** `POST withdrawals/` `{amount, method_id?, idempotency_key}` —
+**only verified trainers** (403 `trainer_not_verified`). The amount leaves the wallet at
+once, into the platform's payout-clearing wallet, so it cannot be spent twice: the
+design's «أموالك في رصيدك حتى يُؤكَّد الوصول» does not describe this server — the money
+is held for the request and comes BACK to the balance only if it fails or is cancelled.
+States: `requested` → `approved` → `sent` → `confirmed` (arrived), or `failed` (money
+back, `failure_reason`), or `cancelled` by the trainer while `requested`
+(`POST …/{id}/cancel/`, 409 `withdrawal_not_cancellable` after). Numbered
+`WD-2026-09-23-041`. A withdrawal reads `{id, number, amount, currency, state,
+destination {kind, address, holder_name, agent}, method_id, transfer_reference,
+failure_reason, can_cancel, requested_at, approved_at, sent_at, confirmed_at, failed_at,
+cancelled_at, timeline [{state, at}]}`; `destination` is a copy taken at the request.
+An operator approves, sends through ShamCash, records the transaction id (one
+transaction pays one withdrawal), confirms or fails it in the console (`/dj-admin/`,
+"Withdrawal queue"). Guardrails and their codes: `withdrawal_below_minimum` (400,
+`minimum`), `withdrawal_already_open` (409, one at a time), `daily_limit_exceeded` (429,
+`daily_cap_left`), `insufficient_balance` (402), `amount_exceeds_available` (409 —
+part of the balance is settling; `available`, `settling`, `settling_until`),
+`payout_method_required` (409), `payout_method_not_found` (404),
+`payout_agent_unavailable` (409), `request_in_flight` (409), `idempotency_key_reused`
+(422). `setup/` answers every number the screen draws — `balance`, `available`,
+`settling`, `settling_until`, `hold_days`, `in_withdrawal`, `minimum`, `daily_cap`,
+`daily_cap_left`, `fee` (always `0.00`), `verified`, `open_withdrawal`, `methods` — and
+`refusal`, the code a request would get right now whatever the amount, or null.
+
+**By build.** Requesting and cancelling move wallet money, so they call the build check
+first: 403 `not_available_on_channel` where `can_transfer_wallet` is off (the first iOS
+build), 400 `app_channel_required` with no known `X-App-Channel`. `setup/` shows the same
+in `refusal`. Every read and the payout methods are identical on every build.
+
+**The settling window (B-097).** A coaching payout — a `trainer_fee_payout` row — is
+"settling" for `hold_days` (3) after its release before it can be withdrawn; nothing
+else settles, and a payout support reversed is not settling. `GET /api/wallet/balance/`
+gains `available` (`balance - settling`), `settling`, `settling_until` (when the next
+settling payout becomes available, ISO 8601, or null) and `in_withdrawal` (the open
+withdrawal's money, already out of `balance`); for a wallet no payout reached,
+`available` is the balance. Every `GET /api/wallet/transactions/` row gains
+`available_at` and `settling`: on a `trainer_fee_payout` row read by the trainer, when
+its money becomes withdrawable and whether that is still ahead; `null` / `false` on
+every other row. Two new `kind`s: `withdrawal` (out, to payout clearing) and
+`withdrawal_returned` (in, a failed or cancelled withdrawal).
+
+Pushes (§4): `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed`. The spec's
+table also lists email for these; there is no email notification channel in this
+codebase, so none is sent.
 
 ### Trainers (design v2)
 

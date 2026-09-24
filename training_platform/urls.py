@@ -72,6 +72,9 @@ urlpatterns = [
     # The trainer's home queue: requests, form checks, idle and slipping clients and
     # programmes ending, in one ordered list (users/attention_queue.py, B-091).
     path('api/v1/trainer/', include('users.urls_trainer_home', namespace='trainer_home')),
+    # The trainer's withdrawals and payout methods (payouts/, B-098). The operator side
+    # is the withdrawal queue in the console at /dj-admin/.
+    path('api/v1/trainer/', include('payouts.urls', namespace='payouts')),
 
     # The design-v2 trainer screens: roster, profile, matches. See users/trainer_views.py.
     path('api/v1/trainers/', include('users.urls_v1', namespace='trainers')),

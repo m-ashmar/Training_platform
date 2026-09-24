@@ -21,7 +21,8 @@ from __future__ import annotations
 from django.utils.translation import gettext_lazy as _
 
 #: `metadata['purpose']` -> the kind of row it is. The purposes are written by
-#: `users/trainer_relations.py`, `users/coaching.py` and `wallet/signals.py`; a purpose
+#: `users/trainer_relations.py`, `users/coaching.py`, `wallet/signals.py` and
+#: `payouts/services.py`; a purpose
 #: that is not here falls through to the shape of the row itself (see `kind_of`).
 PURPOSE_KINDS = {
     'trainer_request_hold': 'trainer_fee_hold',
@@ -33,6 +34,11 @@ PURPOSE_KINDS = {
     'coaching_commission': 'platform_commission',
     'subscription_trainer_share': 'plan_trainer_share',
     'subscription_revenue': 'plan_payment',
+    # A trainer's withdrawal (`payouts/services.py`): the amount leaving their wallet for
+    # payout clearing at the request, and coming back when it fails or is cancelled.
+    # The leg that takes it out of clearing once it arrived touches no person's wallet.
+    'withdrawal_request': 'withdrawal',
+    'withdrawal_returned': 'withdrawal_returned',
 }
 
 #: kind -> what the row is called, in the reader's language. One line, no amounts and
@@ -45,6 +51,8 @@ KIND_LABELS = {
     'platform_commission': _("Platform commission"),
     'plan_trainer_share': _("Your trainer's share of the plan"),
     'plan_payment': _("Plan payment"),
+    'withdrawal': _("Withdrawal"),
+    'withdrawal_returned': _("Withdrawal returned"),
     'plan_credit': _("Plan payment received"),
     'agent_topup': _("Cash top-up"),
     'trainer_transfer': _("Sent to a trainer"),

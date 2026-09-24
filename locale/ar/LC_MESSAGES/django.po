@@ -4920,3 +4920,143 @@ msgid ""
 msgstr ""
 "لقد أرسلت أقصى عدد من الصور والرسائل الصوتية ومقاطع الفيديو المسموح به في "
 "اليوم. حاول مرة أخرى لاحقًا."
+
+#: payouts/models.py
+msgid "Cash from an agent"
+msgstr "نقداً من وكيل"
+
+#: payouts/models.py
+msgid "Requested"
+msgstr "تم الطلب"
+
+#: payouts/models.py
+msgid "Approved"
+msgstr "تمت الموافقة"
+
+#: payouts/models.py
+msgid "Sent"
+msgstr "أُرسل"
+
+#: payouts/models.py
+msgid "Arrived"
+msgstr "وصل"
+
+#: payouts/models.py
+msgid "Cancelled"
+msgstr "أُلغي"
+
+#: payouts/services.py
+msgid "Choose ShamCash or cash from an agent."
+msgstr "اختر شام كاش أو الاستلام نقداً من وكيل."
+
+#: payouts/services.py
+msgid "Type your ShamCash account address."
+msgstr "اكتب عنوان حسابك في شام كاش."
+
+#: payouts/services.py
+msgid "That does not look like a ShamCash account address."
+msgstr "هذا لا يبدو عنوان حساب في شام كاش."
+
+#: payouts/services.py
+msgid "The two addresses you typed do not match."
+msgstr "العنوانان اللذان كتبتهما غير متطابقين."
+
+#: payouts/services.py
+msgid "Type the name on the ShamCash account."
+msgstr "اكتب اسم صاحب حساب شام كاش."
+
+#: payouts/services.py
+msgid "The account holder's name is too long."
+msgstr "اسم صاحب الحساب طويل جداً."
+
+#: payouts/services.py
+msgid "Choose an agent from the list of agents."
+msgstr "اختر وكيلاً من قائمة الوكلاء."
+
+#: payouts/services.py
+msgid "You have already saved this method."
+msgstr "لقد حفظت هذه الطريقة من قبل."
+
+#: payouts/services.py
+msgid "You have saved as many payout methods as you can. Delete one first."
+msgstr "وصلت إلى الحد الأقصى لطرق السحب المحفوظة. احذف واحدة أولاً."
+
+#: payouts/services.py
+msgid "No such payout method."
+msgstr "طريقة السحب هذه غير موجودة."
+
+#: payouts/services.py
+msgid "Only verified trainers can withdraw. Finish your verification first."
+msgstr "السحب متاح للمدربين الموثَّقين فقط. أكمل توثيق حسابك أولاً."
+
+#: payouts/services.py
+msgid "Add a payout method first."
+msgstr "أضف طريقة سحب أولاً."
+
+#: payouts/services.py
+msgid "This agent no longer takes payouts. Choose another method."
+msgstr "هذا الوكيل لم يعد يسلّم الأرباح. اختر طريقة أخرى."
+
+#: payouts/services.py
+msgid "This is below the smallest amount you can withdraw."
+msgstr "هذا أقل من الحد الأدنى للسحب."
+
+#: payouts/services.py
+msgid "You already have a withdrawal in progress. One request at a time."
+msgstr "لديك طلب سحب قيد المعالجة. طلب واحد مفتوح في كل مرة."
+
+#: payouts/services.py
+msgid "This is more than you can withdraw today."
+msgstr "هذا أكثر مما يمكنك سحبه اليوم."
+
+#: payouts/services.py
+msgid "Part of your balance is still settling and cannot be withdrawn yet."
+msgstr "جزء من رصيدك ما زال قيد التسوية ولا يمكن سحبه بعد."
+
+#: payouts/services.py payouts/views.py
+msgid "No such withdrawal."
+msgstr "طلب السحب هذا غير موجود."
+
+#: payouts/services.py
+msgid ""
+"This withdrawal is already being processed and can no longer be cancelled."
+msgstr "طلب السحب هذا قيد المعالجة ولم يعد بالإمكان إلغاؤه."
+
+#: wallet/activity.py
+msgid "Withdrawal"
+msgstr "سحب"
+
+#: wallet/activity.py
+msgid "Withdrawal returned"
+msgstr "سحب مُعاد إلى رصيدك"
+
+#: notifications/domain/payout_events.py
+msgid "Withdrawal requested"
+msgstr "استلمنا طلب السحب"
+
+#: notifications/domain/payout_events.py
+#, python-format
+msgid ""
+"We received your withdrawal request %(number)s. We process requests every "
+"day before noon."
+msgstr "استلمنا طلب السحب %(number)s. نعالج الطلبات يومياً قبل الظهر."
+
+#: notifications/domain/payout_events.py
+msgid "Your withdrawal arrived"
+msgstr "وصل مبلغ السحب إلى حسابك"
+
+#: notifications/domain/payout_events.py
+#, python-format
+msgid "Withdrawal %(number)s was sent and has arrived."
+msgstr "أُرسل طلب السحب %(number)s ووصل إلى حسابك."
+
+#: notifications/domain/payout_events.py
+msgid "Your withdrawal could not be completed"
+msgstr "تعذّر إتمام طلب السحب"
+
+#: notifications/domain/payout_events.py
+#, python-format
+msgid ""
+"Withdrawal %(number)s failed and the money is back in your balance: "
+"%(reason)s"
+msgstr "تعذّر إتمام طلب السحب %(number)s وعاد المبلغ إلى رصيدك: %(reason)s"

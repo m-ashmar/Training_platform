@@ -1,11 +1,14 @@
 from decimal import Decimal
 from rest_framework import serializers
 from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditLog, IdempotencyKey
+# The settling window (BACKEND_BUGS B-097), as mixins so its fields stay out of the two
+# `Meta.fields` lists below: see wallet/settling.py.
+from .settling import TransactionSettlingFields, WalletSettlingFields
 
 _MIN_AMOUNT = Decimal("0.01")
 
 
-class WalletSerializer(serializers.ModelSerializer):
+class WalletSerializer(WalletSettlingFields, serializers.ModelSerializer):
     """The wallet as the Wallet and TopUp screens draw it.
 
     `held` and `held_for` are the "إضافةً إلى 12,000 محجوزة لمدربك رامي" line: money
@@ -114,7 +117,7 @@ class _TransactionListSerializer(serializers.ListSerializer):
         return super().to_representation(rows)
 
 
-class TransactionSerializer(serializers.ModelSerializer):
+class TransactionSerializer(TransactionSettlingFields, serializers.ModelSerializer):
     """One row of "الحركات" on the Wallet screen.
 
     The stored columns say what the database did; `kind`, `reason`, `direction`,
