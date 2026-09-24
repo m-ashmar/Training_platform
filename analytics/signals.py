@@ -112,28 +112,37 @@ def on_meal_completed(sender, instance, **kwargs):
     plan = getattr(meal, "diet_plan", None)
     if plan is None:
         return
-    components = MealComponent.objects.filter(meal_id=meal.pk)
-    if components.filter(is_completed=False).exists():
-        return
-    keys = [f"meal-component-{pk}" for pk in components.values_list("pk", flat=True)]
-    if UserActivity.objects.filter(
-        Q(metadata__meal_id=meal.pk) | Q(session_id__in=keys),
-        user_id=plan.user_id, activity_type="meal_completed",
-    ).exists():
-        return
-    # What was EATEN, by the rule the day's totals use (`DailyProgress.compute_figures`):
-    # the amount the client said, else the planned amount, per 100 g of the food.
-    eaten = Coalesce(F("actual_quantity_consumed"), F("quantity"), output_field=FloatField())
-    calories = components.aggregate(
-        kcal=Sum(eaten / NullIf(F("food__serving_size_grams"), 0)
-                 * F("food__calories")))["kcal"]
-    record_activity(plan.user, "meal_completed",
-                    session_id=f"meal-component-{instance.pk}",
-                    meal_id=meal.pk, name=meal.name or "",
-                    name_ar=meal.name_ar or meal.name or "",
-                    meal_type=meal.meal_type,
-                    date=meal.date.isoformat() if meal.date else None,
-                    calories=round(float(calories or 0), 1))
+    from django.db import transaction
+
+    from diet.models import Meal
+
+    # The check and the write under the MEAL's row lock — the one
+    # `update_completion_status` takes. Two foods ticked together each run this on
+    # commit; unlocked, both saw no row yet and both wrote one (the review, M2).
+    with transaction.atomic():
+        Meal.objects.select_for_update().filter(pk=meal.pk).first()
+        components = MealComponent.objects.filter(meal_id=meal.pk)
+        if components.filter(is_completed=False).exists():
+            return
+        keys = [f"meal-component-{pk}" for pk in components.values_list("pk", flat=True)]
+        if UserActivity.objects.filter(
+            Q(metadata__meal_id=meal.pk) | Q(session_id__in=keys),
+            user_id=plan.user_id, activity_type="meal_completed",
+        ).exists():
+            return
+        # What was EATEN, by the rule the day's totals use (`DailyProgress.compute_figures`):
+        # the amount the client said, else the planned amount, per 100 g of the food.
+        eaten = Coalesce(F("actual_quantity_consumed"), F("quantity"), output_field=FloatField())
+        calories = components.aggregate(
+            kcal=Sum(eaten / NullIf(F("food__serving_size_grams"), 0)
+                     * F("food__calories")))["kcal"]
+        record_activity(plan.user, "meal_completed",
+                        session_id=f"meal-component-{instance.pk}",
+                        meal_id=meal.pk, name=meal.name or "",
+                        name_ar=meal.name_ar or meal.name or "",
+                        meal_type=meal.meal_type,
+                        date=meal.date.isoformat() if meal.date else None,
+                        calories=round(float(calories or 0), 1))
 
 
 @receiver(post_save, sender="users.CustomUser")

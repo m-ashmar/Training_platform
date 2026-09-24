@@ -2096,23 +2096,28 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         # row, not once per set — that is what `suspend_progress_recalc` is for, and
         # the scope is what stops one exercise deciding another routine's day (B-011).
         touched: dict = {}
-        with suspend_progress_recalc():
-            for index, row in enumerate(rows):
-                answer, touch, log = _sync_one_set(request, row, keys.get(index),
-                                                   known, today)
-                results.append(answer)
-                if log is not None:
-                    fresh.append(answer)
-                    # So a second row of the same batch, or a re-send that arrives
-                    # before the commit, sees it as written rather than writing again.
-                    known[log.client_uuid] = log
-                if touch is not None:
-                    progress, routine, day = touch
-                    touched[(progress.pk, getattr(routine, 'pk', None), day)] = touch
+        # Each set commits on its own, so the challenges it moves are recounted ONCE
+        # for the whole sync when this block ends, not once per set (the review, M4).
+        from social.challenge_progress import batched_recounts
 
-        # Outside the suspension, or it would be muted along with the rest.
-        for progress, routine, day in touched.values():
-            recalc_progress_for(progress, routine_scope=routine, day_scope=day)
+        with batched_recounts():
+            with suspend_progress_recalc():
+                for index, row in enumerate(rows):
+                    answer, touch, log = _sync_one_set(request, row, keys.get(index),
+                                                       known, today)
+                    results.append(answer)
+                    if log is not None:
+                        fresh.append(answer)
+                        # So a second row of the same batch, or a re-send that arrives
+                        # before the commit, sees it as written rather than writing again.
+                        known[log.client_uuid] = log
+                    if touch is not None:
+                        progress, routine, day = touch
+                        touched[(progress.pk, getattr(routine, 'pk', None), day)] = touch
+
+            # Outside the suspension, or it would be muted along with the rest.
+            for progress, routine, day in touched.values():
+                recalc_progress_for(progress, routine_scope=routine, day_scope=day)
 
         # The heaviest new set of each exercise is the only one that can be a record
         # (`strength.is_personal_record`), the same as `bulk-create`.

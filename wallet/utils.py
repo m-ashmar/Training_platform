@@ -217,6 +217,7 @@ def user_id_from_account_number(value: str) -> int | None:
         text = text[len(ACCOUNT_NUMBER_PREFIX):]
     elif not text.isdigit():
         return None
-    if not text.isdigit() or not text:
+    # ASCII digits only: "²" passes `isdigit()` and `int()` refuses it (a 500).
+    if not text or not text.isascii() or not text.isdigit():
         return None
     return int(text)

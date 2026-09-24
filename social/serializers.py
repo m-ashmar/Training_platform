@@ -386,10 +386,12 @@ class PostSerializer(serializers.ModelSerializer):
       `share_achievement` — the id of a badge (`/api/achievements/` id) YOU have
           earned; null clears it.
     When a share is set and the request names no `post_type`, it becomes `workout` /
-    `achievement`. Refusals are `400 validation_error` with the field's code in
-    `field_errors`: `share_not_yours` (no such session of yours — another person's is
-    answered the same), `share_workout_unfinished`, `share_badge_not_earned` (or no such
-    badge), `share_one_thing` (both sent).
+    `achievement` — on create and on a PATCH; a PATCH that clears the share of a
+    `workout` / `achievement` post makes it `text`. Refusals are `400 validation_error`
+    with the field's code in `field_errors`: `share_not_yours` (no such session of
+    yours — another person's is answered the same), `share_workout_unfinished`,
+    `share_badge_not_earned` (or no such badge), `share_badge_secret` (a secret badge
+    stays secret), `share_one_thing` (both sent).
 
     Read: `share` — null, or `{"kind": "workout", "workout": {title, volume_kg,
     minutes}}` or `{"kind": "achievement", "achievement": {id, key, name, category,
@@ -463,14 +465,28 @@ class PostSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {'share_achievement': _('You can only share a badge you have earned.')},
                     code='share_badge_not_earned')
+            # A secret badge stays secret: profiles hide it from everyone but its owner
+            # (`featured_badges_queryset`), and a post is read by everyone (the review, M7).
+            if UserAchievement.objects.filter(user=poster, achievement_id=badge_id,
+                                              achievement__is_secret=True).exists():
+                raise serializers.ValidationError(
+                    {'share_achievement': _('A secret badge cannot be shared.')},
+                    code='share_badge_secret')
             attrs['content_type'], attrs['object_id'] = badge_type, badge_id
             kind = 'achievement'
         else:
             # Explicit nulls: take the share off the post.
             attrs['content_type'], attrs['object_id'] = None, None
             kind = None
-        if kind is not None and 'post_type' not in attrs and self.instance is None:
-            attrs['post_type'] = kind
+        # On create AND on a PATCH, as the docstring and the contract say: a share sets
+        # the type when the request names none, and taking a share off a workout or
+        # achievement post makes it a text post again (the review, M8).
+        if 'post_type' not in attrs:
+            if kind is not None:
+                attrs['post_type'] = kind
+            elif self.instance is not None and self.instance.post_type in ('workout',
+                                                                           'achievement'):
+                attrs['post_type'] = 'text'
         return attrs
 
     def get_share(self, obj):

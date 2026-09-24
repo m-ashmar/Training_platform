@@ -23,10 +23,10 @@ challenge who are in the standing and strictly ahead of them. "Ahead" is the tot
 order `STANDING_ORDER`: more progress first; on equal progress, whoever joined earlier;
 on an equal moment, the lower participation id. So two people on the same number hold
 DIFFERENT places (70, 70, 48 → 1, 2, 3), and the listing order and the places are the
-same order. That tiebreak is what `tests/test_side_bugs_social.py` (SIDE_BUGS S-021)
-pins, and the owner's decision of 2026-09-24 — standard competition ranking, ties share
-a place (70, 70, 48 → 1, 1, 3) — is owed its change here, in `_strictly_ahead`, and in
-those tests, together (BACKEND_BUGS B-086 is `needs owner` until then).
+same order. That is the rule API_CONTRACT's Social section states ("places run 1..N
+with no gaps") and `tests/test_side_bugs_social.py` (SIDE_BUGS S-021) pins. Ties
+sharing a place (70, 70, 48 → 1, 1, 3) was suggested on 2026-09-24 and NOT adopted: it
+would change the contract and those tests, and the owner has not asked for it.
 
 **Who is in the standing.** Everyone who joined, including those still at zero, except
 a participation whose `status` is in `ChallengeParticipation.NOT_IN_STANDING`
@@ -93,11 +93,15 @@ def place_or_none():
                 default=place(), output_field=IntegerField())
 
 
-def write_places(challenge) -> dict:
+def write_places(challenge, moved_users: set | None = None) -> dict:
     """Write the stored `rank` of every participant from `place()`; return {id: rank}.
 
-    One SELECT (every row of the challenge, its place annotated) and one bulk UPDATE of
-    the rows whose place moved. A dropped participation is written NULL.
+    `moved_users`, when given, receives the user id of every participant whose place
+    changed: their cached lists and home cards still hold the old one (the review, M5).
+
+    One SELECT (every row of the challenge, in `STANDING_ORDER`, numbered in that order —
+    the same places `place()` answers) and one bulk UPDATE of the rows whose place
+    moved. A dropped participation is written NULL.
 
     **A challenge that is over is not re-ranked.** `lifecycle_status` is terminal once
     the end date has passed or someone closed it; from that moment the standing is a
@@ -110,12 +114,23 @@ def write_places(challenge) -> dict:
     if challenge.lifecycle_status in Challenge.TERMINAL_STATUSES:
         return dict(rows.values_list('id', 'rank'))
 
-    rows = list(rows.annotate(wanted=place_or_none()).only('id', 'rank', 'status'))
-    moved = []
+    # ONE ordered pass. `place()` is a correlated count per row — N x N row visits,
+    # held under the challenge lock on every recount (the review, M4). The order is
+    # total, so numbering the rows in it gives exactly the places `place()` answers.
+    rows = list(rows.only('id', 'rank', 'status', 'current_value', 'joined_at', 'user_id')
+                .order_by(*STANDING_ORDER))
+    moved, number = [], 0
     for row in rows:
-        if row.rank != row.wanted:
-            row.rank = row.wanted
+        if row.status in ChallengeParticipation.NOT_IN_STANDING:
+            wanted = None
+        else:
+            number += 1
+            wanted = number
+        if row.rank != wanted:
+            row.rank = wanted
             moved.append(row)
+            if moved_users is not None:
+                moved_users.add(row.user_id)
     if moved:
         ChallengeParticipation.objects.bulk_update(moved, ['rank'], batch_size=WRITE_BATCH)
     return {row.pk: row.rank for row in rows}

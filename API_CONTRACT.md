@@ -1469,9 +1469,10 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
 - **The share card** (B-080). `POST/PATCH /api/social/posts/` take
   `share_workout_session` (one of YOUR finished sessions) or `share_achievement` (a badge
   you earned, `/api/achievements/` id) — write-only, null clears; with no `post_type` the
-  post becomes `workout` / `achievement`. Refusals: `validation_error` with field code
-  `share_not_yours`, `share_workout_unfinished`, `share_badge_not_earned` or
-  `share_one_thing`. Every post gains read-only `share`: null, `{"kind": "workout",
+  post becomes `workout` / `achievement` (on a PATCH too; clearing the share of such a
+  post makes it `text`). Refusals: `validation_error` with field code
+  `share_not_yours`, `share_workout_unfinished`, `share_badge_not_earned`,
+  `share_badge_secret` or `share_one_thing`. Every post gains read-only `share`: null, `{"kind": "workout",
   "workout": {title, volume_kg, minutes}}` or `{"kind": "achievement", "achievement":
   {id, key, name, category, points, icon_url, badge_color, is_rare}}` — only what the
   card draws.

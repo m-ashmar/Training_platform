@@ -109,7 +109,9 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             return None
         if isinstance(raw, int):
             candidate = raw
-        elif isinstance(raw, str) and raw.strip().isdigit():
+        elif isinstance(raw, str) and raw.strip().isascii() and raw.strip().isdigit():
+            # ASCII digits only: "²" and "①" pass `isdigit()` and `int()` refuses them —
+            # a 500 where the contract says `invalid_user_id` (the review, M9).
             candidate = int(raw.strip())
         else:
             return None
@@ -900,7 +902,13 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         before = serializer.instance
         was_over = before.lifecycle_status == 'completed'
         measured = (before.metric, before.start_date, before.end_date)
+        target = before.target_value
         challenge = serializer.save()
+        if challenge.target_value != target and not was_over:
+            # Completion follows the target as it follows the number (the review, M6).
+            from .challenge_progress import reapply_target
+
+            reapply_target(challenge)
         if not was_over and challenge.lifecycle_status == 'completed':
             from .tasks import award_challenge_winners
 
@@ -1322,9 +1330,17 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         re-ranked**: the standing is a record from that moment, and a late `leave`
         must not move the Challenge Winner badge.
         """
+        from home.views import bump_stamp
+
         from .standing import write_places
 
-        return write_places(challenge)
+        # The people whose place moved have the old one cached too (the review, M5).
+        movers: set = set()
+        places = write_places(challenge, moved_users=movers)
+        for other in sorted(movers):
+            type(self).invalidate_challenges_cache_for(other)
+            bump_stamp(other)
+        return places
 
 
 class AchievementViewSet(viewsets.ReadOnlyModelViewSet):

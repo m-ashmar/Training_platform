@@ -254,10 +254,14 @@ class AchievementEngine:
         try:
             # Workout counts - use CORRECT activity types
             if criteria_type == 'workout_count':
-                return UserActivity.objects.filter(
-                    user=user, 
-                    activity_type__in=activity_types.WORKOUT
-                ).count()
+                # Finished workouts, plus the days trained without one being finished:
+                # a session left open and abandoned overnight, or sets synced with no
+                # session. Those days wrote a row per SET until B-071 made the log one
+                # row per workout; without this they stopped counting at all (M1).
+                finished = UserActivity.objects.filter(
+                    user=user, activity_type__in=activity_types.WORKOUT)
+                finished_days = {t.date() for t in finished.values_list('timestamp', flat=True)}
+                return finished.count() + len(cls._set_log_days(user) - finished_days)
             
             # MEALS, not meal components. Analytics writes one `meal_completed` row
             # per component (`session_id="meal-component-<pk>"`, analytics/signals.py),
@@ -383,7 +387,22 @@ class AchievementEngine:
     MAX_STREAK_DAYS = 400
 
     @classmethod
-    def _streak_of(cls, user: CustomUser, kinds, exclude=None) -> int:
+    def _set_log_days(cls, user: CustomUser, since=None) -> set:
+        """The days this user logged a set on, whatever became of the session.
+
+        A trained day is a day with logged sets: the activity log holds one row per
+        FINISHED workout (BACKEND_BUGS B-071), and a session abandoned overnight or sets
+        synced with no session leave no such row — yet those sets "stay, and stay
+        counted" (routine/views.py). One query."""
+        from routine.models import UserExerciseProgress
+
+        rows = UserExerciseProgress.objects.filter(user=user, set_logs__isnull=False)
+        if since is not None:
+            rows = rows.filter(date__gte=since)
+        return set(rows.values_list('date', flat=True).distinct())
+
+    @classmethod
+    def _streak_of(cls, user: CustomUser, kinds, exclude=None, also=()) -> int:
         """Consecutive days, ending today, on which this user did one of `kinds`.
 
         `exclude`: days that must not count however much was logged on them — the owner's
@@ -416,6 +435,7 @@ class AchievementEngine:
         ).values_list("timestamp", flat=True)
         days = {(t.astimezone(zone) if zone else timezone.localtime(t)).date()
                 for t in stamps}
+        days |= set(also or ())
         days -= set(exclude or ())
 
         streak, day = 0, today
@@ -437,8 +457,11 @@ class AchievementEngine:
         from training_platform.user_time import today_for
 
         window_start = today_for(user) - timedelta(days=cls.MAX_STREAK_DAYS)
+        # Days with logged sets count too, finished or not (M1): the log holds one row
+        # per FINISHED workout, and a day trained in full and never closed still counts.
         return cls._streak_of(user, activity_types.WORKOUT,
-                              exclude=broken_dates(user, since=window_start))
+                              exclude=broken_dates(user, since=window_start),
+                              also=cls._set_log_days(user, since=window_start))
 
     @classmethod
     def _calculate_calorie_streak(cls, user: CustomUser) -> int:
