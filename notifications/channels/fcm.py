@@ -54,6 +54,9 @@ EVENT_CLASS_REGISTRY = {
     # The review queue (subscription.services.payment_service, B-051).
     'payment_needs_review': 'notifications.domain.subscription_events.PaymentNeedsReviewEvent',
     'payment_rejected': 'notifications.domain.subscription_events.PaymentRejectedEvent',
+    # A trainer's verification was decided (trainer_verification/services.py).
+    'trainer_verification_approved': 'notifications.domain.verification_events.TrainerVerificationApprovedEvent',
+    'trainer_verification_rejected': 'notifications.domain.verification_events.TrainerVerificationRejectedEvent',
     # Trainer-client chat (chat/events.py). One nudge until the thread is opened.
     'chat_message': 'notifications.domain.chat_events.ChatMessageEvent',
     # Progress (routine/strength.py, routine/tasks.py). Fact-only, no claims.
