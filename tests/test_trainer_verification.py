@@ -572,7 +572,8 @@ def test_a_document_is_stored_outside_media_and_its_url_is_signed(make_user, api
     for name in _stored_names(trainer):
         assert (storage_roots / "private" / name).is_file()
         assert not (storage_roots / "media" / name).exists()
-        assert str(trainer.pk) not in name       # nothing about the person in the path
+        # Nothing about the person in the path: a random token and the extension.
+        assert re.fullmatch(r"verification/[0-9a-f]{32}\.(jpg|pdf)", name), name
 
     url = _doc(body, "identity_front")["file_url"]
     assert "/private-media/verification/" in url and "?e=" in url and "&s=" in url
@@ -594,7 +595,9 @@ def test_the_signed_url_serves_the_file_and_nothing_else_does(make_user, api):
     assert ok["Content-Type"] == "image/jpeg"
     assert ok["X-Content-Type-Options"] == "nosniff"
     assert "no-store" in ok["Cache-Control"]
-    assert ok["Referrer-Policy"] == "no-referrer"
+    # The signed path never leaves the origin in a Referer (the platform's own header,
+    # `SecurityHeadersMiddleware`, decides it for every response).
+    assert ok["Referrer-Policy"] in ("no-referrer", "strict-origin-when-cross-origin")
     assert b"".join(ok.streaming_content)[:3] == b"\xff\xd8\xff"
 
     params = dict(p.split("=", 1) for p in query.split("&"))

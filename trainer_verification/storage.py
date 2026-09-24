@@ -163,9 +163,9 @@ def serve_private_document(request, path):
         raise Http404("Not found")
     response = serve(request, path, document_root=location)
     response["X-Content-Type-Options"] = "nosniff"
-    # Never cached by a browser or a proxy, never indexed, never leaked by a referrer.
+    # Never cached by a browser or a proxy, never indexed. (The Referer policy is the
+    # platform's, `SecurityHeadersMiddleware`: the path never leaves the origin.)
     response["Cache-Control"] = "private, no-store, max-age=0"
-    response["Referrer-Policy"] = "no-referrer"
     response["X-Robots-Tag"] = "noindex, nofollow"
     content_type = (response.get("Content-Type") or "").split(";")[0].strip().lower()
     if content_type not in _INLINE:
