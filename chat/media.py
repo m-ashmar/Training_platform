@@ -3,16 +3,31 @@
 No pipeline of its own. Each kind goes through the platform's one upload guard for it —
 the same functions the media kit's uploads run (`training_platform/file_security.py`):
 
-    image   `process_uploaded_image`   magic bytes, MIME, the 5 MB image cap, pixel and
-                                       dimension caps, a decode, and a RE-ENCODE: only
-                                       decoded pixels are stored, so the EXIF and GPS a
-                                       phone photo carries never reach the other person
+    image   `process_uploaded_image`   the 5 MB image cap FIRST, then magic bytes,
+                                       MIME, pixel and dimension caps, a decode, and a
+                                       RE-ENCODE: only decoded pixels are stored, so the
+                                       EXIF and GPS a phone photo carries never reach
+                                       the other person. With `quarantine=False`: a
+                                       refused photo is not sampled into `quarantine/`,
+                                       where no erasure would reach its EXIF and GPS
     video   `process_uploaded_video`   the container from its own bytes (MP4, MOV,
                                        WebM), `MEDIA_VIDEO_MAX_BYTES` (64 MB) and
                                        `MEDIA_VIDEO_MAX_SECONDS` (90 s) — the media kit's
                                        caps, read the same way
     voice   `process_uploaded_audio`   the audio twin of the video guard (M4A, Ogg,
-                                       WebM), under the same two caps
+                                       WebM), `CHAT_VOICE_MAX_BYTES` (10 MB) and
+                                       `MEDIA_VIDEO_MAX_SECONDS` (90 s)
+
+Before any of that, `require_media_quota`: a sender's photos, voice notes and videos
+over a rolling 24 hours are capped in number and in bytes (`CHAT_MEDIA_DAILY_COUNT`,
+`CHAT_MEDIA_DAILY_BYTES`), so one account cannot fill the bucket at the hourly rate
+limit. It is decided from the upload's size, before a byte is decoded or stored.
+
+The files leave storage with their rows, but not through a per-row delete receiver —
+that would cost Django's fast delete on this table (`chat.models.Message`). The two bulk
+paths that delete messages sweep the files instead (`delete_conversation_files`, and
+the erasure step in `training_platform/privacy/sources.py`), both through
+`delete_files_on_commit`.
 
 The file is stored on the default storage — the media kit's backend: GCS in production,
 the signed filesystem in development and tests — under the extension the guard DETECTED
@@ -28,13 +43,23 @@ kit's own videos do while they are `pending`.
 from __future__ import annotations
 
 import io
+import logging
 from dataclasses import dataclass
+from datetime import timedelta
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.base import File
+from django.db import DEFAULT_DB_ALIAS, connections, transaction
+from django.utils import timezone
 from django.utils.translation import gettext as _
 
-from .models import KIND_IMAGE, KIND_VIDEO, KIND_VOICE
+from .models import KIND_IMAGE, KIND_VIDEO, KIND_VOICE, MEDIA_KINDS, Message
+
+logger = logging.getLogger(__name__)
+
+#: The window the daily quota is measured over.
+QUOTA_WINDOW = timedelta(hours=24)
 
 
 @dataclass
@@ -45,6 +70,46 @@ class Prepared:
     duration_seconds: float | None = None
     width: int | None = None
     height: int | None = None
+    #: What the stored file will weigh: the re-encode for a photo, the upload itself
+    #: for a voice note or a video. Written to `Message.size_bytes`.
+    size_bytes: int | None = None
+
+
+def require_media_quota(sender, upload) -> None:
+    """Refuse the upload (429 `media_quota_exceeded`) if it would take `sender` past
+    their daily allowance. Reads the upload's SIZE only — nothing is decoded or stored.
+
+    Counted over the rolling 24 hours before now, per SENDER, from their own media
+    rows: every photo, voice note and video they sent, taken-back ones included,
+    because a tombstone keeps its file. The file about to be sent counts too, by its
+    upload size. One indexed aggregate (`chat_msg_media_quota_idx`).
+
+    Not a lock: two uploads racing at the edge can both pass, which overshoots by one
+    file. The bound it exists for — one account filling the bucket — holds.
+
+    Returns nothing when there is no upload: `prepare` refuses that as
+    `media_file_required` right after.
+    """
+    from django.db.models import Count, Min, Sum
+
+    from .exceptions import MediaQuotaExceeded
+
+    if upload is None:
+        return
+    now = timezone.now()
+    used = (Message.objects
+            .filter(sender=sender, kind__in=MEDIA_KINDS,
+                    created_at__gte=now - QUOTA_WINDOW)
+            .aggregate(files=Count('id'), size=Sum('size_bytes'),
+                       oldest=Min('created_at')))
+    files, size = used['files'] or 0, used['size'] or 0
+    incoming = int(getattr(upload, 'size', 0) or 0)
+    if (files + 1 > settings.CHAT_MEDIA_DAILY_COUNT
+            or size + incoming > settings.CHAT_MEDIA_DAILY_BYTES):
+        oldest = used['oldest']
+        wait = ((oldest + QUOTA_WINDOW - now).total_seconds() if oldest is not None
+                else QUOTA_WINDOW.total_seconds())
+        raise MediaQuotaExceeded(wait)
 
 
 def prepare(kind: str, upload) -> Prepared:
@@ -53,7 +118,8 @@ def prepare(kind: str, upload) -> Prepared:
     Nothing is stored here: the caller writes the row and the file together, and
     removes the file again if the row cannot be written.
     """
-    from training_platform.file_security import (process_uploaded_audio,
+    from training_platform.file_security import (FileSecurityValidator,
+                                                  process_uploaded_audio,
                                                   process_uploaded_image,
                                                   process_uploaded_video)
 
@@ -61,19 +127,23 @@ def prepare(kind: str, upload) -> Prepared:
         raise ValidationError(_("Attach the file as `file`."), code="media_file_required")
 
     if kind == KIND_IMAGE:
-        content, extension = process_uploaded_image(upload)
+        # `max_bytes` first, so an oversize photo is refused before the validator reads
+        # it; `quarantine=False`, so no refusal keeps a sample of a private photo.
+        content, extension = process_uploaded_image(
+            upload, max_bytes=FileSecurityValidator.MAX_IMAGE_SIZE, quarantine=False)
         width, height = _pixel_size(content)
-        return Prepared(content=content, extension=extension, width=width, height=height)
+        return Prepared(content=content, extension=extension, width=width, height=height,
+                        size_bytes=content.size)
     if kind == KIND_VIDEO:
         facts = process_uploaded_video(upload)
     elif kind == KIND_VOICE:
-        facts = process_uploaded_audio(upload)
+        facts = process_uploaded_audio(upload, max_bytes=settings.CHAT_VOICE_MAX_BYTES)
     else:
         raise ValidationError(_("Send a photo, a voice note or a video."),
                               code="invalid_kind")
     upload.seek(0)
     return Prepared(content=File(upload), extension=facts.extension,
-                    duration_seconds=facts.duration_seconds)
+                    duration_seconds=facts.duration_seconds, size_bytes=facts.size)
 
 
 def _pixel_size(content):
@@ -98,20 +168,90 @@ def store(message, prepared: Prepared) -> None:
                             save=False)
     message.duration_seconds = prepared.duration_seconds
     message.width, message.height = prepared.width, prepared.height
+    message.size_bytes = prepared.size_bytes
 
 
 def discard(message) -> None:
     """Remove a stored file whose row was never written. Never raises."""
-    import logging
-
     name = message.attachment.name if message.attachment else ''
     if not name:
         return
     try:
         message.attachment.storage.delete(name)
     except Exception:       # noqa: BLE001
-        logging.getLogger(__name__).warning(
-            "could not remove an orphaned chat upload %s", name, exc_info=True)
+        logger.warning("could not remove an orphaned chat upload %s", name, exc_info=True)
+
+
+# --------------------------------------------------------------------------- deletion
+def attachment_names(messages) -> list[str]:
+    """The stored file names behind `messages` (a Message queryset), read as one column
+    — never as rows, which is the point: the rows then go as a plain DELETE."""
+    return list(messages.exclude(attachment='').order_by()
+                .values_list('attachment', flat=True))
+
+
+class _FileSweep:
+    """An `on_commit` callback that deletes chat files. Sweeps of one transaction merge
+    into one where a rollback cannot tell them apart (`delete_files_on_commit`), so a
+    file that two bulk paths both reach is deleted once."""
+
+    def __init__(self, names):
+        self.names = dict.fromkeys(names)
+
+    def add(self, names):
+        self.names.update(dict.fromkeys(names))
+
+    def __call__(self):
+        storage = Message._meta.get_field('attachment').storage
+        for name in self.names:
+            try:
+                storage.delete(name)
+            except Exception:       # noqa: BLE001 — storage may be unreachable
+                logger.warning("could not delete chat file %s", name, exc_info=True)
+
+
+def delete_files_on_commit(names, using=DEFAULT_DB_ALIAS) -> None:
+    """Delete these chat files once the surrounding transaction COMMITS. On a rollback
+    they stay, with the rows that still point at them.
+
+    Inside a transaction, a sweep already waiting under EVERY savepoint that is open
+    now takes the names instead of a second callback, so an erasure — whose
+    conversation receiver and messages step both reach the person's own files —
+    deletes each file once. That merge is safe because Django drops an `on_commit`
+    callback when a savepoint it was registered under rolls back: a sweep registered
+    under all the open savepoints is dropped by every rollback that would drop these
+    names. (The other savepoints in its set were released already and cannot roll
+    back; `None` marks an `atomic(savepoint=False)`, which never does.) Anything
+    else — a sweep from a savepoint since released, or an unexpected shape — gets a
+    callback of its own: a second delete of a name is a no-op, a missed one is not.
+    """
+    names = [name for name in names if name]
+    if not names:
+        return
+    connection = connections[using]
+    if connection.in_atomic_block:
+        open_now = {sid for sid in connection.savepoint_ids if sid}
+        for entry in connection.run_on_commit:
+            savepoints, callback = entry[0], entry[1]
+            if isinstance(callback, _FileSweep) and open_now <= set(savepoints):
+                callback.add(names)
+                return
+    transaction.on_commit(_FileSweep(names), using=using)
+
+
+def delete_conversation_files(sender, instance, using=None, **kwargs):
+    """`pre_delete` on `Conversation` (connected in `chat.apps.ChatConfig.ready`).
+
+    The conversation's messages cascade as a plain DELETE (Message has no delete
+    receiver, so it keeps Django's fast path); their files are read here, as one
+    column, while the rows still exist, and deleted once the delete commits. It runs
+    however a conversation goes: its own delete, an erasure, the cascade from a deleted
+    account.
+    """
+    using = using or DEFAULT_DB_ALIAS
+    delete_files_on_commit(
+        attachment_names(Message.objects.using(using).filter(conversation_id=instance.pk)),
+        using=using)
 
 
 def payload(message, request=None) -> dict | None:

@@ -293,6 +293,33 @@ def test_erasure_takes_every_file_once_and_its_dry_run_takes_none(
     assert len(chat_deletes) == len(set(chat_deletes)) == 2, chat_deletes
 
 
+def test_a_merged_sweep_never_outlives_a_rollback(media_root,
+                                                 django_capture_on_commit_callbacks):
+    """`delete_files_on_commit` folds sweeps of one transaction into one callback. A
+    name scheduled inside a savepoint that rolls back must stay, and one scheduled
+    outside it must go, merge or no merge."""
+    from django.core.files.base import ContentFile
+    from django.core.files.storage import default_storage
+
+    from chat.media import delete_files_on_commit
+
+    names = {key: default_storage.save(f"chat/0/{key}.bin", ContentFile(b"x"))
+             for key in ("kept_outer", "outer", "inner", "after")}
+    with django_capture_on_commit_callbacks(execute=True) as callbacks:
+        with transaction.atomic():
+            delete_files_on_commit([names["outer"]])
+            with pytest.raises(RuntimeError):
+                with transaction.atomic():
+                    delete_files_on_commit([names["inner"]])
+                    raise RuntimeError("roll the inner savepoint back")
+            delete_files_on_commit([names["after"], names["outer"]])
+    assert len(callbacks) == 1, "two sweeps at one depth were not merged"
+    assert not default_storage.exists(names["outer"])
+    assert not default_storage.exists(names["after"])
+    assert default_storage.exists(names["inner"]), "a rolled-back name was deleted"
+    assert default_storage.exists(names["kept_outer"])
+
+
 def test_erasure_takes_a_sent_file_the_conversation_receiver_cannot_reach(
         make_user, pair, conversation, media_root, django_capture_on_commit_callbacks):
     """The messages source deletes by SENDER, as a plain DELETE. A row it deletes whose

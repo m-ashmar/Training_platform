@@ -276,10 +276,23 @@ LOCAL_APPS_FOR_FILE_CLEANUP = {
     'mediakit',
     # Identity documents: a deleted or replaced row must take its file with it.
     'trainer_verification',
-    # A chat photo, voice note or video (B-091): erasure deletes the conversation, the
-    # messages cascade, and their files must go with them.
+    # A chat photo, voice note or video (B-091). Here for the REPLACE receiver only:
+    # `chat.Message` is in `FILES_DELETED_EXPLICITLY` below, so its files leave with
+    # its rows through chat's own sweep, not through the delete receiver.
     'chat',
 }
+
+#: Models with a FileField whose files are deleted by their own app, in bulk, and which
+#: must NOT get `delete_orphaned_files_on_delete`. A `post_delete` receiver makes
+#: `Collector.can_fast_delete()` False for its model, so every delete that reaches the
+#: table — a cascade included — loads each row into memory and runs the receiver per
+#: row. `chat.Message` is the largest table a person owns: with the receiver, erasing a
+#: coach collected every message of every thread as an instance, text included (the
+#: review of 2026-09-24 measured 19.5 MB and 2.85 s for 20,000 messages, linear, inside
+#: the synchronous erase request). Its files go through `chat.media`
+#: (`delete_conversation_files` on the conversation's delete, and the erasure step in
+#: `training_platform/privacy/sources.py`), read as one column and deleted on commit.
+FILES_DELETED_EXPLICITLY = frozenset({'chat.Message'})
 
 _FILE_FIELD_CACHE = {}
 
@@ -438,8 +451,11 @@ def connect_model_signals():
 
     for model in _models_with_a_file_field():
         label = model._meta.label
-        post_delete.connect(delete_orphaned_files_on_delete, sender=model,
-                            dispatch_uid=f"orphan-files-{label}")
+        # Not for a model that sweeps its own files: see `FILES_DELETED_EXPLICITLY`.
+        # `pre_save` does not affect the fast delete, so the replace receiver stays.
+        if label not in FILES_DELETED_EXPLICITLY:
+            post_delete.connect(delete_orphaned_files_on_delete, sender=model,
+                                dispatch_uid=f"orphan-files-{label}")
         pre_save.connect(delete_replaced_files_on_update, sender=model,
                          dispatch_uid=f"replaced-files-{label}")
 

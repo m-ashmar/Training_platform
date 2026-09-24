@@ -146,18 +146,38 @@ register(PersonalDataSource(
 # reading half a conversation with a retired stranger. `Conversation` reaches its owner
 # by either side, and deleting it cascades to the messages; `Message` is registered
 # too so an export can hand someone what they wrote.
+#
+# The FILES of the chat's photos, voice notes and videos (B-091) go with the rows, and
+# not through a per-row delete receiver: `chat.Message` keeps Django's fast delete, so a
+# coach's erasure is a DELETE, not every message loaded into memory (review 2026-09-24,
+# `training_platform/signals.py FILES_DELETED_EXPLICITLY`). Two steps sweep them, both
+# on commit, a rolled-back erasure keeping every file:
+#   * deleting a conversation reads its messages' files first
+#     (`chat.media.delete_conversation_files`, a `pre_delete` on Conversation);
+#   * `messages_sent` deletes the person's messages by SENDER as a plain DELETE, so its
+#     own `before_erase` reads their files first — whether or not the thread goes too.
+# A file both steps reach is deleted once (`chat.media.delete_files_on_commit`). The
+# preview reports `files`: how many stored files the person sent.
+def _chat_files_sent(user, queryset, *, dry_run):
+    from chat.media import attachment_names, delete_files_on_commit
+
+    names = attachment_names(queryset)
+    if not dry_run:
+        delete_files_on_commit(names)
+    return {"files": len(names)}
+
+
 register(PersonalDataSource(
     label="conversations", model="chat.Conversation", user_field=("trainer", "client"),
     fields=["id", "created_at", "last_message_at"], on_erase="delete"))
 register(PersonalDataSource(
     label="messages_sent", model="chat.Message", user_field="sender",
     # `kind`, `exercise` and `duration_seconds` with the chat's photos, voice notes and
-    # videos (B-091). The FILES are deleted with the rows — here, and through the
-    # conversation's cascade above (`training_platform/signals.py`, app `chat`); like
-    # the media kit's, the export lists them and does not bundle the bytes.
+    # videos (B-091); like the media kit's, the export lists them and does not bundle
+    # the bytes.
     fields=["id", "conversation", "kind", "body", "exercise", "duration_seconds",
             "created_at", "read_at", "deleted_at"],
-    on_erase="delete"))
+    on_erase="delete", before_erase=_chat_files_sent))
 
 # --- notifications ------------------------------------------------------------
 # The chat notices this person SENT go with them too. Each one sits in the other side's

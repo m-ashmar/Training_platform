@@ -4896,3 +4896,11 @@ msgstr "هذا التسجيل طويل جدًا. الحد الأقصى للإر�
 #, python-format
 msgid "%(minutes)s minutes"
 msgstr "%(minutes)s دقيقة"
+
+#: chat/exceptions.py
+msgid ""
+"You have sent as many photos, voice notes and videos as a day allows. Try "
+"again later."
+msgstr ""
+"لقد أرسلت أقصى عدد من الصور والرسائل الصوتية ومقاطع الفيديو المسموح به في "
+"اليوم. حاول مرة أخرى لاحقًا."

@@ -505,25 +505,40 @@ never store it. A message taken back serves `media: null`. The conversation list
 **Photos, voice notes and videos** are sent with `POST /api/v1/chat/media/`
 (`multipart/form-data`: `conversation`, `kind`, `file`, optional `body` as the caption,
 `exercise_id` on a video only, `client_uuid`). Each goes through the platform's
-existing guard: a photo is content-checked, capped at 5 MB and re-encoded (no EXIF or
-GPS survives); a video (MP4, MOV, WebM) or a voice note (M4A, Ogg, WebM) is identified
-from its own bytes and capped at `MEDIA_VIDEO_MAX_BYTES` (64 MB) and
-`MEDIA_VIDEO_MAX_SECONDS` (90 s), so this is the third route whose body may exceed
-15 MB, on both spellings. The pair rule, blocks, the coaching freeze and the idempotent
-`client_uuid` are the text send's, checked before a byte is stored. A CLIENT's video
-with an `exercise_id` is a **form check**: it waits in the trainer's attention queue
-until the trainer writes in that thread after it. Codes, in the order decided:
-`not_found` (404), `idempotency_conflict` (409), `invalid_client_uuid`,
+existing guard: a photo is capped at 5 MB (checked first), content-checked and
+re-encoded (no EXIF or GPS survives), and a refused photo is not kept anywhere (no
+quarantine sample); a video (MP4, MOV, WebM) is identified from its own bytes and capped
+at `MEDIA_VIDEO_MAX_BYTES` (64 MB) and `MEDIA_VIDEO_MAX_SECONDS` (90 s), so this is the
+third route whose body may exceed 15 MB, on both spellings; a voice note (M4A, Ogg,
+WebM) the same way under `CHAT_VOICE_MAX_BYTES` (10 MB) and 90 s. A **daily allowance
+per sender** (review 2026-09-24, numbers proposed, not yet confirmed by the owner):
+`CHAT_MEDIA_DAILY_COUNT` files (60) and `CHAT_MEDIA_DAILY_BYTES` (512 MB) over any
+rolling 24 hours, taken-back files included (they are kept); past it, 429
+`media_quota_exceeded` with `retry_after` / `retry_after_seconds` and `Retry-After` —
+the seconds until the oldest of those files leaves the window — decided from the
+upload's size before its bytes are read; text never counts. The pair rule, blocks, the
+coaching freeze and the idempotent `client_uuid` are the text send's, checked before a
+byte is stored. A CLIENT's video with an `exercise_id` is a **form check**: it waits in
+the trainer's attention queue until the trainer writes in that thread after it. Every
+code the route answers, in the order decided: `length_required` (411, a chunked body),
+`payload_too_large` (413), `rate_limited` (429), `not_authenticated` /
+`token_not_valid` (401), `unsupported_media_type` (415, not a multipart or urlencoded
+body), `parse_error` (400, a multipart body that cannot be parsed), `not_found` (404),
+`invalid_client_uuid` (400, the top-level `code`), `idempotency_conflict` (409),
 `validation_error` (a bad `kind`, a caption over 4000), `exercise_only_on_video`,
 `unknown_exercise`, then the send's 403s (`no_relation`, `blocked`, `coaching_frozen`,
-`coaching_unpaid`, `coaching_ended`), then `media_file_required`, `media_not_a_video`,
-`media_video_too_large`, `media_video_too_long`, `media_not_audio`,
-`media_audio_too_large`, `media_audio_too_long`, and the image guard's own
-(`invalid_mime_type`, `file_too_large`, `unreadable_image`, `unsupported_format`,
-`image_too_many_pixels`, `image_dimensions_too_large`, `empty_file`). The push quotes the
-caption, or says "Photo" / "Voice note" / "Video" in the recipient's language — never a
-link. A chat video has no poster frame (no ffmpeg in the image) and a WebM or Ogg file
-declares no duration, so `duration_seconds` may be null.
+`coaching_unpaid`, `coaching_ended`), then `media_quota_exceeded` (429),
+`media_file_required`, a video's `media_not_a_video`, `media_video_too_large`,
+`media_video_too_long`, `empty_file`, a voice note's `media_not_audio`,
+`media_audio_too_large`, `media_audio_too_long`, `empty_file`, and the image guard's own
+(`file_too_large`, `empty_file`, `dangerous_extension`, `invalid_mime_type` — a HEIC is
+refused here —, `corrupt_image`, `invalid_aspect_ratio` (over 10:1), `unreadable_image`
+(a truncated photo), `unsupported_format`, `image_dimensions_too_large`,
+`image_too_many_pixels`, and `mime_detection_failed` / `file_validation_error` when the
+guard itself fails). The push quotes the caption, or says "Photo" / "Voice note" /
+"Video" in the recipient's language — never a link. A chat video has no poster frame (no
+ffmpeg in the image) and a WebM or Ogg file declares no duration, so `duration_seconds`
+may be null.
 
 `refusal` / the send's 403 `code`, in the order they are decided: `no_relation` (never an
 approved pair and never a paid month), `blocked` (either of the two blocked the other —
@@ -534,7 +549,9 @@ a stranger, and opens (or returns) the thread of a pair whose paid coaching has 
 
 `POST .../messages/` may carry `client_uuid`, the app's own id for the message: the first
 send answers 201, a retry answers **200** with the same message, and an id already used
-by the other person in that thread answers 409 `idempotency_conflict`. `DELETE
+by the other person in that thread answers 409 `idempotency_conflict`; one that is not a
+UUID answers 400 `invalid_client_uuid` as the top-level `code` (and the socket's `error`
+frame names the same code). `DELETE
 messages/{id}/` tombstones the sender's own message — the row stays in the thread with
 `deleted: true` and an empty `body`, and nothing is ever hard-deleted.
 
