@@ -651,9 +651,21 @@ def test_a_refund_reverses_every_leg_and_revokes_the_copy(
 
     copy = Routine.objects.get(pk=body["routine_id"])
     assert copy.is_active is False and not copy.assigned_to.exists()
+    # Revoked: out of the buyer's routines, retired, and refused by the one predicate
+    # every training write asks — a set synced later against it included.
+    assert body["routine_id"] not in [
+        r["id"] for r in api(buyer).get("/api/routine/routines/").json()["results"]]
     refused = api(buyer).post("/api/routine/workout-sessions/",
                               {"routine": copy.pk, "day": 1}, content_type=JSON)
-    assert (refused.status_code, refused.json()["code"]) == (403, "product_refunded")
+    assert refused.status_code == 400
+    assert refused.json()["field_errors"]["routine"][0]["code"] == "routine_inactive"
+    from users.coaching import require_can_train, training_refusal
+    from users.exceptions import ProductRefunded
+
+    assert training_refusal(buyer, copy) == "product_refunded"
+    with pytest.raises(ProductRefunded) as raised:
+        require_can_train(buyer, copy)
+    assert (raised.value.status_code, raised.value.get_codes()) == (403, "product_refunded")
     assert Notification.objects.filter(recipient=buyer,
                                        event_type="routine_product_refunded").exists()
     assert Notification.objects.filter(recipient=trainer,
