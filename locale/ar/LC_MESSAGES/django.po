@@ -4896,3 +4896,20 @@ msgstr "هذا التسجيل طويل جدًا. الحد الأقصى للإر�
 #, python-format
 msgid "%(minutes)s minutes"
 msgstr "%(minutes)s دقيقة"
+
+#: trainer_verification/files.py
+#, python-format
+msgid ""
+"This photo is too large to open. The most is %(mp)s megapixels for this kind "
+"of file."
+msgstr ""
+"هذه الصورة كبيرة جداً ولا يمكن فتحها. الحد الأقصى %(mp)s ميغابكسل لهذا النوع "
+"من الملفات."
+
+#: training_platform/privacy/views.py
+msgid ""
+"Your data could not be erased right now because a document you sent for "
+"verification could not be deleted. Please try again later."
+msgstr ""
+"تعذّر حذف بياناتك الآن لأن مستنداً أرسلته للتحقق لم يُحذف. يرجى المحاولة "
+"لاحقاً."

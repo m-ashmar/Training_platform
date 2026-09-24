@@ -168,7 +168,11 @@ class VerificationDocument(models.Model):
 
     @property
     def was_reviewed(self) -> bool:
-        return self.state in (DocumentState.ACCEPTED, DocumentState.REJECTED)
+        """An operator's decision covered it. Usually that shows in its state; a revoke
+        that names no document sends every one back to `uploaded`, and those still
+        carry the round that reviewed them (`services.revoke`)."""
+        return (self.reviewed_in_round is not None
+                or self.state in (DocumentState.ACCEPTED, DocumentState.REJECTED))
 
 
 class ImmutableDecision(Exception):

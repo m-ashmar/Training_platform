@@ -188,28 +188,30 @@ _MAKE_IMAGES = textwrap.dedent("""
     save("jpg_24_o6.jpg", Image.new("RGB", (5712, 4284), rgb), "JPEG", exif=exif(6))
     save("jpg_40.jpg", Image.new("RGB", (7300, 5475), rgb), "JPEG")
     save("jpg_cmyk_16_o6.jpg", Image.new("CMYK", (4000, 4000), cmyk), "JPEG", exif=exif(6))
-    save("jpg_prog444_max.jpg", Image.new("RGB", (3600, 3600), rgb), "JPEG",
+    save("jpg_prog420_max_o6.jpg", Image.new("RGB", (3400, 3400), rgb), "JPEG",
+         progressive=True, subsampling=2, exif=exif(6))
+    save("jpg_prog444_max.jpg", Image.new("RGB", (3000, 3000), rgb), "JPEG",
          progressive=True, subsampling=0)
-    save("jpg_cmyk_prog_max.jpg", Image.new("CMYK", (3300, 3300), cmyk), "JPEG",
+    save("jpg_cmyk_prog_max.jpg", Image.new("CMYK", (2800, 2800), cmyk), "JPEG",
          progressive=True)
-    save("jpg_prog420_30.jpg", Image.new("RGB", (6000, 5000), rgb), "JPEG",
-         progressive=True, subsampling=2)
-    save("webp_rgb_8_o6.webp", Image.new("RGB", (2880, 2880), rgb), "WEBP",
+    save("webp_rgb_max_o6.webp", Image.new("RGB", (2580, 2580), rgb), "WEBP",
          quality=20, method=0, exif=exif(6))
-    save("webp_rgba_8.webp", Image.new("RGBA", (2880, 2880), rgba), "WEBP",
+    save("webp_rgba_max.webp", Image.new("RGBA", (2580, 2580), rgba), "WEBP",
          quality=20, method=0)
     # Refused: over the cap for their kind.
     save("png_over.png", Image.new("RGB", (4001, 4000), rgb), "PNG")
-    save("webp_over.webp", Image.new("RGB", (3000, 3000), rgb), "WEBP", quality=20, method=0)
+    save("webp_over.webp", Image.new("RGB", (2600, 2600), rgb), "WEBP", quality=20, method=0)
     save("jpg_prog444_over.jpg", Image.new("RGB", (4000, 4000), rgb), "JPEG",
          progressive=True, subsampling=0)
+    save("jpg_prog420_over.jpg", Image.new("RGB", (6000, 5000), rgb), "JPEG",
+         progressive=True, subsampling=2)
 """)
 
 ACCEPTED = ["png_rgba_16.png", "png_p_16.png", "jpg_16_o6.jpg", "jpg_24_o6.jpg",
-            "jpg_40.jpg", "jpg_cmyk_16_o6.jpg", "jpg_prog444_max.jpg",
-            "jpg_cmyk_prog_max.jpg", "jpg_prog420_30.jpg", "webp_rgb_8_o6.webp",
-            "webp_rgba_8.webp"]
-REFUSED = ["png_over.png", "webp_over.webp", "jpg_prog444_over.jpg"]
+            "jpg_40.jpg", "jpg_cmyk_16_o6.jpg", "jpg_prog420_max_o6.jpg",
+            "jpg_prog444_max.jpg", "jpg_cmyk_prog_max.jpg", "webp_rgb_max_o6.webp",
+            "webp_rgba_max.webp"]
+REFUSED = ["png_over.png", "webp_over.webp", "jpg_prog444_over.jpg", "jpg_prog420_over.jpg"]
 
 
 @pytest.fixture(scope="module")
@@ -234,18 +236,16 @@ _MEASURE = textwrap.dedent("""
         used = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         return used if sys.platform == "darwin" else used * 1024
 
-    slot = slots.BY_KEY["photo"]
+    path = sys.argv[1]
     base = peak()
-    for path in sys.argv[1:]:
-        with open(path, "rb") as handle:
-            try:
-                done = files.process(File(handle, name="photo"), slot)
-                outcome = [done.width, done.height]
-            except files.DocumentRefused as exc:
-                outcome = exc.code
-        done = None
-        print(json.dumps({"file": path.rsplit("/", 1)[-1], "outcome": outcome,
-                          "peak_extra": peak() - base}), flush=True)
+    with open(path, "rb") as handle:
+        try:
+            done = files.process(File(handle, name="photo"), slots.BY_KEY["photo"])
+            outcome = [done.width, done.height]
+        except files.DocumentRefused as exc:
+            outcome = exc.code
+    print(json.dumps({"file": path.rsplit("/", 1)[-1], "outcome": outcome,
+                      "peak_extra": peak() - base}))
 """)
 
 #: What one upload may add to a web process at its peak (fly.toml: 512 MB machines, a
@@ -254,19 +254,20 @@ MAX_EXTRA_RSS = 150 * 1024 * 1024
 
 
 def test_f2_the_worst_accepted_image_of_every_kind_stays_under_150_mb(big_images):
-    """Peak resident memory, measured in a fresh process, across the worst input each
-    format may send: before the fix a 16 MP WebP alone took 268 MB and a 40 MP RGBA PNG
-    534 MB. `ru_maxrss` is a high-water mark, so the last line is the worst of all."""
-    paths = [str(big_images / name) for name in ACCEPTED]
-    run = subprocess.run([sys.executable, "-c", _MEASURE, *paths], cwd=ROOT,
-                         env=_subprocess_env(), capture_output=True, text=True, timeout=300)
-    assert run.returncode == 0, run.stderr[-3000:]
-    lines = [json.loads(line) for line in run.stdout.splitlines() if line.startswith("{")]
-    assert [line["file"] for line in lines] == ACCEPTED
+    """Peak resident memory one upload adds, each input in a fresh process, for the worst
+    input each kind of file may send. Before the fix a 16 MP WebP alone added 268 MB and
+    a 40 MP RGBA PNG of 170 KB 534 MB; after it, none adds more than about 135 MB."""
+    lines = []
+    for name in ACCEPTED:
+        run = subprocess.run([sys.executable, "-c", _MEASURE, str(big_images / name)],
+                             cwd=ROOT, env=_subprocess_env(), capture_output=True,
+                             text=True, timeout=120)
+        assert run.returncode == 0, run.stderr[-3000:]
+        lines.append(json.loads(run.stdout.strip().splitlines()[-1]))
     report = ", ".join(f"{line['file']}: {line['peak_extra'] // 2**20} MB" for line in lines)
     refused = [line for line in lines if not isinstance(line["outcome"], list)]
     assert not refused, refused
-    assert lines[-1]["peak_extra"] < MAX_EXTRA_RSS, report
+    assert max(line["peak_extra"] for line in lines) < MAX_EXTRA_RSS, report
 
 
 @pytest.mark.parametrize("name,size", [
@@ -685,7 +686,7 @@ def test_f5_a_storage_error_refuses_the_erasure_and_erases_nothing(
     trainer, _photo = _replaced_photo(make_user, api, django_capture_on_commit_callbacks)
     email = trainer.email
     names = _stored(trainer)
-    assert len(names) == 11     # six documents, five of them photos with a thumbnail
+    assert len(names) == 9      # five documents; the four photos carry a thumbnail
 
     storage.break_()
     with django_capture_on_commit_callbacks(execute=True):
@@ -696,12 +697,12 @@ def test_f5_a_storage_error_refuses_the_erasure_and_erases_nothing(
 
     trainer.refresh_from_db()
     assert trainer.email == email and trainer.is_active
-    assert VerificationDocument.objects.filter(application__trainer=trainer).count() == 6
+    assert VerificationDocument.objects.filter(application__trainer=trainer).count() == 5
     assert all((storage_roots / "private" / n).exists() for n in names)
 
     with django_capture_on_commit_callbacks(execute=True):
         report = erase_user_data(trainer)
-    assert report["verification_documents"]["rows"] == 6
+    assert report["verification_documents"]["rows"] == 5
     assert not VerificationApplication.objects.filter(trainer=trainer).exists()
     leftover = [n for n in names if (storage_roots / "private" / n).exists()]
     assert not leftover, leftover

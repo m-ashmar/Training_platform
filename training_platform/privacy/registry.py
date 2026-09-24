@@ -80,6 +80,18 @@ class PersonalDataSource:
     erase_also: Callable | None = None
     #: See ``user_value`` in the class docstring. Last, so no positional use shifts.
     user_value: Callable | None = None
+    #: How this source's rows are deleted on erasure, as `delete_rows(user, queryset)`,
+    #: when a bare `queryset.delete()` is not safe. Only for `on_erase="delete"`; runs in
+    #: the erasure transaction, after every `before_erase`, in the source's turn. May
+    #: raise `ErasureRefused`, which rolls the whole erasure back.
+    #:
+    #: A `queryset.delete()` removes the rows and leaves each file to the post-commit
+    #: receiver of `training_platform/signals.py`, which can only log a storage error:
+    #: the row that knew where the file was is gone by then. For an identity document
+    #: that meant an erased trainer's ID card could outlive the erasure, with nothing
+    #: left to find it (the verification review of 2026-09-24). Its source deletes the
+    #: files first, and refuses the erasure when storage does.
+    delete_rows: Callable | None = None
 
     def get_model(self):
         from django.apps import apps
@@ -113,8 +125,9 @@ class ErasureRefused(Exception):
     refusing, because it cannot be retried.
 
     `code` tells the refusals apart for the app: `erasure_refused` (a held payment could
-    not be returned; retry later) or `trainer_has_active_clients` (the owner's rule: end
-    coaching with every client first). `extra` goes into the response body.
+    not be returned, or a stored identity document could not be deleted; retry later)
+    or `trainer_has_active_clients` (the owner's rule: end coaching with every client
+    first). `extra` says which, for the message: `cause="storage"` for a document.
     """
 
     def __init__(self, message="", *, code="erasure_refused", **extra):
@@ -201,7 +214,9 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
             count = qs.count()
             action = source.on_erase
             if count and not dry_run:
-                if action == "delete":
+                if action == "delete" and source.delete_rows is not None:
+                    source.delete_rows(user, qs)
+                elif action == "delete":
                     qs.delete()
                 elif action == "anonymise":
                     values = {

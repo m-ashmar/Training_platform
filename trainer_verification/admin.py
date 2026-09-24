@@ -13,10 +13,13 @@ a field: it shows each current document through a short-lived signed URL (five m
 `storage.py`), the documents the trainer replaced with what was decided about them, and
 every earlier decision; and it carries the three decisions — approve, reject (with a
 reason the trainer is shown, and optionally a reason per document), and revoke a
-verification. Each goes through `services.decide` / `services.revoke`, under row locks,
-and is written to the admin log. The page sends the ids of the documents it showed, so
-a decision taken while the trainer was replacing a file is refused, not applied to a
-file nobody looked at.
+verification (with a reason per document too: the ones named must be replaced; name
+none and every document is reviewed afresh at the next submission). Each goes through
+`services.decide` / `services.revoke`, under row locks, and is written to the admin
+log. The page sends the ids of the documents it showed and the round it showed, so a
+decision — a revoke included — taken on a page that is out of date is refused: one
+taken while the trainer was replacing a file, or on a verification another operator
+revoked and granted again since the page was opened.
 
 **Who may do it.** Identity documents: operators only — a superuser or an `admin`
 account — and a bare staff account gets 403 on every page (as `moderation/admin.py`).
@@ -114,6 +117,10 @@ class _ReviewAdmin(admin.ModelAdmin):
         reason = request.POST.get("reason", "")
         seen = [int(x) for x in request.POST.get("seen", "").split(",")
                 if x.strip().isdigit()]
+        # The round the page showed. A page from before this build posts none, and is
+        # then held to its documents only.
+        shown_round = request.POST.get("round", "")
+        expected_round = int(shown_round) if shown_round.isdigit() else None
         document_reasons = {
             int(key[len("doc_reason_"):]): value
             for key, value in request.POST.items()
@@ -123,9 +130,12 @@ class _ReviewAdmin(admin.ModelAdmin):
                 decision = services.decide(
                     application.pk, request.user, approve=(action == "approve"),
                     reason=reason, document_reasons=document_reasons,
-                    seen_document_ids=seen)
+                    seen_document_ids=seen, expected_round=expected_round)
             elif action == "revoke":
-                decision = services.revoke(application.pk, request.user, reason)
+                decision = services.revoke(
+                    application.pk, request.user, reason,
+                    document_reasons=document_reasons, seen_document_ids=seen,
+                    expected_round=expected_round)
             else:
                 self.message_user(request, "Choose approve, reject or revoke.",
                                   messages.ERROR)
