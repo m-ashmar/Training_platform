@@ -42,7 +42,9 @@ class ChatSessionDetailSerializer(serializers.ModelSerializer):
 
 class FeedbackSerializer(serializers.Serializer):
     message_id = serializers.IntegerField()
-    feedback = serializers.ChoiceField(choices=['positive', 'negative'])
+    # `null` clears a rating (the owner, F12, 2026-09-24: 👍 then 👎 then none). The key
+    # is still required: a body that forgets it is a 400, never a silent clear.
+    feedback = serializers.ChoiceField(choices=['positive', 'negative'], allow_null=True)
 
 
 class AITrainingConsentSerializer(serializers.Serializer):

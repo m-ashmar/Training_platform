@@ -440,7 +440,7 @@ msgstr "تنسيق start_date غير صالح. استخدم YYYY-MM-DD."
 
 #: diet/views.py:821
 msgid "OpenAI provider error"
-msgstr "خطأ في مزوّد OpenAI"
+msgstr "خطأ لدى مزوّد خدمة الذكاء الاصطناعي الخارجي"
 
 #: diet/views.py:824
 msgid "AI output parsing error"

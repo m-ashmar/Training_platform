@@ -2937,11 +2937,20 @@ class AnalyticsViewSet(viewsets.ViewSet):
         Without `exercise_id`: `{exercises: [...], top_movers, plateaus, rising_count,
         tracked_count, headline, adherence_percent}` — one entry per exercise trained in
         the last 8 weeks, each with `direction` (`rising` | `steady` | `easing`),
-        `change_percent`, `best`, `latest`, `sessions` and its `projection`.
+        `change_percent`, `best`, `latest`, `sessions`, `top_set` and its `projection`.
 
         With `exercise_id`: the same for one exercise plus `points` (one entry per
-        training day: `estimated_1rm`, `best_weight`, `best_reps`, `volume_kg`, `sets`),
-        `share` — the headline a card can draw — and `progression`. An `exercise_id`
+        training day: `estimated_1rm`, `best_weight`, `best_reps`, `volume_kg`, `sets`,
+        `top_set`), `share` — the headline a card can draw — and `progression`.
+
+        `top_set` is «أفضل مجموعة» (the owner, F3, 2026-09-24): the set with the highest
+        weight × reps, among equals the heavier weight; only sets with both a weight and
+        reps compete, a set longer than 12 reps included. On a point it is that day's
+        `{weight, reps, volume_kg}` (null when no set of the day has both). On an overview
+        row, and at the top of the one-exercise answer, it is the best such set of the
+        8-week window with its `date` (among equal sets the most recent day), or null.
+        It is not `best` (the heaviest set) and not `best_weight`/`best_reps` (the set
+        that decides the one-rep max), whose meanings are unchanged. An `exercise_id`
         that is SENT is always read as one (BACKEND_BUGS B-073): not a whole number is
         400 `bad_exercise_id` with `field`; a whole number that names no exercise this
         caller may read — 0 and negatives included, and another trainer's private one —
@@ -3020,9 +3029,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 # exercise, or not one you may read" is exactly `not_found`.
                 return Response({'error': _('Exercise not found.'), 'code': 'not_found'},
                                 status=404)
-            series = strength_module.points(user, exercise_id, until=today)
+            series, top_set = strength_module.series_and_top_set(user, exercise_id, until=today)
             body = strength_module.trend(user, exercise_id, until=today, series=series)
             body['exercise_name'] = exercise.name
+            body['top_set'] = top_set
             body['projection'] = strength_module.projection(
                 user, exercise_id, until=today, series=series, adherence_percent=done_percent)
             body['share'] = strength_module.headline(body)

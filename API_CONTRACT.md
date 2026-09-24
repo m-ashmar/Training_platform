@@ -328,6 +328,14 @@ reads back as `feedback` (`positive` | `negative` | null) on each message of
 `sessions/{session_id}/messages/`. `POST feedback/` answers
 `{message, feedback, updated_records}`; `updated_records` counts training-data rows
 only, which exist only for a user who opted in, so 0 is normal.
+**Changing and clearing** (the owner, F12, 2026-09-24): sending again replaces the
+rating, and `"feedback": null` clears it, on `POST feedback/` and on the socket's
+`feedback` frame alike; the training copy follows. The key is required: a body or a
+frame without it is refused (`400 validation_error` / `invalid_input`), never read as a
+clear. **The coach uses the ratings**: every later answer is written with a short,
+hidden note of the person's OWN recent ratings (the newest five 👎 and five 👍 of the
+last 90 days, each reply cut to 160 characters). Nothing from anyone else; no new
+field, no new route.
 
 A `status` frame is `{"type": "status", "content", "code"}`. Render the `code`; the
 translated `content` is there for a build that predates it. The set, in the order a
@@ -1818,6 +1826,14 @@ collected for it.
 - Sets longer than 12 reps are counted as work (adherence, `volume_kg`, `sets`) but do
   not set a one-rep max: Brzycki says nothing useful past that, and a day of nothing but
   long sets has no strength point.
+- **`top_set`** — «أفضل مجموعة» (the owner, F3, 2026-09-24): the set with the highest
+  weight × reps, among equals the heavier weight. Only sets with both a weight and reps
+  compete; a set longer than 12 reps does (volume is what it is). Every `points` entry
+  carries `top_set: {weight, reps, volume_kg}` for that day (null when no set of the day
+  has both); every overview `exercises` row, and the one-exercise answer, carries
+  `top_set: {weight, reps, volume_kg, date}`, the best such set of the 8-week window
+  (among equal sets the most recent day), or null. `best`, `best_weight` and `best_reps`
+  keep their meanings. Read in the same query as the points.
 - `exercise_id` obeys the exercise visibility rule: another trainer's private exercise
   answers 404 `not_found` with the same body as a missing id (the answer
   `exercises/{id}/add-media/` gives). An exercise the person has actually trained is

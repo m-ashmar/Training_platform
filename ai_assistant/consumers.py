@@ -97,7 +97,8 @@ class AIChatConsumer(AsyncWebsocketConsumer):
 
     Client → Server:
       {"type": "message", "content": "...", "session_id": "uuid|null"}
-      {"type": "feedback", "message_id": 123, "feedback": "positive|negative"}
+      {"type": "feedback", "message_id": 123, "feedback": "positive|negative|null"}
+                            (`null`, sent explicitly, clears the rating)
 
     Server → Client:
       {"type": "status", "content": "...", "code": "..."}
@@ -345,7 +346,10 @@ class AIChatConsumer(AsyncWebsocketConsumer):
         feedback = data.get("feedback")
 
         with LanguageContext.for_user(self.user):
-            if feedback not in ("positive", "negative"):
+            # An explicit `null` clears the rating (as on `POST /api/ai/feedback/`); a
+            # frame that leaves the key out is still refused, never read as a clear.
+            clearing = "feedback" in data and feedback is None
+            if feedback not in ("positive", "negative") and not clearing:
                 await self.send(text_data=json.dumps({
                     "type": "error",
                     "content": str(_("Feedback must be 'positive' or 'negative'.")),

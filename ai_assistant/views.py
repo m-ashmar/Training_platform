@@ -140,12 +140,19 @@ class ChatMessageListView(generics.ListAPIView):
 
 class FeedbackView(APIView):
     """
-    POST /api/ai/feedback/  `{message_id, feedback: "positive" | "negative"}`
+    POST /api/ai/feedback/  `{message_id, feedback: "positive" | "negative" | null}`
 
     Submit 👍/👎 feedback for one of your assistant replies. Stored on the reply —
     `feedback` on `sessions/{id}/messages/` reads it back — for every user, whatever
     their training-data consent; `updated_records` is how many training rows it was
-    also copied to (0 without that consent). Sending again replaces it.
+    also copied to (0 without that consent). Sending again replaces it, and `null`
+    clears it (the training copy follows both); the `feedback` key is required, so a
+    body without it is 400, never a clear.
+
+    The coach USES it (the owner, F12, 2026-09-24): every later answer is written with
+    a short note of this person's own recent ratings — the newest five 👎 and five 👍
+    of the last 90 days (`services/context_compiler.py` `_recent_ratings`). Nothing
+    from anyone else, and the note is never shown.
 
     200 `{message, feedback, updated_records}`; 404 `message_not_found`; 400
     `validation_error` for a missing id or a value that is neither.

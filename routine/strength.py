@@ -79,6 +79,17 @@ def one_rep_max(weight, reps) -> float:
     return round(float(weight) * (36 / (37 - float(reps))), 1)
 
 
+def _set_volume_key(weight, reps) -> tuple:
+    """How two sets compare for «أفضل مجموعة» (the owner, F3, 2026-09-24): the higher
+    weight × reps wins, and among equals the heavier weight."""
+    return (round(float(weight) * int(reps), 2), float(weight))
+
+
+def _top_set_payload(weight, reps) -> dict:
+    return {'weight': float(weight), 'reps': int(reps),
+            'volume_kg': round(float(weight) * int(reps), 2)}
+
+
 def points(user, exercise_id, *, since=None, until=None) -> list[dict]:
     """One entry per training DAY of this exercise, oldest first.
 
@@ -88,7 +99,40 @@ def points(user, exercise_id, *, since=None, until=None) -> list[dict]:
     are counted in adherence instead, and so are sets longer than
     `MAX_REPS_FOR_ESTIMATE`, which say more about endurance than about a one-rep max.
     A day whose every set is that long produces no entry at all.
+
+    Every entry also carries `top_set` — «أفضل مجموعة», the owner's F3 (2026-09-24):
+    the day's set with the highest weight × reps, among equals the heavier weight,
+    `{weight, reps, volume_kg}`. It is a different question from `best_weight` /
+    `best_reps` (the set that decides the one-rep max), and every weighted set with
+    reps competes for it, a long set included. Computed in the same pass, no query.
     """
+    return [day for day in _days(user, exercise_id, since=since, until=until)
+            if day['estimated_1rm']]
+
+
+def series_and_top_set(user, exercise_id, *, until=None) -> tuple[list[dict], dict | None]:
+    """`(points(...), the window's top set)` from ONE read of the sets.
+
+    The window's top set is the best `top_set` of every training day in the window —
+    a day of nothing but long sets included, because volume is exactly what those sets
+    are — with its `date`; among equal sets the most recent day. None when no set in
+    the window has both a weight and reps.
+    """
+    days = _days(user, exercise_id, until=until)
+    best = None
+    for day in days:                                    # oldest first: `>=` keeps the latest
+        top = day['top_set']
+        if top is None:
+            continue
+        if best is None or ((top['volume_kg'], top['weight'])
+                            >= (best['volume_kg'], best['weight'])):
+            best = {**top, 'date': day['date']}
+    return [day for day in days if day['estimated_1rm']], best
+
+
+def _days(user, exercise_id, *, since=None, until=None) -> list[dict]:
+    """Every training day of this exercise in the window, oldest first — including the
+    days `points` leaves out because none of their sets can estimate a one-rep max."""
     from .models import ExerciseSetLog
 
     until = until or timezone.localdate()
@@ -122,7 +166,11 @@ def points(user, exercise_id, *, since=None, until=None) -> list[dict]:
         if entry is None:
             entry = by_date.setdefault(date, {'date': date, 'estimated_1rm': 0.0,
                                               'best_weight': 0.0, 'best_reps': 0,
-                                              'volume_kg': 0.0, 'sets': 0})
+                                              'volume_kg': 0.0, 'sets': 0,
+                                              'top_set': None})
+        top = entry['top_set']
+        if top is None or _set_volume_key(weight, reps) > (top['volume_kg'], top['weight']):
+            entry['top_set'] = _top_set_payload(weight, reps)
         # Every weighted set is the day's WORK; only a set inside the rep range Brzycki
         # can speak about decides the day's STRENGTH. A twenty-rep set estimates a
         # one-rep max of twice the bar — a number nobody lifted, and the whole screen,
@@ -135,8 +183,9 @@ def points(user, exercise_id, *, since=None, until=None) -> list[dict]:
         entry['volume_kg'] = round(entry['volume_kg'] + float(weight) * int(reps), 2)
         entry['sets'] = entry['sets'] + 1
     # A day of nothing but long sets carries no strength point: it is endurance work,
-    # counted in adherence, and it must not enter a line about getting stronger.
-    return [by_date[date] for date in sorted(by_date) if by_date[date]['estimated_1rm']]
+    # counted in adherence, and it must not enter a line about getting stronger. `points`
+    # drops those days; `series_and_top_set` still reads them for the window's top set.
+    return [by_date[date] for date in sorted(by_date)]
 
 
 def _median(values) -> float:
@@ -379,7 +428,9 @@ def overview(user, *, until=None, limit=12, adherence_percent=None) -> dict:
 
     Ordered by how much it moved: what the app shows first is where the person is
     getting stronger. `top_movers` and `plateaus` are the same rows, split, so a screen
-    can show either without asking twice.
+    can show either without asking twice. Every row carries `top_set` — the window's
+    highest weight × reps set with its `date` (`series_and_top_set`), read in the same
+    query as the row's points.
     """
     from .models import Exercise
 
@@ -391,11 +442,13 @@ def overview(user, *, until=None, limit=12, adherence_percent=None) -> dict:
     names = {exercise.pk: exercise.name for exercise in Exercise.objects.filter(pk__in=ids)}
     exercises = []
     for exercise_id in ids:
-        series = points(user, exercise_id, until=until)
+        series, top_set = series_and_top_set(user, exercise_id, until=until)
         if not series:
             continue
         summary = trend(user, exercise_id, until=until, series=series)
         summary['exercise_name'] = names.get(exercise_id)
+        # «أفضل مجموعة» of the window (F3): the highest weight × reps, with its date.
+        summary['top_set'] = top_set
         summary['projection'] = projection(user, exercise_id, until=until, series=series,
                                            adherence_percent=adherence_percent)
         # The per-day series belongs to the one-exercise view, not to a list of twelve.
