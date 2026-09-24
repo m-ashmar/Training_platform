@@ -206,17 +206,17 @@ def measure_for_review(metric, user_ids, start, end) -> tuple[dict, dict]:
             start_time__lte=end, end_time__isnull=False,
             end_time__gte=F('start_time') + timedelta(minutes=MIN_WORKOUT_MINUTES))
         sessions = sessions.annotate(
-            day=TruncDate('start_time', tzinfo=timezone.get_current_timezone()))
+            trained_on=TruncDate('start_time', tzinfo=timezone.get_current_timezone()))
         counted = (credible_sets(ExerciseSetLog.objects.filter(
                        workout_session__in=sessions.values('pk')))
-                   .filter(workout_session_id=OuterRef('pk'), date=OuterRef('day'))
+                   .filter(workout_session_id=OuterRef('pk'), date=OuterRef('trained_on'))
                    .order_by().values('workout_session_id')
                    .annotate(n=Count('id')).values('n'))
         per_day = {}
         for uid, started in (sessions
                              .annotate(sets=Subquery(counted, output_field=IntegerField()))
                              .filter(sets__gte=MIN_SETS_PER_WORKOUT)
-                             .order_by().values_list('user_id', 'day')):
+                             .order_by().values_list('user_id', 'trained_on')):
             key = (uid, started)
             per_day[key] = per_day.get(key, 0) + 1
         for (uid, day), workouts in per_day.items():
