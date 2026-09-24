@@ -177,3 +177,13 @@ class HasPrioritySupportAccess(HasSubscriptionFeature):
 # that duplicates that decision is a second answer waiting to disagree with the first,
 # and one of them did: it kept its own copy of the lookup and inserted duplicate rows
 # that locked the subscriber out. `subscription.quota.FEATURES` is the authority.
+
+
+class AdminsOnly(permissions.IsAdminUser):
+    """DRF's `IsAdminUser` (staff), refusing with its own code: 403 `admins_only`.
+
+    The operator endpoint answered only the 403 default, `permission_denied`; the owner
+    (2026-09-24) asked for every refusal to name its own. `admins_only` is the code the
+    wallet's operator endpoints answer for the same fact (`wallet.permissions.IsAdmin`).
+    """
+    code = 'admins_only'

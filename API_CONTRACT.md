@@ -1485,6 +1485,34 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   username, user_type, first_name, last_name, profile_picture_url, followers_count,
   is_following, member_since}`. `by_username/` is unchanged (exact, case-sensitive).
 
+**Every wallet and subscription refusal names its own code** (the owner, 2026-09-24,
+decision 9). Additive under §6: each code below replaces a status default (`bad_request`,
+`not_authenticated`, `permission_denied`, `conflict`, `unprocessable`, `throttled`) or the
+handler's `validation_error` on a refusal that is not about a field; no status changes,
+no request does anything different, no code a view named changes, and the message is
+kept beside the code. The views' docstrings carry the full tables.
+
+| Endpoint | New codes |
+|---|---|
+| every `wallet/agent/*` route | `403 agents_only` (not an agent) |
+| `wallet/admin/*`, `subscription/v1/admin/management/` | `403 admins_only` (not an operator) |
+| `POST wallet/agent/topup/` (signed) | `401 agent_auth_invalid` — one code for a missing, stale or mismatched `X-Agent-Auth`, an unknown key and a bad signature; `403 agent_ip_not_allowed` |
+| `POST wallet/agent/topup/`, `.../topup/proxy/` | `403 agent_not_active`; `400 target_not_a_client`; `429 daily_limit_exceeded` / `monthly_limit_exceeded` (the agent's cap in that currency — not the rate limiter, and `Retry-After` does not lift it) |
+| top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_key_reused` (the key belongs to a different request; retrying never helps) |
+| `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved) |
+| `POST wallet/admin/reversal/` | `400 insufficient_balance` (the wallet that received the money no longer holds it), `400 currency_mismatch` (a wallet changed currency), `400 reversal_refused` — these three were one `bad_request` |
+| `POST subscription/v1/subscriptions/` | `400 subscription_exists` (one per user: `change-plan/`, `upgrade/` or `renew/` instead); a `plan_id` naming no active plan stays `validation_error`, its field code now `invalid_plan` (was `invalid`) |
+| `PATCH subscription/v1/subscriptions/{id}/` | stays `validation_error` (the view named it); on an inactive subscription `field_errors.non_field_errors[0].code` is `subscription_inactive` (was `invalid`) |
+| `POST subscription/v1/subscriptions/{id}/cancel/` | `400 not_cancellable` (already cancelled or expired); a bad `reason`/`immediate` is `400 validation_error` with `field_errors`. Both were the bare serializer errors with `bad_request`; the serializer's keys (`non_field_errors`, ...) stay at the top level |
+| `POST subscription/v1/admin/management/` | `400 missing_fields`, `400 invalid_user_or_plan`, `400 subscription_exists`, `400 invalid_trial_days` |
+| `POST subscription/v1/access/check/` | `400 invalid_features` (`features` is not a list) |
+| `POST subscription/webhook/{gateway_name}/` | `400 webhook_not_verified`, `400 webhook_rejected` — both were empty bodies; a gateway reads only the status, which is unchanged |
+
+Left as they were, on purpose: `gateway_error` (400) on the Pay, renew and upgrade routes
+also covers an amount outside the gateway's bounds and a buyer with no email or phone —
+splitting it would change a code a view named, so it waits for the owner. A 404 whose only
+meaning is "no such object, or not yours" stays `not_found`.
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 
