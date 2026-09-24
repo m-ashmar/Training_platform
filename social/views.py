@@ -8,12 +8,14 @@ including following, posts, comments, likes, challenges, and achievements.
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.exceptions import APIException
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.db.models import Q, Exists, F, OuterRef
 from django.utils import timezone
 from django.utils.translation import gettext as _
+from django.utils.translation import gettext_lazy as _lazy
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 
@@ -32,6 +34,10 @@ from .serializers import (
 )
 
 from users.models import CustomUser
+# Who may be shown to other people: ONE predicate, read by every surface below (the
+# owner's decision 8, 2026-09-24). A suspended or erased account is not active, and
+# leaves the boards, the feed, the threads, the follow lists and search while it is.
+from users.visibility import hidden_q, public_people, public_q
 # Blocking is enforced HERE, on the read, not by deleting anything: a block hides two
 # people from each other and must be undoable without losing either one's history.
 # `blocked_ids` is one query and returns both directions (moderation/services.py).
@@ -63,6 +69,14 @@ def refuse_a_blocked_follow(follower, target):
         raise UserIsBlocked()
 
 
+class AlreadyFollowing(APIException):
+    """400 `already_following` — `POST follows/` for a follow the caller already has."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    default_code = 'already_following'
+    default_detail = _lazy('You already follow this person.')
+
+
 class UserFollowViewSet(viewsets.ModelViewSet):
     """
     API endpoints for user following system
@@ -78,6 +92,20 @@ class UserFollowViewSet(viewsets.ModelViewSet):
     Neither follows an account that is not active: `follows/` answers the
     `validation_error` a missing `following_id` does, `follow_user/` 404
     `user_not_found` (see each action for its codes).
+
+    **A suspended account is not listed** (the owner's decision 8, 2026-09-24):
+    `GET follows/`, `followers/` and `following/` leave out every follow whose other
+    person is not publicly visible (`users/visibility.py` — suspended or erased), and
+    the counts on a public profile agree. The follow rows are kept: reinstating the
+    account lists them again. `unfollow_user/` still undoes a follow of such an
+    account; `DELETE follows/{id}/` answers 404 `not_found` for one, as for any row the
+    caller cannot see.
+
+    Every refusal names its `code` (the owner's decision 9, 2026-09-24):
+    `DELETE`/`PATCH follows/{id}/` of a follow the caller did not make is 403
+    `not_your_follow` (was `permission_denied`); `POST follows/` with your own id is
+    400 `validation_error` with the field code `cannot_follow_yourself` on
+    `following_id`, and a follow you already have is 400 `already_following`.
     """
     serializer_class = UserFollowSerializer
     permission_classes = [IsFollowParticipant]
@@ -88,11 +116,17 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         hidden = blocked_ids(self.request.user)
         return UserFollow.objects.filter(
             Q(follower=self.request.user) | Q(following=self.request.user)
-        ).exclude(Q(follower_id__in=hidden) | Q(following_id__in=hidden))
+        ).exclude(Q(follower_id__in=hidden) | Q(following_id__in=hidden)).filter(
+            # Both sides, for the same reason: the caller is one of them, and the other
+            # is not shown while their account is suspended (decision 8).
+            public_q('follower'), public_q('following'))
 
     def perform_create(self, serializer):
-        refuse_a_blocked_follow(self.request.user,
-                                serializer.validated_data.get('following'))
+        target = serializer.validated_data.get('following')
+        refuse_a_blocked_follow(self.request.user, target)
+        if UserFollow.objects.filter(follower=self.request.user, following=target).exists():
+            # The unique pair was a 500 (IntegrityError) on a repeated follow.
+            raise AlreadyFollowing()
         serializer.save(follower=self.request.user)
 
     @staticmethod
@@ -240,10 +274,17 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         Get user's followers
         
         GET /api/social/follows/followers/
+
+        Auth required; no body; nothing differs by build. `{"followers": [{id,
+        username, user_type, profile_picture, followed_at}], "count"}` — without anyone
+        blocked either way, and without an account that is suspended or erased (the
+        owner's decision 8, 2026-09-24): the follow is kept and listed again when the
+        account is reinstated.
         """
         followers = UserFollow.objects.filter(
             following=request.user
-        ).exclude(follower_id__in=blocked_ids(request.user)).select_related('follower')
+        ).exclude(follower_id__in=blocked_ids(request.user)).filter(
+            public_q('follower')).select_related('follower')
         
         # No `email`. `UserMinimalSerializer` deliberately dropped it (see
         # social/serializers.py) and these two hand-rolled dicts were never updated, so
@@ -267,10 +308,14 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         Get users that the current user is following
         
         GET /api/social/follows/following/
+
+        The same shape and the same rule as `followers/`, under `"following"`: no one
+        blocked either way, no suspended or erased account (decision 8).
         """
         following = UserFollow.objects.filter(
             follower=request.user
-        ).exclude(following_id__in=blocked_ids(request.user)).select_related('following')
+        ).exclude(following_id__in=blocked_ids(request.user)).filter(
+            public_q('following')).select_related('following')
         
         # No `email`. `UserMinimalSerializer` deliberately dropped it (see
         # social/serializers.py) and these two hand-rolled dicts were never updated, so
@@ -329,6 +374,12 @@ def visible_posts_for(user):
     one definition, so the post list, the feed, search, the detail route, the comment
     queryset and the comment-create guard all inherit it — the same reason `is_hidden`
     lives here rather than in five querysets that disagree.
+
+    And a post whose author is not publicly visible — the account is suspended or
+    erased (`users/visibility.py`, the owner's decision 8, 2026-09-24) — is in nobody's
+    result: not the feed, not search, not `?author=`, not its detail route, and it
+    cannot be liked or commented on. The post is kept; reinstating the account brings
+    it back. The caller's own posts are unaffected: a signed-in caller is active.
     """
     return Post.objects.filter(
         (
@@ -336,12 +387,18 @@ def visible_posts_for(user):
             | Q(visibility='followers', author__followers__follower=user)
         ) & Q(is_hidden=False)
         | Q(author=user)
-    ).exclude(author_id__in=blocked_ids(user)).distinct()
+    ).exclude(author_id__in=blocked_ids(user)).filter(public_q('author')).distinct()
 
 
 class PostViewSet(viewsets.ModelViewSet):
     """
     API endpoints for social posts
+
+    What a caller may read is `visible_posts_for` — which, since the owner's decision 8
+    (2026-09-24), leaves out every post of a suspended or erased account.
+    `PATCH`/`DELETE` of someone else's post is 403 `not_owner` (was
+    `permission_denied`, the owner's decision 9, 2026-09-24); a post the caller cannot
+    read is 404 `not_found`.
     """
     serializer_class = PostSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -404,7 +461,8 @@ class PostViewSet(viewsets.ModelViewSet):
         # twice. Annotated unconditionally, because moderation does not depend on who
         # is looking — and it is still part of the page's own query, not a query per
         # post.
-        unreadable = Q(is_hidden=True)
+        # A comment by a suspended account is unreadable too (decision 8).
+        unreadable = Q(is_hidden=True) | hidden_q('author')
         if hidden:
             unreadable |= Q(author_id__in=hidden)
         queryset = queryset.annotate(
@@ -558,7 +616,7 @@ class PostViewSet(viewsets.ModelViewSet):
             })
 
 
-from rest_framework.exceptions import ValidationError as DRFValidationError, NotFound
+from rest_framework.exceptions import ErrorDetail, ValidationError as DRFValidationError, NotFound
 from rest_framework.pagination import CursorPagination
 
 class CommentCursorPagination(CursorPagination):
@@ -577,6 +635,18 @@ class CommentCursorPagination(CursorPagination):
 class CommentViewSet(viewsets.ModelViewSet):
     """
     API endpoints for post comments
+
+    A comment is listed only when its post is one the caller may read
+    (`visible_posts_for`), it is not hidden, its author is not blocked either way, and
+    its author's account is publicly visible — a suspended or erased account's comments
+    leave every thread, and every post's `comments_count` agrees (the owner's decision
+    8, 2026-09-24). Replying to such a comment is refused like replying to a hidden one.
+
+    Codes (the owner's decision 9, 2026-09-24): `POST` on a post the caller cannot read
+    is 404 `not_found`; `PATCH`/`DELETE` of someone else's comment is 403 `not_owner`
+    (was `permission_denied`); moving a comment is 400 `validation_error` with the
+    field code `comment_cannot_move`, a reply outside its thread the field code
+    `reply_not_in_thread` on `parent_comment`.
     """
     serializer_class = CommentSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -607,6 +677,9 @@ class CommentViewSet(viewsets.ModelViewSet):
             # thread cannot be read through the comment endpoint.
             post__in=visible_posts_for(user),
             is_hidden=False,
+        ).filter(
+            # Not while its author's account is suspended (decision 8).
+            public_q('author'),
         ).exclude(
             # Its OWN block filter, not only the one inherited through the post. The
             # post clause hides a blocked person's posts; it does nothing about a
@@ -647,7 +720,7 @@ class CommentViewSet(viewsets.ModelViewSet):
         target = serializer.validated_data.get('post')
         if target is not None and not visible_posts_for(self.request.user).filter(
                 pk=target.pk).exists():
-            raise NotFound(_('No such post.'))
+            raise NotFound(_('No such post.'), code='not_found')
 
         comment = serializer.save(author=self.request.user)
 
@@ -753,6 +826,16 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     of participants strictly ahead — more progress, then an earlier join, then a lower
     participation id — so two people on the same number hold different places, the
     earlier joiner first. Null for someone who dropped out.
+
+    **A suspended account holds no place** (the owner's decision 8, 2026-09-24): a
+    participant whose account is not publicly visible (`users/visibility.py` —
+    suspended or erased) is treated like one who dropped out — not on the board, not
+    counted ahead of anyone, so everyone behind moves up in `rank`, the `leaderboard/`
+    rows and the home card alike — and a challenge created by such an account is still
+    listed, with `creator: null`. Reinstating the account restores both.
+
+    `PATCH`/`PUT`/`DELETE` of a challenge the caller did not create is 403 `not_owner`
+    (was `permission_denied`, the owner's decision 9, 2026-09-24).
     """
     serializer_class = ChallengeSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -777,6 +860,8 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 'created_at', 'rules', 'reward_description', 'image', 'metric',
                 'creator__id', 'creator__username', 'creator__email',
                 'creator__user_type', 'creator__profile_picture',
+                # Whether the creator may be shown (decision 8), read with the row.
+                'creator__is_active',
             )
             # `-created_at, -id`, never `-created_at` alone. A single non-unique
             # sort column is not a total order, so LIMIT/OFFSET paging repeats
@@ -1090,6 +1175,12 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         An account the caller has blocked, or that has blocked them, is left out of
         `leaderboard` AFTER the places are counted: everyone else keeps their true
         `rank` and the list may be shorter than `limit`.
+
+        A suspended or erased account is different (the owner's decision 8,
+        2026-09-24): it holds NO place, like one that dropped out, so it is not listed
+        and the places close up behind it (1, 2, 3 — not 1, 2, 4). A block is one
+        viewer's choice and must not renumber the board for everyone; a suspension is
+        the platform's, and the public board excludes the account for everyone.
 
         `404` — no such challenge, or one an operator hid.
         """
@@ -1445,12 +1536,17 @@ class NotificationCursorPagination(CursorPagination):
         # documented shape paged forever through the same twenty rows and never saw
         # the other hundred. Say so rather than answering page one again.
         if 'page' in request.query_params:
-            raise DRFValidationError({
-                'page': _(
+            # Its own code (the owner's decision 9, 2026-09-24): `cursor_paginated`,
+            # at the top and on the field, where it answered `validation_error` /
+            # `invalid`.
+            refusal = DRFValidationError({
+                'page': [ErrorDetail(_(
                     "This endpoint is cursor-paginated. Follow the `next` link "
                     "instead of passing `page`."
-                )
+                ), code='cursor_paginated')]
             })
+            refusal.service_code = 'cursor_paginated'
+            raise refusal
         return super().paginate_queryset(queryset, request, view)
 
 
@@ -1462,6 +1558,9 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     
     GET /api/social/notifications/?page_size=20
     GET /api/social/notifications/?cursor=<token>&page_size=20
+
+    `?page=` is 400 `cursor_paginated` (the owner's decision 9, 2026-09-24; it was
+    `validation_error`): follow `next`. An unknown or foreign id is 404 `not_found`.
     """
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
@@ -1551,9 +1650,10 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
     and `member_since` (`"YYYY-MM-01"`, the month joined).
 
     An inactive account (suspended or erased), and anyone the caller has blocked or who
-    has blocked the caller, is not served: 404 `not_found` on the detail route, and
-    `by_username/` answers 404 `{"error": "User not found"}`. The counts agree with the
-    rows the caller can fetch (blocks, hidden posts).
+    has blocked the caller, is not served: 404 `not_found` on the detail route and on
+    `by_username/`. The counts agree with the rows the caller can fetch (blocks, hidden
+    posts, and — the owner's decision 8, 2026-09-24 — followers, follows and posts of
+    suspended or erased accounts, which are not counted).
     """
     serializer_class = PublicUserProfileSerializer
     permission_classes = [IsAuthenticated]
@@ -1574,8 +1674,9 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         return self._hidden_ids
 
     def _visible_people(self):
-        """Every account this viewer may see: active, and neither side blocking."""
-        return CustomUser.objects.filter(is_active=True).exclude(id__in=self._hidden())
+        """Every account this viewer may see: publicly visible (`users/visibility.py`,
+        the account is active), and neither side blocking."""
+        return public_people().exclude(id__in=self._hidden())
 
     def _with_follow_figures(self, queryset):
         """`is_following` and `followers_count`, for the whole page in its own query."""
@@ -1587,9 +1688,11 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
             is_following_anno=Exists(
                 UserFollow.objects.filter(following_id=OuterRef('pk'),
                                           follower=user)),
+            # Not a suspended or erased follower either: the count agrees with
+            # `followers/` (decision 8).
             followers_count_anno=subquery_count(
                 UserFollow.objects.filter(following_id=OuterRef('pk')).exclude(
-                    follower_id__in=hidden), 'following_id'),
+                    follower_id__in=hidden).filter(public_q('follower')), 'following_id'),
         )
 
     def get_queryset(self):
@@ -1612,7 +1715,8 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         return queryset.annotate(
             following_count_anno=subquery_count(
                 UserFollow.objects.filter(follower_id=OuterRef('pk')).exclude(
-                    following_id__in=hidden), 'follower_id'),
+                    following_id__in=hidden).filter(public_q('following')),
+                'follower_id'),
             # Through the one definition of what this viewer may read, so the number
             # cannot drift from `GET /api/social/posts/?author=<id>`.
             posts_count_anno=subquery_count(
@@ -1634,12 +1738,16 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         """Fetch public profile by username: /api/social/users/public-profile/by_username/?username=...
 
         The EXACT username, case-sensitive — use `search/` to find people.
-        400 `{"error"}` without `username`; 404 `{"error"}` when no visible account has
-        it. Otherwise the profile, as the detail route answers it.
+        400 `username_required` without `username` (was the `bad_request` default);
+        404 `not_found` when no visible account has it — none, a suspended or erased
+        one, or one blocked either way: the same answer the detail route gives (the
+        owner's decision 9, 2026-09-24, names both codes explicitly). Otherwise the
+        profile, as the detail route answers it.
         """
         username = request.query_params.get('username')
         if not username:
-            return Response({'error': _('username is required')}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': _('username is required'), 'code': 'username_required'},
+                            status=status.HTTP_400_BAD_REQUEST)
         try:
             # Through `get_queryset()`, not `CustomUser.objects`: this route bypassed
             # the viewset's queryset entirely, so a blocked person stayed reachable by
@@ -1648,7 +1756,8 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
             serializer = self.get_serializer(user)
             return Response(serializer.data)
         except CustomUser.DoesNotExist:
-            return Response({'error': _('User not found')}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': _('User not found'), 'code': 'not_found'},
+                            status=status.HTTP_404_NOT_FOUND)
 
     @action(detail=False, methods=['get'])
     def search(self, request):
@@ -1663,10 +1772,12 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         username, of the first name, of the last name, or of "first last" (so «ليث الن»
         finds ليث النجار). `%` and `_` are ordinary characters.
 
-        Listed: active, verified members (`client` and `trainer` accounts) other than
-        the caller, and never anyone the caller has blocked or who has blocked the
+        Listed: publicly visible (active — never a suspended or erased account, the
+        owner's decision 8), verified members (`client` and `trainer` accounts) other
+        than the caller, and never anyone the caller has blocked or who has blocked the
         caller — a subset of the people whose profile the caller could open; staff,
-        top-up agents and signups that never verified are not listed. Order: an exact username first, then usernames that start
+        top-up agents and signups that never verified are not listed (the owner's
+        decision 7, 2026-09-24, keeps this). Order: an exact username first, then usernames that start
         with `q`, then name matches; each group by username, then id.
 
         Paginated, the project's one shape: `{count, next, previous, results}`, 25 a

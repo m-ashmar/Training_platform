@@ -1521,6 +1521,69 @@ keeps, and each view's docstring states it in full.
   and the names dropped, the text scrubbed. Migration `0010` then drops the three FK
   columns.
 
+**A suspended account leaves every public surface; weekly goals take their target from
+the plan; social refusals name their codes** (the owner's decisions 8, 5 and 9,
+2026-09-24). No new route. Additive under §6 except where marked: new fields, and new
+`code` values where a refusal answered a status default. The views' docstrings carry
+the full contract.
+
+- **Who is shown** (decision 8, P0). ONE predicate, `users/visibility.py`: a person is
+  publicly visible when their account is active; a suspended or erased account is not.
+  Nothing is deleted — the rows stay, they are not SHOWN — and reinstating the account
+  shows everything again. Operator views keep every account.
+  - Challenge standings: a suspended participant holds NO place, exactly like one who
+    dropped out: not in `leaderboard/` rows, never the `me` row, not counted ahead of
+    anyone, so the places close up behind them (1, 2, 3 — a block still leaves the gap,
+    a suspension does not) in `leaderboard/`, `user_progress.rank`, the home card's
+    `challenge_rank.rank` and its `participants`. The stored `rank` of every RUNNING
+    challenge the person is in is rewritten at the moment `is_active` changes, either
+    way (`social/presence.py`); a finished challenge's stored ranks are the record. The
+    Challenge Winner badge is never awarded to an account that is not active.
+  - `GET /api/achievements/leaderboard/`: not on the board and not counted in
+    `user_rank`; the places close up. The cached board is dropped at the suspension.
+  - Posts and comments by such an account leave the feed, the post list, search,
+    `?author=`, the detail route (404 `not_found`), likes and replies; `comments_count`
+    no longer counts their comments.
+  - `follows/followers/`, `follows/following/`, `GET follows/` and a profile's
+    `followers_count` / `following_count` leave them out. `unfollow_user/` still works.
+  - A challenge they created is still listed, with `creator: null` (the app already
+    omits "hosted by" when `creator` is null).
+  - Trainers: never in the roster, matches or trainer lists (as before); a client's
+    `POST /api/auth/client/request-trainer/` for one is `404 not_found` (it created a
+    pending request), and `GET /api/auth/client/trainer-invites/` no longer lists their
+    invitations.
+  - Already true and unchanged: the public profile and `by_username/` (404), people
+    search (only active, verified `client`/`trainer` accounts — decision 7 keeps
+    staff, top-up agents and unverified signups out), following one (`404
+    user_not_found`).
+- **Weekly goals** (decision 5). A `workout_frequency` goal's `target_value` is
+  calculated at read time, like its count: the person's program's training days THIS
+  week (the home's `week_stats.workouts.planned`), else their profile's
+  `training_days_per_week`. New read-only field `target_source`: `"program"` |
+  `"profile"` | `"saved"` (neither is available now: the target it was last calculated
+  at) on a `workout_frequency` goal, null on every other type. `POST
+  /api/analytics/goals/` may leave `target_value` out for that type. Refusals, on POST
+  and PATCH/PUT: `400 goal_target_from_plan` with `expected_target` (number) and
+  `target_source` — a sent target that differs; `400 goal_target_unavailable` — no
+  program asking for work this week and no training days on the profile (a new weekly
+  goal cannot be created then; the app sends the person to set their training days).
+  `update_progress/` still answers `goal_counted_from_workouts`. Every other type still
+  requires `target_value` (field code `required`). A weekly goal's `target_value`, and
+  therefore its `progress_percentage`, can change from one week to the next.
+- **Social codes** (decision 9). Endpoint → new codes:
+  `GET users/public-profile/by_username/` → `400 username_required`, `404 not_found`
+  (named explicitly; it was the default); `PATCH/PUT/DELETE` a post, comment or
+  challenge that is not yours → `403 not_owner`; `PATCH/PUT/DELETE follows/{id}/` of a
+  follow you did not make → `403 not_your_follow`; `POST follows/` → `400
+  already_following` (a repeated follow; it was a 500) and the field code
+  `cannot_follow_yourself` on `following_id`; `GET notifications/?page=` → `400
+  cursor_paginated` (was `validation_error`; `field_errors.page` is still there, code
+  `cursor_paginated`); comments → field codes `comment_cannot_move` (on `post` /
+  `parent_comment`) and `reply_not_in_thread` (on `parent_comment`); challenges → field
+  code `status_follows_dates` on `status`; `POST comments/` on a post you cannot read →
+  `404 not_found` (named explicitly). Every other social refusal already named its
+  code; a 404 from a detail route stays `not_found`.
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 

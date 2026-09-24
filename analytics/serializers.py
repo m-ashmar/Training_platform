@@ -205,16 +205,34 @@ class UserGoalSerializer(serializers.ModelSerializer):
     `progress_percentage` is that against `target_value` capped at 100, and `week_start`
     / `week_end` (dates) say which week. It never becomes `completed`; next week starts
     from 0. `week_start` and `week_end` are null on every other type. The rule is in
-    `analytics/goals.py`; a list costs one extra query however many rows it holds.
+    `analytics/goals.py`.
+
+    **And its target is calculated** (the owner's decision 5, 2026-09-24):
+    `target_value` is what the person's plan asks for THIS week — their program's
+    training days this week, else the training days a week on their profile — and
+    `target_source` says which: `"program"`, `"profile"`, or `"saved"` (neither is
+    available now; the target it was last calculated at). `target_source` is null on
+    every other type, whose target the person sets. On create `target_value` may be
+    left out for a `workout_frequency` goal (it is filled in); one that differs from the
+    calculated number is refused — 400 `goal_target_from_plan` with `expected_target`
+    (a number) and `target_source` — and with no program and no stated training days
+    the goal cannot be created: 400 `goal_target_unavailable`. A PATCH that sends a
+    different `target_value` is refused the same way. A list costs four extra queries
+    however many rows it holds (the count, and the targets: routines, their days,
+    profiles).
     """
 
     days_remaining = serializers.SerializerMethodField()
     # Same reason as PerformanceMetric.value: `update_progress` writes these and a
     # non-finite value poisons every later read of the goal list.
-    target_value = FiniteFloatField()
+    #: Not required at the FIELD: a `workout_frequency` goal takes it from the plan
+    #: (decision 5). `validate` still requires it for every other type, with the same
+    #: `required` field error as before.
+    target_value = FiniteFloatField(required=False)
     start_value = FiniteFloatField(required=False, allow_null=True)
     week_start = serializers.SerializerMethodField()
     week_end = serializers.SerializerMethodField()
+    target_source = serializers.SerializerMethodField()
 
     class Meta:
         model = UserGoal
@@ -222,7 +240,7 @@ class UserGoalSerializer(serializers.ModelSerializer):
             'id', 'user', 'goal_type', 'title', 'description',
             'target_value', 'start_value', 'current_value', 'unit', 'created_at',
             'target_date', 'completed_at', 'status', 'progress_percentage',
-            'metadata', 'days_remaining', 'week_start', 'week_end',
+            'metadata', 'days_remaining', 'week_start', 'week_end', 'target_source',
         ]
         #: `current_value` is read-only here: progress moves through `update_progress`,
         #: which keeps `progress_percentage` and completion in step. PATCHing
@@ -254,8 +272,21 @@ class UserGoalSerializer(serializers.ModelSerializer):
         return _bounded_metadata(value)
 
     def validate(self, attrs):
-        """The start is fixed at creation, and stored with the goal in the one write."""
-        from .goals import start_from_metadata
+        """The start is fixed at creation, and stored with the goal in the one write.
+
+        A `workout_frequency` goal's target is the system's (decision 5): see
+        `_calculated_target`.
+        """
+        from .goals import COUNTED_TYPES, start_from_metadata
+
+        goal_type = attrs.get('goal_type', getattr(self.instance, 'goal_type', None))
+        if goal_type in COUNTED_TYPES:
+            attrs = self._calculated_target(attrs)
+        elif (self.instance is None or not self.partial) and \
+                attrs.get('target_value') is None:
+            # A create, or a full PUT: the field was required before, and still is.
+            raise serializers.ValidationError({'target_value': [serializers.ErrorDetail(
+                self.fields['target_value'].error_messages['required'], code='required')]})
 
         if self.instance is not None:
             # Read-only after creation: moving the start would silently rescale every
@@ -287,12 +318,45 @@ class UserGoalSerializer(serializers.ModelSerializer):
             attrs['progress_percentage'] = 0.0
         return attrs
 
-    def _weekly_count(self, goal):
-        """This week's workouts for the goal's owner. One query for a whole page: the
-        first row asks for every owner of a counted goal on the page at once."""
-        from .goals import COUNTED_TYPES, workouts_this_week
+    def _calculated_target(self, attrs):
+        """The target of a `workout_frequency` goal is what the plan asks for this week.
 
-        cache = self.context.setdefault('_workouts_this_week', {}) \
+        Raises `GoalTargetRefused` (answered by `UserGoalViewSet`) for a sent target
+        that differs — `goal_target_from_plan`, with the number expected — and, when
+        there is no program and no stated training days, for a new goal or a sent
+        target — `goal_target_unavailable`. Otherwise the calculated number is stored.
+        """
+        from .goals import GoalTargetRefused, weekly_target
+
+        request = self.context.get('request')
+        owner_id = (self.instance.user_id if self.instance is not None
+                    else getattr(getattr(request, 'user', None), 'pk', None))
+        target, source = weekly_target(owner_id)
+        sent = attrs.get('target_value')
+        if target is None:
+            if self.instance is None or sent is not None:
+                raise GoalTargetRefused(
+                    'goal_target_unavailable',
+                    str(_('A weekly workout goal follows your plan. Set how many days a '
+                          'week you train in your profile, and the goal will follow it.')))
+            attrs.pop('target_value', None)            # the saved target stands
+            return attrs
+        if sent is not None and float(sent) != float(target):
+            raise GoalTargetRefused(
+                'goal_target_from_plan',
+                str(_('A weekly workout goal follows your plan: %(target)s workouts this '
+                      'week.') % {'target': target}),
+                expected_target=target, target_source=source)
+        attrs['target_value'] = float(target)
+        return attrs
+
+    def _weekly_figures(self, goal):
+        """(this week's workouts, target, source) for the goal's owner. The same queries
+        for a whole page: the first row asks for every owner of a counted goal on the
+        page at once."""
+        from .goals import COUNTED_TYPES, weekly_targets, workouts_this_week
+
+        cache = self.context.setdefault('_weekly_goal_figures', {}) \
             if isinstance(self.context, dict) else {}
         if goal.user_id not in cache:
             owners = {goal.user_id}
@@ -300,18 +364,30 @@ class UserGoalSerializer(serializers.ModelSerializer):
             if isinstance(page, (list, tuple)) or getattr(page, '_result_cache', None):
                 owners |= {row.user_id for row in page
                            if getattr(row, 'goal_type', None) in COUNTED_TYPES}
-            cache.update(workouts_this_week(owners - set(cache)))
-        return cache.get(goal.user_id, 0)
+            owners -= set(cache)
+            counts = workouts_this_week(owners)
+            targets = weekly_targets(owners)
+            for owner in owners:
+                cache[owner] = (counts.get(owner, 0),) + targets.get(owner, (None, None))
+        return cache[goal.user_id]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        from .goals import COUNTED_TYPES, weekly_progress
+        from .goals import COUNTED_TYPES, FROM_SAVED, weekly_progress
 
         if instance.goal_type in COUNTED_TYPES:
-            count = self._weekly_count(instance)
+            count, target, source = self._weekly_figures(instance)
+            if target is None:
+                target, source = instance.target_value, FROM_SAVED
+            data['target_value'] = float(target)
+            data['target_source'] = source
             data['current_value'] = float(count)
-            data['progress_percentage'] = weekly_progress(count, instance.target_value)
+            data['progress_percentage'] = weekly_progress(count, target)
         return data
+
+    def get_target_source(self, obj):
+        # Filled for a counted goal by `to_representation`; the person's own otherwise.
+        return None
 
     def _week(self, obj, index):
         from .goals import COUNTED_TYPES, current_week

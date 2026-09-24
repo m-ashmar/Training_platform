@@ -68,10 +68,12 @@ MAX_REASONS = 3
 
 
 def directory_trainers():
-    """Every trainer the app may show: enabled, with a verified address."""
-    from .models import CustomUser
+    """Every trainer the app may show: publicly visible (`users/visibility.py` — never a
+    suspended or erased account, the owner's decision 8, 2026-09-24), with a verified
+    address."""
+    from .visibility import public_people
 
-    return CustomUser.objects.filter(user_type='trainer', is_active=True, email_verified=True)
+    return public_people().filter(user_type='trainer', email_verified=True)
 
 
 def _strings(value) -> list[str]:

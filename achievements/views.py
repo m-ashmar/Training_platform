@@ -212,6 +212,11 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         has blocked, or that has blocked the caller, is left out of `leaderboard`
         AFTER the ranks are counted: the other rows keep their true `rank` and the
         list can be shorter than `limit`. Nothing differs by build.
+
+        A suspended or erased account is not on the board at all (the owner's decision
+        8, 2026-09-24, `users/visibility.py`): it holds no place, the places close up
+        behind it, and `user_rank` does not count it either. Its badges are kept, and
+        reinstating the account puts it back where its points place it.
         """
         limit = int_param(request.query_params, 'limit', default=10, minimum=1, maximum=50)
 
@@ -225,7 +230,9 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         # swapped places between requests. The user's id breaks the tie (SIDE_BUGS
         # S-088) — `user_id`, not `user`: ordering by the relation sorts by
         # `CustomUser.Meta.ordering`, which is not the id.
-        leaders = (UserAchievement.objects
+        from users.visibility import public_q
+
+        leaders = (UserAchievement.objects.filter(public_q('user'))
                    .values('user', 'user__username', 'user__profile_picture')
                    .annotate(total_points=DjSum('achievement__points'),
                              total_achievements=Count('id'))

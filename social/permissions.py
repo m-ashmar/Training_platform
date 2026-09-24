@@ -8,6 +8,7 @@ authenticated user could PATCH or DELETE any other user's post, comment or
 challenge. Queryset scoping is never sufficient on its own for write methods.
 """
 
+from django.utils.translation import gettext_lazy as _
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 
@@ -30,6 +31,14 @@ class IsOwnerOrReadOnly(BasePermission):
     """
 
     owner_fields = ('author', 'creator', 'user', 'owner')
+
+    #: The refusal's own code and sentence (the owner's decision 9, 2026-09-24): DRF
+    #: raises `PermissionDenied(message, code)` from these, and the error handler keeps
+    #: the code. It answered the generic `permission_denied` before. Only an object
+    #: refusal reaches them: `has_permission` fails only for a caller with no
+    #: credential, which DRF answers 401 `not_authenticated` whatever these say.
+    code = 'not_owner'
+    message = _('Only the person who wrote this can change it.')
 
     def has_permission(self, request, view):
         # Authentication is required for every method, safe ones included.
@@ -55,6 +64,11 @@ class IsOwnerOrReadOnly(BasePermission):
 
 class IsFollowParticipant(BasePermission):
     """A follow edge may only be modified by the follower who created it."""
+
+    #: 403 `not_your_follow` (the owner's decision 9, 2026-09-24): the follow is
+    #: someone else's — the caller is the person being followed.
+    code = 'not_your_follow'
+    message = _('Only the person who follows can change this follow.')
 
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_authenticated)

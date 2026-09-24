@@ -271,6 +271,22 @@ class UserGoalViewSet(viewsets.ModelViewSet):
     B-069). 400 `validation_error` with field codes: `start_reaches_target` on
     `start_value`; `target_value` must be greater than zero. The goal's shape, and how a
     `workout_frequency` goal is counted, are on `UserGoalSerializer`.
+
+    **A `workout_frequency` goal's target is calculated** (the owner's decision 5,
+    2026-09-24): from the person's program this week, else their profile's training
+    days a week (`analytics/goals.py`). `target_value` may be left out of its POST.
+    Refusals, on POST and on PATCH/PUT, each `400 {"error", "detail", "code", ...}`:
+
+      `goal_target_from_plan` — a `target_value` that differs from the calculated one;
+          the body carries `expected_target` (a number) and `target_source`
+          (`"program"` | `"profile"`) — the app can offer that number instead;
+      `goal_target_unavailable` — a new weekly goal (or a sent target) for someone
+          with no program asking for work this week and no training days on their
+          profile: the system has no number to own. The app asks the person to set
+          their training days a week (profile) and tries again.
+
+    A PATCH that changes nothing about the target (a title, `status`) is accepted
+    whatever the plan says. Nothing differs by build.
     """
     serializer_class = UserGoalSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -286,6 +302,26 @@ class UserGoalViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Automatically set user"""
         serializer.save(user=self.request.user)
+
+    def create(self, request, *args, **kwargs):
+        from .goals import GoalTargetRefused
+
+        try:
+            return super().create(request, *args, **kwargs)
+        except GoalTargetRefused as refusal:
+            return Response({**refusal.extra, 'error': refusal.message,
+                             'detail': refusal.message, 'code': refusal.code},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+    def update(self, request, *args, **kwargs):
+        from .goals import GoalTargetRefused
+
+        try:
+            return super().update(request, *args, **kwargs)
+        except GoalTargetRefused as refusal:
+            return Response({**refusal.extra, 'error': refusal.message,
+                             'detail': refusal.message, 'code': refusal.code},
+                            status=status.HTTP_400_BAD_REQUEST)
     
     @action(detail=True, methods=['post'])
     def update_progress(self, request, pk=None):

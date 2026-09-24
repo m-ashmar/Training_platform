@@ -4545,3 +4545,32 @@ msgstr "يمكنك إبراز 3 إنجازات كحدّ أقصى"
 #: social/serializers.py
 msgid "A secret badge cannot be shared."
 msgstr "لا يمكن مشاركة شارة سرية."
+
+#: social/views.py
+msgid "You already follow this person."
+msgstr "أنت تتابع هذا الشخص بالفعل."
+
+#: social/permissions.py
+msgid "Only the person who wrote this can change it."
+msgstr "لا يستطيع تعديل هذا إلا من كتبه."
+
+#: social/permissions.py
+msgid "Only the person who follows can change this follow."
+msgstr "لا يستطيع تعديل هذه المتابعة إلا المتابِع نفسه."
+
+#: social/serializers.py
+msgid "You cannot follow yourself."
+msgstr "لا يمكنك متابعة نفسك."
+
+#: analytics/serializers.py
+msgid ""
+"A weekly workout goal follows your plan. Set how many days a week you train "
+"in your profile, and the goal will follow it."
+msgstr ""
+"هدف التمارين الأسبوعي يتبع خطتك. حدّد في ملفك الشخصي عدد أيام تمرينك في "
+"الأسبوع، وسيتبعه الهدف."
+
+#: analytics/serializers.py
+#, python-format
+msgid "A weekly workout goal follows your plan: %(target)s workouts this week."
+msgstr "هدف التمارين الأسبوعي يتبع خطتك: %(target)s تمارين هذا الأسبوع."

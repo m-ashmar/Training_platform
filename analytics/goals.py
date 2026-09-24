@@ -18,6 +18,30 @@ The rule, in one place:
   `progress_percentage` is that count against `target_value`, capped at 100. A weekly
   goal is never `completed`: meeting this week's number does not end it, and next week
   starts again from 0.
+
+**Its target comes from the plan, too** (the owner's decision 5, 2026-09-24: "I would
+not allow users to manually enter a conflicting number. The system should derive the
+goal from the user's plan/profile and own the calculation"). `weekly_targets` answers
+it, at read time like the count, in this order:
+
+1. `program` — the routine the home screen shows (`home/sections.py current_routine`),
+   when it asks for work this week: the days of this week inside its window whose day
+   of the cycle has exercises (`home/sections.py planned_training_days`) — the same
+   number as the home's `week_stats.workouts.planned`, so the two never disagree. It can
+   differ from week to week: a program that starts on a Wednesday asks for fewer days
+   in its first week.
+2. `profile` — else the training days a week the person gave at onboarding
+   (`CustomUser.training_days_per_week`, 1-7).
+3. Neither: there is no number the system could own. Creating a weekly goal is then
+   REFUSED (`goal_target_unavailable`) rather than taking a typed one — the app sends
+   the person to set their training days (or to their coach for a program), and the
+   goal follows from that. An existing weekly goal whose person has since lost both is
+   read at the target it was last calculated at (`target_source: "saved"`).
+
+A target the client sends that differs from the calculated one is refused
+(`goal_target_from_plan`, carrying `expected_target` and `target_source`); the same
+number, or none, is accepted, and the calculated number is what is stored. The stored
+column is only a snapshot: what is SERVED is recalculated on every read.
 """
 from __future__ import annotations
 
@@ -31,6 +55,25 @@ WORKOUT_FREQUENCY = 'workout_frequency'
 
 #: The goal types whose progress the server counts; `update_progress` refuses them.
 COUNTED_TYPES = frozenset({WORKOUT_FREQUENCY})
+
+#: Where a weekly goal's target came from (`target_source` on the goal).
+FROM_PROGRAM = 'program'
+FROM_PROFILE = 'profile'
+#: Neither is available now: the target it was last calculated at.
+FROM_SAVED = 'saved'
+
+
+class GoalTargetRefused(Exception):
+    """A weekly goal's target the system cannot take: 400 with its own `code`.
+
+    Raised by `UserGoalSerializer.validate` and answered by `UserGoalViewSet` as
+    `{"error", "detail", "code", **extra}` — a DRF ValidationError would turn
+    `expected_target` into a string.
+    """
+
+    def __init__(self, code, message, **extra):
+        super().__init__(code)
+        self.code, self.message, self.extra = code, message, extra
 
 
 def current_week(today=None):
@@ -90,3 +133,64 @@ def start_from_metadata(metadata, target):
     if target is not None and value == float(target):
         return None
     return value
+
+
+def weekly_targets(user_ids, today=None) -> dict:
+    """{user_id: (target, source)} — what each person's weekly workout goal aims at THIS
+    week, by the rule in the module docstring; `(None, None)` for someone with neither a
+    program that asks for work this week nor a stated number of training days.
+
+    Three queries for any number of people: their active routines (newest first, the
+    order `home/sections.py current_routine` reads), the days of the chosen routines'
+    cycles that have exercises, and the stated training days.
+    """
+    from home.sections import ROUTINES_CONSIDERED, pick_current_routine, planned_training_days
+    from routine.models import Routine, RoutineExercise
+    from users.models import CustomUser
+
+    ids = {uid for uid in user_ids if uid is not None}
+    if not ids:
+        return {}
+    today = today or timezone.localdate()
+    first, _last = current_week(today)
+
+    through = Routine.assigned_to.through
+    person = Routine._meta.get_field('assigned_to').m2m_reverse_field_name()
+    candidates: dict = {}
+    for link in (through.objects
+                 .filter(**{f'{person}_id__in': ids}, routine__is_active=True)
+                 .select_related('routine')
+                 .order_by(f'{person}_id', '-routine__start_date', '-routine_id')):
+        rows = candidates.setdefault(getattr(link, f'{person}_id'), [])
+        if len(rows) < ROUTINES_CONSIDERED:
+            rows.append(link.routine)
+    chosen = {uid: pick_current_routine(rows, today) for uid, rows in candidates.items()}
+
+    working: dict = {}
+    routine_ids = {routine.pk for routine in chosen.values() if routine is not None}
+    if routine_ids:
+        for routine_id, day in (RoutineExercise.objects.filter(routine_id__in=routine_ids)
+                                .values_list('routine_id', 'day').distinct()):
+            working.setdefault(routine_id, set()).add(day)
+
+    stated = dict(CustomUser.objects.filter(pk__in=ids)
+                  .values_list('pk', 'training_days_per_week'))
+
+    answer = {}
+    for uid in ids:
+        routine = chosen.get(uid)
+        planned = (planned_training_days(routine, first, working.get(routine.pk, set()))
+                   if routine is not None else 0)
+        days = stated.get(uid)
+        if planned > 0:
+            answer[uid] = (planned, FROM_PROGRAM)
+        elif isinstance(days, int) and 1 <= days <= 7:
+            answer[uid] = (days, FROM_PROFILE)
+        else:
+            answer[uid] = (None, None)
+    return answer
+
+
+def weekly_target(user_id, today=None):
+    """`weekly_targets` for one person: `(target, source)` or `(None, None)`."""
+    return weekly_targets([user_id], today).get(user_id, (None, None))

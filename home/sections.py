@@ -95,6 +95,14 @@ def current_routine(person, on_date):
 
     rows = list(Routine.objects.filter(assigned_to=person, is_active=True)
                 .order_by('-start_date', '-id')[:ROUTINES_CONSIDERED])
+    return pick_current_routine(rows, on_date)
+
+
+def pick_current_routine(rows, on_date):
+    """`current_routine`'s choice among one person's active routines, already read newest
+    first (`-start_date, -id`, at most `ROUTINES_CONSIDERED`). Apart so a caller that
+    reads many people's routines in one query (`analytics/goals.py weekly_targets`)
+    chooses by the same rule."""
     for row in rows:
         starts = row.start_date is None or row.start_date <= on_date
         ends = row.end_date is None or row.end_date >= on_date
@@ -293,6 +301,22 @@ def _in_program(routine, date) -> bool:
     return True
 
 
+def planned_training_days(routine, start, working_days) -> int:
+    """How many days of the week that begins on `start` the routine asks for work: days
+    inside its window (`_in_program`) whose day of the cycle has exercises
+    (`working_days`, from `week_context`). 0 without a routine.
+
+    The home's `week_stats.workouts.planned`, and — the owner's decision 5, 2026-09-24 —
+    the target of a weekly workout goal (`analytics/goals.py weekly_targets`), so the
+    two can never disagree.
+    """
+    if routine is None:
+        return 0
+    return sum(1 for offset in range(7)
+               if _in_program(routine, start + timedelta(days=offset))
+               and day_of(routine, start + timedelta(days=offset)) in working_days)
+
+
 def _week_strip(person, routine, on_date, week) -> list:
     """Saturday to Friday, one entry a day: `done`, `today`, `rest` or `planned`.
 
@@ -385,10 +409,7 @@ def week_stats(person, routine, week, week_payload, *, on_date) -> dict | None:
 
     planned_days = None
     if routine is not None:
-        planned_days = sum(1 for offset in range(7)
-                           if _in_program(routine, start + timedelta(days=offset))
-                           and day_of(routine, start + timedelta(days=offset))
-                           in week['working_days'])
+        planned_days = planned_training_days(routine, start, week['working_days'])
     done_days = len([date for date in week['finished'] if start <= date <= on_date])
 
     # The window the cached payload measures: the seven days ending today. The week

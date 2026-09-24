@@ -197,6 +197,19 @@ def test_b070_a_weekly_goal_counts_this_weeks_workouts(make_user, api):
     from home.sections import week_start
 
     trainer, client, routine, rows = _program(make_user, "b070")
+    # The owner's decision of 2026-09-24 (decision 5): a weekly goal's TARGET comes from
+    # the person's plan, not from the number stored with it. `_program` alone is a 1-day
+    # cycle starting today, which asks for a different number of days depending on the
+    # weekday the test runs; this program asks for four days every week — the target
+    # this test was written with — so what it asserts about the COUNT is unchanged.
+    from routine.models import RoutineExercise
+
+    routine.days = 7
+    routine.start_date = week_start(timezone.localdate()) - timedelta(days=14)
+    routine.save()
+    for day in (2, 3, 4):
+        RoutineExercise.objects.create(routine=routine, exercise=rows[0].exercise, day=day,
+                                       order=day, sets=3, reps=10, weight=20)
     other = make_user("b070_other")
     begins = _this_week_begins()
     _session(client, routine, begins + timedelta(minutes=1))

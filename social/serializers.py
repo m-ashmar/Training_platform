@@ -7,6 +7,7 @@ Serializers for social models to handle API data conversion.
 from django.db.models import F, Q
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
+from rest_framework.exceptions import ErrorDetail
 from .models import (
     UserFollow, Post, PostLike, Comment, CommentLike,
     Challenge, ChallengeParticipation,
@@ -27,6 +28,8 @@ from training_platform.file_security import SecureImageField
 # One query, both directions (moderation/services.py). It imports no model at module
 # level, which is why it can be imported from here at all.
 from moderation.services import blocked_ids
+# Who may be shown to other people (the owner's decision 8, 2026-09-24).
+from users.visibility import hidden_q, is_public, public_q
 import logging
 
 logger = logging.getLogger(__name__)
@@ -186,15 +189,16 @@ class PublicUserProfileSerializer(serializers.ModelSerializer):
         annotated = getattr(obj, 'followers_count_anno', None)
         if annotated is not None:
             return annotated
+        # Nor a suspended or erased follower: the lists leave them out (decision 8).
         return obj.followers.exclude(
-            follower_id__in=_hidden_from(self)).count()
+            follower_id__in=_hidden_from(self)).filter(public_q('follower')).count()
 
     def get_following_count(self, obj):
         annotated = getattr(obj, 'following_count_anno', None)
         if annotated is not None:
             return annotated
         return obj.following.exclude(
-            following_id__in=_hidden_from(self)).count()
+            following_id__in=_hidden_from(self)).filter(public_q('following')).count()
 
     def get_posts_count(self, obj):
         annotated = getattr(obj, 'posts_count_anno', None)
@@ -286,7 +290,10 @@ class UserFollowSerializer(serializers.ModelSerializer):
     def validate_following_id(self, value):
         request = self.context.get('request')
         if request and request.user.is_authenticated and value.pk == request.user.pk:
-            raise serializers.ValidationError("You cannot follow yourself.")
+            # The field code `follow_user/` answers at the top for the same thing (the
+            # owner's decision 9, 2026-09-24); it was the default `invalid`, in English.
+            raise serializers.ValidationError(_("You cannot follow yourself."),
+                                              code='cannot_follow_yourself')
         return value
 
 
@@ -533,7 +540,8 @@ class PostSerializer(serializers.ModelSerializer):
         return PostLike.objects.filter(post=obj, user_id__in=hidden).count()
 
     def _hidden_comments(self, obj):
-        """Comments on this post this viewer cannot open: hidden, or by a blocked author.
+        """Comments on this post this viewer cannot open: hidden, by a blocked author, or
+        by an account that is suspended or erased (the owner's decision 8, 2026-09-24).
 
         `PostViewSet` annotates this for the whole page in its own query and is the
         only place `PostSerializer` is used with a queryset, so the fallback below runs
@@ -545,7 +553,7 @@ class PostSerializer(serializers.ModelSerializer):
             return annotated
         if not (obj.comments_count or 0):
             return 0
-        unreadable = Q(is_hidden=True)
+        unreadable = Q(is_hidden=True) | hidden_q('author')
         hidden = _hidden_from(self)
         if hidden:
             unreadable |= Q(author_id__in=hidden)
@@ -593,18 +601,24 @@ class CommentSerializer(serializers.ModelSerializer):
         could also name a parent comment from a different, hidden post.
         """
         attrs = super().validate(attrs)
+        # Each refusal names its field code (the owner's decision 9, 2026-09-24); they
+        # were the default `invalid`.
         if self.instance is not None:
             for name in ('post', 'parent_comment'):
                 if name in attrs and attrs[name] != getattr(self.instance, name):
                     raise serializers.ValidationError(
-                        {name: _('A comment cannot be moved.')})
+                        {name: ErrorDetail(_('A comment cannot be moved.'),
+                                           code='comment_cannot_move')})
             return attrs
         parent = attrs.get('parent_comment')
         post = attrs.get('post')
+        # A parent the thread does not show — hidden, or written by an account that is
+        # suspended or erased (decision 8) — is not one to reply to.
         if parent is not None and (post is None or parent.post_id != post.pk
-                                   or parent.is_hidden):
+                                   or parent.is_hidden or not is_public(parent.author)):
             raise serializers.ValidationError(
-                {'parent_comment': _('Reply to a comment on the same post.')})
+                {'parent_comment': ErrorDetail(_('Reply to a comment on the same post.'),
+                                               code='reply_not_in_thread')})
         return attrs
 
     def get_likes_count(self, obj):
@@ -641,7 +655,13 @@ class CommentSerializer(serializers.ModelSerializer):
 
 
 class ChallengeSerializer(serializers.ModelSerializer):
-    """Serializer for community challenges"""
+    """Serializer for community challenges
+
+    `creator` is `{id, username, user_type, profile_picture}`, or null when the creator's
+    account is not publicly visible — suspended or erased (the owner's decision 8,
+    2026-09-24): the challenge stays, its participants keep it, and nobody is shown the
+    account's name or photo. Reinstating the account shows it again.
+    """
 
     image = SecureImageField(required=False, allow_null=True, max_bytes=5 * 1024 * 1024)
     creator = UserMinimalSerializer(read_only=True)
@@ -667,16 +687,23 @@ class ChallengeSerializer(serializers.ModelSerializer):
 
     def validate_status(self, value):
         """Only a CLOSE is a decision. 'upcoming' and 'active' follow from the dates, so
-        accepting them from a client produced a write that read back as something else."""
+        accepting them from a client produced a write that read back as something else.
+
+        Field code `status_follows_dates` (the owner's decision 9, 2026-09-24)."""
         if value not in Challenge.TERMINAL_STATUSES:
             raise serializers.ValidationError(
-                _('A challenge starts and ends by its dates; only closing it is a choice.'))
+                _('A challenge starts and ends by its dates; only closing it is a choice.'),
+                code='status_follows_dates')
         return value
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         # The stored value only records a close; the phase comes from the dates.
         data['status'] = instance.lifecycle_status
+        # Not a suspended or erased creator's name and photo (decision 8). The column
+        # is read with the row (`ChallengeViewSet.get_queryset`), so this costs nothing.
+        if instance.creator_id is not None and not is_public(instance.creator):
+            data['creator'] = None
         return data
 
     def get_is_joined(self, obj):
