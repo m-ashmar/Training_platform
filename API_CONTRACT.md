@@ -1469,6 +1469,46 @@ B-051, 2026-09-23).
   reads the merchant account every ten minutes for transfers no checkout claimed. One
   ShamCash transaction confirms one payment, once.
 
+**What wiring the trainer money screens found: escrow and the ledger's reads**
+(BACKEND_BUGS B-096, B-101, 2026-09-24). Additive; identical on every build (money that
+already moved, spec §3: balance and history are visible everywhere).
+
+- `GET /api/wallet/balance/` gains, for a TRAINER, the other side of escrow
+  (TrainerEarnings' «محجوز لدى المنصة · 3 عملاء بانتظار أول برنامج»):
+  `held_for_trainer` (what the trainer will receive when each held month 1 is released
+  by the first program: the client's fee less the platform's commission at the rate
+  copied onto that month, in the trainer's currency), `held_for_trainer_gross` (the
+  clients' fees for the same months), `awaiting_first_program` (how many clients) and
+  `held_for_trainer_items`, newest first: `{relation_id, client {id, name, role},
+  status: "awaiting_first_program", kind: "trainer_fee_hold", reason, month,
+  requested_at, held_at, amount, commission, commission_rate ("0.2"), net, currency,
+  charged_amount, charged_currency, estimated}` with `amount = commission + net`.
+  `estimated` is true when the month was charged in the other currency: the trainer's
+  share is converted when it is paid, so the figure is today's rate. A hold an operator
+  reversed is not counted. `"0.00"`, `"0.00"`, `0`, `[]` for anyone who is not a
+  trainer. The items are NOT ledger rows and never appear in `transactions/` — draw them
+  as the design's «حجز رسوم تدريب» rows; nothing is written for the trainer until the
+  money is released (then a `trainer_fee_payout` row arrives as before).
+- `GET /api/wallet/transactions/` takes optional filters, ANDed; without them the call
+  is unchanged: `since=YYYY-MM-DD` / `until=YYYY-MM-DD` (inclusive, the server's zone),
+  `money_type=` (one or several of the four) and `kind=` (one or several `kind` values;
+  a row matches exactly when its own `kind` is that value). Repeat a parameter or
+  separate values with commas.
+- `GET /api/wallet/transactions/summary/` — the same ledger summed per calendar month
+  and per `money_type`, for the monthly chart and «من أين أرباح أيلول» without paging:
+  `{currency, since, until, money_type, kind, months: [{month: "2026-09", in, out, net,
+  count, by_money_type: {PLATFORM_SUB|COACHING_1TO1|ROUTINE_PRODUCT|WALLET_MOVE: {in,
+  out, net, count, people}}}], totals: {in, out, net, count, by_money_type}}`. Every
+  month the window touches is listed, oldest first, empty ones too; every amount is in
+  the wallet's `currency`; `people` counts the different people the rows were with (a
+  trainer's `COACHING_1TO1.people` is the design's «16 عميلاً»). Same filters; the
+  window defaults to this month and the five before, and may touch at most 12 months.
+- Refusals, 400, each its own code: `bad_date` (+ `field`; not `YYYY-MM-DD`, or outside
+  2000..2999 — the code the diet and routine date parameters already answer),
+  `date_range_reversed` (`since` after `until`), `date_range_too_long` (summary only,
+  + `max_months: 12`), `bad_money_type` (+ `money_type_options`), `bad_kind`
+  (+ `kind_options`; the code diet's meal events answer for an unknown `kind`).
+
 **What wiring the Me screens found** (BACKEND_BUGS B-053..B-057, 2026-09-23). Additive:
 the refusals below answered only their status default (`bad_request` / `not_found`) and
 now answer their own code, which §6 reads as that default; no code a view named changed.
@@ -2370,6 +2410,7 @@ It therefore equals the row count of `GET comments/?post={id}` for the same view
 | `GET` | `/api/wallet/currency/` | auth | `WalletCurrencyView` |
 | `PUT` | `/api/wallet/currency/` | auth | `WalletCurrencyView` |
 | `GET` | `/api/wallet/transactions/` | auth | `WalletTransactionsView` |
+| `GET` | `/api/wallet/transactions/summary/` | auth | `WalletTransactionsSummaryView` |
 | `GET` | `/api/wallet/transactions/{reference_id}/` | auth | `WalletTransactionDetailView` |
 
 ### root

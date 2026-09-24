@@ -5,6 +5,7 @@ from .views import (
     WalletCurrencyView,
     WalletTransactionDetailView,
     WalletTransactionsView,
+    WalletTransactionsSummaryView,
     AgentTopUpView,
     ClientTransferToTrainerView,
     AdminReversalView,
@@ -25,6 +26,11 @@ urlpatterns = [
     # wallet is still untouched (the owner, 2026-09-21).
     path("currency/", WalletCurrencyView.as_view(), name="currency"),
     path("transactions/", WalletTransactionsView.as_view(), name="transactions"),
+    # The same ledger summed by month and by kind of money (B-101). Declared BEFORE the
+    # detail route: "summary" would otherwise be read as a reference_id (never a real
+    # one — references are UUIDs).
+    path("transactions/summary/", WalletTransactionsSummaryView.as_view(),
+         name="transactions-summary"),
     # One row of the caller's own ledger, by its public reference. Same shape as a
     # row of the list above.
     path("transactions/<str:reference_id>/", WalletTransactionDetailView.as_view(),
