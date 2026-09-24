@@ -1618,6 +1618,55 @@ and a non-numeric `food_id` on `DELETE preferences/`, answered 500; each is now 
 `bad_<field>`. The three analytics sentences above were English-only and are now
 translated.
 
+**Every routine refusal names its own code** (the owner, 2026-09-24, decision 9). Each
+refusal below answered only its status default (`bad_request`, `permission_denied`,
+`not_found`, `conflict`) and now names its reason — a new `code` value under §6, so a
+client that does not know one still reads the default it replaces. No status, key or
+named code changed; `error` / `detail` are as before (now translated where they were
+English). Prefix `/api/routine/`.
+
+| Endpoint | New codes |
+|---|---|
+| `DELETE exercises/{id}/` | 409 `exercise_has_history` |
+| `POST exercises/create-with-image/` | 400 `field_required` (+ `field`) |
+| `DELETE routines/{id}/` | 409 `routine_has_history` |
+| `POST routines/{id}/assign_to_client/` | 400 `client_id_required`, `not_your_client`, `already_assigned`; 404 `client_not_found`; 500 `routine_assign_failed` |
+| `POST routines/{id}/unassign_from_client/` | 400 `client_id_required`, `not_your_client`, `not_assigned`; 404 `client_not_found`; 500 `routine_unassign_failed` |
+| `POST routines/{id}/update_progress/` | 400 `day_and_status_required`, `bad_day`, `day_out_of_range`, `day_has_no_exercises`; 403 `routine_not_yours` |
+| `GET routines/my_clients_progress/` | 403 `not_a_trainer` |
+| `POST routine-progress/` | 403 `routine_not_yours` |
+| `PATCH/PUT/DELETE set-logs/{id}/` | 403 `set_not_yours` (a trainer on a client's set) |
+| `POST set-logs/` | 400 `set_log_exists` |
+| `GET set-logs/my-progress/` | 403 `clients_only` |
+| `POST set-logs/bulk-create/` | 400 `routine_day_date_required`, `bad_number` (+ `field`), `sets_out_of_range` (+ `max`), `weight_out_of_range`, `reps_out_of_range`, `bad_date`, `date_in_future`, `date_too_old`, `day_out_of_range`, `day_has_no_exercises`; 403 `routine_not_yours`; 404 `routine_not_found`. `errors[]` rows gain `code`: `set_log_exists`, `set_write_failed` |
+| `POST user-exercise-progress/bulk-complete/` | the same, less the four number codes (its `errors[]` rows already carried `code`) |
+| `GET user-exercise-progress/daily-summary/` | 400 `bad_date` |
+| `POST workout-sessions/` | 403 `not_your_client` (a trainer naming someone else's `user`); field code `routine_not_yours` on `routine` (was `invalid`) |
+| `PATCH/PUT/DELETE workout-sessions/{id}/` | 403 `session_not_yours` (a trainer on a client's session) |
+| `GET analytics/summary/`, `completion/`, `streaks/`, `adherence/`, `strength/`, `trends/` | 403 `user_not_accessible`; 404 `user_not_found` (`summary`, `streaks`, `adherence`, `strength`); 400 `bad_period` (`summary`, `trends` — `adherence` already had it) |
+| `GET analytics/admin_dashboard/` | 403 `not_a_trainer` |
+| `POST templates/{id}/generate/` | 400 `client_id_required`, `bad_date`, `end_before_start`, `bad_days`, `days_out_of_range` (+ `max`); 403 `not_your_client` (single `client_id` too); 404 `client_not_found` |
+| `POST templates/{id}/copy/` | 400 `template_not_public` |
+| `GET templates/my_templates/` | 403 `not_a_trainer` |
+| `POST/DELETE exercises/{id}/image/` | 400 `image_required`; 404 `no_image` (DELETE, the exercise has no picture; gains `error`) |
+| `POST/DELETE exercises/{id}/add-media/` | 400 `media_items_required` / `media_ids_required`; a 207 DELETE gains `errors_detail[] = [{media_id, code, message}]`, `code` `media_not_on_exercise` or `media_delete_failed` |
+| `GET trainer/client-progress/{id}/` | 403 `not_your_client` |
+| `GET trainer/client-progress/recent/`, `attention/` | 403 `not_a_trainer` |
+
+- `not_found` is now NAMED (not filled in) where a 404 means only "no such object, or
+  not yours": the exercise media routes, `analytics/strength/?exercise_id=` and
+  `trainer/client-progress/{id}/`. A body's `routine_id` naming nothing is
+  `routine_not_found` and a body's `client_id` `client_not_found`, so the app can tell
+  the object it named from the route it called.
+- A date shaped like a date and not one (`2026-02-30`) was a 500 on `bulk-create`,
+  `bulk-complete` and `templates/{id}/generate/`, and failed a whole `set-logs/sync/`
+  batch; it is `bad_date` (per row on `sync/`).
+- Still `permission_denied`, deliberately: the ROLE refusals of the permission classes
+  (§2 "wrong role" — a client on a trainer-only viewset, S-117) and the two named ones
+  (`routines/{id}/copy/`, a non-owner's exercise media write). Still `validation_error`:
+  serializer field errors, `?page=`, and `int_param` numbers — `field_errors` carries
+  the specifics.
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 

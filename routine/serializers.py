@@ -1581,12 +1581,15 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         user = getattr(request, 'user', None)
         if user is None or not user.is_authenticated:
-            raise serializers.ValidationError("Authentication required.")
+            raise serializers.ValidationError(_("Authentication required."))
         if user.is_staff or getattr(user, 'is_admin', False):
             return routine
         if routine.created_by_id == user.id or routine.assigned_to.filter(pk=user.pk).exists():
             return routine
-        raise serializers.ValidationError("That routine is not assigned to you.")
+        # A field code of its own, the one the routine routes answer for the same reason
+        # (the owner, 2026-09-24): it was the generic `invalid`, and English.
+        raise serializers.ValidationError(_("That routine is not assigned to you."),
+                                          code='routine_not_yours')
     
     def get_duration(self, obj):
         """Seconds: from start to end once the session has an end; the time so far

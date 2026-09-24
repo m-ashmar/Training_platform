@@ -161,6 +161,21 @@ def _int_or_none(value):
         return None
 
 
+def _date_or_none(value):
+    """A `YYYY-MM-DD` date from a request, or None if it is not one.
+
+    `django.utils.dateparse.parse_date` answers None only for a string that is not
+    SHAPED like a date; one that is shaped like a date and is not one (`2026-13-45`,
+    `2026-02-30`) raises `ValueError`, which is not a DRF exception — so the `bad_date`
+    refusals below were a 500 for exactly the typo they exist to catch, and on
+    `set-logs/sync/` one such row failed the whole batch.
+    """
+    try:
+        return parse_date(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     """ViewSet for managing exercises."""
@@ -194,12 +209,16 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         `ExerciseSetLog` both CASCADE, so deleting one exercise silently erased every
         client's history for it and changed their past volume and streaks. Refuse, and
         offer the retire path instead.
+
+        409 `exercise_has_history` — someone has logged work against it; retire it with
+        `is_active=false` instead (the owner, 2026-09-24: every refusal names its code).
         """
         exercise = self.get_object()
         if exercise.progress.exists():
             return Response(
                 {'error': _('Clients have recorded work against this exercise, so it '
-                            'cannot be deleted. Set is_active=false to retire it.')},
+                            'cannot be deleted. Set is_active=false to retire it.'),
+                 'code': 'exercise_has_history'},
                 status=status.HTTP_409_CONFLICT,
             )
         return super().destroy(request, *args, **kwargs)
@@ -255,8 +274,9 @@ class ExerciseCreateWithImageView(APIView):
     
     Request format:
     - name (required): Exercise name
-    - description (required): Exercise description  
-    - target_muscle (required): Target muscle group
+    - description (required): Exercise description
+    - target_muscle (required): Target muscle group — a missing one of these three
+      answers 400 `field_required` with `field` naming it (the owner, 2026-09-24)
     - difficulty_level (optional): beginner/intermediate/advanced/expert
     - image (optional): Main demonstration image file
     - media_photos (optional): Additional photo files (multiple)
@@ -310,7 +330,8 @@ class ExerciseCreateWithImageView(APIView):
             for field in required_fields:
                 if not request.data.get(field):
                     return Response(
-                        {'error': _('Missing required field: %(field)s') % {'field': field}},
+                        {'error': _('Missing required field: %(field)s') % {'field': field},
+                         'code': 'field_required', 'field': field},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -599,6 +620,9 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         every assignment, so every assigned routine is protected — and `ProtectedError`
         is not a DRF exception, so deleting one was an unhandled 500 rather than a
         message. Retiring is the operation the trainer actually wants.
+
+        409 `routine_has_history` — retire it with `is_active=false` instead (the owner,
+        2026-09-24: every refusal names its code).
         """
         from django.db.models import ProtectedError
 
@@ -607,7 +631,8 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         except ProtectedError:
             return Response(
                 {'error': _('This routine has recorded client progress and cannot be '
-                            'deleted. Set is_active=false to retire it instead.')},
+                            'deleted. Set is_active=false to retire it instead.'),
+                 'code': 'routine_has_history'},
                 status=status.HTTP_409_CONFLICT,
             )
 
@@ -642,20 +667,26 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         first month, and the client is notified in their language.
 
         200 `{message, routine_id, client_id, assignment_date}`.
-        400 `client_id` missing; 400 the client is not an approved client of yours; 400
-        already assigned to this client (nothing is paid twice).
-        404 no such client.
-        409 `routine_belongs_to_another_client` with `copy_url`: another client is on
-        it, or another client has trained on it (their history stays with it) — copy it
-        with `routines/{id}/copy/` instead. A trainer's own tries on a draft do not
-        count. Identical on every build.
+
+        | Status | `code` | When |
+        |---|---|---|
+        | 400 | `client_id_required` | `client_id` missing or not a whole number |
+        | 400 | `not_your_client` | the client is not an approved client of yours |
+        | 400 | `already_assigned` | already this client's (nothing is paid twice); carries `routine_id`, `client_id` |
+        | 404 | `client_not_found` | no client with that id |
+        | 404 | `not_found` | no such routine, or not yours |
+        | 409 | `routine_belongs_to_another_client` | with `copy_url`: another client is on it, or has trained on it (their history stays with it) — copy it with `routines/{id}/copy/` instead. A trainer's own tries on a draft do not count |
+        | 500 | `routine_assign_failed` | an unexpected fault; nothing to fix in the request |
+
+        Every refusal names its own code (the owner, 2026-09-24); the four 400/404 codes
+        above answered only `bad_request` / `not_found` before. Identical on every build.
         """
         routine = self.get_object()
         client_id = _int_or_none(request.data.get('client_id'))
-        
+
         if not client_id:
             return Response(
-                {"error": "client_id is required"}, 
+                {"error": _("client_id is required"), "code": "client_id_required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -681,20 +712,22 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                     )
                     return Response(
                         {
-                            "error": "You can only assign routines to your approved clients.",
+                            "error": _("You can only assign routines to your approved clients."),
+                            "code": "not_your_client",
                             "details": f"Client {client.username} is not in your approved client list."
-                        }, 
+                        },
                         status=status.HTTP_400_BAD_REQUEST
                     )
-            
+
             # Check if routine is already assigned to this client
             if client in routine.assigned_to.all():
                 return Response(
                     {
-                        "error": "Routine is already assigned to this client",
+                        "error": _("This routine is already assigned to this client."),
+                        "code": "already_assigned",
                         "routine_id": routine.id,
                         "client_id": client.id
-                    }, 
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -736,7 +769,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             
         except CustomUser.DoesNotExist:
             return Response(
-                {"error": "Client not found"}, 
+                {"error": _("Client not found"), "code": "client_not_found"},
                 status=status.HTTP_404_NOT_FOUND
             )
         except PASSTHROUGH_EXCEPTIONS:
@@ -747,7 +780,8 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         except Exception as e:
             logger.error(f"Error assigning routine {routine.id} to client {client_id}: {str(e)}")
             return Response(
-                {"error": "An error occurred while assigning the routine"}, 
+                {"error": _("An error occurred while assigning the routine."),
+                 "code": "routine_assign_failed"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -759,16 +793,29 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         Requirements:
         - Only trainers and admins can unassign routines
         - Validation ensures proper authorization
-        
+
+        Body: `client_id`. 200 `{message, routine_id, client_id, unassignment_date}`.
+
+        | Status | `code` | When |
+        |---|---|---|
+        | 400 | `client_id_required` | `client_id` missing or not a whole number |
+        | 400 | `not_your_client` | the client is not an approved client of yours |
+        | 400 | `not_assigned` | the routine is not this client's; carries `routine_id`, `client_id` |
+        | 404 | `client_not_found` | no client with that id |
+        | 404 | `not_found` | no such routine, or not yours |
+        | 500 | `routine_unassign_failed` | an unexpected fault |
+
+        Every refusal names its own code (the owner, 2026-09-24). Identical on every build.
+
         TODO: Add unassignment notifications
         TODO: Implement unassignment history tracking
         """
         routine = self.get_object()
         client_id = _int_or_none(request.data.get('client_id'))
-        
+
         if not client_id:
             return Response(
-                {"error": "client_id is required"}, 
+                {"error": _("client_id is required"), "code": "client_id_required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -788,20 +835,22 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                 if not relation:
                     return Response(
                         {
-                            "error": "You can only unassign routines from your approved clients.",
+                            "error": _("You can only unassign routines from your approved clients."),
+                            "code": "not_your_client",
                             "details": f"Client {client.username} is not in your approved client list."
-                        }, 
+                        },
                         status=status.HTTP_400_BAD_REQUEST
                     )
-            
+
             # Check if routine is actually assigned to this client
             if client not in routine.assigned_to.all():
                 return Response(
                     {
-                        "error": "Routine is not assigned to this client",
+                        "error": _("This routine is not assigned to this client."),
+                        "code": "not_assigned",
                         "routine_id": routine.id,
                         "client_id": client.id
-                    }, 
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -825,7 +874,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             
         except CustomUser.DoesNotExist:
             return Response(
-                {"error": "Client not found"}, 
+                {"error": _("Client not found"), "code": "client_not_found"},
                 status=status.HTTP_404_NOT_FOUND
             )
         except PASSTHROUGH_EXCEPTIONS:
@@ -836,7 +885,8 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         except Exception as e:
             logger.error(f"Error unassigning routine {routine.id} from client {client_id}: {str(e)}")
             return Response(
-                {"error": "An error occurred while unassigning the routine"}, 
+                {"error": _("An error occurred while unassigning the routine."),
+                 "code": "routine_unassign_failed"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -856,9 +906,20 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         2026-09-20). A day closed with sets missing does not count as a training day and
         breaks the streak; `analytics/adherence/` reads these rows.
 
-        Other codes: 400 `bad_status`; 403 when the routine is not yours; 403
-        `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`) while the coaching this
-        routine came from is unpaid or over — readable, not trainable (the owner).
+        Other codes (every refusal names its own since the owner's decision of
+        2026-09-24; the ones marked new answered `bad_request` / `permission_denied`):
+
+        | Status | `code` | When |
+        |---|---|---|
+        | 400 | `day_and_status_required` (new) | `day` or `status` missing |
+        | 400 | `bad_day` (new) | `day` is not a whole number |
+        | 400 | `bad_status` | `status` is not one of the four |
+        | 400 | `day_out_of_range` (new) | `day` is outside 1..the routine's days |
+        | 400 | `day_has_no_exercises` (new) | that day of the routine has no exercises |
+        | 403 | `routine_not_yours` (new) | the routine is not assigned to you |
+        | 403 | `coaching_frozen` / `coaching_unpaid` / `coaching_ended` | with `trainer_id`, while the coaching this routine came from is unpaid or over — readable, not trainable (the owner) |
+        | 404 | `not_found` | no such routine, or not one you can see |
+        | 409 | `unlogged_sets` | above |
         """
         routine = self.get_object()
         user = request.user
@@ -866,18 +927,21 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         status = request.data.get("status")
 
         if user not in routine.assigned_to.all():
-            return Response({"error": _("You are not authorized to update this routine.")}, status=403)
+            return Response({"error": _("You are not authorized to update this routine."),
+                             "code": "routine_not_yours"}, status=403)
         _require_can_train(user, routine)
 
         if not day or not status:
-            return Response({"error": _("Day and status are required.")}, status=400)
+            return Response({"error": _("Day and status are required."),
+                             "code": "day_and_status_required"}, status=400)
 
         # Parsed once, and before it is used. `int(day)` sat unguarded in the comparison
         # below, so `{"day": "abc"}` was a ValueError and a 500 rather than a 400.
         try:
             day_number = int(str(day).strip())
         except (TypeError, ValueError):
-            return Response({"error": _("Day must be a whole number.")}, status=400)
+            return Response({"error": _("Day must be a whole number."), "code": "bad_day"},
+                            status=400)
 
         # A declared status, not any string. `choices` is a form-layer rule and
         # `update_or_create` never calls `full_clean`, so 'banana' was stored and
@@ -894,7 +958,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         # Validate if the day exists in the routine's exercises
         valid_days = [exercise.day for exercise in routine.routine_exercises.all()]
         if day_number not in valid_days:
-            return Response({"error": _("Day %(day)s is not part of the routine.") % {"day": day}}, status=400)
+            return _day_refused(routine, day_number)
 
         confirmed = _truthy(request.data.get('confirm_unlogged'))
         counts = _day_set_counts(routine, user, day_number) if status in ('completed', 'skipped') else None
@@ -906,7 +970,10 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         try:
             updated_progress = routine.update_progress(user=user, day=day_number, status=status)
         except ValueError as e:
-            return Response({"error": _("Invalid progress update.")}, status=400)
+            # `Routine.update_progress` raises it for one reason only: the day is outside
+            # 1..days (a row left on a day the routine no longer has).
+            return Response({"error": _("Invalid progress update."),
+                             "code": "day_out_of_range"}, status=400)
 
         # What the day planned against what was done, kept instead of thrown away (the
         # owner, 2026-09-20). A day closed with sets missing is recorded as such, and it
@@ -931,10 +998,14 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def my_clients_progress(self, request):
-        """Get progress for all clients assigned to this trainer"""
+        """Get progress for all clients assigned to this trainer.
+
+        Trainers only: anyone else answers 403 `not_a_trainer` (the owner, 2026-09-24 —
+        the code the trainer-only routes answer; it was the generic
+        `permission_denied`)."""
         if not request.user.is_trainer:
             return Response(
-                {"error": "This endpoint is only for trainers"}, 
+                {"error": _("This endpoint is only for trainers"), "code": "not_a_trainer"},
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -1057,7 +1128,9 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
     Clients can only see their own progress.
     Trainers can see their clients' progress.
     A client's create or update answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
-    `trainer_id`) while the coaching the routine came from is unpaid or over.
+    `trainer_id`) while the coaching the routine came from is unpaid or over. A create
+    naming a routine that is neither yours nor assigned to you answers 403
+    `routine_not_yours` (the owner, 2026-09-24; it was the generic `permission_denied`).
 
     Every row carries `outcome` since 2026-09-20: what that day actually came to, or
     null while the day is still open. `{complete, via, missed_sets, planned_sets,
@@ -1088,7 +1161,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
             or routine.created_by_id == user.id
             or routine.assigned_to.filter(pk=user.pk).exists()
         ):
-            raise PermissionDenied('This routine is not assigned to you.')
+            raise PermissionDenied(_('This routine is not assigned to you.'),
+                                   code='routine_not_yours')
         _require_can_train(user, routine, serializer.validated_data.get('date'))
         # (user, routine, day, date) is UNIQUE. Re-logging the same day is a normal
         # client action (correcting a set, finishing later), so upsert instead of
@@ -1176,6 +1250,65 @@ def _records_in_window(user, start_date) -> int:
 
 def _truthy(value) -> bool:
     return value is True or str(value).strip().lower() in ('1', 'true', 'yes')
+
+
+def _day_refused(routine, day):
+    """400 for a routine day nothing can be logged against, naming which reason.
+
+    The codes are the ones `workout-sessions/` already answers on `day` for the same two
+    reasons (`WorkoutSessionSerializer._check_routine_day`): `day_out_of_range` for a day
+    outside 1..`routine.days`, `day_has_no_exercises` for a day that exists and holds
+    nothing. `routines/{id}/update_progress/`, `set-logs/bulk-create/` and
+    `user-exercise-progress/bulk-complete/` answered the bare `bad_request` for both (the
+    owner, 2026-09-24: every refusal names its own code).
+    """
+    if not 1 <= day <= (routine.days or 0):
+        return Response({'error': _('Day %(day)s is not part of this routine.') % {'day': day},
+                         'code': 'day_out_of_range'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    return Response({'error': _('Day %(day)s has no exercises.') % {'day': day},
+                     'code': 'day_has_no_exercises'},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+
+def _backlog_date_refused(raw):
+    """The 400 for a logging `date` outside what may be logged, or None when it is fine.
+
+    `bad_date`, `date_in_future` and `date_too_old` — the codes `set-logs/sync/` answers
+    per row for the same three reasons. `bulk-create` and `bulk-complete` answered the
+    bare `bad_request` for all three (the owner, 2026-09-24).
+    """
+    parsed = _date_or_none(raw)
+    if parsed is None:
+        return Response({'error': _('date must be in YYYY-MM-DD format.'), 'code': 'bad_date'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    today = timezone.localdate()
+    if parsed > today:
+        return Response({'error': _('Cannot log a workout in the future.'),
+                         'code': 'date_in_future'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if (today - parsed).days > MAX_BACKLOG_DAYS:
+        return Response(
+            {'error': _('Cannot log a workout more than %(d)d days in the past.')
+             % {'d': MAX_BACKLOG_DAYS}, 'code': 'date_too_old'},
+            status=status.HTTP_400_BAD_REQUEST)
+    return None
+
+
+def _routine_not_found():
+    """404 `routine_not_found`: a `routine_id` in the BODY names no routine. The same code
+    `set-logs/sync/` answers per row. Distinct from the `not_found` of a URL's own object,
+    so the app can tell the routine it named from the route it called."""
+    return Response({'error': _('Routine not found.'), 'code': 'routine_not_found'},
+                    status=status.HTTP_404_NOT_FOUND)
+
+
+def _routine_not_yours():
+    """403 `routine_not_yours`: the routine exists and is neither yours nor assigned to
+    you, so nothing may be logged against it."""
+    return Response({'error': _('You do not have access to this routine.'),
+                     'code': 'routine_not_yours'},
+                    status=status.HTTP_403_FORBIDDEN)
 
 
 def _day_set_counts(routine, user, day, date=None) -> dict:
@@ -1420,7 +1553,7 @@ def _sync_one_set(request, row, key, known, today):
                 'personal_record': False}, _duplicate_touch(user, row, existing), None
 
     # 2. The date. Bounded exactly as `bulk-create` bounds it.
-    parsed = parse_date(str(row.get('date'))) if row.get('date') else today
+    parsed = _date_or_none(row.get('date')) if row.get('date') else today
     if parsed is None:
         return _sync_error(key, 'bad_date',
                            _('date must be in YYYY-MM-DD format.')), None, None
@@ -1582,7 +1715,11 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     POST, PATCH and DELETE belong to the PERSON WHOSE SET IT IS (BACKEND_DELTA item 15),
     and to an admin; a trainer may read a client's sets and no longer create, edit or
     delete them — they did not lift them. A trainer's POST naming a client's progress
-    row or session answers 403 `set_not_yours` (SIDE_BUGS S-114), and the coaching
+    row or session answers 403 `set_not_yours` (SIDE_BUGS S-114) — and so, since the
+    owner's decision of 2026-09-24, does their PATCH or DELETE of a client's set, which
+    answered the generic `permission_denied` (`IsSetLogCreatorOrTrainerOrAdmin.code`). A
+    second row for the same progress row, set number and date answers 400
+    `set_log_exists`. The coaching
     refusal on a create is judged for the set's owner, never for the coach. `reps` is
     1-1000 (400 on `reps`), the bound every logging route applies (S-115). Anyone
     else gets 404, because the list is scoped. Only
@@ -1684,7 +1821,12 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             if 'client_uuid' in str(e):
                 raise       # a retry racing its first attempt: `create` answers it
             if 'unique constraint' in str(e).lower():
-                raise serializers.ValidationError({'detail': _('A set log for this progress, set number, and date already exists.')})
+                # 400 `set_log_exists`, through the handler's `service_code` (the owner,
+                # 2026-09-24): a `detail`-only ValidationError answered the bare
+                # `validation_error` with no field to show it on.
+                refusal = serializers.ValidationError({'detail': _('A set log for this progress, set number, and date already exists.')})
+                refusal.service_code = 'set_log_exists'
+                raise refusal
             raise
         _celebrate_personal_record(serializer.instance)
 
@@ -1733,7 +1875,9 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         """GET /api/routine/set-logs/my-progress/ — the caller's own set logs, or their
         totals per exercise.
 
-        Clients only (403 otherwise). Query params: `group_by=exercise` for one row per
+        Clients only (403 `clients_only` otherwise — the code every client-only route
+        answers; it was the generic `permission_denied` until the owner's decision of
+        2026-09-24). Query params: `group_by=exercise` for one row per
         exercise (`exercise`, `total_volume`, `sets_completed`, `average_weight`,
         `average_reps`); `routine_id` to keep to one routine.
 
@@ -1747,7 +1891,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         if not user.is_authenticated or not user.is_client:
-            return Response({'error': _('Only clients can view their own progress.')}, status=403)
+            return Response({'error': _('Only clients can view their own progress.'),
+                             'code': 'clients_only'}, status=403)
         group_by = request.query_params.get('group_by')
         routine_id = _int_or_none(request.query_params.get('routine_id'))
         qs = self.get_queryset().filter(user_exercise_progress__user=user)
@@ -1804,13 +1949,37 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         with `no_prescribed_reps`.
         403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`): the coaching this
         routine came from is unpaid or over — readable, not trainable (the owner).
+
+        Every refusal names its own code (the owner, 2026-09-24; those marked new
+        answered `bad_request`, `permission_denied` or `not_found`):
+
+        | Status | `code` | When |
+        |---|---|---|
+        | 400 | `routine_day_date_required` (new) | `routine_id`, `day` or `date` missing |
+        | 400 | `bad_number` (new) | `weight` is not a number |
+        | 400 | `validation_error` | `sets` / `reps` not a whole number (`field_errors` names it) |
+        | 400 | `reps_required` | above |
+        | 400 | `sets_out_of_range` (new) | `sets` above 50 |
+        | 400 | `weight_out_of_range` (new) | `weight` outside 0-1000 kg |
+        | 400 | `reps_out_of_range` (new) | `reps` outside 1-1000 |
+        | 400 | `bad_date` (new) | `date` is not YYYY-MM-DD |
+        | 400 | `date_in_future` (new) | `date` after today |
+        | 400 | `date_too_old` (new) | `date` more than 365 days back |
+        | 400 | `day_out_of_range` / `day_has_no_exercises` (new) | the day is not one of the routine's, or holds nothing |
+        | 403 | `routine_not_yours` (new) | the routine is neither yours nor assigned to you |
+        | 404 | `routine_not_found` (new) | `routine_id` names no routine |
+
+        The codes of `sync/`'s rows for the same reasons. Each `errors[]` entry of a 200
+        is `{exercise, error, code}` (+ `set_number`): `no_prescribed_reps`,
+        `set_log_exists`, `set_write_failed`.
         """
         user = request.user
         routine_id = _int_or_none(request.data.get('routine_id'))
         day = _int_or_none(request.data.get('day'))
         date = request.data.get('date')
         if not routine_id or not day or not date:
-            return Response({'error': _('routine_id, day, and date are required.')}, status=400)
+            return Response({'error': _('routine_id, day, and date are required.'),
+                             'code': 'routine_day_date_required'}, status=400)
 
         # --- Real-world input validation -------------------------------------
         # Previously unvalidated: negative weight (-500 kg), 100000 reps, dates in
@@ -1821,7 +1990,10 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             weight = float(request.data.get('weight', 0))
             reps = int_param(request.data, 'reps', default=None, minimum=1, maximum=1000)
         except (TypeError, ValueError):
-            return Response({'error': _('sets, weight and reps must be numeric.')},
+            # `int_param` answers a non-number `sets` / `reps` itself, as a field error;
+            # what reaches here is a `weight` that is not a number.
+            return Response({'error': _('sets, weight and reps must be numeric.'),
+                             'code': 'bad_number', 'field': 'weight'},
                             status=status.HTTP_400_BAD_REQUEST)
         if reps is None and not as_prescribed:
             # Ten was filled in silently before, and every "reps missed" figure reads
@@ -1833,35 +2005,29 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 
         if not (1 <= sets <= MAX_SETS_PER_REQUEST):
             return Response(
-                {'error': _('sets must be between 1 and %(max)d.') % {'max': MAX_SETS_PER_REQUEST}},
+                {'error': _('sets must be between 1 and %(max)d.') % {'max': MAX_SETS_PER_REQUEST},
+                 'code': 'sets_out_of_range', 'max': MAX_SETS_PER_REQUEST},
                 status=status.HTTP_400_BAD_REQUEST)
         if not (0 <= weight <= MAX_WEIGHT_KG):
             return Response(
-                {'error': _('Weight must be between 0 and %(max)d kg.') % {'max': MAX_WEIGHT_KG}},
+                {'error': _('Weight must be between 0 and %(max)d kg.') % {'max': MAX_WEIGHT_KG},
+                 'code': 'weight_out_of_range'},
                 status=status.HTTP_400_BAD_REQUEST)
         if reps is not None and not (1 <= reps <= MAX_REPS_PER_SET):
             return Response(
-                {'error': _('reps must be between 1 and %(max)d.') % {'max': MAX_REPS_PER_SET}},
+                {'error': _('reps must be between 1 and %(max)d.') % {'max': MAX_REPS_PER_SET},
+                 'code': 'reps_out_of_range'},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        parsed_date = parse_date(str(date))
-        if parsed_date is None:
-            return Response({'error': _('date must be in YYYY-MM-DD format.')},
-                            status=status.HTTP_400_BAD_REQUEST)
-        today = timezone.localdate()
-        if parsed_date > today:
-            return Response({'error': _('Cannot log a workout in the future.')},
-                            status=status.HTTP_400_BAD_REQUEST)
-        if (today - parsed_date).days > MAX_BACKLOG_DAYS:
-            return Response(
-                {'error': _('Cannot log a workout more than %(d)d days in the past.') % {'d': MAX_BACKLOG_DAYS}},
-                status=status.HTTP_400_BAD_REQUEST)
-        date = parsed_date
+        refused = _backlog_date_refused(date)
+        if refused is not None:
+            return refused
+        date = _date_or_none(date)
         from .models import Routine, RoutineExercise, UserExerciseProgress, ExerciseSetLog
         try:
             routine = Routine.objects.get(id=routine_id)
         except Routine.DoesNotExist:
-            return Response({'error': _('Routine not found.')}, status=404)
+            return _routine_not_found()
 
         # AUTHORIZATION: the caller must be entitled to this routine. Without this,
         # any authenticated user could pass an arbitrary routine_id and both create
@@ -1870,8 +2036,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         if not (routine.assigned_to.filter(id=user.id).exists()
                 or routine.created_by_id == user.id
                 or user.is_admin):
-            return Response({'error': _('You do not have access to this routine.')},
-                            status=status.HTTP_403_FORBIDDEN)
+            return _routine_not_yours()
 
         _require_can_train(user, routine, date)
 
@@ -1879,9 +2044,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         if not exercises.exists():
             # Previously a nonexistent day returned 200 {"count": 0} — a silent
             # no-op. update_progress() validates the day, so this is now consistent.
-            return Response(
-                {'error': _('Day %(day)s is not part of this routine.') % {'day': day}},
-                status=status.HTTP_400_BAD_REQUEST)
+            return _day_refused(routine, day)
         results = []
         errors = []
         # ATOMIC: previously each progress row and set log was written outside any
@@ -1972,13 +2135,18 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                         results.append({'exercise': rex.exercise.name, 'set_number': set_num,
                                         'created': created, 'id': log.id})
                     except IntegrityError as e:
+                        # Each row error carries a `code`, as `bulk-complete`'s do (S-042;
+                        # the owner, 2026-09-24): these had a sentence only, and the
+                        # duplicate one was English whatever the client spoke.
                         if 'unique constraint' in str(e).lower():
                             errors.append({'exercise': rex.exercise.name, 'set_number': set_num,
-                                           'error': 'Duplicate set log for this progress, set number, and date.'})
+                                           'error': _('A set log for this progress, set number, and date already exists.'),
+                                           'code': 'set_log_exists'})
                         else:
                             logger.exception("bulk set-log failed for %s set %s", rex.exercise_id, set_num)
                             errors.append({'exercise': rex.exercise.name, 'set_number': set_num,
-                                           'error': _('Could not record this set.')})
+                                           'error': _('Could not record this set.'),
+                                           'code': 'set_write_failed'})
 
         # Run the suppressed recomputation ONCE per affected progress row — outside
         # the suspension block, otherwise it would be muted along with the rest. Scoped
@@ -2046,6 +2214,9 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                         `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
                         `trainer_id`) — per row, because one frozen coaching must not
                         throw away the sets that belong to another trainer's routine.
+                        `bad_date` also answers a date that does not exist
+                        (`2026-02-30`): it failed the whole batch with a 500 until
+                        2026-09-24.
 
         The whole-request answer is `{results, created, duplicates, errors, count}`.
         400 `sets_required` when the body carries no list at all. The response's
@@ -2144,8 +2315,9 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     approved client (`user` in the body). The owner PATCHes their session.
 
     **PATCH, PUT and DELETE belong to the person who trained, and to an admin**
-    (SIDE_BUGS S-067). A trainer reads a client's sessions and answers 403 on every
-    write to one — the same rule as a client's sets, which a session holds: deleting
+    (SIDE_BUGS S-067). A trainer reads a client's sessions and answers 403
+    `session_not_yours` on every write to one (the owner, 2026-09-24: it was the generic
+    `permission_denied`) — the same rule as a client's sets, which a session holds: deleting
     it deletes every set logged in it, and finishing it closes the client's day. (A
     trainer's PATCH that also fails validation answers that 400 first, as it always
     has — `effort_not_yours` on `effort_rating`; nothing is written either way.)
@@ -2243,9 +2415,15 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         app's id: a retry answers 200 with the first row; someone else's id answers 409
         `idempotency_conflict`) and optional `start_time` for a workout logged offline
         (at most 30 days back: `start_time_in_future`, `start_time_too_old`); `end_time`
-        is then checked against it. Field codes (400): `routine_inactive` on `routine`,
+        is then checked against it. Field codes (400): `routine_not_yours` on `routine`
+        for a routine neither yours nor assigned to you (the owner, 2026-09-24; it was
+        the generic `invalid`), `routine_inactive` on `routine`,
         `day_out_of_range` / `day_has_no_exercises` on `day` — here, and on a PATCH that
-        changes the routine or the day (a status-only PATCH is not checked)."""
+        changes the routine or the day (a status-only PATCH is not checked).
+
+        A trainer opening a session for someone (`user` in the body) who is not their
+        approved client answers 403 `not_your_client` (the owner, 2026-09-24; it was the
+        generic `permission_denied`)."""
         def create_it():
             response = super(WorkoutSessionViewSet, self).create(request, *args, **kwargs)
             if response.status_code == status.HTTP_201_CREATED and \
@@ -2274,7 +2452,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                 from rest_framework.exceptions import PermissionDenied
                 # A trainer may only create sessions for their OWN approved clients.
                 if not can_access_user_data(self.request.user, user_id):
-                    raise PermissionDenied(_('You may only create sessions for your approved clients.'))
+                    raise PermissionDenied(_('You may only create sessions for your approved clients.'),
+                                           code='not_your_client')
                 user_obj = CustomUser.objects.get(pk=user_id)
                 _require_can_train(user_obj, routine, at)
                 serializer.save(user=user_obj)
@@ -2292,9 +2471,12 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         # Refused HERE rather than in the permission class so that a trainer's edit
         # still answers the field codes it always has (`effort_not_yours`) first —
         # either way nothing of theirs is written.
-        from .permissions import is_session_writer
+        from .permissions import IsSessionOwnerOrTrainerOrAdmin, is_session_writer
         if not is_session_writer(self.request.user, instance):
-            raise PermissionDenied()
+            # The code and sentence the DELETE answers from the permission class: one
+            # meaning, one code (the owner, 2026-09-24).
+            raise PermissionDenied(IsSessionOwnerOrTrainerOrAdmin.message,
+                                   code=IsSessionOwnerOrTrainerOrAdmin.code)
         _require_can_train(self.request.user, instance.routine, instance.start_time)
         serializer.save()
 
@@ -2406,12 +2588,42 @@ def _queue_milestones(user_id):
         logger.warning("could not queue milestone check for user %s", user_id, exc_info=True)
 
 
+def _user_not_accessible():
+    """403 `user_not_accessible`: a `user_id` the caller may not read — not themselves,
+    not an approved client of theirs, and they are not an admin. One code for the six
+    analytics actions, which answered the generic `permission_denied` (the owner,
+    2026-09-24)."""
+    return Response({'error': _('You do not have access to this user\'s data.'),
+                     'code': 'user_not_accessible'},
+                    status=status.HTTP_403_FORBIDDEN)
+
+
+def _user_not_found():
+    """404 `user_not_found`: a `user_id` the caller may read names nobody (only an admin
+    can get here — anyone else is answered `user_not_accessible` first). The code
+    `social/` and `moderation/` answer for a missing account."""
+    return Response({'error': _('User not found'), 'code': 'user_not_found'},
+                    status=status.HTTP_404_NOT_FOUND)
+
+
 class AnalyticsViewSet(viewsets.ViewSet):
     """
     Analytics endpoints for user training data.
     Provides summary stats: total volume, PRs, workout frequency.
     Input: GET params period=week|month, user_id (optional, trainer/admin only)
     Output: JSON summary of analytics
+
+    Refusals, the same on every action that takes them (every refusal names its own
+    code — the owner, 2026-09-24; those marked new answered `bad_request`,
+    `permission_denied` or `not_found`):
+
+    | Status | `code` | When |
+    |---|---|---|
+    | 400 | `bad_period` (new on `summary` and `trends`) | `period` is not one the action knows |
+    | 400 | `bad_exercise_id` | `strength`: `exercise_id` not a whole number |
+    | 403 | `user_not_accessible` (new) | `user_id` is not you, not an approved client of yours, and you are not an admin |
+    | 404 | `user_not_found` (new) | `user_id` names nobody (an admin's question) |
+    | 404 | `not_found` | `strength`: `exercise_id` names no exercise you may read — the same answer as a missing one |
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -2440,7 +2652,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         period = request.query_params.get('period', 'week')
         if period not in ('week', 'month', 'year'):
             return Response(
-                {'error': _('period must be one of: week, month, year.')},
+                {'error': _('period must be one of: week, month, year.'), 'code': 'bad_period'},
                 status=status.HTTP_400_BAD_REQUEST)
         user_id = request.query_params.get('user_id')
         user = request.user
@@ -2451,13 +2663,12 @@ class AnalyticsViewSet(viewsets.ViewSet):
             # could read any other user's training data.
             from .permissions import can_access_user_data
             if not can_access_user_data(request.user, user_id):
-                return Response({'error': _('You do not have access to this user\'s data.')},
-                                status=status.HTTP_403_FORBIDDEN)
+                return _user_not_accessible()
             try:
                 from users.models import CustomUser
                 user = CustomUser.objects.get(pk=user_id)
             except CustomUser.DoesNotExist:
-                return Response({'error': _('User not found')}, status=404)
+                return _user_not_found()
 
         # Calendar days, not a datetime subtracted from now. `date__gte` compares a
         # DateField against a datetime, which truncates: a 7-day window starting at
@@ -2566,8 +2777,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
             # could read any other user's training data.
             from .permissions import can_access_user_data
             if not can_access_user_data(request.user, user_id):
-                return Response({'error': _('You do not have access to this user\'s data.')},
-                                status=status.HTTP_403_FORBIDDEN)
+                return _user_not_accessible()
             qs = qs.filter(user_id=user_id)
         # Grouped and counted by the database. This walked every RoutineProgress row
         # the caller could see and tallied it in Python — a trainer with twenty
@@ -2631,12 +2841,11 @@ class AnalyticsViewSet(viewsets.ViewSet):
             # could read any other user's training data.
             from .permissions import can_access_user_data
             if not can_access_user_data(request.user, user_id):
-                return Response({'error': _('You do not have access to this user\'s data.')},
-                                status=status.HTTP_403_FORBIDDEN)
+                return _user_not_accessible()
             try:
                 user = CustomUser.objects.get(pk=user_id)
             except CustomUser.DoesNotExist:
-                return Response({'error': _('User not found')}, status=404)
+                return _user_not_found()
 
         # Streaks are computed over DISTINCT calendar training days, using the
         # real `date` field. It previously used `updated_at` (auto_now), so editing
@@ -2662,8 +2871,9 @@ class AnalyticsViewSet(viewsets.ViewSet):
         """GET /api/routine/analytics/adherence/?period=week|month|year&user_id= — how
         much of the plan was actually done (the owner, 2026-09-20).
 
-        Self, an approved client of yours, or admin (403 otherwise, 404 for no such
-        user). Answers `{from, to, days_closed, perfect_days, short_days, skipped_days,
+        Self, an approved client of yours, or admin (403 `user_not_accessible`
+        otherwise, 404 `user_not_found` for no such user). Answers `{from, to,
+        days_closed, perfect_days, short_days, skipped_days,
         sets: {planned, logged, missed, done_percent}, reps: {planned, logged, missed},
         volume_kg: {planned, logged}, perfect_streak: {current, longest}, last_break,
         approximate, by_day: [...]}`.
@@ -2684,11 +2894,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
         if user_id:
             from .permissions import can_access_user_data
             if not can_access_user_data(request.user, user_id):
-                return Response({'error': _('You do not have access to this user\'s data.')},
-                                status=status.HTTP_403_FORBIDDEN)
+                return _user_not_accessible()
             user = CustomUser.objects.filter(pk=user_id).first()
             if user is None:
-                return Response({'error': _('User not found')}, status=404)
+                return _user_not_found()
 
         period = (request.query_params.get('period') or 'week').lower()
         spans = {'week': 7, 'month': 30, 'year': 365}
@@ -2721,8 +2930,9 @@ class AnalyticsViewSet(viewsets.ViewSet):
         """GET /api/routine/analytics/strength/?exercise_id=&user_id= — how strong this
         person is getting, and where that is heading (the owner, 2026-09-20).
 
-        Self, an approved client of yours, or admin (403 otherwise, 404 for no such
-        user). Read from sets already logged; nothing here is collected separately.
+        Self, an approved client of yours, or admin (403 `user_not_accessible`
+        otherwise, 404 `user_not_found` for no such user). Read from sets already
+        logged; nothing here is collected separately.
 
         Without `exercise_id`: `{exercises: [...], top_movers, plateaus, rising_count,
         tracked_count, headline, adherence_percent}` — one entry per exercise trained in
@@ -2765,11 +2975,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
         if user_id:
             from .permissions import can_access_user_data
             if not can_access_user_data(request.user, user_id):
-                return Response({'error': _('You do not have access to this user\'s data.')},
-                                status=status.HTTP_403_FORBIDDEN)
+                return _user_not_accessible()
             user = CustomUser.objects.filter(pk=user_id).first()
             if user is None:
-                return Response({'error': _('User not found')}, status=404)
+                return _user_not_found()
 
         today = timezone.localdate()
         # What the projection assumes: the share of PLANNED sets actually done over the
@@ -2807,7 +3016,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
                     user=user, exercise_id=exercise_id).exists():
                 exercise = Exercise.objects.filter(pk=exercise_id).first()
             if exercise is None:
-                return Response({'error': _('Exercise not found.')}, status=404)
+                # Named, not left to the envelope (the owner, 2026-09-24): "no such
+                # exercise, or not one you may read" is exactly `not_found`.
+                return Response({'error': _('Exercise not found.'), 'code': 'not_found'},
+                                status=404)
             series = strength_module.points(user, exercise_id, until=today)
             body = strength_module.trend(user, exercise_id, until=today, series=series)
             body['exercise_name'] = exercise.name
@@ -2851,12 +3063,11 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # user_id must be self, an approved client, or admin.
         from .permissions import can_access_user_data
         if not can_access_user_data(request.user, user_id):
-            return Response({'error': _('You do not have access to this user\'s data.')},
-                            status=status.HTTP_403_FORBIDDEN)
+            return _user_not_accessible()
         period = request.query_params.get('period', 'day')
         if period not in ('day', 'week', 'month'):
             return Response(
-                {'error': _('period must be one of: day, week, month.')},
+                {'error': _('period must be one of: day, week, month.'), 'code': 'bad_period'},
                 status=status.HTTP_400_BAD_REQUEST)
         # Training volume trend
         setlogs = ExerciseSetLog.objects.filter(user_exercise_progress__user_id=user_id)
@@ -2890,7 +3101,8 @@ class AnalyticsViewSet(viewsets.ViewSet):
     def admin_dashboard(self, request):
         """
         Admin/trainer dashboard: summary stats for the caller's clients (a trainer's
-        approved clients; every client for an admin). 403 for anyone else.
+        approved clients; every client for an admin). 403 `not_a_trainer` for anyone
+        else (the owner, 2026-09-24; it was the generic `permission_denied`).
 
         Output: `{dashboard: [{client_id, username, total_volume, completion_rate,
         max_streak}], count, next, previous}` — PAGINATED over clients, by id, 25 a page,
@@ -2906,8 +3118,9 @@ class AnalyticsViewSet(viewsets.ViewSet):
         from datetime import timedelta
         
         if not (request.user.is_trainer or request.user.is_admin):
-            return Response({'error': _('Permission denied.')}, status=403)
-        
+            return Response({'error': _('Permission denied.'), 'code': 'not_a_trainer'},
+                            status=403)
+
         # Get all clients for this trainer/admin with optimized queries
         if request.user.is_trainer:
             ids = accessible_user_ids(request.user)
@@ -3175,13 +3388,28 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         Assigning also settles the coaching's first month, as assign_to_client does: a
         program delivered from a template starts the paid month like any other.
 
-        Codes: 400 bad_request (client_id missing, dates or days malformed), 400
-        `bad_customization` (with `key`), 400 `invalid_client_ids`, 400
-        `template_empty` (no exercises), 400 `client_ids_need_assign`, 400
-        `generate_too_large` (clients x days above `max_routine_days`, 1000), 403
-        permission_denied (not your client), 403 `not_your_client` (with
-        `client_ids`, the list form), 404 not_found (no such client). Identical on
-        every build; no price and no purchase is involved.
+        Codes — every refusal names its own since the owner's decision of 2026-09-24;
+        the ones marked new answered only the status default (`bad_request`,
+        `permission_denied`, `not_found`), which is what a client that does not know
+        them still reads them as:
+
+        | Status | `code` | When |
+        |---|---|---|
+        | 400 | `client_id_required` (new) | assigning, and `client_id` missing or not a whole number |
+        | 400 | `bad_date` (new) | `start_date` / `end_date` not a real YYYY-MM-DD date |
+        | 400 | `end_before_start` (new) | `end_date` before `start_date` |
+        | 400 | `bad_days` (new) | `days` not a whole number |
+        | 400 | `days_out_of_range` (new) | `days` outside 1-365; carries `max` |
+        | 400 | `bad_customization` | with `key` |
+        | 400 | `invalid_client_ids` | the list is not 1-50 different ids |
+        | 400 | `template_empty` | no exercises |
+        | 400 | `client_ids_need_assign` | `client_ids` with `assign: false` |
+        | 400 | `generate_too_large` | clients x days above `max_routine_days`, 1000 |
+        | 403 | `not_your_client` | not your approved client — `client_id` (new there), and with `client_ids` for the list form |
+        | 404 | `client_not_found` (new) | `client_id` names no client |
+        | 404 | `not_found` | no such template, or not one you can see |
+
+        Identical on every build; no price and no purchase is involved.
         """
         from .assignment import (
             MAX_CLIENTS_PER_GENERATE,
@@ -3226,19 +3454,23 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         elif assign or request.data.get('client_id') not in (None, ''):
             client_id = _int_or_none(request.data.get('client_id'))
             if not client_id:
-                return Response({'detail': _('client_id required')}, status=400)
+                return Response({'detail': _('client_id required'),
+                                 'code': 'client_id_required'}, status=400)
             # A client, not whoever has that id: a trainer's own id passed
             # `can_access_user_data` (it admits the caller) and wrote a routine assigned
             # to the trainer.
             client = CustomUser.objects.filter(pk=client_id, user_type='client').first()
             if client is None:
-                return Response({'detail': _('Client not found')}, status=404)
+                return Response({'detail': _('Client not found'),
+                                 'code': 'client_not_found'}, status=404)
             # Only a trainer, and only for an approved client of theirs. This read
             # `client.assigned_trainer_id`, the denormalised display pointer that
             # routine/permissions.py opens by forbidding as an access test — it was the
             # pointer that once granted access without consent.
             if not (request.user.is_trainer and can_access_user_data(request.user, client.pk)):
-                return Response({'detail': _('Permission denied. You can only assign routines to your own clients.')}, status=403)
+                # The code the list form already answers for the same refusal.
+                return Response({'detail': _('Permission denied. You can only assign routines to your own clients.'),
+                                 'code': 'not_your_client'}, status=403)
             if assign:
                 clients = [client]
 
@@ -3250,27 +3482,34 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         MAX_GENERATED_DAYS = 365
         start_date = request.data.get('start_date') or None
         end_date = request.data.get('end_date') or None
-        d1 = parse_date(str(start_date)) if start_date else None
-        d2 = parse_date(str(end_date)) if end_date else None
+        # `_date_or_none`, not `parse_date`: that one RAISES for "2026-13-45" (shaped
+        # like a date, not one), which is the 500 this block was written to end.
+        d1 = _date_or_none(start_date) if start_date else None
+        d2 = _date_or_none(end_date) if end_date else None
         if (start_date and not d1) or (end_date and not d2):
-            return Response({'error': 'start_date and end_date must be YYYY-MM-DD'},
+            return Response({'error': _('start_date and end_date must be YYYY-MM-DD.'),
+                             'code': 'bad_date'},
                             status=status.HTTP_400_BAD_REQUEST)
         if d1 and d2 and d2 < d1:
-            return Response({'error': 'end_date is before start_date'},
+            return Response({'error': _('end_date is before start_date.'),
+                             'code': 'end_before_start'},
                             status=status.HTTP_400_BAD_REQUEST)
         routine_days = request.data.get('days')
         if routine_days not in (None, ''):
             try:
                 routine_days = int(routine_days)
             except (TypeError, ValueError):
-                return Response({'error': 'days must be a whole number'},
+                return Response({'error': _('days must be a whole number.'),
+                                 'code': 'bad_days'},
                                 status=status.HTTP_400_BAD_REQUEST)
         elif d1 and d2:
             routine_days = (d2 - d1).days + 1
         else:
             routine_days = template.days
         if not 1 <= int(routine_days) <= MAX_GENERATED_DAYS:
-            return Response({'error': f'days must be between 1 and {MAX_GENERATED_DAYS}'},
+            return Response({'error': _('days must be between 1 and %(max)d.')
+                             % {'max': MAX_GENERATED_DAYS},
+                             'code': 'days_out_of_range', 'max': MAX_GENERATED_DAYS},
                             status=status.HTTP_400_BAD_REQUEST)
         routine_days = int(routine_days)
         if len(clients) > 1 and len(clients) * routine_days > MAX_ROUTINE_DAYS_PER_GENERATE:
@@ -3319,9 +3558,11 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     def copy(self, request, pk=None):
         """POST /api/routine/templates/{id}/copy/ — a private copy of a template.
 
-        Your own template (to make a variant), or another trainer's PUBLIC one. 400 for
-        someone else's private template. 201 with the copy: private, in your library,
-        both languages of the name prefixed "Copy of".
+        Your own template (to make a variant), or another trainer's PUBLIC one. 400
+        `template_not_public` for someone else's private template (the owner,
+        2026-09-24; it was the bare `bad_request` — only an admin can see one to ask).
+        404 `not_found`: no such template, or not one you can see. 201 with the copy:
+        private, in your library, both languages of the name prefixed "Copy of".
 
         Copying your own template answered 400 "Cannot copy your own template", so a
         trainer could not make a variant of their own program to reuse.
@@ -3331,7 +3572,8 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
         template = self.get_object()
         if not template.is_public and template.created_by_id != request.user.id:
-            return Response({'detail': _('Can only copy public templates')}, status=400)
+            return Response({'detail': _('Can only copy public templates'),
+                             'code': 'template_not_public'}, status=400)
 
         names = {}
         for language, _label in settings.LANGUAGES:
@@ -3361,10 +3603,12 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     def my_templates(self, request):
         """
         Get templates created by the current trainer.
-        Only for trainers.
+        Only for trainers: anyone else answers 403 `not_a_trainer` (the owner,
+        2026-09-24; it was the generic `permission_denied`).
         """
         if not request.user.is_trainer:
-            return Response({'detail': _('Only trainers can access this endpoint')}, status=403)
+            return Response({'detail': _('Only trainers can access this endpoint'),
+                             'code': 'not_a_trainer'}, status=403)
         
         templates = self.get_queryset().filter(created_by=request.user)
         page = self.paginate_queryset(templates)
@@ -3533,16 +3777,20 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         """
         Get a full summary of exercises performed on a specific date.
         Returns detailed stats including sets, reps, weight, and volume.
+
+        `?date=YYYY-MM-DD` (today by default); anything else answers 400 `bad_date` (the
+        owner, 2026-09-24; it was the bare `bad_request`).
         """
         date_str = request.query_params.get('date')
         if not date_str:
             date_str = timezone.localdate().isoformat()
-        
+
         try:
             # Validate date format
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
-            return Response({'error': _('Invalid date format. Use YYYY-MM-DD.')}, status=400)
+            return Response({'error': _('Invalid date format. Use YYYY-MM-DD.'),
+                             'code': 'bad_date'}, status=400)
             
         queryset = list(self.get_queryset().filter(date=target_date)
                         .select_related('exercise')
@@ -3581,6 +3829,13 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
         403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`): the coaching this
         routine came from is unpaid or over — readable, not trainable (the owner).
+
+        The other refusals are `bulk-create`'s, code for code (the owner, 2026-09-24;
+        they answered `bad_request`, `permission_denied` or `not_found`): 400
+        `routine_day_date_required`, `bad_date`, `date_in_future`, `date_too_old`,
+        `day_out_of_range`, `day_has_no_exercises`; 400 `validation_error` for a
+        `completed_sets` that is not a whole number; 403 `routine_not_yours`; 404
+        `routine_not_found`.
         """
         user = request.user
         routine_id = _int_or_none(request.data.get('routine_id'))
@@ -3590,27 +3845,19 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                                    maximum=MAX_SETS_PER_REQUEST)
         skipped = request.data.get('skipped', False)
         if not routine_id or not day or not date:
-            return Response({'error': _('routine_id, day, and date are required.')}, status=400)
+            return Response({'error': _('routine_id, day, and date are required.'),
+                             'code': 'routine_day_date_required'}, status=400)
 
-        parsed_date = parse_date(str(date))
-        if parsed_date is None:
-            return Response({'error': _('date must be in YYYY-MM-DD format.')},
-                            status=status.HTTP_400_BAD_REQUEST)
-        today = timezone.localdate()
-        if parsed_date > today:
-            return Response({'error': _('Cannot log a workout in the future.')},
-                            status=status.HTTP_400_BAD_REQUEST)
-        if (today - parsed_date).days > MAX_BACKLOG_DAYS:
-            return Response(
-                {'error': _('Cannot log a workout more than %(d)d days in the past.') % {'d': MAX_BACKLOG_DAYS}},
-                status=status.HTTP_400_BAD_REQUEST)
-        date = parsed_date
+        refused = _backlog_date_refused(date)
+        if refused is not None:
+            return refused
+        date = _date_or_none(date)
 
         from .models import Routine, RoutineExercise, UserExerciseProgress
         try:
             routine = Routine.objects.get(id=routine_id)
         except Routine.DoesNotExist:
-            return Response({'error': _('Routine not found.')}, status=404)
+            return _routine_not_found()
 
         # AUTHORIZATION: the same check bulk-create already makes, and for the same two
         # reasons. Without it any caller could write progress against a routine never
@@ -3619,16 +3866,13 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         if not (routine.assigned_to.filter(id=user.id).exists()
                 or routine.created_by_id == user.id
                 or user.is_admin):
-            return Response({'error': _('You do not have access to this routine.')},
-                            status=status.HTTP_403_FORBIDDEN)
+            return _routine_not_yours()
 
         _require_can_train(user, routine, date)
 
         exercises = RoutineExercise.objects.filter(routine=routine, day=day)
         if not exercises.exists():
-            return Response(
-                {'error': _('Day %(day)s is not part of this routine.') % {'day': day}},
-                status=status.HTTP_400_BAD_REQUEST)
+            return _day_refused(routine, day)
         results = []
         errors = []
         written = []
@@ -3772,9 +4016,12 @@ def _exercise_not_found():
 
     A fresh dict per call, not a constant: `normalize_error_envelope` fills `detail`
     and `code` into `response.data` in place, so a shared dict would be edited by the
-    first 404 this process serves.
+    first 404 this process serves. `not_found` named here rather than left to the
+    envelope (the owner, 2026-09-24): its only meaning is "no such exercise, or not
+    yours to see".
     """
-    return Response({'error': _('Exercise not found.')}, status=status.HTTP_404_NOT_FOUND)
+    return Response({'error': _('Exercise not found.'), 'code': 'not_found'},
+                    status=status.HTTP_404_NOT_FOUND)
 
 
 def _may_modify_exercise(request, exercise):
@@ -3817,8 +4064,13 @@ class ExerciseImageUploadView(APIView):
 
     | Method | Answers |
     |---|---|
-    | `POST` | `200` `{message, exercise}` · `400` no `image` · `400` refused upload · `403` · `404` · `500` `image_upload_failed` |
-    | `DELETE` | `200` `{message}` · `404` `{message}` when there is no image · `403` · `404` · `500` `image_removal_failed` |
+    | `POST` | `200` `{message, exercise}` · `400` `image_required` (no `image`) · `400` refused upload · `403` `permission_denied` · `404` `not_found` · `500` `image_upload_failed` |
+    | `DELETE` | `200` `{message}` · `404` `no_image` `{message, error}` when the exercise has no image · `403` `permission_denied` · `404` `not_found` · `500` `image_removal_failed` |
+
+    `image_required` and `no_image` are the owner's decision of 2026-09-24 (every
+    refusal names its own code): they answered `bad_request` and `not_found`, and
+    `no_image` could not be told from "no such exercise" at all. `no_image` also
+    carries `error` beside the `message` it always had.
 
     `exercise` is the full `ExerciseSerializer` shape. A refused upload carries the
     upload guard's own `code` — `file_too_large`, `invalid_mime_type`,
@@ -3846,7 +4098,8 @@ class ExerciseImageUploadView(APIView):
             
             if not image_file:
                 return Response(
-                    {'error': _('No image file provided. Please include a file with key "image"')},
+                    {'error': _('No image file provided. Please include a file with key "image"'),
+                     'code': 'image_required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -3909,8 +4162,12 @@ class ExerciseImageUploadView(APIView):
                     'message': _('Exercise image removed successfully')
                 }, status=status.HTTP_200_OK)
             else:
+                # `no_image`: the exercise is there and has no picture, which is not the
+                # `not_found` of a missing exercise (the owner, 2026-09-24).
                 return Response({
-                    'message': _('No image to remove')
+                    'message': _('No image to remove'),
+                    'error': _('No image to remove'),
+                    'code': 'no_image',
                 }, status=status.HTTP_404_NOT_FOUND)
                 
         except PASSTHROUGH_EXCEPTIONS:
@@ -3954,9 +4211,13 @@ class ExerciseAddMediaView(APIView):
 
     | Method | Answers |
     |---|---|
-    | `GET` | `200` `{exercise_id, exercise_name, media_count, media_items[], exercise{}}` · `404` |
-    | `POST` | `201` created · `207` some items rejected (`errors[]`, `errors_detail[]`, `partial_success`) · `400` no `media_items` · `403` not the owner · `404` |
-    | `DELETE` | `200` all deleted · `207` some ids missed · `400` no `media_ids` · `403` not the owner · `404` |
+    | `GET` | `200` `{exercise_id, exercise_name, media_count, media_items[], exercise{}}` · `404` `not_found` |
+    | `POST` | `201` created · `207` some items rejected (`errors[]`, `errors_detail[]`, `partial_success`) · `400` `media_items_required` · `403` `permission_denied` (not the owner) · `404` `not_found` |
+    | `DELETE` | `200` all deleted · `207` some ids missed (`errors[]`, `errors_detail[]`, `partial_success`) · `400` `media_ids_required` · `403` `permission_denied` (not the owner) · `404` `not_found` |
+
+    `media_items_required`, `media_ids_required` and the DELETE's `errors_detail[]` are
+    the owner's decision of 2026-09-24 (every refusal names its own code): the two 400s
+    answered `bad_request`, and a partly refused DELETE carried sentences only.
 
     `GET`'s `exercise` is the full `ExerciseSerializer` shape — the same object the
     exercise list and detail answer, `media_slots` included. `exercise_id` and
@@ -4008,9 +4269,9 @@ class ExerciseAddMediaView(APIView):
     }
 
     DELETE body — `{"media_ids": [1, 2]}`; ids belonging to another exercise are
-    reported in `errors[]` (translated too), never deleted. That list carries no
-    `code`: the DELETE has no `errors_detail[]`, so there is nothing to branch on here
-    beyond `deleted_count` and the 207.
+    reported in `errors[]` (translated too), never deleted. The code to branch on is in
+    `errors_detail[] = [{media_id, code, message}]`, as on the POST:
+    `media_not_on_exercise` (no such item on this exercise) or `media_delete_failed`.
     """
     permission_classes = [IsAuthenticated]
 
@@ -4042,7 +4303,8 @@ class ExerciseAddMediaView(APIView):
             
             if not media_items:
                 return Response(
-                    {'error': _('No media items provided. Please include "media_items" array')},
+                    {'error': _('No media items provided. Please include "media_items" array'),
+                     'code': 'media_items_required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -4235,14 +4497,23 @@ class ExerciseAddMediaView(APIView):
             
             if not media_ids:
                 return Response(
-                    {'error': _('No media_ids provided. Please include "media_ids" array')},
+                    {'error': _('No media_ids provided. Please include "media_ids" array'),
+                     'code': 'media_ids_required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
             # Delete media items
             deleted_count = 0
             errors = []
-            
+            #: The same refusals with a `code`, as the POST has them (the owner,
+            #: 2026-09-24). Beside the sentences, not instead: the contract is additive.
+            errors_detail = []
+
+            def refuse(media_id, code, message):
+                errors.append(message)
+                errors_detail.append({'media_id': media_id, 'code': code,
+                                      'message': str(message)})
+
             for media_id in media_ids:
                 try:
                     media_item = ExerciseMedia.objects.get(id=media_id, exercise=exercise)
@@ -4251,13 +4522,13 @@ class ExerciseAddMediaView(APIView):
                 except ExerciseMedia.DoesNotExist:
                     # Translated, like the POST's (SIDE_BUGS S-039): this is the other
                     # 207 on this route and its `errors[]` were English too.
-                    errors.append(_('Media item %(id)s is not on this exercise.')
-                                  % {'id': media_id})
+                    refuse(media_id, 'media_not_on_exercise',
+                           _('Media item %(id)s is not on this exercise.') % {'id': media_id})
                 except Exception:
                     # Never the exception text (S-006): the id is what the caller sent.
                     logger.exception("deleting exercise media %s failed", media_id)
-                    errors.append(_('Media item %(id)s could not be removed.')
-                                  % {'id': media_id})
+                    refuse(media_id, 'media_delete_failed',
+                           _('Media item %(id)s could not be removed.') % {'id': media_id})
             
             response_data = {
                 'message': _('Successfully deleted %(count)d media items from exercise "%(name)s"')
@@ -4269,6 +4540,7 @@ class ExerciseAddMediaView(APIView):
             
             if errors:
                 response_data['errors'] = errors
+                response_data['errors_detail'] = errors_detail
                 response_data['partial_success'] = True
                 return Response(response_data, status=status.HTTP_207_MULTI_STATUS)
             else:
@@ -4359,7 +4631,10 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
     def client_progress(self, request, client_id=None):
         """GET /api/routine/trainer/client-progress/{client_id}/ — one client's month,
         as the coach reads it. Trainers (their own approved clients) and admins; 403
-        otherwise, 404 for no such client.
+        `not_your_client` for a client who is not an approved client of yours, 403
+        `permission_denied` for a caller who is neither a trainer nor an admin, 404
+        `not_found` for no such client (the owner, 2026-09-24: the first answered
+        `permission_denied`, and the 404 named no code).
 
         `{client: {...}, client_info: {...}, weekly_stats: {...}, strength: {...},
         recent_activity: [...]}`.
@@ -4415,7 +4690,8 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                  ).exists()
                  if not is_approved:
                      return Response(
-                         {"error": "You can only view progress for your approved clients."}, 
+                         {"error": _("You can only view progress for your approved clients."),
+                          "code": "not_your_client"},
                          status=status.HTTP_403_FORBIDDEN
                      )
 
@@ -4524,15 +4800,17 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
              })
 
         except CustomUser.DoesNotExist:
+            # The URL's own object: "no such client" is exactly `not_found`.
             return Response({
-                'error': 'Client not found.'},
+                'error': _('Client not found'), 'code': 'not_found'},
                 status=status.HTTP_404_NOT_FOUND
             )
     def attention(self, request):
         """GET /api/routine/trainer/client-progress/attention/ — the clients who need a
         look, most urgent first (the owner, 2026-09-20).
 
-        Trainers and admins (403 otherwise). One batch of queries for the whole roster.
+        Trainers and admins (403 `not_a_trainer` otherwise — the owner, 2026-09-24; it was
+        the generic `permission_denied`). One batch of queries for the whole roster.
 
         `{trainer_id, count, clients: [{client_id, client_name, score, reasons,
         last_trained, this_week, usual_set_completion_percent}]}`. Each reason carries
@@ -4546,7 +4824,8 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         from users.models import CustomUser
 
         if not (request.user.is_trainer or request.user.is_admin):
-            return Response({'error': _('This endpoint is only for trainers')},
+            return Response({'error': _('This endpoint is only for trainers'),
+                             'code': 'not_a_trainer'},
                             status=status.HTTP_403_FORBIDDEN)
         # `accessible_user_ids` answers None for an admin, meaning "no restriction";
         # `ids or []` read that as "nobody" and showed an admin an empty roster.
@@ -4565,7 +4844,8 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='recent')
     def recent_progress(self, request):
         """GET /api/routine/trainer/client-progress/recent/ — the roster page.
-        Trainers only (403 otherwise).
+        Trainers only (403 `not_a_trainer` otherwise — the owner, 2026-09-24; it was the
+        generic `permission_denied`).
 
         `{trainer_id, trainer_name, client_count, recent_activity: [...]}`. Each entry
         carries the client, their last session, this week's exercises and, since
@@ -4581,7 +4861,7 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         user = request.user
         if not user.is_trainer:
             return Response(
-                {'error': 'Only trainers can access this endpoint.'}, 
+                {'error': _('Only trainers can access this endpoint'), 'code': 'not_a_trainer'},
                 status=403
             )
         

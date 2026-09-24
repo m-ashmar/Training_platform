@@ -13,6 +13,7 @@ SOURCE OF TRUTH: an approved `TrainerClientRelation`, read through
 when the two disagreed it was the pointer that granted access without consent.
 """
 from django.db.models import Q
+from django.utils.translation import gettext_lazy
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 
@@ -256,7 +257,15 @@ class IsSetLogCreatorOrTrainerOrAdmin(BasePermission):
     client deletes it. Reads are unchanged — the trainer sees everything they saw.
 
     Admin keeps the write, as the operator of last resort (`/dj-admin/` support work).
+
+    A refused write answers 403 `set_not_yours` — the code a trainer's POST of a client's
+    set already answers — rather than the generic `permission_denied` (the owner,
+    2026-09-24: every refusal names its own code). `has_permission` refuses nobody who
+    is signed in, so the object check below is the only thing that can use it.
     """
+    message = gettext_lazy('Only the person who trained can change or delete this set.')
+    code = 'set_not_yours'
+
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
             return bool(request.user and request.user.is_authenticated)
@@ -309,7 +318,16 @@ class IsSessionOwnerOrTrainerOrAdmin(BasePermission):
     the next person to trust it would have concluded clients cannot start a workout.
     Removed rather than corrected — the rule for a create belongs in the one class
     that enforces it.
+
+    A refusal answers 403 `session_not_yours`, and `WorkoutSessionViewSet.perform_update`
+    raises the same code and sentence for a trainer's PATCH (the owner, 2026-09-24: every
+    refusal names its own code; it was the generic `permission_denied`). Reads and
+    PATCH/PUT are refused here only for a session outside the caller's queryset, which
+    answers 404 first — so in practice this is the DELETE of someone else's session.
     """
+    message = gettext_lazy('Only the person who trained can change or delete this workout.')
+    code = 'session_not_yours'
+
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
             return request.user and request.user.is_authenticated
