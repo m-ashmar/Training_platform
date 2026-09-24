@@ -14,7 +14,16 @@
                 receiver that can only log a storage error: the identity photo stayed in
                 the bucket for good, with no row pointing at it.
 
-Every test here was run against the code before the fix (20418df) and failed there.
+Every test here was run against the code before the fix (20418df) and failed there,
+but one: `test_s209_a_replacement_that_rolls_back_deletes_nothing` passes there too, as it
+should — it guards the fix's own risk (deleting files inside a transaction that can still
+roll back), which the old row-first order did not have.
+
+Resident memory is measured as the verification review measured it (`ru_maxrss` of a
+fresh child). On macOS under memory pressure the compressor shrinks the pages of these
+flat-colour images, so a number read there is a floor; on Linux (glibc, no compressor)
+the worst accepted input of every kind measured 129 MB through the guard and 119 MB
+through the media kit.
 """
 import io
 import json
