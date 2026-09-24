@@ -467,11 +467,11 @@ class ProductBuyView(APIView):
     | 400 | `app_channel_required` | no known `X-App-Channel` |
     | 403 | `not_available_on_channel` | this build may not buy programs (`play`, `ios`) |
     | 400 | `validation_error` | `idempotency_key` missing or longer than 64 (`field_errors`) |
-    | 404 | `not_found` | no such product, or not one the caller may read |
+    | 404 | `not_found` | no such product, or not one offered to the caller — a draft, one in review, a retired one, or one whose program changed since its review (an owner or its trainer gets the rows below instead) |
     | 403 | `own_product` | the caller wrote it |
     | 403 | `clients_only` | the caller is not a client (the code the coaching and transfer routes answer for the same fact) |
     | 409 | `already_owned` | a confirmed purchase exists; `purchase_id`, `routine_id` |
-    | 409 | `product_not_for_sale` | retired, not published, or its program changed since review |
+    | 409 | `product_not_for_sale` | it stopped being on sale while this request ran (retired, or its program changed) |
     | 409 | `exchange_rate_missing` / `exchange_rate_stale` | the price has to be converted and the operator's rate is missing or too old |
     | 402 | `insufficient_balance` | the wallet holds less than the price; `amount`, `currency` |
     | 422 | `idempotency_key_reused` | the key already bought a different product |
