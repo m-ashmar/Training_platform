@@ -1926,6 +1926,31 @@ Prefix `/api/routine/`.
   record it beat (`strength.record_beaten`). Null when the set is not a record, and on
   a replay, a PATCH or a list read.
 
+**What the review of the routine-logging build found** (2026-09-24). No route, key or
+`code` changed. One new column (`routine/0029`, `ExerciseSetLog.previous_best`, what a
+record beat, stored with the verdict; null on rows written before it). Prefix
+`/api/routine/`.
+
+- **The review reads the plan the day closed with.** `workout-sessions/{id}/?expand=sets`
+  answered `planned` and each `prescription` from the routine AS IT IS NOW, so the coach
+  editing the client's copy the next morning rewrote what the workout was asked to be,
+  and disagreed with the day's own outcome. Once the day is closed (finishing the
+  session closes it), both come from the plan frozen at the close: `sets`, `reps`,
+  `weight`, `order` as they were then (`sets` at least one, as the day counted it), and
+  a row deleted since is still listed with its old `id`; `rest_time` and `notes` are the
+  row's current ones, null and "" for a deleted row. A day still open reads the routine
+  as it is now. Still one query more than the plain detail (one more when the day holds
+  no row any more, one more when a deleted row names an exercise nobody logged).
+- **A duplicate's `previous_best` is the one first answered.** A `set-logs/sync/`
+  `duplicate` row answered the stored verdict beside a `previous_best` recomputed at the
+  retry, so an earlier set corrected or deleted in between answered «+(-10) kg», or a
+  record with nothing beaten. It is now stored on the set when the record is judged and
+  answered as stored.
+- **A raced key is never someone else's set.** Two sends of one `client_uuid` racing,
+  one of them another person's, answered that person's set (its weight, reps and
+  record). That row now answers `idempotency_conflict`, exactly as a key found up front
+  does.
+
 **Anonymous AI training copies** (the owner's decisions 1-3 of 2026-09-24, P0). No
 route, field or `code` changes. What "help us improve" keeps is now what the app says it
 keeps, and each view's docstring states it in full.

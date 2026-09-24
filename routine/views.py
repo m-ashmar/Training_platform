@@ -2323,13 +2323,18 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                         the server HOLDS for it (BACKEND_BUGS B-110): the stored
                         `weight` and `reps` — which may differ from the re-sent
                         copy — and the `personal_record` verdict the first answer
-                        gave (kept on the set; a key sent twice in one batch answers
-                        its twin's verdict). Nothing is written and nothing is
+                        gave with the `previous_best` it gave beside it (both kept on
+                        the set when it was judged, never recomputed: an earlier set
+                        corrected or deleted since does not change what this record
+                        beat; a key sent twice in one batch answers its twin's
+                        verdict). Nothing is written and nothing is
                         celebrated again; what the set is counted in is recomputed
                         again, so a send that died before its recount is repaired by
                         the retry (SIDE_BUGS S-120)
             error       `{client_uuid, status, code, error}` — `bad_row`,
-                        `client_uuid_required`, `idempotency_conflict`, `bad_date`,
+                        `client_uuid_required`, `idempotency_conflict` (the id is on
+                        someone else's set — also when their send and this one raced:
+                        nothing of theirs is answered), `bad_date`,
                         `date_in_future`, `date_too_old`, `exercise_required`,
                         `exercise_not_found`, `session_not_found`, `routine_not_found`,
                         `reps_required`, `reps_out_of_range`, `no_prescribed_reps`,
@@ -2727,10 +2732,21 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                           weight, rest_time, order, notes}`. Empty without a day.
             routine_name  the routine's name in the reader's language.
 
+        **Which plan.** Once the day is CLOSED (it has a day outcome: finishing the
+        session writes one), `planned` and every `prescription` are the plan the day
+        closed with — the same frozen plan the day's outcome counts against — so the
+        coach editing the routine afterwards does not rewrite what this workout was
+        asked to be (the review of 2026-09-24). `sets`, `reps`, `weight` and `order`
+        are as they were then (`sets` as the day counted it: at least one), and a row
+        the coach has deleted since is still listed, with its old `id`; `rest_time` and
+        `notes` are the row's current ones, and null and "" for a deleted row. A day
+        still OPEN is answered against the routine as it is now.
+
         Exercise names are in the request's language. The cost does not grow with the
         sets or the exercises: the sets, their progress rows and exercises are read in
-        the three queries the detail already made, and the day's prescription in one
-        more.
+        the three queries the detail already made, and the day's plan in one more —
+        plus one when the day holds no row any more, and one when a row deleted since
+        names an exercise nobody logged in this session.
 
         Who may read it is who may read the session: the person who trained, an admin,
         and a trainer with an APPROVED relation to them — the one predicate
