@@ -63,6 +63,17 @@ def _field_code(resp, field):
     return body["field_errors"][field][0]["code"]
 
 
+def _warm_request_memos(caller, path):
+    """Setup for the query-count tests, not an assertion. Every signed-in request
+    memoises two per-user reads for a minute (training_platform/middleware.py: the rate
+    limiter's tier, and the response cache's "is this account still usable"), so the
+    FIRST request a user makes costs two queries the next one does not — whatever the
+    page holds. Warming them on ANOTHER cached route, one sharing no SQL with the page
+    measured (so cachalot serves the page nothing), leaves the comparison measuring
+    rows alone."""
+    assert caller.get(path).status_code == 200
+
+
 # ============================================================ B-102 whose exercise
 def test_b102_an_exercise_row_says_whose_it_is(make_user, api):
     """`GET exercises/` merged the trainer's own exercises with the shared catalogue and
@@ -103,6 +114,7 @@ def test_b102_whose_exercise_costs_no_query_per_row(make_user, api):
     trainer = make_user("ra_t_b102q", user_type="trainer")
     for n in range(2):
         _exercise(trainer, f"aaa ra b102q {n}")
+    _warm_request_memos(api(trainer), "/api/routine/templates/")
 
     def page_queries():
         client = api(trainer)
@@ -261,6 +273,7 @@ def test_b108_the_count_costs_no_query_per_template(make_user, api):
         return len(ctx.captured_queries)
 
     add(0)
+    _warm_request_memos(api(trainer), "/api/routine/exercises/")
     one = page_queries()
     add(1)
     add(2)
