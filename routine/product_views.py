@@ -117,7 +117,7 @@ def _trainer_context(request):
 
 def _own_product(request, pk):
     return (_with_sales(RoutineProduct.objects.filter(trainer=request.user, pk=pk))
-            .select_related("source_template", "cover").first())
+            .select_related("trainer", "source_template", "cover").first())
 
 
 class TrainerProductsView(APIView):
@@ -133,7 +133,8 @@ class TrainerProductsView(APIView):
     today's (`"0.20"`: the trainer keeps the rest — «تحصل على 80% من كل بيع»).
 
     A `product`: `id`, `status` (`draft` | `in_review` | `published` | `retired`),
-    `on_sale`, `template_changed`, `title_ar`, `title_en`, `description_ar`,
+    `on_sale` (published, its template unchanged since the review, and you still
+    verified), `template_changed`, `title_ar`, `title_en`, `description_ar`,
     `description_en`, `preview_days`, `template` (`{id, name, days, weeks,
     session_count, program_days}` or null), `cover` (`{asset_id, slot, url_1x, url_2x,
     blur, focal, brightness, alt_ar, alt_en}` or null), `price`, `currency`,
@@ -175,7 +176,7 @@ class TrainerProductsView(APIView):
         from .views import StandardResultsSetPagination
 
         queryset = (_with_sales(RoutineProduct.objects.filter(trainer=request.user))
-                    .select_related("source_template", "cover")
+                    .select_related("trainer", "source_template", "cover")
                     .order_by("-created_at", "-id"))
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
@@ -371,8 +372,9 @@ class ProductCatalogueView(APIView):
 
     Paginated (`?page`, `?page_size` up to 100), newest listing first; `?trainer_id=`
     narrows to one trainer. Lists products that are published and still backed by the
-    version of the program their review saw, by a trainer who is publicly visible and
-    has not blocked (or been blocked by) the caller.
+    version of the program their review saw, by a trainer who is still verified (an
+    operator's revocation takes their products off sale), publicly visible, and has
+    not blocked (or been blocked by) the caller.
 
     A row: `id`, `title` / `description` (in the request's language, the other one
     when that is empty), `title_ar`, `title_en`, `description_ar`, `description_en`,
@@ -468,11 +470,11 @@ class ProductBuyView(APIView):
     | 400 | `app_channel_required` | no known `X-App-Channel` |
     | 403 | `not_available_on_channel` | this build may not buy programs (`play`, `ios`) |
     | 400 | `validation_error` | `idempotency_key` missing or longer than 64 (`field_errors`) |
-    | 404 | `not_found` | no such product, or not one offered to the caller — a draft, one in review, a retired one, or one whose program changed since its review (an owner or its trainer gets the rows below instead) |
+    | 404 | `not_found` | no such product, or not one offered to the caller — a draft, one in review, a retired one, one whose program changed since its review, or one whose trainer is no longer verified (an owner or its trainer gets the rows below instead) |
     | 403 | `own_product` | the caller wrote it |
     | 403 | `clients_only` | the caller is not a client (the code the coaching and transfer routes answer for the same fact) |
     | 409 | `already_owned` | a confirmed purchase exists; `purchase_id`, `routine_id` |
-    | 409 | `product_not_for_sale` | it stopped being on sale while this request ran (retired, or its program changed) |
+    | 409 | `product_not_for_sale` | it stopped being on sale while this request ran (retired, its program changed, or its trainer's verification was revoked) |
     | 409 | `exchange_rate_missing` / `exchange_rate_stale` | the price has to be converted and the operator's rate is missing or too old |
     | 402 | `insufficient_balance` | the wallet holds less than the price; `amount`, `currency` |
     | 422 | `idempotency_key_reused` | the key already bought a different product |

@@ -157,14 +157,15 @@ def net_of(price, rate=None):
 
 def catalogue_for(user):
     """The products `user` may be offered: published, still backed by the template
-    version their review saw, by a trainer who is publicly visible and has not blocked
-    (or been blocked by) `user`."""
+    version their review saw, by a trainer who is still verified (`is_on_sale`),
+    publicly visible, and has not blocked (or been blocked by) `user`."""
     from moderation.services import blocked_ids
     from users.visibility import public_q
 
     queryset = (RoutineProduct.objects
                 .filter(status=ProductStatus.PUBLISHED, source_template__isnull=False,
-                        source_template__updated_at=F("template_version"))
+                        source_template__updated_at=F("template_version"),
+                        trainer__trainer_is_verified=True)
                 .filter(public_q("trainer")))
     blocked = blocked_ids(user)
     if blocked:

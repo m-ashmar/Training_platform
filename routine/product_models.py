@@ -145,9 +145,14 @@ class RoutineProduct(models.Model):
 
     @property
     def is_on_sale(self) -> bool:
-        """Published, still backed by the template version its review saw."""
+        """Published, still backed by the template version its review saw, and its
+        trainer still verified: only a verified trainer may submit, the operator's
+        approval re-checks it, and an operator who revokes a verification
+        (`trainer_verification.services.revoke`) takes that trainer's products off sale
+        with it — the listing comes back unchanged if they are verified again. Reads
+        `trainer`: select it with the product."""
         return (self.status == ProductStatus.PUBLISHED and self.source_template_id is not None
-                and not self.template_changed)
+                and not self.template_changed and bool(self.trainer.trainer_is_verified))
 
 
 class RoutinePurchase(models.Model):
@@ -206,9 +211,13 @@ class RoutinePurchase(models.Model):
     idempotency_key = models.CharField(max_length=64)
     paid_with = models.CharField(max_length=16, choices=PaidWith.choices,
                                  default=PaidWith.WALLET)
-    #: The hosted checkout's reference once one exists (`paid_with="shamcash"`); blank
-    #: for a wallet sale. The seam, not a feature: nothing writes it yet.
-    checkout_reference = models.CharField(max_length=64, blank=True, default="")
+    #: The hosted checkout's reference once one exists (`paid_with="shamcash"`); NULL
+    #: for a wallet sale. The seam, not a feature: nothing writes it yet. Unique — one
+    #: checkout confirms one purchase, once (the spec, section 7) — and the database
+    #: holds it to `paid_with` (`routine_purchase_checkout_matches_rail`): a wallet sale
+    #: has none, a checkout sale always has one.
+    checkout_reference = models.CharField(max_length=64, null=True, blank=True, default=None,
+                                          unique=True)
     refunded_at = models.DateTimeField(null=True, blank=True)
     refunded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True,
                                     on_delete=models.SET_NULL, related_name="+")
@@ -232,6 +241,10 @@ class RoutinePurchase(models.Model):
                                     name="routine_purchase_one_confirmed"),
             models.CheckConstraint(condition=Q(money_type=MoneyType.ROUTINE_PRODUCT),
                                    name="routine_purchase_is_routine_product"),
+            models.CheckConstraint(
+                condition=(Q(paid_with=PaidWith.WALLET, checkout_reference__isnull=True)
+                           | Q(paid_with=PaidWith.SHAMCASH, checkout_reference__isnull=False)),
+                name="routine_purchase_checkout_matches_rail"),
         ]
         indexes = [models.Index(fields=["product", "status"],
                                 name="routinepurchase_product_idx")]

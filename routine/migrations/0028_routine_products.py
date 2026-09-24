@@ -248,7 +248,9 @@ class Migration(migrations.Migration):
                 ),
                 (
                     "checkout_reference",
-                    models.CharField(blank=True, default="", max_length=64),
+                    models.CharField(
+                        blank=True, default=None, max_length=64, null=True, unique=True
+                    ),
                 ),
                 ("refunded_at", models.DateTimeField(blank=True, null=True)),
                 (
@@ -346,6 +348,17 @@ class Migration(migrations.Migration):
             constraint=models.CheckConstraint(
                 condition=models.Q(("money_type", "ROUTINE_PRODUCT")),
                 name="routine_purchase_is_routine_product",
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name="routinepurchase",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(("checkout_reference__isnull", True), ("paid_with", "wallet")),
+                    models.Q(("checkout_reference__isnull", False), ("paid_with", "shamcash")),
+                    _connector="OR",
+                ),
+                name="routine_purchase_checkout_matches_rail",
             ),
         ),
     ]

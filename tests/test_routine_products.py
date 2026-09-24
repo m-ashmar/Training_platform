@@ -631,6 +631,66 @@ def test_a_retired_program_is_not_sold_and_its_owners_keep_it(make_user, api):
     assert (resold.status_code, resold.json()["code"]) == (409, "already_owned")
 
 
+def test_a_revoked_verification_takes_the_trainers_programs_off_sale(make_user, api):
+    """Only a verified trainer may submit, and the approval re-checks it; an operator
+    who revokes a verification (`trainer_verification.services.revoke` clears the flag)
+    must not leave that trainer's programs on sale. Owners keep what they bought."""
+    from users.models import CustomUser
+
+    trainer, _template_, product_id = _published(make_user, api, "revoked")
+    owner = _client(make_user, "revoked_owner")
+    routine_id = _buy(api, owner, product_id).json()["purchase"]["routine_id"]
+    CustomUser.objects.filter(pk=trainer.pk).update(trainer_is_verified=False)
+
+    buyer = _client(make_user, "revoked")
+    assert product_id not in [r["id"] for r in api(buyer).get("/api/v1/products/").json()["results"]]
+    assert api(buyer).get(f"/api/v1/products/{product_id}/").status_code == 404
+    assert _buy(api, buyer, product_id).status_code == 404
+    assert _balance(buyer) == D("10000.00")
+    mine = api(trainer).get(f"/api/v1/trainer/products/{product_id}/").json()
+    assert (mine["status"], mine["on_sale"]) == ("published", False)
+    kept = api(owner).get(f"/api/v1/products/{product_id}/").json()
+    assert (kept["owned"], kept["routine_id"], kept["can_buy"]) == (True, routine_id, False)
+
+    CustomUser.objects.filter(pk=trainer.pk).update(trainer_is_verified=True)
+    assert _buy(api, buyer, product_id).status_code == 200
+
+
+def test_the_checkout_seam_is_null_for_a_wallet_sale_and_one_checkout_buys_once(make_user, api):
+    """The seam for a hosted ShamCash checkout (spec sections 5-7): `paid_with` names the
+    rail and `checkout_reference` the checkout. A wallet sale has none; a checkout sale
+    must have one, and one checkout confirms one purchase, once — the database says so,
+    before any adapter exists to get it wrong."""
+    from django.db import IntegrityError, transaction
+
+    from routine.models import RoutinePurchase
+
+    _trainer_, _template_, product_id = _published(make_user, api, "seam")
+    buyer = _client(make_user, "seam")
+    body = _buy(api, buyer, product_id).json()["purchase"]
+    sale = RoutinePurchase.objects.get(pk=body["id"])
+    assert (sale.paid_with, sale.checkout_reference) == ("wallet", None)
+
+    def row(who, **fields):
+        values = {"buyer": who, "product_id": product_id, "status": "refunded",
+                  "price_amount": D("2500.00"), "price_currency": "SYP",
+                  "amount": D("2500.00"), "currency": "SYP", "commission_rate": OWNER_RATE,
+                  "commission": D("500.00"), "trainer_share": D("2000.00"),
+                  "trainer_amount": D("2000.00"), "trainer_currency": "SYP",
+                  "idempotency_key": f"seam-{who.pk}-{fields.get('checkout_reference')}",
+                  **fields}
+        return RoutinePurchase.objects.create(**values)
+
+    other = _client(make_user, "seam_other")
+    for bad in ({"paid_with": "shamcash"},
+                {"paid_with": "wallet", "checkout_reference": "SC-1"}):
+        with pytest.raises(IntegrityError), transaction.atomic():
+            row(other, **bad)
+    row(other, paid_with="shamcash", checkout_reference="SC-1")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        row(_client(make_user, "seam_third"), paid_with="shamcash", checkout_reference="SC-1")
+
+
 def test_a_template_behind_a_listing_cannot_be_deleted(make_user, api):
     trainer, template, _product_id = _published(make_user, api, "deltpl")
     resp = api(trainer).delete(f"/api/routine/templates/{template.pk}/")

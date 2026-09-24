@@ -912,7 +912,10 @@ the trainer never sees it, and no coaching ever freezes it). The views' docstrin
 or back to `draft` with `review.reason`; `retired` from any state (the trainer). Only a
 `draft` is edited (`PATCH`). A published product whose template is edited afterwards is
 off sale (`on_sale: false`, `template_changed: true`) until it is submitted again and
-approved — the review saw a version of the program, and only that version is sold.
+approved — the review saw a version of the program, and only that version is sold. A
+product is also off sale while its trainer is not verified: an operator who revokes a
+verification takes the trainer's products out of the catalogue and `buy/` (404
+`not_found`), and they come back unchanged if the trainer is verified again.
 
 **The sale** (`buy/`, one atomic step, idempotent on `idempotency_key`): the price
 leaves the buyer's wallet, `COACHING_COMMISSION_RATE` of it (20%) goes to the platform
