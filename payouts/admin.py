@@ -33,12 +33,13 @@ trainer reads (the pushes, the API) go through gettext.
 from django import forms
 from django.contrib import admin, messages
 from django.utils import timezone
+from django.utils.html import format_html_join
+from django.utils.safestring import mark_safe
 
 from training_platform.admin_utils import log_admin_action
 
 from . import services
-from .models import (OPEN_STATES, MethodKind, Withdrawal, WithdrawalEvent,
-                     WithdrawalQueueEntry)
+from .models import OPEN_STATES, MethodKind, Withdrawal, WithdrawalQueueEntry
 
 CHANGE_PERMISSION = "payouts.change_withdrawal"
 
@@ -47,24 +48,6 @@ def _is_operator(user) -> bool:
     """An actual admin, not merely a staff account."""
     return bool(user and user.is_active
                 and (user.is_superuser or getattr(user, "is_admin", False)))
-
-
-class WithdrawalEventInline(admin.TabularInline):
-    model = WithdrawalEvent
-    fields = ("created_at", "from_state", "to_state", "actor", "actor_role", "evidence")
-    readonly_fields = fields
-    extra = 0
-    can_delete = False
-    ordering = ("created_at", "id")
-
-    def has_add_permission(self, request, obj=None):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False
 
 
 DECISIONS = [
@@ -96,7 +79,6 @@ class WithdrawalDecisionForm(forms.ModelForm):
 
 class _WithdrawalAdmin(admin.ModelAdmin):
     form = WithdrawalDecisionForm
-    inlines = [WithdrawalEventInline]
     list_select_related = ("trainer", "destination_agent")
     list_display = ("number", "trainer_name", "trainer_verified", "amount", "currency",
                     "state", "destination", "requested_at", "waiting")
@@ -107,7 +89,7 @@ class _WithdrawalAdmin(admin.ModelAdmin):
                        "state", "destination", "shamcash_transaction_id", "method",
                        "hold_reference", "return_reference", "payout_reference",
                        "failure_reason", "requested_at", "approved_at", "sent_at",
-                       "confirmed_at", "failed_at", "cancelled_at")
+                       "confirmed_at", "failed_at", "cancelled_at", "events_timeline")
     actions = ["approve_selected", "confirm_selected"]
 
     # --- who ------------------------------------------------------------------
@@ -145,6 +127,17 @@ class _WithdrawalAdmin(admin.ModelAdmin):
         agent = obj.destination_agent
         return f"Cash at agent #{agent.pk} {agent.display_name}" if agent else "Cash"
 
+    @admin.display(description="Events")
+    def events_timeline(self, obj):
+        """Every transition, oldest first: who, when, from, to, and the evidence. A
+        read-only field rather than an inline: nothing here is ever edited."""
+        rows = obj.events.select_related("actor").order_by("created_at", "id")
+        return format_html_join(
+            mark_safe("<br>"), "{} &middot; {} &rarr; {} &middot; {} {} &middot; {}",
+            ((e.created_at.strftime("%Y-%m-%d %H:%M"), e.from_state or "-", e.to_state,
+              e.actor_role, getattr(e.actor, "email", "") or "", e.evidence)
+             for e in rows)) or "-"
+
     @admin.display(description="Waiting")
     def waiting(self, obj):
         if obj.state not in OPEN_STATES:
@@ -179,10 +172,6 @@ class _WithdrawalAdmin(admin.ModelAdmin):
                       "confirmed")
         elif decision == "fail":
             self._run(request, obj, lambda: services.fail(obj.pk, user, note), "failed")
-
-    def save_related(self, request, form, formsets, change):
-        # The events are read-only; there is nothing related to save.
-        return
 
     @admin.action(description="Approve the selected withdrawals", permissions=["change"])
     def approve_selected(self, request, queryset):

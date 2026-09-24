@@ -48,8 +48,7 @@ def _is_trainer(request) -> bool:
     return getattr(request.user, "user_type", None) == "trainer"
 
 
-def _money(value):
-    return None if value is None else str(value.quantize(services.ZERO))
+_money = services.money
 
 
 def _withdrawals():

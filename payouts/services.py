@@ -98,6 +98,11 @@ def methods_max() -> int:
     return int(getattr(settings, "PAYOUT_METHODS_MAX", 5))
 
 
+def money(value) -> str | None:
+    """An amount as the wire carries it: a string with two decimals."""
+    return None if value is None else str(Decimal(value).quantize(ZERO))
+
+
 # ------------------------------------------------------------------- addresses
 _ADDRESS = re.compile(r"^[0-9a-z]{8,64}$")
 
@@ -408,7 +413,7 @@ def request_withdrawal(trainer, *, amount, method_id=None, idempotency_key: str)
         if floor is None or amount < floor:
             raise Refused("withdrawal_below_minimum",
                           _("This is below the smallest amount you can withdraw."),
-                          minimum=str(floor) if floor is not None else None,
+                          minimum=money(floor),
                           currency=currency)
 
         current = open_withdrawal(trainer.pk)
@@ -423,7 +428,7 @@ def request_withdrawal(trainer, *, amount, method_id=None, idempotency_key: str)
         if amount > left:
             raise Refused("daily_limit_exceeded",
                           _("This is more than you can withdraw today."), status=429,
-                          daily_cap=str(cap), daily_cap_left=str(left), currency=currency)
+                          daily_cap=money(cap), daily_cap_left=money(left), currency=currency)
 
         clearing = get_payout_clearing_wallet(currency)
         locked = lock_wallets(trainer.pk, [wallet, clearing])
@@ -435,7 +440,7 @@ def request_withdrawal(trainer, *, amount, method_id=None, idempotency_key: str)
             raise Refused("amount_exceeds_available",
                           _("Part of your balance is still settling and cannot be "
                             "withdrawn yet."), status=409,
-                          available=str(split.available), settling=str(split.settling),
+                          available=money(split.available), settling=money(split.settling),
                           settling_until=(split.settling_until.isoformat()
                                           if split.settling_until else None),
                           currency=currency)
