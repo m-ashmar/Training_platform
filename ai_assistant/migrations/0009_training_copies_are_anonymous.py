@@ -61,14 +61,28 @@ def make_every_copy_anonymous(apps, schema_editor):
     CustomUser = apps.get_model("users", "CustomUser")
     now = timezone.now()
     retention_days = int(getattr(settings, "AI_TRAINING_RETENTION_DAYS", 365))
+    Relation = apps.get_model("users", "TrainerClientRelation")
     names = {}
     for row in AITrainingData.objects.order_by("pk").iterator(chunk_size=500):
         if row.user_id not in names:
             person = (CustomUser.objects.filter(pk=row.user_id)
-                      .values("first_name", "last_name", "username").first() or {})
-            names[row.user_id] = [person.get("first_name") or "",
-                                  person.get("last_name") or "",
-                                  person.get("username") or ""]
+                      .values("first_name", "last_name", "username",
+                              "assigned_trainer_id").first() or {})
+            found = [person.get("first_name") or "", person.get("last_name") or "",
+                     person.get("username") or ""]
+            # Every trainer the prompt could name to this person (the review, D1):
+            # the one it names, and every approved relation.
+            trainer_ids = set(Relation.objects.filter(client_id=row.user_id,
+                                                      status="approved")
+                              .values_list("trainer_id", flat=True))
+            if person.get("assigned_trainer_id"):
+                trainer_ids.add(person["assigned_trainer_id"])
+            for trainer in CustomUser.objects.filter(pk__in=trainer_ids).values(
+                    "first_name", "last_name", "username"):
+                first, last = trainer["first_name"] or "", trainer["last_name"] or ""
+                found += [first, last, trainer["username"] or "",
+                          f"{first} {last}".strip()]
+            names[row.user_id] = found
         convert(row, names[row.user_id], now=now, retention_days=retention_days)
         row.save(update_fields=FIELDS)
 
@@ -78,6 +92,8 @@ class Migration(migrations.Migration):
     dependencies = [
         ("ai_assistant", "0008_training_copies_get_their_keys"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        # The trainer names (TrainerClientRelation, assigned_trainer) are read too.
+        ("users", "0046_customuser_ai_training_consent_set_at"),
     ]
 
     # No reverse_code: irreversible (see the module docstring).

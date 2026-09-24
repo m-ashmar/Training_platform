@@ -74,6 +74,16 @@ STANDING_ORDER = ('-current_value', 'joined_at', 'id')
 WRITE_BATCH = 500
 
 
+def participating(queryset):
+    """`queryset` of participations still taking part: everyone but the dropped. The rows
+    a COUNT or a completion judgement is kept current on — a suspended account's too,
+    though it holds no place, so reinstating it brings back a true number and a true
+    completion rather than a stale one (the review, D7). Ranking uses `in_standing`."""
+    from .models import ChallengeParticipation
+
+    return queryset.exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
+
+
 def in_standing(queryset):
     """`queryset` of participations less the ones that hold no place: dropped, or of an
     account that is not publicly visible (suspended or erased)."""
