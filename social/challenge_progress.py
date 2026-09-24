@@ -77,8 +77,11 @@ workout); the caps and the sum over days are a bounded Python pass over those ro
 
 **Not done, deliberately.** No push per recount — `ChallengeProgressEvent` notifies the
 person themselves, and counting on every set would send one per set; the manual log
-still emits it. A challenge that is over, cancelled, hidden or not yet started is not
-recounted: a finished standing is a record (the Challenge Winner badge keys on it). A
+still emits it. A challenge that is cancelled, hidden or not yet started is not recounted. One that
+has ended is recounted for `LATE_HOURS` more (its window's late-synced sets), never
+after its winner is settled (`Challenge.counting_open`; `REVIEW_HOURS` equals
+`LATE_HOURS`, so settlement waits for them): a settled standing is a record (the
+Challenge Winner badge keys on it). A
 failure here is logged and swallowed — a challenge's number must never fail the set it
 counts.
 """
@@ -339,8 +342,7 @@ def recount(challenge, user_ids=None) -> bool:
 
     with transaction.atomic():
         locked = Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
-        if (locked is None or not locked.auto_counted or locked.is_hidden
-                or not locked.is_active):
+        if locked is None or not locked.counting_open():
             return False
         rows = counted_rows(ChallengeParticipation.objects.filter(challenge=locked))
         if user_ids is not None:
@@ -390,9 +392,12 @@ def recount_for_user(user_id) -> int:
     challenges = [row.challenge for row in (
         counted_rows(ChallengeParticipation.objects.filter(user_id=user_id))
         .exclude(challenge__metric=Challenge.METRIC_MANUAL)
-        .exclude(challenge__status__in=Challenge.TERMINAL_STATUSES)
+        .exclude(challenge__status='cancelled')
+        # Running, or ended less than LATE_HOURS ago and not settled: a late-synced set
+        # of the window's last days still counts (`Challenge.counting_open`).
         .filter(challenge__is_hidden=False, challenge__start_date__lte=now,
-                challenge__end_date__gte=now)
+                challenge__end_date__gte=now - timedelta(hours=LATE_HOURS),
+                challenge__winner_checked_at__isnull=True)
         .select_related('challenge').order_by('challenge_id'))]
     moved = 0
     touched = {user_id}

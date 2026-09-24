@@ -765,8 +765,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           "max_weight_kg_per_set", "min_sets_per_day", "max_sets_per_day",
           "max_volume_kg_per_day", "min_sets_per_workout", "min_workout_minutes",
           "max_workouts_per_day", "late_hours"}`.
-      `review_hours` — 48: how long after the end the standing stays open for review
-          before the winner is final.
+      `review_hours` — 72 (equal to `counting.late_hours`): how long after the end
+          the standing stays open for review, and keeps counting its window's sets that
+          sync late, before the winner is final.
       `winner_final` — bool: the challenge ended at least `review_hours` ago and its
           winner is settled.
       `user_progress.review_state` — `"clear"` | `"flagged"` | `"disqualified"`, and
@@ -785,7 +786,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           end would have ranked its self-reported numbers.
       `end_date_in_past` — an `end_date` earlier than now. Ending early is a close
           (`status: "completed"`), which moves the end to the moment of the close, so
-          the 48 h review runs from when it really ended.
+          the review window runs from when it really ended.
     Changing `metric` or the dates of a RUNNING challenge still recounts everyone.
     """
     #: What a finished challenge keeps: `challenge_over` if a PATCH changes one.

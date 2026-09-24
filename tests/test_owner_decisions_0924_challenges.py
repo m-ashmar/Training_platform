@@ -366,7 +366,7 @@ def test_a_manual_challenge_of_a_client_is_not_ranked_and_awards_nothing(make_us
     assert made.status_code == 201, made.content
     body = made.json()
     assert (body["ranked"], body["counting"], body["review_hours"], body["winner_final"]) \
-        == (False, None, 48, False)
+        == (False, None, Challenge.REVIEW_HOURS, False)
     challenge = Challenge.objects.get(pk=body["id"])
 
     assert api(client).post(f"/api/social/challenges/{challenge.pk}/join/", {},
@@ -697,3 +697,49 @@ def test_the_consoles_leave_the_review_and_the_standing_read_only(make_user):
     for admin_class in (ConsoleAdmin, SocialAdmin):
         model_admin = admin_class(ChallengeParticipation, django_admin.site)
         assert must <= set(model_admin.get_readonly_fields(None)), admin_class
+
+
+# ------------------------------------------------------------ the late window after the end
+def test_the_review_window_waits_for_every_set_that_may_still_sync():
+    """The winner cannot settle while a set of the window's last day may still arrive."""
+    from social.challenge_progress import LATE_HOURS
+    from social.models import Challenge
+
+    assert Challenge.REVIEW_HOURS >= LATE_HOURS
+
+
+def test_a_last_day_set_that_syncs_after_the_end_counts_until_the_late_window_closes(make_user):
+    """A phone offline on the challenge's last day syncs the day after the end: those sets
+    are the challenge's and count. A set that arrives after LATE_HOURS does not, and
+    nothing moves the standing once the winner is settled."""
+    from social.challenge_progress import LATE_HOURS, recount_for_user
+    from social.models import Challenge, ChallengeParticipation
+
+    trainer = make_user("f20_late_t", user_type="trainer", trainer_is_verified=True)
+    lifter = make_user("f20_late_c")
+    ex = _exercise(trainer, "late")
+    challenge = _challenge(trainer, "late", metric="sets")
+    _enter(challenge, lifter)
+    last_day = _today(1)
+    # The challenge ended at the end of yesterday; the sets were trained yesterday.
+    Challenge.objects.filter(pk=challenge.pk).update(
+        end_date=timezone.make_aware(datetime.combine(last_day, time(23, 59))))
+    challenge.refresh_from_db()
+
+    # Synced this morning, well inside the late window: counted by the write's recount.
+    _sets(lifter, ex, last_day, 4, received=timezone.now())
+    recount_for_user(lifter.pk)
+    assert ChallengeParticipation.objects.get(challenge=challenge, user=lifter).current_value == 4.0
+
+    # A set of the same day received after the window: not counted.
+    _sets(lifter, ex, last_day, 2, first=5,
+          received=timezone.make_aware(datetime.combine(last_day, time(23, 59)))
+          + timedelta(days=1, hours=LATE_HOURS + 1))
+    assert _count(challenge, lifter)[0] == 4.0
+
+    # Once the winner is settled, nothing recounts the standing.
+    Challenge.objects.filter(pk=challenge.pk).update(winner_checked_at=timezone.now())
+    challenge.refresh_from_db()
+    _sets(lifter, ex, last_day, 3, first=20, received=timezone.now())
+    recount_for_user(lifter.pk)
+    assert ChallengeParticipation.objects.get(challenge=challenge, user=lifter).current_value == 4.0

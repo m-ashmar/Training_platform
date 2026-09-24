@@ -1461,8 +1461,9 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
     "max_weight_kg_per_set": 400, "min_sets_per_day": 3, "max_sets_per_day": 60,
     "max_volume_kg_per_day": 30000, "min_sets_per_workout": 3,
     "min_workout_minutes": 10, "max_workouts_per_day": 2, "late_hours": 72}` —
-    `social/challenge_progress.py COUNTING`), `review_hours` (48: how long after the
-    end the standing stays open for review) and `winner_final` (bool: ended at least
+    `social/challenge_progress.py COUNTING`), `review_hours` (72, equal to `late_hours`: how
+    long after the end the standing stays open for review and for the window's
+    late-synced sets) and `winner_final` (bool: ended at least
     `review_hours` ago and the winner is settled).
   - What an auto-counted challenge counts: a set with 1..30 reps and 0..400 kg; at most
     60 sets and 30 000 kg per person per day; a training day needs 3 counted sets; a
@@ -1487,7 +1488,11 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
     `challenge_over` — `metric`, `start_date`, `end_date` or `target_value` of a
     challenge that is over (ended or closed); `end_date_in_past` — an `end_date`
     earlier than now (to end early, close it with `status: "completed"`).
-  - The winner is settled once, by the hourly phase task, 48 h after the end: the
+  - After the end, the challenge keeps counting its own window's sets that sync late
+    (a phone offline on the last day) until `late_hours` after its end; a set
+    received later never counts. The winner is settled once, by the hourly phase
+    task, `review_hours` (72) after the end, so no late set can move a settled
+    standing: the
     standing is re-ranked, and the person at place 1 is checked for the badge if the
     challenge is ranked and they are clear and reached the target (flagged in a ranked
     challenge: wait for the operator; an unranked or cancelled challenge never waits).

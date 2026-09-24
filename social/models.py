@@ -10,6 +10,8 @@ content sharing, community interactions, and social feeds.
 from django.db import models
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes.fields import GenericForeignKey
+from datetime import timedelta
+
 from django.utils import timezone
 from django.utils.translation import gettext_lazy
 from users.models import CustomUser
@@ -422,7 +424,11 @@ class Challenge(models.Model):
 
     #: How long after its end a challenge's standing stays open for review before the
     #: winner is final (F20). An operator reviews flagged participants in that window.
-    REVIEW_HOURS = 48
+    #: Equal to `social/challenge_progress.py LATE_HOURS`: a set of the window's last day
+    #: that syncs late (a phone offline) is still counted up to LATE_HOURS after its day,
+    #: so the winner must not settle before those sets can arrive
+    #: (tests/test_owner_decisions_0924_challenges.py pins REVIEW_HOURS >= LATE_HOURS).
+    REVIEW_HOURS = 72
 
     class Meta:
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
@@ -469,6 +475,20 @@ class Challenge(models.Model):
     def is_active(self):
         """Is the challenge running right now?"""
         return self.lifecycle_status == 'active'
+
+    def counting_open(self, now=None) -> bool:
+        """May a recount still move this challenge's numbers?
+
+        While it runs, and after its end for `LATE_HOURS` more — the sets of its window
+        that sync late still count (`challenge_progress.credible_sets` refuses any set
+        received later than that) — until its winner is settled. Never for a manual,
+        hidden or cancelled challenge, or one not started yet."""
+        from .challenge_progress import LATE_HOURS
+
+        now = now or timezone.now()
+        return (self.auto_counted and not self.is_hidden and self.status != 'cancelled'
+                and self.winner_checked_at is None and self.start_date <= now
+                and now <= self.end_date + timedelta(hours=LATE_HOURS))
 
     @property
     def auto_counted(self):
