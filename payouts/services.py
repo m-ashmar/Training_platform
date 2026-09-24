@@ -12,6 +12,16 @@ coaching fee or a digital good. Three legs, each written once:
 
 so the clearing wallet in a currency always holds exactly the open withdrawals in it.
 
+**No leg is undone on its own** (the payouts review, 2026-09-24). Support's reversal
+endpoint refuses every one of the three (`withdrawal_of_leg`; 409 `withdrawal_leg`):
+reversing the request leg put the money back while the withdrawal stayed open, and the
+cancel or fail after it paid the trainer a second time out of clearing — out of every
+other trainer's open withdrawal. Undoing a withdrawal is `fail` or `cancel`. As a
+backstop, like `users.trainer_relations._move_hold`'s `reverses=held` check, nothing
+here moves, sends or pays out a withdrawal whose request leg was reversed some other
+way (`_hold_reversal`): the trainer's cancel is refused `withdrawal_hold_reversed`, and
+approve, sent, confirm and fail `ledger_refused`. Such a withdrawal is closed by hand.
+
 **Idempotent.** A request carries the caller's `idempotency_key` (`wallet.idempotency`,
 like every wallet write): a retry of a request that landed answers the same withdrawal
 and moves nothing. A transition that has already happened is a no-op answering the
@@ -21,11 +31,25 @@ row as it is; one that cannot happen from the current state is refused, never fo
 
     request      the trainer's user row (FOR NO KEY UPDATE) -> wallets, ascending id
                  (`users.coaching.lock_wallets`) -> the numbering lock (advisory)
-    transitions  the withdrawal row -> the actor's user row (FOR KEY SHARE) -> wallets
+    transitions  the withdrawal row -> the trainer's user row (FOR KEY SHARE; approve
+                 and sent) -> the actor's user row (FOR KEY SHARE) -> wallets
 
 The user row serialises one trainer's requests, so "one open request", the daily cap
 and the available amount are decided on reads nothing else of theirs can change before
 the money moves. The available amount is read off the LOCKED wallet row.
+
+**Approve and sent re-read the trainer** (the payouts review, 2026-09-24): a
+verification revoked, or an account suspended, AFTER the request used to leave the
+withdrawal to be approved and the money sent off the platform. Both are refused
+(`trainer_not_verified`, `trainer_inactive`) and `fail` is the operator's move. The row
+is taken FOR KEY SHARE, not FOR NO KEY UPDATE: deleting a payout method holds the
+trainer's row FOR NO KEY UPDATE and then updates the withdrawal rows that name it
+(`on_delete=SET_NULL`), so NO KEY UPDATE here, after the withdrawal row, deadlocks with
+it; KEY SHARE does not conflict with it, and still waits for a revocation (which holds
+the row FOR UPDATE). `confirm` does not re-read it: the money has already left the
+platform, and refusing to record that it arrived would only leave clearing holding
+money that is gone, or push the operator to fail a transfer that arrived and pay it
+twice.
 
 **Guardrails** (settings, each a number the owner confirms): `PAYOUT_MIN_AMOUNT`,
 `PAYOUT_DAILY_CAP` (per currency; a currency without one withdraws nothing),
@@ -80,6 +104,21 @@ class TransitionRefused(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+class HoldReversed(Exception):
+    """The withdrawal's request leg was reversed outside this module, so its money is
+    already back in the trainer's wallet (see "No leg is undone on its own")."""
+
+    def __init__(self, withdrawal, reversal: str):
+        super().__init__(reversal)
+        self.withdrawal = withdrawal
+        self.reversal = reversal
+
+    def console_message(self) -> str:
+        return (f"Its request leg {self.withdrawal.hold_reference} was reversed "
+                f"({self.reversal}), so the money is already back in the trainer's "
+                f"wallet. Nothing moved. Do not send it: it has to be closed by hand.")
 
 
 # --------------------------------------------------------------------- settings
@@ -138,6 +177,51 @@ def open_amount(trainer_id) -> Decimal:
     total = (Withdrawal.objects.filter(trainer_id=trainer_id, state__in=OPEN_STATES)
              .aggregate(total=Sum("amount"))["total"])
     return total or ZERO
+
+
+#: `metadata['purpose']` of each of a withdrawal's three ledger legs (`_ledger_metadata`).
+LEG_PURPOSES = ("withdrawal_request", "withdrawal_returned", "withdrawal_paid_out")
+
+
+def withdrawal_of_leg(tx):
+    """`(is_leg, withdrawal)` for the ledger row `tx`: whether it is one of a
+    withdrawal's three legs (the request, the return, the payout), and that withdrawal.
+
+    Decided on what the row itself says — every leg carries `withdrawal_id` and its
+    `purpose`, written with it and never changed — and on the withdrawal naming it by
+    reference, so a leg is found either way. `withdrawal` is None only for a row that
+    says it is a leg of a withdrawal that no longer names it.
+    """
+    from django.db.models import Q
+
+    metadata = tx.metadata or {}
+    named = metadata.get("withdrawal_id")
+    ref = tx.reference_id
+    match = Q(hold_reference=ref) | Q(return_reference=ref) | Q(payout_reference=ref)
+    if str(named).isdigit():
+        match |= Q(pk=int(named))
+    withdrawal = Withdrawal.objects.filter(match).order_by("pk").first()
+    is_leg = (withdrawal is not None or named is not None
+              or metadata.get("purpose") in LEG_PURPOSES)
+    return is_leg, withdrawal
+
+
+def _hold_reversal(withdrawal) -> str | None:
+    """The reference of the reversal of this withdrawal's request leg, or None."""
+    from wallet.models import Transaction
+
+    if not withdrawal.hold_reference:
+        return None
+    return (Transaction.objects.filter(reverses__reference_id=withdrawal.hold_reference)
+            .values_list("reference_id", flat=True).first())
+
+
+def _refuse_if_hold_reversed(withdrawal) -> None:
+    reversal = _hold_reversal(withdrawal)
+    if reversal:
+        logger.error("Withdrawal %s: its request leg %s was reversed by %s; refusing to "
+                     "move it", withdrawal.number, withdrawal.hold_reference, reversal)
+        raise HoldReversed(withdrawal, reversal)
 
 
 def _day_bounds(now):
@@ -468,6 +552,10 @@ def request_withdrawal(trainer, *, amount, method_id=None, idempotency_key: str)
 
 # ------------------------------------------------------------------ transitions
 def _return_money(withdrawal, actor_id, purpose):
+    """Clearing -> the trainer's wallet. Raises `HoldReversed` when the request leg was
+    already reversed: decided AFTER both wallets are locked, which a reversal of that
+    leg needs too, so one committed a moment ago is seen and one in flight is waited
+    for."""
     from users.coaching import lock_wallets
     from wallet.models import move_funds_atomic
     from wallet.utils import get_payout_clearing_wallet
@@ -475,6 +563,7 @@ def _return_money(withdrawal, actor_id, purpose):
     clearing = get_payout_clearing_wallet(withdrawal.currency)
     wallet = trainer_wallet(withdrawal.trainer)
     locked = lock_wallets(actor_id, [clearing, wallet])
+    _refuse_if_hold_reversed(withdrawal)
     tx = move_funds_atomic(locked[clearing.pk], locked[wallet.pk], withdrawal.amount,
                            actor_id=actor_id, tx_type="transfer",
                            currency=withdrawal.currency, money_type=MoneyType.WALLET_MOVE,
@@ -484,7 +573,9 @@ def _return_money(withdrawal, actor_id, purpose):
 
 def cancel(withdrawal_id, trainer) -> Withdrawal:
     """The trainer takes back a withdrawal nobody has approved yet. Idempotent: a
-    cancelled withdrawal is answered as it is."""
+    cancelled withdrawal is answered as it is. Refused `withdrawal_hold_reversed` (409)
+    when its request leg was reversed outside this module: the money is already back in
+    the balance, and returning it again would pay it twice."""
     with transaction.atomic():
         withdrawal = (Withdrawal.objects.select_for_update()
                       .filter(pk=withdrawal_id, trainer=trainer).first()
@@ -497,7 +588,13 @@ def cancel(withdrawal_id, trainer) -> Withdrawal:
             raise Refused("withdrawal_not_cancellable",
                           _("This withdrawal is already being processed and can no longer "
                             "be cancelled."), status=409, state=withdrawal.state)
-        reference = _return_money(withdrawal, trainer.pk, "withdrawal_returned")
+        try:
+            reference = _return_money(withdrawal, trainer.pk, "withdrawal_returned")
+        except HoldReversed as exc:
+            raise Refused("withdrawal_hold_reversed",
+                          _("This withdrawal's money is already back in your balance. "
+                            "Contact support to close it."), status=409,
+                          state=withdrawal.state) from exc
         withdrawal.state, withdrawal.cancelled_at = State.CANCELLED, timezone.now()
         withdrawal.return_reference = reference
         withdrawal.save(update_fields=["state", "cancelled_at", "return_reference",
@@ -526,12 +623,56 @@ def _note(note) -> str:
     return str(note or "").strip()[:MAX_NOTE]
 
 
+def _refuse_unpayable_trainer(withdrawal, verb) -> None:
+    """Refuse unless the trainer is, NOW, an active account and verified (spec section
+    8, "Only verified trainers can withdraw"). Read off the trainer's row taken FOR KEY
+    SHARE after the withdrawal row — see "Approve and sent re-read the trainer" in the
+    module docstring for the order and the mode."""
+    from users.models import CustomUser
+
+    meta = CustomUser._meta
+    if connection.vendor == "postgresql":
+        quote = connection.ops.quote_name
+        with connection.cursor() as cur:
+            cur.execute(
+                f"SELECT {quote(meta.get_field('is_active').column)}, "
+                f"{quote(meta.get_field('trainer_is_verified').column)} "
+                f"FROM {quote(meta.db_table)} WHERE {quote(meta.pk.column)} = %s "
+                f"FOR KEY SHARE", [withdrawal.trainer_id])
+            is_active, verified = cur.fetchone()
+    else:
+        is_active, verified = (CustomUser.objects.filter(pk=withdrawal.trainer_id)
+                               .values_list("is_active", "trainer_is_verified").get())
+    if not is_active:
+        raise TransitionRefused(
+            "trainer_inactive",
+            f"The trainer's account is suspended, so it cannot be {verb}. Fail it to "
+            f"return the money to their wallet.")
+    if not verified:
+        raise TransitionRefused(
+            "trainer_not_verified",
+            f"The trainer is no longer verified (only verified trainers withdraw), so it "
+            f"cannot be {verb}. Fail it to return the money to their wallet.")
+
+
+def _refuse_reversed_for_operator(withdrawal) -> None:
+    try:
+        _refuse_if_hold_reversed(withdrawal)
+    except HoldReversed as exc:
+        raise TransitionRefused("ledger_refused", exc.console_message()) from exc
+
+
 def approve(withdrawal_id, operator, note="") -> Withdrawal:
+    """`requested` -> `approved`. Refused `trainer_inactive` / `trainer_not_verified`
+    when the trainer may not be paid now, and `ledger_refused` when the request leg was
+    reversed; `fail` stays open for both."""
     with transaction.atomic():
         withdrawal = _locked_for_operator(withdrawal_id)
         if withdrawal.state == State.APPROVED:
             return withdrawal
         _refuse_from(withdrawal, (State.REQUESTED,), "approved")
+        _refuse_unpayable_trainer(withdrawal, "approved")
+        _refuse_reversed_for_operator(withdrawal)
         withdrawal.state, withdrawal.approved_at = State.APPROVED, timezone.now()
         withdrawal.save(update_fields=["state", "approved_at", "updated_at"])
         _event(withdrawal, from_state=State.REQUESTED, to_state=State.APPROVED,
@@ -541,7 +682,9 @@ def approve(withdrawal_id, operator, note="") -> Withdrawal:
 
 def mark_sent(withdrawal_id, operator, transaction_id="", note="") -> Withdrawal:
     """The operator sent it. A ShamCash withdrawal needs the ShamCash transaction id,
-    which one withdrawal only may carry; a cash one may carry the agent's reference."""
+    which one withdrawal only may carry; a cash one may carry the agent's reference.
+    Refused like `approve` when the trainer may not be paid now or the request leg was
+    reversed."""
     transaction_id = str(transaction_id or "").strip()
     if len(transaction_id) > 64:
         raise TransitionRefused("transaction_id_too_long",
@@ -556,6 +699,8 @@ def mark_sent(withdrawal_id, operator, transaction_id="", note="") -> Withdrawal
                     f"{withdrawal.shamcash_transaction_id or '(none)'}.")
             return withdrawal
         _refuse_from(withdrawal, (State.APPROVED,), "marked sent")
+        _refuse_unpayable_trainer(withdrawal, "marked sent")
+        _refuse_reversed_for_operator(withdrawal)
         if withdrawal.destination_kind == MethodKind.SHAMCASH and not transaction_id:
             raise TransitionRefused("transaction_id_required",
                                     "Record the ShamCash transaction id it was sent with.")
@@ -583,7 +728,12 @@ def mark_sent(withdrawal_id, operator, transaction_id="", note="") -> Withdrawal
 
 def confirm(withdrawal_id, operator, note="") -> Withdrawal:
     """It arrived. The money leaves payout clearing, and the platform; a ShamCash
-    address that received it is marked verified (the design's «محقّق»)."""
+    address that received it is marked verified (the design's «محقّق»).
+
+    Not refused for a trainer no longer verified or active: the money already left
+    (see the module docstring). Refused `ledger_refused` when the request leg was
+    reversed — decided after clearing is locked, which a reversal of that leg needs
+    too — because paying it out of clearing again takes another trainer's money."""
     from users.coaching import lock_wallets
     from wallet.models import move_funds_atomic
     from wallet.utils import get_payout_clearing_wallet
@@ -595,6 +745,7 @@ def confirm(withdrawal_id, operator, note="") -> Withdrawal:
         _refuse_from(withdrawal, (State.SENT,), "confirmed")
         clearing = get_payout_clearing_wallet(withdrawal.currency)
         locked = lock_wallets(getattr(operator, "pk", None), [clearing])
+        _refuse_reversed_for_operator(withdrawal)
         try:
             tx = move_funds_atomic(
                 locked[clearing.pk], None, withdrawal.amount,
@@ -627,7 +778,9 @@ def confirm(withdrawal_id, operator, note="") -> Withdrawal:
 
 def fail(withdrawal_id, operator, reason) -> Withdrawal:
     """It could not be paid. The money goes back to the trainer's wallet. The reason is
-    shown to the trainer, so it is required."""
+    shown to the trainer, so it is required. Allowed whoever the trainer now is — it is
+    the operator's move for a trainer who may no longer be paid — and refused
+    `ledger_refused` when the request leg was reversed, whose money is already back."""
     reason = _note(reason)
     if not reason:
         raise TransitionRefused("reason_required",
@@ -641,6 +794,8 @@ def fail(withdrawal_id, operator, reason) -> Withdrawal:
         try:
             reference = _return_money(withdrawal, getattr(operator, "pk", None),
                                       "withdrawal_returned")
+        except HoldReversed as exc:
+            raise TransitionRefused("ledger_refused", exc.console_message()) from exc
         except ValueError as exc:
             raise TransitionRefused("ledger_refused",
                                     f"The ledger refused it: {exc}. Nothing moved.") from exc

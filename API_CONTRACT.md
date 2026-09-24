@@ -984,7 +984,8 @@ design's «أموالك في رصيدك حتى يُؤكَّد الوصول» doe
 is held for the request and comes BACK to the balance only if it fails or is cancelled.
 States: `requested` → `approved` → `sent` → `confirmed` (arrived), or `failed` (money
 back, `failure_reason`), or `cancelled` by the trainer while `requested`
-(`POST …/{id}/cancel/`, 409 `withdrawal_not_cancellable` after). Numbered
+(`POST …/{id}/cancel/`, 409 `withdrawal_not_cancellable` after; 409
+`withdrawal_hold_reversed` when support already put its money back). Numbered
 `WD-2026-09-23-041`. A withdrawal reads `{id, number, amount, currency, state,
 destination {kind, address, holder_name, agent}, method_id, transfer_reference,
 failure_reason, can_cancel, requested_at, approved_at, sent_at, confirmed_at, failed_at,
@@ -1462,7 +1463,9 @@ operator maintains in the console. Four things the app needs:
   out, a coaching request or invitation still pending, or a coaching hold (SIDE_BUGS
   S-159).
 - **Support.** `POST wallet/admin/reversal/` refuses one leg of a currency exchange,
-  `409 exchange_leg` with `exchange_reference` (SIDE_BUGS S-161).
+  `409 exchange_leg` with `exchange_reference` (SIDE_BUGS S-161), and any leg of a
+  trainer's withdrawal, `409 withdrawal_leg` with `withdrawal` (the payouts review,
+  2026-09-24).
   `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
   (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
   top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).
@@ -1620,6 +1623,35 @@ already moved, spec §3: balance and history are visible everywhere).
   `date_range_reversed` (`since` after `until`), `date_range_too_long` (summary only,
   + `max_months: 12`), `bad_money_type` (+ `money_type_options`), `bad_kind`
   (+ `kind_options`; the code diet's meal events answer for an unknown `kind`).
+
+**What the payouts review found** (2026-09-24). Additive; identical on every build.
+
+- `GET /api/wallet/balance/` gains, for a TRAINER, what the platform OWES them:
+  `owed_to_trainer` and `owed_to_trainer_items`. A month already paid out whose
+  trainer's share crosses a currency, paid while the operator's rate was missing or
+  stale (month 1 at the first program, or a renewal), runs — but the share stays in
+  escrow, owed, until the hourly run finds a fresh rate. It is neither held nor yet a
+  ledger row, so until now it was in no figure at all. Items, newest first:
+  `{period_id, relation_id, client {id, name, role}, status: "payout_owed", kind:
+  "trainer_fee_payout", reason, month, owed_since, starts_at, amount, commission,
+  commission_rate, net, currency, charged_amount, charged_currency, estimated}`, the
+  amounts as `held_for_trainer_items` expresses them (`estimated: true` when converted
+  at today's rate or taken from the price of record). When the share is paid the item
+  goes and a `trainer_fee_payout` row arrives. `"0.00"` and `[]` for anyone who is not
+  a trainer. `held_for_trainer`, `held_for_trainer_gross`, `awaiting_first_program` and
+  `held_for_trainer_items` keep their meaning: nothing owed is counted in them.
+- `POST /api/wallet/admin/reversal/` refuses any leg of a trainer's withdrawal — the
+  request, the return, the payout — `409 withdrawal_leg` with `withdrawal` `{id,
+  number, state}` (null if no withdrawal names the row). Undoing a withdrawal is fail
+  or cancel in the payouts console.
+- `POST /api/v1/trainer/withdrawals/{id}/cancel/` can answer `409
+  withdrawal_hold_reversed` (+ `state`): the withdrawal's money was already put back in
+  the balance outside the withdrawal, so cancelling would return it twice; nothing
+  moved and support closes it. Not reachable through any endpoint now; the backstop
+  for a reversal written some other way.
+- The payouts console refuses approve and sent for a trainer who is no longer verified
+  or whose account is suspended (the trainer is not told; the operator fails it, and
+  the trainer gets the `withdrawal_failed` push with the reason, as before).
 
 **What wiring the Me screens found** (BACKEND_BUGS B-053..B-057, 2026-09-23). Additive:
 the refusals below answered only their status default (`bad_request` / `not_found`) and
