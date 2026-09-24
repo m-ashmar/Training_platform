@@ -152,6 +152,20 @@ is locked (spec §8); the numbers above are the defaults.
    days on the new plan). An upgrade whose credit covers the whole new price is refused
    (`upgrade_not_payable`) — the owner declined both extra days and wallet credit for
    leftover value.
+6. **Decisions owed from BACKEND_BUGS B-066..B-086** (2026-09-24). (a) The AI consent and
+   privacy screens promise that chats used for training carry nothing that identifies
+   the person, while `AITrainingData` rows hold the user id and a snapshot with age,
+   weight and injury text: change the copy, or de-identify the records (store review
+   risk). (b) Switching "help us improve" off deletes the training copies already kept
+   (the agent's call, on privacy grounds); the alternative is keeping them to their
+   normal expiry. (c) Workout achievements and streaks count finished workouts plus days
+   with logged sets; the per-set activity rows are gone. (d) Weekly workout goals are
+   counted from finished sessions, never complete, and refuse a manual number
+   (`goal_counted_from_workouts`). (e) Migration `analytics/0005` reopens goals the old
+   rule completed short of their target; badges already given stay. (f) People search
+   leaves out admins, agents and unverified sign-ups. (g) Leaderboards still list
+   suspended accounts by name and picture. (h) API_CONTRACT §6 (a refusal that answered
+   only its status default may gain its own code) is still the owner's to confirm.
 
 ## Traps this branch cost a session to find
 
