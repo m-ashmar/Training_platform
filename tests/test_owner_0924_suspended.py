@@ -122,7 +122,7 @@ def test_a_suspended_participant_holds_no_place_on_any_surface(
 
 
 def test_the_challenge_winner_badge_never_goes_to_a_suspended_account(
-        make_user, django_capture_on_commit_callbacks):
+        make_user, django_capture_on_commit_callbacks, winner_minimum_of_one):
     """A leader suspended while the challenge runs hands rank 1 to the next person, who
     is the winner checked at the close; one suspended after the close keeps the record
     but is never awarded."""

@@ -26,7 +26,8 @@ from .models import (
 from .permissions import IsOwnerOrReadOnly, IsFollowParticipant
 # Where each participant of a challenge stands: ONE rule, read by every surface
 # (BACKEND_BUGS B-086). The module imports no model at import time.
-from .standing import STANDING_ORDER, WRITE_BATCH, in_standing, place
+from .standing import (STANDING_ORDER, WRITE_BATCH, active_participants_count, in_standing,
+                       place)
 from .serializers import (
     UserFollowSerializer, PostSerializer, CommentSerializer,
     ChallengeSerializer, AchievementSerializer, UserAchievementSerializer,
@@ -854,6 +855,15 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           sync late, before the winner is final.
       `winner_final` — bool: the challenge ended at least `review_hours` ago and its
           winner is settled.
+      `winner_min_participants` — int, 5 (the owner's decision of 2026-09-24,
+          `social/standing.py MIN_PARTICIPANTS_FOR_WINNER`): a challenge needs at least
+          this many active participants at the settlement for its first place to win
+          the Challenge Winner badge (or anything a first place earns). Fewer, and it
+          settles with no winner (`winner_final` still becomes true).
+      `active_participants` — int, live: participants in the standing (not dropped,
+          not disqualified, the account visible) whose counted number is above zero —
+          a joiner who never trained does not count. Compare it with
+          `winner_min_participants` to say "a winner needs N more people".
       `user_progress.review_state` — `"clear"` | `"flagged"` | `"disqualified"`, and
       `user_progress.review_reason` — null | `"day_over_threshold"` (a day of the
           window above a review threshold, set automatically) | `"operator"`. Only the
@@ -914,6 +924,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             # Reproduced: 50 notifications sharing a timestamp served `b-1` on
             # page 1 and again on page 2, and `b-6` on neither.
             .order_by('-created_at', '-id')
+            # `active_participants` (the owner's minimum for a winner, 2026-09-24): one
+            # correlated COUNT inside this query, never a query per row.
+            .annotate(active_participants_anno=active_participants_count())
         )
         user = getattr(self, 'request', None).user if getattr(self, 'request', None) else None
         if user and user.is_authenticated:

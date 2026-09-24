@@ -682,6 +682,13 @@ class ChallengeSerializer(serializers.ModelSerializer):
     counting = serializers.SerializerMethodField()
     review_hours = serializers.SerializerMethodField()
     winner_final = serializers.ReadOnlyField()
+    #: The owner's minimum for a winner (2026-09-24). `winner_min_participants`: the
+    #: constant (`social/standing.py MIN_PARTICIPANTS_FOR_WINNER`, 5).
+    #: `active_participants`: how many count toward it right now — in the standing and
+    #: with a counted number above zero (`active_participants`). Annotated per page by
+    #: `ChallengeViewSet.get_queryset`; counted here only for a row read elsewhere.
+    winner_min_participants = serializers.SerializerMethodField()
+    active_participants = serializers.SerializerMethodField()
 
     class Meta:
         model = Challenge
@@ -692,6 +699,7 @@ class ChallengeSerializer(serializers.ModelSerializer):
             'created_at', 'rules', 'reward_description', 'image',
             'is_joined', 'user_progress', 'is_active', 'metric', 'auto_counted',
             'ranked', 'counting', 'review_hours', 'winner_final',
+            'winner_min_participants', 'active_participants',
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'participants_count']
 
@@ -739,6 +747,22 @@ class ChallengeSerializer(serializers.ModelSerializer):
 
     def get_review_hours(self, obj):
         return Challenge.REVIEW_HOURS
+
+    def get_winner_min_participants(self, obj):
+        from . import standing
+
+        return standing.MIN_PARTICIPANTS_FOR_WINNER
+
+    def get_active_participants(self, obj):
+        annotated = getattr(obj, 'active_participants_anno', None)
+        if annotated is not None:
+            return int(annotated)
+        # A row that did not come through `ChallengeViewSet.get_queryset` (a create or
+        # update response, the Feed card): one COUNT for this one row.
+        from .standing import active_participants
+
+        return active_participants(ChallengeParticipation.objects
+                                   .filter(challenge_id=obj.pk)).count()
 
     def get_user_progress(self, obj):
         """Get current user's progress in this challenge"""

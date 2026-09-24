@@ -158,7 +158,8 @@ def test_s127_the_social_achievement_routes_serve_the_badges_the_engine_awards(
 
 # ------------------------------------------------------------------------- S-044
 def test_s044_the_winner_badge_waits_for_the_challenge_to_end(make_user, api,
-                                                             django_capture_on_commit_callbacks):
+                                                             django_capture_on_commit_callbacks,
+                                                             winner_minimum_of_one):
     from achievements.engine import AchievementEngine, trigger_achievement_check
     from achievements.models import UserAchievement
     from social.models import Challenge, ChallengeParticipation

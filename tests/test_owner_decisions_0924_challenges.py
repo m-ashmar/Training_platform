@@ -254,7 +254,8 @@ def test_a_legit_week_still_counts_exactly(make_user):
 
 
 # ------------------------------------------------------------ review and winner
-def test_a_flagged_leader_keeps_the_place_but_wins_nothing_until_cleared(make_user, api):
+def test_a_flagged_leader_keeps_the_place_but_wins_nothing_until_cleared(make_user, api,
+                                                                        winner_minimum_of_one):
     from social.models import Challenge, ChallengeParticipation
     from social.review import apply_review
     from social.tasks import advance_challenge_phases
@@ -397,7 +398,8 @@ def test_a_manual_challenge_of_a_client_is_not_ranked_and_awards_nothing(make_us
         "max_workouts_per_day": 2, "late_hours": 72}
 
 
-def test_the_winner_is_checked_once_and_only_after_the_review_window(make_user):
+def test_the_winner_is_checked_once_and_only_after_the_review_window(make_user,
+                                                                    winner_minimum_of_one):
     from social.models import Challenge
     from social.tasks import advance_challenge_phases, settle_winners
 
@@ -619,7 +621,8 @@ def test_a_cleared_participant_is_flagged_again_for_a_new_day_over_the_threshold
     assert row.review_reason == "day_over_threshold"
 
 
-def test_stuck_flagged_challenges_do_not_starve_settlement(make_user, monkeypatch):
+def test_stuck_flagged_challenges_do_not_starve_settlement(make_user, monkeypatch,
+                                                           winner_minimum_of_one):
     from social import tasks
     from social.models import Challenge
 

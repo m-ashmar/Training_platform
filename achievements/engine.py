@@ -327,11 +327,34 @@ class AchievementEngine:
                 # Never for an account that is not active (the owner's decision 8,
                 # 2026-09-24): a suspended or erased account holds no place.
                 from users.visibility import public_q
+                # And never below MIN_PARTICIPANTS_FOR_WINNER active participants (the
+                # owner, 2026-09-24). The settlement already refuses to check a winner
+                # there (`social/tasks.py _settle_winner`); this is the same rule read
+                # off the SETTLED RECORD, so the engine awards nothing below the minimum
+                # even when called directly. At the settlement a participation holds a
+                # stored `rank` exactly when it is in the standing (`write_places(
+                # settling=True)`), and after it nothing re-ranks, so "ranked and above
+                # zero" is `active_participants` as it stood then — a later suspension
+                # does not take back a win that was valid when it was settled.
+                from django.db.models import IntegerField, OuterRef, Subquery, Value
+                from django.db.models.functions import Coalesce
+                from social import standing
 
-                return ChallengeParticipation.objects.filter(
+                settled_active = (ChallengeParticipation.objects
+                                  .filter(challenge_id=OuterRef('challenge_id'),
+                                          rank__isnull=False, current_value__gt=0)
+                                  .order_by().values('challenge_id')
+                                  .annotate(n=Count('id')).values('n'))
+
+                return ChallengeParticipation.objects.annotate(
+                    settled_active=Coalesce(Subquery(settled_active,
+                                                     output_field=IntegerField()),
+                                            Value(0)),
+                ).filter(
                     ended,
                     public_q('user'),
                     Challenge.ranked_q('challenge__'),
+                    settled_active__gte=standing.MIN_PARTICIPANTS_FOR_WINNER,
                     user=user,
                     status='completed',
                     rank=1,
