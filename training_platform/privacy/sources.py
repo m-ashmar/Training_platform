@@ -4,6 +4,7 @@ Registered once, here, so export / erasure / retention stay in step. Retention w
 answer P12-03: `UserActivity` and `UserSession` carry IP address and user agent and were
 previously kept forever.
 """
+from django.conf import settings
 from django.utils.crypto import get_random_string
 
 from .registry import PersonalDataSource, register
@@ -92,9 +93,25 @@ register(PersonalDataSource(label="chat_sessions", model="ai_assistant.ChatSessi
 register(PersonalDataSource(
     label="behaviour_events", model="ai_assistant.UserBehaviorEvent", user_field="user",
     retention_days=365))
+def _training_subject_key(user):
+    from ai_assistant.anonymise import subject_key_for
+
+    return subject_key_for(user)
+
+
+# The anonymous copies kept for improving the coach while "help us improve" is on (the
+# owner, 2026-09-24). No FK reaches the person: a copy is found by `subject_key`, the
+# keyed pseudonym of the user id, which is how erasure deletes them. The export hands
+# the person every copy as it is stored, so they can see that it holds no name, account
+# or measurement, but without the two pseudonyms, which mean nothing to anyone
+# without the server secret.
 register(PersonalDataSource(
-    label="ai_training_data", model="ai_assistant.AITrainingData", user_field="user",
-    retention_days=365, retention_field="retain_until", retention_is_deadline=True))
+    label="ai_training_data", model="ai_assistant.AITrainingData",
+    user_field="subject_key", user_value=_training_subject_key,
+    fields=["created_at", "retain_until", "user_context_snapshot", "user_message",
+            "tools_called", "tool_results", "ai_response", "user_feedback"],
+    retention_days=settings.AI_TRAINING_RETENTION_DAYS, retention_field="retain_until",
+    retention_is_deadline=True))
 
 # --- chat ---------------------------------------------------------------------
 # A private 1:1 thread is JOINT personal data: both people are in every row of it, so

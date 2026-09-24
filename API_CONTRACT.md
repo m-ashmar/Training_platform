@@ -1485,6 +1485,42 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   username, user_type, first_name, last_name, profile_picture_url, followers_count,
   is_following, member_since}`. `by_username/` is unchanged (exact, case-sensitive).
 
+**Anonymous AI training copies** (the owner's decisions 1-3 of 2026-09-24, P0). No
+route, field or `code` changes. What "help us improve" keeps is now what the app says it
+keeps, and each view's docstring states it in full.
+
+- **What a copy is.** While `training-consent/` is on, each answered turn leaves one
+  copy (`AITrainingData`). The copy has no link to the account, the chat or the message,
+  and holds no name, username, e-mail, phone number or account id. The text keeps what
+  was said, with e-mail addresses, phone numbers (Arabic-Indic digits too), links,
+  @handles and the person's own names removed; a name a tool told the coach (the
+  trainer's, for one) is removed too. Anything else the person typed, a weight or an
+  injury included, stays as typed. Tool output loses every id and name, and the profile
+  tools' answers become ranges. The profile is ranges and codes only: age band
+  (`<18`, `18-24` … `65+`), height band (10 cm), weight band (10 kg), BMI category,
+  gender, activity level, goal, training goal, the injury areas chosen from the list
+  (never the injury description), how many routines are active, and the diet goal with
+  a 250 kcal calorie band. The copy is stored under a keyed pseudonym (HMAC-SHA256 of the
+  user id with a server secret, `AI_TRAINING_PSEUDONYM_KEY`, which production requires).
+  Nobody without the secret can reverse it, and it is used only to find the person's
+  copies to delete them, or to put a later 👍/👎 on the right one.
+- **Deleted with the person.** Switching `training-consent/` off, `DELETE /api/ai/data/`,
+  `DELETE /api/privacy/erase/` and deleting the account each delete every copy kept for
+  that person, found by the pseudonym. `GET /api/ai/data/` `details.training_records`
+  counts them the same way.
+- **Deleted after 365 days at most.** Every copy is written with `retain_until`
+  (`AI_TRAINING_RETENTION_DAYS`, default 365; the server refuses to start with more). A
+  daily job (`ai_assistant.tasks.purge_expired_training_data`) deletes a copy once that
+  date passes.
+- **The export** (`GET /api/privacy/export/`) gives the person
+  `sections.ai_training_data`: every copy exactly as stored, `{created_at, retain_until,
+  user_context_snapshot, user_message, tools_called, tool_results, ai_response,
+  user_feedback}`, without the pseudonym. The list is empty when nothing is kept.
+- **Rows already kept** were converted by migration `ai_assistant 0009`, which cannot be
+  reversed: pseudonym from the old user id, the snapshot reduced to bands, the free text
+  and the names dropped, the text scrubbed. Migration `0010` then drops the three FK
+  columns.
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 

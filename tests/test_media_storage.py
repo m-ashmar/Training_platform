@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import secrets
 import struct
 import subprocess
 import sys
@@ -367,6 +368,10 @@ def _production_boot(**overrides):
         # tests can be failing on is the media backend. GENERATED, never a literal: a
         # key-shaped string in the repository is what `detect-secrets` exists to catch.
         "FIELD_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+        # Required since the owner's decision of 2026-09-24: anonymous AI training
+        # copies are keyed with it, and production refuses to boot without it. Generated,
+        # for the same reason as the key above.
+        "AI_TRAINING_PSEUDONYM_KEY": secrets.token_hex(32),
     }
     env.update(overrides)
     code = ("import training_platform.settings_production as s; "

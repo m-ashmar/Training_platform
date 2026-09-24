@@ -488,7 +488,9 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 session__user=self.user,
                 role='assistant',
             )
-            # On the FK, not on a text prefix. `AITrainingData.message` was added to
+            # By the reply's keyed pseudonym (`AITrainingData.reply_key`; the copy has
+            # had no FK since the owner's decision of 2026-09-24), not on a text prefix.
+            # History: `AITrainingData.message` was added to
             # replace exactly this join — the model comment says the old key was "first
             # 100 characters of ai_response, and replies routinely share an opening
             # line, so a single thumbs-up mislabelled several unrelated rows" — but

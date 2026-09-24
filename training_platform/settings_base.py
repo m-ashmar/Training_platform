@@ -1092,5 +1092,25 @@ STORAGES = {
 MODELTRANSLATION_DEFAULT_LANGUAGE = 'en'
 MODELTRANSLATION_FALLBACK_LANGUAGES = ('en', 'ar')
 
-# How long AI training snapshots (which contain health context) are retained.
-AI_TRAINING_RETENTION_DAYS = int(get_env('AI_TRAINING_RETENTION_DAYS', 365))
+# How long an AI training copy is kept (`AITrainingData.retain_until`), and the most it
+# may ever be. The contract (`POST /api/ai/training-consent/`) and the app's wording
+# promise "deleted after 365 days at most" (the owner, 2026-09-24), so a value above the
+# ceiling refuses to boot rather than silently break that promise. Shorter is allowed.
+AI_TRAINING_RETENTION_MAX_DAYS = 365
+AI_TRAINING_RETENTION_DAYS = get_int_env('AI_TRAINING_RETENTION_DAYS', 365)
+if not 1 <= AI_TRAINING_RETENTION_DAYS <= AI_TRAINING_RETENTION_MAX_DAYS:
+    from django.core.exceptions import ImproperlyConfigured as _ImproperlyConfigured
+
+    raise _ImproperlyConfigured(
+        f"AI_TRAINING_RETENTION_DAYS must be 1..{AI_TRAINING_RETENTION_MAX_DAYS}, got "
+        f"{AI_TRAINING_RETENTION_DAYS}: the app promises training copies are deleted "
+        f"after {AI_TRAINING_RETENTION_MAX_DAYS} days at most.")
+
+# The server secret AI training copies are keyed with (`ai_assistant/anonymise.py`):
+# `subject_key` = HMAC-SHA256(this, user id) is the ONLY link from a copy to its person,
+# and it is what lets "help us improve" off, `DELETE /api/ai/data/` and erasure find the
+# copies. Without it nobody can turn a key back into a user. Empty here; local settings
+# give a dev value, production requires a real one (`get_secret`, >= 32 characters).
+# NEVER rotate it while copies exist: a new key cannot find the old copies, so opting out
+# could no longer delete them. Delete every copy first.
+AI_TRAINING_PSEUDONYM_KEY = get_env('AI_TRAINING_PSEUDONYM_KEY', '')

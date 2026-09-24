@@ -316,7 +316,11 @@ def test_feedback_given_before_the_training_row_is_written_reaches_it(make_user)
     DataCollector().log_interaction(
         user=user, session=reply.session, user_message="q", ai_response=reply.content,
         tools_called=[], tool_results=[], message_id=reply.id)
-    assert AITrainingData.objects.get(message=reply).user_feedback == "negative"
+    # The owner's decision of 2026-09-24: the copy has no message FK; the reply is
+    # found by its keyed pseudonym. Same row, same assertion on its feedback.
+    from ai_assistant.anonymise import reply_key_for
+    assert AITrainingData.copies_of(user).get(
+        reply_key=reply_key_for(reply)).user_feedback == "negative"
 
 
 def test_feedback_on_someone_elses_reply_is_refused(make_user):

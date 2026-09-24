@@ -52,7 +52,13 @@ fly secrets set \
   CSRF_TRUSTED_ORIGINS="https://app.example.com" \
   EMAIL_HOST_USER="..." EMAIL_HOST_PASSWORD="..." \
   JWT_PRIVATE_KEY="..." JWT_PUBLIC_KEY="..." \
-  FIELD_ENCRYPTION_KEY="..."
+  FIELD_ENCRYPTION_KEY="..." \
+  AI_TRAINING_PSEUDONYM_KEY="$(openssl rand -hex 32)"
+
+# AI_TRAINING_PSEUDONYM_KEY keys the anonymous AI training copies (the owner,
+# 2026-09-24). Boot refuses it missing, under 32 characters, or equal to
+# DJANGO_SECRET_KEY. NEVER rotate it while copies exist: a new key cannot find the old
+# copies, so "help us improve" off could no longer delete them. Delete every copy first.
 
 # Media. `MEDIA_BACKEND=gcs` is REQUIRED: boot refuses 'local' (and refuses an unset
 # value, which defaults to local). GS_PROJECT_ID is optional when the key carries it.

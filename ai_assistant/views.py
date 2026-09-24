@@ -198,7 +198,8 @@ def ai_data_counts(user) -> dict:
     """
     return {
         'messages': ChatMessage.objects.filter(session__user=user).count(),
-        'training_records': AITrainingData.objects.filter(user=user).count(),
+        # By the keyed pseudonym: a training copy has no FK to its person.
+        'training_records': AITrainingData.copies_of(user).count(),
         'sessions': ChatSession.objects.filter(user=user).count(),
         'behavior_events': UserBehaviorEvent.objects.filter(user=user).count(),
         'insights': UserInsight.objects.filter(user=user).count(),
@@ -219,8 +220,10 @@ class GDPRDataDeleteView(APIView):
 
     What "the assistant's data" is — the six kinds, keyed as in `details`:
       `sessions` your chats; `messages` every message in them, yours and the coach's;
-      `training_records` the copies kept for improving the coach (only while "help us
-      improve" is on, `training-consent/`); `behavior_events` the usage signals it reads;
+      `training_records` the anonymous copies kept for improving the coach (only while
+      "help us improve" is on, `training-consent/`; they carry no name or account and
+      are counted and deleted by the keyed pseudonym they are stored under);
+      `behavior_events` the usage signals it reads;
       `insights` what it has worked out and cached about your training and diet;
       `cost_records` the per-day record of what your messages cost to answer.
     Nothing else: your routines, diet plans, logs and account are not touched.
@@ -265,14 +268,15 @@ class GDPRDataDeleteView(APIView):
         # Report the cascaded rows too — messages and training data were being deleted
         # but never counted, so the response under-reported what had been removed.
         counts = ai_data_counts(user)
-        ChatSession.objects.filter(user=user).delete()  # cascades to messages + training data
+        ChatSession.objects.filter(user=user).delete()  # cascades to the messages
         UserBehaviorEvent.objects.filter(user=user).delete()
         UserInsight.objects.filter(user=user).delete()
         UsageCost.objects.filter(user=user).delete()
 
-        # Training data is keyed to the user as well as the session; sweep any row whose
-        # session was already gone so nothing survives the request.
-        AITrainingData.objects.filter(user=user).delete()
+        # The training copies are anonymous (the owner, 2026-09-24): no FK to the chat
+        # or the person, so deleting the chats does not reach them. Found by the keyed
+        # pseudonym instead.
+        AITrainingData.copies_of(user).delete()
 
         total = sum(counts.values())
 
@@ -300,6 +304,19 @@ class AITrainingConsentView(APIView):
     turns it on here; nothing else writes it, and it needs no plan and no AI consent,
     so it can always be read and switched off. Same on every build.
 
+    What a kept copy is (the owner's decision of 2026-09-24): ANONYMOUS. It carries no
+    name, username, e-mail, phone number, account id, and no link to the account, the
+    chat or the message. It keeps the text of the turn with e-mail addresses, phone
+    numbers, links, @handles and names removed (the person's own, and any a tool told
+    the coach, the trainer's for one); anything else the person typed, a weight or an
+    injury included, stays as typed. The tools' output loses ids and names, and the
+    profile tools' answers become ranges. The profile is ranges and categories only:
+    age band, height band (10 cm), weight band (10 kg), BMI category, gender, activity
+    level, goal, the injury AREAS chosen from the list (never the injury description).
+    It is stored under a keyed pseudonym that only the server's secret produces. That pseudonym is used for one thing: finding the
+    person's copies to delete them. Each copy is deleted automatically at most 365 days
+    after it was kept (`AI_TRAINING_RETENTION_DAYS`, which can only be shorter).
+
     GET — 200 `{granted, set_at}`. Never answered reads `{"granted": false, "set_at":
     null}`; `set_at` (ISO 8601 with offset) is when the person last set it.
 
@@ -307,7 +324,8 @@ class AITrainingConsentView(APIView):
     is stamped on every POST. Turning it OFF also deletes every training copy already
     kept (`GET /api/ai/data/` `details.training_records` reads 0 after), and the very
     next turn keeps nothing, on a WebSocket already open too. Your chats themselves
-    stay (deleting those is `DELETE /api/ai/data/`).
+    stay (deleting those is `DELETE /api/ai/data/`, which deletes the copies too; so
+    does erasing the account).
 
     Refusals: 400 `validation_error` — `granted` missing, or not a JSON boolean
     (`"true"`, `1`, `null` are refused: only the person's own tap opts them in), or a
@@ -341,7 +359,8 @@ class AITrainingConsentView(APIView):
                 ai_training_consent=granted,
                 ai_training_consent_set_at=person.ai_training_consent_set_at)
             if not granted:
-                # Withdrawn: the copies kept on the strength of it go too.
-                AITrainingData.objects.filter(user=person).delete()
+                # Withdrawn: the copies kept on the strength of it go too, found by the
+                # keyed pseudonym they are stored under (they have no FK to the person).
+                AITrainingData.copies_of(person).delete()
 
         return Response(AITrainingConsentSerializer(person).data)

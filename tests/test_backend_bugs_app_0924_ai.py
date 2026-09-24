@@ -107,7 +107,10 @@ def test_b083_what_the_assistant_keeps_is_readable_whenever_it_can_be_deleted(ma
     for session in (first, second):
         ChatMessage.objects.create(session=session, role="user", content="q")
         ChatMessage.objects.create(session=session, role="assistant", content="a")
-    AITrainingData.objects.create(user=person, session=first, consented=True,
+    # Setup, not an assertion: since the owner's decision of 2026-09-24 a training copy
+    # has no user or chat FK and is stored under the person's keyed pseudonym.
+    from ai_assistant.anonymise import subject_key_for
+    AITrainingData.objects.create(subject_key=subject_key_for(person), consented=True,
                                   user_context_snapshot={}, user_message="q",
                                   ai_response="a")
 
@@ -172,17 +175,19 @@ def test_b084_help_us_improve_is_set_by_the_person_and_nothing_else(make_user, a
     turn = dict(session=session, user_message="q", ai_response="a", tools_called=[],
                 tool_results=[], message_id=reply.id)
     DataCollector().log_interaction(user=socket_user, **turn)
-    assert AITrainingData.objects.filter(user=person).count() == 1
+    # The owner's decision of 2026-09-24: a training copy has no user FK, so "this
+    # person's copies" is `copies_of` (the keyed pseudonym). Same count, same meaning.
+    assert AITrainingData.copies_of(person).count() == 1
 
     # Off: what was kept goes, and the next turn keeps nothing, although the socket's
     # instance still says True.
     revoked = client.post(url, {"granted": False}, content_type=JSON)
     assert revoked.status_code == 200, revoked.content
     assert revoked.json()["granted"] is False and revoked.json()["set_at"]
-    assert AITrainingData.objects.filter(user=person).count() == 0
+    assert AITrainingData.copies_of(person).count() == 0
     assert socket_user.ai_training_consent is True
     DataCollector().log_interaction(user=socket_user, **turn)
-    assert AITrainingData.objects.filter(user=person).count() == 0, \
+    assert AITrainingData.copies_of(person).count() == 0, \
         "the collector trusted the socket's stale copy of the consent"
 
     # It is not the AI consent, and it needs neither that nor a plan.

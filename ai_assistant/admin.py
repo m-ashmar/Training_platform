@@ -45,17 +45,21 @@ class ChatSessionAdmin(admin.ModelAdmin):
 
 @admin.register(AITrainingData)
 class AITrainingDataAdmin(admin.ModelAdmin):
+    """Anonymous training copies (the owner, 2026-09-24): no person to show or search
+    by. The two keyed pseudonyms are left off the page: they mean nothing without the
+    server secret and are only for finding a person's copies to delete them."""
     list_display = [
-        'user', 'user_feedback', 'response_tokens',
-        'response_latency_ms', 'created_at',
+        'id', 'user_feedback', 'response_tokens',
+        'response_latency_ms', 'created_at', 'retain_until',
     ]
     list_filter = ['user_feedback', 'created_at']
-    search_fields = ['user__username', 'user_message', 'ai_response']
-    readonly_fields = [
-        'user', 'session', 'user_context_snapshot', 'user_message',
-        'tools_called', 'tool_results', 'ai_response',
-        'response_tokens', 'response_latency_ms', 'created_at',
+    search_fields = ['user_message', 'ai_response']
+    fields = [
+        'user_context_snapshot', 'user_message', 'tools_called', 'tool_results',
+        'ai_response', 'user_feedback', 'response_tokens', 'response_latency_ms',
+        'created_at', 'retain_until',
     ]
+    readonly_fields = fields
     date_hierarchy = 'created_at'
 
     def has_add_permission(self, request):

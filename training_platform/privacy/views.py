@@ -27,7 +27,12 @@ class PersonalDataExportView(APIView):
     source (`privacy/sources.py`). It never discloses what the API itself withholds:
     `blocks` is `{id, blocked, created_at}` for the blocks this person MADE, never one
     made against them; `reports_made` is what `GET /api/v1/reports/mine/` pages, without
-    who handled it. Identical on every build.
+    who handled it. `ai_training_data` is every anonymous copy kept to improve the AI
+    coach while "help us improve" was on, exactly as stored: `{created_at, retain_until,
+    user_context_snapshot, user_message, tools_called, tool_results, ai_response,
+    user_feedback}`, with the ranges and the scrubbed text and without the keyed
+    pseudonym it is stored under. The list is empty when none is kept. Identical on
+    every build.
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -53,6 +58,9 @@ class PersonalDataEraseView(APIView):
     `?dry_run=1` reports what would happen without touching anything. `GET` is the same
     preview; for a trainer, `preview.trainer_relations.active_clients` counts the clients
     they still coach, and while it is above 0 the erasure is refused.
+
+    The anonymous AI training copies (`ai_training_data`) are found by the keyed
+    pseudonym they are stored under and deleted, and counted like any other source.
 
     Rows about the caller that other people hold go too and are never counted in the
     preview or the report: blocks made against them, and the chat notices they sent,
