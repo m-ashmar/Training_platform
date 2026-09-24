@@ -595,12 +595,18 @@ def confirm(withdrawal_id, operator, note="") -> Withdrawal:
         _refuse_from(withdrawal, (State.SENT,), "confirmed")
         clearing = get_payout_clearing_wallet(withdrawal.currency)
         locked = lock_wallets(getattr(operator, "pk", None), [clearing])
-        tx = move_funds_atomic(locked[clearing.pk], None, withdrawal.amount,
-                               actor_id=getattr(operator, "pk", None), tx_type="transfer",
-                               currency=withdrawal.currency,
-                               money_type=MoneyType.WALLET_MOVE,
-                               metadata={**_ledger_metadata(withdrawal, "withdrawal_paid_out"),
-                                         "trainer_id": withdrawal.trainer_id})
+        try:
+            tx = move_funds_atomic(
+                locked[clearing.pk], None, withdrawal.amount,
+                actor_id=getattr(operator, "pk", None), tx_type="transfer",
+                currency=withdrawal.currency, money_type=MoneyType.WALLET_MOVE,
+                metadata={**_ledger_metadata(withdrawal, "withdrawal_paid_out"),
+                          "trainer_id": withdrawal.trainer_id})
+        except ValueError as exc:
+            # Clearing holds every open withdrawal, so this is a ledger out of step
+            # (a hand edit, a restore): nothing moved, and the operator is told.
+            raise TransitionRefused("ledger_refused",
+                                    f"The ledger refused it: {exc}. Nothing moved.") from exc
         now = timezone.now()
         withdrawal.state, withdrawal.confirmed_at = State.CONFIRMED, now
         withdrawal.payout_reference = tx.reference_id
@@ -632,8 +638,12 @@ def fail(withdrawal_id, operator, reason) -> Withdrawal:
             return withdrawal
         _refuse_from(withdrawal, OPEN_STATES, "failed")
         before = withdrawal.state
-        reference = _return_money(withdrawal, getattr(operator, "pk", None),
-                                  "withdrawal_returned")
+        try:
+            reference = _return_money(withdrawal, getattr(operator, "pk", None),
+                                      "withdrawal_returned")
+        except ValueError as exc:
+            raise TransitionRefused("ledger_refused",
+                                    f"The ledger refused it: {exc}. Nothing moved.") from exc
         withdrawal.state, withdrawal.failed_at = State.FAILED, timezone.now()
         withdrawal.return_reference, withdrawal.failure_reason = reference, reason
         withdrawal.save(update_fields=["state", "failed_at", "return_reference",
