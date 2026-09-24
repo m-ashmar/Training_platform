@@ -2609,7 +2609,11 @@ class ProfilePictureUploadView(APIView):
     def post(self, request):
         """Upload a new profile picture. Body: multipart/form-data with the image as the
         `profile_picture` part (at most 2 MB; its content is checked, re-encoded and
-        stripped of EXIF).
+        stripped of EXIF). How many pixels it may have depends on the kind of file — what
+        a 512 MB server can decode (`process_uploaded_image`): a camera JPEG up to 40 MP,
+        stored at half its width and height when it is too large to decode whole; a PNG
+        about 33 MP, a WebP 6.7 (4.8 with transparency). Over that,
+        `image_too_many_pixels`, its sentence naming the limit (API_CONTRACT.md).
 
         200: `{message, profile_picture_url, user: {id, username, email, first_name,
         last_name, user_type, profile_picture}}`.

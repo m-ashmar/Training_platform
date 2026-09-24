@@ -657,6 +657,19 @@ def process_uploaded_image(file, max_bytes=None, quarantine=True):
     a malformed frame, a decompression bomb Pillow itself refuses — is refused as
     `unreadable_image`. It used to escape as Pillow's OSError: a 500 on every route.
 
+    How large an image may be is what decoding it costs, priced from its header before
+    a pixel is decoded (SIDE_BUGS S-210): at most `MAX_IMAGE_DIMENSION` (10,000 px) a
+    side and `MAX_IMAGE_PIXELS` (40 MP) in all, and within
+    `image_budget.DECODE_BUDGET_BYTES` (128 MB) at its peak. A baseline JPEG is taken up
+    to 40 MP: one too large to decode whole (colour over about 19 MP, CMYK over 12) is
+    decoded, and stored, at half or a quarter of its width and height. Anything else is
+    refused over its own limit: a PNG about 33 MP (RGB or RGBA; grey or palette 40,
+    grey with alpha 11), a WebP 6.7 MP (4.8 with transparency), a progressive JPEG 10 to
+    13 MP in colour, an animated GIF 5.6 MP of canvas for two frames and less as frames
+    are added. Over any of them: `image_too_many_pixels` (or
+    `image_dimensions_too_large` for a side), with `max_pixels` / `max_side` in the
+    error's `params`; over a kind's own limit the sentence names it in megapixels.
+
     Returns (ContentFile, extension) — a re-encoded image safe to store.
     Raises ValidationError on anything suspicious.
     """
