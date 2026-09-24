@@ -4545,3 +4545,64 @@ msgstr "يمكنك إبراز 3 إنجازات كحدّ أقصى"
 #: social/serializers.py
 msgid "A secret badge cannot be shared."
 msgstr "لا يمكن مشاركة شارة سرية."
+
+#: routine/views.py
+msgid "This routine is not assigned to you."
+msgstr "هذا البرنامج التدريبي غير مُسنَد إليك."
+
+#: routine/views.py
+msgid "You can only assign routines to your approved clients."
+msgstr "يمكنك تعيين البرامج التدريبية لمتدربيك المعتمدين فقط."
+
+#: routine/views.py
+msgid "This routine is already assigned to this client."
+msgstr "هذا البرنامج التدريبي مُسنَد لهذا المتدرب مسبقاً."
+
+#: routine/views.py
+msgid "An error occurred while assigning the routine."
+msgstr "حدث خطأ أثناء تعيين البرنامج التدريبي."
+
+#: routine/views.py
+msgid "You can only unassign routines from your approved clients."
+msgstr "يمكنك إلغاء تعيين البرامج التدريبية من متدربيك المعتمدين فقط."
+
+#: routine/views.py
+msgid "This routine is not assigned to this client."
+msgstr "هذا البرنامج التدريبي غير مُسنَد لهذا المتدرب."
+
+#: routine/views.py
+msgid "An error occurred while unassigning the routine."
+msgstr "حدث خطأ أثناء إلغاء تعيين البرنامج التدريبي."
+
+#: routine/views.py
+msgid "start_date and end_date must be YYYY-MM-DD."
+msgstr "يجب أن يكون تاريخ البداية وتاريخ النهاية بالصيغة YYYY-MM-DD."
+
+#: routine/views.py
+msgid "end_date is before start_date."
+msgstr "تاريخ النهاية يسبق تاريخ البداية."
+
+#: routine/views.py
+msgid "days must be a whole number."
+msgstr "يجب أن يكون عدد الأيام رقماً صحيحاً."
+
+#: routine/views.py
+#, python-format
+msgid "days must be between 1 and %(max)d."
+msgstr "يجب أن يكون عدد الأيام بين 1 و%(max)d."
+
+#: routine/views.py
+msgid "You can only view progress for your approved clients."
+msgstr "يمكنك عرض تقدّم متدربيك المعتمدين فقط."
+
+#: routine/permissions.py
+msgid "Only the person who trained can change or delete this set."
+msgstr "لا يمكن تعديل هذه المجموعة أو حذفها إلا من قِبل الشخص الذي تمرّن."
+
+#: routine/permissions.py
+msgid "Only the person who trained can change or delete this workout."
+msgstr "لا يمكن تعديل هذا التمرين أو حذفه إلا من قِبل الشخص الذي تمرّن."
+
+#: routine/serializers.py
+msgid "That routine is not assigned to you."
+msgstr "هذا البرنامج التدريبي غير مُسنَد إليك."
