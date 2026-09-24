@@ -338,6 +338,46 @@ def test_receivable_settlements_and_entries_are_immutable(make_user, api):
     assert _receivable(profile) == D("500.00")
 
 
+def test_receivable_top_ups_made_before_it_existed_are_posted_once(make_user):
+    """Migration 0019: every earlier AGENT top-up (and its reversal) is posted in the
+    order it happened, dated as it happened; a plan payment's mint leg is not an agent's
+    cash; running it twice posts nothing twice."""
+    import importlib
+
+    from django.apps import apps
+
+    from wallet.models import (AgentReceivableEntry, Wallet, move_funds_atomic,
+                               wallet_for)
+
+    client = make_user("asbf_c")
+    agent, profile = _agent(make_user, "asbf_a")
+    wallet = wallet_for(client, "client")
+    first = move_funds_atomic(None, wallet, D("300.00"), actor_id=agent.id,
+                              tx_type="topup", currency="SYP",
+                              money_type="WALLET_MOVE", metadata={"agent_id": agent.id})
+    second = move_funds_atomic(None, wallet, D("200.00"), actor_id=agent.id,
+                               tx_type="topup", currency="SYP",
+                               money_type="WALLET_MOVE", metadata={"agent_id": agent.id})
+    move_funds_atomic(None, wallet, D("999.00"), actor_id=client.id, tx_type="topup",
+                      currency="SYP", money_type="PLATFORM_SUB",
+                      metadata={"original_payment_id": "p-1"})
+    back = move_funds_atomic(Wallet.objects.get(pk=wallet.pk), None, D("200.00"),
+                             actor_id=agent.id, tx_type="reversal",
+                             money_type="WALLET_MOVE", reverses=second)
+    migration = importlib.import_module(
+        "wallet.migrations.0019_agent_receivable_backfill_and_raised_caps")
+    migration.backfill_the_receivable(apps, None)
+    migration.backfill_the_receivable(apps, None)
+
+    rows = list(AgentReceivableEntry.objects.filter(agent=profile).order_by("id"))
+    assert [(r.kind, r.amount, r.balance_after, r.transaction_id) for r in rows] == [
+        ("topup", D("300.00"), D("300.00"), first.pk),
+        ("topup", D("200.00"), D("500.00"), second.pk),
+        ("reversal", D("-200.00"), D("300.00"), back.pk)]
+    assert rows[0].created_at == first.created_at
+    assert _receivable(profile) == D("300.00")
+
+
 def test_receivable_a_reversed_top_up_comes_off_it(make_user, api):
     client = make_user("asrev_c")
     agent, profile = _agent(make_user, "asrev_a", daily_limit="100000",
