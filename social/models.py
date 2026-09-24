@@ -10,6 +10,8 @@ content sharing, community interactions, and social feeds.
 from django.db import models
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes.fields import GenericForeignKey
+from datetime import timedelta
+
 from django.utils import timezone
 from django.utils.translation import gettext_lazy
 from users.models import CustomUser
@@ -407,11 +409,27 @@ class Challenge(models.Model):
     #: the same moderation switch a post and a comment have (SIDE_BUGS S-065). A hidden
     #: challenge is served to nobody, its creator included.
     is_hidden = models.BooleanField(default=False)
-    
+
+    #: When the winner of this challenge was SETTLED (owner, 2026-09-24, F20): the
+    #: challenge ended at least `REVIEW_HOURS` ago, the standing was re-ranked one last
+    #: time, and whoever holds place 1 was checked for the Challenge Winner badge — or
+    #: nobody could be (a manual or unranked challenge, nobody at the target). Written
+    #: ONCE (`social/tasks.py settle_winners`); null while the standing is still open to
+    #: review, and while the person at place 1 is flagged and no operator has decided.
+    winner_checked_at = models.DateTimeField(null=True, blank=True)
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
+    #: How long after its end a challenge's standing stays open for review before the
+    #: winner is final (F20). An operator reviews flagged participants in that window.
+    #: Equal to `social/challenge_progress.py LATE_HOURS`: a set of the window's last day
+    #: that syncs late (a phone offline) is still counted up to LATE_HOURS after its day,
+    #: so the winner must not settle before those sets can arrive
+    #: (tests/test_owner_decisions_0924_challenges.py pins REVIEW_HOURS >= LATE_HOURS).
+    REVIEW_HOURS = 72
+
     class Meta:
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
         # paging repeated and hid rows whenever two records shared the value.
@@ -458,10 +476,64 @@ class Challenge(models.Model):
         """Is the challenge running right now?"""
         return self.lifecycle_status == 'active'
 
+    def counting_open(self, now=None) -> bool:
+        """May a recount still move this challenge's numbers?
+
+        While it runs, and after its end for `LATE_HOURS` more — the sets of its window
+        that sync late still count (`challenge_progress.credible_sets` refuses any set
+        received later than that) — until its winner is settled. Never for a manual,
+        hidden or cancelled challenge, or one not started yet."""
+        from .challenge_progress import LATE_HOURS
+
+        now = now or timezone.now()
+        return (self.auto_counted and not self.is_hidden and self.status != 'cancelled'
+                and self.winner_checked_at is None and self.start_date <= now
+                and now <= self.end_date + timedelta(hours=LATE_HOURS))
+
     @property
     def auto_counted(self):
         """Does the server count this challenge's progress from logged training?"""
         return self.metric != self.METRIC_MANUAL
+
+    #: Creators whose auto-counted challenges are RANKED: a VERIFIED trainer, or staff.
+    RANKED_CREATOR_TYPES = ('trainer',)
+
+    @property
+    def ranked(self):
+        """Can a first place in this challenge earn anything (owner, 2026-09-24, F20)?
+
+        Only when the server counts it (`auto_counted`: no self-reported number wins a
+        prize) AND staff or a VERIFIED trainer (`trainer_is_verified`, set by an
+        operator) created it. A client cannot open a challenge of their own and crown
+        themselves, and since anyone may sign up as a trainer, neither can a throwaway
+        trainer account made to crown a friend. The Challenge Winner badge, and anything else
+        a first place earns, is awarded only for a ranked challenge. `ranked_q` is the
+        same rule as a query.
+        """
+        creator = self.creator
+        return bool(self.auto_counted and creator is not None and (
+            creator.is_staff or (creator.user_type in self.RANKED_CREATOR_TYPES
+                                 and creator.trainer_is_verified)))
+
+    @classmethod
+    def ranked_q(cls, prefix=''):
+        """`ranked` as a query, over `<prefix>` (e.g. `'challenge__'`)."""
+        return (~models.Q(**{f'{prefix}metric': cls.METRIC_MANUAL})
+                & (models.Q(**{f'{prefix}creator__is_staff': True})
+                   | models.Q(**{f'{prefix}creator__user_type__in': cls.RANKED_CREATOR_TYPES,
+                                 f'{prefix}creator__trainer_is_verified': True})))
+
+    @property
+    def review_ends_at(self):
+        """When the review of the standing closes: `REVIEW_HOURS` after the end."""
+        from datetime import timedelta
+
+        return self.end_date + timedelta(hours=self.REVIEW_HOURS)
+
+    @property
+    def winner_final(self):
+        """The challenge ended at least `REVIEW_HOURS` ago and its winner is settled."""
+        return self.winner_checked_at is not None
 
     @classmethod
     def advance_stored_phases(cls, now=None):
@@ -538,7 +610,43 @@ class ChallengeParticipation(models.Model):
     
     # Ranking
     rank = models.PositiveIntegerField(null=True, blank=True)
-    
+
+    #: The review of this participant's standing (owner, 2026-09-24, F20).
+    #:
+    #: `clear` — nothing to look at (the default).
+    #: `flagged` — a recount found a single day above a review threshold
+    #:     (`social/challenge_progress.py REVIEW_THRESHOLDS`, reason `day_over_threshold`).
+    #:     The person keeps their place, but a flagged first place wins nothing until an
+    #:     operator clears it. Never un-flagged automatically.
+    #: `disqualified` — an operator's decision (reason `operator`). The participation
+    #:     holds NO place anywhere (`social/standing.py in_standing`), cannot rejoin
+    #:     (`join` answers 403 `challenge_disqualified`), and its `current_value` is
+    #:     still recounted, so clearing it restores a true number.
+    REVIEW_CLEAR = 'clear'
+    REVIEW_FLAGGED = 'flagged'
+    REVIEW_DISQUALIFIED = 'disqualified'
+    REVIEW_STATES = [
+        (REVIEW_CLEAR, gettext_lazy('Clear')),
+        (REVIEW_FLAGGED, gettext_lazy('Flagged for review')),
+        (REVIEW_DISQUALIFIED, gettext_lazy('Disqualified')),
+    ]
+    REASON_DAY_OVER_THRESHOLD = 'day_over_threshold'
+    REASON_OPERATOR = 'operator'
+    REVIEW_REASONS = [
+        (REASON_DAY_OVER_THRESHOLD, gettext_lazy('A day above the review threshold')),
+        (REASON_OPERATOR, gettext_lazy('Set by an operator')),
+    ]
+    review_state = models.CharField(max_length=16, choices=REVIEW_STATES,
+                                    default=REVIEW_CLEAR, db_index=True)
+    review_reason = models.CharField(max_length=24, choices=REVIEW_REASONS,
+                                     null=True, blank=True)
+    #: The last training day an operator's CLEAR covered: the latest day above a review
+    #: threshold when they cleared (`social/review.py apply_review`). A recount flags a
+    #: cleared participant again only for a day above a threshold AFTER this one, so
+    #: one clear is not a licence to log the daily maximum from then on. Null: the
+    #: operator cleared nothing, and any day above a threshold flags.
+    review_cleared_through = models.DateField(null=True, blank=True)
+
     class Meta:
         unique_together = ['user', 'challenge']
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET

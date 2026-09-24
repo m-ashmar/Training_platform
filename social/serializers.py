@@ -673,6 +673,15 @@ class ChallengeSerializer(serializers.ModelSerializer):
     #: not `manual`), so the app offers «ابدأ تمرين اليوم» and no manual log
     #: (BACKEND_BUGS B-075). `metric` itself is writable, default `manual`.
     auto_counted = serializers.ReadOnlyField()
+    #: Anti-cheat (owner, 2026-09-24, F20). `ranked`: a first place here can win
+    #: something (auto-counted, created by a trainer or staff). `counting`: the
+    #: credible-work rules of the count, null for a manual challenge. `review_hours`:
+    #: how long after the end the standing stays open for review. `winner_final`: the
+    #: review is over and the winner settled. `ChallengeViewSet`'s docstring has all four.
+    ranked = serializers.ReadOnlyField()
+    counting = serializers.SerializerMethodField()
+    review_hours = serializers.SerializerMethodField()
+    winner_final = serializers.ReadOnlyField()
 
     class Meta:
         model = Challenge
@@ -682,6 +691,7 @@ class ChallengeSerializer(serializers.ModelSerializer):
             'max_participants', 'participants_count', 'status',
             'created_at', 'rules', 'reward_description', 'image',
             'is_joined', 'user_progress', 'is_active', 'metric', 'auto_counted',
+            'ranked', 'counting', 'review_hours', 'winner_final',
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'participants_count']
 
@@ -720,6 +730,16 @@ class ChallengeSerializer(serializers.ModelSerializer):
             ).exists()
         return False
     
+    def get_counting(self, obj):
+        if not obj.auto_counted:
+            return None
+        from .challenge_progress import COUNTING
+
+        return dict(COUNTING)
+
+    def get_review_hours(self, obj):
+        return Challenge.REVIEW_HOURS
+
     def get_user_progress(self, obj):
         """Get current user's progress in this challenge"""
         # Prefer annotated fields if present
@@ -730,6 +750,9 @@ class ChallengeSerializer(serializers.ModelSerializer):
                 'current_value': getattr(obj, 'cur_value_anno', None) or 0.0,
                 'progress_percentage': getattr(obj, 'prog_pct_anno', None) or 0.0,
                 'rank': getattr(obj, 'rank_anno', None),
+                'review_state': (getattr(obj, 'review_state_anno', None)
+                                 or ChallengeParticipation.REVIEW_CLEAR),
+                'review_reason': getattr(obj, 'review_reason_anno', None),
             }
         request = self.context.get('request')
         if request and request.user.is_authenticated:
@@ -743,7 +766,9 @@ class ChallengeSerializer(serializers.ModelSerializer):
                 return {
                     'current_value': participation.current_value,
                     'progress_percentage': participation.progress_percentage,
-                    'rank': participation.place
+                    'rank': participation.place,
+                    'review_state': participation.review_state,
+                    'review_reason': participation.review_reason,
                 }
             except ChallengeParticipation.DoesNotExist:
                 # Optional side effect: swallowing this silently is what made the

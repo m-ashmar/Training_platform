@@ -820,23 +820,62 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     (`progress_auto_counted`), and the app shows «ابدأ تمرين اليوم» instead of the
     log sheet (BACKEND_BUGS B-075).
 
-    `user_progress` — `{current_value, progress_percentage, rank}` of the caller, or
-    null when they have not joined. `rank` is counted live by the one rule every
-    standing surface reads (`social/standing.py`, BACKEND_BUGS B-086): 1 + the number
-    of participants strictly ahead — more progress, then an earlier join, then a lower
-    participation id — so two people on the same number hold different places, the
-    earlier joiner first. Null for someone who dropped out.
+    `user_progress` — `{current_value, progress_percentage, rank, review_state,
+    review_reason}` of the caller, or null when they have not joined. `rank` is
+    counted live by the one rule every standing surface reads (`social/standing.py`,
+    BACKEND_BUGS B-086): 1 + the number of participants strictly ahead — more
+    progress, then an earlier join, then a lower participation id — so two people on
+    the same number hold different places, the earlier joiner first. Null for someone
+    who dropped out or was disqualified.
 
     **A suspended account holds no place** (the owner's decision 8, 2026-09-24): a
     participant whose account is not publicly visible (`users/visibility.py` —
-    suspended or erased) is treated like one who dropped out — not on the board, not
-    counted ahead of anyone, so everyone behind moves up in `rank`, the `leaderboard/`
-    rows and the home card alike — and a challenge created by such an account is still
-    listed, with `creator: null`. Reinstating the account restores both.
+    suspended or erased) is treated like one who dropped out or was disqualified — not
+    on the board, not counted ahead of anyone, so everyone behind moves up in `rank`,
+    the `leaderboard/` rows and the home card alike — and a challenge created by such
+    an account is still listed, with `creator: null`. Reinstating the account restores
+    both.
 
     `PATCH`/`PUT`/`DELETE` of a challenge the caller did not create is 403 `not_owner`
     (was `permission_denied`, the owner's decision 9, 2026-09-24).
+
+    Anti-cheat (owner, 2026-09-24, F20), all read-only on the row:
+      `ranked` — bool: `auto_counted` AND the creator is staff or a VERIFIED trainer
+          (`trainer_is_verified`; anyone may sign up as a trainer). Only a
+          ranked challenge can award the Challenge Winner badge (or anything a first
+          place earns); a manual (self-reported) challenge is never ranked.
+      `counting` — null for a manual challenge, else the credible-work rules the count
+          applies (`social/challenge_progress.py COUNTING`): `{"max_reps_per_set",
+          "max_weight_kg_per_set", "min_sets_per_day", "max_sets_per_day",
+          "max_volume_kg_per_day", "min_sets_per_workout", "min_workout_minutes",
+          "max_workouts_per_day", "late_hours"}`.
+      `review_hours` — 72 (equal to `counting.late_hours`): how long after the end
+          the standing stays open for review, and keeps counting its window's sets that
+          sync late, before the winner is final.
+      `winner_final` — bool: the challenge ended at least `review_hours` ago and its
+          winner is settled.
+      `user_progress.review_state` — `"clear"` | `"flagged"` | `"disqualified"`, and
+      `user_progress.review_reason` — null | `"day_over_threshold"` (a day of the
+          window above a review threshold, set automatically) | `"operator"`. Only the
+          person themselves sees them. Flagged: listed and placed normally, but a
+          flagged first place wins nothing until an operator clears it. Disqualified:
+          no place anywhere, `join` and `leave` answer 403 `challenge_disqualified`.
+
+    PUT/PATCH (the creator, or staff) — what decides a standing is fixed where
+    changing it would let a result be picked after the fact (F20). Both answer 400
+    with the top-level `code` and the field error beside it (`field_errors`):
+      `challenge_over` — `metric`, `start_date`, `end_date` or `target_value` of a
+          challenge that is over (ended or closed). Nothing recounts a finished
+          challenge, so switching a manual one to an auto-counted metric after the
+          end would have ranked its self-reported numbers.
+      `end_date_in_past` — an `end_date` earlier than now. Ending early is a close
+          (`status: "completed"`), which moves the end to the moment of the close, so
+          the review window runs from when it really ended.
+    Changing `metric` or the dates of a RUNNING challenge still recounts everyone.
     """
+    #: What a finished challenge keeps: `challenge_over` if a PATCH changes one.
+    FIXED_ONCE_OVER = ('metric', 'start_date', 'end_date', 'target_value')
+
     serializer_class = ChallengeSerializer
     permission_classes = [IsOwnerOrReadOnly]
     interaction_actions = ('join', 'leave', 'update_progress')
@@ -858,8 +897,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 'target_value', 'unit', 'start_date', 'end_date',
                 'max_participants', 'participants_count', 'status',
                 'created_at', 'rules', 'reward_description', 'image', 'metric',
+                'winner_checked_at',
                 'creator__id', 'creator__username', 'creator__email',
-                'creator__user_type', 'creator__profile_picture',
+                'creator__user_type', 'creator__profile_picture', 'creator__is_staff',
+                # `ranked` reads it (F20): deferred, it cost one query per row.
+                'creator__trainer_is_verified',
                 # Whether the creator may be shown (decision 8), read with the row.
                 'creator__is_active',
             )
@@ -885,6 +927,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 # Feed card read 2 while the board and the home card said 3 (B-086).
                 rank_anno=Subquery(in_standing(part_qs).annotate(place=place())
                                    .values('place')[:1]),
+                # The caller's own review (F20); nobody else's is ever served.
+                review_state_anno=Subquery(part_qs.values('review_state')[:1]),
+                review_reason_anno=Subquery(part_qs.values('review_reason')[:1]),
             )
         return qs
     
@@ -976,28 +1021,32 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         self._invalidate_challenges_cache(self.request)
 
     def perform_update(self, serializer):
-        """Save, and when this edit is what closed the challenge, check its winner.
+        """Save; a creator closing the challenge early ends it NOW.
 
         The Challenge Winner badge counts a first place only once the challenge is over
-        (`achievements/engine.py challenge_wins`, SIDE_BUGS S-044). The hourly phase
-        task checks the winners of the challenges the clock closes; a creator closing
-        one early (`status: "completed"`, or an end date moved into the past) closes it
-        here, so the check is queued here too — on commit, after the close is visible.
+        (`achievements/engine.py challenge_wins`, SIDE_BUGS S-044) and, since the
+        owner's F20 (2026-09-24), only once its standing has been open for review for
+        `Challenge.REVIEW_HOURS` after the end: the hourly phase task settles the
+        winner then (`social/tasks.py settle_winners`). A creator closing a challenge
+        early (`status: "completed"`) moves its `end_date` to the moment of the close,
+        so the review window runs from when it really ended.
         """
         before = serializer.instance
+        self._refuse_changes_that_pick_a_result(before, serializer.validated_data)
         was_over = before.lifecycle_status == 'completed'
         measured = (before.metric, before.start_date, before.end_date)
         target = before.target_value
         challenge = serializer.save()
+        now = timezone.now()
+        if (not was_over and challenge.status == 'completed'
+                and challenge.end_date > now):
+            Challenge.objects.filter(pk=challenge.pk).update(end_date=now)
+            challenge.end_date = now
         if challenge.target_value != target and not was_over:
             # Completion follows the target as it follows the number (the review, M6).
             from .challenge_progress import reapply_target
 
             reapply_target(challenge)
-        if not was_over and challenge.lifecycle_status == 'completed':
-            from .tasks import award_challenge_winners
-
-            transaction.on_commit(lambda: award_challenge_winners([challenge.pk]))
         # What the challenge counts, or over which days, changed while it runs: every
         # participant's number is recounted (one grouped query) and the standing
         # re-ranked, rather than waiting for each of them to log again (B-075).
@@ -1008,6 +1057,25 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 recount(challenge)
                 self._update_challenge_rankings(challenge)
+
+    def _refuse_changes_that_pick_a_result(self, before, data):
+        """`challenge_over` / `end_date_in_past`; see the class docstring."""
+        from rest_framework.exceptions import ErrorDetail
+
+        def refuse(field, message, code):
+            refusal = DRFValidationError({field: [ErrorDetail(message, code=code)]})
+            refusal.service_code = code
+            raise refusal
+
+        if before.lifecycle_status in Challenge.TERMINAL_STATUSES:
+            for field in self.FIXED_ONCE_OVER:
+                if field in data and data[field] != getattr(before, field):
+                    refuse(field, _('This challenge is over: what it measured and its '
+                                    'dates can no longer change.'), 'challenge_over')
+        end = data.get('end_date')
+        if end is not None and end != before.end_date and end < timezone.now():
+            refuse('end_date', _('The end of a challenge cannot be in the past. To end '
+                                 'it now, close it.'), 'end_date_in_past')
 
     @action(detail=True, methods=['post'])
     def join(self, request, pk=None):
@@ -1024,9 +1092,15 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 yet, over, or cancelled
           `400` `{"error", "code": "challenge_full"}` — `max_participants` reached (it
                 answered the bare `bad_request` default before, BACKEND_BUGS B-076)
+          `403` `{"error", "code": "challenge_disqualified"}` — an operator
+                disqualified you from this challenge (owner, 2026-09-24, F20); checked
+                before anything else
           `404` — no such challenge, or one an operator hid
         """
         challenge = self.get_object()
+
+        if self._is_disqualified(request.user, challenge):
+            return self._disqualified_response()
 
         # A challenge you can still take part in. `join` checked capacity only, while
         # `update_progress` checked `is_active` — so a client could join one that ended
@@ -1049,6 +1123,19 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                     {'error': _('Challenge is full'), 'code': 'challenge_full'},
                     status=status.HTTP_400_BAD_REQUEST)
             return self._join_locked(request, locked or challenge)
+
+    @staticmethod
+    def _is_disqualified(user, challenge):
+        return ChallengeParticipation.objects.filter(
+            user=user, challenge=challenge,
+            review_state=ChallengeParticipation.REVIEW_DISQUALIFIED).exists()
+
+    @staticmethod
+    def _disqualified_response():
+        return Response(
+            {'error': _('You were disqualified from this challenge.'),
+             'code': 'challenge_disqualified'},
+            status=status.HTTP_403_FORBIDDEN)
 
     def _join_locked(self, request, challenge):
         """The join itself, with the challenge row already locked by the caller."""
@@ -1106,11 +1193,17 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           `400` `{"error", "code": "challenge_closed"}` — the challenge is over or was
                 cancelled. A finished challenge is a record: its board, and the
                 Challenge Winner badge that keys on `rank=1`, do not change afterwards.
+          `403` `{"error", "code": "challenge_disqualified"}` — an operator
+                disqualified you (F20): the participation is kept, or leaving and
+                joining again would wipe the decision
           `404` — no such challenge
 
         Nothing differs by build.
         """
         challenge = self.get_object()
+
+        if self._is_disqualified(request.user, challenge):
+            return self._disqualified_response()
 
         # Same rule and the same `code` as `join`. Reused deliberately: it means the
         # same thing to the reader ("this challenge is not running"), and a shipped
@@ -1170,7 +1263,16 @@ class ChallengeViewSet(viewsets.ModelViewSet):
 
         `me` is the caller's own row whether or not it made the list — the app pins it
         below the board when it did not — and null when the caller has not joined or
-        dropped out (someone who dropped holds no place and is never listed).
+        dropped out (someone who dropped holds no place and is never listed). `me` alone
+        also carries the caller's review (owner, 2026-09-24, F20), which nobody else
+        sees: `"review_state": "clear" | "flagged" | "disqualified"` and
+        `"review_reason": null | "day_over_threshold" | "operator"`. A DISQUALIFIED
+        participant is left out of the rows and out of every place (places run 1..N
+        over the rest); their `me` row is still served, with `"rank": null`. A flagged
+        participant is listed and placed like anyone else.
+
+        `ranked` (bool) — whether a first place here can win anything (the challenge
+        row's `ranked`).
 
         An account the caller has blocked, or that has blocked them, is left out of
         `leaderboard` AFTER the places are counted: everyone else keeps their true
@@ -1195,7 +1297,12 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         participants = list(standing.order_by(*STANDING_ORDER)[:limit])
         mine = next((p for p in participants if p.user_id == request.user.id), None)
         if mine is None:
-            mine = standing.filter(user=request.user).first()
+            # Not on this page, or holding no place (disqualified): still their row.
+            from .standing import participating, place_or_none
+
+            mine = (participating(ChallengeParticipation.objects.filter(
+                        challenge=challenge, user=request.user))
+                    .select_related('user').annotate(place=place_or_none()).first())
 
         storage = CustomUser._meta.get_field('profile_picture').storage
 
@@ -1223,11 +1330,17 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         # have renumbered the whole board differently for every viewer, and the
         # Champion badge keys on rank 1.
         hidden = blocked_ids(request.user)
+        me = None
+        if mine is not None:
+            me = row(mine)
+            me['review_state'] = mine.review_state
+            me['review_reason'] = mine.review_reason
         return Response({
             'challenge': challenge.title,
             'auto_counted': challenge.auto_counted,
+            'ranked': challenge.ranked,
             'leaderboard': [row(p) for p in participants if p.user_id not in hidden],
-            'me': row(mine) if mine is not None else None,
+            'me': me,
         })
 
     @action(detail=True, methods=['post'])

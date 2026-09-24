@@ -4,6 +4,8 @@ Social App Admin — Admin interface for social models with translation support.
 
 from django.contrib import admin
 from modeltranslation.admin import TranslationAdmin
+
+from . import review
 from .models import (
     UserFollow, Post, PostLike, Comment, CommentLike,
     Challenge, ChallengeParticipation, Achievement, UserAchievement,
@@ -43,8 +45,13 @@ class UserFollowAdmin(admin.ModelAdmin):
 
 @admin.register(ChallengeParticipation)
 class ChallengeParticipationAdmin(admin.ModelAdmin):
-    list_display = ['user', 'challenge', 'current_value', 'progress_percentage']
-    list_filter = ['challenge']
+    """A participation, and the operator's review of it (owner, 2026-09-24, F20):
+    filter by `review_state`, then clear or disqualify (`social/review.py`)."""
+    list_display = list(review.PARTICIPATION_LIST_DISPLAY)
+    list_filter = list(review.PARTICIPATION_LIST_FILTER)
+    list_select_related = ('user', 'challenge')
+    readonly_fields = review.PARTICIPATION_READONLY
+    actions = [review.clear_review, review.disqualify]
 
 
 @admin.register(UserAchievement)

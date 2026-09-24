@@ -1459,6 +1459,57 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   `400 not_participating`, `challenge_closed` (the codes `leave`/`join` already answer),
   `progress_auto_counted`, `progress_required`, `invalid_progress`; `negative_progress`
   and `progress_out_of_range` unchanged. `leave/` unchanged.
+- **Challenges that cannot be scammed** (owner's decision F20, 2026-09-24). Additive;
+  no new route. The views' docstrings (`ChallengeViewSet`, `join`, `leave`,
+  `leaderboard`) carry the full contract.
+  - Challenge rows (list, detail, create, update) gain, read-only: `ranked` (bool —
+    `auto_counted` AND the creator is staff or a VERIFIED trainer (`trainer_is_verified`,
+    set by an operator: anyone may sign up as a trainer); only a ranked challenge can
+    award the Challenge Winner badge or anything a first place earns; a manual,
+    self-reported challenge is never ranked), `counting` (null for a manual challenge,
+    else the rules the count applies: `{"max_reps_per_set": 30,
+    "max_weight_kg_per_set": 400, "min_sets_per_day": 3, "max_sets_per_day": 60,
+    "max_volume_kg_per_day": 30000, "min_sets_per_workout": 3,
+    "min_workout_minutes": 10, "max_workouts_per_day": 2, "late_hours": 72}` —
+    `social/challenge_progress.py COUNTING`), `review_hours` (72, equal to `late_hours`: how
+    long after the end the standing stays open for review and for the window's
+    late-synced sets) and `winner_final` (bool: ended at least
+    `review_hours` ago and the winner is settled).
+  - What an auto-counted challenge counts: a set with 1..30 reps and 0..400 kg; at most
+    60 sets and 30 000 kg per person per day; a training day needs 3 counted sets; a
+    workout needs to be completed, with 3 counted sets, lasting 10 minutes, at most 2 a
+    day, and only its sets trained on the session's start day count toward it; a set
+    the server received, or whose weight or reps changed, more than 72 h after its
+    training day ended does not count (`ExerciseSetLog.created_at` and
+    `values_changed_at`, new; older rows count). The person's own
+    journal, strength charts and adherence are unchanged: only the challenge filters.
+  - `user_progress` and the `leaderboard/` `me` row gain `review_state` (`"clear"` |
+    `"flagged"` | `"disqualified"`) and `review_reason` (null | `"day_over_threshold"`
+    — a day above 45 sets, 20 000 kg or 2 workouts, flagged automatically |
+    `"operator"`). Only the person themselves sees them; `leaderboard/` also gains
+    `ranked`. Flagged: listed and placed normally, but a flagged first place wins
+    nothing until an operator clears it. Disqualified (an operator's decision): left
+    out of every place — `leaderboard/` rows, `user_progress.rank`, the home card's
+    `challenge_rank`, the stored rank; places run 1..N over the rest — their `me` row
+    is served with `rank: null`, and their number is still counted.
+  - Codes: `join/` and `leave/` by a disqualified person: `403
+    challenge_disqualified`. `update_progress/` unchanged. `PUT/PATCH` answers `400`
+    with the top-level `code` (and the field error in `field_errors`):
+    `challenge_over` — `metric`, `start_date`, `end_date` or `target_value` of a
+    challenge that is over (ended or closed); `end_date_in_past` — an `end_date`
+    earlier than now (to end early, close it with `status: "completed"`).
+  - After the end, the challenge keeps counting its own window's sets that sync late
+    (a phone offline on the last day) until `late_hours` after its end; a set
+    received later never counts. The winner is settled once, by the hourly phase
+    task, `review_hours` (72) after the end, so no late set can move a settled
+    standing: the
+    standing is re-ranked, and the person at place 1 is checked for the badge if the
+    challenge is ranked and they are clear and reached the target (flagged in a ranked
+    challenge: wait for the operator; an unranked or cancelled challenge never waits).
+    An operator's clear covers the days above a threshold up to then; a later such day
+    flags the person again. A creator closing a challenge early (`status: "completed"`) moves
+    its `end_date` to the moment of the close. Operators clear or disqualify from the
+    console (`ChallengeParticipation`, filter by `review_state`).
 - **Another member's profile** (B-077). `GET /api/social/users/public-profile/{id}/`
   (and `by_username/`) gains `featured_achievements` (at most three badges the person
   featured: `{id, key, name, category, points, icon_url, badge_color, is_rare,

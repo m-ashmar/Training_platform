@@ -995,6 +995,23 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
     #: The app's own id for this set: a retried POST (the write landed, the answer was
     #: lost) returns the first row instead of logging the set twice (B-003).
     client_uuid = models.UUIDField(null=True, blank=True, unique=True)
+    #: When the SERVER received this set. Not the day it was trained (`date`): a set may
+    #: be logged up to `routine/views.py MAX_BACKLOG_DAYS` late for the person's own
+    #: journal, and nothing here changes that. A challenge refuses to COUNT a set that
+    #: arrived more than `social/challenge_progress.py LATE_HOURS` after its training
+    #: day ended (owner, 2026-09-24, F20). Null on every row written before the column
+    #: existed: those count as on time.
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    #: When the set's WEIGHT or REPS last changed after it was first written (null: never
+    #: changed). A set logged on time and raised days later kept its `created_at`, so it
+    #: slipped past the late rule; a challenge refuses to count a set whose values
+    #: changed more than `LATE_HOURS` after its training day ended, as it refuses one
+    #: that arrived that late (owner, 2026-09-24, F20). Stamped by `save()` whenever the
+    #: two values differ from what was read, `update_fields` or not.
+    values_changed_at = models.DateTimeField(null=True, blank=True)
+
+    #: The values a challenge counts; a change to either stamps `values_changed_at`.
+    COUNTED_VALUES = ('weight', 'reps')
 
     class Meta:
         verbose_name = "Exercise Set Log"
@@ -1029,9 +1046,24 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
                           "(%(day)s). Log it against that day's progress record."),
                         code="set_date_mismatch", params={'day': owner_date})})
 
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        instance = super().from_db(db, field_names, values)
+        if all(name in field_names for name in cls.COUNTED_VALUES):
+            instance._loaded_values = tuple(getattr(instance, name)
+                                            for name in cls.COUNTED_VALUES)
+        return instance
+
     def save(self, *args, **kwargs):
         self.validate_row()
+        current = tuple(getattr(self, name) for name in self.COUNTED_VALUES)
+        loaded = getattr(self, '_loaded_values', None)
+        if self.pk is not None and loaded is not None and loaded != current:
+            self.values_changed_at = timezone.now()
+            if kwargs.get('update_fields') is not None:
+                kwargs['update_fields'] = {*kwargs['update_fields'], 'values_changed_at'}
         super().save(*args, **kwargs)
+        self._loaded_values = current
 
 
 

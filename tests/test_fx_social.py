@@ -166,10 +166,17 @@ def test_s044_the_winner_badge_waits_for_the_challenge_to_end(make_user, api,
 
     badge = _badge("fx44_winner", points=100,
                    criteria={"type": "challenge_wins", "target": 1})
-    owner = make_user("fx44_owner", user_type="trainer")
+    # A VERIFIED trainer (F20 review: anyone can sign up as a trainer, so only one an
+    # operator verified — or staff — makes a ranked challenge).
+    owner = make_user("fx44_owner", user_type="trainer", trainer_is_verified=True)
     leader = make_user("fx44_leader")
     runner = make_user("fx44_runner")
-    challenge = _running_challenge(owner, "s044")
+    # Setup (owner, 2026-09-24, F20): only a RANKED challenge — counted by the server,
+    # created by a trainer or staff — can award the badge, and only after its review
+    # window (`Challenge.REVIEW_HOURS`). The two challenges below are counted ones
+    # (`metric="sets"`), and "the clock runs out" moves past the review window too.
+    challenge = _running_challenge(owner, "s044", metric="sets")
+    review = timedelta(hours=Challenge.REVIEW_HOURS)
     ChallengeParticipation.objects.create(user=leader, challenge=challenge,
                                           current_value=10.0, status="completed", rank=1)
     ChallengeParticipation.objects.create(user=runner, challenge=challenge,
@@ -185,7 +192,7 @@ def test_s044_the_winner_badge_waits_for_the_challenge_to_end(make_user, api,
 
     # The clock runs out; the hourly phase task closes it and checks its winner.
     Challenge.objects.filter(pk=challenge.pk).update(
-        end_date=timezone.now() - timedelta(minutes=5))
+        end_date=timezone.now() - review - timedelta(minutes=5))
     advance_challenge_phases()
     assert Challenge.objects.get(pk=challenge.pk).status == "completed"
     assert holds(leader), "nobody checked the winner when the challenge closed"
@@ -193,7 +200,7 @@ def test_s044_the_winner_badge_waits_for_the_challenge_to_end(make_user, api,
 
     # A creator closing a challenge early closes it too, and its winner is checked then.
     early = make_user("fx44_early")
-    second = _running_challenge(owner, "s044b")
+    second = _running_challenge(owner, "s044b", metric="sets")
     ChallengeParticipation.objects.create(user=early, challenge=second,
                                           current_value=10.0, status="completed", rank=1)
     assert not holds(early)
@@ -201,6 +208,10 @@ def test_s044_the_winner_badge_waits_for_the_challenge_to_end(make_user, api,
         closed = api(owner).patch(f"/api/social/challenges/{second.pk}/",
                                   {"status": "completed"}, content_type=JSON)
     assert closed.status_code == 200, closed.content
+    # The close ended it now; its review window then runs out (F20).
+    Challenge.objects.filter(pk=second.pk).update(
+        end_date=timezone.now() - review - timedelta(minutes=5))
+    advance_challenge_phases()
     assert holds(early)
 
     # A cancelled challenge was never won.

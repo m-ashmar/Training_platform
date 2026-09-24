@@ -130,9 +130,17 @@ def test_the_challenge_winner_badge_never_goes_to_a_suspended_account(
     from social.models import ChallengeParticipation
     from social.tasks import award_challenge_winners
 
-    owner = make_user("s8w_owner", user_type="trainer")
+    # Setup (owner, 2026-09-24, F20, merged from build/anticheat): only a RANKED
+    # challenge — counted by the server, created by staff or a VERIFIED trainer — awards
+    # the badge, and only once its review window (`Challenge.REVIEW_HOURS`) has run out.
+    # So the creator is verified, the challenges are counted ones (`metric="sets"`), and
+    # "the clock closes it" moves past the review window too. No assertion changed.
+    from social.models import Challenge
+
+    owner = make_user("s8w_owner", user_type="trainer", trainer_is_verified=True)
+    review = timedelta(hours=Challenge.REVIEW_HOURS)
     leader, runner = make_user("s8w_leader"), make_user("s8w_runner")
-    challenge = _running_challenge(owner, "winner", target_value=50.0)
+    challenge = _running_challenge(owner, "winner", target_value=50.0, metric="sets")
     base = timezone.now() - timedelta(days=1)
     _enter(challenge, leader, 90.0, joined_at=base, status="completed")
     _enter(challenge, runner, 80.0, joined_at=base + timedelta(minutes=1), status="completed")
@@ -140,18 +148,18 @@ def test_the_challenge_winner_badge_never_goes_to_a_suspended_account(
 
     _suspend(leader, django_capture_on_commit_callbacks)
     type(challenge).objects.filter(pk=challenge.pk).update(
-        end_date=timezone.now() - timedelta(minutes=1))           # the clock closes it
+        end_date=timezone.now() - review - timedelta(minutes=1))  # the clock closes it
     assert ChallengeParticipation.objects.get(challenge=challenge, user=runner).rank == 1
     assert award_challenge_winners([challenge.pk]) == 1
     assert AchievementEngine._get_metric_value(runner, "challenge_wins", {}) == 1
     assert AchievementEngine._get_metric_value(leader, "challenge_wins", {}) == 0
 
     # Suspended AFTER the close: the record keeps its rank 1, and still no badge.
-    later = _running_challenge(owner, "winner-later", target_value=50.0)
+    later = _running_challenge(owner, "winner-later", target_value=50.0, metric="sets")
     _enter(later, runner, 90.0, joined_at=base, status="completed")
     _rerank(later)
     type(later).objects.filter(pk=later.pk).update(
-        end_date=timezone.now() - timedelta(minutes=1))
+        end_date=timezone.now() - review - timedelta(minutes=1))
     _suspend(runner, django_capture_on_commit_callbacks)
     assert ChallengeParticipation.objects.get(challenge=later, user=runner).rank == 1
     assert award_challenge_winners([later.pk]) == 0
