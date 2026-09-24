@@ -79,6 +79,25 @@ def reserve(user, key: str, digest: str):
     )
 
 
+def finished(user, key: str, digest: str):
+    """The stored response of a FINISHED request of `user`'s with this key and this
+    content, or None. A read: it claims nothing and raises nothing.
+
+    For a caller that checks things BEFORE `reserve` which the request itself changes —
+    an agent's caps and the cash they hold (`wallet.views._perform_topup`). Without it a
+    top-up that filled the day's cap was, on retry, refused by the cap its own money
+    had filled, and the agent was told it failed when it had not.
+    """
+    from wallet.models import IdempotencyKey
+
+    record = IdempotencyKey.objects.filter(created_by=user, key=key, processed=True).first()
+    if record is None or not record.response_snapshot:
+        return None
+    if record.request_hash and record.request_hash != digest:
+        return None
+    return record.response_snapshot
+
+
 def complete(record, response: dict) -> None:
     """Store the response so a later replay of the same request returns it."""
     record.processed = True

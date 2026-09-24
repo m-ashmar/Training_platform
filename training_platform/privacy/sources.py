@@ -386,6 +386,18 @@ register(PersonalDataSource(label="ai_consent", model="moderation.AIConsent",
 # with) — travels with their own export and is kept under erasure like the rest of the
 # financial record. A new field on this model needs no change here; a new model does.
 register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", user_field="user", on_erase="keep"))
+# The cash an agent held for the platform, movement by movement, and the settlements an
+# operator recorded against it (plan step 9). Records of money, kept like the ledger rows
+# they name. A settlement also names the operator who recorded it, so it is in that
+# operator's export too; the export lists what was handed over and when, not the
+# operator's note (as withdrawal events above).
+register(PersonalDataSource(label="agent_receivable", model="wallet.AgentReceivableEntry",
+                            user_field="agent__user", on_erase="keep"))
+register(PersonalDataSource(label="agent_settlements", model="wallet.AgentSettlement",
+                            user_field=("agent__user", "recorded_by"),
+                            fields=["id", "agent", "currency", "amount",
+                                    "receivable_before", "receivable_after", "created_at"],
+                            on_erase="keep"))
 # Each paid month of coaching: what was charged, the commission and the trainer's share.
 # Kept like the ledger rows it names.
 register(PersonalDataSource(label="coaching_periods", model="users.CoachingPeriod",

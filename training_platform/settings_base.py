@@ -288,9 +288,33 @@ REST_FRAMEWORK = {
 from decimal import Decimal as _Decimal
 # Agent top-up caps. IMPORTANT: limits are enforced fail-closed — a value of 0
 # means "no top-ups permitted", NOT unlimited. To allow more, raise the value
-# (tunable per-agent in the admin). Launch model: trusted prepaid cash-in.
-AGENT_DEFAULT_DAILY_LIMIT = _Decimal(get_env("AGENT_DEFAULT_DAILY_LIMIT", "200"))
-AGENT_DEFAULT_MONTHLY_LIMIT = _Decimal(get_env("AGENT_DEFAULT_MONTHLY_LIMIT", "5000"))
+# (tunable per-agent in the console). Launch model: trusted prepaid cash-in.
+#
+# THE OWNER CONFIRMS THESE NUMBERS (plan step 9, 2026-09-24). The spec, section 8: "Raise
+# the default limits. 200 SYP a day cannot cover one Basic plan at 1,000 SYP ... with the
+# daily default above the price of the top plan." The top plan is Professional at 5,000
+# SYP a month (`setup_subscription_plans`); a client also tops up to pay a coach by the
+# month, which costs more than any plan. The four numbers are the ones the agent screens
+# draw (`16-agent-operator/AgentHistory`: 50,000 a top-up, 250,000 a day, 5,000,000 a
+# month; `AgentHome`: a 600,000 ceiling on the cash held for the platform) — a proposal,
+# not a decision. They are SYRIAN POUNDS and they are what a NEW agent gets
+# (`wallet.models.ensure_agent_profile`); migration wallet/0019 lifts an agent still on the
+# old 200 / 5,000 pair to them, and leaves every cap an operator chose alone.
+AGENT_DEFAULT_DAILY_LIMIT = _Decimal(get_env("AGENT_DEFAULT_DAILY_LIMIT", "250000"))
+AGENT_DEFAULT_MONTHLY_LIMIT = _Decimal(get_env("AGENT_DEFAULT_MONTHLY_LIMIT", "5000000"))
+#: The most ONE top-up may be. Empty (None) on an agent means no per-top-up cap of its own
+#: (the daily and monthly caps still bound it).
+AGENT_DEFAULT_PER_TRANSACTION_LIMIT = _Decimal(
+    get_env("AGENT_DEFAULT_PER_TRANSACTION_LIMIT", "50000"))
+#: The most cash an agent may hold for the platform, unsettled, before top-ups stop (the
+#: spec: "Block top-ups when an agent's unsettled total passes their ceiling"). Empty on an
+#: agent means its monthly cap in that currency (`wallet.agents.Usage.ceiling`).
+AGENT_DEFAULT_RECEIVABLE_CEILING = _Decimal(
+    get_env("AGENT_DEFAULT_RECEIVABLE_CEILING", "600000"))
+# The DOLLAR defaults are still nobody's: AGENT_DEFAULT_DAILY_LIMIT_USD /
+# AGENT_DEFAULT_MONTHLY_LIMIT_USD are unset, so a new agent tops up no dollars until an
+# operator sets its dollar caps (SIDE_BUGS S-059), and its dollar per-top-up cap and
+# ceiling are empty (see above) until the owner names numbers.
 # Optional dedicated Fernet key (base64) for encrypting agent API secrets at rest.
 # If unset, a key is derived from SECRET_KEY — a DB leak alone still cannot forge
 # signatures, since SECRET_KEY is not stored in the database.

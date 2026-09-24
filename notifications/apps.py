@@ -20,6 +20,7 @@ class NotificationsConfig(AppConfig):
         import notifications.listeners.chat_listeners  # noqa: F401
         import notifications.listeners.verification_listeners  # noqa: F401
         import notifications.listeners.payout_listeners  # noqa: F401
+        import notifications.listeners.wallet_listeners  # noqa: F401
 
         # Security Check: Initialize Firebase
         self._initialize_firebase()

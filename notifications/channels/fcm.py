@@ -61,6 +61,9 @@ EVENT_CLASS_REGISTRY = {
     'withdrawal_requested': 'notifications.domain.payout_events.WithdrawalRequestedEvent',
     'withdrawal_paid': 'notifications.domain.payout_events.WithdrawalPaidEvent',
     'withdrawal_failed': 'notifications.domain.payout_events.WithdrawalFailedEvent',
+    # An agent credited a client's wallet with cash (wallet/views.py, both top-up
+    # endpoints; BACKEND_BUGS B-115).
+    'wallet_topped_up': 'notifications.domain.wallet_events.WalletToppedUpEvent',
     # Trainer-client chat (chat/events.py). One nudge until the thread is opened.
     'chat_message': 'notifications.domain.chat_events.ChatMessageEvent',
     # Progress (routine/strength.py, routine/tasks.py). Fact-only, no claims.

@@ -479,3 +479,22 @@ class AgentListingSerializer(serializers.ModelSerializer):
 
     def get_name(self, obj):
         return obj.display_name or getattr(obj.user, "full_name", "") or obj.user.username
+
+
+class AgentLedgerEntrySerializer(serializers.BaseSerializer):
+    """One row of `GET wallet/agent/ledger/` (BACKEND_BUGS B-114). Read-only; the shape
+    is `wallet.agents.entry_row`, documented on `AgentLedgerView`."""
+
+    def to_representation(self, instance):
+        from .agents import entry_row
+
+        return entry_row(instance)
+
+
+class AgentSettlementSerializer(serializers.BaseSerializer):
+    """One row of `GET wallet/agent/settlements/`. Read-only; `wallet.agents.settlement_row`."""
+
+    def to_representation(self, instance):
+        from .agents import settlement_row
+
+        return settlement_row(instance)
