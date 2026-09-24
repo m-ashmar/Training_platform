@@ -124,7 +124,12 @@ register(PersonalDataSource(
     fields=["id", "created_at", "last_message_at"], on_erase="delete"))
 register(PersonalDataSource(
     label="messages_sent", model="chat.Message", user_field="sender",
-    fields=["id", "conversation", "body", "created_at", "read_at", "deleted_at"],
+    # `kind`, `exercise` and `duration_seconds` with the chat's photos, voice notes and
+    # videos (B-091). The FILES are deleted with the rows — here, and through the
+    # conversation's cascade above (`training_platform/signals.py`, app `chat`); like
+    # the media kit's, the export lists them and does not bundle the bytes.
+    fields=["id", "conversation", "kind", "body", "exercise", "duration_seconds",
+            "created_at", "read_at", "deleted_at"],
     on_erase="delete"))
 
 # --- notifications ------------------------------------------------------------

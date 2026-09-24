@@ -274,6 +274,9 @@ LOCAL_APPS_FOR_FILE_CLEANUP = {
     'users', 'wallet', 'diet', 'routine', 'subscription', 'social',
     'ai_assistant', 'achievements', 'analytics', 'notifications', 'challenges',
     'mediakit',
+    # A chat photo, voice note or video (B-091): erasure deletes the conversation, the
+    # messages cascade, and their files must go with them.
+    'chat',
 }
 
 _FILE_FIELD_CACHE = {}

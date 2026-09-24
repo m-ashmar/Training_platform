@@ -1,4 +1,5 @@
-"""`/api/v1/chat/` — text messages between a trainer and their client.
+"""`/api/v1/chat/` — messages between a trainer and their client: text, and (B-091) a
+photo, a voice note or a video with an optional caption.
 
 Every route here is authenticated (`401 not_authenticated` without a token) and nothing
 on it differs by build: a message is not a product, so `X-App-Channel` and
@@ -18,6 +19,7 @@ import logging
 from django.utils.translation import gettext as _
 from rest_framework import status
 from rest_framework.exceptions import NotFound
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -48,7 +50,8 @@ class ConversationListView(APIView):
 
         {"id": 7,
          "other": {"id", "first_name", "last_name", "profile_picture"},   absolute URL
-         "last_message": {"id", "sender", "body" (200 chars), "deleted", "created_at"}
+         "last_message": {"id", "sender", "kind", "body" (200 chars), "deleted",
+                          "created_at"}
                          | null,
          "last_message_at": datetime,        what the list is ordered by
          "unread_count": 3,                  messages from the other person since the
@@ -149,11 +152,18 @@ class ConversationMessagesView(APIView):
     the cursor for the next page and is null when the thread has been read to its
     start. A message is::
 
-        {"id", "conversation", "sender", "body", "client_uuid",
-         "created_at", "read_at", "deleted_at", "deleted"}
+        {"id", "conversation", "sender", "kind", "body", "media", "exercise",
+         "client_uuid", "created_at", "read_at", "deleted_at", "deleted"}
 
-    A message the sender took back is still in the list with `deleted: true` and an
-    empty `body`, so the thread does not renumber under a scroll.
+    `kind` is `text`, `image`, `voice` or `video`; `media` is null on a text message
+    and `{url, duration_seconds, width, height}` on the others, where `url` is signed
+    and expires (use it now, never store it); `exercise` is `{id, name}` on a video
+    that names its move, else null (see `MediaMessageView` and `MessageSerializer`).
+    A message the sender took back is still in the list with `deleted: true`, an
+    empty `body` and `media: null`, so the thread does not renumber under a scroll.
+
+    Photos, voice notes and videos are SENT through `POST /api/v1/chat/media/`; this
+    POST takes text only.
 
     **POST** — send. Body `{"body": "...", "client_uuid": "..."}` (`client_uuid`
     optional). `body` is capped at 4000 characters and is stored exactly as typed.
@@ -177,14 +187,87 @@ class ConversationMessagesView(APIView):
         rows, next_before = services.history(
             conversation, before=request.query_params.get('before'),
             limit=request.query_params.get('limit'))
-        return Response({'results': MessageSerializer(rows, many=True).data,
+        return Response({'results': MessageSerializer(
+                            rows, many=True, context={'request': request}).data,
                          'next_before': next_before})
 
     def post(self, request, conversation_id):
         conversation = _mine_or_404(request.user, conversation_id)
         message, created = services.send_message(conversation, request.user,
                                                  request.data)
-        return Response(MessageSerializer(message).data,
+        return Response(MessageSerializer(message, context={'request': request}).data,
+                        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class MediaMessageView(APIView):
+    """POST /api/v1/chat/media/ — send a photo, a voice note or a video.
+
+    `multipart/form-data`:
+
+        conversation   the thread's id (required)
+        kind           `image` | `voice` | `video` (required)
+        file           the bytes (required)
+        body           the caption, optional, capped at 4000 characters, kept as typed
+        exercise_id    a video only: the move it shows. A CLIENT's video with one is a
+                       FORM CHECK — it waits in the trainer's attention queue
+                       (`GET /api/v1/trainer/attention/`) until the trainer writes in
+                       this thread after it
+        client_uuid    optional, the app's own id: a retry answers the first message
+
+    A route of its own, not a second body type on `.../messages/`: a video is bigger
+    than the API's 15 MB body cap, and the ceiling that lets it through
+    (`settings.LARGE_UPLOAD_PATHS`) is granted to exact paths only. Answers on both
+    spellings, with and without the trailing slash — the size check runs before
+    `CommonMiddleware` could redirect a POST, and a redirected POST loses its body.
+
+    Each kind goes through the platform's existing guard (`chat/media.py`): a photo is
+    content-checked, capped at 5 MB and RE-ENCODED (no EXIF, no GPS reaches the other
+    person); a video or voice note is identified from its own bytes and capped at
+    `MEDIA_VIDEO_MAX_BYTES` (64 MB) and `MEDIA_VIDEO_MAX_SECONDS` (90 s) — the media
+    kit's numbers. The stored file is private: its URL is signed, expires, and appears
+    only in answers the two people in this conversation receive.
+
+    201 with the message (the `MessageSerializer` shape: `kind`, `body`, `media`,
+    `exercise`, ...). A repeat of a `client_uuid` answers **200** with the FIRST message
+    and stores nothing. The other side hears `message.new` on the socket and gets the
+    `chat_message` push (the caption, or "Photo" / "Voice note" / "Video" in their
+    language — never a link).
+
+    Every refusal, and its `code`, in the order it is decided:
+
+    | status | `code` | when |
+    |---|---|---|
+    | 404 | `not_found` | no such conversation, or not the caller's (never 403) |
+    | 409 | `idempotency_conflict` | `client_uuid` is the other person's message here |
+    | 400 | `invalid_client_uuid` | `client_uuid` is not a UUID |
+    | 400 | `validation_error` | a form field is wrong (`field_errors` names it: a `kind` that is not `image`/`voice`/`video`, a caption over 4000 characters, a non-numeric `exercise_id`) |
+    | 400 | `exercise_only_on_video` | `exercise_id` on a photo or a voice note |
+    | 400 | `unknown_exercise` | an exercise the sender may not see, or none by that id |
+    | 403 | `no_relation`, `blocked` | the pair rule, exactly as a text send |
+    | 403 | `coaching_frozen`, `coaching_unpaid`, `coaching_ended` | the coaching cannot be used (with `trainer_id`); the thread stays readable |
+    | 400 | `media_file_required` | no `file` part |
+    | 400 | `media_not_a_video`, `media_video_too_large`, `media_video_too_long` | a video the guard refused |
+    | 400 | `media_not_audio`, `media_audio_too_large`, `media_audio_too_long` | a voice note the guard refused |
+    | 400 | `invalid_mime_type`, `file_too_large`, `unreadable_image`, `unsupported_format`, `image_too_many_pixels`, `image_dimensions_too_large`, `empty_file`, `dangerous_extension`, `file_validation_error` | a photo the platform's image guard refused (its own codes) |
+    | 413 | `payload_too_large` | the body itself is over the route's ceiling |
+    | 429 | `rate_limited` | the hourly allowance every route shares |
+
+    Nothing here differs by build: a message is not a product.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        try:
+            message, created = services.send_media_message(
+                request.user, request.data, request.FILES.get('file'))
+        except DjangoValidationError as refused:
+            return Response({'error': refused.messages[0],
+                             'code': getattr(refused, 'code', None) or 'invalid_media'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return Response(MessageSerializer(message, context={'request': request}).data,
                         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 

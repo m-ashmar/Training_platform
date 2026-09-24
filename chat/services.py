@@ -114,11 +114,7 @@ def send_message(conversation, sender, data):
             message = Message.objects.create(
                 conversation=conversation, sender=sender,
                 body=serializer.validated_data['body'], client_uuid=client_uuid)
-            # The list is ordered by this, so it moves with every message, including
-            # one that is later taken back: the thread DID have activity.
-            Conversation.objects.filter(pk=conversation.pk).update(
-                last_message_at=message.created_at)
-            conversation.last_message_at = message.created_at
+            _moved(conversation, message)
     except IntegrityError:
         # Two attempts raced and the partial unique index let one through.
         first = replay(conversation, sender, client_uuid)
@@ -126,10 +122,123 @@ def send_message(conversation, sender, data):
             raise
         return first, False
 
+    _announce(conversation, message)
+    return message, True
+
+
+def _moved(conversation, message):
+    """The list is ordered by `last_message_at`, so it moves with every message —
+    including one that is later taken back: the thread DID have activity."""
+    Conversation.objects.filter(pk=conversation.pk).update(
+        last_message_at=message.created_at)
+    conversation.last_message_at = message.created_at
+
+
+def _announce(conversation, message):
+    """The socket fan-out and the push, for any kind of message. Same object as REST.
+
+    The socket frame is serialized without a request, so on the filesystem backend its
+    `media.url` is relative to the API host (a GCS URL is absolute either way); both
+    people in the group are the conversation's members, checked at connect.
+    """
     payload = dict(MessageSerializer(message).data)
     broadcast(conversation.pk, 'message.new', {'message': payload})
     notify_new_message(message)
+
+
+def send_media_message(sender, data, upload):
+    """Write one photo, voice note or video and tell everyone. Returns
+    `(message, created)`.
+
+    `data` is the multipart form: `{conversation, kind, body?, exercise_id?,
+    client_uuid?}`; `upload` is the file. The order is the text send's, with the file
+    LAST: membership (404), the replay (a retry answers the first message and stores
+    nothing), the form (400), the pair rule (403 — the same `may_message` as text), and
+    only then the bytes, so a refused sender costs no decode and no storage. The file
+    and the row are written together; if the row cannot be written, the file is removed
+    again (`chat.media.discard`), so a refusal or a race never leaves bytes that nothing
+    points at.
+
+    Raises DRF exceptions for the refusals the text send shares, and Django's
+    `ValidationError` (with its `code`) for the upload's own — the view renders both.
+    """
+    from rest_framework.exceptions import NotFound
+
+    from . import media
+    from .serializers import MediaMessageSerializer
+
+    raw = data if hasattr(data, 'get') else {}
+    try:
+        conversation_id = int(raw.get('conversation'))
+    except (TypeError, ValueError):
+        conversation_id = None
+    conversation = (Conversation.objects.select_related('trainer', 'client')
+                    .filter(pk=conversation_id).first() if conversation_id else None)
+    if conversation is None or conversation.other_id(sender.pk) is None:
+        # The same 404 as the thread's own routes: a 403 would confirm it exists.
+        raise NotFound(_('Conversation not found.'), code='not_found')
+
+    client_uuid = parse_client_uuid(raw.get('client_uuid'))
+    replayed = replay(conversation, sender, client_uuid)
+    if replayed is not None:
+        return replayed, False
+
+    form = MediaMessageSerializer(data=raw)
+    form.is_valid(raise_exception=True)
+    kind = form.validated_data['kind']
+    exercise = _exercise_for(sender, kind, form.validated_data.get('exercise_id'))
+
+    recipient = (conversation.client if sender.pk == conversation.trainer_id
+                 else conversation.trainer)
+    require_may_message(sender, recipient)
+
+    prepared = media.prepare(kind, upload)
+    message = Message(conversation=conversation, sender=sender, kind=kind,
+                      body=form.validated_data.get('body') or '', exercise=exercise,
+                      client_uuid=client_uuid)
+    try:
+        media.store(message, prepared)
+        with transaction.atomic():
+            message.save()
+            _moved(conversation, message)
+    except IntegrityError:
+        media.discard(message)
+        first = replay(conversation, sender, client_uuid)
+        if first is None:
+            raise
+        return first, False
+    except Exception:
+        media.discard(message)
+        raise
+
+    _announce(conversation, message)
     return message, True
+
+
+def _exercise_for(sender, kind, exercise_id):
+    """The exercise a video names, resolved as the SENDER may see it, or None.
+
+    Only a video names a move (`exercise_only_on_video`), and only one the sender may
+    read (`routine.permissions.visible_exercises_for`): otherwise a client could put a
+    trainer's private exercise name in front of another trainer. An id the sender may
+    not see answers exactly like one that does not exist (`unknown_exercise`).
+    """
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    from .models import KIND_VIDEO
+
+    if exercise_id is None:
+        return None
+    if kind != KIND_VIDEO:
+        raise DjangoValidationError(_('Only a video can name an exercise.'),
+                                    code='exercise_only_on_video')
+    from routine.permissions import visible_exercises_for
+
+    exercise = visible_exercises_for(sender).filter(pk=exercise_id).first()
+    if exercise is None:
+        raise DjangoValidationError(_('There is no such exercise.'),
+                                    code='unknown_exercise')
+    return exercise
 
 
 def mark_read(conversation, reader):
@@ -202,7 +311,9 @@ def history(conversation, *, before=None, limit=None):
     if size < 1 or size > PAGE_MAX:
         raise ValidationError({'limit': [_('Out of range.')]}, code='invalid_limit')
 
-    rows = Message.objects.filter(conversation=conversation)
+    # `exercise` joined: a form check names its move, and reading it per row would be a
+    # query per video on the page.
+    rows = Message.objects.filter(conversation=conversation).select_related('exercise')
     if before not in (None, ''):
         try:
             rows = rows.filter(pk__lt=int(before))

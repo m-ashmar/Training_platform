@@ -1,8 +1,16 @@
-"""Text messages between a trainer and the client they coach (the owner, 2026-09-20).
+"""Messages between a trainer and the client they coach (the owner, 2026-09-20).
 
-Texting only in this pass: no voice, no image, no video, no program card. The seams for
-those are named where they belong — `may_message` decides WHO may write, and a future
-attachment is a field on `Message` — but none of them is built here.
+Text first (2026-09-20), then a photo, a voice note and a video (BACKEND_BUGS B-091,
+2026-09-24): one attachment per message, on the message itself (`kind`, `attachment`,
+`duration_seconds`, `width`, `height`), with `body` as its caption. A client's video
+that names an `exercise` is a FORM CHECK — "watch my deadlift" — and waits in the
+trainer's attention queue (`users/attention_queue.py`) until the trainer writes in that
+thread after it. Program cards are still to come.
+
+The bytes go through the platform's one upload pipeline (`chat/media.py`): the same
+content sniffing and caps as the media kit, stored on the same backend (GCS in
+production, the filesystem in tests), and served only as a short-lived signed URL
+inside the answers the two people in the thread receive. Nothing else links to them.
 
 Two tables, and the shape of each one is what keeps the screens cheap:
 
@@ -22,6 +30,9 @@ A frozen, unpaid or ended coaching does NOT touch these rows: the owner's rule i
 unpaid relationship is never deleted, so the thread stays readable for ever and only
 SENDING is refused (`chat/permissions.py`).
 """
+import os
+import secrets
+
 from django.conf import settings
 from django.db import models
 from django.db.models import Q
@@ -30,6 +41,27 @@ from django.utils import timezone
 #: What the serializer accepts in one message. Long enough for a coach's paragraph,
 #: short enough that a thread page stays a sensible size on a phone.
 MAX_BODY_CHARS = 4000
+
+#: What a message IS. The app switches on it before reading anything else, and draws a
+#: value it does not know as a placeholder (BACKEND_BUGS B-042). Add values; never
+#: rename one.
+KIND_TEXT, KIND_IMAGE, KIND_VOICE, KIND_VIDEO = 'text', 'image', 'voice', 'video'
+KIND_CHOICES = [(KIND_TEXT, 'Text'), (KIND_IMAGE, 'Image'), (KIND_VOICE, 'Voice'),
+                (KIND_VIDEO, 'Video')]
+MEDIA_KINDS = (KIND_IMAGE, KIND_VOICE, KIND_VIDEO)
+
+
+def _attachment_upload_to(instance, filename):
+    """`chat/<conversation>/<kind>-<random>.<ext>`.
+
+    The extension is the one the upload pipeline DETECTED (`chat/media.py` names the
+    file); nothing the client called it reaches storage. The random token makes the
+    path unguessable, and the signature on every URL makes it useless without the
+    answer that carried it.
+    """
+    ext = os.path.splitext(filename)[1].lower() or '.bin'
+    return (f"chat/{instance.conversation_id}/"
+            f"{instance.kind}-{secrets.token_hex(12)}{ext}")
 
 
 class Conversation(models.Model):
@@ -104,14 +136,39 @@ class Conversation(models.Model):
 
 
 class Message(models.Model):
-    """One text message. Text only in this pass — there is no attachment field yet."""
+    """One message: text, or a photo, voice note or video with an optional caption.
+
+    A media message keeps its file for as long as the row lives, tombstone included —
+    the same rule as the text, which stays in the column after the sender takes it
+    back: the row is a record (a report may need it), and no endpoint serves either
+    once `deleted_at` is set. The file goes when the ROW goes: erasure deletes the
+    conversation, the messages cascade, and `training_platform/signals.py` removes each
+    stored file once that commits.
+    """
     conversation = models.ForeignKey(
         Conversation, on_delete=models.CASCADE, related_name='messages')
     sender = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='chat_messages')
     #: Stored exactly as it was typed. The length cap lives in the serializer; nothing
-    #: here rewrites a person's words.
-    body = models.TextField()
+    #: here rewrites a person's words. On a media message it is the caption, and may be
+    #: empty.
+    body = models.TextField(blank=True)
+    kind = models.CharField(max_length=8, choices=KIND_CHOICES, default=KIND_TEXT)
+    #: The photo (re-encoded, so no EXIF or GPS survives), the voice note or the video
+    #: (stored as uploaded, after its container was checked from its own bytes). Empty
+    #: on a text message. Private: served only through `media_url()`, signed.
+    attachment = models.FileField(upload_to=_attachment_upload_to, max_length=255,
+                                  blank=True)
+    #: Voice and video: what the container declares, read without decoding. Null when
+    #: it declares nothing readable (a WebM, an Ogg) — never a number the client sent.
+    duration_seconds = models.FloatField(null=True, blank=True)
+    #: A photo's pixel size, so the app can lay the bubble out before it loads.
+    width = models.PositiveIntegerField(null=True, blank=True)
+    height = models.PositiveIntegerField(null=True, blank=True)
+    #: The move a video shows. A client's video that names one is a form check.
+    exercise = models.ForeignKey(
+        'routine.Exercise', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     #: The app's own id for this message: the first send with it is created, a retry
     #: whose answer was lost returns that same row instead of posting twice. Scoped to
@@ -139,6 +196,11 @@ class Message(models.Model):
         indexes = [
             # The thread page: WHERE conversation = ? ORDER BY id DESC LIMIT n.
             models.Index(fields=['conversation', '-id'], name='chat_msg_thread_idx'),
+            # The trainer's attention queue: the form checks of a roster. Partial, so it
+            # holds only the few rows that are videos naming an exercise.
+            models.Index(fields=['conversation', 'id'], name='chat_msg_formcheck_idx',
+                         condition=Q(kind='video', exercise__isnull=False,
+                                     deleted_at__isnull=True)),
         ]
 
     def __str__(self):

@@ -15,8 +15,16 @@ Protocol (JSON, one object per frame):
       {"type": "message.send", "body": "...", "client_uuid": "..."}   client_uuid optional
       {"type": "message.read"}
 
+    `message.send` carries text only. A photo, voice note or video is sent through
+    `POST /api/v1/chat/media/` (a multipart upload does not belong in a JSON frame), and
+    both ends hear it here as `message.new` like any other message.
+
     Server -> Client
-      {"type": "message.new", "message": {...}}          the same object REST returns
+      {"type": "message.new", "message": {...}}          the same object REST returns,
+                                                         `kind`, `media` and `exercise`
+                                                         included (on the filesystem
+                                                         backend `media.url` is relative
+                                                         to the API host)
       {"type": "message.read", "conversation", "reader", "read_at"}
       {"type": "message.deleted", "conversation", "message", "deleted_at"}
       {"type": "error", "code": "...", "detail": "..."}   branch on `code`
