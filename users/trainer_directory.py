@@ -170,6 +170,8 @@ class CoachingPriceBook:
         self._currencies = dict(Wallet.objects.filter(owner_id__in=ids)
                                 .values_list('owner_id', 'currency')) if ids else {}
         self._convert = price_list_converter(self.reader_currency)
+        self._ids = ids
+        self._rates = None      # the trainers' live rates, read once if a row needs one
 
     def currency_of(self, trainer_id) -> str:
         """The trainer's currency — their wallet's, like `wallet.currency_for`."""
@@ -201,8 +203,21 @@ class CoachingPriceBook:
             return self.price(relation.agreed_rate, relation.agreed_currency)
         if relation.agreed_rate is not None:
             return self.price(relation.agreed_rate, self.currency_of(relation.trainer_id))
-        return self.price(getattr(relation.trainer, 'trainer_hourly_rate', None) or 0,
-                          self.currency_of(relation.trainer_id))
+        return self.price(self._live_rate(relation), self.currency_of(relation.trainer_id))
+
+    def _live_rate(self, relation):
+        """A trainer's live rate for a row from before `agreed_rate`: the loaded trainer
+        if the row carries it, else ONE query for every trainer of the page (a query
+        per row cost the attention queue one per pending request)."""
+        field = relation._meta.get_field('trainer')
+        if field.is_cached(relation) or relation.trainer_id not in self._ids:
+            return getattr(relation.trainer, 'trainer_hourly_rate', None) or 0
+        if self._rates is None:
+            from .models import CustomUser
+
+            self._rates = dict(CustomUser.objects.filter(pk__in=self._ids)
+                               .values_list('pk', 'trainer_hourly_rate'))
+        return self._rates.get(relation.trainer_id) or 0
 
 
 def _absolute(request, url):
