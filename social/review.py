@@ -14,12 +14,15 @@ from the console — `/dj-admin/challenges/challengeparticipationproxy/` (the cl
   person holds no place anywhere (`social/standing.py in_standing`), cannot rejoin or
   leave (`challenge_disqualified`), and their number is still recounted.
 
-Either decision re-ranks the challenge's standing, even a finished one
-(`write_places(settling=True)`: removing a cheater from a finished board is what the
-review window is for), drops the cached lists and home cards of everyone whose place
-moved, and then settles the winner of any challenge whose review window has already
-closed (`social/tasks.py settle_winners`) — so clearing a flagged first place after the
-window awards the badge at once, and disqualifying one hands the check to the next.
+Either decision re-ranks the challenge's standing, even a finished one whose winner
+is not settled yet (`write_places(settling=True)`: removing a cheater from a finished
+board is what the review window is for), drops the cached lists and home cards of
+everyone whose place moved, and then settles the winner of any challenge whose review
+window has already closed (`social/tasks.py settle_winners`) — so clearing a flagged
+first place after the window awards the badge at once, and disqualifying one hands the
+check to the next. Once the winner IS settled the stored ranks are the record: a later
+decision changes the person's review state (and so what live surfaces show, through
+`in_standing`) but never the stored ranks, which the Challenge Winner badge reads.
 """
 from django.db import transaction
 
@@ -71,7 +74,12 @@ def apply_review(participations, state) -> int:
                 row.save(update_fields=fields)
                 changed += 1
             touched.update(user for _pk, user in by_challenge[challenge_id])
-            write_places(challenge, moved_users=touched, settling=True)
+            # A settled standing is the record (`social/tasks.py settle_winner`): a
+            # review after the settlement changes the person's state, never the stored
+            # ranks. Re-ranking it re-read who is visible NOW, so a suspension after
+            # the settlement moved the record and a second person could win (R1).
+            write_places(challenge, moved_users=touched,
+                         settling=challenge.winner_checked_at is None)
     for user_id in sorted(touched):
         ChallengeViewSet.invalidate_challenges_cache_for(user_id)
         bump_stamp(user_id)
