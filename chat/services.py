@@ -1,9 +1,10 @@
 """Everything that CHANGES a conversation, in one module.
 
-The REST routes and the WebSocket consumer are two doors into these four functions.
-Neither one implements a rule: the pair check, the idempotent replay, the fan-out and
-the push all live here, so a message sent over a socket and a message sent over HTTP are
-the same event with the same side effects.
+The REST routes and the WebSocket consumer are two doors into these functions. Neither
+one implements a rule: the pair check, the idempotent replay, the fan-out and the push
+all live here, so a message sent over a socket and a message sent over HTTP are the same
+event with the same side effects. A photo, voice note or video (`send_media_message`,
+B-091) runs the same checks in the same order and ends in the same `_announce`.
 """
 import logging
 import uuid as _uuid
