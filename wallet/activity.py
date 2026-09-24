@@ -70,6 +70,9 @@ def kind_of(tx, wallet) -> str:
     Stable is the point: `KIND_LABELS` is translated and may be reworded, and the app
     must never branch on the words. A row whose purpose is not recognised still gets
     an honest kind from its own shape rather than a wrong specific one.
+
+    `kind_q` below is this function as a database filter (`?kind=`, B-101): a branch
+    added here is a branch added there.
     """
     metadata = tx.metadata or {}
     purpose = metadata.get('purpose')
@@ -94,6 +97,72 @@ def kind_of(tx, wallet) -> str:
         return ('transfer_received' if tx.destination_wallet_id == wallet.id
                 else 'transfer')
     return tx.tx_type if tx.tx_type in KIND_LABELS else 'adjustment'
+
+
+#: Every `kind` `kind_of` can answer, in the order the contract lists them. `?kind=` on the
+#: ledger routes accepts exactly these (BACKEND_BUGS B-101).
+KINDS = tuple(KIND_LABELS)
+
+
+def _truthy_key(key):
+    """`metadata.get(key)` is truthy, as a filter: the key is there and is not JSON
+    null, "", 0 or false. `has_key` comes first so a row without the key is plainly
+    false (and plainly true under `~`) rather than SQL NULL, which a negation would
+    silently drop."""
+    from django.db.models import Q
+
+    return (Q(metadata__has_key=key)
+            & ~Q(**{f"metadata__{key}": None}) & ~Q(**{f"metadata__{key}": ""})
+            & ~Q(**{f"metadata__{key}": 0}) & ~Q(**{f"metadata__{key}": False}))
+
+
+def kind_q(kind, wallet):
+    """`kind_of(tx, wallet) == kind` as a database filter, for `?kind=` (B-101).
+
+    THE MIRROR OF `kind_of`: the same branches in the same order, so the ledger can be
+    filtered by kind without reading every row into Python. Change one, change the other
+    — `tests/test_trainer_wallet_reads.py` builds a row for every branch and fails the
+    two the moment they disagree. Raises `KeyError` for a kind `kind_of` never answers.
+    """
+    from django.db.models import Q
+
+    if kind not in KIND_LABELS:
+        raise KeyError(kind)
+    purposes = [p for p in PURPOSE_KINDS]
+    known = Q(metadata__has_key='purpose') & Q(metadata__purpose__in=purposes)
+    unknown = ~known
+    incoming = Q(destination_wallet=wallet)
+
+    def purpose_of(target):
+        names = [p for p, k in PURPOSE_KINDS.items() if k == target]
+        return Q(metadata__has_key='purpose') & Q(metadata__purpose__in=names)
+
+    plan_payment = purpose_of('plan_payment')
+    topup = unknown & Q(tx_type='topup')
+    transfer = unknown & Q(tx_type='transfer')
+    sent_to_trainer = _truthy_key('trainer_id') & Q(source_wallet=wallet)
+
+    if kind == 'plan_payment':
+        return plan_payment & ~incoming
+    if kind == 'plan_credit':
+        return ((plan_payment & incoming)
+                | (topup & ~_truthy_key('agent_id') & _truthy_key('original_payment_id')))
+    if kind in PURPOSE_KINDS.values():
+        return purpose_of(kind)
+    if kind == 'reversal':
+        return unknown & Q(tx_type='reversal')
+    if kind == 'agent_topup':
+        return topup & _truthy_key('agent_id')
+    if kind == 'topup':
+        return topup & ~_truthy_key('agent_id') & ~_truthy_key('original_payment_id')
+    if kind == 'trainer_transfer':
+        return transfer & sent_to_trainer
+    if kind == 'transfer_received':
+        return transfer & ~sent_to_trainer & incoming
+    if kind == 'transfer':
+        return transfer & ~sent_to_trainer & ~incoming
+    # 'adjustment': the one `tx_type` left, and the fallback for any other.
+    return unknown & ~Q(tx_type__in=('reversal', 'topup', 'transfer'))
 
 
 def direction_of(tx, wallet) -> str:

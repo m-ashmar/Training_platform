@@ -211,15 +211,32 @@ def _client_named(identifier) -> "User":
 class WalletBalanceView(APIView):
     """`GET /api/wallet/balance/` — the caller's own wallet.
 
-    Answers `{id, owner, owner_type, balance, currency, created_at, updated_at, held,
-    held_for, account_number}` (see `WalletSerializer`). `held` is money in escrow for
+    Headers: `Authorization: Bearer <access>`. No body, no query parameters.
+
+    Answers 200 `{id, owner, owner_type, balance, currency, created_at, updated_at, held,
+    held_for, account_number, currency_locked, currency_options, held_for_trainer,
+    held_for_trainer_gross, awaiting_first_program, held_for_trainer_items}` (see
+    `WalletSerializer`, which documents every key). `held` is money in escrow for
     a coaching month — out of the balance, not spent — and `held_for` names the
     trainer it is held for; both are `0.00`/null for anyone who is not a client with a
     live hold. `account_number` is what the TopUp screen tells the client to give an
     agent.
 
+    For a TRAINER (BACKEND_BUGS B-096), the other side of the same escrow:
+    `held_for_trainer` (what the trainer will receive, net of the platform's
+    commission, when each held month 1 is released by the first program; in this
+    wallet's currency), `held_for_trainer_gross` (the clients' fees for those months),
+    `awaiting_first_program` (how many clients are waiting for their first program) and
+    `held_for_trainer_items` (one per such client, newest first). `"0.00"`, `"0.00"`,
+    `0` and `[]` for anyone else. The items are not ledger rows and never appear in
+    `transactions/`: nothing is written for the trainer until the money is released.
+
+    Refusals: 401 `not_authenticated` / `token_not_valid` (the framework's).
+
     A read of what the caller already has, with no price and no way to buy anything,
-    so it takes no `X-App-Channel` and is identical on every build.
+    so it takes no `X-App-Channel` and is identical on every build — the trainer's
+    held money included: it is money a client already paid (spec §3: the balance and
+    the history are visible on every build).
 
     Also `available`, `settling`, `settling_until` and `in_withdrawal` (BACKEND_BUGS
     B-097; `wallet.settling.WalletSettlingFields`): a coaching payout is `settling` for
@@ -318,8 +335,57 @@ class WalletCurrencyView(APIView):
                 "currency_options": list(CURRENCY_CODES)}
 
 
+def _ledger_filter_refused(exc):
+    """400 with the refusal's own code: `bad_date` (+ `field`), `date_range_reversed`,
+    `date_range_too_long` (+ `max_months`), `bad_money_type` (+ `money_type_options`),
+    `bad_kind` (+ `kind_options`). See `wallet.ledger_reads`."""
+    return Response({"error": exc.message, "code": exc.code, **exc.extra},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+
+def _own_ledger(user):
+    """`(wallet, every row of it)`: the caller's wallet, made if missing, and its rows
+    newest first in a total order."""
+    wallet, _created = Wallet.objects.get_or_create(
+        owner=user, defaults={"owner_type": getattr(user, "user_type", "client")})
+    rows = (
+        Transaction.objects
+        .filter(Q(source_wallet=wallet) | Q(destination_wallet=wallet))
+        # ...__owner too: the serializer reads `source_wallet.owner.username`,
+        # which is one hop past the end of this chain, so the ledger cost two
+        # extra queries PER ROW — 50 queries for a 20-row page of the financial
+        # history screen.
+        .select_related("source_wallet__owner", "destination_wallet__owner")
+        .order_by("-created_at", "-id")  # total order: -created_at alone repeats rows across pages
+    )
+    return wallet, rows
+
+
 class WalletTransactionsView(generics.ListAPIView):
-    """Transaction history for the caller's own wallet.
+    """`GET /api/wallet/transactions/` — the caller's own ledger, newest first.
+
+    Headers: `Authorization: Bearer <access>`. Answers 200 with the paginated envelope
+    `{count, next, previous, results}` (`?page=`, `?page_size=`, §3), each row a
+    `TransactionSerializer` row (`kind`, `reason`, `direction`, `signed_amount`,
+    `counterparty`, amount, currency, `money_type`, reference, metadata).
+
+    Optional filters (BACKEND_BUGS B-101; `wallet.ledger_reads` has the rules), all
+    ANDed, and without any of them the call is exactly what it was:
+
+    * `since=YYYY-MM-DD`, `until=YYYY-MM-DD` — inclusive days in the server's zone.
+    * `money_type=` — one or several of `PLATFORM_SUB`, `COACHING_1TO1`,
+      `ROUTINE_PRODUCT`, `WALLET_MOVE` (repeat the parameter or separate with commas;
+      several mean any of them).
+    * `kind=` — one or several of the `kind` values a row carries
+      (`wallet.activity.KINDS`), matched exactly as each row's `kind` is derived.
+
+    Refusals (400, each its own code): `bad_date` (+ `field`: a date that is not
+    `YYYY-MM-DD` or lies outside 2000..2999), `date_range_reversed` (`since` after
+    `until`), `bad_money_type` (+ `money_type_options`), `bad_kind` (+ `kind_options`);
+    401 `not_authenticated` / `token_not_valid`.
+
+    For the monthly chart and the breakdown by kind of money, do not page this: read
+    `transactions/summary/`.
 
     Was an APIView returning a bare JSON array hard-sliced at [:200]: the only list
     endpoint in the API without the {count, next, previous, results} envelope, and a
@@ -332,26 +398,19 @@ class WalletTransactionsView(generics.ListAPIView):
     the trainer, when its money becomes withdrawable and whether that is still ahead;
     `null` / `false` on every other row. A trainer's withdrawal reads as `kind`
     `withdrawal`, and its money coming back as `withdrawal_returned`.
+
+    A record of money that already moved: no channel header, identical on every build.
     """
     permission_classes = [IsAuthenticated]
     serializer_class = TransactionSerializer
 
     def get_queryset(self):
-        wallet, _created = Wallet.objects.get_or_create(
-            owner=self.request.user,
-            defaults={"owner_type": getattr(self.request.user, "user_type", "client")},
-        )
+        wallet, rows = _own_ledger(self.request.user)
         self._wallet = wallet
-        return (
-            Transaction.objects
-            .filter(Q(source_wallet=wallet) | Q(destination_wallet=wallet))
-            # ...__owner too: the serializer reads `source_wallet.owner.username`,
-            # which is one hop past the end of this chain, so the ledger cost two
-            # extra queries PER ROW — 50 queries for a 20-row page of the financial
-            # history screen.
-            .select_related("source_wallet__owner", "destination_wallet__owner")
-            .order_by("-created_at", "-id")  # total order: -created_at alone repeats rows across pages
-        )
+        filters = getattr(self, "_filters", None)
+        if filters is not None:
+            rows = filters.apply(rows, wallet)
+        return rows
 
     def get_serializer_context(self):
         """The reader's own wallet, so the serializer can say which way each row went.
@@ -377,11 +436,67 @@ class WalletTransactionsView(generics.ListAPIView):
         return context
 
     def list(self, request, *args, **kwargs):
+        from .ledger_reads import LedgerFilterRefused, parse_filters
+
+        try:
+            self._filters = parse_filters(request.query_params)
+        except LedgerFilterRefused as exc:
+            return _ledger_filter_refused(exc)
         response = super().list(request, *args, **kwargs)
         # Audit the access, not the row count: counting used to run a second COUNT
         # query over the whole ledger on every view.
         audit("wallet.transactions.view", request, {"wallet_id": self._wallet.id})
         return response
+
+
+class WalletTransactionsSummaryView(APIView):
+    """`GET /api/wallet/transactions/summary/` — the caller's own ledger summed by
+    calendar month and by kind of money (BACKEND_BUGS B-101).
+
+    TrainerEarnings' monthly chart («أرباحك الشهرية») and «من أين أرباح أيلول» (coaching,
+    the trainer's share of plans, programs sold) without paging six months of rows:
+    two aggregate queries (plus the wallet and the platform's ledger owners) whatever
+    the number of rows.
+
+    Headers: `Authorization: Bearer <access>`. Query, all optional:
+    `since=YYYY-MM-DD` / `until=YYYY-MM-DD` (inclusive, server's zone; default: this
+    month and the five before it, up to today), `money_type=` and `kind=` exactly as on
+    `transactions/`. The window may touch at most 12 calendar months.
+
+    200 `{currency, since, until, money_type, kind, months, totals}`:
+    `currency` is the wallet's, and every amount is in it (a string, two decimals).
+    `months` lists every calendar month the window touches, oldest first, even an empty
+    one: `{month: "2026-09", in, out, net, count, by_money_type}`; `by_money_type` always
+    has the four keys `PLATFORM_SUB`, `COACHING_1TO1`, `ROUTINE_PRODUCT`, `WALLET_MOVE`,
+    each `{in, out, net, count, people}`. `totals` is the same over the whole window,
+    with `people` counted across it. `in` reached this wallet, `out` left it, `net` =
+    `in` - `out`; `count` is ledger rows; `people` is how many different people those
+    rows were with (the row's `counterparty`; escrow and the platform are nobody). For a
+    trainer, `COACHING_1TO1.in` is coaching income and its `people` the clients it came
+    from, `PLATFORM_SUB.in` their share of clients' plans, `ROUTINE_PRODUCT.in` program
+    sales. `since`/`until` echo the window used; `money_type`/`kind` the filters.
+
+    Refusals (400, each its own code): `bad_date` (+ `field`), `date_range_reversed`,
+    `date_range_too_long` (+ `max_months`: 12), `bad_money_type`
+    (+ `money_type_options`), `bad_kind` (+ `kind_options`); 401 `not_authenticated` /
+    `token_not_valid`.
+
+    A record of money that already moved: no channel header, identical on every build.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .ledger_reads import (LedgerFilterRefused, monthly_summary, parse_filters,
+                                   summary_window)
+
+        try:
+            filters = summary_window(parse_filters(request.query_params))
+        except LedgerFilterRefused as exc:
+            return _ledger_filter_refused(exc)
+        wallet, rows = _own_ledger(request.user)
+        body = monthly_summary(rows, wallet, filters)
+        audit("wallet.transactions.summary", request, {"wallet_id": wallet.id})
+        return Response(body)
 
 
 class WalletTransactionDetailView(generics.RetrieveAPIView):

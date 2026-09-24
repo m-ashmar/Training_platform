@@ -19,6 +19,33 @@ class WalletSerializer(WalletSettlingFields, serializers.ModelSerializer):
     `account_number` is what the TopUp screen tells the client to read out to an agent
     (`wallet.utils.account_number_for`) — an address, not a secret.
 
+    THE TRAINER'S SIDE OF ESCROW (BACKEND_BUGS B-096) — TrainerEarnings' «محجوز لدى
+    المنصة · 3 عملاء بانتظار أول برنامج», read by `users.trainer_escrow.held_for_trainer`:
+
+    * `held_for_trainer` — what the trainer will RECEIVE when each held month 1 is
+      released (the client's fee less the platform's commission at the rate copied onto
+      that month), summed, in this wallet's currency. `"0.00"` for anyone who is not a
+      trainer, and for a trainer with nothing held.
+    * `held_for_trainer_gross` — the same months at the client's fee, before commission.
+    * `awaiting_first_program` — how many clients have month 1 held and no first program
+      yet (the status `GET /api/v1/coaching/current/` gives the client for the same
+      month). `0` for anyone who is not a trainer.
+    * `held_for_trainer_items` — one per such client, newest hold first: `relation_id`,
+      `client` `{id, name, role}`, `status` (`awaiting_first_program`), `kind`
+      (`trainer_fee_hold`, the ledger's kind for this money), `reason`, `month`,
+      `requested_at`, `held_at`, `amount` (client's fee) = `commission` + `net`,
+      `commission_rate` (a fraction, `"0.2"`), `currency`, `charged_amount` /
+      `charged_currency` (the month as the client paid it) and `estimated` (true when
+      the month crosses a currency, so `pay_out` will convert the trainer's share at
+      the rate of the day it pays). An item whose amount cannot be put in this wallet's
+      currency keeps its own `currency` and is left out of the two sums. `[]` for
+      anyone who is not a trainer. These are NOT ledger rows (no `reference_id`): the
+      hold is one client -> escrow row, and nothing is written for the trainer until
+      it is released.
+
+    Available and settling (B-097) are another builder's; these four keys stay in their
+    own methods below so the two merge line by line.
+
     None of it is a price or a way to buy anything, so all of it is answered on every
     `X-App-Channel`; the spec lets even the iOS build show the balance and the history.
     """
@@ -27,12 +54,20 @@ class WalletSerializer(WalletSettlingFields, serializers.ModelSerializer):
     account_number = serializers.SerializerMethodField()
     currency_locked = serializers.SerializerMethodField()
     currency_options = serializers.SerializerMethodField()
+    # B-096: the trainer's side of escrow.
+    held_for_trainer = serializers.SerializerMethodField()
+    held_for_trainer_gross = serializers.SerializerMethodField()
+    awaiting_first_program = serializers.SerializerMethodField()
+    held_for_trainer_items = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallet
         fields = ["id", "owner", "owner_type", "balance", "currency", "created_at",
                   "updated_at", "held", "held_for", "account_number",
-                  "currency_locked", "currency_options"]
+                  "currency_locked", "currency_options",
+                  # B-096: the trainer's side of escrow.
+                  "held_for_trainer", "held_for_trainer_gross", "awaiting_first_program",
+                  "held_for_trainer_items"]
         read_only_fields = fields
 
     def get_currency_locked(self, obj):
@@ -97,6 +132,65 @@ class WalletSerializer(WalletSettlingFields, serializers.ModelSerializer):
         from .utils import account_number_for
 
         return account_number_for(obj.owner_id)
+
+    # ------------------------------------------- B-096: the trainer's side of escrow
+    def _trainer_escrow(self, obj):
+        """`users.trainer_escrow.held_for_trainer` for a trainer's wallet, read once per
+        response; None for anyone else.
+
+        Decided by the OWNER's role, not `Wallet.owner_type`: the wallet is made by a
+        `post_save` on the user's first save, so an account whose role was set after
+        that (an operator making someone a trainer) keeps a wallet labelled `client`.
+        """
+        if getattr(obj.owner, "user_type", None) != "trainer":
+            return None
+        if "_trainer_escrow_cache" not in self.__dict__:
+            from users.trainer_escrow import held_for_trainer
+
+            self._trainer_escrow_cache = held_for_trainer(obj.owner_id, obj.currency)
+        return self._trainer_escrow_cache
+
+    def get_held_for_trainer(self, obj):
+        escrow = self._trainer_escrow(obj)
+        return str(escrow["net"]) if escrow else "0.00"
+
+    def get_held_for_trainer_gross(self, obj):
+        escrow = self._trainer_escrow(obj)
+        return str(escrow["gross"]) if escrow else "0.00"
+
+    def get_awaiting_first_program(self, obj):
+        escrow = self._trainer_escrow(obj)
+        return escrow["count"] if escrow else 0
+
+    def get_held_for_trainer_items(self, obj):
+        from . import activity
+
+        escrow = self._trainer_escrow(obj)
+        if not escrow:
+            return []
+        when = serializers.DateTimeField()
+
+        def _at(value):
+            return when.to_representation(value) if value else None
+
+        return [{
+            "relation_id": item["relation_id"],
+            "client": item["client"],
+            "status": item["status"],
+            "kind": item["kind"],
+            "reason": activity.reason_of(item["kind"]),
+            "month": item["month"],
+            "requested_at": _at(item["requested_at"]),
+            "held_at": _at(item["held_at"]),
+            "amount": str(item["amount"]),
+            "commission": str(item["commission"]),
+            "commission_rate": format(item["commission_rate"].normalize(), "f"),
+            "net": str(item["net"]),
+            "currency": item["currency"],
+            "charged_amount": str(item["charged_amount"]),
+            "charged_currency": item["charged_currency"],
+            "estimated": item["estimated"],
+        } for item in escrow["items"]]
 
 
 class _TransactionListSerializer(serializers.ListSerializer):
