@@ -38,6 +38,17 @@ Not a gate, and just as silent: **a new app with a `FileField` must be added to
 replaced row leaves its file in storage for ever — account erasure included. Nothing
 fails; the bytes simply stay (found building `trainer_verification`, 2026-09-24).
 
+Two more that fail silently (found building `payouts`, 2026-09-24):
+
+- **`Wallet.owner_type` is not the owner's role.** It is written once, when the wallet is
+  created, from `user_type` AT THAT MOMENT — and `make_user(..., user_type="trainer")`
+  creates the user as a client first, so every test trainer's wallet says `"client"`.
+  Branch on `wallet.owner.user_type`, or on the ledger, never on `owner_type`.
+- **An admin form field named like a read-only model field vanishes.** `ModelAdmin.
+  get_form` removes a declared form field whose name is in `readonly_fields`, so the
+  POSTed value never reaches `cleaned_data` and the page still answers 302. Name console
+  inputs apart from the model's columns (`transfer_id`, not `shamcash_transaction_id`).
+
 ## Working in a worktree
 
 Worktrees are how several agents build at once. The setup is done for you; what bites is:
