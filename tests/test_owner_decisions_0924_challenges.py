@@ -40,13 +40,14 @@ def _exercise(trainer, tag):
     from routine.models import Exercise
 
     return Exercise.objects.create(name=f"f20 ex {tag}", created_by=trainer,
-                                   target_muscle="Chest")
+                                   target_muscle="Triceps")
 
 
 def _sets(user, exercise, day, count, *, reps=10, weight=50.0, received=None,
           session=None, first=1):
     """`count` sets on `day`, straight into the tables (the count is under test, not
-    the set route). `received` overrides the server's receipt time."""
+    the set route). Received the evening of `day` (as someone logging in the gym), or
+    at `received`."""
     from routine.models import ExerciseSetLog, UserExerciseProgress
 
     progress, _new = UserExerciseProgress.objects.get_or_create(
@@ -55,9 +56,10 @@ def _sets(user, exercise, day, count, *, reps=10, weight=50.0, received=None,
         ExerciseSetLog(user_exercise_progress=progress, set_number=number, reps=reps,
                        weight=weight, date=day, workout_session=session)
         for number in range(first, first + count)])
-    if received is not None:
-        ExerciseSetLog.objects.filter(pk__in=[r.pk for r in rows]).update(
-            created_at=received)
+    if received is None:
+        received = min(timezone.now(),
+                       timezone.make_aware(datetime.combine(day, time(20))))
+    ExerciseSetLog.objects.filter(pk__in=[r.pk for r in rows]).update(created_at=received)
     return rows
 
 
