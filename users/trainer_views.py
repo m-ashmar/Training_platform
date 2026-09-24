@@ -93,7 +93,7 @@ class TrainerDetailView(APIView):
     def get(self, request, trainer_id):
         trainer = directory_trainers().filter(pk=trainer_id).first()
         if trainer is None:
-            raise NotFound(_('Trainer not found'))
+            raise NotFound(_('Trainer not found'), code='not_found')
         return Response(trainer_profile(trainer, request))
 
 

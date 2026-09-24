@@ -105,7 +105,7 @@ class ExerciseMediaView(APIView):
 
     | Method | Answers |
     |---|---|
-    | `GET` | `200` `{exercise_id, media, media_source, media_trainer_id}` · `401` · `404` |
+    | `GET` | `200` `{exercise_id, media, media_source, media_trainer_id}` · `401` · `404` `not_found` |
 
     Nothing here varies by build (`X-App-Channel`): it sells nothing and moves no money.
     The URLs inside are signed and expire (`MEDIA_SIGNED_URL_TTL`, default one hour) —
@@ -118,7 +118,7 @@ class ExerciseMediaView(APIView):
 
         exercise = _visible_exercise(request, exercise_id)
         if exercise is None:
-            return Response({"error": _("Exercise not found.")},
+            return Response({"error": _("Exercise not found."), "code": "not_found"},
                             status=status.HTTP_404_NOT_FOUND)
 
         answer = resolve_exercise_media(
@@ -197,9 +197,13 @@ class VideoUploadView(APIView):
     | `400` | `media_video_too_large` | over the size cap |
     | `400` | `media_video_too_long` | over the duration cap |
     | `400` | `media_alt_too_long` | `alt_ar` or `alt_en` over 200 characters — refused before anything is stored |
-    | `403` | `permission_denied` | visible, but not the caller's to change |
+    | `403` | `media_not_yours` | visible, but not the caller's to change: another trainer's slot, an exercise they did not create, or `program`/`dish`/`app` for anyone but an admin |
+    | `403` | `media_use_trainer_route` | `owner_type=trainer_exercise`: a coach's own demonstration goes through `/api/v1/trainer/exercise-media/`, for everyone, admins included |
     | `404` | `not_found` | an exercise this caller may not see |
     | `413` | `payload_too_large` | the body itself is over the ceiling |
+
+    Both 403 codes answered the generic `permission_denied` before (the owner,
+    2026-09-24: every refusal names its own code).
 
     `state` is `pending` until a worker fills the poster and the measurements; the video
     already plays. See `mediakit/tasks.py` for what fills it and what does not (`hls_url`
@@ -280,7 +284,8 @@ class VideoUploadView(APIView):
             # as not having one. Refused for an admin too, for the same reason.
             return Response(
                 {"error": _("Use /api/v1/trainer/exercise-media/ for your own "
-                            "demonstration of an exercise.")},
+                            "demonstration of an exercise."),
+                 "code": "media_use_trainer_route"},
                 status=status.HTTP_403_FORBIDDEN)
 
         if is_admin:
@@ -289,21 +294,24 @@ class VideoUploadView(APIView):
         if owner_type == OwnerType.EXERCISE:
             exercise = _visible_exercise(request, owner_id)
             if exercise is None:
-                return Response({"error": _("Exercise not found.")},
+                return Response({"error": _("Exercise not found."), "code": "not_found"},
                                 status=status.HTTP_404_NOT_FOUND)
             if not _may_modify_exercise(request, exercise):
                 return Response(
-                    {"error": _("You do not have permission to modify this exercise.")},
+                    {"error": _("You do not have permission to modify this exercise."),
+                     "code": "media_not_yours"},
                     status=status.HTTP_403_FORBIDDEN)
             return None
 
         if owner_type == OwnerType.TRAINER:
             if getattr(user, "is_trainer", False) and int(owner_id) == user.id:
                 return None
-            return Response({"error": _("This is not yours to change.")},
+            return Response({"error": _("This is not yours to change."),
+                             "code": "media_not_yours"},
                             status=status.HTTP_403_FORBIDDEN)
 
         # program / dish / app: the shared catalogue and the app's own content. Curated
         # in the operator console, never by a trainer.
-        return Response({"error": _("This is not yours to change.")},
+        return Response({"error": _("This is not yours to change."),
+                         "code": "media_not_yours"},
                         status=status.HTTP_403_FORBIDDEN)

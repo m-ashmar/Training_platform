@@ -278,6 +278,15 @@ class CustomRegisterSerializer(RegisterSerializer):
     
 
 class CustomLoginSerializer(LoginSerializer):
+    """`POST /api/auth/login/`. Its object-level refusals stay `400 validation_error`
+    with the reason in `field_errors.non_field_errors[0].code` (the owner, 2026-09-24:
+    each names its own; all three were DRF's generic `invalid`):
+
+    `invalid_credentials` (wrong address or password), `email_not_verified` (the right
+    password on an address not yet verified — with `requires_verification` and
+    `email`; route to the code screen) and `credentials_required`. `too_many_attempts`
+    and `account_disabled` are top-level codes of their own (`users/exceptions.py`).
+    """
     username = None  # Remove the username field
 
     email = serializers.EmailField(required=True)  # Ensure email is required
@@ -310,7 +319,9 @@ class CustomLoginSerializer(LoginSerializer):
                     raise AccountDisabled()
                 record_login_failure(email)
                 raise serializers.ValidationError(
-                    {"non_field_errors": [_("Unable to log in with provided credentials.")]}
+                    {"non_field_errors": [serializers.ErrorDetail(
+                        _("Unable to log in with provided credentials."),
+                        code='invalid_credentials')]}
                 )
 
             # Verified, not merely enabled. This tested `is_active`, which the backend
@@ -320,7 +331,9 @@ class CustomLoginSerializer(LoginSerializer):
             if not self.user.email_verified:
                 raise serializers.ValidationError(
                     {
-                        "non_field_errors": [_("Please verify your email address before logging in. Check your inbox for the OTP code.")],
+                        "non_field_errors": [serializers.ErrorDetail(
+                            _("Please verify your email address before logging in. Check your inbox for the OTP code."),
+                            code='email_not_verified')],
                         "requires_verification": True,
                         "email": self.user.email
                     }
@@ -330,7 +343,8 @@ class CustomLoginSerializer(LoginSerializer):
             clear_login_attempts(email)
         else:
             raise serializers.ValidationError(
-                {"non_field_errors": [_("Must include 'email' and 'password'.")]}
+                {"non_field_errors": [serializers.ErrorDetail(
+                    _("Must include 'email' and 'password'."), code='credentials_required')]}
             )
 
         attrs['user'] = self.user
