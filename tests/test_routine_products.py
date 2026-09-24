@@ -283,6 +283,39 @@ def test_a_staff_account_that_is_not_an_operator_sees_no_products(make_user, cli
     assert client.get("/dj-admin/routine/routineproduct/").status_code in (302, 403)
 
 
+def test_a_decision_needs_the_change_permission(make_user, api, client):
+    """An operator account may read the queue, but approving a product or refunding a
+    purchase needs the model's CHANGE permission (like `TransferReviewAdmin`)."""
+    from django.contrib.auth.models import Permission
+
+    from routine.models import RoutineProduct, RoutinePurchase
+
+    trainer = _trainer(make_user, "perm")
+    product = _draft(api, trainer, _template(trainer, "perm"))
+    api(trainer).post(f"/api/v1/trainer/products/{product['id']}/submit/")
+    operator = make_user("rp_admin_noperm", user_type="admin", is_superuser=False)
+
+    client.force_login(operator)
+    assert client.get("/dj-admin/routine/routineproduct/").status_code == 200
+    _console(client, operator, "/dj-admin/routine/routineproduct/", "approve", [product["id"]])
+    assert RoutineProduct.objects.get(pk=product["id"]).status == "in_review"
+
+    operator.user_permissions.add(Permission.objects.get(codename="change_routineproduct"))
+    _console(client, operator, "/dj-admin/routine/routineproduct/", "approve", [product["id"]])
+    assert RoutineProduct.objects.get(pk=product["id"]).status == "published"
+
+    buyer = _client(make_user, "perm")
+    purchase_id = _buy(api, buyer, product["id"], HTTP_X_APP_CHANNEL="web").json()["purchase"]["id"]
+    _console(client, operator, "/dj-admin/routine/routinepurchase/", "refund", [purchase_id],
+             reason="duplicate")
+    assert RoutinePurchase.objects.get(pk=purchase_id).status == "confirmed"
+    operator.user_permissions.add(Permission.objects.get(codename="change_routinepurchase"))
+    _console(client, operator, "/dj-admin/routine/routinepurchase/", "refund", [purchase_id],
+             reason="duplicate")
+    assert RoutinePurchase.objects.get(pk=purchase_id).status == "refunded"
+    assert _balance(buyer) == D("10000.00")
+
+
 def test_an_approval_of_a_program_changed_after_submission_is_refused(make_user, api):
     from routine import products
     from routine.models import RoutineTemplate
