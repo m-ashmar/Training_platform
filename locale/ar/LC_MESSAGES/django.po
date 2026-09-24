@@ -4896,3 +4896,25 @@ msgstr "هذا التسجيل طويل جدًا. الحد الأقصى للإر�
 #, python-format
 msgid "%(minutes)s minutes"
 msgstr "%(minutes)s دقيقة"
+
+#: wallet/ledger_reads.py
+#, python-format
+msgid "%(field)s must be a date written YYYY-MM-DD, between 2000 and 2999."
+msgstr "يجب أن يكون %(field)s تاريخًا بصيغة YYYY-MM-DD بين عامي 2000 و2999."
+
+#: wallet/ledger_reads.py
+msgid "since must not be after until."
+msgstr "يجب ألا يكون تاريخ البداية (since) بعد تاريخ النهاية (until)."
+
+#: wallet/ledger_reads.py
+msgid "That kind of money is unknown."
+msgstr "نوع المال هذا غير معروف."
+
+#: wallet/ledger_reads.py
+msgid "That kind of activity is unknown."
+msgstr "نوع الحركة هذا غير معروف."
+
+#: wallet/ledger_reads.py
+#, python-format
+msgid "The summary covers at most %(months)d months."
+msgstr "يغطي الملخص %(months)d شهرًا على الأكثر."

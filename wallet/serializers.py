@@ -133,8 +133,13 @@ class WalletSerializer(serializers.ModelSerializer):
     # ------------------------------------------- B-096: the trainer's side of escrow
     def _trainer_escrow(self, obj):
         """`users.trainer_escrow.held_for_trainer` for a trainer's wallet, read once per
-        response; None for anyone else."""
-        if obj.owner_type != "trainer":
+        response; None for anyone else.
+
+        Decided by the OWNER's role, not `Wallet.owner_type`: the wallet is made by a
+        `post_save` on the user's first save, so an account whose role was set after
+        that (an operator making someone a trainer) keeps a wallet labelled `client`.
+        """
+        if getattr(obj.owner, "user_type", None) != "trainer":
             return None
         if "_trainer_escrow_cache" not in self.__dict__:
             from users.trainer_escrow import held_for_trainer
