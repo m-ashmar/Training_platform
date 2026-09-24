@@ -11,16 +11,17 @@ and is refused (`ReviewConflict`), rather than both writing a decision.
 Files are decoded BEFORE the transaction (`files.process`) so no lock is held while an
 image is decoded, and written inside it; if the transaction fails, what was written is
 deleted again, so a refusal never leaves an identity document in storage that no row
-points at. A replaced or removed file is deleted after the commit by
-`training_platform/signals.py`, never before it — except when a document is deleted
-for good (the retention purge, an account's erasure): there its files go FIRST and its
-row only once they are gone (`delete_documents`), so a storage error keeps the row that
-knows where the file is.
+points at. Whenever a document is deleted for good — one nobody reviewed, replaced or
+removed (`_retire`); the retention purge; an account's erasure — its files go FIRST and
+its row only once they are gone (`delete_documents`), so a storage error keeps the row
+that knows where the file is. None of that happens inside a transaction that could
+still roll back: a trainer's replacement deletes after its commit.
 """
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from functools import partial
 
 from django.conf import settings
 from django.core.files.base import ContentFile
@@ -176,15 +177,37 @@ def _retire(document, now) -> None:
     """Take a document out of its slot.
 
     One an operator already decided on is KEPT — replaced, with the state and reason
-    they gave it — until its retention runs out; one nobody has looked at yet has no
-    history worth keeping and is deleted (its files go after the commit).
+    they gave it — until its retention runs out. One nobody has looked at yet has no
+    history worth keeping and is deleted at once, files FIRST: here it is only marked
+    replaced and due now, and once the transaction commits its files are deleted and
+    then its row (`_delete_unreviewed`). Deleting the row here, as this did, left the
+    files to the post-commit receiver of `training_platform/signals.py`, which can only
+    log a storage error — and an identity photo stayed in the private bucket for good,
+    with no row pointing at it (SIDE_BUGS S-209). Deleting the files here instead would
+    be undone by nothing if the transaction rolled back. Now a storage error keeps the
+    row, and the daily purge (`purge_replaced_documents`) tries again.
     """
-    if document.was_reviewed:
-        document.replaced_at = now
-        document.purge_after = now + timedelta(days=retention_days())
-        document.save(update_fields=["replaced_at", "purge_after"])
-    else:
-        document.delete()
+    reviewed = document.was_reviewed
+    document.replaced_at = now
+    document.purge_after = now + timedelta(days=retention_days()) if reviewed else now
+    document.save(update_fields=["replaced_at", "purge_after"])
+    if not reviewed:
+        transaction.on_commit(partial(_delete_unreviewed, document.pk), robust=True)
+
+
+def _delete_unreviewed(document_id) -> None:
+    """After the commit: delete a retired document nobody reviewed, files first. When
+    storage refuses, its row is kept (replaced, due now) for the next purge."""
+    document = VerificationDocument.objects.filter(pk=document_id,
+                                                   replaced_at__isnull=False).first()
+    if document is None or document.was_reviewed:
+        return
+    try:
+        with transaction.atomic():
+            delete_documents([document])
+    except DocumentFilesNotDeleted:
+        logger.warning("An unreviewed verification document's files could not be "
+                       "deleted; its row is kept for the next purge", exc_info=True)
 
 
 def upload_document(trainer, slot_key, upload) -> VerificationDocument:
