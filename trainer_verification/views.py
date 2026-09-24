@@ -24,7 +24,8 @@ def _not_a_trainer():
 
 def _refusal(exc):
     """One body for every refusal: `{error, code, ...extra}` (`missing`, `rejected`,
-    `accepted`, `slot`, `slots`, `max_bytes`, `min_side` where the code says so)."""
+    `accepted`, `slot`, `slots`, `max_bytes`, `max_pixels`, `max_side`, `min_side` where
+    the code says so)."""
     status_code = getattr(exc, "status", status.HTTP_400_BAD_REQUEST)
     body = {"error": exc.message, "code": exc.code}
     body.update(exc.extra)
@@ -63,7 +64,18 @@ class MyVerificationView(APIView):
     `status` is `verified` whenever the account is verified, including a trainer an
     operator verified by hand before applications existed (their `documents` are all
     `missing`). The identity card is two slots (front, back); the design draws them as
-    one row. `nutrition_certificate` is the one optional slot.
+    one row. `nutrition_certificate` is the one optional slot, and today it has
+    no effect on roster or match order: the roster (`GET /api/v1/trainers/`) and the
+    matches rank on `trainer_is_verified`, never on a document. The design labels the
+    row "اختيارية · ترفع ترتيبك" ("optional · raises your ranking"); nothing does that
+    yet — whether it should is the owner's decision — so the app must not promise it.
+
+    **A revoke** (an operator withdrawing a verification, e.g. a document found forged
+    afterwards) answers `status: "rejected"` with the reason, like a rejection. The
+    documents it names are `rejected` with their own reason, listed in
+    `needs_replacing`, and block `submit` until replaced; if it names none, every
+    document is `uploaded` again (nothing stays `accepted`) and the trainer may send the
+    application as it is, to be reviewed afresh.
 
     **URLs are signed and expire** after `url_expires_in` seconds (five minutes). Use
     them at once; read this route again rather than storing one. They are never public:
@@ -103,6 +115,13 @@ class DocumentView(APIView):
     metadata (GPS included) removed. HEIC is refused — send JPEG. At most 10 MB
     (`VERIFICATION_DOCUMENT_MAX_BYTES`); a photo needs 400 px on its shorter side.
 
+    **How large a photo may be** (what a 512 MB server can open): at most 10,000 px on
+    a side. A camera JPEG may be up to 40 MP; over 16 MP it is stored at half its width
+    and height (a 24 MP photo becomes 6 MP — plenty to read a card). A PNG may be up to
+    16 MP, a WebP about 6.7 MP, a progressive JPEG about 8 to 13 MP depending on its
+    colour format. Over that, `verification_image_too_large` with `max_pixels` (the most for
+    that kind of file) and `max_side`. Sending the camera's JPEG always works.
+
     After a rejection, every change resets that document to `uploaded`. A document an
     operator had already decided on is kept out of sight for 90 days after it is
     replaced, then deleted; one nobody reviewed is deleted at once.
@@ -116,7 +135,7 @@ class DocumentView(APIView):
     | `400` | `verification_unsupported_format` | not a JPEG, PNG, WebP (or PDF where `accepts` has it), including HEIC; `accepted` lists the kinds |
     | `400` | `verification_unreadable_file` | an empty or broken file |
     | `400` | `verification_file_too_large` | over `max_bytes` |
-    | `400` | `verification_image_too_large` | a photo over 10,000 px on a side or 40 MP |
+    | `400` | `verification_image_too_large` | a photo too large to open (above): over 10,000 px on a side, or over `max_pixels` for its kind; `max_pixels`, `max_side` |
     | `400` | `verification_image_too_small` | a photo under `min_side` (400 px) on its shorter side |
     | `400` | `verification_pdf_encrypted` | a password-protected PDF |
     | `400` | `verification_pdf_active_content` | a PDF with scripts, launch actions, attachments or self-submitting forms |

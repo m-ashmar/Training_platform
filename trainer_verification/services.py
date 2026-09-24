@@ -12,7 +12,10 @@ Files are decoded BEFORE the transaction (`files.process`) so no lock is held wh
 image is decoded, and written inside it; if the transaction fails, what was written is
 deleted again, so a refusal never leaves an identity document in storage that no row
 points at. A replaced or removed file is deleted after the commit by
-`training_platform/signals.py`, never before it.
+`training_platform/signals.py`, never before it — except when a document is deleted
+for good (the retention purge, an account's erasure): there its files go FIRST and its
+row only once they are gone (`delete_documents`), so a storage error keeps the row that
+knows where the file is.
 """
 from __future__ import annotations
 
@@ -320,17 +323,54 @@ def _trainer_id_of(application_id):
     return trainer_id
 
 
+def _document_reasons(document_reasons) -> dict:
+    """`{document_id: reason}`, the empty ones dropped, each cut to `MAX_REASON`."""
+    reasons = {}
+    for key, value in (document_reasons or {}).items():
+        text = str(value or "").strip()
+        if text:
+            reasons[int(key)] = text[:MAX_REASON]
+    return reasons
+
+
+def _current_for_decision(application, reasons, seen_document_ids, expected_round):
+    """The application's current documents, locked — once the page the operator decided
+    on is known to show them.
+
+    The console page posts the ids of the documents it showed and the round it showed.
+    If the trainer changed a document since, or the application has been sent again
+    since (a new round, even with the same files — another operator may have rejected
+    or revoked it in between, and approved it again), the decision is refused rather
+    than taken on a state nobody looked at.
+    """
+    documents = list(application.documents.select_for_update()
+                     .filter(replaced_at__isnull=True).order_by("slot", "id"))
+    ids = {d.pk for d in documents}
+    if seen_document_ids is not None and {int(i) for i in seen_document_ids} != ids:
+        raise ReviewConflict("The trainer changed the documents while you were "
+                             "reviewing them. Open the application again.")
+    if expected_round is not None and int(expected_round) != application.round:
+        raise ReviewConflict(
+            f"The application changed while you were reviewing it: it is at round "
+            f"{application.round} now, not {expected_round}. Open it again.")
+    if set(reasons) - ids:
+        raise ReviewConflict("A document reason names a document that is not part of "
+                             "this application.")
+    return documents
+
+
 def decide(application_id, operator, *, approve: bool, reason: str = "",
            document_reasons: dict | None = None,
-           seen_document_ids=None) -> VerificationDecision:
+           seen_document_ids=None, expected_round=None) -> VerificationDecision:
     """Approve or reject a pending application. Operator-only; the console calls it.
 
     `document_reasons` is `{document_id: reason}` for the documents being refused (a
     rejection only); every other current document is accepted. `reason` is required for
     a rejection — it is what the trainer reads and what the push carries.
-    `seen_document_ids`, when given, is the set of documents the operator was looking
-    at: if the trainer changed one since, the decision is refused rather than taken on
-    files nobody reviewed.
+    `seen_document_ids` and `expected_round`, when given, are what the operator was
+    looking at: the documents and the round. If the trainer changed a document since,
+    or the application was decided and sent again since, the decision is refused rather
+    than taken on files nobody reviewed.
 
     Raises `ReviewConflict` when the application is not pending — including when
     another operator decided it first: the trainer's user row and then the application
@@ -338,11 +378,7 @@ def decide(application_id, operator, *, approve: bool, reason: str = "",
     """
     trainer_id = _trainer_id_of(application_id)
     reason = (reason or "").strip()
-    reasons = {}
-    for key, value in (document_reasons or {}).items():
-        text = str(value or "").strip()
-        if text:
-            reasons[int(key)] = text[:MAX_REASON]
+    reasons = _document_reasons(document_reasons)
     if len(reason) > MAX_REASON:
         raise ReviewConflict(f"The reason is too long: at most {MAX_REASON} characters.")
 
@@ -354,15 +390,8 @@ def decide(application_id, operator, *, approve: bool, reason: str = "",
             raise ReviewConflict(
                 f"This application is {application.state}, not pending: it was decided "
                 f"already.")
-        documents = list(application.documents.select_for_update()
-                         .filter(replaced_at__isnull=True).order_by("slot", "id"))
-        ids = {d.pk for d in documents}
-        if seen_document_ids is not None and {int(i) for i in seen_document_ids} != ids:
-            raise ReviewConflict("The trainer changed the documents while you were "
-                                 "reviewing them. Open the application again.")
-        if set(reasons) - ids:
-            raise ReviewConflict("A document reason names a document that is not part of "
-                                 "this application.")
+        documents = _current_for_decision(application, reasons, seen_document_ids,
+                                          expected_round)
         now = timezone.now()
         if approve:
             if reasons:
@@ -407,11 +436,26 @@ def decide(application_id, operator, *, approve: bool, reason: str = "",
         return decision
 
 
-def revoke(application_id, operator, reason: str) -> VerificationDecision:
+def revoke(application_id, operator, reason: str, *, document_reasons: dict | None = None,
+           seen_document_ids=None, expected_round=None) -> VerificationDecision:
     """Withdraw a verification (a document found forged afterwards). The application
-    goes back to `rejected` with `reason`, and the trainer can fix it and resubmit."""
+    goes back to `rejected` with `reason`, and the trainer can fix it and resubmit.
+
+    `document_reasons` is `{document_id: reason}` for the documents it is withdrawn
+    for: each becomes `rejected` with its reason, so the app lists it in
+    `needs_replacing` and it cannot be sent again unchanged
+    (`verification_documents_rejected`); the others stay `accepted`. A revoke that
+    names none sends EVERY document back to `uploaded`: nothing stays marked accepted
+    by the decision just withdrawn, and the next round reviews them all afresh. Either
+    way the documents keep `reviewed_in_round`, so one the trainer then replaces is
+    kept for comparison (`_retire`) rather than deleted.
+
+    `seen_document_ids` and `expected_round` guard a stale console page, as in
+    `decide`: a verification granted since the page was opened is not withdrawn by it.
+    """
     trainer_id = _trainer_id_of(application_id)
     reason = (reason or "").strip()
+    reasons = _document_reasons(document_reasons)
     if not reason:
         raise ReviewConflict("Say why the verification is withdrawn: the trainer is "
                              "shown this reason.")
@@ -424,8 +468,16 @@ def revoke(application_id, operator, reason: str) -> VerificationDecision:
         if application.state != ApplicationState.VERIFIED:
             raise ReviewConflict(f"This application is {application.state}: only a "
                                  f"verified one can be revoked.")
-        documents = list(application.documents.filter(replaced_at__isnull=True)
-                         .order_by("slot", "id"))
+        documents = _current_for_decision(application, reasons, seen_document_ids,
+                                          expected_round)
+        for doc in documents:
+            refused = reasons.get(doc.pk)
+            if refused:
+                doc.state, doc.rejection_reason = DocumentState.REJECTED, refused
+            elif not reasons:
+                doc.state, doc.rejection_reason = DocumentState.UPLOADED, ""
+            doc.reviewed_in_round = application.round
+            doc.save(update_fields=["state", "rejection_reason", "reviewed_in_round"])
         now = timezone.now()
         application.state = ApplicationState.REJECTED
         application.rejection_reason = reason
@@ -465,6 +517,46 @@ def _notify_on_commit(outcome, trainer_id, application_id, reason) -> None:
 
 
 # ------------------------------------------------------------------ retention
+class DocumentFilesNotDeleted(Exception):
+    """Storage refused to delete a document's file. Its row was kept, so the deletion can
+    be tried again: the row is the only thing that knows where the file is."""
+
+
+def delete_document_files(document) -> None:
+    """Delete the document's stored files — the file and its thumbnail — NOW.
+
+    A file already gone counts as deleted (both backends say so). Clears the names on
+    the instance, so the post-commit receiver of `training_platform/signals.py` has
+    nothing left to do when the row goes. Raises `DocumentFilesNotDeleted`, leaving the
+    name of what could not be deleted on the instance.
+    """
+    for stored in (document.file, document.thumbnail):
+        if stored:
+            try:
+                stored.delete(save=False)
+            except Exception as exc:
+                raise DocumentFilesNotDeleted(
+                    f"verification document {document.pk}: {stored.name}") from exc
+
+
+def delete_documents(documents) -> int:
+    """Delete documents for good: each one's files FIRST, and its row only after them.
+
+    The other order — the row, then the files after the commit — is what Django's
+    receivers do for every other upload, and it lost identity documents: when storage
+    failed, the post-commit deletion could only log it, the row that knew where the
+    file was had gone, and nothing would ever find the file again (the review of
+    2026-09-24). Raises `DocumentFilesNotDeleted` at the first failure; the documents
+    not reached keep their rows and files, and the caller decides what that means.
+    """
+    removed = 0
+    for document in documents:
+        delete_document_files(document)
+        document.delete()
+        removed += 1
+    return removed
+
+
 def purge_replaced_documents(now=None) -> int:
     """Delete replaced documents whose retention ran out, files included.
 
@@ -473,6 +565,9 @@ def purge_replaced_documents(now=None) -> int:
     it with its replacement at the next review — and never while that review is still
     waiting (a `pending` application keeps them until it is decided). What the operator
     decided about it survives in the `VerificationDecision` snapshot.
+
+    The files go before the row (`delete_documents`). When storage refuses, the row is
+    KEPT, logged, and the next daily run tries again; the count is of what went.
     """
     now = now or timezone.now()
     expired = (VerificationDocument.objects
@@ -481,7 +576,10 @@ def purge_replaced_documents(now=None) -> int:
                .order_by("id"))
     removed = 0
     for document in expired.iterator():
-        with transaction.atomic():
-            document.delete()   # the files go after the commit (training_platform/signals.py)
-        removed += 1
+        try:
+            with transaction.atomic():
+                removed += delete_documents([document])
+        except DocumentFilesNotDeleted:
+            logger.warning("A replaced verification document's files could not be "
+                           "deleted; its row is kept for the next purge", exc_info=True)
     return removed

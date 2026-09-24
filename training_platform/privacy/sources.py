@@ -60,19 +60,38 @@ register(PersonalDataSource(
 
 # A trainer's verification (trainer_verification/): identity cards, certificates, a
 # photo, and what operators decided about them. Deleted with the account, files included
-# — the rows go through `delete()`, and training_platform/signals.py removes each row's
-# files once the erasure commits. Documents first, so each source's count is its own.
+# — and the FILES FIRST: each document's file and thumbnail are deleted from storage
+# before its row (`trainer_verification.services.delete_documents`), and when storage
+# refuses, the whole erasure is refused (`erasure_refused`, retry later) rather than
+# committed with an ID card left in the bucket and no row pointing at it. Documents
+# first, so each source's count is its own.
 # While the account lives: current documents and decisions are kept (they are the
 # evidence the verification rests on); a REPLACED document is deleted 90 days after it
 # was replaced (`trainer_verification.purge_replaced_documents`, daily), and what was
 # decided about it survives in the decision's snapshot. The export lists the rows, not
 # the files and not the operator who decided.
+def _delete_verification_documents(user, queryset):
+    from trainer_verification.services import DocumentFilesNotDeleted, delete_documents
+
+    from .registry import ErasureRefused
+
+    try:
+        delete_documents(queryset.order_by("id"))
+    except DocumentFilesNotDeleted as exc:
+        # A file deleted before the one that failed stays deleted: storage cannot roll
+        # back. Its row comes back with the rollback, and the retry finds it gone, which
+        # counts as deleted.
+        raise ErasureRefused(
+            "A verification document could not be deleted from storage, so nothing was "
+            "erased.", cause="storage") from exc
+
+
 register(PersonalDataSource(
     label="verification_documents", model="trainer_verification.VerificationDocument",
     user_field="application__trainer",
     fields=["id", "slot", "kind", "content_type", "size", "state", "rejection_reason",
             "uploaded_at", "replaced_at", "purge_after"],
-    on_erase="delete"))
+    on_erase="delete", delete_rows=_delete_verification_documents))
 register(PersonalDataSource(
     label="verification_decisions", model="trainer_verification.VerificationDecision",
     user_field="application__trainer",

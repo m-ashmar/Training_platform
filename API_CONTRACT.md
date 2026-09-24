@@ -844,8 +844,16 @@ each state allows.
 **States:** `not_started` → (submit) `pending` → `verified`, or `rejected` with a
 `rejection_reason` → fix and submit again (a new `round`; nothing the operator decided
 before is erased). An operator can also revoke a verification, which answers
-`rejected` with the reason. `status` is `verified` for every verified trainer,
-including those verified by hand before this existed (no documents on file).
+`rejected` with the reason: the documents the revoke names are `rejected` (in
+`needs_replacing`, and `submit` answers `verification_documents_rejected` until they
+are replaced); a revoke that names none sends every document back to `uploaded`, to be
+reviewed afresh. `status` is `verified` for every verified trainer, including those
+verified by hand before this existed (no documents on file).
+
+**The nutrition certificate** is optional and has no effect on roster or match order:
+the roster and the matches rank on `trainer_is_verified`, never on a document. The
+design's "ترفع ترتيبك" ("raises your ranking") on that row is not built — whether it
+should be is an owner decision — so the app must not promise it.
 
 **Each document** is listed for every slot, filled or not: `state` `missing` |
 `uploaded` | `accepted` | `rejected` (with `rejection_reason`), a `thumbnail_url` (images)
@@ -862,12 +870,16 @@ and operators are ever given one. On the development backend they are served at
 `/private-media/...?e=&s=`; on GCS the bucket signs them. A photo is stored re-encoded,
 upright, with its metadata (GPS included) removed; the bytes decide the format — JPEG,
 PNG or WebP photos, or a PDF for the two certificates — never the name. HEIC is refused.
+How large a photo may be is what a 512 MB server can open: at most 10,000 px on a side;
+a camera JPEG up to 40 MP (over 16 MP it is stored at half its width and height); a PNG
+up to 16 MP, a WebP about 6.7 MP, a progressive JPEG about 8 to 13 MP by colour format.
+Over that, `verification_image_too_large` carries `max_pixels` and `max_side`.
 
 Codes (every one listed in the view docstrings): `not_a_trainer` (403),
 `verification_unknown_slot` (404), `verification_file_required`,
 `verification_unsupported_format` (`accepted`), `verification_unreadable_file`,
-`verification_file_too_large` (`max_bytes`), `verification_image_too_large`,
-`verification_image_too_small` (`min_side`), `verification_pdf_encrypted`,
+`verification_file_too_large` (`max_bytes`), `verification_image_too_large`
+(`max_pixels`, `max_side`), `verification_image_too_small` (`min_side`), `verification_pdf_encrypted`,
 `verification_pdf_active_content`, `verification_duplicate_document` (`slot`) — all 400;
 `verification_in_review`, `verification_already_verified`,
 `verification_already_pending`, `verification_documents_missing` (`missing`),

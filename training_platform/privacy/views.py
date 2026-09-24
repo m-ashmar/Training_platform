@@ -75,7 +75,9 @@ class PersonalDataEraseView(APIView):
           coaches someone (the owner's rule: never while he has active clients). End
           each coaching first: `POST /api/auth/trainer/unassign-client/`, with
           `at_period_end` for a paid month, which then ends at the month's end.
-      409 `erasure_refused` — a held payment could not be returned; retry later.
+      409 `erasure_refused` — a held payment could not be returned, or a trainer's
+          verification document could not be deleted from storage (the error says
+          which); nothing is erased, retry later.
     Identical on every build.
     """
 
@@ -114,14 +116,18 @@ class PersonalDataEraseView(APIView):
                 )
             # Rolled back whole, and safe to retry: the escrow could not return a held
             # trainer charge, and deleting its record anyway would lose the money for
-            # good.
+            # good — or storage refused to delete an identity document, and deleting its
+            # row anyway would leave the file where nothing could ever find it.
             logger.exception("Erasure refused for user %s", user_id)
-            return Response(
-                {"error": _("Your data could not be erased right now because a payment "
+            if exc.extra.get("cause") == "storage":
+                message = _("Your data could not be erased right now because a document "
+                            "you sent for verification could not be deleted. Please try "
+                            "again later.")
+            else:
+                message = _("Your data could not be erased right now because a payment "
                             "held for your trainer could not be returned. Nothing was "
-                            "changed; please try again later."),
-                 "code": "erasure_refused"},
-                status=status.HTTP_409_CONFLICT,
-            )
+                            "changed; please try again later.")
+            return Response({"error": message, "code": "erasure_refused"},
+                            status=status.HTTP_409_CONFLICT)
         logger.warning("Personal data erased for user %s: %s", user_id, report)
         return Response({"message": _("Your personal data has been erased."), "detail": report})

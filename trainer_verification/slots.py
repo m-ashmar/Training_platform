@@ -2,8 +2,11 @@
 
 What the design draws (`yalla_gym/design/.../12-trainer-shell/TrainerVerify.html` and
 `TrainerLocked.html`): the identity card, BOTH sides; at least one personal-trainer
-certificate; a sports-nutrition certificate, optional ("raises your ranking"); and a
-recent photo of the trainer. The card is two slots because it is two pictures and each
+certificate; a sports-nutrition certificate, optional; and a recent photo of the
+trainer. The design says the nutrition certificate "raises your ranking" (ترفع ترتيبك):
+nothing ranks on it — the roster and the matches read `trainer_is_verified`, never a
+document — and whether anything should is the owner's decision, so the contract says it
+has no effect (`views.MyVerificationView`). The card is two slots because it is two pictures and each
 side can be refused on its own (a blurred back, a cut-off front).
 
 One file per slot. The keys are the API's vocabulary (`POST documents/{slot}/`) and are
