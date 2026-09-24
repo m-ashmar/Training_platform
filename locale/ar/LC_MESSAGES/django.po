@@ -4545,3 +4545,27 @@ msgstr "يمكنك إبراز 3 إنجازات كحدّ أقصى"
 #: social/serializers.py
 msgid "A secret badge cannot be shared."
 msgstr "لا يمكن مشاركة شارة سرية."
+
+#: social/models.py
+msgid "Clear"
+msgstr "سليم"
+
+#: social/models.py
+msgid "Flagged for review"
+msgstr "قيد المراجعة"
+
+#: social/models.py
+msgid "Disqualified"
+msgstr "مُستبعَد"
+
+#: social/models.py
+msgid "A day above the review threshold"
+msgstr "يوم تجاوز حدّ المراجعة"
+
+#: social/models.py
+msgid "Set by an operator"
+msgstr "بقرار من الإدارة"
+
+#: social/views.py
+msgid "You were disqualified from this challenge."
+msgstr "تم استبعادك من هذا التحدي."
