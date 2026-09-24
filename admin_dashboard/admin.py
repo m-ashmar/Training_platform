@@ -825,6 +825,15 @@ from trainer_verification.models import (  # noqa: E402
 admin_site.register(VerificationQueueEntry, VerificationQueueAdmin)
 admin_site.register(VerificationApplication, VerificationApplicationAdmin)
 
+# Routine products (plan step 10): the review queue (approve, or reject with a reason
+# the trainer is shown) and every sale (refund, with a reason). Operator-only, and a
+# decision needs the change permission — see routine/product_admin.py. Every change goes
+# through routine/products.py under row locks.
+from routine.product_admin import RoutineProductAdmin, RoutinePurchaseAdmin  # noqa: E402
+from routine.product_models import RoutineProduct, RoutinePurchase  # noqa: E402
+admin_site.register(RoutineProduct, RoutineProductAdmin)
+admin_site.register(RoutinePurchase, RoutinePurchaseAdmin)
+
 admin_site.register(UserActivity, UserActivityAdmin)
 admin_site.register(PerformanceMetric, PerformanceMetricAdmin)
 admin_site.register(UserSession)

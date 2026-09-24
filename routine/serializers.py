@@ -1649,6 +1649,12 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     """
     exercises = RoutineTemplateExerciseSerializer(source='routinetemplateexercise_set', many=True)
     created_by = serializers.SerializerMethodField()
+    #: BACKEND_BUGS B-100 (additive). `weeks` is writable: how many weeks the program
+    #: runs, 1-52, or null while the trainer has not said — `days` is its week, and the
+    #: rows cannot say how often that week repeats. `session_count` is read-only:
+    #: `days` x `weeks`, null while `weeks` is (never a guess). The product form's line
+    #: «4 أسابيع · 3 أيام · 12 جلسة» is `weeks` · `days` · `session_count`.
+    session_count = serializers.IntegerField(read_only=True, allow_null=True)
 
     def get_created_by(self, obj):
         """Who wrote it, as before (`str(user)`) — null once that account is suspended or
@@ -1661,7 +1667,8 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = RoutineTemplate
-        fields = ['id', 'name', 'description', 'goal', 'days', 'is_public', 'created_by', 'created_at', 'exercises']
+        fields = ['id', 'name', 'description', 'goal', 'days', 'weeks', 'session_count',
+                  'is_public', 'created_by', 'created_at', 'exercises']
 
     def validate(self, attrs):
         """Every row must be one a client's routine can hold.

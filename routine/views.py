@@ -920,7 +920,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         | 400 | `day_out_of_range` (new) | `day` is outside 1..the routine's days |
         | 400 | `day_has_no_exercises` (new) | that day of the routine has no exercises |
         | 403 | `routine_not_yours` (new) | the routine is not assigned to you |
-        | 403 | `coaching_frozen` / `coaching_unpaid` / `coaching_ended` | with `trainer_id`, while the coaching this routine came from is unpaid or over — readable, not trainable (the owner) |
+        | 403 | `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` | with `trainer_id`, while the coaching this routine came from is unpaid or over — readable, not trainable (the owner) |
         | 404 | `not_found` | no such routine, or not one you can see |
         | 409 | `unlogged_sets` | above |
         """
@@ -1130,7 +1130,7 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
     ViewSet for managing routine progress.
     Clients can only see their own progress.
     Trainers can see their clients' progress.
-    A client's create or update answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
+    A client's create or update answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` (with
     `trainer_id`) while the coaching the routine came from is unpaid or over. A create
     naming a routine that is neither yours nor assigned to you answers 403
     `routine_not_yours` (the owner, 2026-09-24; it was the generic `permission_denied`).
@@ -1181,7 +1181,7 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         """A client's own day, refused like a create while the coaching is unpaid or
-        over (403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended`). A trainer's correction is not."""
+        over (403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded`). A trainer's correction is not."""
         instance = serializer.instance
         _require_can_train(self.request.user, instance.routine,
                            serializer.validated_data.get('date', instance.date))
@@ -1381,7 +1381,7 @@ def _celebrate_personal_record(log):
 
 
 def _require_can_train(user, routine, at=None):
-    """403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when a client may see this routine but
+    """403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` when a client may see this routine but
     not train on it (the owner, 2026-09-19; users/coaching.py `training_refusal`)."""
     from users.coaching import require_can_train
     require_can_train(user, routine, at)
@@ -1707,7 +1707,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     someone else's set answers 409 `idempotency_conflict`. `date` is writable, so a set
     logged offline keeps its day.
 
-    A client's new set answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
+    A client's new set answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` (with
     `trainer_id`) while the coaching its routine came from is unpaid or over, unless the
     set is dated inside a paid month (training done offline while paid still syncs).
 
@@ -1728,7 +1728,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     else gets 404, because the list is scoped. Only
     `weight`, `reps`, `notes` and `rpe` may change: moving a set to another progress
     row, session, set number or date answers 400 `set_immutable` on that field. Both
-    are refused with 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while
+    are refused with 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` while
     the coaching the set's routine came from is unpaid or over, judged on the set's own
     date. A delete recomputes everything the set was counted in — the exercise's
     completed sets, the day's `RoutineProgress`, and the `DayOutcome` of a day that was
@@ -1855,7 +1855,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         instance.delete()
 
     def _refuse_if_frozen(self, instance):
-        """403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when the coaching
+        """403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` when the coaching
         behind this set is unpaid or over.
 
         Asked about the CALLER, as `perform_create` asks: the refusal is a rule about a
@@ -1950,7 +1950,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         coach's reps for each exercise of that day (and their weight when none is sent).
         400 `reps_required`; an exercise whose coach set no reps is reported in `errors`
         with `no_prescribed_reps`.
-        403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`): the coaching this
+        403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` (with `trainer_id`): the coaching this
         routine came from is unpaid or over — readable, not trainable (the owner).
 
         Every refusal names its own code (the owner, 2026-09-24; those marked new
@@ -2214,7 +2214,7 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                         `reps_required`, `reps_out_of_range`, `no_prescribed_reps`,
                         `weight_out_of_range`, `set_number_out_of_range`,
                         `rpe_out_of_range`, `invalid_set`, or the coaching refusal
-                        `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
+                        `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` (with
                         `trainer_id`) — per row, because one frozen coaching must not
                         throw away the sets that belong to another trainer's routine.
                         `bad_date` also answers a date that does not exist
@@ -2326,7 +2326,7 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     has — `effort_not_yours` on `effort_rating`; nothing is written either way.)
     DELETE removes the session and the sets logged in it, and recomputes everything
     those sets were counted in, exactly as deleting each set would; it is refused with
-    403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` while the coaching is
+    403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` while the coaching is
     unpaid or over, judged at the session's start.
 
     **`status` only moves forward** (SIDE_BUGS S-122): `active` may become `completed`
@@ -2338,7 +2338,7 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
 
     While the coaching a routine came from is unpaid (frozen) or over, the routine stays
     readable and opening or editing a session on it answers 403 `coaching_frozen` /
-    `coaching_unpaid` / `coaching_ended` with `trainer_id` (the owner, 2026-09-19). A
+    `coaching_unpaid` / `coaching_ended` / `product_refunded` with `trainer_id` (the owner, 2026-09-19). A
     session begun while
     paid can still be finished, and an offline one dated inside a paid month still syncs.
 
@@ -3370,6 +3370,25 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         """Override to assign the template to the creator."""
         serializer.save(created_by=self.request.user)
 
+    def destroy(self, request, *args, **kwargs):
+        """`DELETE /api/routine/templates/{id}/` — 204, or 409 `template_listed_for_sale`
+        while a routine product of yours is in review or published on it (plan step 10):
+        retire the product first (`POST /api/v1/trainer/products/{id}/retire/`).
+        Deleting one behind a draft or a retired product is allowed; the draft then needs
+        another template. Buyers' copies are theirs and are never touched. 404
+        `not_found`: no such template, or not one you can see; 403 for someone else's."""
+        from .product_models import ProductStatus, RoutineProduct
+
+        template = self.get_object()
+        if RoutineProduct.objects.filter(
+                source_template=template,
+                status__in=(ProductStatus.IN_REVIEW, ProductStatus.PUBLISHED)).exists():
+            return Response({'error': _('This template is behind a program in review or on '
+                                        'sale. Retire the program first.'),
+                             'code': 'template_listed_for_sale'},
+                            status=status.HTTP_409_CONFLICT)
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=True, methods=['post'], permission_classes=[IsTrainerOrReadOnly])
     def generate(self, request, pk=None):
         """POST /api/routine/templates/{id}/generate/ — a private routine per client.
@@ -3600,6 +3619,7 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                    or '' for language, _label in settings.LANGUAGES},
                 goal=template.goal,
                 days=template.days,
+                weeks=template.weeks,
                 is_public=False,  # Always private when copied
                 created_by=request.user,
             )
@@ -3709,7 +3729,7 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing UserExerciseProgress objects (per-user, per-exercise progress).
     Allows trainers, admins, and clients to create, view, and update their own progress records.
-    A client's create answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` when every routine
+    A client's create answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` when every routine
     of theirs holding the exercise comes from a coaching that is unpaid or over.
 
     `POST` body: `exercise` (id), optional `date` (default today), `skipped`. 400
@@ -3840,7 +3860,7 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         `{exercise, error, code}` — `code` is `progress_exists` or
         `progress_write_failed`; `error` is translated and for showing only.
 
-        403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with `trainer_id`): the coaching this
+        403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` (with `trainer_id`): the coaching this
         routine came from is unpaid or over — readable, not trainable (the owner).
 
         The other refusals are `bulk-create`'s, code for code (the owner, 2026-09-24;

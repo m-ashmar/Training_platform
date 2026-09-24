@@ -165,8 +165,9 @@ class HomeView(APIView):
 
         `cta.state` is the one button. `continue` carries `session_id` when a session
         is open; `not_started` carries `starts_on`; `refused` carries `refusal`, one of
-        `coaching_frozen`, `coaching_unpaid`, `coaching_ended` — the same 403 `code`
-        every training write on this routine answers (`users/coaching.py`). The owner's
+        `coaching_frozen`, `coaching_unpaid`, `coaching_ended` (or `product_refunded`,
+        a refunded routine product) — the same 403 `code` every training write on this
+        routine answers (`users/coaching.py`). The owner's
         rule: a frozen or ended coaching keeps the day READABLE and unstartable, so the
         section stays and only the button changes. One exception, the server's own: a
         session opened while the coaching was paid may still be logged and finished
