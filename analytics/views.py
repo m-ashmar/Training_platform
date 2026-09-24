@@ -242,7 +242,12 @@ class UserSessionViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['post'])
     def end_session(self, request):
-        """End current user session"""
+        """POST `{session_id}` — ends that session of the caller's; answers the session.
+
+        Refusals, each with its `code` (the owner, 2026-09-24: every refusal names its
+        own; these answered the status defaults, in English): 400 `missing_session_id`;
+        404 `not_found` — no such session, or not yours.
+        """
         session_id = request.data.get('session_id')
         if session_id:
             try:
@@ -252,11 +257,11 @@ class UserSessionViewSet(viewsets.ModelViewSet):
                 return Response(serializer.data)
             except UserSession.DoesNotExist:
                 return Response(
-                    {'error': 'Session not found'}, 
+                    {'error': _('Session not found'), 'code': 'not_found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
         return Response(
-            {'error': 'session_id required'}, 
+            {'error': _('session_id is required'), 'code': 'missing_session_id'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -473,10 +478,14 @@ class AnalyticsDashboardViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def platform_stats(self, request):
-        """Get platform-wide statistics (admin only)"""
+        """Get platform-wide statistics (admin only).
+
+        403 `admins_only` for anyone who is not staff (the status default
+        `permission_denied`, in English, until the owner's decision of 2026-09-24).
+        """
         if not request.user.is_staff:
             return Response(
-                {'error': 'Admin access required'}, 
+                {'error': _('Only an administrator can do this.'), 'code': 'admins_only'},
                 status=status.HTTP_403_FORBIDDEN
             )
         

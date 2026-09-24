@@ -68,12 +68,14 @@ class PersonalDataEraseView(APIView):
 
     Answers:
       200 `{message, detail}`   erased.
-      400 `{error, detail, preview}`   `confirm=ERASE` missing.
-      409 `code: trainer_has_active_clients` with `active_clients` — a trainer still
+      400 `confirmation_required` `{error, detail, code, preview}` — `confirm=ERASE`
+          missing (it answered the status default `bad_request` until the owner's
+          decision of 2026-09-24): show the preview and ask the user to confirm.
+      409 `trainer_has_active_clients` with `active_clients` — a trainer still
           coaches someone (the owner's rule: never while he has active clients). End
           each coaching first: `POST /api/auth/trainer/unassign-client/`, with
           `at_period_end` for a paid month, which then ends at the month's end.
-      409 `code: erasure_refused` — a held payment could not be returned; retry later.
+      409 `erasure_refused` — a held payment could not be returned; retry later.
     Identical on every build.
     """
 
@@ -91,6 +93,7 @@ class PersonalDataEraseView(APIView):
                 {
                     "error": _("Confirmation required."),
                     "detail": _("Repeat the request with confirm=ERASE. This cannot be undone."),
+                    "code": "confirmation_required",
                     "preview": erase_user_data(request.user, dry_run=True),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
