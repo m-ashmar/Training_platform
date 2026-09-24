@@ -9,6 +9,7 @@ from .models import (
     UserExerciseProgress, RoutineProgress, ExerciseSetLog, WorkoutSession,
     RoutineTemplate, RoutineTemplateExercise, DayOutcome
 )
+from .models import DAY_NAME_MAX_LENGTH, SUPERSET_GROUP_MAX, load_value_problem
 from .sessions import SESSION_MAX_SECONDS
 import logging
 from django.db.models import Sum, F
@@ -83,7 +84,33 @@ class ExerciseMediaSlotsMixin:
         return self._resolved_media(obj)['media_trainer_id']
 
 
-class ExerciseSerializer(ExerciseMediaSlotsMixin, serializers.ModelSerializer):
+class ExerciseAuthoringFieldsMixin(serializers.Serializer):
+    """Whose exercise it is, and what it is done with (BACKEND_BUGS B-102, B-107).
+
+    `is_mine`        true when the READER wrote this exercise (their own library), false
+                     for the shared catalogue and for anybody else's — the same exercise
+                     reads true to its trainer and false to that trainer's client.
+    `created_by_id`  the trainer who wrote it, or null for the shared catalogue.
+    `equipment`      a code: `barbell`, `dumbbell`, `cable`, `machine`, `bodyweight`,
+                     or null when not said (every exercise written before the field).
+                     Writable; any other code answers 400 `invalid_choice` on the field.
+    `equipment_display`  its label in the reader's language («دمبل»), or null.
+
+    Read from the row itself (`created_by_id`, and the request's user): no query.
+    """
+    is_mine = serializers.SerializerMethodField()
+    created_by_id = serializers.IntegerField(read_only=True)
+    equipment_display = serializers.CharField(source='get_equipment_display',
+                                              read_only=True, allow_null=True)
+
+    def get_is_mine(self, obj):
+        request = self.context.get('request')
+        user_id = getattr(getattr(request, 'user', None), 'pk', None)
+        return user_id is not None and obj.created_by_id == user_id
+
+
+class ExerciseSerializer(ExerciseAuthoringFieldsMixin, ExerciseMediaSlotsMixin,
+                         serializers.ModelSerializer):
     """
     Serializer for Exercises, with muscle group targeting.
     Input: name, description, target_muscle
@@ -91,6 +118,16 @@ class ExerciseSerializer(ExerciseMediaSlotsMixin, serializers.ModelSerializer):
 
     `media` is the legacy `ExerciseMedia` list. `media_slots`, `media_source` and
     `media_trainer_id` are the per-trainer library — see `ExerciseMediaSlotsMixin`.
+
+    **Names (B-107).** `name` means what it always meant: the reader's language, the
+    other language when that one is empty; writing `name` writes the reader's language
+    (`Accept-Language`). `name_ar` and `name_en` are the two names themselves, readable
+    and writable — TrainerNewExercise sends both. A create needs a name in at least one
+    of `name`, `name_ar`, `name_en` (400 `required` on `name` otherwise, as before);
+    when `name` and the reader's own `name_<lang>` are both sent, `name_<lang>` wins.
+
+    `is_mine`, `created_by_id`, `equipment`, `equipment_display`: see
+    `ExerciseAuthoringFieldsMixin`.
     """
     media = ExerciseMediaSerializer(many=True, read_only=True)
     media_slots = serializers.SerializerMethodField()
@@ -109,9 +146,29 @@ class ExerciseSerializer(ExerciseMediaSlotsMixin, serializers.ModelSerializer):
 
     class Meta:
         model = Exercise
-        fields = ['id', 'name', 'description', 'target_muscle', 'target_muscle_display',
-                  'difficulty_level', 'difficulty_level_display', 'image', 'thumbnail',
-                  'media', 'media_slots', 'media_source', 'media_trainer_id']
+        fields = ['id', 'name', 'name_ar', 'name_en', 'description', 'target_muscle',
+                  'target_muscle_display', 'difficulty_level', 'difficulty_level_display',
+                  'equipment', 'equipment_display', 'image', 'thumbnail',
+                  'media', 'media_slots', 'media_source', 'media_trainer_id',
+                  'is_mine', 'created_by_id']
+        # A name may arrive as `name_ar` / `name_en` alone; `validate` still refuses a
+        # create with no name at all.
+        extra_kwargs = {'name': {'required': False}}
+
+    def validate(self, attrs):
+        from django.utils.translation import get_language
+
+        attrs = super().validate(attrs)
+        if self.instance is None and not any(
+                str(attrs.get(f) or '').strip() for f in ('name', 'name_ar', 'name_en')):
+            raise serializers.ValidationError({'name': [serializers.ErrorDetail(
+                self.fields['name'].error_messages['required'], code='required')]})
+        # `name` writes the reader's language. Sent beside that language's own column,
+        # the explicit column wins, whatever order the two are applied in.
+        own = f"name_{(get_language() or 'en').split('-')[0]}"
+        if 'name' in attrs and own in attrs:
+            attrs.pop('name')
+        return attrs
 
     # `get_image` stood here and never ran: `image` is a plain model field in
     # `Meta.fields`, not a method field (BACKEND_BUGS B-036). DRF's ImageField already
@@ -157,12 +214,15 @@ class ExerciseSerializer(ExerciseMediaSlotsMixin, serializers.ModelSerializer):
         return None
 
 
-class ExerciseCreateWithImageSerializer(ExerciseMediaSlotsMixin,
+class ExerciseCreateWithImageSerializer(ExerciseAuthoringFieldsMixin, ExerciseMediaSlotsMixin,
                                         serializers.ModelSerializer):
     """
     Serializer for creating exercises with optional image upload.
     Input: name, description, target_muscle, image (optional)
     Output: Serialized Exercise data for API responses
+
+    Also answers `name_ar`, `name_en`, `equipment`, `equipment_display`, `is_mine` and
+    `created_by_id`, exactly as `ExerciseSerializer` does (B-102, B-107).
     """
     media = ExerciseMediaSerializer(many=True, read_only=True)
     media_slots = serializers.SerializerMethodField()
@@ -172,8 +232,10 @@ class ExerciseCreateWithImageSerializer(ExerciseMediaSlotsMixin,
 
     class Meta:
         model = Exercise
-        fields = ['id', 'name', 'description', 'target_muscle', 'image', 'media',
-                  'media_slots', 'media_source', 'media_trainer_id']
+        fields = ['id', 'name', 'name_ar', 'name_en', 'description', 'target_muscle',
+                  'equipment', 'equipment_display', 'image', 'media',
+                  'media_slots', 'media_source', 'media_trainer_id',
+                  'is_mine', 'created_by_id']
 
     def get_image(self, obj):
         request = self.context.get('request')
@@ -226,21 +288,65 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
     Serializer for routine exercises.
     Uses nested ExerciseSerializer for read operations to provide full details.
     Uses PrimaryKeyRelatedField for write operations.
+
+    **Supersets and load modes (BACKEND_BUGS B-104)**, readable and writable:
+
+    `superset_group`  1-20 or null. Rows of the same routine and day sharing a number are
+                      one superset (the design's bracket), done back to back in `order`;
+                      the same number on another day is another superset. 400
+                      `superset_group_out_of_range` outside 1-20.
+    `load_mode`       `kg` (the default), `percent` (of the client's one-rep max) or
+                      `rpe`. Anything else: 400 `invalid_choice`.
+    `load_value`      null in `kg`; the percent (1-100) in `percent`; the RPE (1-10, in
+                      steps of 0.5) in `rpe`. 400 `load_value_required` (percent or rpe
+                      without it), `load_value_out_of_range`, `load_value_not_allowed`
+                      (a value beside kg). Switching a row to `kg` without sending
+                      `load_value` clears it.
+    `weight`          unchanged: the kilograms, or null. In `percent` it is the percentage
+                      as the trainer resolved it against the client's record when writing
+                      it (TrainerScheme's «= 66 kg»); in `rpe` an optional starting load.
+                      The server never re-resolves it.
+
+    Every code above is on its field (`field_errors.<field>[0].code`).
     """
     exercise = ExerciseSerializer(read_only=True)
     exercise_id = serializers.PrimaryKeyRelatedField(
-        queryset=Exercise.objects.all(), 
-        source='exercise', 
+        queryset=Exercise.objects.all(),
+        source='exercise',
         write_only=True
     )
     routine = serializers.PrimaryKeyRelatedField(queryset=Routine.objects.all())
+    # Declared, so the refusal names its own code rather than `min_value` / `max_value`.
+    superset_group = serializers.IntegerField(required=False, allow_null=True)
 
     class Meta:
         model = RoutineExercise
         # `weight`: the prescribed working weight in kg, null for none. It was on the model
         # and reachable by no endpoint (BACKEND_BUGS B-012).
-        fields = ['id', 'routine', 'exercise', 'exercise_id', 'sets', 'reps', 'rest_time', 'day', 'order', 'notes', 'weight', 'created_at', 'updated_at']
+        fields = ['id', 'routine', 'exercise', 'exercise_id', 'sets', 'reps', 'rest_time', 'day', 'order', 'notes', 'weight',
+                  'superset_group', 'load_mode', 'load_value',
+                  'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
+
+    def validate_superset_group(self, value):
+        if value is not None and not 1 <= value <= SUPERSET_GROUP_MAX:
+            raise serializers.ValidationError(
+                _("A superset number is from 1 to %(n)s.") % {"n": SUPERSET_GROUP_MAX},
+                code="superset_group_out_of_range")
+        return value
+
+    def _validate_load(self, attrs):
+        """The mode and its value, judged together, against what the row already holds
+        for whichever of the two this write does not send."""
+        if attrs.get('load_mode') == 'kg' and 'load_value' not in attrs:
+            attrs['load_value'] = None
+        mode = attrs.get('load_mode', getattr(self.instance, 'load_mode', None) or 'kg')
+        value = attrs.get('load_value', getattr(self.instance, 'load_value', None))
+        problem = load_value_problem(mode, value)
+        if problem is not None:
+            raise serializers.ValidationError(
+                {'load_value': [serializers.ErrorDetail(problem[1], code=problem[0])]})
+        return attrs
 
     def to_representation(self, instance):
         """Name the coach who prescribed this row, for the length of this row.
@@ -318,7 +424,7 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
                        % {"day": day, "days": routine.days}
             })
 
-        return attrs
+        return self._validate_load(attrs)
 
     def create(self, validated_data):
         """Override create to sync the M2M exercises field on the routine."""
@@ -386,9 +492,23 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
     TODO: Add routine template support
     TODO: Implement routine cloning functionality
     TODO: Add routine sharing between trainers
+
+    `created_by_id` (BACKEND_BUGS B-111, read-only): the author's user id. `created_by`
+    keeps its display text. The coaching freeze (`users/coaching.training_refusal`)
+    holds exactly the routines whose `created_by_id` is the frozen coaching's trainer.
+
+    `day_names` (BACKEND_BUGS B-104): `{"<day>": "<name>"}` — the day as a string, only
+    named days present, a name at most 40 characters. A write MERGES by day: a day sent
+    with a name sets it, a day sent with null or "" removes its name, a day not sent
+    keeps its name (so two phones naming two days never erase each other's). Refusals
+    on `day_names`: 400 `day_names_invalid` (not an object of day number to text),
+    `day_out_of_range` (a day outside 1..`days`), `too_long`. Shortening `days` drops
+    the names of the days the routine no longer has.
     """
     routine_exercises = RoutineExerciseSerializer(many=True, read_only=True)
     created_by = serializers.StringRelatedField(read_only=True)
+    created_by_id = serializers.IntegerField(read_only=True)
+    day_names = serializers.JSONField(required=False)
     estimated_duration_minutes = serializers.SerializerMethodField()
     target_muscles = serializers.SerializerMethodField()
 
@@ -400,11 +520,16 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
             'id', 'name', 'description', 'difficulty_level', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
             'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles',
-            'source_template',
+            'source_template', 'created_by_id', 'day_names',
         ]
         # `source_template`: the template this private copy was generated from, or null.
         # A copy, not a link — set by `templates/{id}/generate/`, never by a write here.
         read_only_fields = ['created_at', 'updated_at', 'created_by', 'source_template']
+
+    def validate_day_names(self, value):
+        """The names as `{"<day>": name or None}`, None meaning "remove". Whether each
+        day is inside the routine is `validate`'s question: `days` may arrive with it."""
+        return clean_day_names(value)
 
     def get_estimated_duration_minutes(self, obj):
         """
