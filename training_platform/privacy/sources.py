@@ -85,6 +85,26 @@ register(PersonalDataSource(
             "created_at"],
     on_erase="delete"))
 
+# A trainer's payouts (payouts/). A payout METHOD is personal data and nothing else — a
+# ShamCash address and the account holder's name, both encrypted at rest — so it goes
+# with the account. A WITHDRAWAL is a record of money, kept like the ledger rows it
+# names; it carries its own copy of the destination (encrypted), which is what the
+# money was actually sent to. Its events are kept with it; the export lists what
+# happened and when, not the operator who did it or their notes.
+register(PersonalDataSource(
+    label="payout_methods", model="payouts.PayoutMethod", user_field="trainer",
+    fields=["id", "kind", "shamcash_address", "holder_name", "agent", "is_default",
+            "verified_at", "created_at"],
+    on_erase="delete"))
+register(PersonalDataSource(
+    label="withdrawals", model="payouts.Withdrawal", user_field="trainer",
+    on_erase="keep"))
+register(PersonalDataSource(
+    label="withdrawal_events", model="payouts.WithdrawalEvent",
+    user_field="withdrawal__trainer",
+    fields=["id", "withdrawal", "from_state", "to_state", "actor_role", "created_at"],
+    on_erase="keep"))
+
 # --- training -----------------------------------------------------------------
 register(PersonalDataSource(label="workout_sessions", model="routine.WorkoutSession", user_field="user"))
 register(PersonalDataSource(label="exercise_progress", model="routine.UserExerciseProgress", user_field="user"))

@@ -825,6 +825,15 @@ from trainer_verification.models import (  # noqa: E402
 admin_site.register(VerificationQueueEntry, VerificationQueueAdmin)
 admin_site.register(VerificationApplication, VerificationApplicationAdmin)
 
+# Trainer withdrawals: the queue of open ones (oldest first) and every withdrawal with its
+# events. Operator-only; approve, mark sent (with the ShamCash transaction id), confirm
+# and fail go through payouts/services.py and need the change permission — see
+# payouts/admin.py.
+from payouts.admin import WithdrawalAdmin, WithdrawalQueueAdmin  # noqa: E402
+from payouts.models import Withdrawal, WithdrawalQueueEntry  # noqa: E402
+admin_site.register(WithdrawalQueueEntry, WithdrawalQueueAdmin)
+admin_site.register(Withdrawal, WithdrawalAdmin)
+
 admin_site.register(UserActivity, UserActivityAdmin)
 admin_site.register(PerformanceMetric, PerformanceMetricAdmin)
 admin_site.register(UserSession)

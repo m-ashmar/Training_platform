@@ -116,7 +116,8 @@ def reserved_username_prefixes() -> tuple[str, ...]:
     """The username bases of the platform's ledger owners, lower-cased."""
     return tuple(base.lower() for base in (
         getattr(settings, 'PLATFORM_ESCROW_USERNAME', 'platform_escrow'),
-        getattr(settings, 'PLATFORM_REVENUE_USERNAME', 'platform_revenue')))
+        getattr(settings, 'PLATFORM_REVENUE_USERNAME', 'platform_revenue'),
+        getattr(settings, 'PLATFORM_PAYOUT_CLEARING_USERNAME', 'platform_payout_clearing')))
 
 
 def is_reserved_username(username) -> bool:
@@ -162,8 +163,31 @@ def get_escrow_wallet(currency):
         currency)
 
 
+def _payout_clearing_base() -> tuple[str, str]:
+    return (getattr(settings, 'PLATFORM_PAYOUT_CLEARING_EMAIL', 'platform_payout_clearing@local'),
+            getattr(settings, 'PLATFORM_PAYOUT_CLEARING_USERNAME', 'platform_payout_clearing'))
+
+
+def get_payout_clearing_wallet(currency):
+    """The platform's payout-clearing wallet for `currency`: a trainer's withdrawal
+    between the request and the operator's transfer (`payouts/services.py`).
+
+    The spec's `payout_clearing` account (section 8): the amount leaves the trainer's
+    wallet for this one AT THE REQUEST, so it cannot be spent or withdrawn twice while
+    the operator is sending it. It comes back to the trainer if the withdrawal fails or
+    is cancelled, and leaves the platform when the operator confirms it arrived. Its
+    balance is therefore always the sum of the open withdrawals in `currency`.
+
+    One per currency, like escrow and revenue (`_ledger_owner_wallet`), and `currency`
+    is REQUIRED: it is the trainer's wallet's.
+    """
+    email, username = _payout_clearing_base()
+    return _ledger_owner_wallet(email, username, currency)
+
+
 def ledger_owner_emails() -> list[str]:
-    """Every address a ledger owner can have: escrow and revenue, in every currency.
+    """Every address a ledger owner can have: escrow, revenue and payout clearing, in
+    every currency.
 
     `wallet.activity` hides these from a client's ledger screen, so the list has to grow
     with the currency list — reading only the two BASE addresses from settings stopped
@@ -173,7 +197,8 @@ def ledger_owner_emails() -> list[str]:
     bases = [(getattr(settings, 'PLATFORM_ESCROW_EMAIL', 'platform_escrow@local'),
               getattr(settings, 'PLATFORM_ESCROW_USERNAME', 'platform_escrow')),
              (getattr(settings, 'PLATFORM_REVENUE_EMAIL', 'platform_revenue@local'),
-              getattr(settings, 'PLATFORM_REVENUE_USERNAME', 'platform_revenue'))]
+              getattr(settings, 'PLATFORM_REVENUE_USERNAME', 'platform_revenue')),
+             _payout_clearing_base()]
     return [_ledger_address(email, username, code)[0]
             for email, username in bases for code in CURRENCY_CODES]
 
