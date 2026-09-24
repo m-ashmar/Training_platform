@@ -179,10 +179,6 @@ REVIEWER = ["review_webp_6320.webp", "review_png_rgba_40.png",
             "review_jpg_prog444_40.jpg", "review_gif_anim2_20.gif"]
 OVER = ["over_png_rgba.png", "over_webp_rgba.webp", "over_webp_rgb.webp",
         "over_gif_anim2.gif"]
-#: Over the limit of the cheapest WebP (no alpha), so refused from the RIFF header before
-#: Pillow opens it. An RGBA WebP between the two limits is opened (its canvases are only
-#: reserved) and refused from what the opened header says.
-WEBP_OVER_EVERY_WEBP = ["review_webp_6320.webp", "over_webp_rgb.webp"]
 
 
 @pytest.fixture(scope="module")
@@ -322,8 +318,7 @@ def test_s210_the_reviewers_inputs_are_refused_before_decoding(
     assert 0 < refused.value.params["max_pixels"] < 40_000_000
     assert refused.value.params["max_side"] == MAX_IMAGE_DIMENSION
     assert str(refused.value.params["max_pixels"] // 1_000_000) in refused.value.messages[0]
-    if name in WEBP_OVER_EVERY_WEBP:
-        assert decoding_forbidden == [], "the WebP was opened before it was refused"
+    assert decoding_forbidden == [], "a WebP was opened before it was refused"
 
 
 @pytest.mark.django_db
@@ -361,18 +356,24 @@ def test_s210_one_estimator_prices_every_decode():
 @pytest.mark.parametrize("mode,options", [
     ("RGB", {"quality": 20}),                       # VP8: a lossy key frame
     ("RGB", {"lossless": True}),                    # VP8L
+    ("RGBA", {"lossless": True}),                   # VP8L with alpha
     ("RGBA", {"quality": 20}),                      # VP8X: alpha
     ("RGB", {"quality": 20, "exif": b"Exif\x00\x00II*\x00\x08\x00\x00\x00\x00\x00"}),
 ])
 @pytest.mark.parametrize("size", [(1, 1), (641, 479), (16383, 2)])
 def test_s210_a_webp_canvas_is_read_from_its_header(mode, options, size):
-    from training_platform.image_budget import webp_canvas
+    """What Pillow would open the file as — its size and mode — from 30 bytes."""
+    from training_platform.image_budget import webp_header
 
     out = io.BytesIO()
-    Image.new(mode, size).save(out, "WEBP", **options)
-    assert webp_canvas(out.getvalue()[:32]) == size
-    assert webp_canvas(b"\x89PNG\r\n\x1a\n" + bytes(24)) is None
-    assert webp_canvas(out.getvalue()[:20]) is None
+    Image.new(mode, size, (1, 2, 3, 0) if mode == "RGBA" else (1, 2, 3)).save(
+        out, "WEBP", **options)
+    width, height, alpha = webp_header(out.getvalue()[:32])
+    with Image.open(io.BytesIO(out.getvalue())) as opened:
+        assert (width, height) == size == opened.size
+        assert ("RGBA" if alpha else "RGB") == opened.mode == mode
+    assert webp_header(b"\x89PNG\r\n\x1a\n" + bytes(24)) is None
+    assert webp_header(out.getvalue()[:20]) is None
 
 
 # ===========================================================================

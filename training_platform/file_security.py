@@ -672,13 +672,13 @@ def process_uploaded_image(file, max_bytes=None, quarantine=True):
         )
 
     # A WebP too large to decode is refused before anything opens it: opening one
-    # already allocates its canvases (`image_budget.webp_canvas`). Priced as the
-    # cheapest WebP there is (no alpha); the check after opening prices the one it is.
+    # already allocates its canvases (`image_budget.webp_header`).
     file.seek(0)
-    canvas = image_budget.webp_canvas(file.read(32))
+    webp = image_budget.webp_header(file.read(32))
     file.seek(0)
-    if canvas is not None:
-        _refuse_over_budget('WEBP', 'RGB', canvas, 1)
+    if webp is not None:
+        width, height, alpha = webp
+        _refuse_over_budget('WEBP', 'RGBA' if alpha else 'RGB', (width, height), 1)
 
     # Magic-byte + MIME + extension checks. No byte-pattern scan: the file is decoded and
     # re-encoded below, so no payload in it can reach storage, and the scan matched
