@@ -454,6 +454,9 @@ def test_what_was_bought_is_owned_and_used_on_every_build(make_user, api):
     for channel in ("ios", "play"):
         read = api(buyer).get(f"/api/routine/routines/{routine_id}/", HTTP_X_APP_CHANNEL=channel)
         assert read.status_code == 200, read.content
+        assert read.json()["product"] == {
+            "id": product_id, "title": "Shoulder rehab in 4 weeks",
+            "trainer": {"id": _trainer_.pk, "name": "Rami Haddad"}}
         one = api(buyer).get(f"/api/v1/products/{product_id}/", HTTP_X_APP_CHANNEL=channel).json()
         assert (one["owned"], one["routine_id"]) == (True, routine_id)
     session = api(buyer).post("/api/routine/workout-sessions/", {"routine": routine_id, "day": 1},

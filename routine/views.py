@@ -565,7 +565,10 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         # "to avoid a DB hit", which forced every one of them into memory — twenty
         # routines x twenty clients x thirty days is 12,000 rows fetched to produce
         # twenty percentages. They are counted in the query now.
-        queryset = self.queryset.select_related('created_by').prefetch_related(
+        # `purchase__product__trainer`: a bought copy's `product` (RoutineSerializer) in
+        # the same query; empty joins for every other routine.
+        queryset = self.queryset.select_related(
+            'created_by', 'purchase__product__trainer').prefetch_related(
             'routine_exercises__exercise__media',
             'assigned_to',
         ).annotate(
