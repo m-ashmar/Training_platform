@@ -1371,9 +1371,11 @@ def _celebrate_personal_record(log):
     The answer carries the verdict (`_is_personal_record`) and, for a record, the best
     it beat (`_previous_best`, BACKEND_BUGS B-112) — both from ONE judgement,
     `strength.record_beaten`, so the «+x kg» on the record card is exactly the record
-    this set beat. The verdict is also kept on the row (`ExerciseSetLog.personal_record`)
-    so a re-sent sync batch and the coach's review read what the client was told
-    (B-110, B-106).
+    this set beat. Both are also kept on the row, in ONE update
+    (`ExerciseSetLog.personal_record`, `ExerciseSetLog.previous_best`), so a re-sent
+    sync batch and the coach's review read what the client was told (B-110, B-106) —
+    and a re-send never recomputes what the record beat: an earlier set corrected or
+    deleted since would make the two disagree (the review of 2026-09-24).
     """
     from notifications.domain.dispatcher import emit_event
     from notifications.domain.progress_events import PersonalRecordEvent
@@ -1385,13 +1387,16 @@ def _celebrate_personal_record(log):
             return
         beaten = record_beaten(log)
         record = beaten is not None
+        previous = _previous_best(beaten)
         log._is_personal_record = record        # the answer carries it, so the app cheers now
-        log._previous_best = _previous_best(beaten)
-        if bool(getattr(log, 'personal_record', False)) != record:
+        log._previous_best = previous
+        if (bool(getattr(log, 'personal_record', False)) != record
+                or getattr(log, 'previous_best', None) != previous):
             # A savepoint: a failed write here must not break the request's transaction.
             with transaction.atomic():
-                ExerciseSetLog.objects.filter(pk=log.pk).update(personal_record=record)
-            log.personal_record = record
+                ExerciseSetLog.objects.filter(pk=log.pk).update(personal_record=record,
+                                                                previous_best=previous)
+            log.personal_record, log.previous_best = record, previous
         if not record:
             return
         progress = log.user_exercise_progress
@@ -1562,20 +1567,33 @@ def _sync_answer(key, state, log, exercise_id):
     this set (BACKEND_BUGS B-110) — its stored `weight` and `reps`, and the record
     verdict it was answered with (`ExerciseSetLog.personal_record`), with the best that
     record beat (`previous_best`, B-112). A `created` row's verdict is filled in by
-    `sync` once the batch is judged; a `duplicate` answers the stored one, so a batch
-    re-sent after its answer was lost learns the record it had."""
-    from .strength import personal_best
-
+    `sync` once the batch is judged; a `duplicate` answers the stored pair, so a batch
+    re-sent after its answer was lost learns the record it had and exactly what it
+    beat. Both are READ, never judged again here: recomputing `previous_best` at replay
+    time answered a stored verdict beside a fresh number, and an earlier set corrected
+    or deleted in between made them disagree (the review of 2026-09-24)."""
     record = bool(getattr(log, 'personal_record', False))
     previous = None
-    if record and state == 'duplicate' and log.user_exercise_progress_id:
-        progress = log.user_exercise_progress
-        previous = _previous_best(personal_best(progress.user_id, progress.exercise_id,
-                                                before=log.pk))
+    if record and state == 'duplicate':
+        previous = getattr(log, 'previous_best', None)
     return {'client_uuid': str(key), 'status': state, 'id': log.pk,
             'set_number': log.set_number, 'exercise_id': exercise_id,
             'weight': None if log.weight is None else float(log.weight),
             'reps': log.reps, 'personal_record': record, 'previous_best': previous}
+
+
+def _sync_key_refusal(key, user, found):
+    """The owner test for a set found by its retry key: None when it is this caller's
+    (or the caller is an admin), otherwise the `idempotency_conflict` row — which says
+    nothing about the set. ONE test for both places `_sync_one_set` finds a key: step 1
+    (the batch's keys read up front) and the race branch (a twin that committed after
+    them), so the two can never answer the same key differently."""
+    owner = (found.user_exercise_progress.user_id
+             if found.user_exercise_progress_id else None)
+    if owner != user.id and not getattr(user, 'is_admin', False):
+        return _sync_error(key, 'idempotency_conflict',
+                           _('This id belongs to another record.'))
+    return None
 
 
 def _sync_one_set(request, row, key, known, today):
@@ -1608,11 +1626,9 @@ def _sync_one_set(request, row, key, known, today):
     #    and nothing is written — the same contract as a retried single POST.
     existing = known.get(key)
     if existing is not None:
-        owner = (existing.user_exercise_progress.user_id
-                 if existing.user_exercise_progress_id else None)
-        if owner != user.id and not getattr(user, 'is_admin', False):
-            return _sync_error(key, 'idempotency_conflict',
-                               _('This id belongs to another record.')), None, None
+        refused = _sync_key_refusal(key, user, existing)
+        if refused is not None:
+            return refused, None, None
         # What the server HOLDS for it (B-110): the stored numbers and the verdict the
         # first answer gave, which the phone lost with that answer.
         return (_sync_answer(key, 'duplicate', existing,
@@ -1755,10 +1771,18 @@ def _sync_one_set(request, row, key, known, today):
                             else _('Could not record this set.'))), None, None
     except IntegrityError:
         # The same batch arriving twice at once: the unique index on `client_uuid` let
-        # one through, and the other answers with its row.
-        twin = ExerciseSetLog.objects.filter(client_uuid=key).first()
+        # one through, and the other answers with its row — under step 1's owner test,
+        # word for word. `known` was read before that row committed, so this is the
+        # first time this request sees whose it is, and a key someone else holds is
+        # `idempotency_conflict` here as it is there: never their weight, reps or
+        # record (the review of 2026-09-24).
+        twin = (ExerciseSetLog.objects.select_related('user_exercise_progress')
+                .filter(client_uuid=key).first())
         if twin is None:
             raise
+        refused = _sync_key_refusal(key, user, twin)
+        if refused is not None:
+            return refused, None, None
         return (_sync_answer(key, 'duplicate', twin, exercise_id),
                 (progress, routine, day), None)
 
@@ -2299,13 +2323,18 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                         the server HOLDS for it (BACKEND_BUGS B-110): the stored
                         `weight` and `reps` — which may differ from the re-sent
                         copy — and the `personal_record` verdict the first answer
-                        gave (kept on the set; a key sent twice in one batch answers
-                        its twin's verdict). Nothing is written and nothing is
+                        gave with the `previous_best` it gave beside it (both kept on
+                        the set when it was judged, never recomputed: an earlier set
+                        corrected or deleted since does not change what this record
+                        beat; a key sent twice in one batch answers its twin's
+                        verdict). Nothing is written and nothing is
                         celebrated again; what the set is counted in is recomputed
                         again, so a send that died before its recount is repaired by
                         the retry (SIDE_BUGS S-120)
             error       `{client_uuid, status, code, error}` — `bad_row`,
-                        `client_uuid_required`, `idempotency_conflict`, `bad_date`,
+                        `client_uuid_required`, `idempotency_conflict` (the id is on
+                        someone else's set — also when their send and this one raced:
+                        nothing of theirs is answered), `bad_date`,
                         `date_in_future`, `date_too_old`, `exercise_required`,
                         `exercise_not_found`, `session_not_found`, `routine_not_found`,
                         `reps_required`, `reps_out_of_range`, `no_prescribed_reps`,
@@ -2422,40 +2451,116 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                          'errors': counts['error']})
 
 
-def _prescription_payload(row):
-    """One row of a day's prescription, as `?expand=sets` answers it (B-106)."""
-    return {'id': row.pk, 'sets': row.sets, 'reps': row.reps,
-            'weight': None if row.weight is None else float(row.weight),
-            'rest_time': row.rest_time, 'order': row.order}
+def _prescription_payload(entry):
+    """One row of a day's prescription, as `?expand=sets` answers it (B-106), from an
+    entry of `_reviewed_plan`."""
+    return {'id': entry['id'], 'sets': entry['sets'], 'reps': entry['reps'],
+            'weight': None if entry['weight'] is None else float(entry['weight']),
+            'rest_time': entry['rest_time'], 'order': entry['order']}
+
+
+def _reviewed_plan(session, logs):
+    """The day's plan a session is reviewed against, in the day's order: one entry per
+    row, `{id, exercise_id, exercise, sets, reps, weight, rest_time, order, notes}`.
+
+    **A closed day is read from its `DayOutcome`** — the plan frozen when the day closed
+    (`outcomes.plan_from_detail`), matched by `(user, routine, day, date of the
+    session's start)`, the key finishing a session writes it under. The coach edits
+    `RoutineExercise` in place and an edit must not rewrite last week: read live, a
+    raise to 5 × 6 at 90 kg the next morning made the review say "8 at 82.5 against 6
+    at 90" and contradict the day's own outcome, and a row deleted since vanished from
+    the plan (the review of 2026-09-24). `sets`, `reps`, `weight` and `order` are the
+    snapshot's (`sets` as the day counted it: at least one); `rest_time` and `notes`,
+    which the snapshot does not hold, are the live row's while it exists, and null and
+    "" for a row deleted since. A row whose exercise has left the catalogue altogether
+    has nothing left to name and is left out. **A day still open** — no outcome yet, or
+    one written before the snapshot carried rows — is read live.
+
+    Cost: ONE query — the live rows, with the outcome's snapshot as a subquery column.
+    One more only when the day holds no live row any more (the outcome is then read on
+    its own), and one more for the names of exercises the coach has deleted since that
+    nobody logged in this session (the logged ones come with the sets). Never a query
+    per set or per exercise.
+    """
+    from django.db.models import JSONField, Subquery
+
+    from .models import DayOutcome, Exercise
+    from .outcomes import plan_from_detail
+
+    if not (session.routine_id and session.day):
+        return []
+    outcome = DayOutcome.objects.filter(
+        user_id=session.user_id, routine_id=session.routine_id, day=session.day,
+        date=timezone.localdate(session.start_time))
+    live = list(RoutineExercise.objects
+                .filter(routine_id=session.routine_id, day=session.day)
+                .select_related('exercise')
+                .annotate(closed_plan=Subquery(outcome.values('detail')[:1],
+                                               output_field=JSONField()))
+                .order_by('order', 'id'))
+    detail = (live[0].closed_plan if live
+              else outcome.values_list('detail', flat=True).first())
+    frozen = plan_from_detail(detail)
+    if not frozen:
+        return [{'id': row.pk, 'exercise_id': row.exercise_id, 'exercise': row.exercise,
+                 'sets': row.sets, 'reps': row.reps, 'weight': row.weight,
+                 'rest_time': row.rest_time, 'order': row.order, 'notes': row.notes}
+                for row in live]
+
+    now_row = {row.pk: row for row in live}
+    exercises = {row.exercise_id: row.exercise for row in live}
+    for log in logs:
+        progress = log.user_exercise_progress
+        if progress is not None:
+            exercises.setdefault(progress.exercise_id, progress.exercise)
+    unnamed = {entry['exercise_id'] for entry in frozen} - set(exercises)
+    if unnamed:
+        exercises.update({exercise.pk: exercise
+                          for exercise in Exercise.objects.filter(pk__in=unnamed)})
+    plan = []
+    for entry in frozen:
+        exercise = exercises.get(entry['exercise_id'])
+        if exercise is None:
+            continue
+        row = now_row.get(entry['routine_exercise_id'])
+        plan.append({
+            'id': entry['routine_exercise_id'], 'exercise_id': entry['exercise_id'],
+            'exercise': exercise, 'sets': entry['sets'], 'reps': entry['reps'],
+            'weight': entry['weight'],
+            'rest_time': row.rest_time if row is not None else None,
+            'order': (entry['order'] if entry['order'] is not None
+                      else getattr(row, 'order', None)),
+            'notes': row.notes if row is not None else '',
+        })
+    return plan
 
 
 def _session_review(session, reader):
     """`{sets, planned, routine_name}` for `GET workout-sessions/{id}/?expand=sets`
-    (BACKEND_BUGS B-106): what was done, set by set, beside what the day prescribed.
+    (BACKEND_BUGS B-106): what was done, set by set, beside what the day prescribed —
+    the plan the day CLOSED with once it is closed, the live one while it is open
+    (`_reviewed_plan`).
 
     The sets, their progress rows and exercises come from the prefetch the detail
-    already made; the day's prescription is ONE more query. Nothing here is asked per
-    set or per exercise. A set's prescription is the day's first row for its exercise
-    by `(order, id)` — the row `set-logs/` reads for `as_prescribed` — so the review
-    and the logging agree about what "planned" was.
+    already made; the day's plan is ONE more query (see `_reviewed_plan` for the two
+    rare cases that cost one more each). Nothing here is asked per set or per exercise.
+    A set's prescription is the plan's first row for its exercise by `(order, id)` —
+    the row `set-logs/` reads for `as_prescribed` — so the review and the logging agree
+    about what "planned" was.
     """
     from .services import routine_name_for
-
-    planned_rows = []
-    if session.routine_id and session.day:
-        planned_rows = list(RoutineExercise.objects
-                            .filter(routine_id=session.routine_id, day=session.day)
-                            .select_related('exercise').order_by('order', 'id'))
-    prescription_of, position = {}, {}
-    for index, row in enumerate(planned_rows):
-        prescription_of.setdefault(row.exercise_id, row)
-        position.setdefault(row.exercise_id, (0, index))
 
     def exercise_of(log):
         progress = log.user_exercise_progress
         return progress.exercise if progress is not None else None
 
     logs = sorted(session.set_logs.all(), key=lambda log: log.pk)
+    plan = _reviewed_plan(session, logs)
+    prescription_of, position = {}, {}
+    for index, entry in enumerate(plan):
+        prescription_of.setdefault(entry['exercise_id'], entry)
+        position.setdefault(entry['exercise_id'], (0, index))
+
     first_logged = {}
     for log in logs:
         exercise = exercise_of(log)
@@ -2482,10 +2587,11 @@ def _session_review(session, reader):
         })
     return {
         'sets': sets,
-        'planned': [{**_prescription_payload(row),
-                     'exercise': {'id': row.exercise_id, 'name': row.exercise.name},
-                     'notes': row.notes}
-                    for row in planned_rows],
+        'planned': [{**_prescription_payload(entry),
+                     'exercise': {'id': entry['exercise_id'],
+                                  'name': entry['exercise'].name},
+                     'notes': entry['notes']}
+                    for entry in plan],
         'routine_name': (routine_name_for(session.routine, reader)
                          if session.routine_id else None),
     }
@@ -2626,10 +2732,21 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                           weight, rest_time, order, notes}`. Empty without a day.
             routine_name  the routine's name in the reader's language.
 
+        **Which plan.** Once the day is CLOSED (it has a day outcome: finishing the
+        session writes one), `planned` and every `prescription` are the plan the day
+        closed with — the same frozen plan the day's outcome counts against — so the
+        coach editing the routine afterwards does not rewrite what this workout was
+        asked to be (the review of 2026-09-24). `sets`, `reps`, `weight` and `order`
+        are as they were then (`sets` as the day counted it: at least one), and a row
+        the coach has deleted since is still listed, with its old `id`; `rest_time` and
+        `notes` are the row's current ones, and null and "" for a deleted row. A day
+        still OPEN is answered against the routine as it is now.
+
         Exercise names are in the request's language. The cost does not grow with the
         sets or the exercises: the sets, their progress rows and exercises are read in
-        the three queries the detail already made, and the day's prescription in one
-        more.
+        the three queries the detail already made, and the day's plan in one more —
+        plus one when the day holds no row any more, and one when a row deleted since
+        names an exercise nobody logged in this session.
 
         Who may read it is who may read the session: the person who trained, an admin,
         and a trainer with an APPROVED relation to them — the one predicate
