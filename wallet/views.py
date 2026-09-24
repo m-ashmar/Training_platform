@@ -442,7 +442,8 @@ class WalletTransactionsSummaryView(APIView):
 
     TrainerEarnings' monthly chart («أرباحك الشهرية») and «من أين أرباح أيلول» (coaching,
     the trainer's share of plans, programs sold) without paging six months of rows:
-    three queries whatever the number of rows.
+    two aggregate queries (plus the wallet and the platform's ledger owners) whatever
+    the number of rows.
 
     Headers: `Authorization: Bearer <access>`. Query, all optional:
     `since=YYYY-MM-DD` / `until=YYYY-MM-DD` (inclusive, server's zone; default: this

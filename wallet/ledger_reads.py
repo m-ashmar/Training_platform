@@ -10,8 +10,8 @@ Two reads, one set of filters:
 * `GET /api/wallet/transactions/` takes `?since=&until=&money_type=&kind=` (all optional;
   with none it is the call it always was).
 * `GET /api/wallet/transactions/summary/` answers the sums per calendar month and per
-  kind of money for a window of at most `SUMMARY_MAX_MONTHS`, in three queries whatever
-  the number of rows.
+  kind of money for a window of at most `SUMMARY_MAX_MONTHS`, in two aggregate queries
+  whatever the number of rows.
 
 THE RULES THE APP CAN RELY ON
 
