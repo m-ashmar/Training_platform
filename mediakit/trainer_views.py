@@ -34,7 +34,7 @@ def _not_found():
     this process serves. Byte-identical to the exercise routes' 404 on purpose — an
     asset is exactly as discoverable as the exercise it hangs on, and no more.
     """
-    return Response({"error": _("Exercise not found.")},
+    return Response({"error": _("Exercise not found."), "code": "not_found"},
                     status=status.HTTP_404_NOT_FOUND)
 
 

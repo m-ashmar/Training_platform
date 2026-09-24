@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
 from django.utils.translation import gettext as _
+from django.utils.translation import gettext_lazy as _lazy
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from .models import CustomUser
@@ -56,7 +57,35 @@ logger = logging.getLogger(__name__)
 CLIENT_NOTE_MAX_LENGTH = 500
 
 
+# A route for one role, called by another: its own code, one per role, the same one
+# every such refusal in this app answers (`coaching/current/` and `trainers/matches`
+# already answer `clients_only`). These answered the generic `permission_denied`, the
+# same code as a paywall or an object the caller may not touch (the owner, 2026-09-24:
+# every refusal names its own code).
+def _trainers_only():
+    """403 `trainers_only` — the caller is not a trainer."""
+    return Response({'error': _('This endpoint is only for trainers'),
+                     'code': 'trainers_only'}, status=status.HTTP_403_FORBIDDEN)
+
+
+def _clients_only():
+    """403 `clients_only` — the caller is not a client."""
+    return Response({'error': _('This endpoint is only for clients'),
+                     'code': 'clients_only'}, status=status.HTTP_403_FORBIDDEN)
+
+
 class CustomLoginView(LoginView):
+    """`POST /api/auth/login/` `{email, password}` — 200 `{access, refresh, key, user}`.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `validation_error` | a field is missing or malformed; or refused as a whole, the reason in `field_errors.non_field_errors[0].code`: `invalid_credentials` (wrong address or password), `email_not_verified` (with `requires_verification` and `email`: route to the code screen), `credentials_required` |
+    | `400` | `too_many_attempts` | five failed sign-ins: locked 15 minutes, `retry_after_seconds` |
+    | `403` | `account_disabled` | the right password on a suspended account |
+
+    The three `non_field_errors` codes were DRF's generic `invalid` (the owner,
+    2026-09-24).
+    """
     serializer_class = CustomLoginSerializer
     permission_classes = [AllowAny]
     def get_response(self):
@@ -98,35 +127,44 @@ class CustomLoginView(LoginView):
         return original_response
 
 class JWTAuthLogoutView(APIView):
-    """
-    JWT Logout View - Blacklists the refresh token and returns success response.
-    This is the proper way to logout with JWT authentication.
+    """POST /api/auth/token/logout/ — sign out: blacklists the refresh token.
+
+    Auth: Bearer JWT. Body (JSON): `refresh_token` (required). 200 `{message}`.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `refresh_token_required` | no `refresh_token`, with `field` |
+    | `400` | `refresh_token_invalid` | not a refresh token, expired, or already blacklisted — the app may treat the person as signed out |
+    | `401` | `not_authenticated`, `token_not_valid` | no access token; an expired or invalid one |
+
+    Both 400s answered the generic `bad_request` before (the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
-    
+
     def post(self, request):
         try:
             # Get the refresh token from the request
             refresh_token = body_dict(request).get('refresh_token')
-            
+
             if not refresh_token:
                 return Response(
-                    {'error': _('Refresh token is required')}, 
+                    {'error': _('Refresh token is required'),
+                     'code': 'refresh_token_required', 'field': 'refresh_token'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
             # Blacklist the refresh token
             token = RefreshToken(refresh_token)
             token.blacklist()
-            
+
             return Response(
-                {'message': _('Successfully logged out')}, 
+                {'message': _('Successfully logged out')},
                 status=status.HTTP_200_OK
             )
-            
+
         except TokenError:
             return Response(
-                {'error': _('Invalid refresh token')}, 
+                {'error': _('Invalid refresh token'), 'code': 'refresh_token_invalid'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         except PASSTHROUGH_EXCEPTIONS:
@@ -279,18 +317,21 @@ class OTPVerificationView(APIView):
     `too_many_attempts` (five wrong codes for this address and purpose lock it for 15
     minutes; carries `retry_after_seconds` and `Retry-After`; the right code is refused
     too while locked). The address is matched lower-cased (BACKEND_BUGS B-021, B-033).
+    400 `email_and_otp_required`: `email` or `otp_code` is missing (it answered the
+    generic `bad_request` before; the owner, 2026-09-24).
     403 `account_disabled`: the code is right but the account is suspended.
     """
     permission_classes = [AllowAny]
-    
+
     def post(self, request):
         """Verify OTP code and activate user"""
         email = request.data.get('email')
         otp_code = request.data.get('otp_code')
-        
+
         if not email or not otp_code:
             return Response(
-                {'error': _('Email and OTP code are required')},
+                {'error': _('Email and OTP code are required'),
+                 'code': 'email_and_otp_required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -356,6 +397,8 @@ class ResendOTPView(APIView):
     verified or is suspended. Limit: 3 an hour per address (lower-cased) and IP, then
     429 `{error, detail, code: "throttled", retry_after_seconds}` with `Retry-After` —
     the seconds really left in the hour (BACKEND_BUGS B-022); the same for every address.
+    400 `email_required` (with `field`) when `email` is missing or not text — it
+    answered the generic `bad_request` before (the owner, 2026-09-24).
     """
     permission_classes = [AllowAny]
 
@@ -373,7 +416,8 @@ class ResendOTPView(APIView):
         email = request.data.get('email')
         if not email or not isinstance(email, str):
             return Response(
-                {'error': _('Email is required')},
+                {'error': _('Email is required'), 'code': 'email_required',
+                 'field': 'email'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         # Stored lower-cased: `Samer@Example.com` found nobody, answered 200, sent
@@ -453,28 +497,32 @@ class ResendOTPView(APIView):
 # ============================================================================
 
 class TrainerProfileView(APIView):
-    """View for trainer profile management"""
+    """`/api/auth/trainer/profile/` — the signed-in trainer's own profile. Auth: Bearer JWT.
+
+    `GET` 200: the profile (`TrainerProfileSerializer`). `POST` (JSON or multipart, a
+    partial update of the writable fields) 200 `{message}`.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
+    | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `403` | `trainers_only` | the caller is not a trainer (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
+    """
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         """Get trainer profile data"""
         if not request.user.is_trainer:
-            return Response(
-                {'error': _('This endpoint is only for trainers')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _trainers_only()
+
         serializer = TrainerProfileSerializer(request.user)
         return Response(serializer.data, status=status.HTTP_200_OK)
-    
+
     def post(self, request):
         """Update trainer profile"""
         if not request.user.is_trainer:
-            return Response(
-                {'error': _('This endpoint is only for trainers')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _trainers_only()
+
         serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True)
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
         serializer.is_valid(raise_exception=True)
@@ -482,17 +530,19 @@ class TrainerProfileView(APIView):
         return Response({'message': _('Trainer profile updated successfully!')}, status=status.HTTP_200_OK)
 
 class TrainerClientsView(APIView):
-    """View for trainer to manage their clients"""
+    """GET /api/auth/trainer/clients/ — the clients assigned to this trainer.
+
+    200 `{trainer_id, trainer_name, client_count, clients: [...]}`.
+    403 `trainers_only` when the caller is not a trainer (it answered the generic
+    `permission_denied` before; the owner, 2026-09-24).
+    """
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         """Get all clients assigned to this trainer"""
         if not request.user.is_trainer:
-            return Response(
-                {'error': _('This endpoint is only for trainers')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _trainers_only()
+
         clients = request.user.clients.all()
         client_data = []
         
@@ -522,21 +572,39 @@ class TrainerClientsView(APIView):
         }, status=status.HTTP_200_OK)
 
 class AssignClientView(APIView):
-    """View for trainer to assign a client to themselves"""
+    """POST /api/auth/trainer/assign-client/ — a trainer invites a client.
+
+    Body: `client_id` (required). An invitation the client answers at
+    `client/respond-to-invite/`, never an assignment. 200 `{message, client_id,
+    status: "pending"}`.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `client_id_required` | no `client_id`, with `field` |
+    | `400` | `validation_error` | `client_id` is not a number |
+    | `400` | `already_your_client` | this client is already yours |
+    | `400` | `request_already_pending` | a request between you two is already waiting (either side sent it) |
+    | `403` | `trainers_only` | the caller is not a trainer |
+    | `403` | `user_blocked` | one of you blocked the other |
+    | `404` | `not_found` | no such client |
+    | `409` | `request_already_pending` | the same, found by the database as two invitations crossed |
+    | `429` | `too_many_invitations` | 25 invitations are already waiting for an answer |
+
+    Every refusal but `user_blocked` and `too_many_invitations` answered only its
+    status default before (the owner, 2026-09-24: every refusal names its own code).
+    """
     permission_classes = [IsAuthenticated]
-    
+
     def post(self, request):
         """Assign a client to this trainer"""
         if not request.user.is_trainer:
-            return Response(
-                {'error': 'This endpoint is only for trainers'}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _trainers_only()
+
         client_id = request.data.get('client_id')
         if not client_id:
             return Response(
-                {'error': _('client_id is required')}, 
+                {'error': _('client_id is required'), 'code': 'client_id_required',
+                 'field': 'client_id'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -601,12 +669,15 @@ class AssignClientView(APIView):
             if not created:
                 if relation.status == 'approved':
                     return Response(
-                        {'error': _('Client is already assigned to you')}, 
+                        {'error': _('Client is already assigned to you'),
+                         'code': 'already_your_client'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'pending':
+                    # The code the client side answers for the same state.
                     return Response(
-                        {'error': _('Client assignment request is already pending')}, 
+                        {'error': _('Client assignment request is already pending'),
+                         'code': 'request_already_pending'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'rejected':
@@ -643,13 +714,16 @@ class AssignClientView(APIView):
             # `unique_pending_trainer_request_per_client` is a partial unique index, so
             # inviting a client who already has an outstanding request raised straight
             # past the only handler here and became a 500.
+            # A constraint on the pair refused the row: an outstanding request, the
+            # same state as the `pending` branch above, so the same code.
             return Response(
-                {'error': _('That client already has an outstanding request.')},
+                {'error': _('That client already has an outstanding request.'),
+                 'code': 'request_already_pending'},
                 status=status.HTTP_409_CONFLICT
             )
         except CustomUser.DoesNotExist:
             return Response(
-                {'error': _('Client not found')},
+                {'error': _('Client not found'), 'code': 'not_found'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
@@ -662,21 +736,32 @@ class UnassignClientView(APIView):
     schedules the end — 200 `{scheduled: true, ends_at}` — and the month is not renewed.
     Before the first program (month 1 only held) the client is released and refunded;
     409 `refund_failed` when that refund cannot be made, and nothing changes.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `client_id_required` | no `client_id`, with `field` |
+    | `400` | `validation_error` | `client_id` is not a number |
+    | `400` | `not_your_client` | no approved coaching between you and this client |
+    | `403` | `trainers_only` | the caller is not a trainer |
+    | `404` | `not_found` | no such client |
+    | `409` | `coaching_month_active` | a paid month is running (with `ends_at`) |
+    | `409` | `refund_failed` | the held month could not be returned; nothing changed |
+
+    `client_id_required`, `not_your_client`, `trainers_only` and `not_found` answered
+    only their status default before (the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
-    
+
     def post(self, request):
         """Unassign a client from this trainer"""
         if not request.user.is_trainer:
-            return Response(
-                {'error': 'This endpoint is only for trainers'}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _trainers_only()
+
         client_id = request.data.get('client_id')
         if not client_id:
             return Response(
-                {'error': _('client_id is required')}, 
+                {'error': _('client_id is required'), 'code': 'client_id_required',
+                 'field': 'client_id'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -767,13 +852,13 @@ class UnassignClientView(APIView):
                 
             except TrainerClientRelation.DoesNotExist:
                 return Response(
-                    {'error': _('Client is not assigned to you')}, 
+                    {'error': _('Client is not assigned to you'), 'code': 'not_your_client'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
         except CustomUser.DoesNotExist:
             return Response(
-                {'error': 'Client not found'}, 
+                {'error': _('Client not found'), 'code': 'not_found'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
@@ -782,28 +867,32 @@ class UnassignClientView(APIView):
 # ============================================================================
 
 class ClientProfileView(APIView):
-    """View for client profile management"""
+    """`/api/auth/client/profile/` — the signed-in client's own profile. Auth: Bearer JWT.
+
+    `GET` 200: the profile (`ClientProfileSerializer`). `POST` (a partial update of the
+    writable fields) 200 `{message}`.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
+    | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `403` | `clients_only` | the caller is not a client (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
+    """
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         """Get client profile data"""
         if not request.user.is_client:
-            return Response(
-                {'error': _('This endpoint is only for clients')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _clients_only()
+
         serializer = ClientProfileSerializer(request.user)
         return Response(serializer.data, status=status.HTTP_200_OK)
-    
+
     def post(self, request):
         """Update client profile"""
         if not request.user.is_client:
-            return Response(
-                {'error': _('This endpoint is only for clients')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _clients_only()
+
         serializer = ClientProfileSerializer(request.user, data=request.data, partial=True)
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
         serializer.is_valid(raise_exception=True)
@@ -938,18 +1027,16 @@ class AvailableTrainersView(APIView):
     it, and a trainer's address is never on a card (`users/trainer_directory.py`). It
     was every trainer's address, to any signed-in client (SIDE_BUGS S-152).
 
-    403 `permission_denied` when the caller is not a client.
+    403 `clients_only` when the caller is not a client (it answered the generic
+    `permission_denied` before; the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         """Get all available trainers"""
         if not request.user.is_client:
-            return Response(
-                {'error': _('This endpoint is only for clients')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _clients_only()
+
         # Get all available trainers with client count annotated
         # Use Count('clients') to get the number of reverse relationships
         from django.db.models import Count, Q
@@ -1041,24 +1128,36 @@ class AvailableTrainersView(APIView):
             'trainer_count': len(trainer_data)
         }, status=status.HTTP_200_OK)
 
-class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+class _TrainerOfApprovedClient(IsTrainerOfApprovedClient):
+    """`routine.permissions.IsTrainerOfApprovedClient`, refusing with this app's code.
+
+    Its `has_permission` is "a trainer or an admin", so its refusal here is exactly
+    `trainers_only`; without a `code` DRF answered the generic `permission_denied`
+    (the owner, 2026-09-24: every refusal names its own code).
     """
-    Enhanced read-only viewset for trainers to view approved client profiles.
-    
-    Features:
-    - Returns personal data: weight, height, age, gender, activity_level
-    - Calculated metrics: BMI, BMR, TDEE, goals
-    - Training/diet history
-    - Access protected by IsTrainerOfApprovedClient permission
-    
-    TODO: Add comprehensive training history tracking
-    TODO: Implement progress analytics and reporting
-    TODO: Add goal achievement tracking
-    TODO: Implement data privacy and audit logging
+    code = 'trainers_only'
+    message = _lazy('This endpoint is only for trainers')
+
+
+class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    """`/api/auth/trainer/client-profile/` (list) and `…/{id}/` — a trainer reads the
+    profiles of their approved clients (an admin: every client's).
+
+    Returns personal data (weight, height, age, gender, activity level), calculated
+    metrics (BMI, BMR, TDEE, goals) and training/diet history.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `403` | `trainers_only` | the caller is neither a trainer nor an admin |
+    | `403` | `not_your_client` | `{id}` is a client with no approved coaching with you |
+    | `404` | `not_found` | `{id}` is no client at all |
+
+    All three answered only their status default before (the owner, 2026-09-24).
     """
     queryset = CustomUser.objects.filter(user_type='client')
     serializer_class = ClientProfileViewSerializer
-    permission_classes = [IsTrainerOfApprovedClient]
+    permission_classes = [_TrainerOfApprovedClient]
 
     def get_queryset(self):
         user = self.request.user
@@ -1090,11 +1189,15 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
         try:
             obj = self.queryset.get(pk=pk)
         except self.queryset.model.DoesNotExist:
-            return Response({'error': _('Client not found')}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': _('Client not found'), 'code': 'not_found'},
+                            status=status.HTTP_404_NOT_FOUND)
         # Object permission is already enforced by permission_classes but ensure 403 explicitly
         has_perm = all(perm().has_object_permission(request, self, obj) for perm in self.permission_classes)
         if not has_perm:
-            return Response({'error': _('Forbidden')}, status=status.HTTP_403_FORBIDDEN)
+            # The code `trainer/unassign-client/` answers for the same fact.
+            return Response({'error': _('Client is not assigned to you'),
+                             'code': 'not_your_client'},
+                            status=status.HTTP_403_FORBIDDEN)
         from training_platform.cache import private_cache
         cache_key = LanguageContext.cache_key("client_profile", pk)
         data = private_cache().get(cache_key)
@@ -1194,9 +1297,16 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         from rest_framework import serializers
 
         if not user.email_verified:
+            # The shape and code `/login/` answers (the owner, 2026-09-24: its own code,
+            # `email_not_verified`, not DRF's `invalid`). Under `non_field_errors`, not
+            # `detail`: a `detail` key is not a field, so the error handler took the
+            # first "field" it found — `requires_verification` — and answered
+            # `detail: "True"`.
             raise serializers.ValidationError(
                 {
-                    "detail": _("Please verify your email address before logging in. Check your inbox for the OTP code."),
+                    "non_field_errors": [serializers.ErrorDetail(
+                        _("Please verify your email address before logging in. Check your inbox for the OTP code."),
+                        code='email_not_verified')],
                     "requires_verification": True,
                     "email": user.email
                 }
@@ -1262,7 +1372,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
-    """Custom JWT token view that includes user information in the response"""
+    """`POST /api/auth/token/` `{email, password}` — 200 `{access, refresh, user}`.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `validation_error` | a field is missing; or the right password on an unverified address: `field_errors.non_field_errors[0].code` is `email_not_verified`, with `requires_verification` and `email` (the same as `/login/`) |
+    | `400` | `too_many_attempts` | five failed sign-ins: locked 15 minutes, `retry_after_seconds` |
+    | `401` | `no_active_account` | wrong address or password (simplejwt's own code) |
+    | `403` | `account_disabled` | the right password on a suspended account |
+    """
     serializer_class = CustomTokenObtainPairSerializer
 
 # ============================================================================
@@ -1287,7 +1405,8 @@ class ClientRequestTrainerView(APIView):
     trainer who charges); 402 `insufficient_balance` (with `required`, `balance` and
     `currency` — the month's price IN THE CLIENT'S CURRENCY, converted from the
     trainer's at the operator's rate, and the client's balance in the same unit);
-    403 `permission_denied` (the caller is not a client), `not_available_on_channel`;
+    403 `clients_only` (the caller is not a client; it answered the generic
+    `permission_denied` before — the owner, 2026-09-24), `not_available_on_channel`;
     404 `not_found` (no such trainer, or a `trainer_id` that is not a number); 409
     `exchange_rate_stale` / `exchange_rate_missing` when the trainer prices in the other
     currency and the operator's rate cannot convert it.
@@ -1301,10 +1420,7 @@ class ClientRequestTrainerView(APIView):
     def post(self, request):
         """Client requests to be assigned to a trainer"""
         if not request.user.is_client:
-            return Response(
-                {'error': _('This endpoint is only for clients')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return _clients_only()
         
         trainer_id = request.data.get('trainer_id')
         # The note to the trainer (RequestSheet), optional. `message` is the name older
@@ -1505,25 +1621,30 @@ class ClientUnassignTrainerView(APIView):
     
     Endpoint: POST /api/auth/client/unassign-trainer/
 
-    409 `refund_failed` when the held month could not be returned; nothing changed.
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `no_assigned_trainer` | the client has no trainer to leave |
+    | `403` | `clients_only` | the caller is not a client |
+    | `409` | `refund_failed` | the held month could not be returned; nothing changed |
+
+    `no_assigned_trainer` and `clients_only` answered only their status default before
+    (the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
-    
+
     def post(self, request):
         """Client unassigns their current trainer"""
         if not request.user.is_client:
-            return Response(
-                {'error': _('This endpoint is only for clients')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _clients_only()
+
         try:
             from .models import TrainerClientRelation
-            
+
             # Check if client has an assigned trainer
             if not request.user.assigned_trainer:
                 return Response(
-                    {'error': _('You do not have an assigned trainer')}, 
+                    {'error': _('You do not have an assigned trainer'),
+                     'code': 'no_assigned_trainer'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -1604,18 +1725,25 @@ class ClientCancelTrainerRequestView(APIView):
     - Allows client to request a different trainer after cancelling
     - Sends notification to the trainer about cancellation
     
-    Endpoint: POST /api/users/client/cancel-trainer-request/
+    Endpoint: POST /api/auth/client/cancel-trainer-request/ — no body; it cancels the
+    client's own pending request (never a trainer's invitation).
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `no_pending_request` | the client has no pending request of their own |
+    | `403` | `clients_only` | the caller is not a client |
+    | `409` | `request_in_flight` | the request is being accepted right now; try again shortly |
+
+    `no_pending_request` and `clients_only` answered only their status default before
+    (the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
-    
+
     def post(self, request):
         """Client cancels their pending trainer request"""
         if not request.user.is_client:
-            return Response(
-                {'error': _('This endpoint is only for clients')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+            return _clients_only()
+
         try:
             from .models import TrainerClientRelation
 
@@ -1645,7 +1773,8 @@ class ClientCancelTrainerRequestView(APIView):
 
                 if not pending_request:
                     return Response(
-                        {'error': _('You do not have a pending trainer request')},
+                        {'error': _('You do not have a pending trainer request'),
+                         'code': 'no_pending_request'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -1707,17 +1836,15 @@ class TrainerPendingRequestsView(APIView):
     shape, the same as an invitation the trainer sent. Nothing says which side
     blocked or that anyone did.
 
-    403 `permission_denied` when the caller is not a trainer.
+    403 `trainers_only` when the caller is not a trainer (it answered the generic
+    `permission_denied` before; the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
         """Get all pending client requests for this trainer"""
         if not request.user.is_trainer:
-            return Response(
-                {'error': _('This endpoint is only for trainers')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return _trainers_only()
         
         try:
             from .models import TrainerClientRelation
@@ -1811,6 +1938,8 @@ class ClientRespondToTrainerInviteView(APIView):
       user_blocked              403  one of you blocked the other after it was sent
       refund_failed             409  the hold could not be returned; nothing changed
       client_has_other_trainer  400  you are already another trainer's client
+      clients_only              403  the caller is not a client (it answered the generic
+                                     `permission_denied` before; the owner, 2026-09-24)
 
     Accepting takes month 1 into escrow, in the client's currency; if that fails:
 
@@ -1829,8 +1958,7 @@ class ClientRespondToTrainerInviteView(APIView):
         from .models import TrainerClientRelation
 
         if not request.user.is_client:
-            return Response({'error': _('This endpoint is only for clients')},
-                            status=status.HTTP_403_FORBIDDEN)
+            return _clients_only()
         # str() before .lower(): a JSON number, boolean or object here used to be an
         # AttributeError and a 500, on the path a client uses to accept a trainer.
         action = str(body_dict(request).get('action') or '').lower()
@@ -1898,6 +2026,9 @@ class ClientPendingTrainerInvitesView(APIView):
     operator's rate cannot convert it, it is the trainer's quoted price and
     `agreed_currency` names the trainer's currency. Both null on a build that may not
     show a coaching fee.
+
+    403 `clients_only` when the caller is not a client (it answered the generic
+    `permission_denied` before; the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
 
@@ -1905,8 +2036,7 @@ class ClientPendingTrainerInvitesView(APIView):
         from .models import TrainerClientRelation
 
         if not request.user.is_client:
-            return Response({'error': _('This endpoint is only for clients')},
-                            status=status.HTTP_403_FORBIDDEN)
+            return _clients_only()
         rows = (TrainerClientRelation.objects
                 .filter(client=request.user, status='pending', initiated_by='trainer')
                 .select_related('trainer').order_by('-created_at', '-id')[:50])
@@ -2171,6 +2301,8 @@ class TrainerRespondToRequestView(APIView):
       currency_mismatch         409  approving: the charge could not be moved
       hold_failed               402  approving: anything else; nothing changed, try again
       client_has_other_trainer  400  the client is already another trainer's
+      trainers_only             403  the caller is not a trainer (it answered the generic
+                                     `permission_denied` before; the owner, 2026-09-24)
 
     A `request_id` that is not a number answers `request_not_found`.
 
@@ -2183,10 +2315,7 @@ class TrainerRespondToRequestView(APIView):
     def post(self, request):
         """Trainer responds to a client request (approve/reject)"""
         if not request.user.is_trainer:
-            return Response(
-                {'error': _('This endpoint is only for trainers')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return _trainers_only()
         
         request_id = request.data.get('request_id')
         action = request.data.get('action')  # 'approve' or 'reject'
@@ -2320,17 +2449,15 @@ class ClientRequestStatusView(APIView):
     pending, it is the one outstanding request that stops them asking anyone else.
     Of the trainer it carries nothing beyond their public card.
 
-    403 `permission_denied` when the caller is not a client.
+    403 `clients_only` when the caller is not a client (it answered the generic
+    `permission_denied` before; the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
         """Get all requests made by this client"""
         if not request.user.is_client:
-            return Response(
-                {'error': _('This endpoint is only for clients')}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return _clients_only()
         
         try:
             from .models import TrainerClientRelation
@@ -2657,6 +2784,15 @@ class PasswordResetConfirmView(APIView):
     user's password. The new password answers the same validator codes as sign-up on
     `field_errors.new_password` (`password_too_short`, `password_too_common`,
     `password_entirely_numeric`; BACKEND_BUGS B-034).
+
+    | status | `code` | when |
+    |---|---|---|
+    | `400` | `validation_error` | a field is refused (above), or one is missing |
+    | `400` | `reset_token_invalid` | no such reset token — start again from `forgot-password/` |
+    | `400` | `reset_token_expired` | the token was already used, or its 15 minutes are over — ask for a new code |
+
+    Both token refusals answered the generic `bad_request` before (the owner,
+    2026-09-24).
     """
     permission_classes = [AllowAny]
 
@@ -2677,13 +2813,15 @@ class PasswordResetConfirmView(APIView):
         reset_token = PasswordResetToken.verify(str(token_uuid))
         if reset_token is None:
             return Response(
-                {'error': _('Invalid or expired reset token.')},
+                {'error': _('Invalid or expired reset token.'),
+                 'code': 'reset_token_invalid'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         if not reset_token.is_valid():
             return Response(
-                {'error': _('This reset token has already been used or has expired. Please request a new one.')},
+                {'error': _('This reset token has already been used or has expired. Please request a new one.'),
+                 'code': 'reset_token_expired'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 

@@ -35,12 +35,17 @@ class FCMTokenView(APIView):
         """Body: `token` (required, text up to 255), optional `platform`
         (android | ios | web), `app_version` (up to 50), `device_id` (up to 255).
         201 registered, 200 already registered or moved to this account. 400
-        `bad_request` without a token, `field_too_long` / `invalid_field` with `field` — these
+        `token_required` without a token (with `field`; the code `DELETE` answers — it
+        was the generic `bad_request`, the owner, 2026-09-24), `field_too_long` /
+        `invalid_field` with `field` — these
         reached the database unchecked and came back as a generic 500, so the device
         silently never registered (BACKEND_BUGS B-025)."""
         token = request.data.get('token')
         if not token:
-            return Response({'error': _('Token is required')}, status=status.HTTP_400_BAD_REQUEST)
+            message = _('Token is required')
+            return Response({'error': message, 'detail': message,
+                             'code': 'token_required', 'field': 'token'},
+                            status=status.HTTP_400_BAD_REQUEST)
         for name, limit in (('token', 255), ('app_version', 50), ('device_id', 255)):
             value = request.data.get(name)
             if value in (None, ''):

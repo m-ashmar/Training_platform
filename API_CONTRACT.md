@@ -1485,6 +1485,46 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   username, user_type, first_name, last_name, profile_picture_url, followers_count,
   is_following, member_since}`. `by_username/` is unchanged (exact, case-sensitive).
 
+**Every refusal names its own code: accounts, coaching requests, media, chat** (the
+owner, 2026-09-24, decision 9). Additive under §6: each code below replaces a status
+default the envelope filled in (`bad_request`, `permission_denied`, `not_found`,
+`conflict`); no code a view named changed, and no status moved. A 404 that only means
+"no such object, or not yours" now names `not_found` itself (same value). The views'
+docstrings carry the full tables.
+
+| Endpoint | New codes |
+|---|---|
+| `POST /api/auth/token/logout/` | 400 `refresh_token_required` (with `field`), 400 `refresh_token_invalid` |
+| `POST /api/auth/verify-otp/` | 400 `email_and_otp_required` |
+| `POST /api/auth/resend-otp/` | 400 `email_required` (with `field`) |
+| `POST /api/auth/forgot-password/confirm/` | 400 `reset_token_invalid` (no such token), 400 `reset_token_expired` (used, or its 15 minutes are over) |
+| `POST /api/auth/device-token/` | 400 `token_required` (with `field`) — the code `DELETE` already answers |
+| `trainer/profile/` (GET, POST), `trainer/clients/`, `trainer/assign-client/`, `trainer/unassign-client/`, `trainer/pending-requests/`, `trainer/respond-to-request/`, `trainer/client-profile/` (list and `{id}/`) | 403 `trainers_only` for a caller who is not a trainer (`client-profile/`: nor an admin) |
+| `client/profile/` (GET, POST), `client/available-trainers/`, `client/request-trainer/`, `client/unassign-trainer/`, `client/cancel-trainer-request/`, `client/respond-to-invite/`, `client/trainer-invites/`, `client/request-status/` | 403 `clients_only` for a caller who is not a client — the code `/api/v1/coaching/current/` and `/api/v1/trainers/matches` already answer |
+| `POST /api/auth/trainer/assign-client/` | 400 `client_id_required` (with `field`), 400 `already_your_client`, 400 / 409 `request_already_pending` (the code the client side answers for the same state), 404 `not_found` |
+| `POST /api/auth/trainer/unassign-client/` | 400 `client_id_required` (with `field`), 400 `not_your_client`, 404 `not_found` |
+| `GET /api/auth/trainer/client-profile/{id}/` | 403 `not_your_client`, 404 `not_found` |
+| `POST /api/auth/client/unassign-trainer/` | 400 `no_assigned_trainer` |
+| `POST /api/auth/client/cancel-trainer-request/` | 400 `no_pending_request` |
+| `GET /api/v1/trainers/{id}/` | 404 `not_found`, now named (same value) |
+| `POST /api/v1/content/media/video/` | 403 `media_not_yours` (visible, not the caller's to change), 403 `media_use_trainer_route` (`owner_type=trainer_exercise` goes through `/api/v1/trainer/exercise-media/`); 404 `not_found` now named |
+| `GET /api/v1/content/media/exercise/{id}/`, `/api/v1/trainer/exercise-media/` | 404 `not_found`, now named (same value; the body is byte-identical) |
+| `POST /api/v1/chat/conversations/start/` | 400 `invalid_body` now reaches the app: it was documented, but raised as DRF's `ValidationError`, whose code never reaches the envelope, so the app read `validation_error` |
+
+Sign-in: `POST /api/auth/login/` and `POST /api/auth/token/` keep `400 validation_error`
+for a refusal of the whole request (the regression gate pins it), and the reason is now
+`field_errors.non_field_errors[0].code`: `invalid_credentials` (`/login/`: wrong address
+or password), `email_not_verified` (the right password on an unverified address, with
+`requires_verification` and `email`) and `credentials_required` — all three were DRF's
+generic `invalid`. `/token/`'s unverified refusal answered `detail: "True"` (the
+sentence sat under a `detail` key the handler does not read as a field); it now answers
+the sentence, in the shape `/login/` answers. A wrong password on `/token/` stays `401
+no_active_account` (simplejwt's own).
+
+Left as named, because a named code never changes: `POST
+/api/notifications/message-client/` still answers 403 `permission_denied` for a caller
+who is not a trainer (the view names it).
+
 **Getting stronger** (the owner, 2026-09-20). Read from sets already logged; nothing is
 collected for it.
 

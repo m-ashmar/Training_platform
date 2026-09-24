@@ -105,7 +105,11 @@ class ConversationStartView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        from rest_framework.exceptions import ValidationError
+        # Django's ValidationError, not DRF's: only Django's carries its `code` to the
+        # response's top-level `code` (training_platform/exception_handler.py). DRF's
+        # answered `validation_error`, so the documented `invalid_body` never reached
+        # the app (the owner, 2026-09-24: every refusal names its own code).
+        from django.core.exceptions import ValidationError
 
         from .permissions import may_open_thread
 
