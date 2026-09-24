@@ -178,17 +178,23 @@ def award_challenge_winners(challenge_ids) -> int:
     some unrelated event happened to trigger one later.
 
     The winner is the participation with `rank=1` that reached the target
-    (`status='completed'`), the definition the metric counts. Returns how many were
-    checked. Never raises: a badge is a reward, and must not fail the close.
+    (`status='completed'`), the definition the metric counts — and never an account
+    that is not active (the owner's decision 8, 2026-09-24): a suspended one holds no
+    place while the challenge runs (`social/presence.py` re-ranks at the suspension),
+    and one suspended after the end keeps its stored rank as the record but is not
+    awarded. Returns how many were checked. Never raises: a badge is a reward, and must
+    not fail the close.
     """
     ids = [pk for pk in challenge_ids or () if pk is not None]
     if not ids:
         return 0
+    from users.visibility import public_q
+
     from .models import ChallengeParticipation
 
     checked = 0
     for row in (ChallengeParticipation.objects
-                .filter(challenge_id__in=ids, rank=1, status='completed')
+                .filter(public_q('user'), challenge_id__in=ids, rank=1, status='completed')
                 .select_related('user').order_by('challenge_id', 'id')):
         try:
             from achievements.engine import trigger_achievement_check

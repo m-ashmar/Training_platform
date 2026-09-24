@@ -1288,7 +1288,9 @@ class ClientRequestTrainerView(APIView):
     `currency` — the month's price IN THE CLIENT'S CURRENCY, converted from the
     trainer's at the operator's rate, and the client's balance in the same unit);
     403 `permission_denied` (the caller is not a client), `not_available_on_channel`;
-    404 `not_found` (no such trainer, or a `trainer_id` that is not a number); 409
+    404 `not_found` (no such trainer, a trainer whose account is suspended or erased —
+    the owner's decision 8, 2026-09-24: a suspended trainer is never offered, so the
+    answer is the same as for no trainer — or a `trainer_id` that is not a number); 409
     `exchange_rate_stale` / `exchange_rate_missing` when the trainer prices in the other
     currency and the operator's rate cannot convert it.
     """
@@ -1335,7 +1337,10 @@ class ClientRequestTrainerView(APIView):
         
         try:
             from .models import TrainerClientRelation
-            trainer = CustomUser.objects.get(id=trainer_id, user_type='trainer')
+            from .visibility import public_people
+            # A trainer who may be shown (`users/visibility.py`): a suspended one is not
+            # offered anywhere, so asking one is asking no trainer (decision 8).
+            trainer = public_people().get(id=trainer_id, user_type='trainer')
             # Neither side can start a coaching relationship with someone they have
             # blocked, or who has blocked them. First, before the wallet is touched
             # and before any row is written: a block that only stops the reading half
@@ -1898,17 +1903,24 @@ class ClientPendingTrainerInvitesView(APIView):
     operator's rate cannot convert it, it is the trainer's quoted price and
     `agreed_currency` names the trainer's currency. Both null on a build that may not
     show a coaching fee.
+
+    An invitation from a trainer whose account is suspended or erased is not listed
+    (the owner's decision 8, 2026-09-24: a suspended trainer is never offered; accepting
+    one answered 409 `trainer_unavailable` anyway). It is listed again if the account is
+    reinstated.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from .models import TrainerClientRelation
+        from .visibility import public_q
 
         if not request.user.is_client:
             return Response({'error': _('This endpoint is only for clients')},
                             status=status.HTTP_403_FORBIDDEN)
         rows = (TrainerClientRelation.objects
-                .filter(client=request.user, status='pending', initiated_by='trainer')
+                .filter(public_q('trainer'), client=request.user, status='pending',
+                        initiated_by='trainer')
                 .select_related('trainer').order_by('-created_at', '-id')[:50])
         rows = list(rows)
         # The price the invitation carries, in THIS client's currency, with the unit

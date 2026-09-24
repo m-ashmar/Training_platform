@@ -320,8 +320,13 @@ class AchievementEngine:
                 ended = (Q(challenge__status='completed')
                          | (Q(challenge__end_date__lt=timezone.now())
                             & ~Q(challenge__status__in=Challenge.TERMINAL_STATUSES)))
+                # Never for an account that is not active (the owner's decision 8,
+                # 2026-09-24): a suspended or erased account holds no place.
+                from users.visibility import public_q
+
                 return ChallengeParticipation.objects.filter(
                     ended,
+                    public_q('user'),
                     user=user,
                     status='completed',
                     rank=1,
@@ -629,10 +634,12 @@ class AchievementEngine:
         for category, _ in Achievement.ACHIEVEMENT_CATEGORIES:
             categories[category] = earned.filter(achievement__category=category).count()
         
-        # Rank among all users
+        # Rank among all users — the ones the leaderboard shows: not a suspended or
+        # erased account (the owner's decision 8, 2026-09-24).
         from django.db.models import Sum as DjSum
+        from users.visibility import public_q
         user_points = total_points
-        users_with_more = UserAchievement.objects.values('user').annotate(
+        users_with_more = UserAchievement.objects.filter(public_q('user')).values('user').annotate(
             total=DjSum('achievement__points')
         ).filter(total__gt=user_points).count()
         

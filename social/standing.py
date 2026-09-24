@@ -33,6 +33,21 @@ a participation whose `status` is in `ChallengeParticipation.NOT_IN_STANDING`
 (`dropped`): it holds no place (its `place` and stored `rank` are null), it is not
 listed, and it is behind nobody and ahead of nobody (SIDE_BUGS S-045).
 
+**Nor a suspended account** (the owner's decision 8, 2026-09-24): a participation whose
+person is not publicly visible (`users/visibility.py` — the account is not active) holds
+no place either, exactly like a dropped one. The people behind them move up — every
+surface above closes the gap, because every surface reads `in_standing` — and they are
+not listed, on the board or as its `me` row. Their row and its number stay in the table
+(historical statistics stay internal); reinstating the account puts them back in the
+standing where their number places them.
+
+The stored `rank` follows at the moment of the suspension, not only at the next
+re-rank: `social/presence.py` re-ranks every RUNNING challenge the person is in when
+`is_active` changes, either way. A challenge that is over is not re-ranked (below):
+its stored ranks are the record. The Challenge Winner badge never goes to an account
+that is not active (`social/tasks.py award_challenge_winners`,
+`achievements/engine.py challenge_wins`).
+
 **Cost.** `place()` is one correlated COUNT per row it is annotated on, inside the
 query that reads the rows: one extra subquery for a home card, at most `limit` (50) for
 a leaderboard page, one per challenge on a page of the challenge list. `write_places`
@@ -41,8 +56,13 @@ moved in ONE bulk UPDATE; its SQL work grows with the square of the standing (ea
 counts the rows ahead of it, served by the `(challenge, status, current_value)` index),
 which is milliseconds at the hundreds a challenge holds today.
 """
-from django.db.models import Case, Count, IntegerField, OuterRef, Q, Subquery, Value, When
+from django.db.models import (Case, Count, F, IntegerField, OuterRef, Q, Subquery, Value,
+                              When)
 from django.db.models.functions import Coalesce
+
+# Who may be shown to other people: one predicate (the owner's decision 8, 2026-09-24).
+# The module imports no model, so importing it here costs nothing at import time.
+from users.visibility import FIELD as VISIBILITY_FIELD, hidden_q, public_q
 
 #: The order the standing is LISTED in, and the order `place()` counts in. Total: no two
 #: participations compare equal, so a tie is always listed the same way, earlier joiner
@@ -55,10 +75,12 @@ WRITE_BATCH = 500
 
 
 def in_standing(queryset):
-    """`queryset` of participations less the ones that hold no place."""
+    """`queryset` of participations less the ones that hold no place: dropped, or of an
+    account that is not publicly visible (suspended or erased)."""
     from .models import ChallengeParticipation
 
-    return queryset.exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
+    return (queryset.exclude(status__in=ChallengeParticipation.NOT_IN_STANDING)
+            .filter(public_q('user')))
 
 
 def _strictly_ahead():
@@ -86,10 +108,12 @@ def place():
 
 
 def place_or_none():
-    """`place()` for a row in the standing, null for one that is not (`dropped`)."""
+    """`place()` for a row in the standing, null for one that is not (`dropped`, or a
+    suspended account)."""
     from .models import ChallengeParticipation
 
     return Case(When(status__in=ChallengeParticipation.NOT_IN_STANDING, then=Value(None)),
+                When(hidden_q('user'), then=Value(None)),
                 default=place(), output_field=IntegerField())
 
 
@@ -101,7 +125,8 @@ def write_places(challenge, moved_users: set | None = None) -> dict:
 
     One SELECT (every row of the challenge, in `STANDING_ORDER`, numbered in that order —
     the same places `place()` answers) and one bulk UPDATE of the rows whose place
-    moved. A dropped participation is written NULL.
+    moved. A dropped participation, and one of an account that is not publicly visible
+    (suspended or erased, `users/visibility.py`), is written NULL.
 
     **A challenge that is over is not re-ranked.** `lifecycle_status` is terminal once
     the end date has passed or someone closed it; from that moment the standing is a
@@ -117,11 +142,13 @@ def write_places(challenge, moved_users: set | None = None) -> dict:
     # ONE ordered pass. `place()` is a correlated count per row — N x N row visits,
     # held under the challenge lock on every recount (the review, M4). The order is
     # total, so numbering the rows in it gives exactly the places `place()` answers.
+    # `shown`: the person may be shown (`users/visibility.py`), read in the same SELECT.
     rows = list(rows.only('id', 'rank', 'status', 'current_value', 'joined_at', 'user_id')
+                .annotate(shown=F(f'user__{VISIBILITY_FIELD}'))
                 .order_by(*STANDING_ORDER))
     moved, number = [], 0
     for row in rows:
-        if row.status in ChallengeParticipation.NOT_IN_STANDING:
+        if row.status in ChallengeParticipation.NOT_IN_STANDING or not row.shown:
             wanted = None
         else:
             number += 1

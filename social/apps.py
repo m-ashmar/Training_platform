@@ -14,3 +14,6 @@ class SocialConfig(AppConfig):
         # Challenge progress counted from logged training: receivers on the routine
         # app's set, progress and session rows (BACKEND_BUGS B-075).
         import social.challenge_progress  # noqa: F401
+        # A suspension (or a reinstatement) re-ranks the running challenges the person
+        # is in at once: the owner's decision 8, 2026-09-24 (`social/presence.py`).
+        import social.presence  # noqa: F401
