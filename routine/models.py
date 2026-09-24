@@ -1018,6 +1018,14 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
     #: it back, as it does not take back the push. False on every row written before
     #: the column existed (2026-09-24).
     personal_record = models.BooleanField(default=False)
+    #: `{weight, reps, date}` of the best this set beat, beside `personal_record: true`
+    #: — written in the SAME update as the verdict, by the same judgement
+    #: (`strength.record_beaten`), and null when the set is not a record. A re-sent sync
+    #: batch answers THIS: recomputed at replay time, an earlier set corrected or
+    #: deleted after the first answer turned the record card into «+(-10) kg», or a
+    #: record that beat nothing (the review of 2026-09-24). Like the verdict, never
+    #: recomputed afterwards. Null on every row written before the column existed.
+    previous_best = models.JSONField(null=True, blank=True)
 
     #: The values a challenge counts; a change to either stamps `values_changed_at`.
     COUNTED_VALUES = ('weight', 'reps')
