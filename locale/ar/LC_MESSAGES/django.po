@@ -4541,3 +4541,7 @@ msgstr "لم تحصل على هذا الإنجاز بعد"
 #: achievements/views.py
 msgid "Maximum 3 featured achievements allowed"
 msgstr "يمكنك إبراز 3 إنجازات كحدّ أقصى"
+
+#: social/serializers.py
+msgid "A secret badge cannot be shared."
+msgstr "لا يمكن مشاركة شارة سرية."

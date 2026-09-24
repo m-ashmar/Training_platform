@@ -54,6 +54,9 @@ counts.
 """
 import logging
 
+import threading
+from contextlib import contextmanager
+
 from django.db import transaction
 from django.db.models import Count, ExpressionWrapper, F, FloatField, Q, Sum
 from django.dispatch import receiver
@@ -137,6 +140,33 @@ def apply_value(participation, challenge, value):
 
 
 # ------------------------------------------------------------------- recounting
+def reapply_target(challenge) -> int:
+    """Re-judge every participant against the challenge's CURRENT target.
+
+    A target edited while the challenge runs moved nobody's number, so `recount` —
+    which rewrites only the rows whose number moved — never reached them: a participant
+    completed at 22 of 20 stayed `completed` at 22 of 30 and could take the Challenge
+    Winner badge for a target never reached (the review, M6). Manual and counted
+    challenges alike. Returns how many rows changed.
+    """
+    from .models import Challenge, ChallengeParticipation
+    from .standing import in_standing
+
+    with transaction.atomic():
+        locked = Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
+        if locked is None:
+            return 0
+        changed, fields = [], []
+        for row in in_standing(ChallengeParticipation.objects.filter(challenge=locked)):
+            before = (row.progress_percentage, row.status, row.completed_at)
+            fields = apply_value(row, locked, row.current_value)
+            if (row.progress_percentage, row.status, row.completed_at) != before:
+                changed.append(row)
+        if changed:
+            ChallengeParticipation.objects.bulk_update(changed, fields)
+        return len(changed)
+
+
 def recount(challenge, user_ids=None) -> bool:
     """Recount `user_ids` (default: everyone in the standing) of one running challenge.
 
@@ -185,15 +215,23 @@ def recount_for_user(user_id) -> int:
                 challenge__end_date__gte=now)
         .select_related('challenge').order_by('challenge_id'))]
     moved = 0
+    touched = {user_id}
     for challenge in challenges:
         with transaction.atomic():
             if recount(challenge, [user_id]):
-                write_places(challenge)
+                write_places(challenge, moved_users=touched)
                 moved += 1
     if moved:
+        from home.views import bump_stamp
+
         from .views import ChallengeViewSet
 
-        ChallengeViewSet.invalidate_challenges_cache_for(user_id)
+        # Everyone whose place moved, not only the person who logged: passing a rival
+        # moves the rival too, and their cached list and home card still said 1st
+        # while the board said 2nd (the review, M5; BACKEND_BUGS B-086).
+        for other in sorted(touched):
+            ChallengeViewSet.invalidate_challenges_cache_for(other)
+            bump_stamp(other)
     return moved
 
 
@@ -221,14 +259,42 @@ class _AfterCommit:
             _recount_quietly(user_id)
 
 
+_batch = threading.local()
+
+
+@contextmanager
+def batched_recounts():
+    """Hold every recount scheduled inside this block and run each person's ONCE when
+    it ends — for a request that commits many small transactions, like the offline
+    sync, which writes each set in a transaction of its own. Per transaction, a sync of
+    200 sets re-ranked the challenge 200 times under its lock (the review, M4)."""
+    if getattr(_batch, 'user_ids', None) is not None:
+        yield                               # already batching: the outer block runs them
+        return
+    _batch.user_ids = set()
+    try:
+        yield
+    finally:
+        user_ids, _batch.user_ids = _batch.user_ids, None
+        if user_ids:
+            job = _AfterCommit()
+            job.user_ids |= user_ids
+            transaction.on_commit(job)       # straight away outside a transaction
+
+
 def schedule_recount(user_id):
     """Recount this person's challenges once the current transaction commits.
 
     Logging a whole day writes a set per row inside one transaction; this folds them
     into ONE recount by finding the job already queued on this transaction. Outside a
     transaction `on_commit` runs it straight away, the write being committed already.
+    Inside `batched_recounts` it waits for the block to end.
     """
     if not user_id:
+        return
+    held = getattr(_batch, 'user_ids', None)
+    if held is not None:
+        held.add(user_id)
         return
     connection = transaction.get_connection()
     if connection.in_atomic_block:
