@@ -47,6 +47,7 @@ from .permissions import (
 # sees (mediakit/resolution.py). Without the mixin a nested ExerciseSerializer asks
 # per row.
 from .media_context import ExerciseMediaMixin
+import functools
 import logging
 from .services import send_notification
 from django.utils import timezone
@@ -1349,6 +1350,16 @@ def _heaviest_per_exercise(results):
     return list(top.values())
 
 
+def _previous_best(best):
+    """`{weight, reps, date}` of the best a personal record beat (BACKEND_BUGS B-112),
+    from `strength.personal_best` / `record_beaten`; None when there is none. `date` is
+    `YYYY-MM-DD`, the training day of that set."""
+    if best is None:
+        return None
+    return {'weight': best['weight'], 'reps': best['reps'],
+            'date': best['date'].isoformat() if best.get('date') else None}
+
+
 def _celebrate_personal_record(log):
     """Tell someone the moment they beat their own best (the owner, 2026-09-20).
 
@@ -1356,17 +1367,31 @@ def _celebrate_personal_record(log):
     exercise never can (there is nothing to beat), and the push is keyed on the set, so a
     retry of the same set never celebrates twice. A failure here is logged: the set is
     recorded either way — a missed cheer must not cost a workout.
+
+    The answer carries the verdict (`_is_personal_record`) and, for a record, the best
+    it beat (`_previous_best`, BACKEND_BUGS B-112) — both from ONE judgement,
+    `strength.record_beaten`, so the «+x kg» on the record card is exactly the record
+    this set beat. The verdict is also kept on the row (`ExerciseSetLog.personal_record`)
+    so a re-sent sync batch and the coach's review read what the client was told
+    (B-110, B-106).
     """
     from notifications.domain.dispatcher import emit_event
     from notifications.domain.progress_events import PersonalRecordEvent
 
-    from .strength import is_personal_record
+    from .strength import record_beaten
 
     try:
         if log is None:
             return
-        record = is_personal_record(log)
+        beaten = record_beaten(log)
+        record = beaten is not None
         log._is_personal_record = record        # the answer carries it, so the app cheers now
+        log._previous_best = _previous_best(beaten)
+        if bool(getattr(log, 'personal_record', False)) != record:
+            # A savepoint: a failed write here must not break the request's transaction.
+            with transaction.atomic():
+                ExerciseSetLog.objects.filter(pk=log.pk).update(personal_record=record)
+            log.personal_record = record
         if not record:
             return
         progress = log.user_exercise_progress
@@ -1514,6 +1539,45 @@ def _duplicate_touch(user, row, existing):
     return progress, routine, day
 
 
+@functools.lru_cache(maxsize=1)
+def _single_post_rest_time_field():
+    """The `rest_time` field of `POST set-logs/` (`ExerciseSetLogSerializer`), built once."""
+    return ExerciseSetLogSerializer().fields['rest_time']
+
+
+def _sync_rest_time(raw):
+    """A sync row's `rest_time`, read by the SAME field the single `POST set-logs/`
+    reads it with (BACKEND_BUGS B-109), so the two routes store and refuse exactly the
+    same values. None when not sent; False when the single POST would refuse it."""
+    if raw is None or raw == '':
+        return None
+    try:
+        return _single_post_rest_time_field().run_validation(raw)
+    except serializers.ValidationError:
+        return False
+
+
+def _sync_answer(key, state, log, exercise_id):
+    """One `created` or `duplicate` row of a sync answer: what the server HOLDS for
+    this set (BACKEND_BUGS B-110) — its stored `weight` and `reps`, and the record
+    verdict it was answered with (`ExerciseSetLog.personal_record`), with the best that
+    record beat (`previous_best`, B-112). A `created` row's verdict is filled in by
+    `sync` once the batch is judged; a `duplicate` answers the stored one, so a batch
+    re-sent after its answer was lost learns the record it had."""
+    from .strength import personal_best
+
+    record = bool(getattr(log, 'personal_record', False))
+    previous = None
+    if record and state == 'duplicate' and log.user_exercise_progress_id:
+        progress = log.user_exercise_progress
+        previous = _previous_best(personal_best(progress.user_id, progress.exercise_id,
+                                                before=log.pk))
+    return {'client_uuid': str(key), 'status': state, 'id': log.pk,
+            'set_number': log.set_number, 'exercise_id': exercise_id,
+            'weight': None if log.weight is None else float(log.weight),
+            'reps': log.reps, 'personal_record': record, 'previous_best': previous}
+
+
 def _sync_one_set(request, row, key, known, today):
     """Write one set of an offline batch. Returns `(answer, touched, log)`.
 
@@ -1549,11 +1613,12 @@ def _sync_one_set(request, row, key, known, today):
         if owner != user.id and not getattr(user, 'is_admin', False):
             return _sync_error(key, 'idempotency_conflict',
                                _('This id belongs to another record.')), None, None
-        return {'client_uuid': str(key), 'status': 'duplicate', 'id': existing.pk,
-                'set_number': existing.set_number,
-                'exercise_id': (existing.user_exercise_progress.exercise_id
-                                if existing.user_exercise_progress_id else None),
-                'personal_record': False}, _duplicate_touch(user, row, existing), None
+        # What the server HOLDS for it (B-110): the stored numbers and the verdict the
+        # first answer gave, which the phone lost with that answer.
+        return (_sync_answer(key, 'duplicate', existing,
+                             existing.user_exercise_progress.exercise_id
+                             if existing.user_exercise_progress_id else None),
+                _duplicate_touch(user, row, existing), None)
 
     # 2. The date. Bounded exactly as `bulk-create` bounds it.
     parsed = _date_or_none(row.get('date')) if row.get('date') else today
@@ -1652,6 +1717,12 @@ def _sync_one_set(request, row, key, known, today):
     if rpe is False:
         return _sync_error(key, 'rpe_out_of_range',
                            _('RPE must be between 1 and 10')), None, None
+    # The rest before this set, kept exactly as the single POST keeps it (B-109): it
+    # was dropped here, so a phone that trained offline had no rest on any set.
+    rest_time = _sync_rest_time(row.get('rest_time'))
+    if rest_time is False:
+        return _sync_error(key, 'rest_time_out_of_range',
+                           _('rest_time must be a whole number of seconds.')), None, None
 
     # 7. The progress row the phone could not know the id of. This is the whole point
     #    of the endpoint: `(user, exercise, date)` is its key, so the server can
@@ -1677,7 +1748,7 @@ def _sync_one_set(request, row, key, known, today):
                 set_number=int(set_number) if set_number else None,
                 weight=weight, reps=int(reps), date=parsed,
                 notes=(row.get('notes') or ''), rpe=int(rpe) if rpe else None,
-                client_uuid=key)
+                rest_time=rest_time, client_uuid=key)
     except DjangoValidationError as invalid:
         return _sync_error(key, 'invalid_set',
                            (invalid.messages[0] if getattr(invalid, 'messages', None)
@@ -1688,14 +1759,11 @@ def _sync_one_set(request, row, key, known, today):
         twin = ExerciseSetLog.objects.filter(client_uuid=key).first()
         if twin is None:
             raise
-        return {'client_uuid': str(key), 'status': 'duplicate', 'id': twin.pk,
-                'set_number': twin.set_number, 'exercise_id': exercise_id,
-                'personal_record': False}, (progress, routine, day), None
+        return (_sync_answer(key, 'duplicate', twin, exercise_id),
+                (progress, routine, day), None)
 
-    return ({'client_uuid': str(key), 'status': 'created', 'id': log.pk,
-             'set_number': log.set_number, 'exercise_id': exercise_id,
-             'personal_record': False},
-            (progress, routine, day), log)
+    # The verdict and `previous_best` are filled in by `sync` once the batch is judged.
+    return _sync_answer(key, 'created', log, exercise_id), (progress, routine, day), log
 
 
 class ExerciseSetLogViewSet(viewsets.ModelViewSet):
@@ -1713,7 +1781,15 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 
     A set that beats everything this person has logged for that exercise answers
     `personal_record: true` and sends them the `personal_record` push (the owner,
-    2026-09-20). The first set of an exercise never counts as a record.
+    2026-09-20). The first set of an exercise never counts as a record. With it the
+    answer carries `previous_best: {weight, reps, date}` — the best this set beat, the
+    heaviest set logged before it (among equal weights the most reps, then the latest),
+    so the record card can say «+x kg» against a record set weeks ago (BACKEND_BUGS
+    B-112); null when the set is not a record. Both are judged only on the POST that
+    creates the set: a replay (200), a PATCH and a list row answer null for both.
+
+    `rest_time` (seconds of rest before the set) is stored as sent; `set-logs/sync/`
+    reads it with this route's own field (B-109).
 
     POST, PATCH and DELETE belong to the PERSON WHOSE SET IT IS (BACKEND_DELTA item 15),
     and to an admin; a trainer may read a client's sets and no longer create, edit or
@@ -1975,6 +2051,12 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         The codes of `sync/`'s rows for the same reasons. Each `errors[]` entry of a 200
         is `{exercise, error, code}` (+ `set_number`): `no_prescribed_reps`,
         `set_log_exists`, `set_write_failed`.
+
+        Each `results[]` row is `{exercise, set_number, created, id, personal_record,
+        previous_best}`: `personal_record` is true on the heaviest new set of an
+        exercise when it beat everything logged before it (the push follows), and
+        `previous_best` is then `{weight, reps, date}` of the best it beat, null
+        otherwise (BACKEND_BUGS B-112, as `POST set-logs/` answers it).
         """
         user = request.user
         routine_id = _int_or_none(request.data.get('routine_id'))
@@ -2169,8 +2251,11 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             for row in results:
                 if row['id'] == log.pk:
                     row['personal_record'] = bool(getattr(log, '_is_personal_record', False))
+                    # The best it beat, as `POST set-logs/` and `sync/` answer (B-112).
+                    row['previous_best'] = getattr(log, '_previous_best', None)
         for row in results:
             row.setdefault('personal_record', False)
+            row.setdefault('previous_best', None)
 
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
@@ -2196,24 +2281,38 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
             routine_id, day     which day this belongs to; also found from the session
             workout_session_id  the session it was logged in, when there was one
             notes, rpe          as on a single set (rpe 1-10)
+            rest_time           seconds of rest before this set, kept exactly as the
+                                single `POST set-logs/` keeps it — read by that
+                                route's own field, so both accept and refuse the same
+                                values (BACKEND_BUGS B-109; it was dropped until
+                                2026-09-24)
 
         IDEMPOTENT per `client_uuid`, exactly as the single POST is: re-sending the
         same batch writes nothing and answers the same ids. PARTIAL SUCCESS: one bad
         row never fails the batch. Every entry answers `status`:
 
-            created     `{client_uuid, status, id, set_number, exercise_id,
-                         personal_record}`
-            duplicate   the same, for the row the first send wrote — nothing is
-                        written, and what the set is counted in is recomputed
-                        again, so a send that died before its recount is repaired
-                        by the retry (SIDE_BUGS S-120)
+            created     `{client_uuid, status, id, set_number, exercise_id, weight,
+                         reps, personal_record, previous_best}` — `weight` and `reps`
+                         as STORED (the coach's numbers when `as_prescribed` filled
+                         them in); `previous_best` below
+            duplicate   the same keys, for the row the first send wrote, with what
+                        the server HOLDS for it (BACKEND_BUGS B-110): the stored
+                        `weight` and `reps` — which may differ from the re-sent
+                        copy — and the `personal_record` verdict the first answer
+                        gave (kept on the set; a key sent twice in one batch answers
+                        its twin's verdict). Nothing is written and nothing is
+                        celebrated again; what the set is counted in is recomputed
+                        again, so a send that died before its recount is repaired by
+                        the retry (SIDE_BUGS S-120)
             error       `{client_uuid, status, code, error}` — `bad_row`,
                         `client_uuid_required`, `idempotency_conflict`, `bad_date`,
                         `date_in_future`, `date_too_old`, `exercise_required`,
                         `exercise_not_found`, `session_not_found`, `routine_not_found`,
                         `reps_required`, `reps_out_of_range`, `no_prescribed_reps`,
                         `weight_out_of_range`, `set_number_out_of_range`,
-                        `rpe_out_of_range`, `invalid_set`, or the coaching refusal
+                        `rpe_out_of_range`, `rest_time_out_of_range` (a `rest_time`
+                        the single POST refuses: not a whole number of seconds),
+                        `invalid_set`, or the coaching refusal
                         `coaching_frozen` / `coaching_unpaid` / `coaching_ended` (with
                         `trainer_id`) — per row, because one frozen coaching must not
                         throw away the sets that belong to another trainer's routine.
@@ -2224,7 +2323,12 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
         The whole-request answer is `{results, created, duplicates, errors, count}`.
         400 `sets_required` when the body carries no list at all. The response's
         `personal_record` is true on a set that beat everything logged before it, and
-        the `personal_record` push follows, as on every other logging route.
+        the `personal_record` push follows, as on every other logging route. Only the
+        heaviest new set of each exercise in the batch can claim it. When it is true,
+        `previous_best` is `{weight, reps, date}` of the best it beat — the heaviest set
+        written before it, among equal weights the most reps, then the latest; a
+        lighter set earlier in the same batch counts (`strength.record_beaten`,
+        BACKEND_BUGS B-112) — and null otherwise.
 
         Identical on every build; sets are the client's own, so there is no `user_id`.
         """
@@ -2294,13 +2398,20 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                 recalc_progress_for(progress, routine_scope=routine, day_scope=day)
 
         # The heaviest new set of each exercise is the only one that can be a record
-        # (`strength.is_personal_record`), the same as `bulk-create`.
+        # (`strength.is_personal_record`), the same as `bulk-create`. The verdict, and
+        # the best a record beat (`previous_best`, B-112), go on the set's `created` row
+        # AND on any `duplicate` row of the same set in this batch (a key sent twice):
+        # one set, one verdict, in one answer (B-110).
+        verdicts = {}
         for log in _heaviest_per_exercise(fresh):
             _celebrate_personal_record(log)
-            for answer in fresh:
-                if answer['id'] == log.pk:
-                    answer['personal_record'] = bool(
-                        getattr(log, '_is_personal_record', False))
+            verdicts[log.pk] = (bool(getattr(log, '_is_personal_record', False)),
+                                getattr(log, '_previous_best', None))
+        written_now = {answer['id'] for answer in fresh}
+        for answer in results:
+            if answer.get('id') in written_now and answer['status'] != 'error':
+                answer['personal_record'], answer['previous_best'] = \
+                    verdicts.get(answer['id'], (False, None))
 
         counts = {'created': 0, 'duplicate': 0, 'error': 0}
         for answer in results:
@@ -2309,6 +2420,75 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
                          'created': counts['created'],
                          'duplicates': counts['duplicate'],
                          'errors': counts['error']})
+
+
+def _prescription_payload(row):
+    """One row of a day's prescription, as `?expand=sets` answers it (B-106)."""
+    return {'id': row.pk, 'sets': row.sets, 'reps': row.reps,
+            'weight': None if row.weight is None else float(row.weight),
+            'rest_time': row.rest_time, 'order': row.order}
+
+
+def _session_review(session, reader):
+    """`{sets, planned, routine_name}` for `GET workout-sessions/{id}/?expand=sets`
+    (BACKEND_BUGS B-106): what was done, set by set, beside what the day prescribed.
+
+    The sets, their progress rows and exercises come from the prefetch the detail
+    already made; the day's prescription is ONE more query. Nothing here is asked per
+    set or per exercise. A set's prescription is the day's first row for its exercise
+    by `(order, id)` — the row `set-logs/` reads for `as_prescribed` — so the review
+    and the logging agree about what "planned" was.
+    """
+    from .services import routine_name_for
+
+    planned_rows = []
+    if session.routine_id and session.day:
+        planned_rows = list(RoutineExercise.objects
+                            .filter(routine_id=session.routine_id, day=session.day)
+                            .select_related('exercise').order_by('order', 'id'))
+    prescription_of, position = {}, {}
+    for index, row in enumerate(planned_rows):
+        prescription_of.setdefault(row.exercise_id, row)
+        position.setdefault(row.exercise_id, (0, index))
+
+    def exercise_of(log):
+        progress = log.user_exercise_progress
+        return progress.exercise if progress is not None else None
+
+    logs = sorted(session.set_logs.all(), key=lambda log: log.pk)
+    first_logged = {}
+    for log in logs:
+        exercise = exercise_of(log)
+        first_logged.setdefault(getattr(exercise, 'pk', None), log.pk)
+
+    def place(log):
+        exercise_id = getattr(exercise_of(log), 'pk', None)
+        return (position.get(exercise_id, (1, first_logged[exercise_id])),
+                log.set_number is None, log.set_number or 0, log.pk)
+
+    sets = []
+    for log in sorted(logs, key=place):
+        exercise = exercise_of(log)
+        planned = prescription_of.get(getattr(exercise, 'pk', None))
+        sets.append({
+            'id': log.pk, 'set_number': log.set_number,
+            'weight': None if log.weight is None else float(log.weight),
+            'reps': log.reps, 'rest_time': log.rest_time, 'rpe': log.rpe,
+            'notes': log.notes, 'date': log.date.isoformat() if log.date else None,
+            'personal_record': bool(log.personal_record),
+            'exercise': (None if exercise is None
+                         else {'id': exercise.pk, 'name': exercise.name}),
+            'prescription': None if planned is None else _prescription_payload(planned),
+        })
+    return {
+        'sets': sets,
+        'planned': [{**_prescription_payload(row),
+                     'exercise': {'id': row.exercise_id, 'name': row.exercise.name},
+                     'notes': row.notes}
+                    for row in planned_rows],
+        'routine_name': (routine_name_for(session.routine, reader)
+                         if session.routine_id else None),
+    }
 
 
 class WorkoutSessionViewSet(viewsets.ModelViewSet):
@@ -2362,9 +2542,16 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     newest first: by `start_time`, then by `id`, so the order is total and a row never
     repeats or goes missing between pages (BACKEND_BUGS B-067).
 
+    **One read for the coach's review** (BACKEND_BUGS B-106): `GET
+    workout-sessions/{id}/?expand=sets` adds the session's sets inline, each beside the
+    day's prescription — see `retrieve`. Without `expand` the answer is unchanged, and
+    the list is never expanded.
+
     Input: API requests with session data (POST), session updates (PATCH)
     Output: JSON responses with session data
     """
+    #: What `?expand=` may name on the detail (B-106).
+    EXPANSIONS = ('sets',)
     queryset = WorkoutSession.objects.select_related(
         'user', 'routine', 'routine__created_by'
     ).prefetch_related(
@@ -2412,6 +2599,62 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
             from .sessions import running
             return running(base)
         return base
+
+    def retrieve(self, request, *args, **kwargs):
+        """GET one session: the fields of the list row, unchanged.
+
+        **`?expand=sets`** (BACKEND_BUGS B-106) — the trainer's review in one read. The
+        answer gains three keys and changes none:
+
+            sets          every set logged in this session, grouped by exercise in the
+                          order the day prescribes them (exercises the day does not
+                          prescribe after, in the order they were first logged), and by
+                          `set_number` within one. Each:
+                          `{id, set_number, weight, reps, rest_time, rpe, notes, date,
+                            personal_record, exercise: {id, name}, prescription}` —
+                          what was DONE, as stored. `personal_record` is the verdict the
+                          client was answered with when the set was logged (kept on the
+                          set; false on sets logged before 2026-09-24). `exercise` is
+                          null for a legacy set with no progress row.
+                          `prescription` is the day's row for that exercise — `{id,
+                          sets, reps, weight, rest_time, order}`, the first by `order`
+                          when the day holds it twice, the row logging reads — or null
+                          when the day does not prescribe it (or the session names no
+                          routine day).
+            planned       the whole day's prescription, in order, the exercises nobody
+                          touched included: `{id, exercise: {id, name}, sets, reps,
+                          weight, rest_time, order, notes}`. Empty without a day.
+            routine_name  the routine's name in the reader's language.
+
+        Exercise names are in the request's language. The cost does not grow with the
+        sets or the exercises: the sets, their progress rows and exercises are read in
+        the three queries the detail already made, and the day's prescription in one
+        more.
+
+        Who may read it is who may read the session: the person who trained, an admin,
+        and a trainer with an APPROVED relation to them — the one predicate
+        (`accessible_user_ids` / `can_access_user_data`); anyone else gets 404
+        `not_found`, as for the plain detail. The `assigned_trainer` pointer grants
+        nothing.
+
+        `expand` is a comma-separated list; a name other than `sets` answers 400
+        `bad_expand` with `field: "expand"`. An empty `expand` is no expansion. Identical
+        on every build.
+        """
+        raw = request.query_params.get('expand') or ''
+        wanted = {name.strip() for name in raw.split(',') if name.strip()}
+        unknown = sorted(wanted - set(self.EXPANSIONS))
+        if unknown:
+            return Response(
+                {'error': _('Cannot expand %(names)s. What can be expanded: %(known)s.')
+                 % {'names': ', '.join(unknown), 'known': ', '.join(self.EXPANSIONS)},
+                 'code': 'bad_expand', 'field': 'expand'},
+                status=status.HTTP_400_BAD_REQUEST)
+        instance = self.get_object()
+        data = self.get_serializer(instance).data
+        if 'sets' in wanted:
+            data = {**data, **_session_review(instance, request.user)}
+        return Response(data)
 
     def create(self, request, *args, **kwargs):
         """POST: open a session. Body: `routine`, `day`, optional `client_uuid` (the

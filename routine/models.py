@@ -1009,6 +1009,15 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
     #: that arrived that late (owner, 2026-09-24, F20). Stamped by `save()` whenever the
     #: two values differ from what was read, `update_fields` or not.
     values_changed_at = models.DateTimeField(null=True, blank=True)
+    #: The VERDICT the logging answer gave: true when this set was answered
+    #: `personal_record: true` as it was written (`routine/views.py
+    #: _celebrate_personal_record`, the one place that judges). Kept so a re-sent sync
+    #: batch whose first answer was lost learns the record it had (BACKEND_BUGS B-110),
+    #: and so the coach's review shows the record the client was told about (B-106).
+    #: Not recomputed afterwards — deleting or correcting an earlier set does not take
+    #: it back, as it does not take back the push. False on every row written before
+    #: the column existed (2026-09-24).
+    personal_record = models.BooleanField(default=False)
 
     #: The values a challenge counts; a change to either stamps `values_changed_at`.
     COUNTED_VALUES = ('weight', 'reps')

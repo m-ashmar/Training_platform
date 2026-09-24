@@ -940,6 +940,10 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     `reps` is 1-1000 on every route (S-115). A TRAINER may not create a set on a
     client's progress row or session: 403 `set_not_yours` (S-114, see
     `ExerciseSetLogViewSet.perform_create`).
+
+    Read-only on the answer that creates a set: `personal_record` (true / false) and,
+    when it is true, `previous_best` `{weight, reps, date}` — the best it beat
+    (BACKEND_BUGS B-112). Both are null on a replay, a PATCH and a list read.
     """
     user_exercise_progress = serializers.PrimaryKeyRelatedField(queryset=UserExerciseProgress.objects.all(), required=True)
     volume = serializers.SerializerMethodField()
@@ -947,6 +951,9 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
     #: True when this set beat everything logged before it for that exercise, so the app
     #: can celebrate at once; the push follows (the owner, 2026-09-20).
     personal_record = serializers.SerializerMethodField()
+    #: `{weight, reps, date}` of the best this set beat, beside `personal_record: true`
+    #: on the answer that created it (BACKEND_BUGS B-112); null otherwise.
+    previous_best = serializers.SerializerMethodField()
     #: "I did what the coach asked" — write-only, never stored.
     as_prescribed = serializers.BooleanField(write_only=True, required=False, default=False)
     #: Which routine the prescription for `as_prescribed` comes from — a plain id,
@@ -1156,6 +1163,7 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user_exercise_progress', 'workout_session', 'set_number', 
             'weight', 'reps', 'volume', 'one_rep_max_estimate', 'personal_record',
+            'previous_best',
             'date', 'notes', 'rest_time', 'rpe',
             # The app's id for the set; a retried POST returns the first row (B-003).
             'client_uuid',
@@ -1170,6 +1178,12 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         """True or false for the set just written, null when reading a list: asking per
         row would be a query per set."""
         return getattr(obj, '_is_personal_record', None)
+
+    def get_previous_best(self, obj):
+        """`{weight, reps, date}` of the best the set just written beat, when it is a
+        personal record (`strength.record_beaten`, the same judgement as
+        `personal_record`); null otherwise, and on every read that judged nothing."""
+        return getattr(obj, '_previous_best', None)
 
     def get_volume(self, obj):
         """Calculate volume for this set (weight × reps)"""
