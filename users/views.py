@@ -53,8 +53,31 @@ from .trainer_directory import CoachingPriceBook
 logger = logging.getLogger(__name__)
 
 
-#: The longest note a client may send with a request (RequestSheet).
+#: The longest note a client may send with a request (RequestSheet), and a trainer with
+#: an invitation (TrainerInvite, BACKEND_BUGS B-093): one rule for both directions.
 CLIENT_NOTE_MAX_LENGTH = 500
+
+
+def _request_note(request):
+    """`(note, refusal)`: the note sent with a request or an invitation, or the 400.
+
+    Optional; read from `note`, or `message` (the name older client builds, and the
+    trainer's TrainerInvite, send it under). Stripped, at most `CLIENT_NOTE_MAX_LENGTH`
+    characters. 400 `invalid_note` when it is not text, 400 `note_too_long` over the cap.
+    The same rule for the client's request and the trainer's invitation, because it is
+    the same thing: one person's words shown to the other.
+    """
+    note = request.data.get('note', request.data.get('message', '')) or ''
+    if not isinstance(note, str):
+        return None, Response({'error': _('The note must be text.'), 'code': 'invalid_note'},
+                              status=status.HTTP_400_BAD_REQUEST)
+    note = note.strip()
+    if len(note) > CLIENT_NOTE_MAX_LENGTH:
+        return None, Response(
+            {'error': _('The note can be at most %(max)s characters.')
+             % {'max': CLIENT_NOTE_MAX_LENGTH}, 'code': 'note_too_long'},
+            status=status.HTTP_400_BAD_REQUEST)
+    return note, None
 
 
 # A route for one role, called by another: its own code, one per role, the same one
@@ -62,10 +85,15 @@ CLIENT_NOTE_MAX_LENGTH = 500
 # already answer `clients_only`). These answered the generic `permission_denied`, the
 # same code as a paywall or an object the caller may not touch (the owner, 2026-09-24:
 # every refusal names its own code).
-def _trainers_only():
-    """403 `trainers_only` — the caller is not a trainer."""
+#
+# `not_a_trainer`, not `trainers_only` (BACKEND_BUGS B-092): the routine and mediakit
+# trainer routes already answered `not_a_trainer` for the same refusal, and
+# `trainers_only` was minted here on 2026-09-24 and never shipped — a deliberate,
+# pre-release contract change onto the older code, so the app has one code to branch on.
+def _not_a_trainer():
+    """403 `not_a_trainer` — the caller is not a trainer."""
     return Response({'error': _('This endpoint is only for trainers'),
-                     'code': 'trainers_only'}, status=status.HTTP_403_FORBIDDEN)
+                     'code': 'not_a_trainer'}, status=status.HTTP_403_FORBIDDEN)
 
 
 def _clients_only():
@@ -510,14 +538,14 @@ class TrainerProfileView(APIView):
     |---|---|---|
     | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
-    | `403` | `trainers_only` | the caller is not a trainer (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
+    | `403` | `not_a_trainer` | the caller is not a trainer (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Get trainer profile data"""
         if not request.user.is_trainer:
-            return _trainers_only()
+            return _not_a_trainer()
 
         serializer = TrainerProfileSerializer(request.user)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -525,7 +553,7 @@ class TrainerProfileView(APIView):
     def post(self, request):
         """Update trainer profile"""
         if not request.user.is_trainer:
-            return _trainers_only()
+            return _not_a_trainer()
 
         serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True)
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
@@ -537,7 +565,7 @@ class TrainerClientsView(APIView):
     """GET /api/auth/trainer/clients/ — the clients assigned to this trainer.
 
     200 `{trainer_id, trainer_name, client_count, clients: [...]}`.
-    403 `trainers_only` when the caller is not a trainer (it answered the generic
+    403 `not_a_trainer` when the caller is not a trainer (it answered the generic
     `permission_denied` before; the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
@@ -545,7 +573,7 @@ class TrainerClientsView(APIView):
     def get(self, request):
         """Get all clients assigned to this trainer"""
         if not request.user.is_trainer:
-            return _trainers_only()
+            return _not_a_trainer()
 
         clients = request.user.clients.all()
         client_data = []
@@ -578,7 +606,13 @@ class TrainerClientsView(APIView):
 class AssignClientView(APIView):
     """POST /api/auth/trainer/assign-client/ — a trainer invites a client.
 
-    Body: `client_id` (required). An invitation the client answers at
+    Body: `client_id` (required); `message` (or `note`), optional — the note the trainer
+    sends with the invitation (TrainerInvite, BACKEND_BUGS B-093): text, stripped, at
+    most 500 characters, the same rule as the client's request note. The client reads
+    it as `note` on `client/trainer-invites/` and as `trainer_note` on
+    `client/request-status/` (neither while one of you has blocked the other), and this
+    trainer as `note` on their own row of `trainer/pending-requests/`. A new invitation
+    after a declined one replaces it. An invitation the client answers at
     `client/respond-to-invite/`, never an assignment. 200 `{message, client_id,
     status: "pending"}`.
 
@@ -586,9 +620,11 @@ class AssignClientView(APIView):
     |---|---|---|
     | `400` | `client_id_required` | no `client_id`, with `field` |
     | `400` | `validation_error` | `client_id` is not a number |
-    | `400` | `already_your_client` | this client is already yours |
+    | `400` | `invalid_note` | `message` / `note` is not text |
+    | `400` | `note_too_long` | `message` / `note` is over 500 characters |
+    | `400` | `already_with_this_trainer` | this client is already yours: the code `client/request-trainer/` answers for the same state (it was `already_your_client`, minted 2026-09-24 and never shipped; BACKEND_BUGS B-092) |
     | `400` | `request_already_pending` | a request between you two is already waiting (either side sent it) |
-    | `403` | `trainers_only` | the caller is not a trainer |
+    | `403` | `not_a_trainer` | the caller is not a trainer |
     | `403` | `user_blocked` | one of you blocked the other |
     | `404` | `not_found` | no such client |
     | `409` | `request_already_pending` | the same, found by the database as two invitations crossed |
@@ -602,7 +638,7 @@ class AssignClientView(APIView):
     def post(self, request):
         """Assign a client to this trainer"""
         if not request.user.is_trainer:
-            return _trainers_only()
+            return _not_a_trainer()
 
         client_id = request.data.get('client_id')
         if not client_id:
@@ -611,7 +647,12 @@ class AssignClientView(APIView):
                  'field': 'client_id'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+        # The note with the invitation (B-093). It was read nowhere, so the client never
+        # saw what the trainer wrote.
+        note, refusal = _request_note(request)
+        if refusal is not None:
+            return refusal
+
         try:
             from .models import TrainerClientRelation
 
@@ -667,14 +708,19 @@ class AssignClientView(APIView):
                     defaults={'status': 'pending', 'initiated_by': 'trainer',
                               'agreed_rate': quoted.agreed_rate,
                               'agreed_currency': quoted.agreed_currency,
-                              'requested_at': timezone.now(), 'responded_at': None}
+                              'requested_at': timezone.now(), 'responded_at': None,
+                              # The note of THIS request, written by the side that
+                              # sent it (see `TrainerClientRelation.client_note`).
+                              'client_note': note}
                 )
-            
+
             if not created:
                 if relation.status == 'approved':
+                    # The code `client/request-trainer/` answers for the same state, an
+                    # approved pair (B-092), as `request_already_pending` below is.
                     return Response(
                         {'error': _('Client is already assigned to you'),
-                         'code': 'already_your_client'},
+                         'code': 'already_with_this_trainer'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 elif relation.status == 'pending':
@@ -690,7 +736,9 @@ class AssignClientView(APIView):
                     relation.initiated_by = 'trainer'
                     quote_agreed_price(relation, request.user)
                     relation.requested_at, relation.responded_at = timezone.now(), None
-                    relation.client_note = ''    # the client's old note is not theirs to keep
+                    # The client's old note is not theirs to keep; the row's note is now
+                    # this invitation's (B-093).
+                    relation.client_note = note
                     relation.save(update_fields=['status', 'initiated_by', 'agreed_rate',
                                                  'agreed_currency',
                                                  'requested_at', 'responded_at',
@@ -746,12 +794,12 @@ class UnassignClientView(APIView):
     | `400` | `client_id_required` | no `client_id`, with `field` |
     | `400` | `validation_error` | `client_id` is not a number |
     | `400` | `not_your_client` | no approved coaching between you and this client |
-    | `403` | `trainers_only` | the caller is not a trainer |
+    | `403` | `not_a_trainer` | the caller is not a trainer |
     | `404` | `not_found` | no such client |
     | `409` | `coaching_month_active` | a paid month is running (with `ends_at`) |
     | `409` | `refund_failed` | the held month could not be returned; nothing changed |
 
-    `client_id_required`, `not_your_client`, `trainers_only` and `not_found` answered
+    `client_id_required`, `not_your_client`, `not_a_trainer` and `not_found` answered
     only their status default before (the owner, 2026-09-24).
     """
     permission_classes = [IsAuthenticated]
@@ -759,7 +807,7 @@ class UnassignClientView(APIView):
     def post(self, request):
         """Unassign a client from this trainer"""
         if not request.user.is_trainer:
-            return _trainers_only()
+            return _not_a_trainer()
 
         client_id = request.data.get('client_id')
         if not client_id:
@@ -1136,10 +1184,11 @@ class _TrainerOfApprovedClient(IsTrainerOfApprovedClient):
     """`routine.permissions.IsTrainerOfApprovedClient`, refusing with this app's code.
 
     Its `has_permission` is "a trainer or an admin", so its refusal here is exactly
-    `trainers_only`; without a `code` DRF answered the generic `permission_denied`
-    (the owner, 2026-09-24: every refusal names its own code).
+    `not_a_trainer` (BACKEND_BUGS B-092: the code the routine and mediakit trainer routes
+    answer); without a `code` DRF answered the generic `permission_denied` (the owner,
+    2026-09-24: every refusal names its own code).
     """
-    code = 'trainers_only'
+    code = 'not_a_trainer'
     message = _lazy('This endpoint is only for trainers')
 
 
@@ -1153,7 +1202,7 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     | status | `code` | when |
     |---|---|---|
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
-    | `403` | `trainers_only` | the caller is neither a trainer nor an admin |
+    | `403` | `not_a_trainer` | the caller is neither a trainer nor an admin |
     | `403` | `not_your_client` | `{id}` is a client with no approved coaching with you |
     | `404` | `not_found` | `{id}` is no client at all |
 
@@ -1431,16 +1480,9 @@ class ClientRequestTrainerView(APIView):
         trainer_id = request.data.get('trainer_id')
         # The note to the trainer (RequestSheet), optional. `message` is the name older
         # builds sent it under; it used to be read and thrown away.
-        note = request.data.get('note', request.data.get('message', '')) or ''
-        if not isinstance(note, str):
-            return Response({'error': _('The note must be text.'), 'code': 'invalid_note'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        note = note.strip()
-        if len(note) > CLIENT_NOTE_MAX_LENGTH:
-            return Response(
-                {'error': _('The note can be at most %(max)s characters.')
-                 % {'max': CLIENT_NOTE_MAX_LENGTH}, 'code': 'note_too_long'},
-                status=status.HTTP_400_BAD_REQUEST)
+        note, refusal = _request_note(request)
+        if refusal is not None:
+            return refusal
         
         if not trainer_id:
             return Response(
@@ -1838,75 +1880,58 @@ class TrainerPendingRequestsView(APIView):
     first.
 
     A row always has `request_id`, `client_id`, `client_name`, `client_username`,
-    `initiated_by` and `created_at`. Only a request the CLIENT sent also carries their
-    email, picture, age, gender, goals, activity level, `requested_at`, `status` and
+    `initiated_by`, `created_at` and the quote (additive, BACKEND_BUGS B-089):
+    `agreed_rate` / `agreed_currency` — the price quoted when the request was made, in
+    this trainer's currency when the operator's rate converts it, the unit beside it —
+    `trainer_net`, what the trainer keeps after the platform's commission (split by the
+    code that splits a paid month, `users.coaching.split`), and `commission_rate`, that
+    commission as a fraction (`0.2`). All four are null on a build that may not show a
+    coaching fee (`X-App-Channel` / `X-App-Version`; `ios` today, or no channel) and
+    the first three when no price was quoted. An invitation the trainer sent also
+    carries `note`: what they wrote with it (B-093).
+
+    Only a request the CLIENT sent also carries their email, picture, age, gender,
+    goals, activity level, the v2 onboarding answers `training_goal`,
+    `training_place`, `training_days_per_week` (a code, or `""` / null while
+    unanswered — as on `trainer/client-profile/{id}/`), `requested_at`, `status` and
     `note` — and not when either of the two has since blocked the other (SIDE_BUGS
     S-154): that row stays listed, so it can still be declined, but with the short
     shape, the same as an invitation the trainer sent. Nothing says which side
-    blocked or that anyone did.
+    blocked or that anyone did. Health notes, injury areas and training history are
+    never on a pending row (the design shows them after acceptance).
 
-    403 `trainers_only` when the caller is not a trainer (it answered the generic
-    `permission_denied` before; the owner, 2026-09-24).
+    The row is `users.trainer_requests.pending_request_row`: any other trainer surface
+    that lists a pending request answers the same one.
+
+    403 `not_a_trainer` when the caller is not a trainer (it answered the generic
+    `permission_denied` before; the owner, 2026-09-24; `not_a_trainer`, not
+    `trainers_only`, since BACKEND_BUGS B-092).
     """
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         """Get all pending client requests for this trainer"""
         if not request.user.is_trainer:
-            return _trainers_only()
-        
+            return _not_a_trainer()
+
         try:
             from .models import TrainerClientRelation
-            
+            from .trainer_requests import pending_request_row
+
             # Get pending requests
             pending_relations = TrainerClientRelation.objects.filter(
                 trainer=request.user,
                 status='pending'
             ).select_related('client').order_by('-created_at', '-id')
-            
-            # Either direction, one query. A block does not touch pending rows, so a
+
+            # One row shape, one function (B-089). The blocks are read once, both
+            # directions, for the whole page: a block does not touch pending rows, so a
             # client who asked and then blocked this trainer stayed listed here with
             # their email, age, gender, goals, activity level and note — disclosed to
             # the very person the block is against, until somebody answered.
-            blocked = blocked_ids(request.user)
+            requests_data = [pending_request_row(relation, request)
+                             for relation in pending_relations]
 
-            requests_data = []
-            for relation in pending_relations:
-                client = relation.client
-                # A client who ASKED has chosen to be seen; a client who was merely
-                # invited has not answered yet and must not be disclosed. Trainer-side
-                # invitations are unlimited and can name any client id, so this view was
-                # a directory: register as a trainer, loop client_id 1..N, read the list
-                # once, and take the full name, email address, age, gender and fitness
-                # goals of the entire client base. The consent boundary was enforced at
-                # APPROVAL and not at disclosure.
-                asked_for_this = (relation.initiated_by == 'client'
-                                  and client.id not in blocked)
-                row = {
-                    'request_id': relation.id,
-                    'client_id': client.id,
-                    'client_name': client.full_name or client.username,
-                    'client_username': client.username,
-                    'initiated_by': relation.initiated_by,
-                    'created_at': relation.created_at,
-                }
-                if not asked_for_this:
-                    requests_data.append(row)
-                    continue
-                requests_data.append({
-                    **row,
-                    'client_email': client.email,
-                    'client_profile_picture': client.profile_picture.url if client.profile_picture else None,
-                    'client_age': client.age,
-                    'client_gender': client.gender,
-                    'client_goals': client.client_goals,
-                    'client_activity_level': client.activity_level,
-                    # When THIS request was sent; `created_at` for rows older than that.
-                    'requested_at': relation.requested_at or relation.created_at,
-                    'status': relation.status,
-                    'note': relation.client_note,
-                })
-            
             return Response({
                 'trainer_id': request.user.id,
                 'trainer_name': request.user.full_name or request.user.username,
@@ -2031,7 +2056,11 @@ class ClientPendingTrainerInvitesView(APIView):
     """Invitations waiting on this client, so the app can show them.
 
     `{invitations: [{request_id, trainer_id, trainer_name, agreed_rate, agreed_currency,
-    created_at}]}`. `agreed_rate` is the invitation's price in the CLIENT's currency —
+    created_at, note}]}`. `note` (additive, BACKEND_BUGS B-093) is what the trainer wrote
+    with the invitation (`message` on `trainer/assign-client/`), `""` when they wrote
+    nothing — and `""` while either of the two has blocked the other: a blocked person
+    receives no messages, the rule the trainer's side follows for a client's note
+    (SIDE_BUGS S-154). `agreed_rate` is the invitation's price in the CLIENT's currency —
     what accepting it will charge — and `agreed_currency` is that currency; when the
     operator's rate cannot convert it, it is the trainer's quoted price and
     `agreed_currency` names the trainer's currency. Both null on a build that may not
@@ -2061,6 +2090,8 @@ class ClientPendingTrainerInvitesView(APIView):
         # The price the invitation carries, in THIS client's currency, with the unit
         # beside it (SIDE_BUGS S-041). One wallet query for the page.
         prices = CoachingPriceBook(request, [r.trainer_id for r in rows])
+        # Either direction, one query (as `trainer/pending-requests/` reads it).
+        blocked = blocked_ids(request.user) if rows else set()
         return Response({'invitations': [{
             'request_id': r.id,
             'trainer_id': r.trainer_id,
@@ -2068,6 +2099,9 @@ class ClientPendingTrainerInvitesView(APIView):
             'agreed_rate': prices.agreed(r)[0],
             'agreed_currency': prices.agreed(r)[1],
             'created_at': r.created_at,
+            # The trainer's note with this invitation (B-093); every row here is one
+            # the trainer sent, so the row's note is theirs.
+            'note': '' if r.trainer_id in blocked else r.client_note,
         } for r in rows]})
 
 
@@ -2326,8 +2360,9 @@ class TrainerRespondToRequestView(APIView):
       currency_mismatch         409  approving: the charge could not be moved
       hold_failed               402  approving: anything else; nothing changed, try again
       client_has_other_trainer  400  the client is already another trainer's
-      trainers_only             403  the caller is not a trainer (it answered the generic
-                                     `permission_denied` before; the owner, 2026-09-24)
+      not_a_trainer             403  the caller is not a trainer (it answered the generic
+                                     `permission_denied` before; the owner, 2026-09-24;
+                                     the routine routes' code, BACKEND_BUGS B-092)
 
     A `request_id` that is not a number answers `request_not_found`.
 
@@ -2340,7 +2375,7 @@ class TrainerRespondToRequestView(APIView):
     def post(self, request):
         """Trainer responds to a client request (approve/reject)"""
         if not request.user.is_trainer:
-            return _trainers_only()
+            return _not_a_trainer()
         
         request_id = request.data.get('request_id')
         action = request.data.get('action')  # 'approve' or 'reject'
@@ -2474,6 +2509,16 @@ class ClientRequestStatusView(APIView):
     pending, it is the one outstanding request that stops them asking anyone else.
     Of the trainer it carries nothing beyond their public card.
 
+    Each row: `request_id`, `trainer_id`, `trainer_name`, `trainer_email` (null),
+    `trainer_profile_picture`, `trainer_bio`, `trainer_specializations`,
+    `trainer_experience_years`, `trainer_hourly_rate` / `coaching_currency` and
+    `agreed_rate` / `agreed_currency` (null on a build that may not show a coaching
+    fee), `requested_at`, `status`, `responded_at`, `note` (this client's own note with
+    a request they sent; `""` on an invitation). Additive (BACKEND_BUGS B-093):
+    `initiated_by` (`client` | `trainer` | `unknown`) and `trainer_note` — what the
+    trainer wrote with an invitation, `""` on the client's own request and while either
+    of the two has blocked the other.
+
     403 `clients_only` when the caller is not a client (it answered the generic
     `permission_denied` before; the owner, 2026-09-24).
     """
@@ -2495,9 +2540,14 @@ class ClientRequestStatusView(APIView):
             client_relations = list(client_relations)
             # Every price in this client's currency, with its unit (SIDE_BUGS S-041).
             prices = CoachingPriceBook(request, [r.trainer_id for r in client_relations])
+            # A trainer's note is a message to this client; not from someone either of
+            # them has blocked (B-093, the rule S-154 set for the other direction).
+            blocked = blocked_ids(request.user) if client_relations else set()
             requests_data = []
             for relation in client_relations:
                 trainer = relation.trainer
+                # The row's note belongs to whoever sent THIS request (`initiated_by`).
+                by_trainer = relation.initiated_by == 'trainer'
                 requests_data.append({
                     'request_id': relation.id,
                     'trainer_id': trainer.id,
@@ -2519,7 +2569,13 @@ class ClientRequestStatusView(APIView):
                     'responded_at': relation.responded_at,
                     'agreed_rate': prices.agreed(relation)[0],
                     'agreed_currency': prices.agreed(relation)[1],
-                    'note': relation.client_note,
+                    # This client's own note; `""` on an invitation, as it always was.
+                    'note': '' if by_trainer else relation.client_note,
+                    # Additive (B-093): who sent it, and the trainer's note with an
+                    # invitation (`""` on the client's own request).
+                    'initiated_by': relation.initiated_by,
+                    'trainer_note': (relation.client_note
+                                     if by_trainer and trainer.id not in blocked else ''),
                 })
             
             return Response({

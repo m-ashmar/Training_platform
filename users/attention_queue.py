@@ -54,37 +54,15 @@ PROGRAM_ENDING_WITHIN_DAYS = 7
 
 
 # --------------------------------------------------------------------------- rows
-def _request_row(relation) -> dict:
-    """A `new_request` item's `new_request` object: the pending-requests row.
+def _request_row(relation, request) -> dict:
+    """A `new_request` item's `new_request` object: exactly the row
+    `GET /api/auth/trainer/pending-requests/` answers for it — one builder,
+    `users/trainer_requests.py pending_request_row` (the quoted fee and the trainer's net,
+    null on a build that may not show a coaching fee; the client's v2 answers; never a
+    health note before acceptance)."""
+    from .trainer_requests import pending_request_row
 
-    MERGE NOTE: `TrainerPendingRequestsView` (`users/views.py`) builds this row inline
-    today, and a parallel branch (`fx/trainer-rows`) extracts it as
-    `users.trainer_requests.pending_request_row(relation, request)` and adds the
-    client's v2 answers and the quoted fee to it. Point this one adapter at that
-    function and both land together; nothing else here builds a request row.
-
-    This reproduces the view's row for a request the CLIENT sent to a trainer neither
-    of them has blocked — the only kind the queue shows — which is the long shape.
-    """
-    client = relation.client
-    return {
-        'request_id': relation.id,
-        'client_id': client.id,
-        'client_name': client.full_name or client.username,
-        'client_username': client.username,
-        'initiated_by': relation.initiated_by,
-        'created_at': relation.created_at,
-        'client_email': client.email,
-        'client_profile_picture': (client.profile_picture.url
-                                   if client.profile_picture else None),
-        'client_age': client.age,
-        'client_gender': client.gender,
-        'client_goals': client.client_goals,
-        'client_activity_level': client.activity_level,
-        'requested_at': relation.requested_at or relation.created_at,
-        'status': relation.status,
-        'note': relation.client_note,
-    }
+    return pending_request_row(relation, request)
 
 
 def _client_card(user, request) -> dict:
@@ -142,7 +120,7 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
             'id': f'new_request:{relation.pk}',
             'client': _client_card(relation.client, request),
             'at': relation.requested_at or relation.created_at,
-            'new_request': _request_row(relation),
+            'new_request': _request_row(relation, request),
         })
 
     # --- the roster: approved (the one predicate), active, not blocked.

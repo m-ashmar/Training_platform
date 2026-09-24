@@ -4891,3 +4891,8 @@ msgstr "هذا الملف ليس تسجيلًا صوتيًا. أرسل ملف M4
 msgid ""
 "This recording is too long. The most that can be sent is %(seconds)s seconds."
 msgstr "هذا التسجيل طويل جدًا. الحد الأقصى للإرسال هو %(seconds)s ثانية."
+
+#: routine/serializers.py
+#, python-format
+msgid "%(minutes)s minutes"
+msgstr "%(minutes)s دقيقة"

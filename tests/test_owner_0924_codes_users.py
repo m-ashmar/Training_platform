@@ -29,6 +29,19 @@ def _code(response):
     return response.status_code, response.json()["code"]
 
 
+# A deliberate, pre-release contract change (BACKEND_BUGS B-092, 2026-09-24): two codes
+# minted here that day named refusals an OLDER code already named, so they were unified
+# onto the older one before anything shipped (API_CONTRACT.md §6). The tests below still
+# assert what they were written to protect — the refusal names its own code, not the
+# status default — only the name of that code moved.
+#: The caller is not a trainer: `not_a_trainer`, the routine and mediakit trainer routes'
+#: code since before 4cbb522 (it was minted here as `trainers_only`).
+NOT_A_TRAINER = "not_a_trainer"
+#: An approved pair, asked again from the trainer's side: `already_with_this_trainer`,
+#: the code the client's side answers for the same state (was `already_your_client`).
+ALREADY_A_PAIR = "already_with_this_trainer"
+
+
 # ------------------------------------------------------------------- sign-in and out
 def test_logout_names_a_missing_and_a_bad_refresh_token(make_user, api):
     user = make_user("oc_logout")
@@ -97,13 +110,13 @@ CLIENT_ONLY = [
 
 def test_a_route_for_one_role_names_the_role(make_user, api):
     """`permission_denied` is also the paywall's and an object's answer; the role
-    refusal is `trainers_only` / `clients_only`, the code `coaching/current/` and
-    `trainers/matches` already answer."""
+    refusal is `not_a_trainer` (see NOT_A_TRAINER) / `clients_only`, the codes the
+    routine trainer routes, `coaching/current/` and `trainers/matches` already answer."""
     client = api(make_user("oc_role_client"))
     trainer = api(make_user("oc_role_trainer", user_type="trainer"))
     for method, path in TRAINER_ONLY:
         r = getattr(client, method)(f"{AUTH}/{path}", {}, content_type=JSON)
-        assert _code(r) == (403, "trainers_only"), (path, r.content)
+        assert _code(r) == (403, NOT_A_TRAINER), (path, r.content)
     for method, path in CLIENT_ONLY:
         r = getattr(trainer, method)(f"{AUTH}/{path}", {}, content_type=JSON)
         assert _code(r) == (403, "clients_only"), (path, r.content)
@@ -132,7 +145,7 @@ def test_an_invitation_names_each_refusal(make_user, api):
 
     already = t.post(f"{AUTH}/trainer/assign-client/", {"client_id": mine.pk},
                      content_type=JSON)
-    assert _code(already) == (400, "already_your_client"), already.content
+    assert _code(already) == (400, ALREADY_A_PAIR), already.content
 
     nobody = t.post(f"{AUTH}/trainer/assign-client/", {"client_id": 987654321},
                     content_type=JSON)

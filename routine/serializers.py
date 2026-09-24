@@ -2067,21 +2067,43 @@ class RecentActivitySerializer(serializers.ModelSerializer):
         }
 
     def get_last_session(self, obj):
+        """`{date, routine_name, exercises_completed, total_volume, duration,
+        duration_seconds}`, or null before the first completed session.
+
+        `duration_seconds` (additive, BACKEND_BUGS B-095) is the session's length in
+        exactly the shape `trainer/client-progress/{id}/` `recent_activity[].duration`
+        sends: seconds as a decimal string (`"2820.0"`), null when the session has no
+        start or end. Read this one.
+
+        `duration` is LEGACY DISPLAY TEXT, kept for builds that read it: the minutes as a
+        sentence in the reader's language (`"47.0 minutes"`, `"47.0 دقيقة"`), null for a
+        session without both times or of zero length. Never parse it.
+        """
+        from django.utils.translation import gettext
+
         entry = self._activity(obj)
         last_session = entry["last_session"]
         if not last_session:
             return None
 
-        duration = None
+        duration = seconds = None
         if last_session.start_time and last_session.end_time:
-            duration = round((last_session.end_time - last_session.start_time).total_seconds() / 60, 1)
+            elapsed = last_session.end_time - last_session.start_time
+            duration = round(elapsed.total_seconds() / 60, 1)
+            # `str(timedelta.total_seconds())`: what DRF's encoder writes for the
+            # `WorkoutSession.duration` timedelta on client-progress, character for
+            # character.
+            seconds = str(elapsed.total_seconds())
 
         return {
             'date': last_session.end_time.date() if last_session.end_time else None,
             'routine_name': last_session.routine.name if last_session.routine else None,
             'exercises_completed': entry["last_exercises"],
             'total_volume': entry["last_volume"],
-            'duration': f"{duration} minutes" if duration else None
+            # User-facing text, so through the catalogue (it was English to everyone).
+            'duration': (gettext('%(minutes)s minutes') % {'minutes': duration}
+                         if duration else None),
+            'duration_seconds': seconds,
         }
 
     def get_this_week(self, obj):

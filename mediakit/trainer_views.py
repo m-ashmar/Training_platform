@@ -278,6 +278,69 @@ class TrainerExerciseMediaDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class TrainerMediaKitView(APIView):
+    """`GET /api/v1/trainer/media-kit/` — the signed-in trainer's OWN media kit.
+
+    The TrainerProfileEdit meter (BACKEND_BUGS B-094): the eight `trainer.*` slots, each
+    done or missing, and how complete the kit is. It answers whatever the public roster
+    lists: a trainer the directory does not show (unverified address, not yet
+    listed) reads their real uploads here, where the public card
+    `/api/v1/trainers/{id}/` answers 404. Auth: Bearer JWT. No body, no headers;
+    nothing here varies by build (`X-App-Channel`) — it sells nothing.
+
+    200::
+
+        {"trainer_id": 42,
+         "kit_status": {"complete": false, "filled": 3, "required": 5,
+                        "missing": ["trainer.story", "trainer.avatar"]},
+         "filled": 4, "total": 8,
+         "slots": [{"slot": "trainer.portrait", "kind": "image", "required": true,
+                    "done": true, "media": {<payload>}},
+                   {"slot": "trainer.loop", "kind": "video", "required": false,
+                    "done": false, "media": null}, ...],
+         "media": {"trainer.portrait": {<payload>}, ...}}
+
+    `kit_status` is `mediakit.services.kit_status` — the REQUIRED slots, the rule that
+    decides whether the trainer may be featured or matched first; `filled` / `total`
+    count all eight slots, the design's "5 / 8". `slots` is the eight in the slot list's
+    order (`mediakit/slots.py`). `media` is the public card's `media`, the same
+    `{slot: payload}` (`mediakit/services.py`: images `url_1x`/`url_2x`/`blur`/...,
+    videos `video_url`/`poster_url`/`state`/...), an empty slot absent; each slot's
+    `media` is that payload or null. URLs are signed and expire within the hour: use
+    what this returns, never store it.
+
+    An admin reads a trainer's kit by naming `?trainer_id=` (the console), as on
+    `exercise-media/`.
+
+    | status | `code` | when |
+    |---|---|---|
+    | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `403` | `not_a_trainer` | the caller is not a trainer (an admin who names no trainer) |
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .services import kit_status, media_for
+        from .slots import SLOTS
+
+        trainer = _acting_trainer(request)
+        if trainer is None:
+            return _refuse_not_a_trainer()
+        media = media_for(OwnerType.TRAINER, trainer.id, request)
+        kit = [slot for slot in SLOTS.values() if slot.owner_type == OwnerType.TRAINER]
+        slots = [{"slot": slot.key, "kind": slot.kind, "required": slot.required,
+                  "done": slot.key in media, "media": media.get(slot.key)}
+                 for slot in kit]
+        return Response({
+            "trainer_id": trainer.id,
+            "kit_status": kit_status(OwnerType.TRAINER, media.keys()),
+            "filled": sum(1 for s in slots if s["done"]),
+            "total": len(slots),
+            "slots": slots,
+            "media": media,
+        })
+
+
 def _refuse_not_a_trainer():
     return Response({"error": _("Only a trainer has a library here."),
                      "code": "not_a_trainer"}, status=status.HTTP_403_FORBIDDEN)

@@ -35,6 +35,15 @@ def _code(resp):
     return resp.json().get("code")
 
 
+#: A missing required field on `exercises/create-with-image/`. A deliberate, pre-release
+#: contract change (BACKEND_BUGS B-092, 2026-09-24): minted here that day as
+#: `field_required`, it named the refusal the older `missing_fields` (with `fields`)
+#: already names on the diet and subscription routes, so it was unified onto that one
+#: before it shipped (API_CONTRACT.md §6). The test still asserts what it protects: the
+#: refusal names its own code and the field, not the `bad_request` default.
+MISSING_FIELD = "missing_fields"
+
+
 def _strangers_routine(make_user, tag):
     from routine.models import Exercise, Routine, RoutineExercise
 
@@ -83,7 +92,7 @@ def test_create_with_image_names_the_missing_field(make_user, api):
     resp = api(trainer).post("/api/routine/exercises/create-with-image/",
                              {"description": "d", "target_muscle": "Biceps"})
     assert resp.status_code == 400, resp.content
-    assert (_code(resp), resp.json()["field"]) == ("field_required", "name")
+    assert (_code(resp), resp.json()["field"]) == (MISSING_FIELD, "name")
 
 
 # ------------------------------------------------------------ assign / unassign

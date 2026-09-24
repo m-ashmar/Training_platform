@@ -847,9 +847,13 @@ class TrainerClientRelation(models.Model):
     #: month the client is in (owner, 2026-09-19); the renewal then ends the coaching
     #: instead of charging the next month (users/coaching.py).
     ends_at_period_end = models.BooleanField(default=False)
-    #: What the client wrote to the trainer with the request ("introduce yourself",
-    #: RequestSheet). Encrypted: people describe injuries here. Shown to that trainer
-    #: only, on client-initiated requests; replaced by each new request.
+    #: The note sent with the CURRENT request, written by the side `initiated_by` names:
+    #: what the client wrote with a request ("introduce yourself", RequestSheet), or what
+    #: the trainer wrote with an invitation (TrainerInvite, BACKEND_BUGS B-093). The name
+    #: predates invitations carrying one; read the author from `initiated_by`, never
+    #: from the column's name. Encrypted: people describe injuries here. Shown to its
+    #: author, and to the other side of that request unless either has blocked the
+    #: other; replaced by each new request or invitation.
     client_note = EncryptedTextField(blank=True, default='')
     #: When the other side approved or declined it ("training together since"). Each
     #: answer is also written to `TrainerRequestOutcome`, which outlives this row and
