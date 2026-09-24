@@ -16,6 +16,10 @@ an immutable `WithdrawalEvent` naming the operator, and a line in the admin log:
 * approve — `requested` → `approved` (also a list action);
 * sent — `approved` → `sent`, with the ShamCash transaction id it went out with
   (required for a ShamCash withdrawal; one transaction pays one withdrawal);
+* approve and sent are refused for a trainer who is not, NOW, verified ("Verified") and
+  an active account ("Account active") — a verification revoked or an account
+  suspended after the request counts — and for a withdrawal whose request leg was
+  reversed; fail is the move for the first two;
 * confirm — `sent` → `confirmed`: it arrived; the money leaves payout clearing (also a
   list action);
 * fail — from any open state → `failed`, with a reason the trainer is shown; the money
@@ -80,12 +84,14 @@ class WithdrawalDecisionForm(forms.ModelForm):
 class _WithdrawalAdmin(admin.ModelAdmin):
     form = WithdrawalDecisionForm
     list_select_related = ("trainer", "destination_agent")
-    list_display = ("number", "trainer_name", "trainer_verified", "amount", "currency",
-                    "state", "destination", "requested_at", "waiting")
+    list_display = ("number", "trainer_name", "trainer_verified", "trainer_active",
+                    "amount", "currency", "state", "destination", "requested_at",
+                    "waiting")
     list_filter = ("state", "currency", "destination_kind")
     search_fields = ("number", "trainer__email", "trainer__username",
                      "shamcash_transaction_id")
-    readonly_fields = ("number", "trainer", "trainer_verified", "amount", "currency",
+    readonly_fields = ("number", "trainer", "trainer_verified", "trainer_active",
+                       "amount", "currency",
                        "state", "destination", "shamcash_transaction_id", "method",
                        "hold_reference", "return_reference", "payout_reference",
                        "failure_reason", "requested_at", "approved_at", "sent_at",
@@ -118,6 +124,13 @@ class _WithdrawalAdmin(admin.ModelAdmin):
     @admin.display(description="Verified", boolean=True)
     def trainer_verified(self, obj):
         return bool(obj.trainer.trainer_is_verified)
+
+    @admin.display(description="Account active", boolean=True)
+    def trainer_active(self, obj):
+        """A suspended account is not paid: approve and sent refuse it, and fail is the
+        move (`services._refuse_unpayable_trainer`). Shown so the queue says so before
+        anyone opens ShamCash."""
+        return bool(obj.trainer.is_active)
 
     @admin.display(description="Destination")
     def destination(self, obj):

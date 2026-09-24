@@ -15,8 +15,19 @@ live hold (`trainer_relations.py`: "One hold, named here"); the period carries t
 of record, the currency it was charged in and the commission rate copied onto it when it
 was charged. A hold from before months existed has no period: its ledger row gives the
 amount and currency, and today's `commission_rate()` is the rate — `settle_hold` opens
-its month at settlement with exactly that rate. A renewal is never seen here: `renew`
-charges and pays out in one transaction, so it is never held between two reads.
+its month at settlement with exactly that rate. A renewal is never HELD: `renew` charges
+and pays out in one transaction.
+
+BUT A PAID MONTH CAN STILL BE OWED TO THE TRAINER (the payouts review, 2026-09-24). When
+the pair trades in two currencies and the operator's rate is missing or stale at the
+moment `users.coaching.pay_out` pays a month — month 1 at the first program, or any
+renewal — the client's charge and the platform's commission go through, the month runs,
+and the trainer's share stays in escrow, OWED (`CoachingPeriod.payout_owed_since`), until
+`settle_owed_payouts` finds a fresh rate. That share is neither held (the relation has
+forgotten the hold and the month is `settled`) nor a ledger row of the trainer's, so it
+appeared in no figure at all for as long as the rate stayed stale. `owed_to_trainer`
+reads it as its OWN figure: `held_for_trainer` keeps meaning month 1 waiting for a first
+program, and nothing owed is added to it.
 
 A hold an operator already reversed (`POST /api/wallet/admin/reversal/`) is NOT held: the
 money went back to the client, and `_move_hold` will find the reversal and forget the
@@ -48,6 +59,9 @@ ZERO = Decimal('0.00')
 #: The status every item carries: the same word `GET /api/v1/coaching/current/` answers the
 #: client for the same month (`users.coaching.coaching_status`).
 AWAITING_FIRST_PROGRAM = 'awaiting_first_program'
+
+#: The status of a paid month whose trainer's share is still owed in escrow.
+PAYOUT_OWED = 'payout_owed'
 
 
 def held_for_trainer(trainer_id, currency) -> dict:
@@ -136,6 +150,59 @@ def held_for_trainer(trainer_id, currency) -> dict:
     return {'net': sum((i['net'] for i in summable), ZERO),
             'gross': sum((i['amount'] for i in summable), ZERO),
             'count': len(items),
+            'items': items}
+
+
+def owed_to_trainer(trainer_id, currency) -> dict:
+    """`{'net', 'items'}`: every paid month whose trainer's share `pay_out` left OWED in
+    escrow for the trainer `trainer_id`, in `currency` (the trainer's wallet's). See the
+    module docstring.
+
+    `net` is a Decimal summed over the items in `currency`. `items`, newest owed first
+    (ties by period id, so the order is total), each:
+
+        period_id, relation_id, client (`wallet.activity.describe`), status
+        (`payout_owed`), kind (`trainer_fee_payout`, the ledger's kind for the row that
+        arrives when it is paid), month, owed_since, starts_at, amount, commission,
+        commission_rate, net, currency, charged_amount, charged_currency, estimated
+
+    The amounts are the month's own price and commission rate expressed as the trainer
+    will be paid, exactly as `held_for_trainer` expresses a held month: today's rate, or
+    the price of record in the trainer's currency (a renewal inherits month 1's), or —
+    with neither — the month's own currency, left out of `net`. Two queries at most (the
+    months with their clients, and today's rate once), whatever the number of months.
+    """
+    from .models import CoachingPeriod
+
+    periods = (CoachingPeriod.objects
+               .filter(trainer_id=trainer_id, payout_owed_since__isnull=False)
+               .select_related('client')
+               .order_by('-payout_owed_since', '-pk'))
+    converter = []
+    items = []
+    for period in periods:
+        amount, commission, net, unit, estimated = _as_the_trainer_is_paid(
+            Decimal(period.price), period.currency, Decimal(period.commission_rate),
+            (period.price_amount, period.price_currency), currency, converter)
+        items.append({
+            'period_id': period.pk,
+            'relation_id': period.relation_id,
+            'client': _describe(period.client),
+            'status': PAYOUT_OWED,
+            'kind': 'trainer_fee_payout',
+            'month': period.number,
+            'owed_since': period.payout_owed_since,
+            'starts_at': period.starts_at,
+            'amount': amount,
+            'commission': commission,
+            'commission_rate': Decimal(period.commission_rate),
+            'net': net,
+            'currency': unit,
+            'charged_amount': Decimal(period.price),
+            'charged_currency': period.currency,
+            'estimated': estimated,
+        })
+    return {'net': sum((i['net'] for i in items if i['currency'] == currency), ZERO),
             'items': items}
 
 

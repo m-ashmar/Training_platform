@@ -43,6 +43,26 @@ class WalletSerializer(WalletSettlingFields, serializers.ModelSerializer):
       hold is one client -> escrow row, and nothing is written for the trainer until
       it is released.
 
+    WHAT THE PLATFORM OWES THE TRAINER (the payouts review, 2026-09-24), read by
+    `users.trainer_escrow.owed_to_trainer`. A month paid out across two currencies while
+    the operator's rate was missing or stale — month 1 at the first program, or a
+    renewal — runs, but the trainer's share stays in escrow, owed, until the hourly run
+    finds a fresh rate (`users.coaching.pay_out`). It is not held and not yet a ledger
+    row, so it was in none of the figures above. Two keys of its own; nothing above
+    changes meaning:
+
+    * `owed_to_trainer` — the owed shares, summed, in this wallet's currency. `"0.00"`
+      for anyone who is not a trainer and for a trainer owed nothing.
+    * `owed_to_trainer_items` — one per such month, newest first: `period_id`,
+      `relation_id` (null once the relation is gone), `client` `{id, name, role}`,
+      `status` (`payout_owed`), `kind` (`trainer_fee_payout`, the kind of the ledger row
+      that arrives when it is paid), `reason`, `month`, `owed_since`, `starts_at`,
+      `amount` = `commission` + `net`, `commission_rate`, `currency`, `charged_amount` /
+      `charged_currency` and `estimated`, all as in `held_for_trainer_items` (an item
+      whose amount cannot be put in this wallet's currency keeps its own and is left
+      out of the sum). `[]` for anyone else. Not ledger rows: when the share is paid the
+      item goes and a `trainer_fee_payout` row arrives.
+
     Available and settling (B-097) are another builder's; these four keys stay in their
     own methods below so the two merge line by line.
 
@@ -59,6 +79,9 @@ class WalletSerializer(WalletSettlingFields, serializers.ModelSerializer):
     held_for_trainer_gross = serializers.SerializerMethodField()
     awaiting_first_program = serializers.SerializerMethodField()
     held_for_trainer_items = serializers.SerializerMethodField()
+    # The payouts review, 2026-09-24: a trainer's share owed in escrow.
+    owed_to_trainer = serializers.SerializerMethodField()
+    owed_to_trainer_items = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallet
@@ -67,7 +90,9 @@ class WalletSerializer(WalletSettlingFields, serializers.ModelSerializer):
                   "currency_locked", "currency_options",
                   # B-096: the trainer's side of escrow.
                   "held_for_trainer", "held_for_trainer_gross", "awaiting_first_program",
-                  "held_for_trainer_items"]
+                  "held_for_trainer_items",
+                  # The payouts review, 2026-09-24: a trainer's share owed in escrow.
+                  "owed_to_trainer", "owed_to_trainer_items"]
         read_only_fields = fields
 
     def get_currency_locked(self, obj):
@@ -191,6 +216,53 @@ class WalletSerializer(WalletSettlingFields, serializers.ModelSerializer):
             "charged_currency": item["charged_currency"],
             "estimated": item["estimated"],
         } for item in escrow["items"]]
+
+    # ------------------------- the payouts review, 2026-09-24: a trainer's share owed
+    def _trainer_owed(self, obj):
+        """`users.trainer_escrow.owed_to_trainer` for a trainer's wallet, read once per
+        response; None for anyone else (the owner's role, as `_trainer_escrow`)."""
+        if getattr(obj.owner, "user_type", None) != "trainer":
+            return None
+        if "_trainer_owed_cache" not in self.__dict__:
+            from users.trainer_escrow import owed_to_trainer
+
+            self._trainer_owed_cache = owed_to_trainer(obj.owner_id, obj.currency)
+        return self._trainer_owed_cache
+
+    def get_owed_to_trainer(self, obj):
+        owed = self._trainer_owed(obj)
+        return str(owed["net"]) if owed else "0.00"
+
+    def get_owed_to_trainer_items(self, obj):
+        from . import activity
+
+        owed = self._trainer_owed(obj)
+        if not owed:
+            return []
+        when = serializers.DateTimeField()
+
+        def _at(value):
+            return when.to_representation(value) if value else None
+
+        return [{
+            "period_id": item["period_id"],
+            "relation_id": item["relation_id"],
+            "client": item["client"],
+            "status": item["status"],
+            "kind": item["kind"],
+            "reason": activity.reason_of(item["kind"]),
+            "month": item["month"],
+            "owed_since": _at(item["owed_since"]),
+            "starts_at": _at(item["starts_at"]),
+            "amount": str(item["amount"]),
+            "commission": str(item["commission"]),
+            "commission_rate": format(item["commission_rate"].normalize(), "f"),
+            "net": str(item["net"]),
+            "currency": item["currency"],
+            "charged_amount": str(item["charged_amount"]),
+            "charged_currency": item["charged_currency"],
+            "estimated": item["estimated"],
+        } for item in owed["items"]]
 
 
 class _TransactionListSerializer(serializers.ListSerializer):

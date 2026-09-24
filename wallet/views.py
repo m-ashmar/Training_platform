@@ -215,7 +215,8 @@ class WalletBalanceView(APIView):
 
     Answers 200 `{id, owner, owner_type, balance, currency, created_at, updated_at, held,
     held_for, account_number, currency_locked, currency_options, held_for_trainer,
-    held_for_trainer_gross, awaiting_first_program, held_for_trainer_items}` (see
+    held_for_trainer_gross, awaiting_first_program, held_for_trainer_items,
+    owed_to_trainer, owed_to_trainer_items}` (see
     `WalletSerializer`, which documents every key). `held` is money in escrow for
     a coaching month — out of the balance, not spent — and `held_for` names the
     trainer it is held for; both are `0.00`/null for anyone who is not a client with a
@@ -230,6 +231,17 @@ class WalletBalanceView(APIView):
     `held_for_trainer_items` (one per such client, newest first). `"0.00"`, `"0.00"`,
     `0` and `[]` for anyone else. The items are not ledger rows and never appear in
     `transactions/`: nothing is written for the trainer until the money is released.
+
+    Also for a TRAINER (the payouts review, 2026-09-24): `owed_to_trainer` and
+    `owed_to_trainer_items` — a month already paid out whose trainer's share is still in
+    escrow, owed, because it crosses a currency and the operator's rate was missing or
+    stale when it was paid (month 1 or a renewal). It is not held and not yet a ledger
+    row; when the share is paid the item goes and a `trainer_fee_payout` row arrives.
+    Items `{period_id, relation_id, client, status: "payout_owed", kind:
+    "trainer_fee_payout", reason, month, owed_since, starts_at, amount, commission,
+    commission_rate, net, currency, charged_amount, charged_currency, estimated}`,
+    newest first. `"0.00"` and `[]` for anyone else. The four held keys above keep
+    their meaning: nothing owed is counted in them.
 
     Refusals: 401 `not_authenticated` / `token_not_valid` (the framework's).
 
@@ -853,6 +865,7 @@ class AdminReversalView(APIView):
     | 409 | `already_reversed` | it has been reversed already |
     | 409 | `not_reversible` | it is itself a reversal |
     | 409 | `exchange_leg` | it is one half of a currency exchange (see below); `exchange_reference` names the pair |
+    | 409 | `withdrawal_leg` | it is one leg of a trainer's withdrawal (see below); `withdrawal` `{id, number, state}` names it, or is null if no withdrawal names the row any more |
     | 400 | `insufficient_balance` | the wallet that received the money no longer holds it, so it cannot be taken back |
     | 400 | `currency_mismatch` | a wallet on either side changed currency since the row was written |
     | 400 | `reversal_refused` | the ledger refused the reversal for any other reason; nothing moved |
@@ -869,6 +882,17 @@ class AdminReversalView(APIView):
     reversing only the debit minted escrow money whose trainer side was never taken
     back; and either way the coaching month still read as paid. Undoing an exchange is
     a decision about both legs and the month, and this endpoint does not make it.
+
+    NO LEG OF A WITHDRAWAL IS REVERSED (the payouts review, 2026-09-24). A withdrawal
+    writes three legs (`payouts/services.py`): the request (trainer -> payout
+    clearing), the return (clearing -> trainer, on fail or cancel) and the payout
+    (clearing -> off the platform). Reversing the request leg put the money back while
+    the withdrawal stayed open, and its cancel or fail then paid the trainer a second
+    time out of clearing, which holds every other trainer's open withdrawal; reversing
+    the return stranded the trainer's money in clearing with nothing open; reversing
+    the payout minted money into clearing. Undoing a withdrawal is `fail` (or the
+    trainer's `cancel`) in the payouts console, which moves the money once and records
+    it on the withdrawal.
     """
     permission_classes = [IsAuthenticated, IsAdmin]
 
@@ -896,6 +920,20 @@ class AdminReversalView(APIView):
                                         "cannot be reversed on its own."),
                              "code": "exchange_leg",
                              "exchange_reference": original.exchange_reference},
+                            status=status.HTTP_409_CONFLICT)
+        # Decided on what the row says of itself, which never changes, so this read is
+        # the guard and not only an early answer (see above).
+        from payouts.services import withdrawal_of_leg
+
+        is_leg, withdrawal = withdrawal_of_leg(original)
+        if is_leg:
+            return Response({"error": _("This is one leg of a trainer's withdrawal and "
+                                        "cannot be reversed on its own. Fail or cancel "
+                                        "the withdrawal instead."),
+                             "code": "withdrawal_leg",
+                             "withdrawal": ({"id": withdrawal.pk, "number": withdrawal.number,
+                                             "state": withdrawal.state}
+                                            if withdrawal is not None else None)},
                             status=status.HTTP_409_CONFLICT)
 
         idem_key = serializer.validated_data["idempotency_key"]

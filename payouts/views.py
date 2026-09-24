@@ -233,6 +233,7 @@ class WithdrawalCancelView(APIView):
     | 403 | `not_a_trainer` | the caller is not a trainer |
     | 404 | `withdrawal_not_found` | not the caller's, or none |
     | 409 | `withdrawal_not_cancellable` | it is past `requested`; `state` says where it is |
+    | 409 | `withdrawal_hold_reversed` | support already put this withdrawal's money back in the balance, so cancelling would return it twice; nothing moved, and support closes it. `state` as above |
     """
     permission_classes = [IsAuthenticated]
 
