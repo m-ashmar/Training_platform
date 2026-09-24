@@ -4852,3 +4852,42 @@ msgstr "طلب التوثيق يحتاج إلى تعديل"
 #, python-format
 msgid "We could not verify your account: %(reason)s"
 msgstr "لم نتمكن من توثيق حسابك: %(reason)s"
+
+#: chat/events.py
+msgid "Photo"
+msgstr "صورة"
+
+#: chat/events.py
+msgid "Voice note"
+msgstr "رسالة صوتية"
+
+#: chat/events.py
+msgid "Video"
+msgstr "فيديو"
+
+#: chat/media.py
+msgid "Send a photo, a voice note or a video."
+msgstr "أرسل صورة أو رسالة صوتية أو فيديو."
+
+#: chat/services.py
+msgid "Only a video can name an exercise."
+msgstr "يمكن ربط تمرين بالفيديو فقط."
+
+#: chat/services.py
+msgid "There is no such exercise."
+msgstr "لا يوجد تمرين كهذا."
+
+#: training_platform/file_security.py
+#, python-format
+msgid "This recording is too large. The most that can be sent is %(mb)s MB."
+msgstr "هذا التسجيل كبير جدًا. الحد الأقصى للإرسال هو %(mb)s ميغابايت."
+
+#: training_platform/file_security.py
+msgid "This file is not a voice recording. Send an M4A, Ogg or WebM file."
+msgstr "هذا الملف ليس تسجيلًا صوتيًا. أرسل ملف M4A أو Ogg أو WebM."
+
+#: training_platform/file_security.py
+#, python-format
+msgid ""
+"This recording is too long. The most that can be sent is %(seconds)s seconds."
+msgstr "هذا التسجيل طويل جدًا. الحد الأقصى للإرسال هو %(seconds)s ثانية."

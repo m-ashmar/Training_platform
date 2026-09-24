@@ -917,3 +917,92 @@ def process_uploaded_video(file, max_bytes=None, max_seconds=None) -> VideoFacts
 
     file.seek(0)
     return VideoFacts(container, extension, duration, size)
+
+
+# ============================================================================
+# Audio — a voice note in the chat. The video rule, for sound: the BYTES decide
+# ============================================================================
+# A voice note is what a phone's recorder writes: AAC in an MPEG-4 container (`.m4a`,
+# iOS and most Android builds), Opus in Ogg, or Opus/Vorbis in WebM (Android, Chrome).
+# Like video it is stored as it arrived — no transcoder is needed to accept one — so
+# the container is sniffed from its magic bytes, the size is measured on the file and
+# the duration is read from the container where it declares one, with the same box
+# walk video uses (`probe_declared_duration`).
+
+#: ISO BMFF brands a recorder writes for sound: the audio-only brands, the generic
+#: MPEG-4 ones an Android recorder stamps on an AAC file, and 3GPP.
+_ISO_AUDIO_BRANDS = frozenset({
+    b'M4A ', b'M4B ', b'isom', b'iso2', b'iso4', b'iso5', b'iso6', b'mp41', b'mp42',
+    b'dash', b'3gp4', b'3gp5', b'3gp6', b'3gp7', b'3gg6',
+})
+_OGG_MAGIC = b'OggS'
+
+
+def sniff_audio_container(head: bytes):
+    """`('iso', 'm4a')`, `('ogg', 'ogg')`, `('matroska', 'webm')` — or None.
+
+    `head` is the first `VIDEO_SNIFF_BYTES` bytes; nothing else about the upload is
+    consulted, exactly as for video.
+    """
+    if not head:
+        return None
+    if head.startswith(_OGG_MAGIC):
+        return ('ogg', 'ogg')
+    if head.startswith(_MATROSKA_MAGIC):
+        return ('matroska', 'webm')
+    if (len(head) >= 12 and head[4:8] == _ISO_BMFF_MARKER
+            and head[8:12] in _ISO_AUDIO_BRANDS):
+        return ('iso', 'm4a')
+    return None
+
+
+def process_uploaded_audio(file, max_bytes=None, max_seconds=None) -> VideoFacts:
+    """Validate an uploaded voice note by its CONTENT. The audio twin of
+    `process_uploaded_video`, answering the same `VideoFacts`.
+
+    The caps default to the video ones (`MEDIA_VIDEO_MAX_BYTES`,
+    `MEDIA_VIDEO_MAX_SECONDS`): a voice note is not a longer thing than a clip, and a
+    second pair of numbers would be a second thing to keep in step.
+
+    Raises `ValidationError` with a stable `code`: `no_file`, `empty_file`,
+    `media_audio_too_large`, `media_not_audio`, `media_audio_too_long`.
+    """
+    if file is None:
+        raise ValidationError(_("No file provided."), code="no_file")
+
+    size = getattr(file, 'size', None)
+    if not size:
+        raise ValidationError(_("Empty file not allowed."), code="empty_file")
+
+    if max_bytes is None:
+        max_bytes = getattr(settings, 'MEDIA_VIDEO_MAX_BYTES', 64 * 1024 * 1024)
+    if max_seconds is None:
+        max_seconds = getattr(settings, 'MEDIA_VIDEO_MAX_SECONDS', 90)
+
+    if size > max_bytes:
+        raise ValidationError(
+            _("This recording is too large. The most that can be sent is %(mb)s MB.")
+            % {"mb": round(max_bytes / (1024 * 1024))},
+            code="media_audio_too_large",
+        )
+
+    file.seek(0)
+    sniffed = sniff_audio_container(file.read(VIDEO_SNIFF_BYTES))
+    file.seek(0)
+    if sniffed is None:
+        raise ValidationError(
+            _("This file is not a voice recording. Send an M4A, Ogg or WebM file."),
+            code="media_not_audio",
+        )
+    container, extension = sniffed
+
+    duration = probe_declared_duration(file, container)
+    if duration is not None and max_seconds and duration > max_seconds:
+        raise ValidationError(
+            _("This recording is too long. The most that can be sent is %(seconds)s "
+              "seconds.") % {"seconds": max_seconds},
+            code="media_audio_too_long",
+        )
+
+    file.seek(0)
+    return VideoFacts(container, extension, duration, size)

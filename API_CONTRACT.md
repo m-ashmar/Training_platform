@@ -430,9 +430,9 @@ unassign routes answer 409 `refund_failed` when a held month cannot be returned.
 
 ### Chat
 
-Text messages between a trainer and the client they coach — text only in this pass (no
-voice, image, video or program card). Exactly one conversation per pair. Nothing here
-differs by build.
+Messages between a trainer and the client they coach: text, and (B-091, 2026-09-24) a
+photo, a voice note or a video with an optional caption. No program card yet. Exactly
+one conversation per pair. Nothing here differs by build.
 
 Reading and writing are decided separately (the owner, 2026-09-19). Being in the
 conversation is what lets you READ it, for ever; writing asks
@@ -442,10 +442,38 @@ conversation row carries `can_send` and `refusal` so the app can explain a close
 composer without posting first. A conversation that is not the caller's is **404**, never
 403.
 
-Every message carries `kind` — `"text"` is the only value today, on REST and on the
-socket's `message.new` (the same serializer). Voice and images will add values and their
-own fields beside `body`; switch on `kind`, and draw an unknown one as a placeholder
-rather than guessing from which fields are present (BACKEND_BUGS B-042).
+Every message carries `kind` — `text`, `image`, `voice` or `video` — on REST and on the
+socket's `message.new` (the same serializer); switch on it, and draw an unknown one as a
+placeholder rather than guessing from which fields are present (BACKEND_BUGS B-042).
+Every message also carries, additively, `media` (null on text; `{url,
+duration_seconds, width, height}` otherwise) and `exercise` (`{id, name}` on a video
+that names its move, else null). `media.url` is PRIVATE: signed, expiring (an hour on
+GCS), and handed out only in answers the two people in the thread receive — use it,
+never store it. A message taken back serves `media: null`. The conversation list's
+`last_message` and the home card's `trainer_message` carry `kind` and never the media.
+
+**Photos, voice notes and videos** are sent with `POST /api/v1/chat/media/`
+(`multipart/form-data`: `conversation`, `kind`, `file`, optional `body` as the caption,
+`exercise_id` on a video only, `client_uuid`). Each goes through the platform's
+existing guard: a photo is content-checked, capped at 5 MB and re-encoded (no EXIF or
+GPS survives); a video (MP4, MOV, WebM) or a voice note (M4A, Ogg, WebM) is identified
+from its own bytes and capped at `MEDIA_VIDEO_MAX_BYTES` (64 MB) and
+`MEDIA_VIDEO_MAX_SECONDS` (90 s), so this is the third route whose body may exceed
+15 MB, on both spellings. The pair rule, blocks, the coaching freeze and the idempotent
+`client_uuid` are the text send's, checked before a byte is stored. A CLIENT's video
+with an `exercise_id` is a **form check**: it waits in the trainer's attention queue
+until the trainer writes in that thread after it. Codes, in the order decided:
+`not_found` (404), `idempotency_conflict` (409), `invalid_client_uuid`,
+`validation_error` (a bad `kind`, a caption over 4000), `exercise_only_on_video`,
+`unknown_exercise`, then the send's 403s (`no_relation`, `blocked`, `coaching_frozen`,
+`coaching_unpaid`, `coaching_ended`), then `media_file_required`, `media_not_a_video`,
+`media_video_too_large`, `media_video_too_long`, `media_not_audio`,
+`media_audio_too_large`, `media_audio_too_long`, and the image guard's own
+(`invalid_mime_type`, `file_too_large`, `unreadable_image`, `unsupported_format`,
+`image_too_many_pixels`, `image_dimensions_too_large`, `empty_file`). The push quotes the
+caption, or says "Photo" / "Voice note" / "Video" in the recipient's language — never a
+link. A chat video has no poster frame (no ffmpeg in the image) and a WebM or Ogg file
+declares no duration, so `duration_seconds` may be null.
 
 `refusal` / the send's 403 `code`, in the order they are decided: `no_relation` (never an
 approved pair and never a paid month), `blocked` (either of the two blocked the other —
@@ -463,7 +491,8 @@ messages/{id}/` tombstones the sender's own message — the row stays in the thr
 Live: `ws://host/ws/chat/{conversation_id}/?token=<access JWT>`. Client frames
 `{"type": "message.send", body, client_uuid?}` and `{"type": "message.read"}`; server
 frames `message.new`, `message.read`, `message.deleted` and
-`{"type": "error", code, detail}`. A socket send runs the same checks and the same
+`{"type": "error", code, detail}`. `message.send` is text only; a media message sent
+over REST reaches both sockets as `message.new`. A socket send runs the same checks and the same
 serializer as the REST route, and `detail` is in the reader's language. The socket's
 own codes: `invalid_frame`, `unknown_type`, `server_error`, `auth` (the token expired or
 the account was suspended since connect — re-checked on every frame; the socket then
@@ -485,6 +514,7 @@ stops being quoted in the recipient's inbox (`context.preview` is blanked on the
 | `GET, POST` | `/api/v1/chat/conversations/{id}/messages/` | auth | `ConversationMessagesView` |
 | `POST` | `/api/v1/chat/conversations/{id}/read/` | auth | `ConversationReadView` |
 | `DELETE` | `/api/v1/chat/messages/{id}/` | auth | `MessageDeleteView` |
+| `POST` | `/api/v1/chat/media/` | auth | `MediaMessageView` |
 
 ### Diet
 
@@ -783,6 +813,37 @@ changes nothing an unverified trainer may do today (see BACKEND_DELTA decision 5
 `trainer_is_verified`, which the roster ranks and the paywall exemption reads.
 `GET /api/auth/trainer/profile/` and `GET /api/auth/user/update/` also carry a read-only
 `verification_status` (null for anyone who is not a trainer).
+
+### Trainer home: the attention queue (B-091)
+
+The trainer's home is a queue, not a dashboard (`12-trainer-shell/TrainerHome`): one
+ordered list of what needs them, each item with its own actions. `GET` only, trainers
+only (403 `not_a_trainer` for anyone else), identical on every build. The view's
+docstring (`users/attention_queue.py AttentionQueueView`) is the full contract.
+
+`{count, items: [{kind, id, client: {id, name, first_name, last_name,
+profile_picture}, at, <kind>: {...}}]}` — `kind` is `new_request`, `form_check`,
+`idle_client`, `slipping_client` or `program_ending`; `id` is stable (`form_check:812`);
+`at` is when the item became due; the kind's own fields sit under a key named after it:
+the pending-requests row; the form check's `message_id`, `conversation_id`, `exercise`,
+`caption`, `duration_seconds`, `sent_at` and signed `media`; the idle client's `reason`
+(`quiet` / `never_started`), `days`, `last_trained_on`, `last_workout`, `program`; the
+slipping client's `this_week_percent`, `usual_percent`, `planned_sets`, `missed_sets`,
+`program`; the ending programme's `routine_id`, `name`, `week` of `weeks`, `end_date`,
+`days_left` (within 7 days).
+
+One total order: requests, form checks, idle, slipping, programmes ending; within a
+kind the longest-waiting request, the oldest unanswered video, the highest `attention`
+urgency score, the biggest drop against the client's own average, the fewest days
+left — ties broken by a unique id. Only approved, active, unblocked clients; a client
+whose coaching is frozen, unpaid or ended appears in none of the kinds. A form check
+leaves the queue when the trainer sends any message in that thread after it. The
+threshold for idle is `attention`'s own (`QUIET_DAYS`, 5 days). The four older reads
+are unchanged.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/trainer/attention/` | auth (trainer) | `AttentionQueueView` |
 
 ### Trainers (design v2)
 

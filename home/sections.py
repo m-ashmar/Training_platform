@@ -442,12 +442,11 @@ def trainer_message(person, relation, *, request) -> dict | None:
     Left out when there is no coach, no conversation, no message, or when the pair is
     blocked (`moderation/`). NOT left out when the newest message was taken back by its
     sender: the card then carries `body: ""` and `deleted: true`, the tombstone the
-    conversation list shows for the same thread. Chat is TEXT ONLY in this build (`chat/models.py`: "no
-    voice, no image, no video"), so `kind` is always `text` today; a voice note arrives
-    as a `MessageAttachment` (BACKEND_DELTA item 8) and will add `audio_url`,
-    `duration_seconds` and `state` beside `kind: "voice"` without moving anything the
-    app already reads. The key is sent now, unconditionally, so the app never has to
-    guess what it is looking at.
+    conversation list shows for the same thread. `kind` is the message's own: `text`,
+    `image`, `voice` or `video` (BACKEND_BUGS B-091). A photo, voice note or video sent
+    without a caption has an empty `body`; the card says what it is from `kind` and
+    opens the thread, which is the only place its media is served (signed, to the two
+    people in it). Nothing the app already reads moved.
 
     `POST /api/notifications/message-client/` does NOT write a chat message (it only
     pushes a notification), so a coach who used that route does not appear here. That
@@ -470,7 +469,8 @@ def trainer_message(person, relation, *, request) -> dict | None:
     if thread is None or not thread['last_message_id']:
         return None
     last = (Message.objects.filter(pk=thread['last_message_id'])
-            .values('id', 'sender_id', 'body', 'created_at', 'deleted_at').first())
+            .values('id', 'sender_id', 'kind', 'body', 'created_at', 'deleted_at')
+            .first())
     if last is None:
         return None
     # A newest message its sender took back is a TOMBSTONE, not "no message": the card
@@ -487,7 +487,9 @@ def trainer_message(person, relation, *, request) -> dict | None:
         'from_coach': last['sender_id'] == relation.trainer_id,
         'message': {
             'id': last['id'],
-            'kind': 'text',
+            # `text`, `image`, `voice` or `video` (B-091). The card never carries the
+            # media itself: the thread serves it, signed, to the two people in it.
+            'kind': last['kind'],
             'body': '' if deleted else last['body'][:MESSAGE_PREVIEW_CHARS],
             'deleted': deleted,
             'sent_at': last['created_at'],

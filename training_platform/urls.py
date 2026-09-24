@@ -69,6 +69,9 @@ urlpatterns = [
     # The operator side is the console at /dj-admin/.
     path('api/v1/trainer/verification/',
          include('trainer_verification.urls', namespace='trainer_verification')),
+    # The trainer's home queue: requests, form checks, idle and slipping clients and
+    # programmes ending, in one ordered list (users/attention_queue.py, B-091).
+    path('api/v1/trainer/', include('users.urls_trainer_home', namespace='trainer_home')),
 
     # The design-v2 trainer screens: roster, profile, matches. See users/trainer_views.py.
     path('api/v1/trainers/', include('users.urls_v1', namespace='trainers')),

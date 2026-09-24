@@ -542,7 +542,13 @@ def week_totals(user_ids, start, end) -> dict:
     return collected
 
 
-def attention(trainer, client_ids, *, today=None, quiet_days=5):
+#: How many days without training make a client "quiet" — idle, to the coach. ONE
+#: number: `attention()` below, the trainer's roster read of it and the attention queue
+#: (`users/attention_queue.py`) all use this constant, never a literal of their own.
+QUIET_DAYS = 5
+
+
+def attention(trainer, client_ids, *, today=None, quiet_days=QUIET_DAYS):
     """Which of these clients need the coach's eye, most urgent first.
 
     One batch of queries for the whole roster, never one per client: the roster screen

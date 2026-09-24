@@ -88,11 +88,30 @@ def notify_new_message(message):
             message_id=message.pk,
             sender=(f"{sender.first_name} {sender.last_name}".strip()
                     or sender.username),
-            preview=message.body[:PREVIEW_CHARS],
+            preview=_preview(message, recipient_id),
         ))
     except Exception:       # noqa: BLE001 — the message stands whatever happens here
         logger.warning('could not notify about chat message %s',
                        getattr(message, 'pk', None), exc_info=True)
+
+
+def _preview(message, recipient_id) -> str:
+    """What the lock screen quotes: the text, or a media message's caption, or — for a
+    photo, voice note or video sent without one — what it is, in the RECIPIENT's
+    language (the context is interpolated as it is stored, so it is translated here).
+    Never a link: the media itself is only ever served inside the thread.
+    """
+    from django.utils.translation import gettext as _
+
+    from training_platform.i18n import LanguageContext
+
+    from .models import KIND_IMAGE, KIND_VIDEO, KIND_VOICE
+
+    if message.body.strip() or message.kind not in (KIND_IMAGE, KIND_VOICE, KIND_VIDEO):
+        return message.body[:PREVIEW_CHARS]
+    with LanguageContext.for_user_id(recipient_id):
+        return str({KIND_IMAGE: _("Photo"), KIND_VOICE: _("Voice note"),
+                    KIND_VIDEO: _("Video")}[message.kind])
 
 
 def _claim_nudge(conversation, recipient_id) -> bool:

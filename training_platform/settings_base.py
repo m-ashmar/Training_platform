@@ -1028,6 +1028,10 @@ LARGE_UPLOAD_PATHS = {
     # the same pipeline, so it needs the same ceiling (mediakit/urls_trainer.py).
     '/api/v1/trainer/exercise-media': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
     '/api/v1/trainer/exercise-media/': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
+    # A client's form-check video in the chat (BACKEND_BUGS B-091) — the same video
+    # guard, the same caps, so the same ceiling (chat/urls.py, chat/media.py).
+    '/api/v1/chat/media': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
+    '/api/v1/chat/media/': MEDIA_VIDEO_MAX_BYTES + 1024 * 1024,
 }
 
 # WHERE an exercise's video/photo media may point (routine/views.py

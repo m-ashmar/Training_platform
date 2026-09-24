@@ -276,6 +276,9 @@ LOCAL_APPS_FOR_FILE_CLEANUP = {
     'mediakit',
     # Identity documents: a deleted or replaced row must take its file with it.
     'trainer_verification',
+    # A chat photo, voice note or video (B-091): erasure deletes the conversation, the
+    # messages cascade, and their files must go with them.
+    'chat',
 }
 
 _FILE_FIELD_CACHE = {}
