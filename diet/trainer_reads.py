@@ -333,7 +333,8 @@ class TrainerClientAdherenceView(APIView):
                     'calories_target': figures.target_calories if figures else None,
                     'protein_consumed': figures.protein_consumed if figures else None,
                     'protein_target': figures.target_protein if figures else None,
-                    'missed_meal_types': sorted(missed.get(day, ()), key=MEAL_ORDER.get),
+                    'missed_meal_types': sorted(missed.get(day, ()),
+                                                key=lambda kind: MEAL_ORDER.get(kind, 99)),
                 })
 
             current = (DietPlan.governing(client, today)
