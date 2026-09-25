@@ -14,7 +14,7 @@
 Every test fails on 7831839 (the routes did not exist, the fields were not there, or the
 create retired the client's plan at once).
 """
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pytest
 from django.utils import timezone
@@ -92,6 +92,15 @@ def _body(client, start, **extra):
     return body
 
 
+def _declare(client, allergies):
+    """The client's food preferences: one row per client, which may already exist."""
+    from diet.models import UserFoodPreference
+
+    preference, _created = UserFoodPreference.objects.update_or_create(
+        user=client, defaults={"allergies": allergies})
+    return preference
+
+
 def _meal(day, meal_type, *items, time=None):
     row = {"meal_type": meal_type, "target_date": str(day),
            "food_items": [{"food_id": f.id, "quantity": g} for f, g in items]}
@@ -122,8 +131,7 @@ def test_b132_the_old_create_retires_nothing_until_its_meals_land(make_user, api
     assert plan.is_draft and not plan.is_active
 
     # A refused meal list (a declared allergen) changes nothing either.
-    from diet.models import UserFoodPreference
-    UserFoodPreference.objects.create(user=client, allergies="peanuts")
+    _declare(client, "peanuts")
     refused = t.post(MEALS, [dict(_meal(plan.start_date, "Lunch", (foods["base"], 150)),
                                   diet_plan_id=plan.id),
                              dict(_meal(plan.start_date, "Dinner", (foods["peanut"], 30)),
@@ -236,10 +244,10 @@ def test_b132_a_plan_sent_with_its_meals_is_all_or_nothing(make_user, api, foods
 
 
 def test_b132_a_plan_sent_whole_refuses_a_declared_allergen(make_user, api, foods):
-    from diet.models import DietPlan, UserFoodPreference
+    from diet.models import DietPlan
 
     trainer, client = _pair(make_user, "whole_allergen")
-    UserFoodPreference.objects.create(user=client, allergies="peanut")
+    _declare(client, "peanut")
     today = timezone.localdate()
     before = DietPlan.objects.count()
     refused = api(trainer).post(CREATE, _body(client, today, meals=[
@@ -406,7 +414,6 @@ def test_b134_adherence_is_the_platforms_figure_from_ticked_meals(make_user, api
 
 # ============================================================ B-131 — the review
 def test_b131_the_review_of_a_sent_plan(make_user, api, foods):
-    from diet.models import UserFoodPreference
     from diet.planner.policy import load_policy
 
     trainer, client = _pair(make_user, "review")
@@ -420,7 +427,7 @@ def test_b131_the_review_of_a_sent_plan(make_user, api, foods):
         _meal(today + timedelta(days=1), "Lunch", (foods["base"], 400), (foods["liver"], 100))]),
         content_type=JSON).json()["diet_plan"]["id"]
     # Declared after the plan was written: the review is where the trainer learns it.
-    preference = UserFoodPreference.objects.create(user=client, allergies="peanut")
+    preference = _declare(client, "peanut")
     preference.disliked_foods.add(foods["liver"])
 
     review = t.get(_review(plan_id))
@@ -458,10 +465,10 @@ def test_b131_the_review_of_a_sent_plan(make_user, api, foods):
 def test_b131_the_review_of_a_plan_not_yet_sent(make_user, api, foods):
     """The phone's draft, reviewed before it is sent: nothing is written, and a declared
     allergen is REPORTED here (the send refuses it)."""
-    from diet.models import DietPlan, Meal, UserFoodPreference
+    from diet.models import DietPlan, Meal
 
     trainer, client = _pair(make_user, "draft_review")
-    UserFoodPreference.objects.create(user=client, allergies="peanuts, sesame")
+    _declare(client, "peanuts, sesame")
     today = timezone.localdate()
     plans, meals = DietPlan.objects.count(), Meal.objects.count()
     body = _body(client, today, duration_days=2, daily_calories=2400, meals=[

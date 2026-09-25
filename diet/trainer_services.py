@@ -25,6 +25,28 @@ from users.models import CustomUser
 
 logger = logging.getLogger(__name__)
 
+#: The most meals one plan may be SENT with (BACKEND_BUGS B-132). The design's longest
+#: plan is 30 days of 5 meals, 150; this leaves room for 12 weeks of 5, and a longer plan
+#: is sent with its first part and grown with `trainer/meals/`. The whole list is written
+#: in a handful of queries (`_insert_meals`), not per meal.
+MAX_PLAN_MEALS = 500
+#: The longest plan in days (BACKEND_BUGS B-133): the 52 weeks `duration_weeks` has always
+#: allowed.
+MAX_PLAN_DAYS = 364
+
+
+class MealRefused(ValidationError):
+    """A refusal of one meal in a LIST, carrying `index`, its position in the list, so
+    the app can say which meal to fix. `code` and the message are the single-meal
+    refusal's own; `extra` rides along in the answer (`fields` for `missing_fields`)."""
+
+    def __init__(self, error, index, **extra):
+        messages = getattr(error, 'messages', None) or [str(error)]
+        super().__init__(messages[0], code=getattr(error, 'code', None) or 'invalid')
+        self.index = index
+        self.extra = extra
+
+
 class TrainerDietPlanService:
     """
     Service for trainers to create and manage diet plans for their clients.
@@ -61,11 +83,31 @@ class TrainerDietPlanService:
         start_date: date,
         duration_weeks: int = 4,
         goal: str = 'Maintain',
-        daily_calories: Optional[float] = None
+        daily_calories: Optional[float] = None,
+        *,
+        duration_days=None,
+        meals: Optional[List[Dict[str, Any]]] = None,
     ) -> DietPlan:
         """
         Create a new diet plan for a client using a template.
-        
+
+        Two ways (BACKEND_BUGS B-132). Creating a plan used to retire every active plan
+        of the client that overlapped it — his automatic plan included — before a single
+        meal existed, while the meals came in later requests: a refused meal list or a
+        dropped phone left him an empty active plan and his own plan gone.
+
+        * `meals` given (a list of parsed meals, see `prepare_meals`): the plan is SENT
+          whole. Plan, meals and the retirement of what it overlaps happen in one
+          transaction, after every meal is valid; one refused meal (`MealRefused`, with
+          its `index`) and nothing is written or retired.
+        * `meals` None (the old call): a DRAFT (`is_draft`, not active) that retires
+          nothing and that the client never sees. Its first meals send it
+          (`add_meal_to_plan`), in the transaction that writes them.
+
+        The length is `duration_days` (1-364, BACKEND_BUGS B-133) when given, else
+        `duration_weeks` (1-52) as before; the stored `duration_weeks` is the days
+        rounded up to whole weeks, as the engine stores it.
+
         Args:
             client: The client user
             template: The diet plan template to use
@@ -73,14 +115,63 @@ class TrainerDietPlanService:
             duration_weeks: Duration in weeks
             goal: Fitness goal (Lose, Maintain, Gain)
             daily_calories: Daily calorie target (auto-calculated if None)
-            
+            duration_days: Duration in days; wins over `duration_weeks`
+            meals: The plan's meals, to send it whole; None for a draft
+
         Returns:
-            Created DietPlan instance
+            The DietPlan, carrying `superseded_plan_ids` (what this call retired) and
+            `will_replace_plan_ids` (for a draft: the active plans its sending would
+            retire, as they stand now).
         """
         # Validate trainer-client relationship
         if not self._can_manage_client(client):
             raise ValidationError(_("You can only create diet plans for your assigned clients"), code="not_assigned_client")
-        
+
+        daily_calories, resolved_goal, macros = self._plan_targets(client, goal, daily_calories)
+        end_date, duration_weeks = self._plan_window(start_date, duration_weeks, duration_days)
+
+        fields = dict(
+            user=client,
+            goal=resolved_goal,
+            daily_calories=daily_calories,
+            target_protein=macros['protein'],
+            target_carbs=macros['carb'],
+            target_fat=macros['fat'],
+            start_date=start_date,
+            end_date=end_date,
+            duration_weeks=duration_weeks,
+            generation_strategy=DietPlan.TRAINER,
+            template=template,
+            created_by=self.trainer,
+            # Written as a draft either way: sending is `_publish`, the one place that
+            # retires what a trainer plan replaces.
+            is_draft=True,
+            is_active=False,
+        )
+
+        if meals is None:
+            diet_plan = DietPlan.objects.create(**fields)
+            diet_plan.superseded_plan_ids = []
+            diet_plan.will_replace_plan_ids = self._overlapping_active(diet_plan)
+            return diet_plan
+
+        with transaction.atomic():
+            # Serialise on the client's row, exactly as `save_plan` does, so two plans
+            # sent at once cannot each retire what they saw and both stay active.
+            type(client).objects.select_for_update().filter(pk=client.pk).first()
+            diet_plan = DietPlan.objects.create(**fields)
+            self._insert_meals(diet_plan, meals)
+            superseded_ids = self._publish(diet_plan)
+        self._recompute_allergens(diet_plan)
+        # The caller reports these to the trainer; a plan vanishing with no
+        # explanation is what made this feature look broken.
+        diet_plan.superseded_plan_ids = superseded_ids or []
+        diet_plan.will_replace_plan_ids = []
+        return diet_plan
+
+    def _plan_targets(self, client, goal, daily_calories):
+        """`(daily_calories, goal, macro grams)` for a plan written for `client`: the
+        figure the trainer set, or the one computed from the client's profile."""
         # Calculate daily calories if not provided. Not from an activity level the client
         # never chose (the owner, 2026-09-20): the default would pass for sedentary.
         if daily_calories is None:
@@ -94,21 +185,6 @@ class TrainerDietPlanService:
         # Validate the calorie target server-side (bounds + type). Prevents a
         # trainer from persisting a medically dangerous target (e.g. 200 or 50000).
         daily_calories = DietInputValidator.validate_daily_calories(daily_calories)
-
-        try:
-            duration_weeks = int(duration_weeks)
-        except (TypeError, ValueError):
-            raise ValidationError(_("duration_weeks must be a whole number"),
-                                  code="bad_duration")
-        if not 1 <= duration_weeks <= 52:
-            raise ValidationError(_("duration_weeks must be between 1 and 52"),
-                                  code="bad_duration")
-
-        # INCLUSIVE, matching `DietPlan.end_date` and the engine. `start + weeks` made a
-        # "4 week" plan span 29 days: the trainer got a day they did not ask for,
-        # `add_meal_to_plan` accepted a meal on it, and two back-to-back four-week plans
-        # overlapped on one day, so creating the second silently superseded the first.
-        end_date = start_date + timedelta(weeks=duration_weeks) - timedelta(days=1)
         resolved_goal = DietPlan.normalise_goal(goal)
 
         # The same macro split the deterministic planner builds to. A trainer plan
@@ -118,53 +194,179 @@ class TrainerDietPlanService:
         from diet.planner.targets import day_macro_grams
         macros = day_macro_grams(float(daily_calories), load_policy(resolved_goal),
                                  getattr(client, 'weight', None))
+        return daily_calories, resolved_goal, macros
 
-        # One active plan per client per window is a model constraint, and it made
-        # trainer plan creation fail with an opaque 400 for any client who already
-        # had one — which is every client the engine has ever served. Retiring the
-        # overlap is what the trainer means by "here is your new plan".
+    @staticmethod
+    def _plan_window(start_date, duration_weeks, duration_days=None):
+        """`(end_date, duration_weeks)`: the plan's last day, INCLUSIVE, and its weeks.
+
+        `duration_days` when given (BACKEND_BUGS B-133: the design's 30 days could only
+        be asked for as 35), else `duration_weeks`.
+        """
+        if duration_days is not None:
+            days = TrainerDietPlanService.parse_duration_days(duration_days)
+            weeks = (days + 6) // 7
+        else:
+            try:
+                weeks = int(duration_weeks)
+            except (TypeError, ValueError):
+                raise ValidationError(_("duration_weeks must be a whole number"),
+                                      code="bad_duration")
+            if not 1 <= weeks <= 52:
+                raise ValidationError(_("duration_weeks must be between 1 and 52"),
+                                      code="bad_duration")
+            days = weeks * 7
+        # INCLUSIVE, matching `DietPlan.end_date` and the engine. `start + weeks` made a
+        # "4 week" plan span 29 days: the trainer got a day they did not ask for,
+        # `add_meal_to_plan` accepted a meal on it, and two back-to-back four-week plans
+        # overlapped on one day, so creating the second silently superseded the first.
+        end_date = start_date + timedelta(days=days - 1) if start_date else None
+        return end_date, weeks
+
+    @staticmethod
+    def parse_duration_days(value) -> int:
+        """A whole number of days from 1 to `MAX_PLAN_DAYS`, or 400 `bad_duration`.
+
+        Refused, not clamped: a length is a choice the trainer made, and 7.5 or 400 days
+        is a mistake to show them, not one to correct silently.
+        """
+        refusal = ValidationError(
+            _("duration_days must be a whole number from 1 to %(max)d") % {"max": MAX_PLAN_DAYS},
+            code="bad_duration")
+        if isinstance(value, (bool, float)):
+            raise refusal
+        try:
+            days = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise refusal
+        if not 1 <= days <= MAX_PLAN_DAYS:
+            raise refusal
+        return days
+
+    @staticmethod
+    def _overlapping_active(diet_plan) -> List[int]:
+        """The client's active plans whose dates overlap `diet_plan`'s, whoever wrote
+        them: what sending it retires."""
+        return list(DietPlan.objects.filter(
+            user_id=diet_plan.user_id, is_active=True,
+            start_date__lte=diet_plan.end_date, end_date__gte=diet_plan.start_date,
+        ).exclude(pk=diet_plan.pk).order_by('id').values_list('id', flat=True))
+
+    def _publish(self, diet_plan) -> Optional[List[int]]:
+        """SEND a draft: retire every active plan it overlaps and make it the client's.
+
+        Returns the ids it retired, or None when it was not a draft (already sent — by a
+        request that raced this one, too). Runs inside the caller's transaction, so the
+        meals that trigger it and the retirement land together or not at all.
+
+        One active plan per client per window is the rule (`DietPlan.clean`), and it
+        made trainer plan creation fail with an opaque 400 for any client who already
+        had one — every client the engine has served. Retiring the overlap, whoever
+        wrote it (the client's own generated plan is the common case), is what the
+        trainer means by "here is your new plan"; the ids go back so they can say what
+        was replaced.
+        """
         with transaction.atomic():
             # Serialise on the client's row, exactly as `save_plan` does. Superseding
-            # and then inserting is two statements, and without the lock two trainers
-            # (or a trainer and the client's own generate) could each supersede what
-            # they saw and each insert, leaving the client with two active plans over
-            # one window — the thing this block exists to prevent.
-            type(client).objects.select_for_update().filter(pk=client.pk).first()
-
-            # Every overlapping active plan, whoever wrote it: a client follows one
-            # plan, and the model refuses two over one window. That includes the
-            # generated plan the client already had, which is the common case and the
-            # reason trainer plan creation used to fail outright. What was missing was
-            # not the scoping but the telling — the ids come back in the response so
-            # the trainer can say what was replaced.
-            superseded_ids = list(DietPlan.objects.filter(
-                user=client, is_active=True,
-                start_date__lte=end_date, end_date__gte=start_date,
-            ).values_list('id', flat=True))
+            # and then activating is two statements, and without the lock two plans
+            # (or a plan and the client's own generate) could each supersede what they
+            # saw, leaving two active plans over one window.
+            CustomUser.objects.select_for_update().filter(pk=diet_plan.user_id).first()
+            # NO KEY UPDATE, not UPDATE: a second request writing this draft's first
+            # meals holds KEY SHARE on the row (its Meal insert), and a plain FOR UPDATE
+            # would wait for it while it waits for the client's row — a deadlock.
+            still_draft = (DietPlan.objects.select_for_update(no_key=True)
+                           .filter(pk=diet_plan.pk).values_list('is_draft', flat=True).first())
+            if not still_draft:
+                diet_plan.refresh_from_db(fields=['is_draft', 'is_active'])
+                return None
+            superseded_ids = self._overlapping_active(diet_plan)
             DietPlan.objects.filter(id__in=superseded_ids).update(is_active=False)
-
-            diet_plan = DietPlan.objects.create(
-                user=client,
-                goal=resolved_goal,
-                daily_calories=daily_calories,
-                target_protein=macros['protein'],
-                target_carbs=macros['carb'],
-                target_fat=macros['fat'],
-                start_date=start_date,
-                end_date=end_date,
-                duration_weeks=duration_weeks,
-                generation_strategy=DietPlan.TRAINER,
-                template=template,
-                created_by=self.trainer
-            )
+            DietPlan.objects.filter(pk=diet_plan.pk).update(
+                is_draft=False, is_active=True, updated_at=timezone.now())
+        diet_plan.is_draft, diet_plan.is_active = False, True
         if superseded_ids:
-            logger.info("Trainer %s replaced plan(s) %s for client %s",
-                        self.trainer.id, superseded_ids, client.id)
-        # The caller reports these to the trainer; a plan vanishing with no
-        # explanation is what made this feature look broken.
-        diet_plan.superseded_plan_ids = superseded_ids
-        return diet_plan
-    
+            logger.info("Trainer %s sent plan %s, replacing %s for client %s",
+                        self.trainer.id, diet_plan.pk, superseded_ids, diet_plan.user_id)
+        return superseded_ids
+
+    @staticmethod
+    def _check_slot(start_date, end_date, meal_type, target_date) -> None:
+        """A meal type on the list, on a day the plan covers."""
+        # `choices` is a form-layer rule; nothing called full_clean(), so "Brunch" was
+        # persisted and then matched no slot in the target split downstream.
+        if meal_type not in dict(Meal.MEAL_TYPES):
+            raise ValidationError(_("%(value)s is not a meal type") % {"value": meal_type},
+                                  code="bad_meal_type")
+        if start_date and end_date and not (start_date <= target_date <= end_date):
+            raise ValidationError(
+                _("That date is outside the plan (%(a)s to %(b)s)")
+                % {"a": start_date, "b": end_date},
+                code="date_outside_plan")
+
+    def prepare_meals(self, start_date, end_date, meals, client=None):
+        """Every meal of a plan checked as `add_meal_to_plan` checks one; nothing written.
+
+        `meals` is a list of `{meal_type, target_date (date), food_items,
+        scheduled_time (time or None), description}`. Returns `[(meal, components)]`
+        with `components` `[(FoodItem, grams)]`. A refusal is `MealRefused` naming the
+        meal's `index`. With `client`, a declared allergen is refused as it is on the
+        meal route; without, it is left for the review to report.
+        """
+        taken, prepared = set(), []
+        for index, meal in enumerate(meals):
+            try:
+                self._check_slot(start_date, end_date, meal['meal_type'], meal['target_date'])
+                # The slot key the database enforces (`one_meal_per_slot_per_day`,
+                # NULL times equal), checked here because the rows are new.
+                slot = (meal['target_date'], meal['meal_type'], meal.get('scheduled_time'))
+                if slot in taken:
+                    raise ValidationError(
+                        _("A %(slot)s already exists for %(date)s in this plan")
+                        % {"slot": meal['meal_type'], "date": meal['target_date']},
+                        code="duplicate_meal")
+                taken.add(slot)
+                components = self._validated_items(meal['food_items'], meal['meal_type'],
+                                                   client=client)
+            except MealRefused:
+                raise
+            except ValidationError as refusal:
+                raise MealRefused(refusal, index)
+            prepared.append((meal, components))
+        return prepared
+
+    def _insert_meals(self, diet_plan, meals) -> None:
+        """Write a new plan's meals in a few queries, whatever their number.
+
+        The same checks as `add_meal_to_plan` (`prepare_meals`), the same names and
+        reasons, the same row validation minus the two foreign-key lookups (the plan
+        was created in this transaction; no recipe). One insert for the meals and one
+        for their components: a 150-meal plan at `add_meal_to_plan`'s six queries a
+        meal was 900 round trips inside one transaction.
+        """
+        prepared = self.prepare_meals(diet_plan.start_date, diet_plan.end_date, meals,
+                                      client=diet_plan.user)
+        rows = []
+        for index, (meal, components) in enumerate(prepared):
+            name, name_ar, reason, reason_ar = self._meal_names(meal['meal_type'], components)
+            row = Meal(diet_plan=diet_plan, meal_type=meal['meal_type'],
+                       date=meal['target_date'], scheduled_time=meal.get('scheduled_time'),
+                       description=meal.get('description') or '', is_ai_generated=False,
+                       name=name[:160], name_ar=name_ar[:160], reason=reason[:200],
+                       reason_ar=reason_ar[:200])
+            try:
+                row.full_clean(exclude={'diet_plan', 'recipe'}, validate_unique=False,
+                               validate_constraints=False)
+            except ValidationError as refusal:
+                raise MealRefused(refusal, index)
+            rows.append(row)
+        Meal.objects.bulk_create(rows)
+        MealComponent.objects.bulk_create([
+            MealComponent(meal=row, food=food, quantity=grams, meal_time=row.meal_type)
+            for row, (_meal, components) in zip(rows, prepared)
+            for food, grams in components
+        ])
+
     def add_meal_to_plan(
         self,
         diet_plan: DietPlan,
@@ -176,8 +378,9 @@ class TrainerDietPlanService:
         recompute_allergens: bool = True,
     ) -> Meal:
         """
-        Add a meal to a diet plan.
-        
+        Add a meal to a diet plan. On a draft, the first meal sends the plan
+        (`_publish`) in the same transaction; `diet_plan.publication` then says so.
+
         Args:
             diet_plan: The diet plan to add the meal to
             meal_type: Type of meal (Breakfast, Lunch, Dinner, Snack)
@@ -190,18 +393,7 @@ class TrainerDietPlanService:
             Created Meal instance
         """
         self._authorize_plan(diet_plan)
-
-        # `choices` is a form-layer rule; nothing called full_clean(), so "Brunch" was
-        # persisted and then matched no slot in the target split downstream.
-        if meal_type not in dict(Meal.MEAL_TYPES):
-            raise ValidationError(_("%(value)s is not a meal type") % {"value": meal_type},
-                                  code="bad_meal_type")
-        if diet_plan.start_date and diet_plan.end_date and not (
-                diet_plan.start_date <= target_date <= diet_plan.end_date):
-            raise ValidationError(
-                _("That date is outside the plan (%(a)s to %(b)s)")
-                % {"a": diet_plan.start_date, "b": diet_plan.end_date},
-                code="date_outside_plan")
+        self._check_slot(diet_plan.start_date, diet_plan.end_date, meal_type, target_date)
 
         # A retried POST wrote a second Breakfast for the same day, and the database
         # cannot refuse it: `unique_together` includes `scheduled_time`, which is
@@ -237,6 +429,15 @@ class TrainerDietPlanService:
                 MealComponent(meal=meal, food=food, quantity=grams, meal_time=meal_type)
                 for food, grams in components
             ])
+            # A draft's first meal SENDS it (BACKEND_BUGS B-132), in this transaction:
+            # the plan the old create made retires the client's plan only now that it
+            # holds something to eat, and a refused meal sends nothing. The caller
+            # reads `publication` off the plan to tell the trainer what was replaced.
+            if diet_plan.is_draft:
+                superseded_ids = self._publish(diet_plan)
+                if superseded_ids is not None:
+                    diet_plan.publication = {"diet_plan_id": diet_plan.pk,
+                                             "superseded_plan_ids": superseded_ids}
         # The batch endpoint passes False and recomputes ONCE at the end. The report is
         # derived from every component of the whole plan, so doing it per meal made a
         # hundred-meal batch re-derive it a hundred times — about twelve queries per meal
@@ -405,7 +606,9 @@ class TrainerDietPlanService:
         return (plans
                 .select_related('template')
                 .annotate(meals_count=Count('meals'))
-                .order_by('-start_date')[:200])
+                # `-id` breaks ties: two plans starting the same day (a draft and the
+                # plan it replaces) came back in no defined order.
+                .order_by('-start_date', '-id')[:200])
     
     def _can_manage_client(self, client: CustomUser) -> bool:
         """
@@ -438,7 +641,9 @@ class TrainerDietPlanService:
         if not self._can_manage_client(diet_plan.user):
             raise ValidationError(_("This client is no longer assigned to you"),
                                   code="not_assigned_client")
-        if not diet_plan.is_active:
+        # A draft (BACKEND_BUGS B-132) is not followed YET, which is different: it is
+        # the plan being written, and its first meals send it.
+        if not diet_plan.is_active and not diet_plan.is_draft:
             # A plan the client no longer follows. `diet_persistence` identified this
             # exact failure — "every meal they added to it afterwards landed on a plan
             # nobody follows" — and fixed only the LOGGING on the superseding side. The
@@ -496,7 +701,12 @@ class TrainerDietPlanService:
             seen.add(food_id)
             rows.append((food_id, grams))
 
-        found = FoodItem.objects.in_bulk([fid for fid, _g in rows])
+        # Fetched once per service instance (one request), not once per meal: a plan
+        # sent whole repeats the same few foods over a hundred meals.
+        found = self.__dict__.setdefault('_foods', {})
+        wanted = [fid for fid, _g in rows if fid not in found]
+        if wanted:
+            found.update(FoodItem.objects.in_bulk(wanted))
         missing = [fid for fid, _g in rows if fid not in found]
         if missing:
             raise ValidationError(_("No such food: %(ids)s") % {"ids": missing},

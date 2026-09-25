@@ -17,7 +17,7 @@ is free. After the freeze, changes here are additive or go behind `v2/`.
 
 from django.urls import path
 
-from . import views
+from . import trainer_plan_views, views
 
 app_name = 'diet'
 
@@ -44,6 +44,11 @@ urlpatterns = [
     # --- Trainer ---
     path('v1/trainer/templates/', views.TrainerTemplatesView.as_view(), name='v1_trainer_templates'),
     path('v1/trainer/diet-plans/', views.TrainerDietPlanView.as_view(), name='v1_trainer_diet_plans'),
+    # The review before a plan is sent (BACKEND_BUGS B-131): an unsaved plan, a saved one.
+    path('v1/trainer/diet-plans/review/', trainer_plan_views.TrainerDraftPlanReviewView.as_view(),
+         name='v1_trainer_draft_plan_review'),
+    path('v1/trainer/diet-plans/<int:plan_id>/review/',
+         trainer_plan_views.TrainerPlanReviewView.as_view(), name='v1_trainer_plan_review'),
     path('v1/trainer/meals/', views.TrainerMealView.as_view(), name='v1_trainer_meals'),
     path('v1/trainer/meals/<int:meal_id>/', views.TrainerMealView.as_view(), name='v1_trainer_meal_detail'),
 
