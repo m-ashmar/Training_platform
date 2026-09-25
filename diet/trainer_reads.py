@@ -139,7 +139,7 @@ class ClientFoodMarks:
 
         ids = set(self.disliked_ids)
         if self.checker.active:
-            for food in (queryset.order_by().only(
+            for food in (queryset.select_related(None).order_by().only(
                     'id', 'name_en', 'allergens', 'allergen_source', 'ingredients_text')
                     .iterator(chunk_size=500)):
                 if self.checker.check_food(food).verdict == VIOLATION:
@@ -168,8 +168,9 @@ class TrainerClientPreferencesView(APIView):
       refuses a food that names one (`declared_allergen`).
     - `liked_foods` / `disliked_foods` — `{id, name, name_ar, image_url}` rows, in the
       catalogue's order (the English name, then id).
-    - `has_preferences` — false while the client has never saved a preference; every
-      list is then empty and `allergies` is "". Reading writes nothing.
+    - `has_preferences` — false while the client has told us nothing: no allergies, no
+      liked and no disliked food (the app says «لم يخبرنا بعد», not «لا حساسية»).
+      Reading writes nothing.
 
     Refusals, each with its `code`: 401 `not_authenticated` / `token_not_valid`; 403
     `not_a_trainer` — the caller is not a trainer (an admin included: health data goes
@@ -190,14 +191,18 @@ class TrainerClientPreferencesView(APIView):
                      .prefetch_related('liked_foods', 'disliked_foods').first())
             allergies = (prefs.allergies or '') if prefs is not None else ''
             tags = parse_user_allergies(allergies)
+            liked = food_rows(prefs.liked_foods.all()) if prefs else []
+            disliked = food_rows(prefs.disliked_foods.all()) if prefs else []
             return Response({
                 'client_id': client.pk,
-                'has_preferences': prefs is not None,
+                # Every client has a row from sign-up (users/signals.py), so the row
+                # says nothing: this is whether they have told us anything.
+                'has_preferences': bool(allergies.strip() or liked or disliked),
                 'allergies': allergies,
                 'allergens': sorted(t for t in tags if not t.startswith('free:')),
                 'allergy_terms': sorted(t[5:] for t in tags if t.startswith('free:')),
-                'liked_foods': food_rows(prefs.liked_foods.all()) if prefs else [],
-                'disliked_foods': food_rows(prefs.disliked_foods.all()) if prefs else [],
+                'liked_foods': liked,
+                'disliked_foods': disliked,
             })
         except PASSTHROUGH_EXCEPTIONS:
             raise

@@ -259,6 +259,8 @@ def test_b127_the_marks_cost_no_query_per_row(seeded_catalogue, pair, api):
 
     _preferences(client, allergies="sesame", liked=list(FoodItem.objects.all()[:5]),
                  disliked=list(FoodItem.objects.all()[5:10]))
+    # Warm: a caller's first request pays one-time reads the page size has nothing to do with.
+    assert api(trainer).get(LIST, {"for_client": client.pk}).status_code == 200
     counts = []
     for size in (5, 60):
         with cachalot_disabled(), CaptureQueriesContext(connection) as queries:
@@ -292,6 +294,13 @@ def test_b128_a_client_with_no_preferences_reads_empty_and_nothing_is_written(pa
     from diet.models import UserFoodPreference
 
     trainer, client = pair
+    # Every client gets an empty row at sign-up (users/signals.py): told us nothing.
+    assert UserFoodPreference.objects.filter(user=client).exists()
+    body = api(trainer).get(PREFS.format(id=client.pk)).json()
+    assert (body["has_preferences"], body["allergens"], body["liked_foods"],
+            body["disliked_foods"], body["allergies"]) == (False, [], [], [], "")
+    # And one whose row is gone reads the same, and the read does not make one.
+    UserFoodPreference.objects.filter(user=client).delete()
     response = api(trainer).get(PREFS.format(id=client.pk))
     assert response.status_code == 200, response.content
     body = response.json()
@@ -422,6 +431,7 @@ def test_b129_the_week_defaults_to_saturday_to_friday(pair, api):
 def test_b129_the_week_costs_no_query_per_meal(week, api):
     trainer, client, plan, start, _today, chicken = week
     url, params = WEEK.format(id=client.pk), {"start_date": start.isoformat()}
+    assert api(trainer).get(url, params).status_code == 200     # warm, as above
     with cachalot_disabled(), CaptureQueriesContext(connection) as before:
         assert api(trainer).get(url, params).status_code == 200
     for offset in range(6):
@@ -616,4 +626,4 @@ def test_b130_the_list_costs_no_query_per_meal(foods, make_user, api):
     with cachalot_disabled(), CaptureQueriesContext(connection) as after:
         response = api(trainer).get(SAVED)
     assert len(response.json()["results"]) == 6
-    assert len(after) == len(before), (len(before), len(after))
+    assert len(after) == len(before), [q["sql"][:160] for q in after.captured_queries] + ["----"] + [q["sql"][:160] for q in before.captured_queries]
