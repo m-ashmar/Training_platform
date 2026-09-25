@@ -78,6 +78,12 @@ def coefficient_bytes(img, width: int, height: int) -> int:
     down_max = max(layer[2] for layer in layers) or 1
     total = 0
     for _component, across, down, _table in layers:
+        # Pillow stores the SOF's sampling factors unvalidated: a crafted JPEG can carry
+        # 0 for one component, and dividing by it raised ZeroDivisionError — a 500 on
+        # every image route instead of the decoder's own refusal (the review,
+        # 2026-09-24). Read a zero as 1, as the maxima above are; libjpeg then refuses
+        # the file and each caller answers its unreadable code.
+        across, down = across or 1, down or 1
         # ceil(ceil(side * sampling / max sampling) / 8) blocks, then whole MCUs.
         blocks_across = -(-(-(-width * across // across_max)) // 8)
         blocks_down = -(-(-(-height * down // down_max)) // 8)

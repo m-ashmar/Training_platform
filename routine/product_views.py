@@ -293,7 +293,7 @@ class TrainerProductSubmitView(APIView):
     | 409 | `product_not_submittable` | it is retired, or published with its template unchanged; `status` |
     | 409 | `product_incomplete` | `missing`: any of `title_ar`, `title_en`, `price`, `template`, `template_exercises` |
     | 409 | `program_too_long` | `max_days` (365), `program_days` |
-    | 409 | `preview_covers_program` | `preview_days` is not shorter than the program; `program_days` |
+    | 409 | `preview_covers_program` | `preview_days` is not shorter than the template's week (`cycle_days`), which the program repeats — a preview that long shows every row the buyer would get; `program_days`, `cycle_days` |
     """
     permission_classes = [IsAuthenticated]
 

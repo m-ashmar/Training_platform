@@ -206,7 +206,9 @@ def preview_of(product) -> list[dict]:
     if template is None or not product.preview_days:
         return []
     cycle = template.days or 1
-    days = min(product.preview_days, program_days(template))
+    # Never a whole cycle — that is every distinct row the paid copy holds. `submit`
+    # refuses such a product; this also holds for one published before that rule.
+    days = min(product.preview_days, program_days(template), max(cycle - 1, 0))
     rows = list(template.routinetemplateexercise_set.select_related("exercise")
                 .order_by("day", "order", "id"))
     out = []
@@ -265,8 +267,12 @@ def submit(trainer, product_id) -> RoutineProduct:
         days = program_days(template)
         if days > MAX_PROGRAM_DAYS:
             raise ProgramTooLong(max_days=MAX_PROGRAM_DAYS, program_days=days)
-        if product.preview_days and product.preview_days >= days:
-            raise PreviewCoversProgram(program_days=days)
+        # The program is the template's week REPEATED (`routine_from_template`), so a
+        # preview as long as that week is the whole program, however many weeks it runs:
+        # it must stay shorter than the cycle, not the program (the review, 2026-09-24).
+        cycle = template.days or 1
+        if product.preview_days and product.preview_days >= min(days, cycle):
+            raise PreviewCoversProgram(program_days=days, cycle_days=cycle)
         product.status = ProductStatus.IN_REVIEW
         product.submitted_at = timezone.now()
         product.template_version = template.updated_at
@@ -439,10 +445,15 @@ def buy(product_id, buyer, *, idempotency_key) -> tuple[RoutinePurchase, bool]:
             metadata={"purpose": "routine_product_charge", **common})
         payout = fee = None
         trainer_amount, trainer_currency = Decimal("0.00"), trainer_wallet.currency
+        # The legs after the charge carry NO actor: the ledger serves `actor` on every
+        # row the trainer reads, and the buyer's id there named who bought — the one
+        # thing a sale never tells the trainer (the review, 2026-09-24). The buyer's row
+        # is already locked above (`lock_wallets(buyer.pk, ...)`), which is all
+        # `move_funds_atomic` used the actor for.
         if share > 0:
             if trainer_wallet.currency == buyer_currency:
                 payout = move_funds_atomic(
-                    escrow, trainer_wallet, share, actor_id=buyer.pk, currency=buyer_currency,
+                    escrow, trainer_wallet, share, actor_id=None, currency=buyer_currency,
                     tx_type="transfer", money_type=MoneyType.ROUTINE_PRODUCT,
                     metadata={"purpose": "routine_product_sale", **common})
             else:
@@ -450,12 +461,12 @@ def buy(product_id, buyer, *, idempotency_key) -> tuple[RoutinePurchase, bool]:
                 # exactly `share` leaves escrow and the trainer's figure is derived.
                 _debit, payout = exchange_funds_atomic(
                     escrow, trainer_wallet, share, amount_in=buyer_currency,
-                    actor_id=buyer.pk, money_type=MoneyType.ROUTINE_PRODUCT,
+                    actor_id=None, money_type=MoneyType.ROUTINE_PRODUCT,
                     metadata={"purpose": "routine_product_sale", **common})
             trainer_amount = payout.amount
         if commission > 0:
             fee = move_funds_atomic(
-                escrow, platform, commission, actor_id=buyer.pk, currency=buyer_currency,
+                escrow, platform, commission, actor_id=None, currency=buyer_currency,
                 tx_type="transfer", money_type=MoneyType.ROUTINE_PRODUCT,
                 metadata={"purpose": "routine_product_commission", "rate": str(rate),
                           **common})

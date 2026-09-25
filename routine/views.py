@@ -778,7 +778,11 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         from .weeks import WeekCopyRefused, copy_week, parse_load_factor, parse_week
 
         routine = self.get_object()
-        if routine.created_by_id != request.user.id:
+        # The author AND a trainer: a bought copy of a routine product is `created_by`
+        # its buyer (a client), and authorship alone let the buyer rewrite it (the
+        # review, 2026-09-24).
+        if (routine.created_by_id != request.user.id
+                or not getattr(request.user, 'is_trainer', False)):
             return Response({'error': _('Only the trainer who wrote this routine can change it.'),
                              'code': 'not_routine_owner'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data if isinstance(request.data, dict) else {}
@@ -1260,12 +1264,17 @@ class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         Restrict to routines the caller is assigned to or created (admins see all).
         Previously unscoped: IsAdminOrOwnerOrReadOnly returns True for all reads, so
         any authenticated user could list every routine's exercise composition.
+        A bought copy of a routine product is `created_by` its buyer, so authorship
+        does not grant reading it: only the assignment does, and a refund unassigns the
+        buyer (`routine/products.py refund`) — the copy is revoked, not left readable row
+        by row (the review, 2026-09-24).
         """
         user = self.request.user
         if getattr(user, 'is_admin', False):
             return self.queryset
         return self.queryset.filter(
-            Q(routine__assigned_to=user) | Q(routine__created_by=user)
+            Q(routine__assigned_to=user)
+            | Q(routine__created_by=user, routine__purchase__isnull=True)
         ).distinct()
 
 
