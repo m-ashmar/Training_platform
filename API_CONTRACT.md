@@ -663,6 +663,69 @@ none it can stand behind.
 | `DELETE, POST, PUT` | `/api/diet/v1/trainer/meals/{meal_id}/` | auth, HasDietAccess | `TrainerMealView` |
 | `GET` | `/api/diet/v1/trainer/templates/` | auth, HasDietAccess | `TrainerTemplatesView` |
 
+### Trainer nutrition plans (BACKEND_BUGS B-131..B-134)
+
+What wiring the `14-trainer-nutrition` screens found. The views' docstrings
+(`diet/views.py TrainerDietPlanView`, `TrainerMealView`; `diet/trainer_plan_views.py`)
+are the full contract.
+
+**A plan is sent with its meals (B-132).** A trainer plan replaces every active plan of
+the client whose dates overlap it, his automatic plan included. `POST
+trainer/diet-plans/` did that at once, before any meal existed, and the meals came in
+later requests, so a refused meal list or a dropped phone left the client an empty
+active plan. Now:
+
+- `POST trainer/diet-plans/` WITH `meals` (a list of at most 500 `trainer/meals/` items
+  without `diet_plan_id`) SENDS the plan whole: every meal is checked first, and one
+  refused (with `index`) writes and replaces nothing. 201 `{message,
+  superseded_plan_ids, will_replace_plan_ids: [], diet_plan}`.
+- WITHOUT `meals` (the call as it always was) it makes a DRAFT: nothing is replaced,
+  the client does not see it (`my/diet-plans/` leaves it out, `nutrition/plan/{id}/` and
+  `plan/{id}/meals-with-ingredients/` answer the client 404), and the first successful
+  `trainer/meals/` call on it (one meal or a list) sends it in the same transaction.
+  200 `{message, superseded_plan_ids: [], will_replace_plan_ids, diet_plan}`;
+  `will_replace_plan_ids` are the plans sending it would replace as things stand.
+- `trainer/meals/` answers gain `published: [{diet_plan_id, superseded_plan_ids}]`, the
+  plans that call sent (`[]` otherwise), and every refusal inside a list now carries
+  `index` (the service's refusals did not).
+- The client's own generation replaces only active plans, so it does not touch a draft;
+  the draft, once sent, replaces whatever the client then follows.
+
+**Days (B-133).** `duration_days` (1-364) beside `duration_weeks` on the create; days win
+when both are sent; out of range or not a whole number is 400 `bad_duration`. The plan's
+last day is `start_date + days - 1`, and its stored weeks are the days rounded up.
+
+**The rows (B-133, B-134).** `diet_plan` on the create and each row of `GET
+trainer/diet-plans/?client_id=` gain `status` (`draft`, `scheduled`, `active`, `ended`,
+`superseded` — why it is or is not followed), `duration_days`, `duration_weeks`; the
+rows also `adherence_percent` (the platform's adherence figure from the meals the client
+ticked, the one the AI coach quotes; null for a draft, a plan not started, or nothing
+ticked). The list gains `adherence_withheld`: `coaching_frozen` / `coaching_unpaid` /
+`coaching_ended` while the coaching cannot be used (every `adherence_percent` is then
+null), else null. Rows are newest start first, ties by id.
+
+**The review (B-131).** Per day, the plan's calories and macros against its target,
+with each miss judged by the engine's own test and bands (`tolerance_percent`: calories
+10, protein 15, carbs 20, fat 20, from `diet/planner/policy.py`), the averages over the
+days that hold meals, and the allergen and dislike verdict against the client's own
+preferences. For a saved plan you wrote, or for the plan on the phone before it is sent
+(nothing is written). Health data: the client's approved trainer only — 403
+`not_a_trainer` to anyone else (admins included), `not_assigned_client`,
+`not_plan_owner`, `plan_superseded`, and `coaching_frozen` / `coaching_unpaid` /
+`coaching_ended` (with `client_id`) while the coaching cannot be used. Identical on every
+build.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `POST` | `/api/diet/v1/trainer/diet-plans/review/` | auth (trainer), HasDietAccess | `TrainerDraftPlanReviewView` |
+| `GET` | `/api/diet/v1/trainer/diet-plans/{plan_id}/review/` | auth (trainer), HasDietAccess | `TrainerPlanReviewView` |
+
+New codes: `bad_meals` (400: `meals` is not a non-empty list, or an item is not an
+object). Reused with their meaning: `bad_duration` (now also `duration_days`),
+`batch_too_large` (with `limit`), `duplicate_meal` and the meal refusals (with `index`),
+`not_a_trainer`, `not_assigned_client`, `not_plan_owner`, `plan_superseded`,
+`coaching_frozen`, `coaching_unpaid`, `coaching_ended`.
+
 ### Home (server-driven)
 
 The screen the app opens on, and the fourth layer of the design canvas's build guide.

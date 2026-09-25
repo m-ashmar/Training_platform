@@ -5425,3 +5425,32 @@ msgstr "اكتب الرقم الظاهر على حاسوبك."
 #: admin_dashboard/console_login.py
 msgid "That is not the number your computer shows."
 msgstr "هذا ليس الرقم الظاهر على حاسوبك."
+
+#: diet/trainer_services.py
+#, python-format
+msgid "duration_days must be a whole number from 1 to %(max)d"
+msgstr "يجب أن تكون duration_days عدداً صحيحاً من 1 إلى %(max)d"
+
+#: diet/trainer_plans.py
+msgid "meals must be a list of meals"
+msgstr "يجب أن تكون meals قائمة وجبات"
+
+#: diet/views.py
+msgid "Plan sent to the client"
+msgstr "أُرسلت الخطة إلى المتدرب"
+
+#: diet/views.py
+msgid "Plan saved. It reaches the client with its first meals."
+msgstr "حُفظت الخطة. تصل إلى المتدرب مع أول وجباتها."
+
+#: diet/trainer_plan_views.py
+msgid "This client's coaching is paused or over, so their data is not shown."
+msgstr "التدريب مع هذا المتدرب متوقف أو منتهٍ، لذلك لا تظهر بياناته."
+
+#: diet/trainer_plan_views.py
+msgid "Only the client's trainer can review a plan"
+msgstr "مراجعة الخطة لمدرب المتدرب فقط"
+
+#: diet/trainer_plan_views.py
+msgid "client_id, start_date and meals are required"
+msgstr "الحقول client_id وstart_date وmeals مطلوبة"

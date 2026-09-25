@@ -473,7 +473,8 @@ def test_b131_the_review_of_a_plan_not_yet_sent(make_user, api, foods):
     plans, meals = DietPlan.objects.count(), Meal.objects.count()
     body = _body(client, today, duration_days=2, daily_calories=2400, meals=[
         _meal(today, "Lunch", (foods["base"], 600), (foods["peanut"], 30)),
-        _meal(today + timedelta(days=1), "Lunch", (foods["base"], 1200))])
+        _meal(today + timedelta(days=1), "Lunch", (foods["base"], 600)),
+        _meal(today + timedelta(days=1), "Dinner", (foods["base"], 600))])
     body.pop("template_id")                    # not needed to review
 
     review = api(trainer).post(DRAFT_REVIEW, body, content_type=JSON)
@@ -511,8 +512,9 @@ def test_b131_only_the_approved_trainer_reads_it(make_user, api, foods):
     refused = s.post(DRAFT_REVIEW, draft, content_type=JSON)
     assert (refused.status_code, refused.json()["code"]) == (403, "not_assigned_client")
 
-    for who in (client, make_user("tp_admin", user_type="admin")):
-        _grant_diet_access(who)
+    admin = make_user("tp_admin", user_type="admin")
+    _grant_diet_access(admin)
+    for who in (client, admin):
         for resp in (api(who).get(_review(plan_id)),
                      api(who).post(DRAFT_REVIEW, draft, content_type=JSON)):
             assert (resp.status_code, resp.json()["code"]) == (403, "not_a_trainer")
@@ -552,3 +554,22 @@ def test_b131_b134_a_frozen_coaching_withholds_the_clients_data(make_user, api, 
     listed = t.get(f"{CREATE}?client_id={client.id}").json()
     assert listed["adherence_withheld"] == "coaching_frozen"
     assert all(row["adherence_percent"] is None for row in listed["results"])
+
+
+def test_b131_the_review_views_name_every_code_they_answer():
+    """The docstring is the app's contract (CLAUDE.md), and the gate that holds it
+    (`test_every_code_a_view_answers_is_in_its_docstring`) reads `diet/views.py` only."""
+    import inspect
+    import re
+
+    from diet import trainer_plan_views
+    from tests.test_owner_0924_codes_diet import _documented
+
+    helpers = inspect.getsource(trainer_plan_views._not_a_trainer)
+    for view in (trainer_plan_views.TrainerPlanReviewView,
+                 trainer_plan_views.TrainerDraftPlanReviewView):
+        source = inspect.getsource(view) + helpers
+        codes = set(re.findall(r"""["']code["']:\s*["']([a-z_]+)["']""", source))
+        codes |= {"coaching_frozen", "coaching_unpaid", "coaching_ended"}
+        doc = _documented(view)
+        assert not [c for c in sorted(codes) if f"`{c}`" not in doc], view.__name__

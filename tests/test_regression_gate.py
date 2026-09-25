@@ -4626,9 +4626,19 @@ def test_a_trainer_can_build_a_plan_for_a_client_who_already_has_one(seeded_cata
     _out, generated = generate_and_save(client_user, duration_days=2, seed_salt="trainer")
     assert generated.is_active
 
+    # Deliberate contract change (BACKEND_BUGS B-132, P1, 2026-09-24): a create WITHOUT
+    # meals is now a draft that retires nothing until its first meals land, because
+    # retiring the client's plan before any meal existed left him an empty one. The plan
+    # is sent here WITH a meal — the create that retires and replaces — so every
+    # assertion below still holds the rule it was written for. The two-step path is
+    # pinned in tests/test_trainer_plans_0924.py.
+    from diet.models import FoodItem as _Food
+    _rice = _Food.objects.get(name="White Rice (Cooked)")
     r = t_api.post("/api/diet/v1/trainer/diet-plans/",
                    {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 2,
-                    "template_id": _a_template().id, "start_date": str(date.today())},
+                    "template_id": _a_template().id, "start_date": str(date.today()),
+                    "meals": [{"meal_type": "Breakfast", "target_date": str(date.today()),
+                               "food_items": [{"food_id": _rice.id, "quantity": 150}]}]},
                    content_type="application/json")
     assert r.status_code in (200, 201), r.content
     plan = DietPlan.objects.filter(user=client_user, created_by=trainer).first()
@@ -5095,9 +5105,17 @@ def test_a_new_trainer_plan_says_what_it_replaced(seeded_catalogue, make_user):
     _out, generated = generate_and_save(client_user, duration_days=3, seed_salt="sup")
     assert generated.is_active
 
+    # Deliberate contract change (BACKEND_BUGS B-132, P1, 2026-09-24): a create WITHOUT
+    # meals is a draft and retires nothing yet (its first meals do, and that answer's
+    # `published` names what they replaced). Sent WITH its meals, the create is the call
+    # that replaces, so it is the one that must say what it replaced — as asserted below.
+    from diet.models import FoodItem as _Food
+    _rice = _Food.objects.get(name="White Rice (Cooked)")
     r = t_api.post("/api/diet/v1/trainer/diet-plans/",
                    {"client_id": client_user.id, "goal": "Maintain", "duration_weeks": 1,
-                    "template_id": _a_template().id, "start_date": str(date.today())},
+                    "template_id": _a_template().id, "start_date": str(date.today()),
+                    "meals": [{"meal_type": "Lunch", "target_date": str(date.today()),
+                               "food_items": [{"food_id": _rice.id, "quantity": 150}]}]},
                    content_type="application/json")
     assert r.status_code in (200, 201), r.content
     assert generated.id in r.json()["superseded_plan_ids"]
@@ -8117,6 +8135,14 @@ def test_a_trainer_cannot_write_to_a_plan_the_client_no_longer_follows(
     plan = service.create_diet_plan(client_user, template, _tz.localdate(),
                                     duration_weeks=4)
     food = FoodItem.objects.filter(needs_review=False).first()
+    # Deliberate contract change (BACKEND_BUGS B-132, P1, 2026-09-24): the create is a
+    # draft until its first meal SENDS it; a draft is nobody's plan yet, so the client's
+    # generation leaves it alone. The plan is sent first, so it is the followed plan the
+    # client's generation then retires — the case this test protects.
+    service.add_meal_to_plan(plan, "Lunch", _tz.localdate(),
+                             [{"food_id": food.id, "quantity": 100}])
+    plan.refresh_from_db()
+    assert plan.is_active
 
     # The client generates their own, which supersedes the trainer's.
     generate_and_save(client_user, duration_days=1, seed_salt="gate-retired")
