@@ -279,6 +279,12 @@ register(PersonalDataSource(label="meals", model="diet.Meal",
                             user_field="diet_plan__user"))
 register(PersonalDataSource(label="meal_components", model="diet.MealComponent",
                             user_field="meal__diet_plan__user"))
+# A trainer's saved meals (BACKEND_BUGS B-130): the trainer's own library, holding no
+# client's data. Exported to that trainer and deleted with their account.
+register(PersonalDataSource(label="trainer_saved_meals", model="diet.TrainerSavedMeal",
+                            user_field="trainer"))
+register(PersonalDataSource(label="trainer_saved_meal_items", model="diet.TrainerSavedMealItem",
+                            user_field="saved_meal__trainer"))
 
 register(PersonalDataSource(label="ai_usage_cost", model="ai_assistant.UsageCost", user_field="user", on_erase="keep"))
 register(PersonalDataSource(label="ai_insights", model="ai_assistant.UserInsight", user_field="user"))

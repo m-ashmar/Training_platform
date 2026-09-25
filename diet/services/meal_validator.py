@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from typing import Iterable, List, Set, Tuple
 
 from ..allergens import (
-    infer_allergens,
+    food_allergen_tags,
+    food_text,
     label,
     mentions_term,
     parse_user_allergies,
@@ -95,21 +96,23 @@ class AllergenChecker:
         # food, opposite outcome depending on which app made the request.
         name = getattr(food, "name_en", None) or getattr(food, "name", "") or ""
         source = getattr(food, "allergen_source", "unknown") or "unknown"
-        stored = set(getattr(food, "allergens", None) or [])
-        text = f"{name} {getattr(food, 'ingredients_text', '') or ''}"
+        text = food_text(food)
 
         if not self.active:
             return IngredientVerdict(name, SAFE, [], source)
 
-        # 1. Curated tags are authoritative in both directions.
-        matched = sorted(stored & self.canonical)
+        # 1. What the food carries — its curated tags (authoritative), plus what its name
+        #    and ingredients imply, which catches rows whose tags are missing or stale.
+        #    ONE function, `food_allergen_tags`, which the catalogue row's `allergens`
+        #    and the trainer picker's marks read too (BACKEND_BUGS B-127): what a row
+        #    says a food contains is exactly what this check refuses. The same two
+        #    sources as before, unchanged.
+        matched = sorted(food_allergen_tags(food) & self.canonical)
         # 2. Free-text terms the vocabulary did not recognise are still matched on text,
         #    by WORD and singular — not by substring. `t in text.lower()` let English
         #    morphology decide who was protected: "strawberry" was served Strawberries
         #    and "bananas" was served Banana, each with the plan reporting `is_safe`.
         matched += sorted(t for t in self.free_terms if mentions_term(t, text))
-        # 3. Name/ingredient inference catches rows whose tags are missing or stale.
-        matched += sorted(infer_allergens(text) & self.canonical - set(matched))
 
         if matched:
             return IngredientVerdict(name, VIOLATION, sorted(set(matched)), source)

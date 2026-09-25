@@ -17,7 +17,7 @@ is free. After the freeze, changes here are additive or go behind `v2/`.
 
 from django.urls import path
 
-from . import views
+from . import saved_meals, trainer_reads, views
 
 app_name = 'diet'
 
@@ -46,6 +46,23 @@ urlpatterns = [
     path('v1/trainer/diet-plans/', views.TrainerDietPlanView.as_view(), name='v1_trainer_diet_plans'),
     path('v1/trainer/meals/', views.TrainerMealView.as_view(), name='v1_trainer_meals'),
     path('v1/trainer/meals/<int:meal_id>/', views.TrainerMealView.as_view(), name='v1_trainer_meal_detail'),
+    # One approved client's nutrition, as their trainer reads it (BACKEND_BUGS B-128,
+    # B-129; diet/trainer_reads.py), and the trainer's own saved meals (B-130;
+    # diet/saved_meals.py).
+    path('v1/trainer/clients/<int:client_id>/preferences/',
+         trainer_reads.TrainerClientPreferencesView.as_view(),
+         name='v1_trainer_client_preferences'),
+    path('v1/trainer/clients/<int:client_id>/adherence/',
+         trainer_reads.TrainerClientAdherenceView.as_view(),
+         name='v1_trainer_client_adherence'),
+    path('v1/trainer/clients/<int:client_id>/automatic-plan/',
+         trainer_reads.TrainerClientAutomaticPlanView.as_view(),
+         name='v1_trainer_client_automatic_plan'),
+    path('v1/trainer/saved-meals/', saved_meals.TrainerSavedMealListView.as_view(),
+         name='v1_trainer_saved_meals'),
+    path('v1/trainer/saved-meals/<int:saved_meal_id>/',
+         saved_meals.TrainerSavedMealDetailView.as_view(),
+         name='v1_trainer_saved_meal_detail'),
 
     # --- Client progress ---
     path('v1/client/progress/', views.ClientProgressView.as_view(), name='v1_client_progress'),
