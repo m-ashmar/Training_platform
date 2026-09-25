@@ -211,9 +211,13 @@ is locked (spec §8); the numbers above are the defaults.
    hides them on `ios` and on requests without a channel) — confirm `play`. (n) A request
    to a trainer who set no price is quoted at 0 and stays free when approved (it used to
    charge the rate set later). (o) Height and weight are not on a pending request (the
-   TrainerRequestDetail design shows them before acceptance). (p) Opus asks: should a
-   first place need a minimum number of participants (a verified trainer with one client
-   can hand them the badge), and has the AI provider's terms for Syria been checked?
+   TrainerRequestDetail design shows them before acceptance). (p) DECIDED by the owner
+   (2026-09-24, relayed by the app session that built it, merged `7831839`): the Challenge
+   Winner badge needs at least 5 participants in the standing with logged progress
+   (`social/standing.py MIN_PARTICIPANTS_FOR_WINNER`, counted at the settlement and
+   recorded on `Challenge.settled_active_participants`; below 5 the challenge settles
+   with no winner). The AI provider question (OpenAI not serving Syria, a possible move to
+   Gemini) is POSTPONED by the owner: nothing was built.
 
 ## Traps this branch cost a session to find
 
