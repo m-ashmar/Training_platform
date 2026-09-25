@@ -276,10 +276,42 @@ class FoodListView(APIView):
     a vegetarian flag, 2026-09-23) and no sugar tag, and a tag is never guessed from a
     name.
 
+    `allergens` (BACKEND_BUGS B-127) — the tags of the 14-tag vocabulary this food
+    carries, sorted: `peanut`, `tree_nut`, `milk`, `egg`, `fish`, `shellfish`,
+    `mollusc`, `soy`, `gluten`, `sesame`, `mustard`, `celery`, `lupin`, `sulphite`
+    (`diet/allergens.py`; the app draws the words). Its curated tags plus what its name
+    and ingredients imply — `food_allergen_tags`, the one function the allergen check
+    matches with, so a client who declared a tag on this list is refused this food by
+    the trainer's meal write (`declared_allergen`) and never served it by the planner.
+    `allergen_source` — how far to trust the list: `verified` (curated), `inferred`
+    (read from the name, a hint) or `unknown` (nobody has looked; an empty list then
+    means "not known", never "free of allergens").
+
+    The trainer's picker for one client (TrainerFoodPicker, B-127): `for_client=<id>` —
+    an approved client of the calling trainer — adds to every row `for_client`:
+    `{excluded, excluded_allergens, excluded_terms, allergen_verdict, liked, disliked}`.
+    `excluded` is true exactly when the trainer's meal write would refuse this food for
+    this client (`declared_allergen`); `excluded_allergens` the client's declared tags it
+    carries, `excluded_terms` the client's own words for allergies the vocabulary does
+    not know ("kiwi") that its name names; `allergen_verdict` is `violation`, `safe` or
+    `unverified` (nothing matched but the food's allergen data is not curated: the plan
+    check reports it for review, the write accepts it); `liked` / `disliked` from the
+    client's preferences. With it, `hide_conflicts=true` drops every excluded or
+    disliked row and `liked_only=true` keeps only the client's liked foods; `count` and
+    the pages follow. The marks cost the same few queries whatever the page size.
+
     Refusals: 400 `validation_error` (a bad `page`/`page_size`, with `field_errors`),
     400 `bad_category` / `bad_search` (a NUL character in that parameter; it answered the
-    status default `bad_request` until the owner's decision of 2026-09-24), 403
-    `no_entitlement` / `feature_not_in_plan`, 500 `server_error`.
+    status default `bad_request` until the owner's decision of 2026-09-24), 400
+    `bad_for_client` (not a positive whole number), 400 `bad_hide_conflicts` /
+    `bad_liked_only` (not true or false), 400 `missing_fields` (`fields: ["for_client"]`
+    — `hide_conflicts` or `liked_only` without it), 403 `not_a_trainer` (`for_client`
+    from a caller who is not a trainer), 403 `not_your_client` (`for_client` names no
+    approved client of yours, or no client at all), 403 `coaching_frozen` /
+    `coaching_unpaid` / `coaching_ended` with `trainer_id` (`for_client` while that
+    coaching may not be used — `users/coaching.py`; without `for_client` the catalogue
+    answers as always), 403 `no_entitlement` / `feature_not_in_plan`, 500 `server_error`.
+    Identical on every build.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
@@ -310,7 +342,12 @@ class FoodListView(APIView):
             
             if search_query:
                 queryset = queryset.filter(name__icontains=search_query)
-            
+
+            # One client's picker (BACKEND_BUGS B-127), for their approved trainer only.
+            marks, refusal, queryset = self._for_client(request, queryset)
+            if refusal is not None:
+                return refusal
+
             # By the ENGLISH name, so a page boundary is the same row whatever language
             # the client asked in. `order_by('name')` is rewritten to the active
             # language's column, which reorders the whole catalogue and makes paging
@@ -326,9 +363,11 @@ class FoodListView(APIView):
             food_items = queryset[start_index:end_index]
             
             # Serialize results
+            from .allergens import food_allergen_tags
+
             results = []
             for food in food_items:
-                results.append({
+                row = {
                     'id': food.id,
                     **food_names(food),
                     'calories': food.calories,
@@ -349,8 +388,14 @@ class FoodListView(APIView):
                     'fat_per_gram': food.fat_per_gram,
                     # From columns already on the row: no query per food.
                     'tags': food_tags(food),
-                })
-            
+                    # What the allergen check matches, from the row's own columns.
+                    'allergens': sorted(food_allergen_tags(food)),
+                    'allergen_source': food.allergen_source,
+                }
+                if marks is not None:
+                    row['for_client'] = marks.mark(food)
+                results.append(row)
+
             # Calculate pagination info
             total_pages = (total_count + page_size - 1) // page_size
             has_next = page < total_pages
@@ -398,6 +443,36 @@ class FoodListView(APIView):
                 {"error": _("Failed to retrieve food items"), "code": "server_error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @staticmethod
+    def _for_client(request, queryset):
+        """`(marks, refusal, queryset)` for `for_client` / `hide_conflicts` /
+        `liked_only`. `marks` is None without `for_client`; `refusal` is a Response to
+        answer instead. Raises the coaching refusal (see `diet/trainer_reads.py`)."""
+        from .trainer_reads import ClientFoodMarks, approved_client
+
+        params = request.GET
+        raw = params.get('for_client')
+        flags = {name: params.get(name) for name in ('hide_conflicts', 'liked_only')
+                 if params.get(name) not in (None, '')}
+        if raw in (None, ''):
+            if flags:
+                return None, Response(
+                    {"error": _("for_client is required with hide_conflicts or liked_only"),
+                     "code": "missing_fields", "fields": ["for_client"]},
+                    status=status.HTTP_400_BAD_REQUEST), queryset
+            return None, None, queryset
+        client_id = _id(raw, 'for_client')
+        wanted = {name: _as_bool(value, name) for name, value in flags.items()}
+        client, refusal = approved_client(request, client_id)
+        if refusal is not None:
+            return None, refusal, queryset
+        marks = ClientFoodMarks.for_client(client)
+        if wanted.get('liked_only'):
+            queryset = queryset.filter(id__in=marks.liked_ids)
+        if wanted.get('hide_conflicts'):
+            queryset = queryset.exclude(id__in=marks.conflicting_ids(queryset))
+        return marks, None, queryset
 
 class FoodCategoryListView(APIView):
     """

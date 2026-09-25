@@ -227,6 +227,32 @@ def infer_allergens(*texts: str) -> Set[str]:
     return found
 
 
+def food_text(food) -> str:
+    """The text a food's allergens are read from: its ENGLISH name and its ingredients.
+
+    English, whatever language the request activated: `FoodItem.name` is a
+    modeltranslation field and the markers above are English words, so under an Arabic
+    request the Arabic name matched nothing (see `AllergenChecker.check_food`).
+    """
+    name = getattr(food, "name_en", None) or getattr(food, "name", "") or ""
+    return f"{name} {getattr(food, 'ingredients_text', '') or ''}"
+
+
+def food_allergen_tags(food) -> Set[str]:
+    """Every tag of the vocabulary this food carries: its stored tags, plus what its name
+    and ingredients imply.
+
+    THE answer to "what is in this food", for every reader. The allergen checker
+    (`diet/services/meal_validator.py AllergenChecker.check_food`) matches a client's
+    declared allergens against exactly this set — so the plan generator's filter, the
+    trainer write's `declared_allergen` refusal, the catalogue row's `allergens` and the
+    trainer picker's per-client marks (BACKEND_BUGS B-127) cannot disagree. Stored tags
+    outside the vocabulary are dropped: `validate_tags` refuses them on write.
+    """
+    stored = {t for t in (getattr(food, "allergens", None) or []) if t in ALLERGENS}
+    return stored | infer_allergens(food_text(food))
+
+
 def parse_user_allergies(raw: str | None) -> Set[str]:
     """Turn a free-text allergy list into canonical tags.
 

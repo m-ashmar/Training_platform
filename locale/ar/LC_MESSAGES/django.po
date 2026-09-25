@@ -5454,3 +5454,46 @@ msgstr "مراجعة الخطة لمدرب المتدرب فقط"
 #: diet/trainer_plan_views.py
 msgid "client_id, start_date and meals are required"
 msgstr "الحقول client_id وstart_date وmeals مطلوبة"
+
+#: diet/views.py
+msgid "for_client is required with hide_conflicts or liked_only"
+msgstr "لا بد من for_client مع hide_conflicts أو liked_only"
+
+#: diet/saved_meals.py
+msgid "Only trainers keep saved meals."
+msgstr "الوجبات المحفوظة للمدربين فقط."
+
+#: diet/saved_meals.py
+msgid "name must be text"
+msgstr "يجب أن يكون الاسم نصاً"
+
+#: diet/saved_meals.py
+msgid "A saved meal needs a name."
+msgstr "الوجبة المحفوظة تحتاج إلى اسم."
+
+#: diet/saved_meals.py
+#, python-format
+msgid "name must be at most %(n)d characters"
+msgstr "يجب ألّا يزيد الاسم على %(n)d حرفاً"
+
+#: diet/saved_meals.py
+msgid "meal_type must be Breakfast, Lunch, Dinner or Snack"
+msgstr "يجب أن يكون meal_type واحداً من Breakfast أو Lunch أو Dinner أو Snack"
+
+#: diet/saved_meals.py
+#, python-format
+msgid "A saved meal holds at most %(n)d foods"
+msgstr "تتّسع الوجبة المحفوظة لـ %(n)d مكوّناً على الأكثر"
+
+#: diet/saved_meals.py
+#, python-format
+msgid "You keep %(n)d saved meals already. Delete one first."
+msgstr "لديك %(n)d وجبة محفوظة. احذف واحدة أولاً."
+
+#: diet/saved_meals.py
+msgid "No such saved meal."
+msgstr "لا توجد وجبة محفوظة بهذا المعرّف."
+
+#: diet/saved_meals.py
+msgid "name and food_items are required"
+msgstr "الاسم وfood_items مطلوبان"

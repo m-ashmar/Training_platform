@@ -1561,3 +1561,8 @@ class RecipeIngredient(models.Model):
     def __str__(self):
         return f"{self.recipe_id}: {self.food.name} {self.grams:g}g"
 
+
+
+# A trainer's saved meals (BACKEND_BUGS B-130) live in their own module and are
+# registered here, in the `diet` app, beside the foods they are made of.
+from .saved_meal_models import TrainerSavedMeal, TrainerSavedMealItem  # noqa: E402,F401

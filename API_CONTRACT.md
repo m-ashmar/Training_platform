@@ -662,6 +662,11 @@ none it can stand behind.
 | `DELETE, POST, PUT` | `/api/diet/v1/trainer/meals/` | auth, HasDietAccess | `TrainerMealView` |
 | `DELETE, POST, PUT` | `/api/diet/v1/trainer/meals/{meal_id}/` | auth, HasDietAccess | `TrainerMealView` |
 | `GET` | `/api/diet/v1/trainer/templates/` | auth, HasDietAccess | `TrainerTemplatesView` |
+| `GET` | `/api/diet/v1/trainer/clients/{client_id}/preferences/` | auth, HasDietAccess, **approved trainer** | `TrainerClientPreferencesView` |
+| `GET` | `/api/diet/v1/trainer/clients/{client_id}/adherence/` | auth, HasDietAccess, **approved trainer** | `TrainerClientAdherenceView` |
+| `GET` | `/api/diet/v1/trainer/clients/{client_id}/automatic-plan/` | auth, HasDietAccess, **approved trainer** | `TrainerClientAutomaticPlanView` |
+| `GET, POST` | `/api/diet/v1/trainer/saved-meals/` | auth, HasDietAccess, trainer | `TrainerSavedMealListView` |
+| `DELETE, GET, PATCH, PUT` | `/api/diet/v1/trainer/saved-meals/{saved_meal_id}/` | auth, HasDietAccess, trainer (own) | `TrainerSavedMealDetailView` |
 
 ### Trainer nutrition plans (BACKEND_BUGS B-131..B-134)
 
@@ -1995,6 +2000,58 @@ contract.
     the existing ones, whose order does not change.
   - **No vegetarian tag, and none is coming**: the owner decided against a vegetarian
     flag (2026-09-23). The app drops «نباتي».
+
+**What wiring the trainer nutrition screens found: the read side** (BACKEND_BUGS
+B-127..B-130, 2026-09-25; screens/14-trainer-nutrition). Additive under §6: two keys on
+every catalogue row, one optional query parameter set, five new routes, one new table
+(`diet/0078`); no route, key or `code` changed. Prefix `/api/diet/v1/`. The views'
+docstrings carry the full contract (`diet/views.py FoodListView`,
+`diet/trainer_reads.py`, `diet/saved_meals.py`).
+
+- **Who may read a client.** `trainer/clients/{client_id}/…` and the catalogue's
+  `for_client` answer the client's APPROVED trainer only (the approved relation;
+  an admin is not a trainer): 403 `not_a_trainer`, then 403 `not_your_client` (no
+  approved coaching, or no such client — one answer), then, like the chat, 403
+  `coaching_frozen` / `coaching_unpaid` / `coaching_ended` with `trainer_id` while
+  `users/coaching.py` says the coaching may not be used. A trainer not yet verified:
+  403 `no_entitlement` (`HasDietAccess`, as on every diet trainer route).
+- **A food names its allergens** (B-127). `food/list/` rows gain `allergens` — the
+  14-tag vocabulary of `diet/allergens.py`, sorted — and `allergen_source`
+  (`verified` | `inferred` | `unknown`; an empty list on `unknown` is "not known").
+  One function (`food_allergen_tags`) decides it for the row, the planner's filter and
+  the trainer write's `declared_allergen` refusal.
+- **The picker for one client** (B-127). `food/list/?for_client=<id>` adds `for_client`
+  to each row: `{excluded, excluded_allergens, excluded_terms, allergen_verdict,
+  liked, disliked}` — `excluded` exactly when the trainer's meal write would refuse the
+  food for that client. `&hide_conflicts=true` drops excluded and disliked rows,
+  `&liked_only=true` keeps the liked ones; `count` follows. 400 `bad_for_client`,
+  `bad_hide_conflicts`, `bad_liked_only`, `missing_fields` (`fields: ["for_client"]`,
+  a flag without it).
+- **The client's tastes** (B-128). `GET trainer/clients/{client_id}/preferences/` —
+  `{client_id, has_preferences, allergies, allergens, allergy_terms, liked_foods,
+  disliked_foods}`: the client's own text, its tags, the words the vocabulary does not
+  know, and `{id, name, name_ar, image_url}` food rows. Reading writes nothing.
+- **The client's week** (B-129). `GET trainer/clients/{client_id}/adherence/
+  ?start_date=` — seven `days` (Saturday to Friday by default) with the client's own
+  progress figures (ticked meals, calories and protein eaten and their targets, the
+  meal kinds with nothing ticked), a `summary` over the closed days
+  (`adherence_percent`, `average_protein_gap_g`, `missed_meals: [{meal_type, days}]`)
+  and `current_plan` (the plan governing today, `generation_strategy`, `is_yours`,
+  targets). 400 `bad_date`.
+- **The automatic plan to start from** (B-129). `GET trainer/clients/{client_id}/
+  automatic-plan/?from=&to=` — the client's newest active `ENGINE` plan that has
+  started (`covers_today` says whether it is today's), with every meal and component
+  (`food_id`, `quantity_grams` — what `trainer/meals/` takes back as `food_items`); at
+  most 60 meals, `truncated`. `plan: null` when there is none. 400 `bad_date`.
+- **Saved meals follow the trainer** (B-130). `GET, POST trainer/saved-meals/` and
+  `GET, PUT, PATCH, DELETE trainer/saved-meals/{saved_meal_id}/` — the calling trainer's
+  own library, `{id, name, meal_type, items, totals, allergens, created_at,
+  updated_at}`; a write takes `{name, food_items: [{food_id, quantity}], meal_type?}`,
+  validated by the meal write's own code (`no_food_items`, `bad_food_items`,
+  `bad_food_item`, `bad_quantity`, `duplicate_food`, `unknown_food`) plus
+  `missing_fields`, `bad_name`, `bad_meal_type`, `too_many_food_items` (over 30), 409
+  `saved_meals_limit` (300 kept), 404 `not_found` (none, or another trainer's), 403
+  `not_a_trainer`. Exported with and erased with the trainer's account.
 
 **What wiring the progress screens found** (BACKEND_BUGS B-066..B-073, 2026-09-24).
 Additive under §6: new fields and new codes; no code a view named changed. Two values
