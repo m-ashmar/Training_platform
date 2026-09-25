@@ -48,6 +48,12 @@ Two more that fail silently (found building `payouts`, 2026-09-24):
   get_form` removes a declared form field whose name is in `readonly_fields`, so the
   POSTed value never reaches `cleaned_data` and the page still answers 302. Name console
   inputs apart from the model's columns (`transfer_id`, not `shamcash_transaction_id`).
+- **A `DietPlan` can be a trainer's unsent draft** (`is_draft`, BACKEND_BUGS B-132,
+  2026-09-25): inactive, empty, and not the client's yet. A read that filters
+  `is_active=True` or goes through `DietPlan.governing` already skips it; a CLIENT read
+  that lists a user's plans or fetches one by id must exclude `is_draft=True` itself
+  (`MyDietPlansView` and the two plan reads do). A write that retires plans must
+  filter `is_active=True`, never "not mine", or it will retire a draft nobody follows.
 
 ## Working in a worktree
 

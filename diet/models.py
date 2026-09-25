@@ -731,6 +731,15 @@ class DietPlan(RowValidationMixin, models.Model):
         help_text="Trainer who created this plan"
     )
     is_active = models.BooleanField(default=True, help_text="Whether this plan is currently active")
+    #: A trainer's plan that has not been SENT yet (BACKEND_BUGS B-132). Creating a plan
+    #: retired the client's plan (his automatic one included) before a single meal
+    #: existed, and the meals came in later requests, so a refused list or a dropped phone
+    #: left him an empty active plan. A create WITHOUT meals now makes a draft: inactive,
+    #: retiring nothing, never shown to the client. Its first meals send it, in the same
+    #: transaction that writes them (`TrainerDietPlanService.add_meal_to_plan`), so a
+    #: draft never holds a meal. Every engine plan, and every plan older than this
+    #: column, is False.
+    is_draft = models.BooleanField(default=False)
     #: NOT NULL. `ordering = ['-created_at', '-id']` puts NULLs FIRST in Postgres on a
     #: descending sort, so one plan with a null timestamp — a `loaddata` fixture, an
     #: import, a `queryset.update()` — became permanently "the latest" for its owner, and
@@ -793,6 +802,33 @@ class DietPlan(RowValidationMixin, models.Model):
         days = (self.end_date - self.start_date).days + 1
         return 'weekly' if days == 7 else 'monthly' if days > 14 else 'daily'
     
+    #: Why a plan is or is not the one being followed (BACKEND_BUGS B-134).
+    STATUSES = ('draft', 'scheduled', 'active', 'ended', 'superseded')
+
+    def status_on(self, today=None) -> str:
+        """`draft` (never sent), `superseded` (a newer plan retired it: `is_active` is
+        False, and the only writers of that are the two that supersede), `ended` (its
+        last day is past), `scheduled` (its first day is ahead) or `active`.
+
+        A plan retired and then outlived by its dates is still `superseded`: that is why
+        it stopped.
+        """
+        if self.is_draft:
+            return 'draft'
+        if not self.is_active:
+            return 'superseded'
+        today = today or timezone.localdate()
+        if self.end_date < today:
+            return 'ended'
+        if self.start_date > today:
+            return 'scheduled'
+        return 'active'
+
+    @property
+    def duration_days(self) -> int:
+        """Days the plan covers, both ends included (`end_date` is inclusive)."""
+        return (self.end_date - self.start_date).days + 1
+
     @property
     def is_engine_generated(self):
         """Built by the deterministic planner rather than by a person."""

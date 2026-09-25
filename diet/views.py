@@ -29,7 +29,7 @@ from .models import (
     UserFoodCategoryPreference
 )
 from .api import search_food
-from .trainer_services import TrainerDietPlanService, ClientProgressService
+from .trainer_services import TrainerDietPlanService, ClientProgressService, MealRefused
 import json
 import logging
 from django.shortcuts import render
@@ -1833,6 +1833,18 @@ def service_refusal(exc):
     return None
 
 
+def meal_refusal(exc):
+    """`service_refusal` for one meal of a LIST (`trainer_services.MealRefused`): the
+    same code and status, with `index` — the position of the meal refused — and any
+    extra it carries (`fields`, `limit`). The trainer-meals docstring promised `index`
+    on every refusal inside a list; only the view's own three carried it."""
+    response = service_refusal(exc)
+    if getattr(exc, 'index', None) is not None:
+        response.data['index'] = exc.index
+    response.data.update(getattr(exc, 'extra', None) or {})
+    return response
+
+
 class TrainerTemplatesView(APIView):
     """
     API endpoint for trainers to get available diet plan templates.
@@ -1901,16 +1913,65 @@ class TrainerDietPlanView(APIView):
     level: ask the client, or send `daily_calories` yourself.
 
     `POST v1/trainer/diet-plans/` — `client_id`, `template_id`, `start_date`
-    (YYYY-MM-DD), all required; optional `duration_weeks` (1-52, default 4), `goal`,
-    `daily_calories`. 200 `{message, superseded_plan_ids, diet_plan}`.
-    `GET ?client_id=` — that client's plans, `{count, next, previous, results}`.
+    (YYYY-MM-DD), all required; optional `duration_days` (1-364, BACKEND_BUGS B-133;
+    wins over weeks when both are sent), `duration_weeks` (1-52, default 4; clamped
+    into range as before), `goal`, `daily_calories`, `meals`. The plan's last day is
+    `start_date + days - 1`.
+
+    Sending a plan (BACKEND_BUGS B-132). A trainer plan replaces every active plan of
+    the client whose dates overlap it — his automatic plan included — and it used to do
+    so at this call, before any meal existed, while the meals came in later requests.
+    Now:
+
+    - WITH `meals` (a list of at most 500 `{meal_type, target_date, food_items,
+      scheduled_time?, description?}`, the `trainer/meals/` item without
+      `diet_plan_id`): the plan is SENT WHOLE, all or nothing. Every meal is checked
+      first; one refused and nothing is written or replaced, and the refusal carries
+      `index`, the meal's position. 201 `{message, superseded_plan_ids,
+      will_replace_plan_ids: [], diet_plan}` — `superseded_plan_ids` are the plans it
+      replaced.
+    - WITHOUT `meals` (the call as it always was): a DRAFT. It replaces nothing, the
+      client never sees it (not listed on `my/diet-plans/`, 404 on the plan reads), and
+      the trainer's FIRST successful `trainer/meals/` call on it (one meal or a list)
+      sends it, in the same transaction: that answer's `published` names the plan and
+      what it replaced. A refused meal list sends nothing. 200 `{message,
+      superseded_plan_ids: [], will_replace_plan_ids, diet_plan}` —
+      `will_replace_plan_ids` are the active plans sending it would replace as things
+      stand now. So the old two calls still build a plan; the client's own plan now
+      stays in force until the plan has meals.
+
+    `diet_plan` is `{id, client_name, template_name, start_date, end_date, goal,
+    daily_calories, status, is_active, duration_days, duration_weeks, meals_count}`;
+    `status` is `draft`, `scheduled`, `active`, `ended` or `superseded`.
+
+    `GET ?client_id=` — that client's plans you wrote, newest start first (ties by id),
+    `{count, next, previous, results, adherence_withheld}`. Each row: `id`, `goal`,
+    `daily_calories`, `start_date`, `end_date`, `is_active` (the flag, as before),
+    `template_name`, `meals_count`, and (BACKEND_BUGS B-133, B-134) `duration_days`,
+    `duration_weeks`, `status` — why it is or is not followed: `draft` (never sent),
+    `scheduled`, `active`, `ended` (its last day is past), `superseded` (a newer plan
+    replaced it, the trainer's or the client's own) — and `adherence_percent`: the
+    platform's adherence figure for the plan, from the meals the client ticked (the one
+    the AI coach quotes: each day of the plan that held meals scores 100 minus how far
+    its eaten calories landed from the target, an untracked day 0), null for a draft, a
+    plan not started, or one with nothing ticked. While the coaching with this client is
+    frozen, unpaid or ended, `adherence_withheld` names it (`coaching_frozen`,
+    `coaching_unpaid`, `coaching_ended`) and every `adherence_percent` is null; the
+    plans themselves stay listed. Null otherwise.
 
     Refusals, each with its `code`:
 
-    - 400 `missing_fields` (with `fields`, the names absent).
+    - 400 `missing_fields` (with `fields`, the names absent; in `meals`, with `index`).
     - 400 `bad_client_id` | `bad_template_id` — not a positive whole number.
-    - 400 `bad_date` — `start_date` is not YYYY-MM-DD.
-    - 400 `bad_duration` — `duration_weeks` not a whole number from 1 to 52.
+    - 400 `bad_date` — `start_date` is not YYYY-MM-DD (in `meals`: a `target_date`).
+    - 400 `bad_duration` — `duration_weeks` not a whole number from 1 to 52, or
+      `duration_days` not a whole number from 1 to 364.
+    - 400 `bad_meals` — `meals` is not a non-empty list, or an item is not an object.
+    - 400 `batch_too_large` — more than 500 meals (with `limit`).
+    - 400, with `index`: `bad_time`, `bad_meal_type`, `date_outside_plan`,
+      `no_food_items`, `bad_food_items`, `bad_food_item`, `bad_quantity`,
+      `duplicate_food`, `unknown_food`, `declared_allergen` — as `trainer/meals/`.
+    - 409 `duplicate_meal`, with `index` — two meals of `meals` in one slot.
     - 400 `client_activity_level_required` — see above.
     - 400 `bad_body` — the body is not a JSON object.
     - 400 `validation_error` — `duration_weeks` is not a number (`field_errors`).
@@ -1920,6 +1981,8 @@ class TrainerDietPlanView(APIView):
     - 403 `no_entitlement` / `feature_not_in_plan`.
     - 404 `not_found` — no such client or template.
     - 500 `server_error`.
+
+    Identical on every build.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
     
@@ -1963,6 +2026,13 @@ class TrainerDietPlanView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+            # The plan's meals, when it is sent whole (B-132). `null` is the old call.
+            from .trainer_plans import parse_meals, plan_row
+
+            meals = _body(request).get('meals')
+            if meals is not None:
+                meals = parse_meals(meals)
+
             # Create diet plan
             trainer_service = TrainerDietPlanService(request.user)
             diet_plan = trainer_service.create_diet_plan(
@@ -1971,16 +2041,21 @@ class TrainerDietPlanView(APIView):
                 start_date=start_date,
                 duration_weeks=int_param(request.data, 'duration_weeks', default=4, minimum=1, maximum=52),
                 goal=DietPlan.normalise_goal(_body(request).get('goal')),
-                daily_calories=_body(request).get('daily_calories')
+                daily_calories=_body(request).get('daily_calories'),
+                duration_days=_body(request).get('duration_days'),
+                meals=meals,
             )
-            
+
+            sent = meals is not None
             return Response({
-                "message": _("Diet plan created successfully"),
+                "message": (_("Plan sent to the client") if sent else
+                            _("Plan saved. It reaches the client with its first meals.")),
                 # What this plan replaced. A client follows one plan at a time, so
-                # creating one retires any that overlap it — including the generated
+                # sending one retires any that overlap it — including the generated
                 # plan they already had, which is the common case. The trainer needs
-                # to be able to say which.
+                # to be able to say which. Empty for a draft: it replaced nothing yet.
                 "superseded_plan_ids": getattr(diet_plan, 'superseded_plan_ids', []),
+                "will_replace_plan_ids": getattr(diet_plan, 'will_replace_plan_ids', []),
                 "diet_plan": {
                     'id': diet_plan.id,
                     'client_name': client.username,
@@ -1988,10 +2063,14 @@ class TrainerDietPlanView(APIView):
                     'start_date': diet_plan.start_date,
                     'end_date': diet_plan.end_date,
                     'goal': diet_plan.goal,
-                    'daily_calories': diet_plan.daily_calories
+                    'daily_calories': diet_plan.daily_calories,
+                    'is_active': diet_plan.is_active,
+                    'meals_count': len(meals) if sent else 0,
+                    **{key: value for key, value in plan_row(diet_plan, timezone.localdate()).items()
+                       if key != 'adherence_percent'},
                 }
-            })
-            
+            }, status=status.HTTP_201_CREATED if sent else status.HTTP_200_OK)
+
         except BadInput as e:
             return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
@@ -1999,6 +2078,8 @@ class TrainerDietPlanView(APIView):
             # swallowed those and re-emitted them as 500 (str(Http404()) is '',
             # so the log line was empty too). Control-flow exceptions must pass.
             raise
+        except MealRefused as e:
+            return meal_refusal(e)
         except DjangoValidationError as e:
             refusal = service_refusal(e)
             if refusal is not None:
@@ -2035,8 +2116,17 @@ class TrainerDietPlanView(APIView):
             client = get_object_or_404(CustomUser, id=_id(client_id, 'client_id'))
             
             trainer_service = TrainerDietPlanService(request.user)
-            diet_plans = trainer_service.get_client_diet_plans(client)
-            
+            diet_plans = list(trainer_service.get_client_diet_plans(client))
+
+            # Why each row is or is not followed, and how well it was (B-133, B-134).
+            # The adherence is the client's own behaviour, so it is withheld while the
+            # coaching cannot be used, as every other read of the client's data is.
+            from .trainer_plans import adherence_by_plan, coaching_refusal, plan_row
+
+            today = timezone.localdate()
+            withheld = coaching_refusal(request.user, client)
+            adherence = {} if withheld else adherence_by_plan(client, diet_plans, today)
+
             results = []
             for plan in diet_plans:
                 results.append({
@@ -2048,11 +2138,12 @@ class TrainerDietPlanView(APIView):
                     'is_active': plan.is_active,
                     'template_name': plan.template.name if plan.template else None,
                     'meals_count': getattr(plan, 'meals_count', None)
-                                   if getattr(plan, 'meals_count', None) is not None else plan.meals.count()
+                                   if getattr(plan, 'meals_count', None) is not None else plan.meals.count(),
+                    **plan_row(plan, today, adherence.get(plan.id)),
                 })
-            
+
             # Return response outside the loop
-            return Response(listing(results))
+            return Response(listing(results, extra={'adherence_withheld': withheld}))
                 
         except BadInput as e:
             return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
@@ -2079,9 +2170,16 @@ class TrainerMealView(APIView):
 
     `POST v1/trainer/meals/` — one meal: `diet_plan_id`, `meal_type`, `target_date`
     (YYYY-MM-DD), `food_items` (a list of `{food_id, quantity}`), all required; optional
-    `scheduled_time` (HH:MM), `description`. 200 `{message, meal}`. Or a JSON LIST of
-    such objects (at most 100), all or nothing: 201 `{message, created, created_count}`;
-    a refusal inside the list carries `index`, the position of the item refused.
+    `scheduled_time` (HH:MM), `description`. 200 `{message, meal, published}`. Or a JSON
+    LIST of such objects (at most 100), all or nothing: 201 `{message, created,
+    created_count, published}`; a refusal inside the list carries `index`, the position
+    of the item refused (the service's refusals too, since BACKEND_BUGS B-132).
+
+    `published` (BACKEND_BUGS B-132): a plan created without meals is a draft, and the
+    first successful call that adds meals to it SENDS it, in the same transaction —
+    it then replaces the client's active plans that overlap it. `published` lists each
+    plan this call sent, `[{diet_plan_id, superseded_plan_ids}]`; `[]` when it sent
+    none. A refused call sends nothing.
     `PUT v1/trainer/meals/<meal_id>/` — optional `food_items`, `scheduled_time`,
     `description`. `DELETE v1/trainer/meals/<meal_id>/`.
 
@@ -2177,16 +2275,21 @@ class TrainerMealView(APIView):
                             # One fetch per distinct plan, not one per meal.
                             if diet_plan_id not in plans:
                                 plans[diet_plan_id] = get_object_or_404(DietPlan, id=diet_plan_id)
-                            meal = trainer_service.add_meal_to_plan(
-                                diet_plan=plans[diet_plan_id],
-                                meal_type=meal_type,
-                                target_date=target_date,
-                                food_items=food_items,
-                                scheduled_time=scheduled_time,
-                                description=meal_data.get('description', ''),
-                                # Once, below, for each plan the batch touched.
-                                recompute_allergens=False,
-                            )
+                            try:
+                                meal = trainer_service.add_meal_to_plan(
+                                    diet_plan=plans[diet_plan_id],
+                                    meal_type=meal_type,
+                                    target_date=target_date,
+                                    food_items=food_items,
+                                    scheduled_time=scheduled_time,
+                                    description=meal_data.get('description', ''),
+                                    # Once, below, for each plan the batch touched.
+                                    recompute_allergens=False,
+                                )
+                            except DjangoValidationError as refused:
+                                # Which meal: the docstring promised `index` on every
+                                # refusal in a list, and the service's carried none.
+                                raise _Refuse(meal_refusal(MealRefused(refused, index)))
                             created_meals.append({
                                 'id': meal.id,
                                 'meal_type': meal.meal_type,
@@ -2203,6 +2306,8 @@ class TrainerMealView(APIView):
                     "message": _("Meals created successfully"),
                     "created": created_meals,
                     "created_count": len(created_meals),
+                    "published": [plan.publication for plan in plans.values()
+                                  if getattr(plan, 'publication', None)],
                 }, status=status.HTTP_201_CREATED)
             
             # Validate required fields for single object
@@ -2265,7 +2370,9 @@ class TrainerMealView(APIView):
                     'scheduled_time': meal.scheduled_time,
                     'description': meal.description,
                     'components_count': meal.components.count()
-                }
+                },
+                "published": ([diet_plan.publication]
+                              if getattr(diet_plan, 'publication', None) else []),
             })
             
         except BadInput as e:
@@ -2434,7 +2541,8 @@ class DietPlanNutritionView(APIView):
     reading a plan another trainer wrote, of a client no longer theirs, or one the client
     no longer follows (it answered the status default `permission_denied` until the
     owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
-    404 `not_found` — no such plan, or not yours (a client, an agent); 500 `server_error`.
+    404 `not_found` — no such plan, or not yours (a client, an agent), or a trainer's draft
+    not yet sent (a client; BACKEND_BUGS B-132); 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -2456,7 +2564,8 @@ class DietPlanNutritionView(APIView):
                         status=status.HTTP_403_FORBIDDEN
                     )
             elif request.user.is_client:
-                if diet_plan.user != request.user:
+                # A trainer's DRAFT (B-132) is not the client's until it is sent.
+                if diet_plan.user != request.user or diet_plan.is_draft:
                     # 404, not 403. `client/meals/<id>/`, `.../complete/` and
                     # `interact/` all answer 404 for another client's object; these three
                     # answered 403, which says "it exists and is not yours" and turns the
@@ -3630,7 +3739,8 @@ class ClientMealDetailsView(APIView):
 
 class MyDietPlansView(APIView):
     """
-    List all diet plans for the authenticated client user.
+    List all diet plans for the authenticated client user, except a trainer's draft
+    not yet sent (BACKEND_BUGS B-132: it reaches the client with its first meals).
     Supports standard pagination: ?page=N&page_size=N
 
     Each row: `id`, `goal`, `daily_calories`, `start_date`, `end_date`, `is_active`,
@@ -3655,15 +3765,16 @@ class MyDietPlansView(APIView):
         try:
             # The author in the SAME query (a join), so the row's `author` costs nothing
             # per plan.
+            # Not a trainer's DRAFT (B-132): it reaches the client with its first meals.
             plans = (DietPlan.objects
-                     .filter(user=request.user)
+                     .filter(user=request.user, is_draft=False)
                      .select_related('created_by')
                      .only('id', 'goal', 'daily_calories', 'start_date', 'end_date', 'is_active',
                            'created_at', 'template_id', 'allergen_report',
                            'generation_strategy', 'created_by__id',
                            'created_by__first_name', 'created_by__last_name',
                            'created_by__username', 'created_by__is_active')
-                     .order_by('-start_date', '-created_at'))
+                     .order_by('-start_date', '-created_at', '-id'))  # a total order
 
             # Paginate the queryset first before building dicts
             paginator = StandardResultsSetPagination()
@@ -3741,7 +3852,8 @@ class DietPlanMealsWithIngredientsView(APIView):
     reading a plan another trainer wrote, of a client no longer theirs, or one the client
     no longer follows (it answered the status default `permission_denied` until the
     owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
-    404 `not_found` — no such plan, or not yours; 500 `server_error`.
+    404 `not_found` — no such plan, or not yours, or (to a client) a trainer's draft not
+    yet sent (BACKEND_BUGS B-132); 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
     
@@ -3753,7 +3865,8 @@ class DietPlanMealsWithIngredientsView(APIView):
             # let every trainer read every client's plan, and an agent or admin role
             # matched neither branch and read all of them.
             if request.user.is_client:
-                if plan.user_id != request.user.id:
+                # A trainer's DRAFT (B-132) is not the client's until it is sent.
+                if plan.user_id != request.user.id or plan.is_draft:
                     # 404 — see DietPlanNutritionView. Another client's plan does not
                     # exist as far as this caller is concerned.
                     raise NotFound(code="not_found")
