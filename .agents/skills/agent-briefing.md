@@ -74,6 +74,14 @@ Worktrees are how several agents build at once. The setup is done for you; what 
 
 ## The merge, and what conflicts
 
+**Never leave a merge staged in the main checkout.** The app sessions commit their
+BACKEND_BUGS rows directly on `spec/payments-compliance` in the main checkout, and a
+`git commit` there takes EVERYTHING staged: on 2026-09-24 a resolved merge sitting in
+the index (MERGE_HEAD set, tests still running) was committed under an app session's
+"docs(BACKEND_BUGS): B-135" message (`f03f9c2`). The content was right; the history is
+misleading and nobody reviewed the moment it landed. Resolve and commit a merge in one
+go, run its tests right after, and do longer fix work in a worktree of your own.
+
 **Never `git add -A` (or `git add .`) in the main checkout.** Stage the paths you mean.
 On 2026-09-20 one `git add -A` swept a stranger's working-tree state into a commit: it
 deleted `SYSTEM_OVERVIEW.md` (which `CLAUDE.md` tells every session to read) and added
