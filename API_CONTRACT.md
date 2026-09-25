@@ -695,6 +695,12 @@ active plan. Now:
   `index` (the service's refusals did not).
 - The client's own generation replaces only active plans, so it does not touch a draft;
   the draft, once sent, replaces whatever the client then follows.
+- A plan is never SENT to begin before today (the review, 2026-09-24): sending would
+  retire the plan the client ate from on days they already lived. A create with `meals`
+  starting in the past, or a `trainer/meals/` call that would send a draft whose start
+  has passed, answers 409 `draft_start_passed` and writes nothing. A replaced plan
+  records the day it was replaced (`superseded_on`), and its row's `adherence_percent`
+  counts only the days it governed.
 
 **Days (B-133).** `duration_days` (1-364) beside `duration_weeks` on the create; days win
 when both are sent; out of range or not a whole number is 400 `bad_duration`. The plan's

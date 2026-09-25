@@ -109,6 +109,20 @@ def _meal(day, meal_type, *items, time=None):
     return row
 
 
+def _move_back(plan_id, days):
+    """Setup: a plan cannot be SENT to begin in the past any more (the review of B-132,
+    2026-09-24: sending it retired the plan the client ate from on days they had already
+    lived), so a plan that began earlier is sent today and its dates moved back."""
+    from django.db.models import F
+
+    from diet.models import DietPlan, Meal
+
+    delta = timedelta(days=days)
+    DietPlan.objects.filter(pk=plan_id).update(start_date=F("start_date") - delta,
+                                               end_date=F("end_date") - delta)
+    Meal.objects.filter(diet_plan_id=plan_id).update(date=F("date") - delta)
+
+
 # ============================================================ B-132 — sent whole
 def test_b132_the_old_create_retires_nothing_until_its_meals_land(make_user, api, foods):
     from diet.models import DietPlan
@@ -354,9 +368,16 @@ def test_b134_a_row_says_why_it_is_not_active(make_user, api, foods):
     t = api(trainer)
 
     def send(start, days, meal_day=None):
-        return t.post(CREATE, _body(client, start, duration_days=days, meals=[
-            _meal(meal_day or start, "Lunch", (foods["base"], 100))]),
-            content_type=JSON).json()["diet_plan"]["id"]
+        # Setup (see `_move_back`): a plan that began in the past is sent today, then
+        # its dates are moved back. No assertion changed.
+        back = max((today - start).days, 0)
+        plan_id = t.post(CREATE, _body(client, start + timedelta(days=back), duration_days=days,
+                                       meals=[_meal((meal_day or start) + timedelta(days=back),
+                                                    "Lunch", (foods["base"], 100))]),
+                         content_type=JSON).json()["diet_plan"]["id"]
+        if back:
+            _move_back(plan_id, back)
+        return plan_id
 
     ended = send(today - timedelta(days=20), 7)
     replaced = send(today, 7)
@@ -387,9 +408,11 @@ def test_b134_adherence_is_the_platforms_figure_from_ticked_meals(make_user, api
     today = timezone.localdate()
     start = today - timedelta(days=3)
     t, c = api(trainer), api(client)
-    followed = t.post(CREATE, _body(client, start, meals=[
-        _meal(start + timedelta(days=d), "Lunch", (foods["base"], 500)) for d in range(3)]),
+    # Setup (see `_move_back`): sent today, then moved back to begin three days ago.
+    followed = t.post(CREATE, _body(client, today, meals=[
+        _meal(today + timedelta(days=d), "Lunch", (foods["base"], 500)) for d in range(3)]),
         content_type=JSON).json()["diet_plan"]["id"]
+    _move_back(followed, 3)
     ticked = Meal.objects.get(diet_plan_id=followed, date=start + timedelta(days=1))
     done = c.post(f"/api/diet/v1/client/meals/{ticked.id}/complete/",
                   {"action": "complete_meal"}, content_type=JSON)
@@ -542,9 +565,11 @@ def test_b131_b134_a_frozen_coaching_withholds_the_clients_data(make_user, api, 
         _grant_diet_access(user)
     today = timezone.localdate()
     t = api(trainer)
-    plan_id = t.post(CREATE, _body(client, today - timedelta(days=2), meals=[
-        _meal(today - timedelta(days=2), "Lunch", (foods["base"], 100))]),
+    # Setup (see `_move_back`): sent today, then moved back to begin two days ago.
+    plan_id = t.post(CREATE, _body(client, today, meals=[
+        _meal(today, "Lunch", (foods["base"], 100))]),
         content_type=JSON).json()["diet_plan"]["id"]
+    _move_back(plan_id, 2)
     draft = _body(client, today, meals=[_meal(today, "Lunch", (foods["base"], 100))])
     assert t.get(_review(plan_id)).status_code == 200
 

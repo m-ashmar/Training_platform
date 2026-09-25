@@ -5497,3 +5497,6 @@ msgstr "لا توجد وجبة محفوظة بهذا المعرّف."
 #: diet/saved_meals.py
 msgid "name and food_items are required"
 msgstr "الاسم وfood_items مطلوبان"
+
+msgid "This plan starts on a day that has passed. Choose a start date from today on, then send it."
+msgstr "تبدأ هذه الخطة في يوم مضى. اختر تاريخ بدء من اليوم فصاعداً، ثم أرسلها."

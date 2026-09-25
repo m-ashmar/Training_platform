@@ -1861,6 +1861,8 @@ TRAINER_REFUSALS = {
     'not_a_trainer': status.HTTP_403_FORBIDDEN,
     'not_meal_viewer': status.HTTP_403_FORBIDDEN,
     'duplicate_meal': status.HTTP_409_CONFLICT,
+    # A draft whose start date has passed cannot be sent (trainer_services._publish).
+    'draft_start_passed': status.HTTP_409_CONFLICT,
 }
 
 
@@ -2277,6 +2279,10 @@ class TrainerMealView(APIView):
     - 404 `not_found` — no such plan or meal.
     - 405 `method_not_allowed` — PUT or DELETE without a meal id.
     - 409 `duplicate_meal` — that slot already holds a meal.
+    - 409 `draft_start_passed` — these meals would SEND a draft whose start date has
+      passed; nothing is written and nothing is replaced. Sending it would hand days the
+      client already lived to a plan they never saw: re-date the plan (from today on)
+      and send again (the review of B-132, 2026-09-24).
     - 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
