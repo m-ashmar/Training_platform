@@ -3774,7 +3774,7 @@ class MyDietPlansView(APIView):
                            'generation_strategy', 'created_by__id',
                            'created_by__first_name', 'created_by__last_name',
                            'created_by__username', 'created_by__is_active')
-                     .order_by('-start_date', '-created_at'))
+                     .order_by('-start_date', '-created_at', '-id'))  # a total order
 
             # Paginate the queryset first before building dicts
             paginator = StandardResultsSetPagination()
