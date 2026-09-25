@@ -63,7 +63,9 @@ class DietPersistenceService:
                     start_date__lte=ed, end_date__gte=sd,
                 ).values_list("id", "created_by_id"))
                 superseded_ids = [pk for pk, _author in overlapping]
-                DietPlan.objects.filter(id__in=superseded_ids).update(is_active=False)
+                # When, too: adherence stops at the retirement (DietPlan.superseded_on).
+                DietPlan.objects.filter(id__in=superseded_ids).update(
+                    is_active=False, superseded_on=timezone.localdate())
                 # WHOSE plan was retired, not just how many. A client tapping Generate
                 # deactivates their TRAINER's plan too, and said nothing to anyone: the
                 # trainer's list still showed it, marked inactive, and every meal they

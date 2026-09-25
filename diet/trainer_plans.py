@@ -122,8 +122,22 @@ def adherence_by_plan(client, plans, today) -> Dict[int, Optional[float]]:
                   .filter(user=client, diet_plan_id__in=[p.id for p in started],
                           target_calories__gt=0, date__lte=today)
                   .order_by().values_list("diet_plan_id", flat=True).distinct())
-    return {p.id: plan_day_adherence(client, p, p.start_date, p.end_date)["average"]
+    return {p.id: plan_day_adherence(client, p, p.start_date, _governed_until(p))["average"]
             for p in started if p.id in tracked}
+
+
+def _governed_until(plan):
+    """The last day `plan` governed: its end, or the day before a newer plan retired it
+    (`DietPlan.superseded_on`). After that nobody can tick its meals, so counting those
+    days would score a client who followed it perfectly as having missed them (the
+    review, 2026-09-24). A plan retired before this column existed has no date and is
+    read to its end, as before."""
+    from datetime import timedelta
+
+    retired = getattr(plan, "superseded_on", None)
+    if retired is None:
+        return plan.end_date
+    return max(plan.start_date, min(plan.end_date, retired - timedelta(days=1)))
 
 
 def plan_row(plan, today, adherence=None) -> dict:

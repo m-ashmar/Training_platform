@@ -740,6 +740,13 @@ class DietPlan(RowValidationMixin, models.Model):
     #: draft never holds a meal. Every engine plan, and every plan older than this
     #: column, is False.
     is_draft = models.BooleanField(default=False)
+    #: The day a newer plan retired this one (`is_active` went False because another
+    #: plan covering its dates was sent or generated); null otherwise. The plan
+    #: governed the client's days BEFORE it, not after: adherence reads stop there
+    #: (`diet/trainer_plans.py adherence_by_plan`), so the days after a replacement —
+    #: which nobody could tick any more — are not scored 0 against it (the review,
+    #: 2026-09-24).
+    superseded_on = models.DateField(null=True, blank=True)
     #: NOT NULL. `ordering = ['-created_at', '-id']` puts NULLs FIRST in Postgres on a
     #: descending sort, so one plan with a null timestamp — a `loaddata` fixture, an
     #: import, a `queryset.update()` — became permanently "the latest" for its owner, and

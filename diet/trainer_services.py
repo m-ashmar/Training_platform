@@ -280,8 +280,20 @@ class TrainerDietPlanService:
             if not still_draft:
                 diet_plan.refresh_from_db(fields=['is_draft', 'is_active'])
                 return None
+            # Never over days the client already lived. A draft's window is fixed when it
+            # is made, and sending it retires every plan it overlaps: a draft sent after
+            # its start date retired the plan the client ate from on those days, their
+            # ticks dropped out of every progress read, and the trainer's never-shown
+            # meals scored those days 0 for good (the review, 2026-09-24). Refused, and
+            # the meal write that triggered it rolls back with it: re-date the plan.
+            if diet_plan.start_date and diet_plan.start_date < timezone.localdate():
+                raise ValidationError(
+                    _("This plan starts on a day that has passed. Choose a start date "
+                      "from today on, then send it."), code="draft_start_passed")
             superseded_ids = self._overlapping_active(diet_plan)
-            DietPlan.objects.filter(id__in=superseded_ids).update(is_active=False)
+            today = timezone.localdate()
+            DietPlan.objects.filter(id__in=superseded_ids).update(
+                is_active=False, superseded_on=today)
             DietPlan.objects.filter(pk=diet_plan.pk).update(
                 is_draft=False, is_active=True, updated_at=timezone.now())
         diet_plan.is_draft, diet_plan.is_active = False, True

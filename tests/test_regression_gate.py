@@ -8185,6 +8185,14 @@ def test_editing_a_past_meal_does_not_erase_what_the_client_ate(
     plan = service.create_diet_plan(
         client_user, template, _tz.localdate() - _dt.timedelta(days=7),
         duration_weeks=4)
+    # Setup: a plan the trainer SENT a week ago. Since B-132 a create without meals is a
+    # draft, and since the review of B-132 (2026-09-24) a draft whose start has passed
+    # cannot be sent (it would retire what the client ate from on days they lived), so
+    # the sent state is written directly. No assertion changed.
+    from diet.models import DietPlan as _DietPlan
+
+    _DietPlan.objects.filter(pk=plan.pk).update(is_draft=False, is_active=True)
+    plan.refresh_from_db()
     food = FoodItem.objects.filter(needs_review=False).first()
 
     eaten = service.add_meal_to_plan(
