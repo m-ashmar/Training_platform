@@ -2423,7 +2423,9 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             seconds = str(elapsed.total_seconds())
 
         return {
-            'date': last_session.end_time.date() if last_session.end_time else None,
+            # The Damascus day (TIME_ZONE), as routine/outcomes judges idle days: the
+            # stored UTC day moved a session after local midnight to yesterday (B-135).
+            'date': timezone.localdate(last_session.end_time) if last_session.end_time else None,
             'routine_name': last_session.routine.name if last_session.routine else None,
             'exercises_completed': entry["last_exercises"],
             'total_volume': entry["last_volume"],

@@ -9,8 +9,11 @@ it from `created_at`.
 WHAT SETTLES. A coaching payout: escrow -> trainer, the rows `wallet.activity` reads as
 `trainer_fee_payout` (month 1 on the first program, every renewal, an owed share paid
 later, and the legacy one-fee settlement), including the credit leg of a payout that
-crossed a currency. Nothing else: a client's direct transfer and a plan share are not
-released escrow, and the spec holds only that. A payout support has since REVERSED is
+crossed a currency. And a routine product's sale (escrow -> trainer, the rows read as
+`routine_product_sale`): a buyer can be refunded, and a refund takes the trainer's share
+back, which a share withdrawn at once would make impossible (the review, 2026-09-24).
+Nothing else: a client's direct transfer and a plan share are not released escrow, and
+the spec holds only that. A payout support has since REVERSED is
 not settling either — the money is no longer in the wallet.
 
 HOW LONG. `PAYOUT_HOLD_DAYS` after the row was written (the release). 0 switches the
@@ -39,12 +42,20 @@ from rest_framework import serializers
 ZERO = Decimal("0.00")
 
 
+#: The `wallet.activity` kinds whose money was just released out of escrow to a trainer
+#: and may still be disputed: a coaching payout, and a routine product's sale (a buyer
+#: can be refunded, and a refund takes the trainer's share back — withdrawn at once, it
+#: could not be; the review, 2026-09-24). Both wait `PAYOUT_HOLD_DAYS` before they are
+#: withdrawable.
+SETTLING_KINDS = frozenset({"trainer_fee_payout", "routine_product_sale"})
+
+
 def payout_purposes() -> frozenset:
-    """The `metadata['purpose']` values of a coaching payout: exactly the rows
-    `wallet.activity` calls `trainer_fee_payout`, so the two can never disagree."""
+    """The `metadata['purpose']` values of the rows that settle: exactly the rows
+    `wallet.activity` calls one of `SETTLING_KINDS`, so the two can never disagree."""
     from .activity import PURPOSE_KINDS
 
-    return frozenset(p for p, kind in PURPOSE_KINDS.items() if kind == "trainer_fee_payout")
+    return frozenset(p for p, kind in PURPOSE_KINDS.items() if kind in SETTLING_KINDS)
 
 
 def hold_days() -> int:
