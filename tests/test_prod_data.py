@@ -427,7 +427,7 @@ def test_the_many_to_many_ids_come_with_each_row(make_user):
                                      carbs=10, fat=2, serving_size="100 g",
                                      serving_size_grams=100)
              for _ in range(3)]
-    preference = UserFoodPreference.objects.create(user=person)
+    preference, _created = UserFoodPreference.objects.get_or_create(user=person)
     preference.liked_foods.set(foods[:2])
     row = export_user_data(person)["sections"]["food_preferences"][0]
     assert sorted(row["liked_foods"]) == sorted(f.pk for f in foods[:2])
