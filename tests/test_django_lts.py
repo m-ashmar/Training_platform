@@ -361,3 +361,32 @@ def test_the_admin_badges_render_on_5_2_without_the_6_0_warning():
         '<div style="font-family: monospace;"><strong>Meal Distribution:</strong><br>'
         'breakfast: 7<br>&lt;b&gt;lunch&lt;/b&gt;: 3<br></div>'), \
         "a stored value is escaped, not pasted into the markup"
+
+
+def test_the_receipt_is_an_iso_a5_page_and_renders_without_a_warning():
+    """fpdf2 2.8.5 corrected the width of its "A5" (it was 148.5 mm, ISO says 148) and
+    warns on every use of the name, so after the upgrade every receipt logged a
+    UserWarning. The page is now given in millimetres: exactly ISO A5, and silent."""
+    from django.utils import timezone
+
+    from subscription.receipts import render_pdf
+
+    data = {
+        "platform": {"name": "Yalla Gym", "legal_name": "Yalla Gym",
+                     "contact_email": "", "website": ""},
+        "amount": "5000", "currency": "SYP",
+        "item": {"plan_name": "Premium", "duration_days": 30},
+        "issued_at": timezone.now(), "invoice_number": "YG-2026-000001",
+        "method": {"name": "ShamCash"}, "reference": "TX-1", "payer": {"name": "Samer"},
+    }
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pdf = render_pdf(data, compress=False)
+    fpdf_warnings = [str(w.message) for w in caught if "fpdf" in w.filename]
+    assert not fpdf_warnings, fpdf_warnings
+
+    box = re.search(rb"/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]", pdf)
+    assert box, "no page size in the document"
+    width_mm, height_mm = (float(v) * 25.4 / 72 for v in box.groups())
+    assert abs(width_mm - 148) < 0.05 and abs(height_mm - 210) < 0.05, \
+        f"page is {width_mm:.2f} x {height_mm:.2f} mm, not ISO A5 (148 x 210)"

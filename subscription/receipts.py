@@ -52,6 +52,9 @@ from wallet.currencies import RATE_BASE, RATE_QUOTE
 #: The one font the document is drawn with. See the module docstring.
 FONT_PATH = Path(__file__).resolve().parent / "fonts" / "NotoNaskhArabic-Regular.ttf"
 
+#: The page: ISO 216 A5, portrait, in millimetres.
+A5_MM = (148, 210)
+
 #: `Payment.payment_method` -> what the receipt calls it. A method with no entry is
 #: shown by its stored code rather than by a guess.
 METHOD_NAMES = {
@@ -242,7 +245,10 @@ def render_pdf(data: dict, *, compress: bool = True) -> bytes:
     """
     from fpdf import FPDF
 
-    pdf = FPDF(format="A5", unit="mm")
+    # ISO A5 as millimetres, not the name "A5": fpdf2 2.8.5 corrected its A5 width
+    # (148.5 mm to 148 mm) and warns on every use of the name to say so. These are the
+    # corrected dimensions, stated where they cannot move again.
+    pdf = FPDF(format=A5_MM, unit="mm")
     pdf.set_compression(compress)
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_font("receipt", "", str(FONT_PATH))
