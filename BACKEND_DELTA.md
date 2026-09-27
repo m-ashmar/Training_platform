@@ -23,12 +23,12 @@ contract, every user-facing string goes through gettext with an Arabic entry in
 | 5 | Trainer proof stats | L | DONE |
 | 6 | Trainer matching with reasons (+ roster and profile endpoints) | L | DONE |
 | 7 | Per-trainer exercise media library | L | DONE (2026-09-20, `build/trainer-media`) |
-| 8 | Two-way chat: voice, image, video, program cards, report, block | XL | TEXT DONE (`chat` app, branch `build/chat`); media, program cards, report/block TODO |
-| 9 | Server-driven home + day timeline | L | Home DONE (2026-09-20); day timeline TODO |
+| 8 | Two-way chat: voice, image, video, program cards, report, block | XL | DONE (2026-09-27): text, photo/voice/video (B-091), program cards, video posters (ffmpeg in the worker image), reports and blocks (moderation). Left: voice transcripts |
+| 9 | Server-driven home + day timeline | L | DONE (2026-09-27): day timeline as `nutrition_today.timeline`, ready programs from routine products, voice trainer message |
 | 10 | Note to the trainer on a request | S | DONE (with BACKEND_BUGS B-008) |
 | 11 | Effort rating 1-5, progression suggestion | L | DONE (2026-09-20) |
-| 12 | Personal records (always 0 today) | M | `prs` DONE (BACKEND_BUGS B-013); records on the completion response TODO |
-| 13 | Intro story content + remote theme override | M | Story media DONE (item 2); theme TODO |
+| 12 | Personal records (always 0 today) | M | DONE: `prs` (B-013), `previous_best` on set logs (B-112), `personal_records` on the completing PATCH (2026-09-27) |
+| 13 | Intro story content + remote theme override | M | DONE: story media (item 2), theme (`GET /api/v1/config/theme`, 2026-09-20) |
 | 14 | Offline set logging idempotency (build guide section 6) | M | DONE (B-003 + `set-logs/sync/`, 2026-09-20) |
 | 15 | Owner may edit/delete a saved set (build guide section 6) | M | DONE (2026-09-20) |
 | 16 | Coaching by the month, commission on every month (owner decision 3) | L | DONE |
