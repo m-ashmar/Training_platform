@@ -26,8 +26,9 @@ def broadcast(conversation_id, event_type, payload):
     """Send one event to everyone with this thread open.
 
     `event_type` is the name the app reads (`message.new`, `message.read`,
-    `message.deleted`) and is also what Channels turns into the consumer's handler
-    (`message_new`), so the two can never drift apart.
+    `message.deleted`, `message.updated`) and is also what Channels turns into the
+    consumer's handler (`message_new`), so the two can never drift apart — a new event
+    needs its handler in `chat/consumers.py`, or the consumer fails on it.
 
     Never raises: a socket layer that is down must not cost the message. The row is
     written and the history endpoint still serves it.
@@ -99,19 +100,42 @@ def _preview(message, recipient_id) -> str:
     """What the lock screen quotes: the text, or a media message's caption, or — for a
     photo, voice note or video sent without one — what it is, in the RECIPIENT's
     language (the context is interpolated as it is stored, so it is translated here).
-    Never a link: the media itself is only ever served inside the thread.
+    A program card without a caption reads «حدّث برنامجك · <routine>», the routine's
+    name in the recipient's language too. Never a link: the media itself is only ever
+    served inside the thread.
     """
     from django.utils.translation import gettext as _
 
     from training_platform.i18n import LanguageContext
 
-    from .models import KIND_IMAGE, KIND_VIDEO, KIND_VOICE
+    from .models import KIND_IMAGE, KIND_PROGRAM, KIND_VIDEO, KIND_VOICE
 
-    if message.body.strip() or message.kind not in (KIND_IMAGE, KIND_VOICE, KIND_VIDEO):
+    labelled = (KIND_IMAGE, KIND_VOICE, KIND_VIDEO, KIND_PROGRAM)
+    if message.body.strip() or message.kind not in labelled:
         return message.body[:PREVIEW_CHARS]
     with LanguageContext.for_user_id(recipient_id):
+        if message.kind == KIND_PROGRAM:
+            return _program_preview(message, recipient_id)
         return str({KIND_IMAGE: _("Photo"), KIND_VOICE: _("Voice note"),
                     KIND_VIDEO: _("Video")}[message.kind])
+
+
+def _program_preview(message, recipient_id) -> str:
+    """«حدّث برنامجك · برنامج القوة» — the design's words, the routine's name in the
+    recipient's language (`routine.services.routine_name_for`)."""
+    from django.utils.translation import gettext as _
+
+    routine = message.routine if message.routine_id else None
+    if routine is None:
+        return str(_("Your program was updated"))
+    from routine.services import routine_name_for
+    from users.models import CustomUser
+
+    recipient = CustomUser.objects.filter(pk=recipient_id).only(
+        'pk', 'preferred_language').first()
+    name = routine_name_for(routine, recipient)
+    return (str(_("Your program was updated · %(routine)s")) % {'routine': name}
+            )[:PREVIEW_CHARS]
 
 
 def _claim_nudge(conversation, recipient_id) -> bool:

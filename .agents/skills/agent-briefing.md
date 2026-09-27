@@ -107,6 +107,15 @@ Three more about tests of background work (found building `fx/prod-services`, 20
   `_prod_env`. A new `require_env` in `settings_production.py` goes into both, with the
   reason, or every "boots" assertion fails for a reason that is not theirs.
 
+One about counting queries (found building `build/chat-cards-posters`, 2026-09-27):
+
+- **django-cachalot answers a repeated read from its cache**, so one request costs N
+  queries the first time, N-1 when it repeats a cached read, and N again after any write
+  to a table it read. A test comparing two query counts wraps each measurement in
+  `cachalot.api.cachalot_disabled()` (`tests/test_chat_cards_posters.py`,
+  `tests/test_backend_bugs_app_0923d.py`) or counts only its own tables
+  (`tests/test_chat.py`), or it fails for a reason that is not the code's.
+
 One about email (found building `build/email-channel`, 2026-09-27):
 
 - **Notices now send email too** (`notifications/channels/email.py`). A test that runs

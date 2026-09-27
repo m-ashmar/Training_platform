@@ -309,12 +309,15 @@ register(PersonalDataSource(
 # A file both steps reach is deleted once (`chat.media.delete_files_on_commit`). The
 # preview reports `files`: how many stored files the person sent.
 def _chat_files_sent(user, queryset, *, dry_run):
-    from chat.media import attachment_names, delete_files_on_commit
+    # `stored_names`: the attachment AND the poster frame a worker cut from a video
+    # (2026-09-27). `files` still counts what the person SENT; a poster is derived from
+    # one of those and goes with it.
+    from chat.media import CHAT_FILES, delete_stored_on_commit, stored_names
 
-    names = attachment_names(queryset)
+    names = stored_names(queryset)
     if not dry_run:
-        delete_files_on_commit(names)
-    return {"files": len(names)}
+        delete_stored_on_commit(names)
+    return {"files": len(names[CHAT_FILES])}
 
 
 register(PersonalDataSource(
@@ -327,12 +330,14 @@ register(PersonalDataSource(
     label="messages_sent", model="chat.Message", user_field="sender",
     # `kind`, `exercise` and `duration_seconds` with the chat's photos, voice notes and
     # videos (B-091); like the media kit's, the export lists them and does not bundle
-    # the bytes.
+    # the bytes (nor a video's poster frame, which is cut from it). A trainer's program
+    # card (2026-09-27) names its `routine` and `program_day`.
     fields=["id", "conversation", "kind", "body", "exercise", "duration_seconds",
-            "created_at", "read_at", "deleted_at"],
+            "routine", "program_day", "created_at", "read_at", "deleted_at"],
     on_erase="delete", before_erase=_chat_files_sent,
     purpose=("What the person sent in the trainer-client chat: text, photos, voice notes "
-             "and videos, a form-check video naming an exercise."),
+             "and videos, a form-check video naming an exercise, a coach's card "
+             "pointing at the client's program."),
     recipients=("coach", "clients", "push_provider", "file_storage"),
     data_types=("messages", "photos_videos", "audio")))
 

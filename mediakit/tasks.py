@@ -1,11 +1,15 @@
 """What a worker does to a video after it is stored.
 
 The rule this module is built around: **an upload never fails because a transcoder is
-missing.** ffmpeg is not in the image today, the worker machine may be replaced by one
-without it, and a coach in Damascus uploading a demonstration clip must not see an error
-for either. So every path here ends with the asset `ready` — with a poster and
-measurements when the tools are there, without them when they are not — and only a file
-the tools ran on and could not read is marked `failed`.
+missing.** The image installs ffmpeg (Dockerfile, 2026-09-27), but a worker machine may
+still run from an image without it, and a coach in Damascus uploading a demonstration
+clip must not see an error for that. So every path here ends with the asset `ready` —
+with a poster and measurements when the tools are there, without them when they are not
+(said ONCE per worker process in the log, `_tool`) — and only a file the tools ran on
+and could not read is marked `failed`.
+
+The frame-cutting helpers here are also the chat's (`chat.tasks.cut_video_poster`): one
+ffmpeg invocation, one "logs once", one lazy download for both kinds of video.
 
 HLS is deliberately not built here (see `fill_video_metadata`).
 """
@@ -34,20 +38,36 @@ PROBE_TIMEOUT = 30
 POSTER_TIMEOUT = 60
 
 #: Where in the clip the poster frame is cut from. One second in, not frame zero: the
-#: first frame of a phone recording is usually the lens still adjusting.
+#: first frame of a phone recording is usually the lens still adjusting. A clip shorter
+#: than that has no frame there, so `_poster_bytes` falls back to its first frame.
 POSTER_AT_SECONDS = 1
 
 #: How long an asset may sit `pending` before the sweep assumes its task was lost.
 STUCK_AFTER_MINUTES = 15
 
+#: The binaries this worker process has already said it does not have.
+_MISSING_TOOLS: set = set()
+
 
 def _tool(name):
-    """The binary's path, or None. `shutil.which`, so a test can hide it."""
-    return shutil.which(name)
+    """The binary's path, or None. `shutil.which`, so a test can hide it.
+
+    A missing binary is logged ONCE per worker process, as a warning an operator can
+    act on (install ffmpeg on the worker), and then silently: every video that follows
+    would say the same thing, and a log line per upload is noise that hides the one
+    that matters. Nothing is raised — the video is stored and plays without a poster.
+    """
+    path = shutil.which(name)
+    if path is None and name not in _MISSING_TOOLS:
+        _MISSING_TOOLS.add(name)
+        logger.warning("%s is not installed on this worker: videos get no poster frame "
+                       "and no measured duration or size until it is (Dockerfile "
+                       "installs ffmpeg)", name)
+    return path
 
 
-def _local_copy(asset):
-    """A path on this machine for the stored original.
+def local_copy_of(field_file):
+    """`(path, temporary)`: a path on this machine for a stored file.
 
     The filesystem backend can answer with `.path`; object storage cannot, so the file
     is streamed to a temporary copy. Either way the caller gets a path and a cleanup
@@ -55,21 +75,26 @@ def _local_copy(asset):
     """
     storage_path = None
     try:
-        storage_path = asset.original.path
+        storage_path = field_file.path
     except (NotImplementedError, AttributeError, ValueError):
         storage_path = None
     if storage_path and os.path.exists(storage_path):
         return storage_path, False
 
-    suffix = os.path.splitext(asset.original.name or "")[1] or ".mp4"
+    suffix = os.path.splitext(field_file.name or "")[1] or ".mp4"
     handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     try:
-        with asset.original.open("rb") as source:
+        with field_file.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 handle.write(chunk)
     finally:
         handle.close()
     return handle.name, True
+
+
+def _local_copy(asset):
+    """A path on this machine for a media-kit asset's stored original."""
+    return local_copy_of(asset.original)
 
 
 class _LazyCopy:
@@ -81,16 +106,21 @@ class _LazyCopy:
     be marked `ready` with nothing filled in, and the hourly sweep did it again for
     anything stuck (SIDE_BUGS S-102). Each tool below finds its binary FIRST and only
     then asks for the path, so with no tools there is no download at all.
+
+    `fetch` turns what it was given into `(path, temporary)`: `_local_copy` for a
+    media-kit asset (the default), `local_copy_of` for a chat message's attachment.
     """
 
-    def __init__(self, asset):
+    def __init__(self, asset, fetch=None):
         self._asset = asset
+        self._fetch = fetch
         self._path = None
         self._temporary = False
 
     def path(self):
         if self._path is None:
-            self._path, self._temporary = _local_copy(self._asset)
+            # `_local_copy` looked up at CALL time, so a test can stand in for it.
+            self._path, self._temporary = (self._fetch or _local_copy)(self._asset)
         return self._path
 
     def cleanup(self):
@@ -99,6 +129,10 @@ class _LazyCopy:
                 os.unlink(self._path)
             except OSError:
                 logger.debug("could not remove the temporary video copy", exc_info=True)
+
+
+#: The public name, for the chat's poster task (`chat.tasks`).
+LazyCopy = _LazyCopy
 
 
 def _path_of(source):
@@ -142,24 +176,53 @@ def _probe(source):
             "width": stream.get("width"), "height": stream.get("height")}
 
 
-def _poster_bytes(source, at_seconds=POSTER_AT_SECONDS):
-    """One JPEG frame, or None when ffmpeg is absent or cannot produce one."""
+def _poster_bytes(source, at_seconds=POSTER_AT_SECONDS, max_side=None):
+    """One JPEG frame near the start, or None when ffmpeg is absent or cannot produce
+    one.
+
+    `at_seconds` in; a clip shorter than that has no frame there (ffmpeg 7 exits with
+    an error, older ones write an empty file), so the first frame is cut instead —
+    unless the first run TIMED OUT, which a second run would only repeat. `max_side`
+    bounds the frame's longer side, keeping its shape (the chat's bubble does not need
+    a 4K still). The JPEG carries no metadata (`-map_metadata -1`): nothing of the
+    video's own tags — a phone's location among them — is copied into the still.
+    """
     ffmpeg = _tool("ffmpeg")
     if not ffmpeg:
         return None
     path = _path_of(source)
+    frame = _cut_frame(ffmpeg, path, at_seconds, max_side)
+    if frame is None and at_seconds:
+        frame = _cut_frame(ffmpeg, path, 0, max_side)
+    return frame if frame is not _TIMED_OUT else None
+
+
+#: `_cut_frame`'s answer when ffmpeg ran out of time: not worth a second run.
+_TIMED_OUT = object()
+
+
+def _cut_frame(ffmpeg, path, at_seconds, max_side):
+    """One run of ffmpeg: the frame at `at_seconds` as JPEG bytes, None when there is
+    none, `_TIMED_OUT` when ffmpeg did not finish in `POSTER_TIMEOUT`."""
     out = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     out.close()
+    command = [ffmpeg, "-y", "-ss", str(at_seconds), "-i", path,
+               "-frames:v", "1", "-map_metadata", "-1"]
+    if max_side:
+        side = int(max_side)
+        command += ["-vf", f"scale='min({side},iw)':'min({side},ih)'"
+                           ":force_original_aspect_ratio=decrease"]
+    command += ["-q:v", "3", out.name]
     try:
-        result = subprocess.run(
-            [ffmpeg, "-y", "-ss", str(at_seconds), "-i", path,
-             "-frames:v", "1", "-q:v", "3", out.name],
-            capture_output=True, timeout=POSTER_TIMEOUT, check=False,
-        )
+        result = subprocess.run(command, capture_output=True, timeout=POSTER_TIMEOUT,
+                                check=False)
         if result.returncode != 0 or not os.path.getsize(out.name):
             return None
         with open(out.name, "rb") as handle:
             return handle.read()
+    except subprocess.TimeoutExpired:
+        logger.warning("ffmpeg did not cut a poster frame within %ss", POSTER_TIMEOUT)
+        return _TIMED_OUT
     except (subprocess.SubprocessError, OSError):
         logger.warning("ffmpeg could not cut a poster frame", exc_info=True)
         return None

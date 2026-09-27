@@ -13,18 +13,29 @@ Protocol (JSON, one object per frame):
 
     Client -> Server
       {"type": "message.send", "body": "...", "client_uuid": "..."}   client_uuid optional
+      {"type": "message.send", "kind": "program", "routine_id": 41 | "template_id": 7,
+       "day": 2, "body": "...", "client_uuid": "..."}      a trainer's program card
       {"type": "message.read"}
 
-    `message.send` carries text only. A photo, voice note or video is sent through
+    `message.send` carries text, or (the trainer only, 2026-09-27) a program card: the
+    body the REST send takes, the same `services.send_message` behind it, the same
+    refusals as `error` frames (`program_trainer_only`, `program_target_required`,
+    `unknown_program`, `program_not_for_this_client`, `day_out_of_range`,
+    `invalid_kind`). A photo, voice note or video is sent through
     `POST /api/v1/chat/media/` (a multipart upload does not belong in a JSON frame), and
     both ends hear it here as `message.new` like any other message.
 
     Server -> Client
       {"type": "message.new", "message": {...}}          the same object REST returns,
-                                                         `kind`, `media` and `exercise`
-                                                         included (on the filesystem
-                                                         backend `media.url` is relative
-                                                         to the API host)
+                                                         `kind`, `media`, `exercise` and
+                                                         `program` included (on the
+                                                         filesystem backend `media.url`
+                                                         is relative to the API host)
+      {"type": "message.updated", "message": {...}}      a message already sent now
+                                                         reads differently: today, a
+                                                         video's `media.poster_url` was
+                                                         filled by the worker. Replace
+                                                         the row you hold by `id`
       {"type": "message.read", "conversation", "reader", "read_at"}
       {"type": "message.deleted", "conversation", "message", "deleted_at"}
       {"type": "error", "code": "...", "detail": "..."}   branch on `code`
@@ -194,6 +205,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     async def message_deleted(self, event):
         await self._out('message.deleted', event)
+
+    async def message_updated(self, event):
+        await self._out('message.updated', event)
 
     # --- plumbing -----------------------------------------------------------------
 

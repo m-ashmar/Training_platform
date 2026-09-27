@@ -421,6 +421,41 @@ def accessible_user_ids(requester):
     return ids
 
 
+def readable_routines(requester, base_qs=None):
+    """
+    Single source of truth for "which routines may `requester` READ?".
+
+    Readable by:
+      * admin — every routine,
+      * a trainer — the routines they wrote, and any routine one of their clients is
+        on, where "their client" is `accessible_user_ids` (an APPROVED relation),
+      * anyone else — the routines they are on (`assigned_to`).
+
+    Reading is not training: a client whose coaching is frozen, unpaid or ended still
+    READS the coach's routines (the owner, 2026-09-19) and is refused only when they
+    start one (`users.coaching.training_refusal`). So nothing here asks about the
+    coaching's state.
+
+    `RoutineViewSet` lists and retrieves through this, and so does the chat's program
+    card (`chat.serializers`), which a client sees only while they may read the routine
+    it names: two definitions of the same rule drift. `base_qs` lets a caller keep its
+    own annotations and joins; the filtering is identical either way.
+    """
+    from .models import Routine
+
+    qs = Routine.objects.all() if base_qs is None else base_qs
+    if requester is None or not getattr(requester, 'is_authenticated', False):
+        return qs.none()
+    if getattr(requester, 'is_admin', False):
+        return qs
+    if getattr(requester, 'is_trainer', False):
+        ids = accessible_user_ids(requester)
+        if ids is None:
+            return qs
+        return qs.filter(Q(created_by=requester) | Q(assigned_to__id__in=ids)).distinct()
+    return qs.filter(assigned_to=requester)
+
+
 # ============================================================================
 # Shared exercise visibility
 # ============================================================================

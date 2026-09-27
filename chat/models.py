@@ -5,7 +5,15 @@ Text first (2026-09-20), then a photo, a voice note and a video (BACKEND_BUGS B-
 `duration_seconds`, `width`, `height`), with `body` as its caption. A client's video
 that names an `exercise` is a FORM CHECK — "watch my deadlift" — and waits in the
 trainer's attention queue (`users/attention_queue.py`) until the trainer writes in that
-thread after it. Program cards are still to come.
+thread after it. A video gets a POSTER frame after it is stored (`poster`, cut off the
+request by `chat.tasks.cut_video_poster` where the worker has ffmpeg).
+
+A PROGRAM CARD (`kind='program'`, 2026-09-27) is the trainer pointing at a routine they
+wrote for this client — «حدّث برنامجك · برنامج القوة · يوم الدفع» — with an optional
+day and caption: `routine`, `program_day`, and `program_changes`, what the card said
+about the routine when it was sent. The client opens it as the routine it names, and
+sees it only while they may READ that routine (`routine.permissions.readable_routines`,
+the rule the routine routes use).
 
 The bytes go through the platform's one upload pipeline (`chat/media.py`): the same
 content sniffing and caps as the media kit, stored on the same backend (GCS in
@@ -46,8 +54,10 @@ MAX_BODY_CHARS = 4000
 #: value it does not know as a placeholder (BACKEND_BUGS B-042). Add values; never
 #: rename one.
 KIND_TEXT, KIND_IMAGE, KIND_VOICE, KIND_VIDEO = 'text', 'image', 'voice', 'video'
+#: A trainer's card pointing at one of this client's routines (2026-09-27).
+KIND_PROGRAM = 'program'
 KIND_CHOICES = [(KIND_TEXT, 'Text'), (KIND_IMAGE, 'Image'), (KIND_VOICE, 'Voice'),
-                (KIND_VIDEO, 'Video')]
+                (KIND_VIDEO, 'Video'), (KIND_PROGRAM, 'Program')]
 MEDIA_KINDS = (KIND_IMAGE, KIND_VOICE, KIND_VIDEO)
 
 
@@ -62,6 +72,12 @@ def _attachment_upload_to(instance, filename):
     ext = os.path.splitext(filename)[1].lower() or '.bin'
     return (f"chat/{instance.conversation_id}/"
             f"{instance.kind}-{secrets.token_hex(12)}{ext}")
+
+
+def _poster_upload_to(instance, filename):
+    """`chat/<conversation>/poster-<random>.jpg`: beside the video it was cut from,
+    unguessable like it, and served only signed, like it."""
+    return f"chat/{instance.conversation_id}/poster-{secrets.token_hex(12)}.jpg"
 
 
 class Conversation(models.Model):
@@ -136,7 +152,8 @@ class Conversation(models.Model):
 
 
 class Message(models.Model):
-    """One message: text, or a photo, voice note or video with an optional caption.
+    """One message: text, a photo, voice note or video, or a trainer's program card —
+    the last three with an optional caption.
 
     A media message keeps its file for as long as the row lives, tombstone included —
     the same rule as the text, which stays in the column after the sender takes it
@@ -181,6 +198,25 @@ class Message(models.Model):
     exercise = models.ForeignKey(
         'routine.Exercise', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='+')
+    #: A video's poster: one JPEG frame near its start, cut by a worker after the video
+    #: is stored (`chat.tasks.cut_video_poster`), never on the request. Empty until
+    #: then, and for good where the worker has no ffmpeg or could not read the video.
+    #: Private like the video, served signed (`chat.media.payload` `poster_url`), and
+    #: removed with it (`chat.media.stored_names`).
+    poster = models.FileField(upload_to=_poster_upload_to, max_length=255, blank=True)
+    #: A program card's routine: one the trainer wrote that this client is on. Null on
+    #: every other kind, and on a card whose routine was deleted since (the card stays
+    #: in the thread and opens nothing).
+    routine = models.ForeignKey(
+        'routine.Routine', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+')
+    #: The day of that routine the card opens (1-based), or null for the whole routine.
+    program_day = models.PositiveSmallIntegerField(null=True, blank=True)
+    #: What the card said about the routine WHEN IT WAS SENT, written once:
+    #: `{"exercises": n, "changes": null | {"since", "added", "edited", "removed"}}`
+    #: (`chat.services.program_summary`). A snapshot, so a page of history reads no
+    #: routine-exercise rows to draw it.
+    program_changes = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     #: The app's own id for this message: the first send with it is created, a retry
     #: whose answer was lost returns that same row instead of posting twice. Scoped to

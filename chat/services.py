@@ -4,7 +4,9 @@ The REST routes and the WebSocket consumer are two doors into these functions. N
 one implements a rule: the pair check, the idempotent replay, the fan-out and the push
 all live here, so a message sent over a socket and a message sent over HTTP are the same
 event with the same side effects. A photo, voice note or video (`send_media_message`,
-B-091) runs the same checks in the same order and ends in the same `_announce`.
+B-091) runs the same checks in the same order and ends in the same `_announce`, and so
+does a trainer's PROGRAM CARD (`kind: "program"` on the text send, `_send_program`,
+2026-09-27): one send path, one replay, one pair rule, one fan-out.
 """
 import logging
 import uuid as _uuid
@@ -95,14 +97,43 @@ def parse_client_uuid(raw):
         raise refused
 
 
+def _refused(code, message, field):
+    """A 400 whose top-level `code` is `code`, with the same code on
+    `field_errors.<field>`: DRF's ValidationError, because the socket catches
+    `APIException` and nothing else, carrying `service_code` so the code reaches the
+    envelope (see `parse_client_uuid`)."""
+    refused = ValidationError({field: [message]}, code=code)
+    refused.service_code = code
+    return refused
+
+
+def kind_of(data):
+    """What the text send is asked to write: `text` (the default, and what an absent or
+    empty `kind` means) or `program`. Anything else is 400 `invalid_kind` — a photo,
+    voice note or video has its own route (`POST /api/v1/chat/media/`)."""
+    from .models import KIND_PROGRAM, KIND_TEXT
+
+    raw = data.get('kind') if hasattr(data, 'get') else None
+    if raw in (None, '', KIND_TEXT):
+        return KIND_TEXT
+    if raw == KIND_PROGRAM:
+        return KIND_PROGRAM
+    raise _refused('invalid_kind',
+                   _('This route sends text and program cards. Send photos, voice notes '
+                     'and videos to /api/v1/chat/media/.'), 'kind')
+
+
 def send_message(conversation, sender, data):
     """Write one message and tell everyone. Returns `(message, created)`.
 
-    `data` is the raw request body: `{body, client_uuid?}`. Validation, the pair check
-    and the replay all happen here, in that order — an idempotent retry of a message
-    that landed while the coaching was still paid is ANSWERED, not refused, exactly as a
-    replayed set log is.
+    `data` is the raw request body: `{body, client_uuid?}` for text, or `{kind:
+    "program", routine_id | template_id, day?, body?, client_uuid?}` for a trainer's
+    program card (`_send_program`). Validation, the pair check and the replay all happen
+    here, the replay first — an idempotent retry of a message that landed while the
+    coaching was still paid is ANSWERED, not refused, exactly as a replayed set log is.
     """
+    from .models import KIND_PROGRAM
+
     recipient_id = conversation.other_id(sender.pk)
     if recipient_id is None:
         # Not a member. Callers 404 before this; belt and braces for the socket.
@@ -113,6 +144,9 @@ def send_message(conversation, sender, data):
     replayed = replay(conversation, sender, client_uuid)
     if replayed is not None:
         return replayed, False
+
+    if kind_of(data) == KIND_PROGRAM:
+        return _send_program(conversation, sender, data, client_uuid)
 
     serializer = MessageSerializer(data=data)
     serializer.is_valid(raise_exception=True)
@@ -138,6 +172,159 @@ def send_message(conversation, sender, data):
     return message, True
 
 
+def _send_program(conversation, sender, data, client_uuid):
+    """Write a trainer's program card and tell everyone. Returns `(message, True)`, or
+    the first card on a lost-answer race of the same `client_uuid`.
+
+    In the order it is decided, after the membership check, the `client_uuid` and the
+    replay that `send_message` ran:
+
+        403 `program_trainer_only`         the sender is the thread's client
+        400 `validation_error`             a field is malformed (`field_errors` names it)
+        400 `program_target_required`      neither or both of `routine_id`, `template_id`
+        400 `unknown_program`              no routine / template of THIS trainer's by
+                                           that id (someone else's answers the same)
+        400 `program_not_for_this_client`  the trainer's routine, but this client is not
+                                           on it; or the trainer's template, and this
+                                           client has no routine written from it
+        400 `day_out_of_range`             `day` is past the routine's `days`
+        403 the pair rule                  `no_relation`, `blocked`, `coaching_frozen`,
+                                           `coaching_unpaid`, `coaching_ended` — exactly
+                                           as a text send
+    """
+    from .models import KIND_PROGRAM
+    from .serializers import ProgramCardSerializer
+
+    if sender.pk != conversation.trainer_id:
+        raise PermissionDenied(_('Only the trainer sends program cards.'),
+                               code='program_trainer_only')
+    form = ProgramCardSerializer(data=data)
+    form.is_valid(raise_exception=True)
+    values = form.validated_data
+    if (values.get('routine_id') is None) == (values.get('template_id') is None):
+        raise _refused('program_target_required',
+                       _('Name exactly one of routine_id or template_id.'), 'routine_id')
+    client = conversation.client
+    routine = resolve_program(sender, client, routine_id=values.get('routine_id'),
+                              template_id=values.get('template_id'))
+    day = values.get('day')
+    if day is not None and day > routine.days:
+        raise _refused('day_out_of_range',
+                       _('This routine has %(days)s days.') % {'days': routine.days},
+                       'day')
+
+    require_may_message(sender, client)
+
+    try:
+        with transaction.atomic():
+            message = Message.objects.create(
+                conversation=conversation, sender=sender, kind=KIND_PROGRAM,
+                body=values.get('body') or '', client_uuid=client_uuid,
+                routine=routine, program_day=day,
+                program_changes=program_summary(conversation, routine, day))
+            _moved(conversation, message)
+    except IntegrityError:
+        first = replay(conversation, sender, client_uuid)
+        if first is None:
+            raise
+        return first, False
+
+    _announce(conversation, message)
+    return message, True
+
+
+def resolve_program(trainer, client, *, routine_id=None, template_id=None):
+    """The routine a program card names: one `trainer` wrote that `client` is on.
+
+    By `routine_id`: that routine, if the trainer wrote it (`created_by`) and the client
+    is on it (`assigned_to`) — the client's private copy (`routine/assignment.py`).
+
+    By `template_id`: a template the trainer OWNS, resolved to the client's own routine
+    written from it (`source_template`), the newest active one first. The card always
+    opens a ROUTINE the client reads; a template is only a way for the trainer to name
+    it. A template the client has no copy of is `program_not_for_this_client`: the
+    trainer delivers it first (`templates/{id}/generate/`).
+
+    A routine or template of another trainer's answers `unknown_program`, like an id
+    that does not exist. A routine product the client bought is theirs, not the
+    trainer's (`Routine.purchase`), so it cannot be named either.
+    """
+    from routine.models import Routine, RoutineTemplate
+
+    if routine_id is not None:
+        # The whole row: the card served right after the send reads its name, day
+        # names and template, and a deferred field is a query each.
+        routine = Routine.objects.filter(pk=routine_id, created_by=trainer).first()
+        if routine is None:
+            raise _refused('unknown_program', _('There is no such program of yours.'),
+                           'routine_id')
+        if not routine.assigned_to.filter(pk=client.pk).exists():
+            raise _refused('program_not_for_this_client',
+                           _('This client is not on that routine.'), 'routine_id')
+        return routine
+
+    if not RoutineTemplate.objects.filter(pk=template_id, created_by=trainer).exists():
+        raise _refused('unknown_program', _('There is no such program of yours.'),
+                       'template_id')
+    routine = (Routine.objects
+               .filter(source_template_id=template_id, created_by=trainer,
+                       assigned_to=client)
+               .order_by('-is_active', '-created_at', '-id').first())
+    if routine is None:
+        raise _refused('program_not_for_this_client',
+                       _('This client has no routine written from that template yet.'),
+                       'template_id')
+    return routine
+
+
+def program_summary(conversation, routine, day):
+    """What a card announces about `routine` (its `day`, or the whole routine when
+    `day` is None), written once when it is sent:
+
+        {"exercises": 6,                     exercise rows on that day now
+         "changes": null | {                 since the previous card for this routine
+             "since": "<that card's time>",  in this thread (a taken-back one does not
+             "added": 1,                     count): rows written after it,
+             "edited": 2,                    rows edited after it,
+             "removed": 1 | null}}           rows gone since (null when the two cards
+                                             are about different days)
+
+    `changes` is null on the first card for a routine. Every routine-exercise write
+    goes through `save()`, which stamps `created_at` / `updated_at`, so the two counts
+    are exact; a removal leaves no row, so `removed` is worked out from the two cards'
+    `exercises` (a row moved onto the day counts as edited, one moved off as removed).
+    Two queries, both on indexes: the previous card, and one aggregate.
+    """
+    from django.db.models import Count, Q
+
+    from routine.models import RoutineExercise
+
+    from .models import KIND_PROGRAM
+
+    rows = RoutineExercise.objects.filter(routine=routine)
+    if day is not None:
+        rows = rows.filter(day=day)
+    previous = (Message.objects
+                .filter(conversation=conversation, kind=KIND_PROGRAM, routine=routine,
+                        deleted_at__isnull=True)
+                .order_by('-id')
+                .values('created_at', 'program_day', 'program_changes').first())
+    if previous is None:
+        return {'exercises': rows.count(), 'changes': None}
+    since = previous['created_at']
+    counts = rows.aggregate(
+        exercises=Count('pk'),
+        added=Count('pk', filter=Q(created_at__gt=since)),
+        edited=Count('pk', filter=Q(created_at__lte=since, updated_at__gt=since)))
+    before = (previous['program_changes'] or {}).get('exercises')
+    removed = None
+    if previous['program_day'] == day and isinstance(before, int):
+        removed = max(0, before + counts['added'] - counts['exercises'])
+    return {'exercises': counts['exercises'],
+            'changes': {'since': since.isoformat(), 'added': counts['added'],
+                        'edited': counts['edited'], 'removed': removed}}
+
+
 def _moved(conversation, message):
     """The list is ordered by `last_message_at`, so it moves with every message —
     including one that is later taken back: the thread DID have activity."""
@@ -152,8 +339,14 @@ def _announce(conversation, message):
     The socket frame is serialized without a request, so on the filesystem backend its
     `media.url` is relative to the API host (a GCS URL is absolute either way); both
     people in the group are the conversation's members, checked at connect.
+
+    A program card goes out WITH its card: the send has just checked that the trainer
+    wrote the routine and the client is on it, so both people in the group may read it
+    (`readable_routines`), and one frame serves them both.
     """
-    payload = dict(MessageSerializer(message).data)
+    context = ({'readable_routines': {message.routine_id}}
+               if message.routine_id is not None else {})
+    payload = dict(MessageSerializer(message, context=context).data)
     broadcast(conversation.pk, 'message.new', {'message': payload})
     notify_new_message(message)
 
@@ -170,7 +363,9 @@ def send_media_message(sender, data, upload):
     alone: `chat.media.require_media_quota`), and only then the bytes, so a refused
     sender costs no decode and no storage. The file and the row are written together;
     if the row cannot be written, the file is removed again (`chat.media.discard`), so
-    a refusal or a race never leaves bytes that nothing points at.
+    a refusal or a race never leaves bytes that nothing points at. A video's poster
+    frame is not cut here: it is queued for a worker once the row commits
+    (`chat.media.queue_poster`, 2026-09-27), so the request never decodes a frame.
 
     Raises DRF exceptions for the refusals the text send shares and for the quota, and
     Django's `ValidationError` (with its `code`) for the upload's own — the view
@@ -179,6 +374,7 @@ def send_media_message(sender, data, upload):
     from rest_framework.exceptions import NotFound
 
     from . import media
+    from .models import KIND_VIDEO
     from .serializers import MediaMessageSerializer
 
     raw = data if hasattr(data, 'get') else {}
@@ -227,6 +423,13 @@ def send_media_message(sender, data, upload):
         raise
 
     _announce(conversation, message)
+    if kind == KIND_VIDEO:
+        # The poster frame is a worker's job, never this request's: queued once the
+        # row is committed (at once here, where nothing wraps the send in a wider
+        # transaction), after `message.new` went out with `poster_url: null`. The
+        # worker announces the frame with `message.updated` (`chat.tasks`).
+        message_id = message.pk
+        transaction.on_commit(lambda: media.queue_poster(message_id))
     return message, True
 
 
@@ -327,8 +530,9 @@ def history(conversation, *, before=None, limit=None):
         raise ValidationError({'limit': [_('Out of range.')]}, code='invalid_limit')
 
     # `exercise` joined: a form check names its move, and reading it per row would be a
-    # query per video on the page.
-    rows = Message.objects.filter(conversation=conversation).select_related('exercise')
+    # query per video on the page. `routine` likewise: a program card names its routine.
+    rows = (Message.objects.filter(conversation=conversation)
+            .select_related('exercise', 'routine'))
     if before not in (None, ''):
         try:
             rows = rows.filter(pk__lt=int(before))

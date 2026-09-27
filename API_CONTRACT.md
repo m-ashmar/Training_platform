@@ -553,9 +553,9 @@ its contract: `Authorization: Bearer`, the fields, 401 `not_authenticated` /
 
 ### Chat
 
-Messages between a trainer and the client they coach: text, and (B-091, 2026-09-24) a
-photo, a voice note or a video with an optional caption. No program card yet. Exactly
-one conversation per pair. Nothing here differs by build.
+Messages between a trainer and the client they coach: text, (B-091, 2026-09-24) a
+photo, a voice note or a video with an optional caption, and (2026-09-27) a trainer's
+**program card**. Exactly one conversation per pair. Nothing here differs by build.
 
 Reading and writing are decided separately (the owner, 2026-09-19). Being in the
 conversation is what lets you READ it, for ever; writing asks
@@ -565,15 +565,49 @@ conversation row carries `can_send` and `refusal` so the app can explain a close
 composer without posting first. A conversation that is not the caller's is **404**, never
 403.
 
-Every message carries `kind` — `text`, `image`, `voice` or `video` — on REST and on the
-socket's `message.new` (the same serializer); switch on it, and draw an unknown one as a
-placeholder rather than guessing from which fields are present (BACKEND_BUGS B-042).
-Every message also carries, additively, `media` (null on text; `{url,
-duration_seconds, width, height}` otherwise) and `exercise` (`{id, name}` on a video
-that names its move, else null). `media.url` is PRIVATE: signed, expiring (an hour on
-GCS), and handed out only in answers the two people in the thread receive — use it,
-never store it. A message taken back serves `media: null`. The conversation list's
-`last_message` and the home card's `trainer_message` carry `kind` and never the media.
+Every message carries `kind` — `text`, `image`, `voice`, `video` or `program` — on REST
+and on the socket's `message.new` (the same serializer); switch on it, and draw an
+unknown one as a placeholder rather than guessing from which fields are present
+(BACKEND_BUGS B-042). Every message also carries, additively, `media` (null on text and
+on a program card; `{url, duration_seconds, width, height, poster_url}` otherwise),
+`exercise` (`{id, name}` on a video that names its move, else null) and `program` (the
+card below, else null). `media.url` and `media.poster_url` are PRIVATE: signed, expiring
+(an hour on GCS), and handed out only in answers the two people in the thread receive —
+use them, never store them. A message taken back serves `media: null` and
+`program: null`. The conversation list's `last_message` and the home card's
+`trainer_message` carry `kind` and never the media or the card.
+
+**Video poster frames** (2026-09-27). `media.poster_url` is a video's poster: one JPEG
+frame near its start (at most 720 px a side, no metadata), cut AFTER the send by a
+Celery worker with ffmpeg (`chat.tasks.cut_video_poster`) — never on the request — and
+stored privately beside the video under the same signed-URL rules. It is null on a
+photo and a voice note, null in the send's own answer and in `message.new`, and filled
+on every read once the worker has stored it; the worker then sends `message.updated`
+(the whole message, as REST serves it) on the socket. Where the worker has no ffmpeg
+(logged once per worker process) or cannot read the video it stays null: draw a
+placeholder. The files go with the message (a conversation's delete, an erasure).
+
+**Program cards** (the trainer only; «حدّث برنامجك · برنامج القوة · يوم الدفع»,
+`screens/05-chat-utility/Chat.png`) are sent on the text route — and over the socket's
+`message.send` — with `{"kind": "program", "routine_id" | "template_id", "day"?,
+"body"?, "client_uuid"?}`: a routine the trainer wrote that this client is on (their
+private copy), or a template the trainer owns, which names the client's routine written
+from it (the newest active one). The card: `program: {routine_id, template_id, name,
+day, day_name, exercises, changes}` — open it as `GET /api/routine/routines/{routine_id}/`
+and its `day`; `name` and `day_name` are the routine's now, in the reader's language;
+`exercises` (rows on that day) and `changes` (`null` on the first card for a routine,
+else `{since, added, edited, removed | null}` since the previous card for it in this
+thread) are what the card said when it was sent. A reader gets `program` only while they
+may READ that routine — the rule of the routine routes (`routine.permissions.
+readable_routines`): so a client whose coaching is frozen, unpaid or ended still sees
+and opens it (reading is not training), and a card whose routine was taken off the
+client or deleted stays in the thread with `program: null`. The same replay, pair rule
+and fan-out as text; the push reads the caption, or «حدّث برنامجك · <routine>» in the
+client's language. Refusals, in the order decided: `program_trainer_only` (403),
+`validation_error`, `program_target_required`, `unknown_program` (another trainer's
+routine or template answers the same), `program_not_for_this_client`,
+`day_out_of_range` (400s), then the send's 403s. A `kind` that is neither `text` nor
+`program` on this route is 400 `invalid_kind`.
 
 **Photos, voice notes and videos** are sent with `POST /api/v1/chat/media/`
 (`multipart/form-data`: `conversation`, `kind`, `file`, optional `body` as the caption,
@@ -611,9 +645,9 @@ refused here —, `corrupt_image`, `invalid_aspect_ratio` (over 10:1), `unreadab
 guard itself fails), and for a photo `upload_busy` (503, 2026-09-27: every image-decode
 slot of the server is taken — nothing was stored or counted; send it again after
 `Retry-After`). The push quotes the caption, or says "Photo" / "Voice note" /
-"Video" in the recipient's language — never a link. A chat video has no poster frame (no
-ffmpeg in the image) and a WebM or Ogg file declares no duration, so `duration_seconds`
-may be null.
+"Video" in the recipient's language — never a link. A chat video's poster frame comes
+later, from a worker (above); a WebM or Ogg file declares no duration, so
+`duration_seconds` may be null.
 
 `refusal` / the send's 403 `code`, in the order they are decided: `no_relation` (never an
 approved pair and never a paid month), `blocked` (either of the two blocked the other —
@@ -631,9 +665,12 @@ messages/{id}/` tombstones the sender's own message — the row stays in the thr
 `deleted: true` and an empty `body`, and nothing is ever hard-deleted.
 
 Live: `ws://host/ws/chat/{conversation_id}/?token=<access JWT>`. Client frames
-`{"type": "message.send", body, client_uuid?}` and `{"type": "message.read"}`; server
-frames `message.new`, `message.read`, `message.deleted` and
-`{"type": "error", code, detail}`. `message.send` is text only; a media message sent
+`{"type": "message.send", body, client_uuid?}` (or a program card: `kind: "program"`
+and the card's fields, as on REST) and `{"type": "message.read"}`; server frames
+`message.new`, `message.updated` (a message already sent now reads differently —
+today, a video's `poster_url` arrived; replace the row by `id`), `message.read`,
+`message.deleted` and `{"type": "error", code, detail}`. `message.send` is text or a
+program card; a media message sent
 over REST reaches both sockets as `message.new`. A socket send runs the same checks and the same
 serializer as the REST route, and `detail` is in the reader's language. The socket's
 own codes: `invalid_frame`, `unknown_type`, `server_error`, `auth` (the token expired or
@@ -897,7 +934,10 @@ the same place with a different set of keys: `{video_url, poster_url, hls_url,
 duration_seconds, width, height, state, alt_ar, alt_en}`. `state` is `pending` | `ready` |
 `failed` — `pending` means the video plays now and its poster frame is still being cut.
 `poster_url` and `hls_url` are ABSENT until they exist (`hls_url` needs a transcoder,
-which is not built yet). Every media URL is signed and expires after an hour
+which is not built yet). The poster is cut off the request by the worker's ffmpeg
+(`mediakit.fill_video_metadata`; the image installs ffmpeg since 2026-09-27): a frame
+one second in, or the first frame of a shorter clip, with no metadata. A worker without
+ffmpeg logs it once and leaves the asset `ready` with no poster. Every media URL is signed and expires after an hour
 (`MEDIA_SIGNED_URL_TTL`): use what the API just returned, never a stored copy.
 
 | Method | Path | Auth | View |

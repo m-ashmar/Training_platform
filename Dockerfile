@@ -1,7 +1,13 @@
 # syntax=docker/dockerfile:1
 FROM python:3.12-slim
 
-# System dependencies for psycopg2, Pillow, python-magic, and libmagic
+# System dependencies for psycopg2, Pillow, python-magic, and libmagic — and ffmpeg
+# (2026-09-27), which the WORKER uses to cut a video's poster frame and measure it
+# (`mediakit.tasks`, `chat.tasks`). The web process never runs it: nothing on a request
+# decodes video. `--no-install-recommends` keeps it to the binaries and their codec
+# libraries; the cost is the size of the image, roughly +250 MB uncompressed (the
+# estimate DEPLOY_CHECKLIST.md carried; not measured here). Without it the workers still
+# run: every video uploads and plays, with no poster (logged once per worker).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
@@ -9,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmagic-dev \
     libjpeg-dev \
     zlib1g-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
