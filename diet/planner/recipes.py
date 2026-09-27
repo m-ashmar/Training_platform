@@ -440,6 +440,12 @@ def find_recipe(meal_name: str, targets: Dict[str, float], policy: PlannerPolicy
         suits = getattr(recipe, "meal_types", None) or []
         if suits and meal_name not in suits:
             continue
+        # The DISH, as written, before any line is swapped (spec B4). The line check
+        # below cannot see a dish whose text says more than its lines — `Chicken Satay`
+        # with no peanut line passed it for a peanut-allergic client — and a
+        # substitution must not launder a dish that was incompletely tagged.
+        if constraints is not None and constraints.forbids_dish(recipe):
+            continue
 
         lines = _recipe_lines(recipe)
         if not lines:
