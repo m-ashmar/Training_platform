@@ -505,6 +505,12 @@ What wiring the trainer shell found (BACKEND_BUGS B-089, B-093, 2026-09-24; addi
 `not_found` for no such trainer and for a `trainer_id` that is not a number, and both
 unassign routes answer 409 `refund_failed` when a held month cannot be returned.
 
+`register/` (`username`), `user/update/`, `trainer/profile/` and `client/profile/` (the
+names, and a trainer's bio, specialisations and certifications) answer 400
+`content_not_allowed` when the text holds a term on the banned-terms list, with the
+field in `field_errors` and nothing saved; see "The banned-terms filter" under Safety
+(2026-09-27).
+
 **`user/details/` names the role** (BACKEND_BUGS B-121, 2026-09-24; additive). The answer
 gains `user_type` (`client` | `trainer` | `agent` | `admin`) and `media` — the person's
 media map in the trainer cards' shape, `{slot: {url_1x, url_2x, blur, focal, brightness,
@@ -1386,6 +1392,38 @@ and neither number ever exceeds what that person can actually fetch.
 
 In the app's "report and block" flow, call `reports/` FIRST: what a blocked person
 wrote is no longer visible to the reporter, and therefore no longer reportable.
+
+**The banned-terms filter** (spec B1, 2026-09-27; additive: one new `code`, no new
+route). Text a person writes for other people to read is checked against a list the
+operators edit in the console (`/dj-admin/moderation/bannedterm/`), on create AND on
+edit, and only the fields the request writes:
+
+| Route | Fields checked |
+|---|---|
+| `POST`, `PUT`, `PATCH` `/api/social/posts/` (and `{id}/`) | `title`, `content` |
+| `POST`, `PUT`, `PATCH` `/api/social/comments/` (and `{id}/`) | `content` |
+| `POST`, `PUT`, `PATCH` `/api/social/challenges/` (and `{id}/`) | `title`, `description`, `rules`, `reward_description`, `unit` |
+| `POST` `/api/auth/user/update/`, `/api/auth/trainer/profile/` | `first_name`, `last_name`, and a trainer's `trainer_bio`, `trainer_specializations`, `trainer_certifications` |
+| `POST` `/api/auth/client/profile/` | `first_name`, `last_name` |
+| `POST` `/api/auth/register/` | `username` |
+
+A refused write answers **400 `content_not_allowed`** (the top-level `code`), with every
+refused field in `field_errors` carrying the same code:
+
+```json
+{"code": "content_not_allowed", "detail": "…", "error": "…",
+ "field_errors": {"content": [{"message": "…", "code": "content_not_allowed"}]},
+ "content": ["…"]}
+```
+
+Nothing is written: no post, no comment counter moved, no push, no account. The
+message never names the word. It is checked after every other validation, so a request
+that also has another mistake answers that one (`validation_error`) first. Matching
+ignores case, Arabic letter forms (أ/إ/آ/ا, ة/ه, ى/ي), diacritics, tatweel, invisible
+characters, repeated letters and punctuation between letters; whole word or anywhere,
+per term. **Identical on every `X-App-Channel` and for every account.** Private chat is
+not filtered (`chat/views.py`): it has reporting (`coach_message`) and blocking. A
+change to the list takes effect at the next write, without a release.
 
 **AI consent.** `GET ai-consent/` → `{granted, policy_version, granted_at,
 revoked_at}`; never asked reads as all-null with `granted: false`, which is how the
@@ -2950,6 +2988,10 @@ the list, and its detail, `join`, `leave`, `update_progress` and `leaderboard` a
 `comments_count` on a post is the number of comments THIS viewer can open: the stored
 counter less the ones hidden by moderation and the ones by accounts they have blocked.
 It therefore equals the row count of `GET comments/?post={id}` for the same viewer.
+
+A post, comment or challenge whose text holds a term on the banned-terms list answers
+400 `content_not_allowed` on create and edit, naming the field in `field_errors`; see
+"The banned-terms filter" under Safety above (2026-09-27).
 
 | Method | Path | Auth | View |
 |---|---|---|---|

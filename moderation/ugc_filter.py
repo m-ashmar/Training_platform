@@ -47,8 +47,10 @@ top of that each term's pattern tolerates:
 
 * a letter repeated: every letter of the term matches one or more of itself. A letter
   the term itself doubles matches two or more, so "ass"-shaped terms do not start
-  matching "as";
-* punctuation between letters ("f.u.c.k", "ش.ر.م"), never spaces;
+  matching "as" (folding first cuts any run of one character to three);
+* up to three punctuation characters between letters ("f.u.c.k", "ش.ر.م"), never
+  spaces. An underscore counts as punctuation, so "f_u_c_k" is caught and a whole-word
+  term is found in a username such as "zorblax_99";
 * for a WHOLE-WORD Arabic term of three letters or more: the proclitics that join the
   next word — و ف ب ك ل, the article ال (and لل), their combinations, and a joined
   vocative يا — so "والشرموطة" is the listed word.

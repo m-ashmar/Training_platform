@@ -70,6 +70,18 @@ Two more that fail silently (found building `payouts`, 2026-09-24):
   (`MyDietPlansView` and the two plan reads do). A write that retires plans must
   filter `is_active=True`, never "not mine", or it will retire a draft nobody follows.
 
+One about user-written text (found building `build/ugc-filter`, 2026-09-27):
+
+- **The banned-terms list is live in every test that writes through the API.**
+  Migration `moderation/0004` seeds ~60 terms (`wa.me/`, `t.me/`, `shit`, `fuck`, Arabic
+  obscenities and slurs, "للتواصل واتس"...), and a post, comment, challenge, profile
+  name or bio, or sign-up username holding one answers 400 `content_not_allowed`
+  (`moderation/ugc_filter.py`). Test text that needs a link or a curse fails for that
+  reason, not yours. A test about the filter builds its own list (`tests/
+  test_ugc_filter.py` deletes the rows and calls `ugc_filter.invalidate()` before and
+  after): the compiled list is cached per process and keyed to a version in the
+  shared cache, which OUTLIVES a test's rolled-back transaction.
+
 Three more about tests of background work (found building `fx/prod-services`, 2026-09-27):
 
 - **No Celery retry ever runs in the suite.** Tasks run eagerly with
