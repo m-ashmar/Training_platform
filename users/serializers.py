@@ -13,6 +13,16 @@ from django.core.files.images import get_image_dimensions
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+# The banned-terms filter (spec B1, moderation/ugc_filter.py): what other people read
+# of a profile — the names, a trainer's bio, specialisations and certifications — and
+# the sign-up username refuse a listed term with 400 `content_not_allowed`.
+from moderation.ugc_filter import BannedTermsFilter, refuse_banned_text
+
+#: A profile's text other people read. Only the ones a serializer has AND the request
+#: writes are checked; a client's trainer fields are dropped before (`validate`).
+PROFILE_TEXT_FIELDS = ('first_name', 'last_name', 'trainer_bio',
+                       'trainer_specializations', 'trainer_certifications')
+
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +191,12 @@ class CustomRegisterSerializer(RegisterSerializer):
     Arabic, the platform's primary language (`SIGNUP_DEFAULT_LANGUAGE`). Anything else
     is refused with `field_errors.preferred_language[0].code` = `invalid_choice`. The
     answer's `user` carries the saved value. Changed later on `user/update/`.
+
+    A `username` that holds a term on the banned-terms list answers 400
+    `content_not_allowed` — the top-level `code`, and `field_errors.username[0].code` —
+    and no account is made (spec B1, `moderation/ugc_filter.py`). It is checked after
+    every other field, so a request with other mistakes answers `validation_error`
+    first. Same on every build.
     """
     phone_number = serializers.CharField(max_length=15,  required=True)
     user_type = serializers.ChoiceField(choices=[('client', 'Client'), ('trainer', 'Trainer'), ('agent', 'Agent'), ('admin', 'Administrator')], required=False, default='client')
@@ -262,6 +278,9 @@ class CustomRegisterSerializer(RegisterSerializer):
 
     def save(self, request):
         logger.info("CustomRegisterSerializer.save() called")
+        # Before anything is written: the username is shown to everyone on posts,
+        # comments, boards and the public profile, and cannot be changed later.
+        refuse_banned_text({'username': self.validated_data.get('username')})
         try:
             user = super().save(request)
             user.phone_number = self.validated_data.get('phone_number')
@@ -385,8 +404,11 @@ class CustomLoginSerializer(LoginSerializer):
         attrs['user'] = self.user
         return attrs
     
-class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
-                            serializers.ModelSerializer):
+class UserDetailsSerializer(BannedTermsFilter, OnboardingFieldsMixin,
+                            TrainerMatchingFieldsMixin, serializers.ModelSerializer):
+    # A write of a name, or of a trainer's bio, specialisations or certifications, that
+    # holds a banned term: 400 `content_not_allowed` naming the field, nothing saved.
+    banned_terms_fields = PROFILE_TEXT_FIELDS
     profile_picture = serializers.SerializerMethodField()
     # Read-only, like every login detail (BACKEND_BUGS B-053): a number is changed through
     # support, never here. A `phone_number` sent to `user/update/` is ignored with the
@@ -473,16 +495,22 @@ class UserDetailsSerializer(OnboardingFieldsMixin, TrainerMatchingFieldsMixin,
                     attrs.pop(field)
         return attrs
 
-class TrainerProfileSerializer(TrainerMatchingFieldsMixin, serializers.ModelSerializer):
+class TrainerProfileSerializer(BannedTermsFilter, TrainerMatchingFieldsMixin,
+                               serializers.ModelSerializer):
     """Serializer for trainer-specific profile data.
+
+    A name, `trainer_bio`, `trainer_specializations` or `trainer_certifications` that
+    holds a banned term: 400 `content_not_allowed` naming the field, nothing saved
+    (spec B1, `moderation/ugc_filter.py`).
 
     Also takes the matching codes (`trainer_goal_focus`, `trainer_injury_focus`,
     `trainer_training_places`), which decide which clients the trainer is matched with
     and why (`GET /api/v1/trainers/matches`).
     """
+    banned_terms_fields = PROFILE_TEXT_FIELDS
     client_count = serializers.SerializerMethodField()
     profile_picture = serializers.SerializerMethodField()
-    
+
     onboarding_completed = serializers.BooleanField(source='is_onboarding_completed', read_only=True)
     # `not_started` | `pending` | `rejected` | `verified` — the trainer's own application
     # (`GET /api/v1/trainer/verification/` has the documents). Additive and read-only;
@@ -528,9 +556,14 @@ class TrainerProfileSerializer(TrainerMatchingFieldsMixin, serializers.ModelSeri
             raise serializers.ValidationError(_("This serializer is only for trainers"))
         return attrs
 
-class ClientProfileSerializer(OnboardingFieldsMixin, serializers.ModelSerializer):
+class ClientProfileSerializer(BannedTermsFilter, OnboardingFieldsMixin,
+                              serializers.ModelSerializer):
     """Serializer for client-specific profile data, including the v2 onboarding
-    answers and the date of birth (see OnboardingFieldsMixin)."""
+    answers and the date of birth (see OnboardingFieldsMixin).
+
+    A `first_name` or `last_name` that holds a banned term: 400 `content_not_allowed`
+    naming the field, nothing saved (spec B1, `moderation/ugc_filter.py`)."""
+    banned_terms_fields = ('first_name', 'last_name')
     assigned_trainer_name = serializers.SerializerMethodField()
     profile_picture = serializers.SerializerMethodField()
     

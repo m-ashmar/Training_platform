@@ -13,6 +13,13 @@ THE RULE FOR A COACHING THAT IS NOT PAID (the owner, 2026-09-19): frozen, unpaid
 ended keep the thread READABLE and refuse SENDING with that code, because an unpaid
 relationship is never deleted and cannot be used. Reading is membership; writing asks
 `chat.permissions.may_message`.
+
+NOT FILTERED FOR BANNED TERMS, deliberately (`moderation/ugc_filter.py`, 2026-09-27).
+Spec B1 asks for a banned-terms filter on post and comment creation: text written for
+everyone to read. A chat is private, between one trainer and one client who chose each
+other, and its safety tools are the ones B1 names for it — reporting a message
+(`coach_message` on `POST /api/v1/reports/`) and blocking, which closes the thread for
+writing both ways. A message body is stored exactly as typed.
 """
 import logging
 
@@ -166,7 +173,8 @@ class ConversationMessagesView(APIView):
     POST takes text only.
 
     **POST** — send. Body `{"body": "...", "client_uuid": "..."}` (`client_uuid`
-    optional). `body` is capped at 4000 characters and is stored exactly as typed.
+    optional). `body` is capped at 4000 characters and is stored exactly as typed;
+    it is not checked against the banned-terms list (see the module docstring).
     201 with the message. A repeat of a `client_uuid` already used answers **200** with
     the FIRST message and writes nothing, so a retry after a lost answer is safe.
     400 `validation_error` (an empty or whitespace-only body: `blank_message` on

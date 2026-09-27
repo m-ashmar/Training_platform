@@ -245,6 +245,7 @@ class UpdateUserDetailsView(APIView):
         | status | `code` | when |
         |---|---|---|
         | `400` | `validation_error` | a field is refused; each carries its own code in `field_errors.<field>[0].code`, e.g. `under_minimum_age` on `date_of_birth` or `age`. The field keys stay at the top level as before |
+        | `400` | `content_not_allowed` | `first_name`, `last_name`, or a trainer's `trainer_bio`, `trainer_specializations` or `trainer_certifications` holds a term on the banned-terms list (spec B1); each such field is in `field_errors` with the same code, and nothing in the request is saved. Checked after every other field; same on every build |
         | `400` | `profile_picture_read_only` | a file sent as `profile_picture` (with `field`); nothing in the request is saved. Upload it with `POST /api/auth/user/profile-picture/` |
         | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
         """
@@ -338,6 +339,11 @@ def _absolute_picture_url(user, request):
     return url
 
 class CustomRegisterView(RegisterView):
+    """POST /api/auth/register/ — the body and every field code are in
+    `CustomRegisterSerializer`'s docstring. Since 2026-09-27 (spec B1) a `username`
+    holding a term on the banned-terms list answers 400 `content_not_allowed` (with
+    `field_errors.username`) and no account is made. Same on every build.
+    """
     serializer_class = CustomRegisterSerializer
     permission_classes = [AllowAny]
     
@@ -599,6 +605,7 @@ class TrainerProfileView(APIView):
     | status | `code` | when |
     |---|---|---|
     | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
+    | `400` | `content_not_allowed` | a name, `trainer_bio`, `trainer_specializations` or `trainer_certifications` holds a term on the banned-terms list (spec B1); the field is in `field_errors` with the same code; nothing is saved |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
     | `403` | `not_a_trainer` | the caller is not a trainer (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
     """
@@ -989,6 +996,7 @@ class ClientProfileView(APIView):
     | status | `code` | when |
     |---|---|---|
     | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
+    | `400` | `content_not_allowed` | `first_name` or `last_name` holds a term on the banned-terms list (spec B1); the field is in `field_errors` with the same code; nothing is saved |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
     | `403` | `clients_only` | the caller is not a client (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
     """

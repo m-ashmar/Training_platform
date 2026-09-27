@@ -401,6 +401,13 @@ class PostViewSet(viewsets.ModelViewSet):
     `permission_denied`, the owner's decision 9, 2026-09-24); a post the caller cannot
     read is 404 `not_found`.
 
+    The banned-terms filter (spec B1, 2026-09-27): a `POST`/`PUT`/`PATCH` whose `title`
+    or `content` holds a term on the operators' list answers 400 `content_not_allowed`
+    — the top-level `code`, and `field_errors.<field>[0].code` for each such field —
+    and nothing is written. Only the fields the request sends are checked, after every
+    other validation. The matched term is never named. Same on every build
+    (`moderation/ugc_filter.py`).
+
     A POST/PUT/PATCH carrying an `image` answers 503 `upload_busy` while the server is
     already decoding as many images as its memory holds (`training_platform/
     image_budget.py`): nothing was saved; send it again after `Retry-After` seconds
@@ -653,6 +660,11 @@ class CommentViewSet(viewsets.ModelViewSet):
     (was `permission_denied`); moving a comment is 400 `validation_error` with the
     field code `comment_cannot_move`, a reply outside its thread the field code
     `reply_not_in_thread` on `parent_comment`.
+
+    The banned-terms filter (spec B1, 2026-09-27): a `POST`/`PUT`/`PATCH` whose
+    `content` holds a term on the operators' list answers 400 `content_not_allowed`
+    (top-level `code`, and `field_errors.content[0].code`); nothing is written, no
+    counter moves and no push is sent. Same on every build (`moderation/ugc_filter.py`).
     """
     serializer_class = CommentSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -887,6 +899,12 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           (`status: "completed"`), which moves the end to the moment of the close, so
           the review window runs from when it really ended.
     Changing `metric` or the dates of a RUNNING challenge still recounts everyone.
+
+    The banned-terms filter (spec B1, 2026-09-27): a POST/PUT/PATCH whose `title`,
+    `description`, `rules`, `reward_description` or `unit` holds a term on the
+    operators' list answers 400 `content_not_allowed` (top-level `code`, and
+    `field_errors.<field>[0].code` for each such field); nothing is written. Checked
+    after the two refusals above. Same on every build (`moderation/ugc_filter.py`).
 
     A POST/PUT/PATCH carrying an `image` answers 503 `upload_busy` while the server is
     already decoding as many images as its memory holds (`training_platform/

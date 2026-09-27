@@ -5532,3 +5532,9 @@ msgid ""
 "The server is busy with other photos right now. Please try again in a few "
 "seconds."
 msgstr "الخادم مشغول بصور أخرى الآن. يُرجى المحاولة مرة أخرى بعد بضع ثوانٍ."
+
+#. The banned-terms filter refused a post, comment, challenge, profile name or
+#. username (spec B1). It never names the word.
+#: moderation/exceptions.py
+msgid "This contains words that are not allowed here. Please change them and try again."
+msgstr "يحتوي هذا النص على كلمات غير مسموح بها هنا. يُرجى تعديلها والمحاولة مرة أخرى."

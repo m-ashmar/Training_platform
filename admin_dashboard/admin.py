@@ -826,6 +826,12 @@ from moderation.models import AIConsent, Block, Report  # noqa: E402
 admin_site.register(Report, ReportAdmin)
 admin_site.register(Block, BlockAdmin)
 admin_site.register(AIConsent, AIConsentAdmin)
+# The banned-terms list (spec B1, moderation/ugc_filter.py): operators read it, and
+# adding, changing or deleting a term needs that permission. A change takes effect at
+# the next post, comment, challenge or profile write, without a deploy.
+from moderation.admin import BannedTermAdmin  # noqa: E402
+from moderation.models import BannedTerm  # noqa: E402
+admin_site.register(BannedTerm, BannedTermAdmin)
 
 # Trainer verification: the queue of pending applications (oldest first) and every
 # application with its history. Operator-only, and a decision needs the change
