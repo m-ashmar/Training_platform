@@ -762,8 +762,11 @@ class DietPlan(RowValidationMixin, models.Model):
         # generation path was patched for inversion once; admin, import and any other
         # writer bypassed that guard, so the rule belongs in the database.
         constraints = [
+            # `condition=`, not `check=`: the old keyword is deprecated since Django 5.1
+            # and removed in 6.0 (RemovedInDjango60Warning on every import). Same
+            # constraint; migration 0043 already records it as `condition`.
             models.CheckConstraint(
-                check=models.Q(end_date__gte=models.F('start_date')),
+                condition=models.Q(end_date__gte=models.F('start_date')),
                 name='dietplan_end_after_start',
             ),
             # A NaN target was accepted by every validator (`nan < 1000` and

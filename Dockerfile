@@ -13,12 +13,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python dependencies first (layer cache)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Add daphne explicitly (ASGI server)
-RUN pip install --no-cache-dir daphne
+# Install Python dependencies first (layer cache).
+#
+# ONLY the lock, and in hash-checking mode: every package, transitive ones included, at
+# the exact version the test suite passed on, and pip refuses a file whose hash differs
+# or a dependency the lock does not name. This used to install requirements.txt (which
+# had `>=` ranges and bare names) plus a second, unpinned `pip install daphne`, so every
+# build resolved whatever was newest that day. Daphne is in the lock like everything
+# else. To change a version, see the header of requirements.txt.
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Copy project
 COPY . .

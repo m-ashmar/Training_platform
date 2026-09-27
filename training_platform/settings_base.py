@@ -195,9 +195,12 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Allauth — disable native signup flow, force through custom OTP adapter
 ACCOUNT_EMAIL_VERIFICATION = 'none'
-ACCOUNT_EMAIL_REQUIRED = True
-ACCOUNT_AUTHENTICATION_METHOD = 'email'
-ACCOUNT_USERNAME_REQUIRED = False
+# allauth 65 replaced ACCOUNT_AUTHENTICATION_METHOD = 'email', ACCOUNT_EMAIL_REQUIRED =
+# True and ACCOUNT_USERNAME_REQUIRED = False with the two settings below — the exact
+# values its own deprecation warnings name for that combination, so sign-in and the
+# register serializer's required fields are unchanged (Django 5.2 upgrade, 2026-09-27).
+ACCOUNT_LOGIN_METHODS = {'email'}
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
 ACCOUNT_ADAPTER = "users.adapters.CustomAccountAdapter"
 
 # Signing in to the web console on a computer with a link made on the operator's phone
@@ -216,6 +219,13 @@ REST_AUTH_SERIALIZERS = {
     'REGISTER_SERIALIZER': 'users.serializers.CustomRegisterSerializer',
     'LOGIN_SERIALIZER': 'users.serializers.CustomLoginSerializer',
 }
+
+# drf-yasg's "compat" renderers answer a `format` with a leading dot (`.json`), for a
+# URLconf written as `swagger(?P<format>\.json|\.yaml)`. This one has no such route —
+# only the `swagger/` and `redoc/` UIs, and only under DEBUG (training_platform/urls.py)
+# — so the compat copies were dead weight and drf-yasg warned about them on every
+# start. False is the library's future default.
+SWAGGER_USE_COMPAT_RENDERERS = False
 
 # ========================
 # REST Framework
