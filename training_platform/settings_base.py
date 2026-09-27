@@ -131,6 +131,10 @@ MIDDLEWARE = [
     # security headers still apply to static responses.
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "training_platform.middleware.SecurityHeadersMiddleware",
+    # Answers the machine health check (GET|HEAD /api/auth/health/, nothing else) before
+    # CommonMiddleware reads the Host header, which the platform's checker does not set
+    # to an allowed name. See training_platform/health_probe.py for the reasoning.
+    "training_platform.health_probe.HealthProbeMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -487,9 +491,38 @@ from celery.schedules import crontab
 CELERY_IMPORTS = (
     'diet.planner.tasks',
     'training_platform.privacy.tasks',
+    'training_platform.background_health',
 )
 
+#: The beat jobs whose silence costs money, and how long each may go without a success
+#: before it counts as stale (seconds; a few of its periods, so one slow or failed run is
+#: not an alert). Watched two ways: `GET /api/auth/health/background/` reports each one
+#: (training_platform/background_health.py), and when SENTRY_DSN is set each one is a
+#: Sentry cron monitor (training_platform/observability.py). Keys are beat ENTRY names.
+BACKGROUND_WATCHED_JOBS = {
+    # Every minute. In reconcile mode the only thing that completes a paid checkout.
+    'poll-open-payments': 5 * 60,
+    # Every ten minutes. The backstop that pays a trainer an owed payout.
+    'settle-owed-payouts': 35 * 60,
+    # Hourly. Charges the coaching months that ended and freezes the unpaid ones.
+    'renew-coaching-periods': 2 * 3600 + 10 * 60,
+    # Hourly. Ends paid access whose cover ran out.
+    'expire-lapsed-subscriptions': 2 * 3600 + 10 * 60,
+}
+
+#: The heartbeat runs every minute; three missed in a row is an outage, not a slow queue.
+BACKGROUND_HEARTBEAT_MAX_AGE_SECONDS = get_int_env('BACKGROUND_HEARTBEAT_MAX_AGE_SECONDS', 180)
+
 CELERY_BEAT_SCHEDULE = {
+    # Proves beat, the broker and a worker are all alive: read by
+    # GET /api/auth/health/background/ (training_platform/background_health.py). A
+    # heartbeat still queued after 50 s is dropped rather than run late, so a backed-up
+    # queue shows as a stale heartbeat instead of hiding behind a burst of old ones.
+    'background-heartbeat': {
+        'task': 'training_platform.background_heartbeat',
+        'schedule': crontab(minute='*'),
+        'options': {'expires': 50},
+    },
     # Coaching is monthly: remind 3 days ahead, charge the months that ended, freeze the
     # ones the wallet cannot cover and keep reminding them (users/coaching.py). Hourly,
     # so a renewal — or a top-up that unfreezes — lands within the hour.
@@ -777,10 +810,10 @@ STATICFILES_DIRS = [
 ]
 
 MEDIA_URL = '/media/'
-# MEDIA_ROOT must NOT sit inside the container image: Fly's filesystem is ephemeral
-# and `min_machines_running = 0` stops the machine when idle, so every upload was
-# destroyed on restart/redeploy. In production this points at a mounted volume
-# (fly.toml [mounts] -> /data), overridable by env for an S3/R2 migration later.
+# The filesystem media backend's root: development and the test suite. Production
+# stores media in object storage (MEDIA_BACKEND=gcs, enforced at boot) — a machine's
+# filesystem is ephemeral and a volume attaches to one machine only — so nothing is
+# written here there, and fly.toml mounts no volume.
 MEDIA_ROOT = get_env("MEDIA_ROOT", str(BASE_DIR / 'media'))
 
 # Set true once files are served by an external backend (S3/R2/CDN); Django then
@@ -1026,9 +1059,11 @@ CACHALOT_UNCACHABLE_TABLES = frozenset([
     'payouts_withdrawal', 'payouts_withdrawalevent', 'payouts_payoutmethod',
 ])
 
-# Multipart bodies are buffered here before a view ever sees them. Unset, this is the
-# container's ephemeral rootfs rather than the mounted volume, so a large upload fills
-# the machine's disk. Paired with MAX_REQUEST_BODY_BYTES, which caps the body up front.
+# Multipart bodies over FILE_UPLOAD_MAX_MEMORY_SIZE are spooled here before a view ever
+# sees them. Production points it at a directory under the container's /tmp (fly.toml;
+# docker-entrypoint.sh creates it for the app user): the spool is scratch space and a
+# file lives only as long as its request. Paired with MAX_REQUEST_BODY_BYTES, which caps
+# the body up front.
 MAX_REQUEST_BODY_BYTES = int(get_env('MAX_REQUEST_BODY_BYTES', 15 * 1024 * 1024))
 FILE_UPLOAD_TEMP_DIR = get_env('FILE_UPLOAD_TEMP_DIR', None) or None
 

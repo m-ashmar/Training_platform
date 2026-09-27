@@ -406,13 +406,18 @@ def test_mask_email_keeps_the_domain_and_one_letter():
 _LOG_METHODS = {"debug", "info", "warning", "warn", "error", "exception", "critical"}
 
 
+def _is_address_name(name):
+    """`email`, `user.email`, `to_email`, `emails` — not `email_verified`, a boolean."""
+    return name.lower().endswith(("email", "emails"))
+
+
 def _unmasked_email_refs(node):
     if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "mask_email":
         return []
     hits = []
-    if isinstance(node, ast.Name) and "email" in node.id.lower():
+    if isinstance(node, ast.Name) and _is_address_name(node.id):
         hits.append(node.id)
-    elif isinstance(node, ast.Attribute) and "email" in node.attr.lower():
+    elif isinstance(node, ast.Attribute) and _is_address_name(node.attr):
         hits.append(node.attr)
     for child in ast.iter_child_nodes(node):
         hits += _unmasked_email_refs(child)

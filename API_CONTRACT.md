@@ -441,6 +441,7 @@ tool-calling loop — `thinking`, `checking_data`, `analyzing`, `looking_deeper`
 | `POST` | `/api/auth/forgot-password/confirm/` | public | `PasswordResetConfirmView` |
 | `POST` | `/api/auth/forgot-password/verify/` | public | `PasswordResetVerifyView` |
 | `GET` | `/api/auth/health/` | public | `HealthCheckView` |
+| `GET` | `/api/auth/health/background/` | public | `BackgroundHealthView` |
 | `POST` | `/api/auth/login/` | public | `CustomLoginView` |
 | `POST` | `/api/auth/register/` | public | `CustomRegisterView` |
 | `POST` | `/api/auth/resend-otp/` | public | `ResendOTPView` |

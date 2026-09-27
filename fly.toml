@@ -1,77 +1,111 @@
-# fly.toml — Training Platform
-# Generated for fly.io free tier deployment
-# Branch: noti-system
+# fly.toml — Yalla Gym API: Django under Daphne, Celery worker, Celery beat.
+#
+# THREE process groups from one image, sized and scaled separately:
+#
+#   web     Daphne: HTTP and the WebSockets (chat, AI coach). Behind [http_service].
+#   worker  Celery worker: everything queued, including the money jobs beat sends.
+#   beat    Celery beat, ALONE: the clock that sends the scheduled jobs.
+#
+# Machine counts are set with `fly scale count`, not here, and a deploy keeps them:
+#
+#   fly scale count web=1 worker=1 beat=1     # the first deploy
+#   fly scale count web=2                     # a second web machine; Fly starts it
+#                                             # when the first passes soft_limit
+#
+# `beat` is EXACTLY ONE MACHINE, ALWAYS. Two beats send every scheduled job twice: two
+# payment polls a minute, two renewal sweeps an hour, every reminder push twice. Never
+# `fly scale count beat=2`, never clone the beat machine. The worker, by contrast, may
+# be scaled out freely — it runs what it is given and schedules nothing — which is why
+# beat is no longer `--beat` inside the worker: that made the worker unscalable, and one
+# OOM there stopped the queue and the clock together.
+#
+# Liveness of worker and beat is watched from outside: an external monitor polls
+# GET /api/auth/health/background/ (503 when the heartbeat or a money job is late), and
+# Sentry cron monitors cover the money jobs when SENTRY_DSN is set. Neither is the web
+# machines' check below, on purpose: a failing check restarts the machine, and a late
+# beat must never restart the machines serving users.
 
 app = "training-platform-api"   # CHANGE THIS to your unique fly app name
-primary_region = "ams"          # Amsterdam — closest free-tier region to Middle East
+primary_region = "ams"          # Amsterdam — closest region to the Middle East
 
 [build]
   dockerfile = "Dockerfile"
 
-# Two process groups. Previously the only process was the Dockerfile CMD (web), so no
-# Celery worker or beat existed anywhere — every .delay() enqueued a job nothing ever
-# consumed: feed fan-out, notifications, FCM, AI plan generation, all silently dead.
+# The worker: two prefork children. 512 MB holds the parent (~110 MB of Django) and two
+# children with an image decode (up to 128 MB, training_platform/image_budget.py) in
+# one of them; a third child is what would tip it over. A child whose resident memory
+# passes ~200 MB is replaced after the task it is running finishes
+# (--max-memory-per-child is in KiB), so a slow leak cannot accumulate into an OOM that
+# kills the task in flight (acks_late then redelivers it into the same OOM).
+#
+# Beat keeps its schedule state in a file. Every entry is a crontab (a gate test holds
+# that), so a restart loses no daily job, and /tmp is where scratch state belongs.
 [processes]
   web    = "daphne -b 0.0.0.0 -p 8000 training_platform.asgi:application"
-  worker = "celery -A training_platform worker --beat --loglevel=info --concurrency=2"
+  worker = "celery -A training_platform worker --loglevel=info --concurrency=2 --max-memory-per-child=200000"
+  beat   = "celery -A training_platform beat --loglevel=info --schedule=/tmp/celerybeat-schedule"
 
 # Migrations run ONCE per deploy, here, before any machine starts serving. They used to
-# be part of the web command, and `auto_start_machines` with `min_machines_running = 0`
-# means several machines cold-start at the same moment by design: each ran `migrate`
-# against the same database, Django takes no cross-process migration lock, and the loser
-# died on "constraint already exists". `&&` meant daphne never started on that machine,
-# so it served nothing and Fly restarted it into the same race. Reproduced with two
-# concurrent `migrate` processes: one exited 0, the other exited 1 partway through.
+# be part of the web command, and several machines starting at the same moment each ran
+# `migrate` against the same database; Django takes no cross-process migration lock, and
+# the loser died on "constraint already exists" with daphne never started on it.
 release_command = "python manage.py migrate --noinput"
 
 [env]
   DJANGO_SETTINGS_MODULE = "training_platform.settings_production"
   PORT = "8000"
-  # User uploads must live on the mounted volume, NOT inside the image. The image
-  # filesystem is ephemeral and `min_machines_running = 0` stops the machine when
-  # idle, so anything written into the container is lost on the next start.
-  MEDIA_ROOT = "/data/media"
-  # Multipart bodies buffer here before any view runs. Unset it lands on the
-  # container rootfs; on the volume it shares the same (monitored) disk as media.
-  FILE_UPLOAD_TEMP_DIR = "/data/tmp"
-  # Broker/result backend on DB6/DB7 — outside the six segmented cache DBs.
-  # Set these to the managed Redis URL; enforce_production_safety() refuses to boot
-  # if they are unset, point at localhost, or land on a cache DB.
+  # The multipart spool: bodies over 2.5 MB are buffered here before a view runs. The
+  # container's own /tmp — scratch that lives as long as the request — and no volume:
+  # media is object storage in production (MEDIA_BACKEND=gcs, enforced at boot). The
+  # entrypoint creates it for the app user. MEDIA_ROOT is deliberately unset.
+  FILE_UPLOAD_TEMP_DIR = "/tmp/uploads"
+  # Broker/result backend on DB6/DB7 — outside the six segmented cache DBs. Set as
+  # secrets to the managed Redis URL; enforce_production_safety() refuses to boot if
+  # the broker is unset, points at localhost, or lands on a cache DB.
   # CELERY_BROKER_URL     = "redis://<managed-redis>:6379/6"
   # CELERY_RESULT_BACKEND = "redis://<managed-redis>:6379/7"
 
-# Persistent volume for user-uploaded media (profile pictures, exercise images).
-# Create it once before deploying:
-#   fly volumes create training_data --region ams --size 1
-# Scoped to `web`: a Fly volume attaches to a single machine, and only the web
-# process serves or writes user media. The worker must not claim it.
-[mounts]
-  processes = ["web"]
-  source = "training_data"
-  destination = "/data"
+# There is no [mounts]. A Fly volume attaches to exactly one machine, and one volume
+# existed, so the web group could never have more than one machine — while all it held
+# was the upload spool, which is scratch.
 
 [http_service]
   processes = ["web"]
   internal_port = 8000
   force_https = true
-  auto_stop_machines = true    # Free tier: machines stop when idle
+  # Extra web machines stop when idle and start again on demand, but one always runs:
+  # with 0, the first request after a quiet spell waited for a cold Daphne and Django
+  # boot, and a WebSocket reconnect storm met a machine that was not there.
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0     # Free tier: scale to zero
+  min_machines_running = 1
 
-  # Connection budget. Postgres allows 100; each concurrent ASGI request can hold its
-  # own persistent connection (CONN_MAX_AGE=600), and auto_start_machines means the
-  # machine count is elastic. 4 web machines x 25 + the worker already reaches ~102, at
-  # which point new connections are refused outright — precisely when traffic arrives.
-  # 15 keeps 6 machines plus the worker inside the ceiling. Raise this only together
-  # with max_connections or a pooler.
+  # Connections per web machine, counted by Fly's proxy, WebSockets included.
+  #
+  # The chat and AI-coach screens hold a WebSocket open for as long as they are on
+  # screen, so the old hard_limit of 15 meant fifteen people in a chat took the whole
+  # machine and every other request queued behind them. An idle socket costs Daphne
+  # tens of KB, so memory is not what bounds this; the database is. Connections are not
+  # kept between requests (CONN_MAX_AGE 0, settings_production.py), so a machine holds
+  # at most one Postgres connection per request actually running — never more than
+  # hard_limit, and in practice far fewer, since most open connections are idle sockets.
+  #
+  # The budget the operator must keep: Postgres max_connections (or the pooler's client
+  # limit, with DB_POOLER set) >= web machines x hard_limit + worker concurrency x worker
+  # machines + ~5 (beat, the release migration, a console). Two web machines at 100 need
+  # ~210 without a pooler — above many managed plans' limit, which is what DB_POOLER is
+  # for. soft_limit is where Fly starts sending new connections to (and starting) another
+  # machine, if one exists.
   [http_service.concurrency]
     type = "connections"
-    hard_limit = 15
-    soft_limit = 12
+    soft_limit = 80
+    hard_limit = 100
 
-  # Health check — MUST live under [http_service.checks] to bind to this service.
-  # (Legacy [[services.http_checks]] only attaches to a [[services]] block, which
-  # does not exist here, so the check would never run.)
+  # The web machines' health check. MUST live under [http_service] to bind to this
+  # service. It is answered whatever Host header the checker sends
+  # (training_platform/health_probe.py), so it needs no `headers` here and nothing to
+  # keep in step with DJANGO_ALLOWED_HOSTS. It checks the database and the cache — never
+  # the background side (see the top of this file).
   [[http_service.checks]]
     interval = "30s"
     timeout = "10s"
@@ -85,10 +119,19 @@ release_command = "python manage.py migrate --noinput"
   cpu_kind = "shared"
   cpus = 1
 
-# The worker must stay up. Scale-to-zero on this group would stop background jobs and
-# beat entirely — which is the state the app shipped in.
+# The worker must stay up: it is not behind [http_service], so nothing stops it when
+# idle, and stopping it would stop every queued job.
 [[vm]]
   processes = ["worker"]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+# Beat sends messages and does no work itself; it still loads Django (~110 MB). 512 MB
+# until its real footprint has been measured on a machine — shrinking it to 256 MB is a
+# measurement away, and a beat that OOMs stops every money job.
+[[vm]]
+  processes = ["beat"]
   memory = "512mb"
   cpu_kind = "shared"
   cpus = 1

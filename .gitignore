@@ -26,6 +26,9 @@ media/
 # Identity documents on the filesystem backend (trainer_verification/storage.py).
 private_media/
 *.log
+# db.sqlite3 was committed before this line existed and stayed tracked (an ignore rule
+# does not untrack a file); it was removed from the index on 2026-09-27. It is still in
+# the history that was pushed.
 *.sqlite3
 
 # Node/Flutter/Other

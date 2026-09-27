@@ -83,6 +83,11 @@ def test_anonymous_gets_no_5xx_and_reaches_only_public_endpoints(api):
     """An unauthenticated sweep caught permission classes that 500'd instead of 401ing."""
     anon = api()
     allowed = {"/api/auth/health/", "/api/auth/trainers/public/", "/api/auth/trainers/stats/",
+               # Deliberate addition (2026-09-27, tests/test_prod_platform.py): the
+               # background health route is polled by an external uptime monitor, which
+               # carries no credentials. It reports timestamps of scheduled jobs and
+               # nothing about any user.
+               "/api/auth/health/background/",
                # What a build may show and sell. Public on purpose: the app asks at launch,
                # before anyone has signed in, and the answer never depends on who asks.
                "/api/v1/config/capabilities", "/api/v1/config/capabilities/",

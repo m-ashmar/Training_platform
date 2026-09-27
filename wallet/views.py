@@ -36,6 +36,7 @@ from .throttles import ChargingRateThrottle
 import uuid
 from policy.money import MoneyType
 from policy.services import require_purchase_allowed
+from training_platform.middleware import get_recordable_client_ip
 from training_platform.query_params import body_dict, int_param
 from wallet import idempotency
 
@@ -48,11 +49,28 @@ def audit(event_type: str, request, payload: dict):
         event_type=event_type,
         actor=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
         request_id=getattr(request, "id", None),
-        ip_address=request.META.get("REMOTE_ADDR"),
+        # The client, not the proxy: behind Fly REMOTE_ADDR is the edge proxy, so every
+        # row recorded the same address. One helper decides it for the whole app.
+        ip_address=get_recordable_client_ip(request),
         user_agent=request.META.get("HTTP_USER_AGENT"),
         path=request.path,
         payload=payload or {},
     )
+
+
+def _normalised_allowlist(entries):
+    """An agent's allow-list as normalised address strings; entries that are not a single
+    address are kept verbatim, so they still match exactly what they matched before."""
+    import ipaddress
+
+    out = set()
+    for entry in entries or []:
+        text = str(entry).strip()
+        try:
+            out.add(str(ipaddress.ip_address(text)))
+        except ValueError:
+            out.add(text)
+    return out
 
 
 #: What each cap refusal says, by `wallet.agents.CapRefusal.scope`. The first two are
@@ -776,8 +794,13 @@ class AgentTopUpView(APIView):
             audit("wallet.topup.auth_failed", request, {"reason": "key_not_callers"})
             return _agent_auth_refused(_("Invalid credentials"))
 
-        ip = request.META.get("REMOTE_ADDR")
-        if api_key.agent.ip_allowlist and ip not in api_key.agent.ip_allowlist:
+        # The client's address as the trusted proxy chain gives it. REMOTE_ADDR is the
+        # proxy behind Fly, so this refused every agent with an allow-list (and allowing
+        # the proxy's address instead would have let everyone through). Compared
+        # normalised, so `2001:DB8::1` in the list matches `2001:db8::1` on the wire.
+        ip = get_recordable_client_ip(request)
+        if api_key.agent.ip_allowlist and (ip is None or ip not in _normalised_allowlist(
+                api_key.agent.ip_allowlist)):
             audit("wallet.topup.denied_ip", request, {"ip": ip})
             return Response({"error": _("IP not allowed"), "code": "agent_ip_not_allowed"},
                             status=status.HTTP_403_FORBIDDEN)

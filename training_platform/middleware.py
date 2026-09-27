@@ -20,6 +20,7 @@ from training_platform.cache import ratelimit_cache, public_cache, private_cache
 from django.db import connection
 from django.utils import timezone
 from django.shortcuts import redirect
+import ipaddress
 import re
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,23 @@ def get_trusted_client_ip(request):
         if len(parts) >= num_proxies:
             return parts[-num_proxies]
     return request.META.get('REMOTE_ADDR', 'unknown')
+
+
+def get_recordable_client_ip(request):
+    """`get_trusted_client_ip`, normalised, or None when it is not an IP address.
+
+    For WRITING an address (the wallet audit log, analytics sessions) and for comparing
+    one (agent allow-lists). The ONE place the client address is decided is the function
+    above: behind Fly, REMOTE_ADDR is the edge proxy, so every audit row recorded the
+    proxy and every agent with an allow-list was refused on every top-up (the audit's
+    deploy finding 14). A value that is not an address — `unknown`, or garbage in the
+    header on a host with no proxy in front — becomes None: a GenericIPAddressField is
+    an `inet` column, and a bad value there is a 500 on the money path.
+    """
+    try:
+        return str(ipaddress.ip_address(str(get_trusted_client_ip(request)).strip()))
+    except ValueError:
+        return None
 
 
 class RateLimitMiddleware(MiddlewareMixin):

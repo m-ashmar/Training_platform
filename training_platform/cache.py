@@ -46,6 +46,17 @@ def edamam_cache():
     return _get('edamam')
 
 
+def ops_cache():
+    """DB0 — operational markers shared by every process: the background heartbeat and
+    the last success of each watched beat job (`training_platform/background_health.py`).
+
+    A handful of tiny keys. It has to be a cache every machine reads — the worker writes
+    them and a web machine answers the monitor — and one that does NOT ignore Redis
+    errors, so a Redis that is down reads as "unreachable" rather than as "no heartbeat".
+    """
+    return _get('default')
+
+
 def seconds_left(cache, key: str, default: int) -> int:
     """Seconds until `key` expires in `cache`, or `default` when the backend cannot say
     (the in-memory cache in tests has no `ttl`) or the key has no expiry. For the
