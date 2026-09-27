@@ -42,6 +42,10 @@ Settings: `settings_base.py` (shared) · `settings_local.py` (tests, dev) ·
 Mobile: `yalla_gym/` is the Flutter client, built by its own sessions from the design canvas
 and from THIS SOURCE CODE — not from documents (owner, 2026-09-19). A backend session does
 not edit it. `mobile/` and `flutter/` are abandoned attempts: never read or touch them.
+`yalla_gym/` is its OWN git repository (branch `main`); its remote `origin` is the private
+GitHub repo `m-ashmar/ygFrontend` (first pushed 2026-09-27 at the owner's request, 78
+commits; uncommitted app work stays local until an app session commits it). The rule
+below still holds for it: push only when the owner asks.
 `_excluded/` is not part of the codebase: never read or modify it.
 
 ## Commands
