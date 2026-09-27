@@ -289,7 +289,7 @@ def poll_open_payments(now=None):
 
     from .services.payment_gateways import PaymentGatewayError, PaymentGatewayService
     from .models import OPEN_PAYMENT_STATUSES, Payment
-    from .services.payment_service import (InvalidPaymentTransition,
+    from .services.payment_service import (By, InvalidPaymentTransition,
                                            PaymentService, PaymentVerificationError)
 
     now = now or timezone.now()
@@ -345,7 +345,7 @@ def poll_open_payments(now=None):
         state = str((result or {}).get('status', '')).lower()
         if state in ('completed', 'success', 'succeeded', 'paid'):
             try:
-                PaymentService.complete_payment(payment.id, result)
+                PaymentService.complete_payment(payment.id, result, by=By.POLLER)
                 completed += 1
             except (PaymentVerificationError, InvalidPaymentTransition) as exc:
                 logger.warning("poll: refused to complete payment %s: %s", payment.id, exc)
@@ -355,7 +355,8 @@ def poll_open_payments(now=None):
             # never dropped (B-051). Seeing the same transfer again is a no-op.
             try:
                 PaymentService.hold_for_review(payment.id, result,
-                                               reason=result.get('reason') or 'amount_differs')
+                                               reason=result.get('reason') or 'amount_differs',
+                                               by=By.POLLER)
                 held += 1
             except (PaymentVerificationError, InvalidPaymentTransition) as exc:
                 logger.warning("poll: could not hold payment %s for review: %s",
@@ -369,7 +370,8 @@ def poll_open_payments(now=None):
             continue
         if state in ('failed', 'declined', 'rejected'):
             try:
-                PaymentService.fail_payment(payment.id, 'The gateway declined it')
+                PaymentService.fail_payment(payment.id, 'The gateway declined it',
+                                            by=By.POLLER)
                 failed += 1
             except InvalidPaymentTransition as exc:
                 logger.warning("poll: could not fail payment %s: %s", payment.id, exc)
@@ -382,7 +384,8 @@ def poll_open_payments(now=None):
         if payment.created_at > now - ttl_window:
             continue                      # young enough to still be being paid
         try:
-            PaymentService.expire_payment(payment.id, 'Not completed within its window')
+            PaymentService.expire_payment(payment.id, 'Not completed within its window',
+                                          by=By.POLLER)
         except InvalidPaymentTransition as exc:
             logger.warning("poll: could not expire payment %s: %s", payment.id, exc)
             continue
@@ -443,7 +446,7 @@ def poll_expired_checkouts(now=None):
 
     from .models import Payment
     from .services.payment_gateways import PaymentGatewayError, PaymentGatewayService
-    from .services.payment_service import (InvalidPaymentTransition,
+    from .services.payment_service import (By, InvalidPaymentTransition,
                                            PaymentService, PaymentVerificationError)
 
     now = now or timezone.now()
@@ -474,14 +477,15 @@ def poll_expired_checkouts(now=None):
             # Almost-right money for a closed checkout is still money: held (B-051).
             try:
                 PaymentService.hold_for_review(payment.id, result,
-                                               reason=result.get('reason') or 'amount_differs')
+                                               reason=result.get('reason') or 'amount_differs',
+                                               by=By.POLLER)
             except (PaymentVerificationError, InvalidPaymentTransition) as exc:
                 logger.warning("late poll: could not hold payment %s: %s", payment.id, exc)
             continue
         if state not in ('completed', 'success', 'succeeded', 'paid'):
             continue
         try:
-            PaymentService.complete_payment(payment.id, result)
+            PaymentService.complete_payment(payment.id, result, by=By.POLLER)
             completed += 1
             logger.warning("late poll: payment %s was paid after its checkout closed; "
                            "completed", payment.id)
@@ -533,7 +537,7 @@ def sweep_unmatched_transfers(now=None):
 
     from .models import HELD_PAYMENT_STATUSES, OPEN_PAYMENT_STATUSES, Payment, TransferReview
     from .services.payment_gateways import PaymentGatewayError, PaymentGatewayService
-    from .services.payment_service import PaymentError, PaymentService
+    from .services.payment_service import By, PaymentError, PaymentService
 
     now = now or timezone.now()
     lookback = timedelta(hours=int(getattr(settings, 'PAYMENT_LATE_MONEY_WINDOW_HOURS', 72)))
@@ -581,13 +585,14 @@ def sweep_unmatched_transfers(now=None):
                             'transaction_id': fact['transaction_id'],
                             'event_id': fact['transaction_id'],
                             'reference': named.gateway_transaction_reference,
-                            'gateway_data': fact.get('gateway_data')})
+                            'gateway_data': fact.get('gateway_data')}, by=By.SWEEP)
                         settled += 1
                     elif PaymentService.hold_for_review(
-                            named.id, fact, reason=_near_reason(fact, named)):
+                            named.id, fact, reason=_near_reason(fact, named), by=By.SWEEP):
                         held += 1
                     continue
-                if PaymentService.hold_for_review(named.id, fact, reason='checkout_closed'):
+                if PaymentService.hold_for_review(named.id, fact, reason='checkout_closed',
+                                                  by=By.SWEEP):
                     queued += 1
                 continue
             try:
@@ -610,7 +615,7 @@ def sweep_unmatched_transfers(now=None):
                     .order_by('created_at', 'id').values_list('id', flat=True))
             if len(candidates) == 1:
                 if PaymentService.hold_for_review(candidates[0], fact,
-                                                  reason='reference_missing'):
+                                                  reason='reference_missing', by=By.SWEEP):
                     held += 1
             elif PaymentService.queue_unclaimed_transfer(fact, candidates=candidates):
                 queued += 1

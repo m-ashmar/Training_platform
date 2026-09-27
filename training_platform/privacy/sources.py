@@ -530,6 +530,16 @@ register(PersonalDataSource(label="transfer_reviews", model="subscription.Transf
                             fields=["id", "reason", "status", "amount", "currency",
                                     "occurred_at", "created_at", "resolved_at"],
                             on_erase="keep"))
+# Every state a customer's payment went through (plan step 5; immutable at the database,
+# `subscription/migrations/0016`). A record of money like the payment it belongs to:
+# kept on erasure, exported to the customer. The export lists the steps and who or what
+# took them, not the evidence (a transfer's details are its sender's, a note is the
+# operator's) and not which operator.
+register(PersonalDataSource(label="payment_events", model="subscription.PaymentEvent",
+                            user_field="payment__subscription__user",
+                            fields=["id", "payment", "from_status", "to_status",
+                                    "actor_role", "backfill", "created_at"],
+                            on_erase="keep"))
 # A live credential, not a record. An erased account must not keep one.
 register(PersonalDataSource(label="agent_api_keys", model="wallet.AgentAPIKey",
                             user_field="agent__user"))

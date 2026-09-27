@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.utils.html import format_html
 from django.utils import timezone
 from .models import (
-    SubscriptionPlan, Subscription, Payment, 
+    SubscriptionPlan, Subscription, Payment, PaymentEvent,
     SubscriptionFeature, SubscriptionUsage
 )
 from training_platform.admin_utils import bulk_apply, log_admin_action
@@ -163,6 +163,30 @@ PAYMENT_READONLY_FIELDS = (
 )
 
 
+class PaymentEventInline(admin.TabularInline):
+    """Every transition of the payment, oldest first: who or what, when, from, to, and
+    the evidence it rested on (the spec, section 7). Read-only in every way — the rows
+    are immutable at the database (migration 0016) — and written only by
+    `PaymentService`. A row marked `backfill` was written for a payment older than the
+    table: the state it was in then, not a transition anyone saw."""
+    model = PaymentEvent
+    extra = 0
+    can_delete = False
+    ordering = ('created_at', 'id')
+    fields = ('created_at', 'from_status', 'to_status', 'actor_role', 'actor', 'evidence',
+              'backfill')
+    readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
     list_display = [
@@ -175,6 +199,8 @@ class PaymentAdmin(admin.ModelAdmin):
     # no `payout_settled_at` is a trainer payout still owed; `subscription.settle_owed_payouts`
     # sends it, and this is where a person sees one that keeps failing.
     readonly_fields = PAYMENT_READONLY_FIELDS
+    # The payment's history, under it: every transition and what it rested on.
+    inlines = [PaymentEventInline]
     
     fieldsets = (
         ('Payment Details', {
@@ -244,7 +270,7 @@ class PaymentAdmin(admin.ModelAdmin):
         it asked for, and completing it here minted the price that never arrived. It is
         decided in the transfer review queue, which records what did."""
         from django.contrib import messages
-        from subscription.services.payment_service import PaymentService
+        from subscription.services.payment_service import By, PaymentService
 
         held = queryset.filter(status='needs_review')
         for payment in held:
@@ -255,20 +281,24 @@ class PaymentAdmin(admin.ModelAdmin):
             p.id,
             {'amount': p.amount, 'currency': p.currency, 'status': 'completed',
              'event_id': f'admin-{p.id}'},
+            by=By.OPERATOR, actor=getattr(request, "user", None),
+            evidence={'action': 'mark_as_completed'},
         ), "Completed")
     mark_as_completed.short_description = "Mark as completed"
 
     def mark_as_failed(self, request, queryset):
-        from subscription.services.payment_service import PaymentService
+        from subscription.services.payment_service import By, PaymentService
         self._apply(request, queryset, lambda p: PaymentService.fail_payment(
-            p.id, "Marked failed by an administrator"), "Failed")
+            p.id, "Marked failed by an administrator", by=By.OPERATOR,
+            actor=getattr(request, "user", None)), "Failed")
     mark_as_failed.short_description = "Mark as failed"
 
     def mark_as_refunded(self, request, queryset):
         """Refunds the payment and withdraws the access it paid for."""
-        from subscription.services.payment_service import PaymentService
+        from subscription.services.payment_service import By, PaymentService
         self._apply(request, queryset, lambda p: PaymentService.refund_payment(
-            p.id, "Refunded by an administrator"), "Refunded")
+            p.id, "Refunded by an administrator", by=By.OPERATOR,
+            actor=getattr(request, "user", None)), "Refunded")
     mark_as_refunded.short_description = "Mark as refunded"
 
 @admin.register(SubscriptionFeature)

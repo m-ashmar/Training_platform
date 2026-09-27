@@ -232,6 +232,20 @@ class PaymentSerializer(serializers.ModelSerializer):
         a receipt; the app hides the row's receipt icon for anything else."""
         return obj.status == 'completed'
 
+
+class PaymentDetailSerializer(PaymentSerializer):
+    """One payment (`GET payments/{id}/`): the list row, plus `events` — every state it
+    went through, oldest first (`PaymentEvent.for_app`: `from_status`, `to_status`, `at`,
+    `by`, `backfill`). The same on every build: a history carries no price."""
+    events = serializers.SerializerMethodField()
+
+    class Meta(PaymentSerializer.Meta):
+        fields = [*PaymentSerializer.Meta.fields, 'events']
+        read_only_fields = fields
+
+    def get_events(self, obj):
+        return [event.for_app() for event in obj.events.all()]
+
 class SubscriptionUsageSerializer(serializers.ModelSerializer):
     """Serializer for subscription usage tracking"""
     feature_name = serializers.CharField(source='feature.name', read_only=True)

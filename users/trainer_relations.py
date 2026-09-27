@@ -232,8 +232,11 @@ def take_hold(relation, actor) -> None:
     relation.hold_reference = tx.reference_id
     relation.save(update_fields=['hold_reference', 'updated_at'])
     # Month 1 of the coaching, with the commission rate of today (users/coaching.py).
-    from .coaching import open_period
-    open_period(relation, tx, priced=priced)
+    from .coaching import notify_fee, open_period
+    period = open_period(relation, tx, priced=priced)
+    # Both people hear the month is held (on commit: an approval that rolls back tells
+    # no one).
+    notify_fee('held', period)
 
 
 def _move_hold(relation, actor, destination_owner, owner_type, purpose, *, pay_out=False):
@@ -304,6 +307,10 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose, *, pay_o
                     period = coaching.open_period(locked, held)
                 tx = coaching.pay_out(period, actor_id=getattr(actor, 'id', None),
                                       starts_at=timezone.now(), trainer_purpose=purpose)
+                # Both people hear month 1 left escrow — the trainer once their share
+                # has landed (a share owed for a stale rate is announced when paid).
+                coaching.notify_fee('released', period,
+                                    trainer=bool(period.payout_reference))
                 locked.hold_reference = ''
                 locked.save(update_fields=['hold_reference', 'updated_at'])
                 relation.hold_reference = ''
@@ -336,6 +343,9 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose, *, pay_o
             if period is not None:
                 period.status = 'refunded'
                 period.save(update_fields=['status', 'updated_at'])
+                # Both people hear the held month went back to the client.
+                from .coaching import notify_fee
+                notify_fee('refunded', period)
             return tx
     except HoldFailed:
         raise
@@ -350,6 +360,10 @@ def release_hold(relation, actor):
     Raises `HoldFailed` if it cannot. The caller decides what to do about it — the
     one thing it must not do is delete the relation anyway, because that row is the
     only record of whose money is sitting in escrow.
+
+    Both people are told (`coaching_fee_refunded`), on commit; an account that is no
+    longer active by then — the one an erasure just retired — is not written to
+    (`notifications/listeners/money_listeners.py`).
     """
     return _move_hold(relation, actor, lambda r: r.client, "client",
                       'trainer_hold_release')

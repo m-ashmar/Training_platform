@@ -22,6 +22,46 @@ Lock order: the SUBSCRIPTION row first, then its payment rows. Every method here
 takes both takes them in that order, so a checkout (which starts from the subscription)
 and a completion (which starts from a payment) wait for each other instead of
 deadlocking.
+
+EVERY TRANSITION IS AN EVENT (the spec, section 7; plan step 5). A payment's `status` is
+assigned in exactly one line of this module, `_move`, and that line writes a
+`PaymentEvent` — who or what (`by`, `actor`), when, from, to, and what it rested on
+(`evidence`) — in the same transaction as the transition, so a transition that rolls
+back takes its event with it and one that commits cannot lack it. A checkout's opening
+is the first event (`_opened`, `from_status` empty). The events are immutable at the
+database (migration 0016) and read by the app on `payments/{id}/status/` and
+`payments/{id}/` (`events`), and by operators on the payment in the console. Every public
+method that moves a state takes `by` (a `PaymentEvent.By`) and `actor` (the person, when
+a person did it); callers say who they are, and anything that does not is `system`.
+
+THE SPEC'S CHECKOUT SESSION IS THE PAYMENT ROW. Section 5 describes a checkout session
+holding money_type, amount, currency, reference, expiry, status and the ShamCash payment
+target; a `Payment` holds every one of them (`money_type`, `amount`, `currency`,
+`gateway_transaction_reference`, `status`, and the target in
+`gateway_response['instructions']`), and its expiry is `created_at +
+PAYMENT_CHECKOUT_TTL_MINUTES` (`utils.checkout_expires_at`, the same two values the
+poller closes on). One open checkout per subscription is enforced here under the
+subscription lock, and one transfer confirms one payment through
+`uniq_payment_transaction_id`. So there is no second table; the spec's states map onto
+`Payment.status` like this:
+
+    spec          Payment.status
+    OPEN          pending (processing / authorized: a hosted gateway's own in-between
+                  states; ShamCash transfer mode never writes them)
+    MATCHING      not stored. The match runs inside one poll, reconcile, webhook or
+                  sweep call, under the subscription and payment locks, and ends in the
+                  same transaction: completed, needs_review, or no change. A customer's
+                  "I paid" (reconcile) that finds nothing leaves it OPEN, and the
+                  pollers keep looking — for 72 hours after it expires, too.
+    CONFIRMED     completed
+    NEEDS_REVIEW  needs_review
+    REJECTED      rejected
+    EXPIRED       expired (and failed / cancelled: the gateway said so)
+    REFUNDED      refunded
+
+Two transitions the spec's diagram does not draw are deliberate: `expired -> completed`
+and `expired -> needs_review`, because money that arrives for a checkout the server
+already closed is still the customer's money (late money, SIDE_BUGS S-077).
 """
 from __future__ import annotations
 
@@ -36,8 +76,11 @@ from django.utils import timezone
 
 from policy.money import source_of_payment_method
 
-from ..models import (OPEN_PAYMENT_STATUSES, Payment, Subscription, SubscriptionPlan,
-                      TransferReview, plan_snapshot)
+from ..models import (OPEN_PAYMENT_STATUSES, Payment, PaymentEvent, Subscription,
+                      SubscriptionPlan, TransferReview, plan_snapshot)
+
+#: Who or what moved a payment (`PaymentEvent.By`), for callers of this service.
+By = PaymentEvent.By
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +142,66 @@ class CheckoutOpen(PaymentError):
         self.payment = payment
 
 
+def _gateway_facts(data: dict | None) -> dict:
+    """The part of what a gateway reported that an event keeps: ids and figures, never
+    the raw payload (that is `Payment.gateway_response`)."""
+    if not data:
+        return {}
+    keep = ('transaction_id', 'event_id', 'reference', 'amount', 'currency', 'status',
+            'reason')
+    return {key: str(data[key]) for key in keep if data.get(key) not in (None, '')}
+
+
 class PaymentService:
     """Centralized, verified payment lifecycle operations."""
+
+    # ------------------------------------------------------------------ #
+    # The one place a state moves, and its record
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _move(payment: Payment, to_status: str, *, by: str, actor=None,
+              evidence: dict | None = None) -> PaymentEvent:
+        """Set `payment.status` to `to_status` and write the event that says so.
+
+        The ONLY assignment of a payment's status in this module (a test reads the
+        source to keep it so). The event is inserted now, inside the caller's
+        transaction and under its locks; the caller saves the payment row in the same
+        transaction. Either both land or neither does. The caller has already decided
+        the transition is legal and is a change (`can_transition_to`, and the early
+        returns on the same status), so every event is a real step.
+        """
+        event = PaymentEvent.objects.create(
+            payment=payment, from_status=payment.status or '', to_status=to_status,
+            actor=actor if getattr(actor, 'pk', None) else None, actor_role=str(by),
+            evidence=evidence or {})
+        payment.status = to_status
+        return event
+
+    @staticmethod
+    def _opened(payment: Payment, *, by: str, actor=None,
+                evidence: dict | None = None) -> PaymentEvent:
+        """The checkout's first event, once its row is saved: '' -> its status. Opened
+        by the customer unless the caller says otherwise, and then `actor` defaults to
+        the subscriber."""
+        actor_id = getattr(actor, 'pk', None)
+        if actor_id is None and str(by) == By.CUSTOMER:
+            actor_id = payment.subscription.user_id
+        return PaymentEvent.objects.create(
+            payment=payment, from_status='', to_status=payment.status,
+            actor_id=actor_id, actor_role=str(by),
+            evidence={'reference': payment.gateway_transaction_reference or None,
+                      'amount': str(payment.amount), 'currency': payment.currency,
+                      'money_type': payment.money_type,
+                      'payment_method': payment.payment_method,
+                      'kind': (payment.metadata or {}).get('kind') or 'initial',
+                      **(evidence or {})})
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
     @classmethod
-    def complete_payment(cls, payment_id, verified_data: dict) -> Payment:
+    def complete_payment(cls, payment_id, verified_data: dict, *, by: str = By.SYSTEM,
+                         actor=None, evidence: dict | None = None) -> Payment:
         """
         Complete a payment and activate its subscription — the ONLY path to
         active access. `verified_data` must come from a trusted source (a
@@ -117,6 +212,11 @@ class PaymentService:
         Idempotent: replays (same event id, or already-completed payment) return
         the existing payment without granting anything again — but a replay of a payment
         whose payout is still owed sends the payout again (see `redeliver_payout`).
+
+        `by`/`actor` say who or what confirmed it (`PaymentEvent.By`); the event keeps
+        the gateway's ids and figures from `verified_data`, plus `evidence`. On commit
+        the customer is told (`payment_confirmed`, push and inbox: the receipt is ready)
+        — only for a completion, never for a replay.
         """
         with transaction.atomic():
             subscription, payment = cls._lock_subscription_and_payment(payment_id)
@@ -151,7 +251,8 @@ class PaymentService:
                 )
 
             # --- Apply completion ---
-            payment.status = 'completed'
+            cls._move(payment, 'completed', by=by, actor=actor,
+                      evidence={**_gateway_facts(verified_data), **(evidence or {})})
             if verified_data.get('transaction_id'):
                 payment.transaction_id = str(verified_data['transaction_id'])
             if verified_data.get('reference'):
@@ -201,6 +302,14 @@ class PaymentService:
                 f"subscription {payment.subscription_id} activated"
             )
 
+        # The customer hears the money arrived (the spec's table: payment confirmed —
+        # push and inbox). Registered BEFORE the payout and `robust`: a notice that
+        # cannot be queued is logged and never stops the payout behind it, and a payout
+        # that fails (it raises, for a retry) never swallows the notice of a payment
+        # that did commit.
+        recipient_id = payment.subscription.user_id
+        transaction.on_commit(lambda: cls._notify_confirmed(recipient_id, payment.id),
+                              robust=True)
         # ON COMMIT. The comment here said "after commit-safe state", which was true of
         # this function and not of its callers: `PaymentWebhookView` wraps the whole
         # update in `transaction.atomic()`, so the send happened inside a transaction
@@ -208,6 +317,18 @@ class PaymentService:
         transaction.on_commit(lambda: payment_completed.send(
             sender=cls, payment=payment, subscription=payment.subscription))
         return payment
+
+    @staticmethod
+    def _notify_confirmed(recipient_id, payment_id) -> None:
+        """`payment_confirmed` to the customer, on commit. The fact only — no amount, no
+        link, no button: a push reaches every build, and a store build may not sell the
+        plan (the spec, section 7). `data` carries the payment's id and invoice number;
+        its receipt is `payments/{payment_id}/receipt/`."""
+        from notifications.domain.dispatcher import emit_event
+        from notifications.domain.money_events import PaymentConfirmedEvent
+
+        emit_event(PaymentConfirmedEvent(recipient_id=recipient_id,
+                                         payment_id=str(payment_id)))
 
     @classmethod
     def ensure_invoice_number(cls, payment: Payment) -> str:
@@ -274,7 +395,8 @@ class PaymentService:
         return True
 
     @classmethod
-    def cancel_payment(cls, payment_id, reason: str = "") -> Payment:
+    def cancel_payment(cls, payment_id, reason: str = "", *, by: str = By.SYSTEM,
+                       actor=None) -> Payment:
         """A payment that was never taken. Legal from pending/processing.
 
         `cancelled` has been a declared transition from `pending` since the state machine
@@ -291,14 +413,16 @@ class PaymentService:
             if not payment.can_transition_to('cancelled'):
                 raise InvalidPaymentTransition(
                     f"Payment {payment.id} cannot go {payment.status} -> cancelled")
-            payment.status = 'cancelled'
+            cls._move(payment, 'cancelled', by=by, actor=actor,
+                      evidence={'reason': (reason or 'Cancelled at the gateway')[:500]})
             payment.gateway_error = (reason or 'Cancelled at the gateway')[:2000]
             payment.save()
             logger.info("Payment %s cancelled (%s)", payment.id, reason or 'no reason')
         return payment
 
     @classmethod
-    def refund_payment(cls, payment_id, reason: str = "", gateway_data: dict | None = None) -> Payment:
+    def refund_payment(cls, payment_id, reason: str = "", gateway_data: dict | None = None,
+                       *, by: str = By.SYSTEM, actor=None) -> Payment:
         """Move a completed payment to refunded and take back what it paid for.
 
         Nothing could reach this state. `PAYMENT_STATUS_TRANSITIONS` has declared
@@ -328,7 +452,9 @@ class PaymentService:
             if gateway_data:
                 cls._verify_amount_and_currency(payment, gateway_data)
 
-            payment.status = 'refunded'
+            cls._move(payment, 'refunded', by=by, actor=actor,
+                      evidence={**_gateway_facts(gateway_data),
+                                'reason': (reason or '')[:500]})
             if reason:
                 payment.gateway_error = reason[:2000]
             payment.save()
@@ -406,7 +532,8 @@ class PaymentService:
     # ------------------------------------------------------------------ #
     @classmethod
     def hold_for_review(cls, payment_id, facts: dict, *, reason: str,
-                        gateway: str = 'shamcash') -> TransferReview | None:
+                        gateway: str = 'shamcash', by: str = By.SYSTEM,
+                        actor=None) -> TransferReview | None:
         """Hold money that is almost right for an operator, never drop it.
 
         `facts` is what the gateway saw (`transaction_facts`: transaction id, amount,
@@ -456,7 +583,10 @@ class PaymentService:
                 meta['review'] = {'reason': reason, 'transaction_id': txn_id,
                                   'held_at': timezone.now().isoformat()}
                 payment.metadata = meta
-                payment.status = 'needs_review'
+                cls._move(payment, 'needs_review', by=by, actor=actor, evidence={
+                    'review_id': str(review.pk), 'reason': reason, 'gateway': gateway,
+                    'transaction_id': txn_id, 'amount': str(review.amount),
+                    'currency': review.currency})
                 payment.save(update_fields=['status', 'metadata', 'updated_at'])
                 logger.warning("Payment %s held for review (%s, transfer %s)",
                                payment.id, reason, txn_id)
@@ -563,7 +693,9 @@ class PaymentService:
                 'event_id': review.transaction_id,
                 'reference': payment.gateway_transaction_reference,
                 'gateway_data': review.raw or None,
-            })
+            }, by=By.OPERATOR, actor=operator, evidence={
+                'review_id': str(review.pk), 'note': review.resolution_note,
+                **({'price': record['price']} if 'price' in record else {})})
 
     @classmethod
     def reject_review(cls, review_id, operator, note: str = '') -> TransferReview:
@@ -594,7 +726,9 @@ class PaymentService:
             others = (payment is not None and TransferReview.objects.filter(
                 payment=payment, status='open').exists())
             if payment is not None and payment.status == 'needs_review' and not others:
-                payment.status = 'rejected'
+                cls._move(payment, 'rejected', by=By.OPERATOR, actor=operator, evidence={
+                    'review_id': str(review.pk), 'note': review.resolution_note,
+                    'transaction_id': review.transaction_id})
                 payment.gateway_error = (note or 'Rejected on review')[:2000]
                 payment.save(update_fields=['status', 'gateway_error', 'updated_at'])
                 recipient_id = payment.subscription.user_id
@@ -633,7 +767,12 @@ class PaymentService:
                                   'held_at': timezone.now().isoformat(),
                                   'attached_by': operator.pk if operator else None}
                 payment.metadata = meta
-                payment.status = 'needs_review'
+                cls._move(payment, 'needs_review', by=By.OPERATOR, actor=operator,
+                          evidence={'review_id': str(review.pk), 'reason': review.reason,
+                                    'attached': True,
+                                    'transaction_id': review.transaction_id,
+                                    'amount': str(review.amount),
+                                    'currency': review.currency})
                 payment.save(update_fields=['status', 'metadata', 'updated_at'])
                 recipient_id = subscription.user_id
                 transaction.on_commit(lambda: cls._notify_review(
@@ -683,7 +822,8 @@ class PaymentService:
                                                   'payment_id': str(payment_id)}})
 
     @classmethod
-    def fail_payment(cls, payment_id, error_message: str = "") -> Payment:
+    def fail_payment(cls, payment_id, error_message: str = "", *, by: str = By.SYSTEM,
+                     actor=None) -> Payment:
         """Mark a payment failed (legal from pending/processing/authorized)."""
         with transaction.atomic():
             payment = Payment.objects.select_for_update().get(id=payment_id)
@@ -691,13 +831,15 @@ class PaymentService:
                 return payment
             if not payment.can_transition_to('failed'):
                 raise InvalidPaymentTransition(f"Payment {payment.id} cannot go {payment.status} -> failed")
-            payment.status = 'failed'
+            cls._move(payment, 'failed', by=by, actor=actor,
+                      evidence={'error': (error_message or 'Payment failed')[:500]})
             payment.gateway_error = (error_message or 'Payment failed')[:2000]
             payment.save()
         return payment
 
     @classmethod
-    def expire_payment(cls, payment_id, reason: str = "") -> Payment:
+    def expire_payment(cls, payment_id, reason: str = "", *, by: str = By.SYSTEM,
+                       actor=None) -> Payment:
         """A checkout nobody finished. Legal from pending/processing/authorized.
 
         `expired` has been a declared transition since the state machine was written and
@@ -713,14 +855,15 @@ class PaymentService:
             if not payment.can_transition_to('expired'):
                 raise InvalidPaymentTransition(
                     f"Payment {payment.id} cannot go {payment.status} -> expired")
-            payment.status = 'expired'
+            cls._move(payment, 'expired', by=by, actor=actor,
+                      evidence={'reason': (reason or 'The checkout expired')[:500]})
             payment.gateway_error = (reason or 'The checkout expired')[:2000]
             payment.save()
             logger.info("Payment %s expired (%s)", payment.id, reason or 'timed out')
         return payment
 
     @classmethod
-    def mark_processing(cls, payment_id) -> Payment:
+    def mark_processing(cls, payment_id, *, by: str = By.SYSTEM, actor=None) -> Payment:
         """Optional intermediate state once the gateway has accepted the request."""
         with transaction.atomic():
             payment = Payment.objects.select_for_update().get(id=payment_id)
@@ -728,12 +871,14 @@ class PaymentService:
                 return payment
             if not payment.can_transition_to('processing'):
                 raise InvalidPaymentTransition(f"Payment {payment.id} cannot go {payment.status} -> processing")
-            payment.status = 'processing'
+            cls._move(payment, 'processing', by=by, actor=actor)
             payment.save()
         return payment
 
     @classmethod
-    def start_renewal(cls, subscription: Subscription, initiate=None) -> Payment:
+    def start_renewal(cls, subscription: Subscription, initiate=None, *,
+                      by: str = By.CUSTOMER, actor=None,
+                      evidence: dict | None = None) -> Payment:
         """
         Begin a renewal: return the subscription's open checkout, opening one if it has
         none. This never mutates the subscription — activation happens later via
@@ -742,6 +887,10 @@ class PaymentService:
         `initiate(payment)` opens the gateway session and returns
         `(payment_method, reference, gateway_response)`; see `_checkout_under_lock`.
         Without it the payment is created without a reference.
+
+        A checkout opened here writes its first event (`_opened`): by the customer
+        unless `by` says otherwise; `evidence` is what the caller adds to it (the build
+        that asked: `channel`, `version`).
         """
         # One checkout in flight at a time, and the check has to hold under concurrency.
         # It was a `.filter(...).first()` followed by a `.create(...)` with no lock, so
@@ -767,11 +916,13 @@ class PaymentService:
             # both handed out a live reference and paying both charged twice.
             open_payments = Payment.objects.filter(
                 subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
-            return cls._checkout_under_lock(locked, open_payments, 'renewal', initiate)
+            return cls._checkout_under_lock(locked, open_payments, 'renewal', initiate,
+                                            by=by, actor=actor, evidence=evidence)
 
     @classmethod
     def start_payment(cls, subscription: Subscription, initiate,
-                      expected_plan_id=None) -> Payment:
+                      expected_plan_id=None, *, by: str = By.CUSTOMER, actor=None,
+                      evidence: dict | None = None) -> Payment:
         """The Pay button: the subscription's open checkout, opening one if it has none.
 
         Refused while cover is running — extending an active subscription is what renew
@@ -795,12 +946,14 @@ class PaymentService:
                                   f"{expected_plan_id} to {locked.plan_id}")
             open_payments = Payment.objects.filter(
                 subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
-            return cls._checkout_under_lock(locked, open_payments, 'initial', initiate)
+            return cls._checkout_under_lock(locked, open_payments, 'initial', initiate,
+                                            by=by, actor=actor, evidence=evidence)
 
     @classmethod
     def start_upgrade(cls, subscription: Subscription, to_plan: SubscriptionPlan, initiate,
                       *, expected_from_plan_id, expected_to_pay=None,
-                      gateway_name=None) -> Payment:
+                      gateway_name=None, by: str = By.CUSTOMER, actor=None,
+                      evidence: dict | None = None) -> Payment:
         """Open the checkout that moves a RUNNING subscription onto a dearer plan.
 
         The owner (2026-09-23): an upgrade is allowed while a plan runs, a downgrade is
@@ -877,13 +1030,17 @@ class PaymentService:
             payment.gateway_transaction_reference = reference
             payment.gateway_response = response or {}
             payment.save()
+            if not unoffered:
+                # A row that was never offered keeps the event it was written with.
+                cls._opened(payment, by=by, actor=actor, evidence=evidence)
             payment.already_open = False
             payment.quote = quote
             return payment
 
     @classmethod
     def _checkout_under_lock(cls, subscription: Subscription, open_payments, kind: str,
-                             initiate) -> Payment:
+                             initiate, *, by: str = By.CUSTOMER, actor=None,
+                             evidence: dict | None = None) -> Payment:
         """Return the open checkout, or open one. The caller holds the subscription lock.
 
         * An open payment that already has a reference is THE checkout: the customer may
@@ -984,6 +1141,10 @@ class PaymentService:
             payment.gateway_transaction_reference = reference
             payment.gateway_response = response or {}
         payment.save()
+        if not candidates:
+            # The checkout's first event. An adopted row changes no state (it was open
+            # and stays open) and keeps the event it was written with.
+            cls._opened(payment, by=by, actor=actor, evidence=evidence)
         payment.already_open = False
         return payment
 
