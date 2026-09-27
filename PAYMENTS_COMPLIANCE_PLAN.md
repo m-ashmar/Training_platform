@@ -53,7 +53,7 @@ production readiness 5/10).
 | 5 | Step 5 remainder: an immutable event row per payment transition; email channel + receipt email; push on payment confirmed; trainer-fee pushes both sides | MERGED (`b434394`, `84caa8c`): PaymentEvent (immutable, trigger), no separate checkout-session table (the mapping is in payment_service.py), payment_confirmed + coaching-fee pushes, the §7 emails with delivery rows |
 | 6 | Deploy runbook rewritten from the final config: every secret, backup/restore + key custody, staging config | TODO |
 | 7 | Features left: program cards in chat + video poster frames (`fc9b15c`); home day timeline, ready programs from products, voice trainer message, PRs on completion (`84c6d87`). NOT in this run: HLS/SVG (optional), BACKEND_DELTA item 20 gaps and all SIDE_BUGS (S-212..S-227 logged this run) — the owner's separate fix run | MERGED |
-| 8 | Step 11 web hub (Next.js) | TODO |
+| 8 | Step 11 web hub — the BACKEND: checkout sessions for plans and routine products through ShamCash (`build/hub-checkout`), deep-link association files, the sender's saved ShamCash address as review evidence, the gateway-down state (`build/hub-signals`) | BUILDING. The SITE itself is an owner decision: the design ships the money screens in the Flutter app's `web` channel (so the hub can be the app's web build), while the spec names a separate Next.js site; the backend serves either |
 
 ## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
 
