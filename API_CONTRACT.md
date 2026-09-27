@@ -400,6 +400,29 @@ turn produces them: `connected` (on connect), `getting_ready`, then one per pass
 tool-calling loop — `thinking`, `checking_data`, `analyzing`, `looking_deeper`,
 `almost_done` (the last repeats if the loop runs longer).
 
+**The socket declares its build** (spec §4, §10; 2026-09-27). Send `X-App-Channel` and
+`X-App-Version` on the handshake as headers, exactly as on REST; a client that cannot
+set handshake headers sends `?app_channel=ios&app_version=1.4.0` beside `?token=`
+instead (a header that is present wins). Read once at connect with policy's parser. A
+socket that declares no channel, or one policy does not know, gets what a REST caller
+declaring none gets — the strictest flags — never a refusal. **What differs by build:**
+on a build that may not sell plans or routine products (today `play`, `ios` and no
+declaration; `ai_assistant/store_safe.py payment_talk_blocked`), a question about
+paying, prices, subscribing or buying — Arabic, Levantine, Arabizi or English — is
+answered with one fixed sentence that names no price, place or link, WITHOUT calling
+the model, in the ordinary frames (`token`, `complete`, `rate_limit`; saved and charged
+like any turn); every other question reaches the model with the store rule in its
+instructions. On `apk` and `web` nothing changes. The model's reply is never edited on
+any build. `sessions/{session_id}/messages/` follows the same rule on the build its
+request declares: on a store build, a stored reply to a payment question reads as that
+fixed sentence; everything else reads as written.
+
+**`medical_disclaimer`** (spec §9 B4, additive): one sentence in the reader's language
+("The AI coach can make mistakes. It is not a substitute for your trainer or your
+doctor." — the canvas's own words), on the `connected` status, on every `complete`, and
+on every `assistant` message of `sessions/{session_id}/messages/` (null on `user`
+messages). The same on every build.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET, DELETE` | `/api/ai/data/` | auth | `GDPRDataDeleteView` |
@@ -631,6 +654,13 @@ tells "ended" from "never subscribed" by `access` on `subscriptions/current/`
 true (3 days before the end). Pushes: `subscription_expiring` (3 days before),
 `subscription_expired` (on the day it ends, then after 3, 7, 14 and 30 days). No price and
 no link in either, on any build.
+
+**`medical_disclaimer`** (spec §9 B4, 2026-09-27, additive): the nutrition onboarding
+and diet generation carry one sentence in the reader's language ("This plan is general
+guidance, not medical advice. Check with your doctor before changing how you eat…"):
+every 200 of `GET` and `POST preferences/` (where the tastes and allergies are saved),
+the 200 of `plans/generate/`, both 201s of `plans/generate-rule/`, and
+`plans/tasks/{task_id}/` once `plan_id` is there. The same on every build.
 
 No plan is generated from an activity level the client never chose (the owner,
 2026-09-20): `plans/generate/` and `plans/generate-rule/` answer 400

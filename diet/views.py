@@ -48,6 +48,7 @@ from django.http import Http404
 from rest_framework.exceptions import (NotFound, NotAuthenticated, PermissionDenied,
                                        ValidationError as DRFValidationError)
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
+from training_platform.disclaimers import nutrition_disclaimer
 from training_platform.query_params import int_param
 
 from diet.planner.portion import describe
@@ -1070,6 +1071,11 @@ class UserPreferencesView(APIView):
     `DELETE` — `action` + `food_id` removes one like/dislike; otherwise `liked_foods` /
     `disliked_foods` present in the body clears that list.
 
+    `medical_disclaimer` (spec §9 B4, additive) — on every 200 of `GET` and `POST`:
+    this is the nutrition onboarding (the tastes and the allergies are saved here), and
+    the app shows the sentence there. General guidance, not medical advice; check with
+    a doctor. In the reader's language, the same on every build.
+
     Refusals, each with its `code`:
 
     - 400 `missing_fields` (with `fields: ["food_id"]`) — an `action` without `food_id`.
@@ -1136,8 +1142,9 @@ class UserPreferencesView(APIView):
                     for food in preferences.fruit_choices.all()
                 ],
                 'local_ratio': preferences.local_ratio,
+                'medical_disclaimer': nutrition_disclaimer(),
             })
-            
+
         except BadInput as e:
             return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
@@ -1174,11 +1181,13 @@ class UserPreferencesView(APIView):
                 if action == 'like':
                     preferences.liked_foods.add(food)
                     preferences.disliked_foods.remove(food)
-                    return Response({"message": _("Preference updated"), "action": "like"})
+                    return Response({"message": _("Preference updated"), "action": "like",
+                                     "medical_disclaimer": nutrition_disclaimer()})
                 if action == 'dislike':
                     preferences.disliked_foods.add(food)
                     preferences.liked_foods.remove(food)
-                    return Response({"message": _("Preference updated"), "action": "dislike"})
+                    return Response({"message": _("Preference updated"), "action": "dislike",
+                                     "medical_disclaimer": nutrition_disclaimer()})
                 return Response({"error": _("Invalid action"), "code": "invalid_action"},
                                 status=status.HTTP_400_BAD_REQUEST)
 
@@ -1222,7 +1231,8 @@ class UserPreferencesView(APIView):
                 changed.append('local_ratio')
             if changed:
                 preferences.save(update_fields=changed)
-            return Response({"message": _("Preferences updated successfully")})
+            return Response({"message": _("Preferences updated successfully"),
+                             "medical_disclaimer": nutrition_disclaimer()})
         except BadInput as e:
             return Response({"error": str(e), "code": e.refusal_code}, status=status.HTTP_400_BAD_REQUEST)
         except PASSTHROUGH_EXCEPTIONS:
@@ -1357,7 +1367,12 @@ class GenerateDietPlanView(APIView):
 
     `POST v1/plans/generate/` — optional `meal_count` (1-10), `snack_count` (0-10),
     `duration_days`, `start_date` (YYYY-MM-DD). 200 `{message, task_id, engine,
-    estimated_time}`.
+    estimated_time, medical_disclaimer}`.
+
+    `medical_disclaimer` (spec §9 B4, additive): the sentence the app shows with a
+    generated plan — general guidance, not medical advice; check with a doctor — in
+    the reader's language, the same on every build. `plans/tasks/<task_id>/` repeats
+    it once the plan is built.
 
     Refusals, each with its `code`:
 
@@ -1447,6 +1462,7 @@ class GenerateDietPlanView(APIView):
                 "task_id": task.id,
                 "engine": "rule",
                 "estimated_time": "under a minute",
+                "medical_disclaimer": nutrition_disclaimer(),
             })
             
         except BadInput as e:
@@ -1476,7 +1492,9 @@ class PlanTaskStatusView(APIView):
     - `PENDING` | `STARTED` | `RETRY` | `RECEIVED` — still running; poll again.
     - `FAILURE` — plus `error` (a sentence); start again.
     - `SUCCESS` — plus what the task returned: `{plan_id, superseded_plan_ids,
-      replaced_a_plan_written_for_you}` when a plan was built, or `{error, code}` when it
+      replaced_a_plan_written_for_you}` and `medical_disclaimer` (spec §9 B4, additive:
+      the sentence shown with a generated plan, in the reader's language) when a plan
+      was built, or `{error, code}` when it
       was refused and the allowance given back — `code` one of `infeasible_calories`
       (with `max_feasible_kcal`, `suggestion`), `no_servable_meal`, `plan_already_exists`,
       `preferences_changed`, `invalid_request`.
@@ -1519,6 +1537,8 @@ class PlanTaskStatusView(APIView):
         payload = result.result if isinstance(result.result, dict) else {}
         body = {"task_id": task_id, "state": state}
         body.update({k: v for k, v in payload.items() if k != "user_id"})
+        if body.get("plan_id"):
+            body["medical_disclaimer"] = nutrition_disclaimer()
         return Response(body)
 
 
@@ -1530,7 +1550,10 @@ class GenerateDietPlanRuleBasedView(APIView):
     `duration_days` (up to 7), `start_date` (YYYY-MM-DD). 201 with the plan, or 201
     `{status: "created_but_not_rendered", diet_plan_id, message}` with `code`
     `payload_unavailable` when the plan was saved and its payload could not be built
-    (not a refusal: the plan exists; open it by id).
+    (not a refusal: the plan exists; open it by id). Both 201s carry
+    `medical_disclaimer` (spec §9 B4, additive): the sentence the app shows with a
+    generated plan — general guidance, not medical advice; check with a doctor — in the
+    reader's language, the same on every build.
 
     Refusals, each with its `code`:
 
@@ -1667,6 +1690,7 @@ class GenerateDietPlanRuleBasedView(APIView):
                     "diet_plan_id": diet_plan.id,
                     "message": _("Your plan was created. Open it to see today's meals."),
                     "code": "payload_unavailable",
+                    "medical_disclaimer": nutrition_disclaimer(),
                 }, status=status.HTTP_201_CREATED)
 
             return Response({
@@ -1699,7 +1723,8 @@ class GenerateDietPlanRuleBasedView(APIView):
                 # allergen data could not be verified is still served, and silence used
                 # to be the only signal that anything was uncertain.
                 "allergen_report": diet_plan.allergen_report or {},
-                "smart_macro_summary": plan_output.plan_metadata.get("smart_macro_summary") if hasattr(plan_output, "plan_metadata") else None
+                "smart_macro_summary": plan_output.plan_metadata.get("smart_macro_summary") if hasattr(plan_output, "plan_metadata") else None,
+                "medical_disclaimer": nutrition_disclaimer(),
             }, status=status.HTTP_201_CREATED)
         except NoServableMealError as e:
             # The pool cannot supply a dish or a shape for a slot. That is a message

@@ -5532,3 +5532,31 @@ msgid ""
 "The server is busy with other photos right now. Please try again in a few "
 "seconds."
 msgstr "الخادم مشغول بصور أخرى الآن. يُرجى المحاولة مرة أخرى بعد بضع ثوانٍ."
+
+#. Spec §9 B4: shown with every AI coach reply. The canvas's own words
+#. (screens/10-ai-coach/AiChat, under the message box).
+#: training_platform/disclaimers.py
+msgid ""
+"The AI coach can make mistakes. It is not a substitute for your trainer or "
+"your doctor."
+msgstr "قد يخطئ المدرب الذكي. ليس بديلاً عن مدربك أو طبيبك."
+
+#. Spec §9 B4: shown at nutrition onboarding and with every generated diet plan.
+#: training_platform/disclaimers.py
+msgid ""
+"This plan is general guidance, not medical advice. Check with your doctor "
+"before changing how you eat, especially if you have a health condition or a "
+"severe allergy."
+msgstr ""
+"هذه الخطة إرشادات عامة وليست نصيحة طبية. استشر طبيبك قبل أن تغيّر طريقة "
+"أكلك، خاصةً إذا كانت لديك حالة صحية أو حساسية شديدة."
+
+#. The AI coach's whole answer to a payment question on a build that sells
+#. nothing (spec §3, §10). No price, no place, no link, no hint of paying elsewhere.
+#: ai_assistant/store_safe.py
+msgid ""
+"I'm the AI coach, so I can't help with payments, prices or subscriptions. Ask "
+"me about your training, your meals or your progress."
+msgstr ""
+"أنا المدرب الذكي، لذلك لا أستطيع المساعدة في الدفع أو الأسعار أو الاشتراكات. "
+"اسألني عن تمارينك أو وجباتك أو تقدّمك."

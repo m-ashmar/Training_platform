@@ -23,6 +23,8 @@ from django.utils.translation import gettext as _
 
 from ai_assistant.services.chat_service import ChatService
 from ai_assistant.services.security import InputSanitizer
+from ai_assistant.store_safe import build_of_scope
+from training_platform.disclaimers import ai_coach_disclaimer
 from training_platform.i18n import LanguageContext
 from training_platform.ws_auth import authenticate_scope
 
@@ -93,6 +95,25 @@ class AIChatConsumer(AsyncWebsocketConsumer):
     """
     WebSocket endpoint: ws://host/ws/ai/chat/?token=<JWT>
 
+    **The build.** Declare it on the handshake the way every REST call does, as
+    `X-App-Channel: apk | play | ios | web` and `X-App-Version: 1.4.0` headers; a
+    client that cannot set headers on a WebSocket sends them as query parameters
+    instead, `?token=<JWT>&app_channel=ios&app_version=1.4.0`. A header that is present
+    wins over the parameter. Read once, at connect (a build's channel never changes at
+    runtime), by `ai_assistant.store_safe.build_of_scope` with policy's own parser:
+    exact lower-case channels only. A socket that declares no channel, or one policy
+    does not know, is treated as REST treats such a caller — policy's STRICTEST flags,
+    which sell nothing — so it gets the store build's coach, never a refusal.
+
+    What differs by build: on a build that may not sell plans or routine products
+    (`store_safe.payment_talk_blocked` — today `play`, `ios` and no declaration), a
+    question about paying, prices, subscribing or buying is answered with one fixed
+    sentence that names no price, no place and no link, without calling the model;
+    every other question is answered by the model with the store rule in its
+    instructions. On `apk` and `web` the coach answers everything. The same for every
+    user of a build. The turn's frames are the ordinary ones (`token`, `complete`,
+    `rate_limit`), so the app needs no branch for it.
+
     Protocol (JSON messages):
 
     Client → Server:
@@ -102,9 +123,11 @@ class AIChatConsumer(AsyncWebsocketConsumer):
 
     Server → Client:
       {"type": "status", "content": "...", "code": "..."}
+                            (`connected` also carries `medical_disclaimer`)
       {"type": "token", "content": "partial text"}
       {"type": "tool_used", "name": "...", "display": "..."}
-      {"type": "complete", "session_id": "uuid", "message_id": 123, "tools_used": [...]}
+      {"type": "complete", "session_id": "uuid", "message_id": 123, "tools_used": [...],
+       "medical_disclaimer": "..."}
       {"type": "feedback_saved", "content": "..."}
       {"type": "rate_limit", "remaining": 49, "resets_at": "..."}
       {"type": "error", "content": "...", "code": "..."}
@@ -132,6 +155,12 @@ class AIChatConsumer(AsyncWebsocketConsumer):
     of the tool-calling loop, `thinking`, `checking_data`, `analyzing`,
     `looking_deeper`, `almost_done` (`services/chat_service.py ITERATION_STATUSES`).
 
+    `medical_disclaimer` (spec §9 B4) is one sentence in the reader's language — the AI
+    coach can be wrong and is not a substitute for a trainer or a doctor — sent on the
+    `connected` status (so the chat screen can show it before the first reply) and on
+    every `complete`. The same on every build. Additive: a build that ignores it loses
+    nothing.
+
     A turn that ends on an `error` is NOT charged against the daily allowance
     (`_reserve_rate_limit`), and the `rate_limit` frame that closes every turn carries
     what is actually left. `resets_at` is the next midnight in the server's
@@ -142,11 +171,18 @@ class AIChatConsumer(AsyncWebsocketConsumer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.user = None
+        #: `(channel, version)` from the handshake; `(None, None)` until connect reads
+        #: it, which is policy's strictest answer.
+        self.build = (None, None)
         self.chat_service = ChatService()
         self.sanitizer = InputSanitizer()
 
     async def connect(self):
         """Authenticate and check premium status on WebSocket connect."""
+        # The build this socket speaks for, read once: a build's channel is a
+        # compiled-in constant and never changes while it runs.
+        self.build = build_of_scope(self.scope)
+        self.chat_service.build = self.build
         self.user = await self._authenticate()
         if not self.user:
             await self.close(code=4001)
@@ -167,6 +203,7 @@ class AIChatConsumer(AsyncWebsocketConsumer):
                 "type": "status",
                 "content": str(_("Connected to AI Assistant. How can I help you today?")),
                 "code": "connected",
+                "medical_disclaimer": ai_coach_disclaimer(),
             }))
 
     async def disconnect(self, close_code):
