@@ -92,6 +92,24 @@ class PersonalDataSource:
     #: left to find it (the verification review of 2026-09-24). Its source deletes the
     #: files first, and refuses the erasure when storage does.
     delete_rows: Callable | None = None
+    #: What the three store documents are written from (spec §9 B3): the data inventory
+    #: (`manage.py data_inventory`, `docs/store/data_inventory.md`), which feeds the
+    #: privacy policy, Apple's privacy labels and Google's Data safety form.
+    #:
+    #: `purpose` — why the platform holds this, in a sentence or two a reader of the
+    #: privacy policy would understand. Empty is undeclared.
+    purpose: str = ""
+    #: Who outside the platform's servers and operators receives it, as keys of
+    #: `privacy.disclosure.RECIPIENTS` (another person in the app, or a service provider).
+    #: `()` is a declaration: nobody. None is undeclared.
+    recipients: tuple[str, ...] | None = None
+    #: What kind of data it is on the stores' forms, as keys of
+    #: `privacy.disclosure.DATA_TYPES`. None is undeclared.
+    #:
+    #: The inventory refuses to generate while any source leaves one of the three
+    #: undeclared, and `tests/test_store_docs.py` fails, so a model registered here
+    #: without them cannot reach the committed inventory unnoticed.
+    data_types: tuple[str, ...] | None = None
 
     def get_model(self):
         from django.apps import apps
