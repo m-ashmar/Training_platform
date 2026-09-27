@@ -48,11 +48,11 @@ production readiness 5/10).
 |---|---|---|
 | 1 | Hardening: Django 5.2 LTS + pinned deps; stdout logs; worker/beat split + heartbeat; Fly health check, capacity, no volume; client IP behind Fly; DB-enforced append-only ledger; bounded erasure/export; image-decode cap; batched daily jobs; Redis per role; email for any provider, sent async, in the recipient's language; CI on this branch | PART MERGED: `fx/prod-services` and `fx/prod-data` merged (`55cd2ba`, `dbc480a`). `fx/prod-platform` and `fx/django-lts` WAIT: both change `.github/workflows/security.yml`, and `.github/` is owned by another macOS user (`xx`), so git cannot write it — the owner runs `sudo chown -R mac:staff .github`, then merge both, then `.venv/bin/pip install --require-hashes -r requirements.lock` in the main venv (only when no other test run is active), then the full gate |
 | 2 | Launch data: `bootstrap_platform`, `seed_review_accounts` (spec §10), starter exercise catalogue | MERGED (`cf17d77`) |
-| 3 | Store review (spec §9) — BUILDING (`build/store-ai`, `build/ugc-filter`, `build/releases-legal`, `build/allergen-safety`): AI refuses payment instructions on play/ios; banned-terms filter; medical disclaimers; incomplete-allergen dishes out of allergic users' plans; APK hosting + `GET /api/v1/app/latest`; privacy + terms pages (draft text for the owner) with URLs via capabilities; web account-deletion request page | TODO |
-| 4 | Review documents: review notes, data inventory from the privacy registry, privacy-label / Data safety source | TODO |
-| 5 | Step 5 remainder: an immutable event row per payment transition; email channel + receipt email; push on payment confirmed; trainer-fee pushes both sides | TODO |
+| 3 | Store review (spec §9) — MERGED (`a24a148`, `f32da81`, `0af3831`, `b4a9397`): AI refuses payment instructions on play/ios; banned-terms filter; medical disclaimers; incomplete-allergen dishes out of allergic users' plans; APK hosting + `GET /api/v1/app/latest`; privacy + terms pages (draft text for the owner) with URLs via capabilities; web account-deletion request page | TODO |
+| 4 | Review documents: review notes, data inventory from the privacy registry, privacy-label / Data safety source, DRAFT privacy policy + terms (ar/en) | BUILDING (`build/store-docs`) |
+| 5 | Step 5 remainder: an immutable event row per payment transition; email channel + receipt email; push on payment confirmed; trainer-fee pushes both sides | BUILDING (`build/payment-events`, `build/email-channel`) |
 | 6 | Deploy runbook rewritten from the final config: every secret, backup/restore + key custody, staging config | TODO |
-| 7 | Backlog: SIDE_BUGS (S-106 first), BACKEND_DELTA leftovers, program cards in chat, video poster frames | TODO |
+| 7 | Features left: BACKEND_DELTA leftovers, program cards in chat, video poster frames. (SIDE_BUGS fixing is NOT in this run — the owner's rule: bugs are fixed in a separate run) | TODO |
 | 8 | Step 11 web hub (Next.js) | TODO |
 
 ## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
