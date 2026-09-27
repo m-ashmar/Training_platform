@@ -144,8 +144,8 @@ def render() -> str:
       "previews it). Without the app: a request on the web page `/legal/delete-account/`, "
       "which an operator confirms with the owner of the address and carries out through "
       "the same erasure. Each source says what erasure does to it: **deleted**; "
-      "**anonymised** (the fields named are cleared or replaced, the others stay on a row "
-      "that no longer names anyone); or **kept** (a record of money, or content other "
+      "**anonymised** (the fields named are cleared or replaced, the others stay on the "
+      "row, which is listed field by field); or **kept** (a record of money, or content other "
       "people's programs are built on). The account row itself is anonymised and "
       "deactivated.")
     w("- **Retention.** A source with a window is purged every night "
@@ -222,7 +222,7 @@ def render() -> str:
         else:
             w("**Who else receives it.** Nobody outside the platform.")
         w("")
-        w(f"**Data types.** " + "; ".join(
+        w("**Data types.** " + "; ".join(
             f"{DATA_TYPES[key].name} (`{key}`)" for key in source.data_types) + ".")
         w("")
         w(f"**Fields stored.** {_code(stored)}.")
