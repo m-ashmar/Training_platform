@@ -148,6 +148,9 @@ def send_renewal_reminders(now=None, phase="expiring", after=None):
       * expiring — an entitled row whose cover ends within
         SUBSCRIPTION_RENEWAL_NOTICE_DAYS gets `subscription_expiring`, once per cover
         period (keyed on its end, so a renewal that moves the end is reminded again).
+        One whose cover ends within SUBSCRIPTION_EXPIRY_EMAIL_DAYS (7) is also owed the
+        7-day EMAIL, once per cover the same way, and only queued here
+        (notifications/channels/email.py); the push is not changed by it.
       * lapsed — a frozen row (`Subscription.is_frozen`) gets `subscription_expired` for
         each step of SUBSCRIPTION_LAPSED_REMINDER_DAYS it reaches after its end (the
         latest one, so a missed run is made up), then no more.
@@ -177,23 +180,40 @@ def send_renewal_reminders(now=None, phase="expiring", after=None):
     now = as_datetime(now) or timezone.now()
     batch = Batch()
     lead = timedelta(days=int(getattr(settings, 'SUBSCRIPTION_RENEWAL_NOTICE_DAYS', 3)))
+    email_lead = timedelta(days=int(getattr(settings, 'SUBSCRIPTION_EXPIRY_EMAIL_DAYS', 7)))
+    window = max(lead, email_lead)
     steps = sorted(getattr(settings, 'SUBSCRIPTION_LAPSED_REMINDER_DAYS', (0, 3, 7, 14, 30)))
     counts = {'expiring': 0, 'expired': 0}
 
     # The whole window, every run: a run missed or cut short is made up by the next
     # one. A notice already written is found by its key and not pushed again to a device
-    # that has it (the FCM channel skips tokens it already reached).
+    # that has it (the FCM channel skips tokens it already reached). The window is the
+    # wider of the push's and the email's; each keeps its own below.
     soon = (Subscription.objects.filter(status__in=Subscription.ENTITLED_STATUSES,
                                         user__is_active=True)
-            .filter(Q(end_date__gt=now, end_date__lte=now + lead)
-                    | Q(trial_end_date__gt=now, trial_end_date__lte=now + lead))
+            .filter(Q(end_date__gt=now, end_date__lte=now + window)
+                    | Q(trial_end_date__gt=now, trial_end_date__lte=now + window))
             .select_related('user'))
     for sub in (batch.page(soon, after) if phase == "expiring" else ()):
         if batch.spent():
             break
         batch.done(sub.pk)
         end = sub.effective_end
-        if not sub.is_active or end is None or not (now < end <= now + lead):
+        if not sub.is_active or end is None or not (now < end <= now + window):
+            continue
+        # The EMAIL a week ahead (the spec's table: "7-day only"), once per cover —
+        # keyed on its end, as the push is — and queued, never sent, here
+        # (notifications/channels/email.py). Not for a cover no longer than the notice.
+        if end <= now + email_lead and not (sub.start_date
+                                            and end - sub.start_date <= email_lead):
+            from notifications.channels import email as email_channel
+
+            email_channel.queue(sub.user, "subscription_expiring",
+                                key=f"subscription_expiring:{sub.pk}:{end.isoformat()}",
+                                context={'subscription_id': str(sub.pk),
+                                         'ends_at': end.isoformat()})
+        # The push: unchanged, SUBSCRIPTION_RENEWAL_NOTICE_DAYS ahead.
+        if end > now + lead:
             continue
         # A cover shorter than the notice would be told "ends soon" the day it was
         # bought.

@@ -385,6 +385,10 @@ PAYMENT_LATE_MONEY_WINDOW_HOURS = 72
 
 SUBSCRIPTION_RENEWAL_NOTICE_DAYS = 3
 SUBSCRIPTION_LAPSED_REMINDER_DAYS = (0, 3, 7, 14, 30)
+# The EMAIL before the plan ends (the payments spec, section 7: "Plan expires in 7 days,
+# 3 days, 1 day — email: 7-day only"): once per cover, when its end first comes within
+# this many days. Sent by the same daily job as the 3-day push, which it does not change.
+SUBSCRIPTION_EXPIRY_EMAIL_DAYS = 7
 
 # ========================
 # JWT Configuration — RS256 asymmetric signing
@@ -631,6 +635,14 @@ CELERY_BEAT_SCHEDULE = {
     'drain-notification-dlq': {
         'task': 'notifications.drain_dead_letter_queue',
         'schedule': crontab(minute=20),
+    },
+    # The email channel (notifications/channels/email.py) publishes each email after the
+    # commit and never fails the caller, so a broker down at that moment, or a worker
+    # killed mid-send, leaves an email owed with no message. Hourly, this publishes those
+    # again and gives up what is too old (notifications/tasks.py).
+    'sweep-unsent-emails': {
+        'task': 'notifications.sweep_unsent_emails',
+        'schedule': crontab(minute=50),
     },
     # A video whose metadata task was lost (Celery is at-least-once: a worker that dies
     # between the commit and the ack drops the message) would sit `pending` for ever —

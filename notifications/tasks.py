@@ -398,3 +398,106 @@ def send_workout_reminders(now=None, after=None):
     logger.info("workout reminders sent: %d", sent)
     batch.hand_on(send_workout_reminders, now=carry(now))
     return sent
+
+
+# ================================================================== the email channel
+#: Seconds before each retry of a notification email that did not go out: about 45
+#: minutes in all. Longer than the account emails' (whose code dies in ten minutes): a
+#: receipt or a withdrawal notice is still worth delivering an hour late.
+EMAIL_RETRY_COUNTDOWNS = (30, 120, 600, 1800)
+
+#: A row still `queued` (its message lost: the broker down at the commit) or `sending`
+#: (its worker killed mid-send) this long after its last attempt is published again by
+#: the sweep. Longer than the retry schedule above, so a retry waiting its turn is not
+#: raced; the claim in `deliver` makes a race harmless anyway.
+EMAIL_STALE_AFTER = timedelta(minutes=45)
+
+#: How long an email is still worth sending at all. Older unsent rows are given up.
+EMAIL_SEND_WINDOW = timedelta(days=3)
+
+
+@shared_task(
+    bind=True,
+    name="notifications.send_email",
+    max_retries=len(EMAIL_RETRY_COUNTDOWNS),
+    acks_late=True,
+    ignore_result=True,
+    # One SMTP operation is bounded by EMAIL_TIMEOUT (10 s) and the receipt's PDF by a
+    # few hundred milliseconds; this bounds the whole send, so a hung one frees its slot.
+    soft_time_limit=60,
+    time_limit=90,
+)
+def send_notification_email(self, delivery_id):
+    """Send one email the notification system owes (`notifications.EmailDelivery`) — the
+    worker's half of `notifications.channels.email.queue`.
+
+    Written in the recipient's SAVED language, read now; sent only if the account may
+    still be emailed (active, verified address, preferences). A transient failure is
+    retried (`EMAIL_RETRY_COUNTDOWNS`); a permanent one, or the last retry's, is recorded
+    `failed` and reported once (`deliver`). Returns what `deliver` returns — `sent`,
+    `skipped`, the row's state when there was nothing to do, or `gone` — or `failed`.
+    """
+    from notifications.channels.email import EmailUndelivered, TransientEmailFailure, deliver
+
+    try:
+        return deliver(delivery_id, last_try=self.request.retries >= self.max_retries)
+    except TransientEmailFailure as exc:
+        raise self.retry(exc=exc.__cause__ or exc,
+                         countdown=EMAIL_RETRY_COUNTDOWNS[self.request.retries])
+    except EmailUndelivered:
+        # Recorded and reported by `deliver`; nothing to retry.
+        return "failed"
+
+
+@shared_task(
+    name="notifications.sweep_unsent_emails",
+    autoretry_for=TRANSIENT_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+@no_retry_on_timeout
+def sweep_unsent_emails(now=None, limit=200):
+    """Hourly: publish again every email whose message was lost, and give up the ones
+    that are too old or out of attempts.
+
+    `queue` publishes after the commit and never raises into the caller, so a broker that
+    was down at that moment leaves a row `queued` with no message; a worker killed between
+    its claim and its send leaves one `sending`. Both are picked up here once their last
+    attempt is `EMAIL_STALE_AFTER` old: `limit` a run, oldest first. A row older than
+    `EMAIL_SEND_WINDOW`, or out of attempts, is recorded `failed` (`gave_up`) and logged.
+    Idempotent: the claim in `deliver` sends each email once, whatever number of messages
+    point at it. Returns the counts.
+    """
+    from django.db.models import Q
+    from django.utils import timezone
+
+    from notifications.channels.email import EMAIL_MAX_ATTEMPTS, publish
+    from notifications.models import EmailDelivery
+    from training_platform.batching import as_datetime
+
+    now = as_datetime(now) or timezone.now()
+    stale = now - EMAIL_STALE_AFTER
+    unsent = (EmailDelivery.objects
+              .filter(status__in=(EmailDelivery.QUEUED, EmailDelivery.SENDING))
+              .filter(Q(last_attempt_at__lt=stale)
+                      | Q(last_attempt_at__isnull=True, created_at__lt=stale)))
+
+    given_up = (unsent.filter(Q(created_at__lt=now - EMAIL_SEND_WINDOW)
+                              | Q(attempts__gte=EMAIL_MAX_ATTEMPTS))
+                .update(status=EmailDelivery.FAILED, error="gave_up"))
+    if given_up:
+        logger.error("Gave up %s notification email(s) that never went out", given_up)
+
+    republished = 0
+    for pk in list(unsent.order_by("created_at", "id").values_list("pk", flat=True)[:limit]):
+        # A `sending` row whose worker died goes back to the queue first, or the claim
+        # would refuse it.
+        EmailDelivery.objects.filter(pk=pk, status=EmailDelivery.SENDING) \
+            .update(status=EmailDelivery.QUEUED)
+        if publish(pk):
+            republished += 1
+    if republished:
+        logger.warning("Published %s lost notification email(s) again", republished)
+    return {"republished": republished, "given_up": given_up}

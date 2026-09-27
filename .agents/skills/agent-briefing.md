@@ -106,6 +106,15 @@ Three more about tests of background work (found building `fx/prod-services`, 20
   `_prod_env`. A new `require_env` in `settings_production.py` goes into both, with the
   reason, or every "boots" assertion fails for a reason that is not theirs.
 
+One about email (found building `build/email-channel`, 2026-09-27):
+
+- **Notices now send email too** (`notifications/channels/email.py`). A test that runs
+  on-commit callbacks around a payment completion, a withdrawal step or the plan
+  reminders now finds a notification email in `mail.outbox` beside any account email
+  (every `make_user` account has a verified address), and an `EmailDelivery` row. Count
+  the outbox by recipient or subject, not by length. A receiver added to
+  `payment_completed` must never raise: the payout receiver shares that signal.
+
 Three more about a public HTML page (found building `legal/`, 2026-09-27):
 
 - **`Content-Language` is written by `LanguageResolutionMiddleware` AFTER the view**, from

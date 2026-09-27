@@ -246,6 +246,13 @@ def _chat_notices_sent(user):
 register(PersonalDataSource(
     label="notifications", model="notifications.Notification", user_field="recipient",
     retention_days=90, erase_also=_chat_notices_sent))
+# The emails the notification system owed this person, and whether each left
+# (notifications/channels/email.py). No address and no text is stored — the kind, the
+# ids it was written from, the outcome — and the same window as the inbox.
+register(PersonalDataSource(
+    label="notification_emails", model="notifications.EmailDelivery", user_field="recipient",
+    fields=["id", "kind", "context", "status", "language", "created_at", "sent_at"],
+    retention_days=90))
 
 # --- financial: KEPT. Wallet.owner is PROTECT so a deletion cannot erase a balance,
 #     and payment history has to survive an erasure request.

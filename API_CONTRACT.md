@@ -258,6 +258,9 @@ via the notification preferences endpoint rather than picking an unreachable hou
 
 Notification history is read at `GET /api/social/notifications/` (cursor-paginated).
 
+Some notices also send an email; which ones, and how preferences stop it, is under
+"Notifications" in section 7 (`email_event_types`).
+
 ---
 
 ## 5. Rate limits
@@ -855,6 +858,25 @@ is not refused by those three.
 
 `comment_created` quotes the first words of a comment; once a moderator hides the
 comment or it is deleted, the quote is blanked on the inbox row.
+
+**Email (the payments spec, section 7; 2026-09-27).** Six kinds of notice also send an
+email, to a VERIFIED address only, written in the recipient's saved
+`preferred_language`, with a plain-text and an HTML part, by the worker after the commit
+(`notifications/channels/email.py`). No email carries a link, a button or the price of
+anything to buy, on any build:
+
+| preference `event_type` | the email |
+|---|---|
+| `payment_confirmed` | the payment's receipt as a PDF attachment (the same document as `payments/{id}/receipt/?format=pdf`). Email only: there is no push of this type |
+| `subscription_expiring` | once per cover, when its end comes within 7 days. The 3-day push is unchanged and sends no email |
+| `subscription_expired` | once per cover, with its first lapsed notice (not on each reminder step) |
+| `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed` | with each push; the number and the amount |
+
+Preferences govern the email as they govern the push: `channels.email: false` on a type's
+row (or on `all`) stops its email, `is_enabled: false` stops push and email, and the
+inbox row is written either way. `GET preferences/event_types/` answers additively
+`{"event_types": [...], "email_event_types": [the six above]}`; `payment_confirmed` is a
+valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`).
 
 | Method | Path | Auth | View |
 |---|---|---|---|
