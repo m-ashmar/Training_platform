@@ -114,7 +114,10 @@ def test_fly_runs_web_worker_and_beat_as_separate_process_groups():
     assert worker[:4] == ["celery", "-A", "training_platform", "worker"], worker
     assert beat[:4] == ["celery", "-A", "training_platform", "beat"], beat
     assert "migrate" not in processes["web"]
-    assert "migrate" in fly["release_command"]
+    # `release_command` belongs in [deploy]. Written below [processes], TOML made it a
+    # key OF that table: a process group called "release_command" that runs `migrate`
+    # as a long-lived machine, and no release command at all.
+    assert "migrate" in fly["deploy"]["release_command"]
 
     for group in ("web", "worker", "beat"):
         assert _vm_for(fly, group), f"no [[vm]] sizes the {group} group"
@@ -248,8 +251,10 @@ def test_background_health_when_its_store_is_down(api, background, monkeypatch):
         def get_many(self, *_a, **_k):
             raise ConnectionError("redis is gone")
 
-    monkeypatch.setattr(background, "ops_cache", lambda: Down())
-    resp = api().get("/api/auth/health/background/")
+    # A context, so the real store is back before the fixture's own teardown uses it.
+    with monkeypatch.context() as patch:
+        patch.setattr(background, "ops_cache", lambda: Down())
+        resp = api().get("/api/auth/health/background/")
     assert resp.status_code == 503
     assert resp.json()["status"] == "unreachable"
 
@@ -412,7 +417,8 @@ def _is_address_name(name):
 
 
 def _unmasked_email_refs(node):
-    if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "mask_email":
+    if isinstance(node, ast.Call) and getattr(node.func, "id", None) in (
+            "mask_email", "redact_emails"):
         return []
     hits = []
     if isinstance(node, ast.Name) and _is_address_name(node.id):
