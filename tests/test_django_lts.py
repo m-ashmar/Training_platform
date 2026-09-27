@@ -258,8 +258,9 @@ def test_the_project_starts_without_a_deprecation_warning_or_a_check_issue():
 
 def test_nothing_calls_what_django_6_removes():
     """Two calls that warn on 5.2 and fail on 6.0, found by this upgrade:
-    `format_html()` with no arguments (a TypeError in 6.0; seven admin badges called
-    it) and `CheckConstraint(check=...)` (the keyword is `condition`). The admin ones
+    `format_html()` with no arguments (a TypeError in 6.0; twelve call sites in the
+    diet, users and wallet admins) and `CheckConstraint(check=...)` (the keyword is
+    `condition`). The admin ones
     warn only when a page renders, so start-up alone would never show them."""
     offenders = []
     for rel, path in _project_sources():
