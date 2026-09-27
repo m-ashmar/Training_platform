@@ -5500,3 +5500,26 @@ msgstr "الاسم وfood_items مطلوبان"
 
 msgid "This plan starts on a day that has passed. Choose a start date from today on, then send it."
 msgstr "تبدأ هذه الخطة في يوم مضى. اختر تاريخ بدء من اليوم فصاعداً، ثم أرسلها."
+
+#. The subject of the sign-up code email; %(brand)s is the platform's name ("يلا جيم").
+#: users/utils.py
+#, python-format
+msgid "Verify your email - %(brand)s"
+msgstr "تأكيد بريدك الإلكتروني - %(brand)s"
+
+#. The subject of the password-reset code email; %(brand)s is the platform's name.
+#: users/utils.py
+#, python-format
+msgid "Password reset - %(brand)s"
+msgstr "إعادة تعيين كلمة المرور - %(brand)s"
+
+#: templates/emails/otp_verification.html
+msgid ""
+"Thank you for registering! To complete your registration and activate your "
+"account, please use the verification code below:"
+msgstr "شكرًا لتسجيلك! لإكمال التسجيل وتفعيل حسابك، استخدم رمز التحقق أدناه:"
+
+#. The account emails' footer, after "© <year> <brand>.".
+#: templates/emails/otp_verification.html templates/emails/password_reset_otp.html
+msgid "All rights reserved."
+msgstr "جميع الحقوق محفوظة."

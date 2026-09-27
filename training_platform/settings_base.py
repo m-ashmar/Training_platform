@@ -106,7 +106,13 @@ ASGI_APPLICATION = "training_platform.asgi.application"
 # container. Boot succeeded and the AI assistant and social consumers simply could not
 # reach their group layer. REDIS_HOST/REDIS_PORT still work for a local dev box that
 # sets them.
-_CHANNEL_REDIS = get_env("REDIS_URL") or (
+#
+# Each Redis role can also take its own full URL (training_platform/redis_layout.py):
+# REDIS_CHANNELS_URL here, CELERY_BROKER_URL and CELERY_RESULT_BACKEND below, and
+# REDIS_CACHE_URL in settings_production. Unset, a role takes its database of this one.
+from .redis_layout import with_database as _with_database
+
+_REDIS_BASE = get_env("REDIS_URL") or (
     f"redis://{get_env('REDIS_HOST', '127.0.0.1')}:{get_int_env('REDIS_PORT', 6379)}"
 )
 
@@ -114,7 +120,7 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [f"{_CHANNEL_REDIS.rstrip('/')}/5"],
+            "hosts": [get_env("REDIS_CHANNELS_URL") or _with_database(_REDIS_BASE, 5)],
         },
     },
 }
@@ -458,11 +464,23 @@ AI_ASSISTANT_CONFIG = {
 # ========================
 # Celery
 # ========================
-# DB6/DB7 — deliberately outside the 6 logical DBs the caches use. The default used to
-# be DB0, which settings_production assigns to SESSIONS, so queue keys and session keys
-# shared a keyspace.
-CELERY_BROKER_URL = get_env('CELERY_BROKER_URL', 'redis://localhost:6379/6')
-CELERY_RESULT_BACKEND = get_env('CELERY_RESULT_BACKEND', 'redis://localhost:6379/7')
+# DB6/DB7 of REDIS_URL by default — deliberately outside the 6 logical DBs the caches
+# and the channel layer use. The default used to be DB0, which settings_production
+# assigns to SESSIONS, so queue keys and session keys shared a keyspace. Either can be a
+# full URL of its own (a Redis that serves only database 0, a separate instance); the
+# production boot check refuses a broker in the same database as a cache wherever it is
+# (training_platform/redis_layout.py). The defaults followed only `localhost`, so a
+# production that set REDIS_URL and forgot CELERY_RESULT_BACKEND stored results nowhere.
+CELERY_BROKER_URL = get_env('CELERY_BROKER_URL') or _with_database(_REDIS_BASE, 6)
+CELERY_RESULT_BACKEND = get_env('CELERY_RESULT_BACKEND') or _with_database(_REDIS_BASE, 7)
+
+# How long a `.delay()` may wait to REACH Redis. Unset, a broker or result store that is
+# unreachable (a firewall that drops packets) holds the caller for the operating
+# system's TCP connect timeout — minutes — and the callers include requests: sign-up and
+# password reset queue their email (users/utils.py `queue_otp_email`). A healthy Redis
+# answers in milliseconds, so five seconds costs nothing and bounds the worst case.
+CELERY_BROKER_TRANSPORT_OPTIONS = {'socket_connect_timeout': 5}
+CELERY_REDIS_SOCKET_CONNECT_TIMEOUT = 5
 
 # Acknowledge a task only after it finishes. With the default (ack on delivery) a worker
 # killed mid-task — routine on Fly, where machines stop when idle — dropped the job
@@ -798,7 +816,14 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # ========================
 EMAIL_HOST_USER = get_env('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = get_env('EMAIL_HOST_PASSWORD', '')
+# A development placeholder. Production requires its own and refuses this domain
+# (settings_production `_from_address_problem`): no provider sends for it.
 DEFAULT_FROM_EMAIL = get_env('DEFAULT_FROM_EMAIL', 'noreply@trainingplatform.com')
+# Seconds an SMTP connection may stall before the send fails. Django's default is None —
+# wait for ever — and a mail server that accepts the connection and never answers then
+# held its caller for good: the sign-up request, before the account emails moved to a
+# worker (users/tasks.py), and now a worker slot. Every environment gets a bound.
+EMAIL_TIMEOUT = get_int_env('EMAIL_TIMEOUT', 10)
 
 # ========================
 # CSRF Configuration
