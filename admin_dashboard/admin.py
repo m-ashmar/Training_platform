@@ -37,7 +37,7 @@ import logging
 
 # Import all models
 from users.models import CustomUser, TrainerClientRelation, DeviceToken
-from routine.admin import OneClientRoutineAdminMixin
+from routine.admin import OneClientRoutineAdminMixin, StarterCatalogueFilter
 from routine.models import (
     Exercise, Routine, RoutineExercise, UserExerciseProgress, 
     ExerciseSetLog, RoutineProgress, WorkoutSession, RoutineTemplate,
@@ -163,7 +163,9 @@ class ExerciseAdmin(admin.ModelAdmin):
     # queries per changelist page.
     list_select_related = ('created_by',)
     list_display = ('name', 'target_muscle', 'difficulty_level', 'created_by', 'is_global', 'is_active', 'media_count')
-    list_filter = ('target_muscle', 'difficulty_level', 'is_global', 'is_active', 'created_by')
+    # `StarterCatalogueFilter`: the rows `bootstrap_platform` seeded, for the owner to review.
+    list_filter = ('target_muscle', 'difficulty_level', 'is_global', 'is_active', 'created_by',
+                   StarterCatalogueFilter)
     search_fields = ('name', 'description', 'target_muscle')
     list_editable = ('is_active', 'is_global')
     

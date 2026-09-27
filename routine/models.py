@@ -214,6 +214,18 @@ class Exercise(RowValidationMixin, models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     is_active = models.BooleanField(default=True, help_text="Whether this exercise is active")
 
+    #: The row of the STARTER catalogue (`routine/data/exercise_catalogue.py`) this
+    #: exercise was written from by `manage.py bootstrap_platform`, or null for every
+    #: exercise a person made. Two jobs: it is how the bootstrap finds its own rows
+    #: again (so a second run writes nothing, and a name the owner corrected in the
+    #: console is not re-created beside the correction), and it marks the rows the owner
+    #: still has to review — the console filters on it. Not editable: it names a line of
+    #: a file, not something about the exercise. Nothing else reads it.
+    catalogue_key = models.CharField(
+        max_length=64, null=True, blank=True, unique=True, editable=False,
+        help_text="Key of the starter-catalogue row this exercise was seeded from; "
+                  "empty for exercises people made")
+
     class Meta:
         verbose_name = "Exercise"
         verbose_name_plural = "Exercises"

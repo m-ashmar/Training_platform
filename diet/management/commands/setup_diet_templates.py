@@ -2,13 +2,40 @@
 Management command to set up initial diet plan templates.
 """
 
+from django.conf import settings
 from django.core.management.base import BaseCommand
+from django.utils import translation
+
 from diet.models import DietPlanTemplate
+
+#: The Arabic a trainer reads in the template picker, by English name. Written on
+#: create, and onto an existing row only where its Arabic is still EMPTY, so an
+#: operator's wording is never replaced. The app is Arabic-first; these six were English
+#: in both languages.
+ARABIC = {
+    '3 Meals + 1 Snack': ('3 وجبات + وجبة خفيفة',
+                          'ثلاث وجبات رئيسية ووجبة خفيفة، مناسبة لمعظم المستخدمين'),
+    '4 Meals + 2 Snacks': ('4 وجبات + وجبتان خفيفتان',
+                           'أربع وجبات ووجبتان خفيفتان، مثالية للنشيطين ولبناء العضل'),
+    '5 Meals + 1 Snack': ('5 وجبات + وجبة خفيفة',
+                          'خمس وجبات ووجبة خفيفة، للمتقدمين ولكمال الأجسام'),
+    '6 Meals + 2 Snacks': ('6 وجبات + وجبتان خفيفتان',
+                           'ست وجبات ووجبتان خفيفتان، للرياضيين المحترفين واللياقة العالية'),
+    '3 Meals Only': ('3 وجبات فقط', 'ثلاث وجبات يومياً، للمبتدئين والمتابعة البسيطة'),
+    '4 Meals Only': ('4 وجبات فقط', 'أربع وجبات يومياً، نهج متوازن للنشاط المعتدل'),
+}
+
 
 class Command(BaseCommand):
     help = 'Set up initial diet plan templates'
 
     def handle(self, *args, **options):
+        # The default language, whatever locale called this (`bootstrap_platform`
+        # does): `name=` and `description=` below write the ACTIVE language's column.
+        with translation.override(settings.LANGUAGE_CODE):
+            self._handle()
+
+    def _handle(self):
         self.stdout.write('Setting up diet plan templates...')
         
         templates_data = [
@@ -68,12 +95,24 @@ class Command(BaseCommand):
             template = DietPlanTemplate.objects.filter(
                 name_en=template_data['name']).first()
             created = template is None
+            name_ar, description_ar = ARABIC[template_data['name']]
             if created:
                 template = DietPlanTemplate.objects.create(
-                    name_en=template_data['name'], **template_data)
+                    name_en=template_data['name'],
+                    description_en=template_data['description'],
+                    name_ar=name_ar, description_ar=description_ar, **template_data)
             if created:
                 created_count += 1
                 self.stdout.write(f'  Created template: {template.name}')
+                continue
+            arabic = {'name_ar': name_ar, 'description_ar': description_ar}
+            filled = [field for field in arabic
+                      if not (getattr(template, field) or '').strip()]
+            for field in filled:
+                setattr(template, field, arabic[field])
+            if filled:
+                template.save(update_fields=filled)
+                self.stdout.write(f'  Template already exists, Arabic added: {template.name}')
             else:
                 self.stdout.write(f'  Template already exists: {template.name}')
         

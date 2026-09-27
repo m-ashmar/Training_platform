@@ -23,6 +23,24 @@ class ExerciseMediaInline(admin.TabularInline):
 
 # Exercise Admin
 
+class StarterCatalogueFilter(admin.SimpleListFilter):
+    """The exercises `manage.py bootstrap_platform` wrote from the starter catalogue
+    (`routine/data/exercise_catalogue.py`), for the owner to review: they carry
+    `catalogue_key`, and nothing a person made does."""
+    title = "Starter catalogue"
+    parameter_name = "starter"
+
+    def lookups(self, request, model_admin):
+        return (("yes", "From the starter catalogue"), ("no", "Made by people"))
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.filter(catalogue_key__isnull=False)
+        if self.value() == "no":
+            return queryset.filter(catalogue_key__isnull=True)
+        return queryset
+
+
 # Routine Exercise Inline
 class RoutineExerciseInline(admin.TabularInline):
     model = RoutineExercise
@@ -35,7 +53,8 @@ class ExerciseAdmin(TranslationAdmin):
     list_display = ('name', 'target_muscle', 'description', 'created_by', 'has_image')
     inlines = [ExerciseMediaInline]
     search_fields = ('name', 'target_muscle', 'description')
-    list_filter = ('target_muscle', 'difficulty_level', 'is_global', 'is_active')
+    list_filter = ('target_muscle', 'difficulty_level', 'is_global', 'is_active',
+                   StarterCatalogueFilter)
     readonly_fields = ('created_at', 'updated_at')
     fieldsets = (
         (None, {
