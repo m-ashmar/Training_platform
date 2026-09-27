@@ -1,7 +1,7 @@
 # Django Conventions — Training Platform (Backend)
 
 ## Project Identity
-- **Framework**: Django 5.1.3 + Django REST Framework 3.15.2
+- **Framework**: Django 5.2 LTS + Django REST Framework 3.18 (exact versions: `requirements.lock`)
 - **Runtime**: Python 3.12 / Daphne (ASGI, WebSocket support via Channels)
 - **DB**: PostgreSQL 15 (local port 5433 via Docker)
 - **Auth**: JWT (RS256, asymmetric) via `djangorestframework-simplejwt`

@@ -2,7 +2,7 @@
 
 ## What this is, and where it stands
 
-Django 5.1 REST + WebSocket backend for a Flutter mobile app. Arabic-first, Syrian market,
+Django 5.2 LTS REST + WebSocket backend for a Flutter mobile app. Arabic-first, Syrian market,
 payments through ShamCash. **Phase: building to production** against the owner's payments
 and store-compliance spec. Not yet deployed.
 
@@ -19,7 +19,7 @@ and store-compliance spec. Not yet deployed.
 ## Architecture at a glance
 
 ```
-Python 3.12 · Django 5.1.3 · DRF 3.15 · Channels 4 (Daphne) · Celery 5.5
+Python 3.12 · Django 5.2 LTS · DRF 3.18 · Channels 4 (Daphne) · Celery 5.6
 PostgreSQL (prod, and tests: Docker on :5433) · Redis, 6 logical DBs · RS256 JWT + OTP
 Docker → Fly.io (Amsterdam)
 ```
@@ -48,6 +48,7 @@ not edit it. `mobile/` and `flutter/` are abandoned attempts: never read or touc
 
 ```bash
 docker compose up -d db                                                    # Postgres 15 on :5433
+.venv/bin/pip install --require-hashes -r requirements.lock                # the venv must BE the lock
 .venv/bin/python manage.py check --settings=training_platform.settings_local
 .venv/bin/python manage.py makemigrations --check --dry-run --settings=training_platform.settings_local
 .venv/bin/python -m pytest tests/test_policy_channels.py -q -p no:cacheprovider      # one file: seconds
@@ -81,6 +82,13 @@ edit produces a false failure. After adding a migration, the gate is `--create-d
   routines stay readable and cannot be used (`users/coaching.py` `training_refusal`,
   `subscription` `is_frozen`). A routine is one client's private copy
   (`routine/assignment.py`); reuse goes through templates.
+
+**Dependencies**
+- A version changes only in `requirements.txt` (one exact pin per direct dependency),
+  then `requirements.lock` is regenerated as that file's header says and both are
+  committed together. The Dockerfile and CI install only the lock, with hashes, and
+  `tests/test_django_lts.py` fails when the lock is stale or the venv is not the lock.
+  Stay on the Django 5.2 LTS line until a deliberate move to the next LTS.
 
 **Tests**
 - Never edit a test's assertion to match code, and never restore an old baseline to make a

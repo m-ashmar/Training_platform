@@ -59,7 +59,7 @@ source /home/training_app/venv/bin/activate
 
 # Install Python dependencies
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 ```
 
 ### Database Configuration
@@ -648,9 +648,10 @@ sudo journalctl -u training_platform -f
 # Update system packages
 sudo apt update && sudo apt upgrade -y
 
-# Update Python packages
+# Update Python packages: never `--upgrade` in place. Change the pin in
+# requirements.txt, regenerate requirements.lock (see its header), run the tests, then:
 source /home/training_app/venv/bin/activate
-pip install --upgrade -r requirements.txt
+pip install --require-hashes -r requirements.lock
 
 # Restart services
 sudo systemctl restart training_platform

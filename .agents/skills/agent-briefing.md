@@ -32,6 +32,8 @@ After adding a migration, the run needs `--create-db` or it dies with `Duplicate
 | Beat entries resolve | Every `CELERY_BEAT_SCHEDULE` entry must name a real registered task |
 | The Arabic catalogue | **Every string you pass to `_()` — and every `{% trans %}` — must be IN `django.po` with Arabic, and in the compiled `django.mo`.** Not "every entry already in the file": the gate used to check only those, so a string that never reached the catalogue was invisible and shipped in English (SIDE_BUGS S-019 — 152 of them). None fuzzy. Add the entry, then `msgfmt --check-format -o locale/ar/LC_MESSAGES/django.mo locale/ar/LC_MESSAGES/django.po` and commit the `.mo` |
 | One predicate decides what a trainer sees | A source scan forbids reading `assigned_trainer` directly — use the approved relation |
+| The venv IS the lock (`tests/test_django_lts.py`) | Every package `requirements.lock` pins must be installed at exactly that version where the tests run, or the gate fails. A worktree's symlinked `.venv` is the main checkout's: if it predates the lock, run `.venv/bin/pip install --require-hashes -r requirements.lock` in the main checkout — only when no other agent is running tests on it. Never `pip install` a package by name to get past this; change `requirements.txt` and regenerate the lock (its header says how) |
+| Nothing Django 6.0 removes | An AST scan fails `format_html()` with no arguments (pass the text as an argument, or use `format_html_join`) and `CheckConstraint(check=...)` (it is `condition=`); `manage.py check` must start with no deprecation warning and no issue |
 
 Not a gate, and just as silent: **a new app with a `FileField` must be added to
 `LOCAL_APPS_FOR_FILE_CLEANUP` in `training_platform/signals.py`**, or a deleted or

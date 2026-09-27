@@ -33,9 +33,8 @@ FROM python:3.12-slim
 RUN apt-get install -y gcc libpq-dev libmagic1 libmagic-dev libjpeg-dev zlib1g-dev
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir daphne   # explicit ASGI server
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock   # daphne included
 
 COPY . .
 
@@ -50,6 +49,12 @@ CMD ["sh", "-c", "python manage.py migrate --noinput && daphne -b 0.0.0.0 -p 800
 ```
 
 **Key decisions:**
+- The image installs **only `requirements.lock`**, in hash-checking mode: every package,
+  transitive ones included, at the version the tests passed on. `requirements.txt` is the
+  human list (one exact pin per direct dependency); its header says how to regenerate the
+  lock (`uv pip compile --universal --generate-hashes`). Never `pip install <pkg>` in the
+  Dockerfile beside it — the old unpinned `pip install daphne` is what the 2026-09-26
+  audit found.
 - `collectstatic` runs at **build time** (not startup) — WhiteNoise serves static files
 - Migrations run at **container startup** (before Daphne starts)
 - Non-root user `appuser` for security
