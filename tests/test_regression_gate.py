@@ -95,7 +95,15 @@ def test_anonymous_gets_no_5xx_and_reaches_only_public_endpoints(api):
                # sign-in (the visitor shell). Neither runs authentication, and neither
                # answer depends on who asks. The media route answers both spellings, as
                # capabilities does: its contract names it without the slash (B-035).
-               "/api/v1/content/media", "/api/v1/content/media/", "/api/v1/trainers/"}
+               "/api/v1/content/media", "/api/v1/content/media/", "/api/v1/trainers/",
+               # The newest build of a channel (plan step 11): the update prompt asks
+               # before sign-in, and the hub's download page has no account at all. The
+               # answer is computed from the channel and build alone. Both spellings.
+               "/api/v1/app/latest", "/api/v1/app/latest/",
+               # Spec B6/B7: the privacy policy, the terms and the account-deletion page
+               # are public web pages by definition — a store listing links to them and
+               # the deletion page exists for people who cannot sign in.
+               "/legal/privacy/", "/legal/terms/", "/legal/delete-account/"}
     errors, reachable = [], []
     for path in _routes():
         resp = anon.get(path)

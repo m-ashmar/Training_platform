@@ -272,6 +272,7 @@ Endpoint-specific, identity-scoped limits sit on top and are the ones users actu
 | `POST /api/auth/resend-otp/` | 3 / hour per email+IP |
 | `POST /api/auth/forgot-password/` | 3 / hour per email |
 | OTP verification | 5 wrong codes per email and purpose, then locked 15 minutes (400 `too_many_attempts`) |
+| `POST /legal/delete-account/` (a web page, not JSON) | 5 / hour per network, then the page again with `429` and `Retry-After` |
 
 Every limit answer carries `retry_after_seconds` and `Retry-After`: the seconds really left,
 not the window's length. The global limiter's `429` has `code: "rate_limited"`; the
@@ -1484,7 +1485,14 @@ computed from those two headers alone and is identical for every user of a build
 
 Response: `{channel, can_purchase_platform_sub, can_purchase_routine_product,
 can_pay_coaching_in_app, can_show_prices, can_show_coaching_prices, can_show_web_hub_link,
-can_view_entitlements, can_view_wallet, can_transfer_wallet}` — all booleans but `channel`.
+can_view_entitlements, can_view_wallet, can_transfer_wallet, links}` — all booleans but
+`channel` and `links`.
+
+`links` (additive, 2026-09-27, spec B7) — where the public pages are, per language, so the
+app opens them and they can move without a release:
+`{"privacy_policy": {"ar": url, "en": url}, "terms_of_use": {...}, "account_deletion":
+{...}}`, absolute URLs ending `?lang=ar|en` (see "Public pages" below). The same for every
+channel and version; the base is `PUBLIC_PAGES_BASE_URL`, else the API's own host.
 
 The flags are enforced by the server, not only rendered by the app:
 
@@ -1540,6 +1548,71 @@ fetch is `304 Not Modified` with no body.
 | `code` | Status | When |
 |---|---|---|
 | `app_channel_required` | 400 | No `X-App-Channel`, or one this server does not know |
+
+### App releases (plan step 11: the update prompt and the APK download)
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/app/latest/` | public | `LatestReleaseView` |
+
+Both spellings answer (`/api/v1/app/latest` too). Query: `channel` (`apk | play | ios`;
+defaults to `X-App-Channel`), `build` (the caller's build number; defaults to the `+N` of
+`X-App-Version: 1.4.0+N` when `channel` is the caller's own). No authentication runs.
+
+Response: `{channel, latest, build, update_available, update_required}`. `latest` is `null`
+when nothing is published, else `{version_name, build_number, min_supported_build,
+release_notes: {ar, en}, published_at, download_url, sha256, size_bytes, store_url}`.
+`update_available` = `build < latest.build_number`, `update_required` = `build <
+latest.min_supported_build`; both `null` when no build was sent, `false` when nothing is
+published. Verify the file against `sha256` before installing.
+
+**Only the direct APK is a file.** `download_url`, `sha256` and `size_bytes` are `null` on a
+`play` or `ios` release, which may carry `store_url` (its store page) instead; a Play or App
+Store build asking about another channel is refused, so no store build can learn where an
+APK is. The hub (`web`) and the APK may ask about any channel. An uploaded APK's
+`download_url` is signed and expires (an hour on object storage): fetch again rather than
+keep it. `Cache-Control: public, max-age=300`, `Vary: X-App-Channel, X-App-Version`.
+
+| `code` | Status | When |
+|---|---|---|
+| `app_channel_required` | 400 | No `channel` and no known `X-App-Channel` |
+| `invalid_choice` | 400 | `channel` is not `apk`, `play` or `ios` (`web` has no releases) |
+| `channel_mismatch` | 400 | A `play` or `ios` build asked about another channel |
+| `build_invalid` | 400 | `build` is not a whole number of up to nine digits |
+
+Operators add and publish releases in the console (`/dj-admin/releases/apprelease/`): an
+uploaded APK gets its checksum and size from the server; a hosted one (the hub domain, a
+CDN) is named by its HTTPS URL with the checksum and size from the build pipeline. A
+published release never changes its file or build; raising its `min_supported_build`
+later is how a fix becomes a required update, and unticking "published" withdraws it.
+
+### Public pages (spec B6, B7): privacy policy, terms, account deletion
+
+HTML for a browser, not JSON — opened from the app (their URLs are in capabilities
+`links`), from the store listings and from the hub. No authentication runs and nothing on
+them depends on who is looking. `?lang=ar|en`; Arabic (right-to-left) when absent.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/legal/privacy/` | public | `privacy_page` |
+| `GET` | `/legal/terms/` | public | `terms_page` |
+| `GET, POST` | `/legal/delete-account/` | public | `delete_account_page` |
+
+- **Privacy policy, terms.** The newest published version in the language asked (the
+  other language's, with a line saying so, while one is missing; 404 when neither exists).
+  Operator-written and versioned in the console (`/dj-admin/legal/legaldocument/`); a
+  published version never changes. `Cache-Control: public, max-age=300`, no cookie. Until
+  the owner publishes the approved text, version 1 is a seeded placeholder marked DRAFT /
+  مسودة on its face.
+- **Account deletion.** Explains deletion in the app (Me → Privacy and data → Delete my
+  account) and takes a request from someone who cannot open it: form fields `email`,
+  `reason` (optional, ≤ 1000 characters), `lang`. A POST queues it for an operator and
+  answers `303` to `?lang=..&sent=1` — the same answer whether or not an account uses the
+  address; it deletes nothing. `400` (the page, with a sentence) for an address that is not
+  one or a reason too long; `429` with `Retry-After` past 5 posts an hour from one network.
+  Never cached (the form carries a CSRF token). The operator confirms ownership by email,
+  erases the account through the existing erasure, and closes the request
+  (`/dj-admin/legal/accountdeletionrequest/`).
 
 ### Privacy (GDPR)
 

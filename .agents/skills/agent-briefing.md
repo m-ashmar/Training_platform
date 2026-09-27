@@ -97,6 +97,23 @@ Three more about tests of background work (found building `fx/prod-services`, 20
   `_prod_env`. A new `require_env` in `settings_production.py` goes into both, with the
   reason, or every "boots" assertion fails for a reason that is not theirs.
 
+Three more about a public HTML page (found building `legal/`, 2026-09-27):
+
+- **`Content-Language` is written by `LanguageResolutionMiddleware` AFTER the view**, from
+  whatever language is active then. A view that renders under `translation.override(...)`
+  answers the caller's Accept-Language instead of the page's: `translation.activate()` the
+  page's language (`legal/views.py _speak`). The same middleware adds `Vary:
+  Accept-Language, Cookie` to every response.
+- **Production CSP allows an inline `<style>`/`<script>` only with the request's nonce**
+  (`nonce="{{ request.csp_nonce }}"`); DEBUG (tests) allows anything, so a missing nonce
+  passes every test and renders unstyled in production. A cacheable page carrying a nonce
+  must not send an ETag or Last-Modified: a 304 merges the new CSP header into the stored
+  page and blocks its style.
+- **A new public route fails the anonymous sweep** (`test_anonymous_gets_no_5xx_and_
+  reaches_only_public_endpoints`) until it is in that test's allow-list — and the test
+  client sends `X-App-Channel: apk` by default, so a route that refuses a missing channel
+  is still reachable there.
+
 ## Working in a worktree
 
 Worktrees are how several agents build at once. The setup is done for you; what bites is:

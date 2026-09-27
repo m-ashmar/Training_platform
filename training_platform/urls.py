@@ -57,6 +57,12 @@ urlpatterns = [
 
     # What each build may show and sell (X-App-Channel). See policy/models.py.
     path('api/v1/config/', include('policy.urls', namespace='policy')),
+    # The newest build of each channel, for the update prompt and the APK download
+    # (releases/views.py). Only the direct APK is ever handed a file.
+    path('api/v1/app/', include('releases.urls', namespace='releases')),
+    # Public HTML pages: the privacy policy, the terms of use and how to delete an
+    # account (legal/views.py). Their URLs reach the app through capabilities.
+    path('legal/', include('legal.urls', namespace='legal')),
 
     # Pictures the app itself shows (intro story, banners, empty states). Media for
     # trainers, exercises and programs travels inside those objects. See mediakit/.

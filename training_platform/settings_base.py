@@ -77,6 +77,10 @@ INSTALLED_APPS = [
     # A trainer's withdrawals and payout methods, and the operator's queue
     # (payouts/models.py).
     "payouts",
+    # Released builds per channel and the update endpoint (releases/models.py).
+    "releases",
+    # The privacy policy, the terms and the account-deletion page (legal/models.py).
+    "legal",
 
     # Third-party
     "rest_framework",
@@ -216,6 +220,11 @@ OPS_QR_LOGIN_ENABLED = get_bool_env_optional("OPS_QR_LOGIN_ENABLED", False)
 # host of its own; empty means the host the API request came to. Used for the links the
 # operator's phone is given (B-119 queue pages, the B-120 sign-in link).
 OPS_CONSOLE_BASE_URL = get_env("OPS_CONSOLE_BASE_URL", "")
+# Where the public pages — the privacy policy, the terms, the account-deletion page
+# (legal/) — are reached from outside, e.g. https://yallagym.com when the hub domain serves
+# or forwards `/legal/...`. The capabilities answer hands these URLs to every build
+# (legal/links.py). Empty means the host the API request came to.
+PUBLIC_PAGES_BASE_URL = get_env("PUBLIC_PAGES_BASE_URL", "")
 
 # REST Auth
 REST_AUTH_SERIALIZERS = {

@@ -35,6 +35,17 @@ SPEC_TABLE = {
                 can_view_entitlements=True, can_view_wallet=True, can_transfer_wallet=True),
 }
 
+#: The one part of the answer that is not a flag. A deliberate, additive contract change
+#: (spec B7, 2026-09-27): the capabilities answer carries the public pages' URLs so they
+#: can move without a release — the same for every channel and version, built from the
+#: test server's host (`legal/links.py`). The exact-answer tests below still assert the
+#: WHOLE answer, flags included; tests/test_releases_legal.py covers the links themselves.
+LINKS = {
+    page: {lang: f"http://testserver/legal/{path}/?lang={lang}" for lang in ("ar", "en")}
+    for page, path in (("privacy_policy", "privacy"), ("terms_of_use", "terms"),
+                       ("account_deletion", "delete-account"))
+}
+
 
 # --------------------------------------------------------------------------- helpers
 @pytest.fixture(autouse=True)
@@ -95,7 +106,7 @@ def _on(channel, version=None):
 @pytest.mark.parametrize("channel", sorted(SPEC_TABLE))
 def test_each_channel_gets_the_flags_the_spec_sets(client, channel):
     body = client.get(CAPABILITIES, **_on(channel)).json()
-    assert body == {"channel": channel, **SPEC_TABLE[channel]}
+    assert body == {"channel": channel, **SPEC_TABLE[channel], "links": LINKS}
 
 
 def test_the_seed_migration_and_the_code_defaults_are_the_same_table():
@@ -116,7 +127,7 @@ def test_a_channel_with_no_row_gets_the_specs_table_not_a_shutdown(client, chann
 
     ChannelCapabilities.objects.all().delete()
     assert client.get(CAPABILITIES, **_on(channel)).json() == {
-        "channel": channel, **SPEC_TABLE[channel]}
+        "channel": channel, **SPEC_TABLE[channel], "links": LINKS}
 
 
 @pytest.mark.django_db
