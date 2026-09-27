@@ -30,7 +30,8 @@ the old token is dead the moment it is exchanged.
 
 ```
 POST /api/auth/register/
-     {username, email, password1, password2, phone_number, user_type, date_of_birth}
+     {username, email, password1, password2, phone_number, user_type, date_of_birth,
+      preferred_language?}
   -> 201 {user}                       account created unverified, OTP emailed
 
 POST /api/auth/verify-otp/   {email, otp_code}
@@ -50,6 +51,15 @@ than 14 with `field_errors.date_of_birth[0].code` = `under_minimum_age` (also
 `date_of_birth_in_future`, `date_of_birth_implausible`). The same rule applies wherever the
 date or `age` is written (`user/update/`, `client/profile/`), and once set the date cannot
 be removed (`date_of_birth_required`).
+`preferred_language` (`ar` | `en`, optional, additive 2026-09-27) is saved on the account
+and decides the language of every email and push it gets, starting with this sign-up
+code; omitted, the account takes the language `Accept-Language` names (if served), else
+Arabic. `fr` or any other value: `field_errors.preferred_language[0].code` =
+`invalid_choice`. `user.preferred_language` in the 201 carries what was saved; change it on
+`user/update/`. The sign-up, resend and reset codes are emailed by a background worker in
+that saved language — whatever language the request itself was in — usually within
+seconds, and retried for about seven minutes if the mail server fails; the answers of the
+three routes are unchanged.
 The v2 onboarding answers (`training_goal`, `training_place`, `training_days_per_week`,
 `injury_areas`) and `onboarding_missing` are on those two profile endpoints; the trainer
 matching codes (`trainer_goal_focus`, `trainer_injury_focus`, `trainer_training_places`)

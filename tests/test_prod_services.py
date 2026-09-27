@@ -367,6 +367,19 @@ def _run(call):
 
 
 @pytest.fixture
+def worker_retries(monkeypatch):
+    """Let the eager executor RETRY the way a worker does.
+
+    With `task_eager_propagates` (settings_base), Celery hands a task's `Retry` back to the
+    caller instead of re-running it, so no retry ever ran in the suite. Off, the eager
+    executor re-applies the task on `Retry` — the production retry path, minus the
+    countdown — and records a final failure instead of raising it."""
+    from users.tasks import send_account_code_email
+
+    monkeypatch.setattr(send_account_code_email.app.conf, "task_eager_propagates", False)
+
+
+@pytest.fixture
 def users_log(caplog):
     """The `users` logger does not propagate (settings_base LOGGING), so caplog's root
     handler never sees it; hang the handler on it directly."""
@@ -510,7 +523,7 @@ def test_an_expired_code_is_never_sent(api, make_user, queued):
     assert seal_otp_code("123456") != seal_otp_code("123456"), "a seal must not repeat"
 
 
-def test_a_failed_send_is_retried_and_then_delivered(api, monkeypatch):
+def test_a_failed_send_is_retried_and_then_delivered(api, monkeypatch, worker_retries):
     from django.core.mail import send_mail as real_send_mail
 
     attempts = []
@@ -527,7 +540,7 @@ def test_a_failed_send_is_retried_and_then_delivered(api, monkeypatch):
 
 
 def test_a_send_that_keeps_failing_is_logged_and_alerted_and_answers_as_before(
-        api, make_user, monkeypatch, users_log, sentry_events):
+        api, make_user, monkeypatch, users_log, sentry_events, worker_retries):
     """Every attempt fails: the request answers exactly as it does today (201, 200, 200),
     and each failure is ONE error log line naming the account by id (never its address)
     and one Sentry event — never a silent `return False`."""
@@ -561,7 +574,7 @@ def test_a_send_that_keeps_failing_is_logged_and_alerted_and_answers_as_before(
         assert event["exception"]["values"][-1]["type"] == "ConnectionRefusedError"
 
 
-def test_a_permanent_refusal_is_not_retried(api, monkeypatch, users_log):
+def test_a_permanent_refusal_is_not_retried(api, monkeypatch, users_log, worker_retries):
     attempts = []
 
     def refused(*args, **kwargs):
@@ -573,6 +586,24 @@ def test_a_permanent_refusal_is_not_retried(api, monkeypatch, users_log):
     assert len(attempts) == 1
     assert any(rec.levelno >= logging.ERROR and "account email" in rec.getMessage()
                for rec in users_log.records)
+
+
+def test_without_a_worker_a_failed_send_is_still_reported_once(api, monkeypatch,
+                                                                users_log, sentry_events):
+    """Development and the suite run tasks inline with `task_eager_propagates`, where
+    Celery hands the retry back to the caller. The request still answers as before and
+    the failure is reported once, with its real cause — not as a queueing error."""
+    def down(*args, **kwargs):
+        raise ConnectionRefusedError("SMTP down")
+
+    monkeypatch.setattr("users.utils.send_mail", down)
+    r = _sign_up(api, "ps_eager_down")
+    assert r.status_code == 201 and set(r.json()) == {"user", "message", "requires_verification"}
+    reports = [rec.getMessage() for rec in users_log.records
+               if rec.levelno >= logging.ERROR and "account email" in rec.getMessage()]
+    assert len(reports) == 1 and "stage=send" in reports[0], reports
+    assert [e["exception"]["values"][-1]["type"] for e in sentry_events] == \
+        ["ConnectionRefusedError"]
 
 
 def test_an_unreachable_broker_does_not_fail_the_request(api, monkeypatch, users_log,

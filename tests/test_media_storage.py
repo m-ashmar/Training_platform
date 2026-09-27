@@ -357,6 +357,12 @@ def _production_boot(**overrides):
         "REDIS_URL": "redis://redis.internal:6379",
         "CELERY_BROKER_URL": "redis://redis.internal:6379/6",
         "EMAIL_HOST_USER": "a@example.com", "EMAIL_HOST_PASSWORD": "y" * 12,
+        # Deliberate contract change (fx/prod-services, 2026-09-27): production no longer
+        # hard-codes Gmail, so the SMTP host and the From address are required from the
+        # environment (tests/test_prod_services.py). This environment passes every other
+        # check so that the only thing these tests can fail on is the media backend.
+        "EMAIL_HOST": "smtp.mail-provider.test",
+        "DEFAULT_FROM_EMAIL": "Yalla Gym <no-reply@yallagym.test>",
         "CORS_ALLOWED_ORIGINS": "https://app.example.com",
         "CSRF_TRUSTED_ORIGINS": "https://app.example.com",
         "DJANGO_SECRET_KEY": "s" * 64,

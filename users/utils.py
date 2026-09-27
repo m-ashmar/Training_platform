@@ -233,6 +233,8 @@ def queue_otp_email(otp, otp_code):
     A task that could not be PUBLISHED is logged and alerted here (the person can ask for
     a new code); a send that fails in the worker is retried and reported there.
     """
+    from celery.exceptions import Retry
+
     from .tasks import AccountEmailUndelivered, send_account_code_email
 
     try:
@@ -245,6 +247,14 @@ def queue_otp_email(otp, otp_code):
     except AccountEmailUndelivered:
         # Eager mode (development, tests) runs the task inline, and its final failure
         # propagates here — already logged and alerted by the task itself.
+        return False
+    except Retry as retry:
+        # Eager mode with task_eager_propagates (settings_base) hands a retry back to the
+        # caller instead of running it — there is no broker to re-deliver through. The
+        # send failed and will not be tried again: report it as the worker would after
+        # its last retry. A real worker never gets here.
+        report_account_email_failure(otp.purpose, otp.user_id, retry.exc or retry,
+                                     stage="send")
         return False
     except Exception as exc:
         report_account_email_failure(otp.purpose, otp.user_id, exc, stage="queue")
