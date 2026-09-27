@@ -54,8 +54,11 @@ AI_TRAINING_PSEUDONYM_KEY = get_secret("AI_TRAINING_PSEUDONYM_KEY")
 # Postgres backend; the boot check refuses a kept connection without one. Under a
 # TRANSACTION pooler each transaction may get a different server connection, and a
 # server-side cursor (`.iterator()`) lives on the one that opened it, so those are
-# switched off. DB_SSLMODE is libpq's sslmode ("require" for a managed Postgres reached
-# over the internet); unset leaves libpq's default.
+# switched off; and the database's own timezone must be UTC, or Django issues a
+# session-level SET TIME ZONE that the pooler hands on to other clients (Django's docs,
+# "Transaction pooling and server-side cursors"). DB_SSLMODE is libpq's sslmode
+# ("require" for a managed Postgres reached over the internet); unset leaves libpq's
+# default.
 DB_POOLER = get_env("DB_POOLER", "").strip().lower()
 DB_CONN_MAX_AGE = get_int_env("DB_CONN_MAX_AGE", 0)
 DB_SSLMODE = get_env("DB_SSLMODE", "").strip()
