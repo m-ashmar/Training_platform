@@ -19,7 +19,7 @@ from decimal import Decimal, InvalidOperation
 
 from .models import (
     OPEN_PAYMENT_STATUSES, SubscriptionPlan, Subscription, Payment,
-    SubscriptionFeature, SubscriptionUsage, plan_snapshot
+    SubscriptionFeature, SubscriptionUsage, paid_by, plan_snapshot
 )
 from .serializers import (
     SubscriptionPlanSerializer, SubscriptionSerializer,
@@ -72,27 +72,14 @@ def _checkout_opener(request, subscription, gateway_name, gateway_service):
     `gateway_service` is a callable returning the service, so a caller that may be handed
     back an already-open checkout resolves the gateway only when a new one is opened.
     Returns `(payment_method, reference, gateway_response)`.
+
+    Through the payment step (`subscription/payment_step.py`, the spec's section 6), the
+    ONE way every checkout opens — Pay, Renew, Upgrade and the web hub's sessions.
     """
-    def initiate(payment):
-        service = gateway_service()
-        reference = service._generate_reference()
-        init = service.initiate_payment(
-            amount=payment.amount,
-            currency=payment.currency,
-            user_data={
-                'email': request.user.email,
-                'phone': request.user.phone_number,
-                'name': f"{request.user.first_name} {request.user.last_name}".strip(),
-            },
-            reference=reference,
-            metadata={'subscription_id': str(subscription.id),
-                      **({'kind': payment.metadata['kind']}
-                         if (payment.metadata or {}).get('kind') else {}),
-                      'description': payment.description},
-            callback_url=request.build_absolute_uri(f"/api/subscription/webhook/{gateway_name}/"),
-        )
-        return gateway_name, reference, init.get('response', {})
-    return initiate
+    from .payment_step import payment_step
+
+    return payment_step(gateway_name).opener(
+        request, metadata={'subscription_id': str(subscription.id)}, service=gateway_service)
 
 
 def _opened_from(request) -> dict:
@@ -235,6 +222,45 @@ def _locked_subscription(pk):
     """
     return (Subscription.objects.select_for_update(of=('self',))
             .select_related('plan').get(pk=pk))
+
+
+def move_plan_while_idle(subscription_pk, plan):
+    """Move a subscription that holds no running cover and no open checkout onto `plan`.
+
+    `(locked, changed, refusal)`: `changed` is False when the row is already on `plan`;
+    `refusal` is the 409 to answer — `plan_change_while_active` while cover runs,
+    `checkout_open` while a checkout is open (the customer may be transferring against
+    its reference) — and nothing is written then. `subscriptions/{id}/change-plan/` and
+    the web hub's plan checkout (`POST api/v1/checkout/sessions/`) both move a plan
+    through here, under the lock the Pay button and every completion take first, so a
+    checkout opened or cleared concurrently is either seen here or prices the new plan.
+    """
+    with transaction.atomic():
+        locked = _locked_subscription(subscription_pk)
+        if locked.plan_id == plan.pk:
+            return locked, False, None
+        if locked.is_active:
+            return locked, False, Response(
+                {'error': _('The plan can change once the current period ends.'),
+                 'code': 'plan_change_while_active'},
+                status=status.HTTP_409_CONFLICT)
+        # Open with a reference = offered to the customer. One with no reference
+        # was never offered, and is repriced from the plan when it opens.
+        open_checkout = (Payment.objects
+                         .filter(subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
+                         .exclude(gateway_transaction_reference__isnull=True)
+                         .exclude(gateway_transaction_reference='')
+                         .order_by('created_at', 'id').first())
+        if open_checkout is not None:
+            # The same shape as renew/, gateways/ and upgrade/ answer it, `status`
+            # included — one code, one shape (BACKEND_BUGS B-087).
+            return locked, False, _checkout_open(open_checkout)
+        previous = locked.plan_id
+        locked.plan = plan
+        # `save()` re-inherits the plan's five access flags on a plan change.
+        locked.save(update_fields=['plan', *Subscription.PLAN_FEATURE_FLAGS, 'updated_at'])
+    logger.info("Subscription %s moved from plan %s to plan %s", locked.id, previous, plan.pk)
+    return locked, True, None
 
 
 class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
@@ -701,38 +727,16 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             return Response({'error': _('Invalid or inactive plan'), 'code': 'invalid_plan'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        with transaction.atomic():
-            # The lock the Pay button and every completion take first, so a checkout
-            # opened or cleared concurrently is either seen here or prices the new plan.
-            locked = _locked_subscription(subscription.pk)
-            if locked.plan_id == plan.pk:
-                return Response({'message': _('The subscription is already on this plan.'),
-                                 'changed': False,
-                                 'subscription': SubscriptionSerializer(
-                                     locked, context=self.get_serializer_context()).data})
-            if locked.is_active:
-                return Response(
-                    {'error': _('The plan can change once the current period ends.'),
-                     'code': 'plan_change_while_active'},
-                    status=status.HTTP_409_CONFLICT)
-            # Open with a reference = offered to the customer. One with no reference
-            # was never offered, and is repriced from the plan when it opens.
-            open_checkout = (Payment.objects
-                             .filter(subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
-                             .exclude(gateway_transaction_reference__isnull=True)
-                             .exclude(gateway_transaction_reference='')
-                             .order_by('created_at', 'id').first())
-            if open_checkout is not None:
-                # The same shape as renew/, gateways/ and upgrade/ answer it, `status`
-                # included — one code, one shape (BACKEND_BUGS B-087).
-                return _checkout_open(open_checkout)
-            previous = locked.plan_id
-            locked.plan = plan
-            # `save()` re-inherits the plan's five access flags on a plan change.
-            locked.save(update_fields=['plan', *Subscription.PLAN_FEATURE_FLAGS,
-                                       'updated_at'])
-        logger.info("Subscription %s moved from plan %s to plan %s by user %s",
-                    locked.id, previous, plan.pk, request.user.id)
+        locked, changed, refusal = move_plan_while_idle(subscription.pk, plan)
+        if refusal is not None:
+            return refusal
+        if not changed:
+            return Response({'message': _('The subscription is already on this plan.'),
+                             'changed': False,
+                             'subscription': SubscriptionSerializer(
+                                 locked, context=self.get_serializer_context()).data})
+        logger.info("Subscription %s moved to plan %s by user %s",
+                    locked.id, plan.pk, request.user.id)
         locked = self.get_queryset().get(pk=locked.pk)
         # With the request as context, as `GET v1/subscriptions/{id}/` answers it: the
         # plan's price in the READER's currency, and none at all on a store build.
@@ -1853,7 +1857,9 @@ class PaymentStatusView(APIView):
     (the money goes back to its sender by hand). `review` is null otherwise, else
     `{"reason": "amount_differs" | "currency_differs" | "reference_missing" | ...,
     "held_at": "<iso>"}`. 404 `not_found` — no such payment, or not the caller's
-    (one answer for both).
+    (one answer for both). The caller's payments are their plan's and their routine
+    product checkouts from the web hub (`api/v1/checkout/sessions/`), whose id is the
+    session's.
 
     `events` (plan step 5): every state the payment went through, oldest first —
     `[{from_status, to_status, at, by, backfill}]`. `from_status` is null for the
@@ -1869,7 +1875,7 @@ class PaymentStatusView(APIView):
 
     def get(self, request, payment_id):
         try:
-            payment = Payment.objects.get(id=payment_id, subscription__user=request.user)
+            payment = Payment.objects.get(paid_by(request.user), id=payment_id)
         except Payment.DoesNotExist:
             return Response({'error': _('Payment not found'), 'code': 'not_found'},
                             status=status.HTTP_404_NOT_FOUND)
@@ -1907,6 +1913,10 @@ class PaymentReconcileView(APIView):
     only on a verified match, completes it via PaymentService. It never trusts a bare
     status flag and never activates on unverified data.
 
+    The customer's "I paid" for any of their checkouts: a plan's, or a routine product
+    session from the web hub (`api/v1/checkout/sessions/`; its id is the payment's), which
+    a verified match confirms and delivers exactly as the pollers do.
+
     200 `{success, payment_id, status, invoice_number}` — `status` is whatever the
     payment is after asking: still `pending` when the gateway has seen nothing yet, and
     `needs_review` when a transfer quoting this reference arrived with another amount or
@@ -1929,7 +1939,7 @@ class PaymentReconcileView(APIView):
 
     def post(self, request, payment_id):
         try:
-            payment = Payment.objects.get(id=payment_id, subscription__user=request.user)
+            payment = Payment.objects.get(paid_by(request.user), id=payment_id)
         except Payment.DoesNotExist:
             return Response({'error': _('Payment not found'), 'code': 'not_found'},
                             status=status.HTTP_404_NOT_FOUND)

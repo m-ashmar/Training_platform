@@ -154,7 +154,7 @@ class SubscriptionAdmin(admin.ModelAdmin):
 #: longer matched its snapshot and the gateway refused it (SIDE_BUGS S-128). A state
 #: change goes through the actions below, which call the service.
 PAYMENT_READONLY_FIELDS = (
-    'id', 'subscription', 'amount', 'currency', 'status', 'payment_method', 'money_type',
+    'id', 'subscription', 'buyer', 'routine_product', 'amount', 'currency', 'status', 'payment_method', 'money_type',
     'price_amount', 'price_currency', 'exchange_rate', 'exchange_rate_value',
     'transaction_id', 'payment_intent_id', 'gateway_transaction_reference',
     'gateway_event_id', 'gateway_response', 'gateway_error', 'invoice_number',
@@ -204,8 +204,10 @@ class PaymentAdmin(admin.ModelAdmin):
     
     fieldsets = (
         ('Payment Details', {
-            'fields': ('subscription', 'amount', 'currency', 'status', 'payment_method',
-                       'money_type')
+            # A plan's payment names its subscription; a routine product checkout (the
+            # web hub) its buyer and product.
+            'fields': ('subscription', 'buyer', 'routine_product', 'amount', 'currency',
+                       'status', 'payment_method', 'money_type')
         }),
         ('Price of record', {
             # How `amount` was reached when the buyer trades in the other currency.
@@ -236,7 +238,8 @@ class PaymentAdmin(admin.ModelAdmin):
         return False
 
     def subscription_user(self, obj):
-        return obj.subscription.user.username
+        # The payer: a routine product checkout (the web hub) has a buyer, no subscription.
+        return getattr(obj.payer, 'username', '-')
     subscription_user.short_description = 'User'
     
     # `queryset.update()` writes the column and nothing else: it skips save(), so it

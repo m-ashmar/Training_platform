@@ -60,6 +60,10 @@ urlpatterns = [
     # The newest build of each channel, for the update prompt and the APK download
     # (releases/views.py). Only the direct APK is ever handed a file.
     path('api/v1/app/', include('releases.urls', namespace='releases')),
+    # Checkout sessions: how the web payment hub buys a plan or a routine product (the
+    # payments spec, section 5). A session is a subscription.Payment; see
+    # subscription/checkout_views.py.
+    path('api/v1/checkout/', include('subscription.urls_checkout', namespace='checkout')),
     # Public HTML pages: the privacy policy, the terms of use and how to delete an
     # account (legal/views.py). Their URLs reach the app through capabilities.
     path('legal/', include('legal.urls', namespace='legal')),

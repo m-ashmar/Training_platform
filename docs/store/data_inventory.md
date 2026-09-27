@@ -1668,15 +1668,15 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 ### `payments` — `subscription.Payment`
 
-**Why.** Each payment for a plan: amount, currency, state, the gateway's reference, invoice number and the period it pays for. A record of money.
+**Why.** Each payment for a plan, or for a routine product bought through a checkout: amount, currency, state, the gateway's reference, invoice number and what it pays for. A record of money.
 
-**Whose.** Rows whose `subscription__user` is the account.
+**Whose.** Rows whose `subscription__user` or `buyer` is the account.
 
 **Who else receives it.** ShamCash (`payment_gateway`).
 
 **Data types.** Purchase and payment history (`purchases`).
 
-**Fields stored.** `id`, `subscription`, `amount`, `currency`, `price_amount`, `price_currency`, `exchange_rate`, `exchange_rate_value`, `status`, `payment_method`, `money_type`, `transaction_id`, `payment_intent_id`, `gateway_response`, `gateway_error`, `gateway_transaction_reference`, `gateway_event_id`, `invoice_number`, `completed_at`, `covers_from`, `covers_until`, `payout_settled_at`, `description`, `metadata`, `created_at`, `updated_at`.
+**Fields stored.** `id`, `subscription`, `buyer`, `routine_product`, `amount`, `currency`, `price_amount`, `price_currency`, `exchange_rate`, `exchange_rate_value`, `status`, `payment_method`, `money_type`, `transaction_id`, `payment_intent_id`, `gateway_response`, `gateway_error`, `gateway_transaction_reference`, `gateway_event_id`, `invoice_number`, `completed_at`, `covers_from`, `covers_until`, `payout_settled_at`, `description`, `metadata`, `created_at`, `updated_at`.
 
 **In the export.** Every field.
 
@@ -1706,7 +1706,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Why.** A transfer held for an operator's review against the person's checkout, with the sender and note as ShamCash reported them. A record of money.
 
-**Whose.** Rows whose `payment__subscription__user` is the account.
+**Whose.** Rows whose `payment__subscription__user` or `payment__buyer` is the account.
 
 **Who else receives it.** Nobody outside the platform.
 
@@ -1724,7 +1724,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Why.** Every state the person's payment went through and who or what moved it. A record of money.
 
-**Whose.** Rows whose `payment__subscription__user` is the account.
+**Whose.** Rows whose `payment__subscription__user` or `payment__buyer` is the account.
 
 **Who else receives it.** Nobody outside the platform.
 

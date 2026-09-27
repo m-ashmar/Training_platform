@@ -330,7 +330,7 @@ def poll_open_payments(now=None):
                 .exclude(status__in=HELD_PAYMENT_STATUSES)
                 .exclude(gateway_transaction_reference='')
                 .exclude(gateway_transaction_reference__isnull=True)
-                .select_related('subscription__user')
+                .select_related('subscription__user', 'buyer')
                 .order_by('created_at', 'id')[:batch])
     # Held rows never expire, so oldest-first they would fill the batch for good and
     # starve every new checkout (the review, L5). They are asked about in a small pass of
@@ -410,7 +410,8 @@ def poll_open_payments(now=None):
             logger.warning("poll: could not expire payment %s: %s", payment.id, exc)
             continue
         expired += 1
-        recipient = getattr(payment.subscription, 'user', None)
+        # The payer: the subscriber, or a routine product checkout's buyer (the hub).
+        recipient = payment.payer
         if recipient is None:
             continue
         # The inbox row is always written; a muted type simply sends no push —

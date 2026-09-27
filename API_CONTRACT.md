@@ -1206,7 +1206,8 @@ Codes: `not_a_trainer` (403), `not_found` (404), `validation_error` (400;
 `program_days`), `preview_covers_program` (409, `program_days`, `cycle_days`: the preview must be shorter than the template's week, which the program repeats),
 `product_already_retired` (409), `bad_trainer_id` (400), `own_product` (403),
 `clients_only` (403), `already_owned` (409, `purchase_id`, `routine_id`),
-`product_not_for_sale` (409), `exchange_rate_missing` / `exchange_rate_stale` (409),
+`checkout_open` (409, `payment_id`: `buy/` while the caller has a checkout of this product
+open on the web hub — paying both would pay twice), `product_not_for_sale` (409), `exchange_rate_missing` / `exchange_rate_stale` (409),
 `insufficient_balance` (402, `amount`, `currency`), `idempotency_key_reused` (422),
 `purchase_refused` (400), `throttled` (429). Pushes: `routine_product_approved`,
 `_rejected`, `_sold`, `_purchased`, `_refunded`, `_sale_refunded` (§4).
@@ -3266,6 +3267,58 @@ A post, comment or challenge whose text holds a term on the banned-terms list an
 | `GET` | `/api/social/users/public-profile/by_username/` | auth | `PublicUserProfileViewSet` |
 | `GET` | `/api/social/users/public-profile/search/` | auth | `PublicUserProfileViewSet` |
 | `GET` | `/api/social/users/public-profile/{id}/` | auth | `PublicUserProfileViewSet` |
+
+### Checkout sessions (the web payment hub, payments spec §5)
+
+How the web hub (channel `web`; `apk` may use it too) buys the two digital goods, a plan
+(`PLATFORM_SUB`) and a routine product (`ROUTINE_PRODUCT`), and pays through ShamCash.
+A session IS a payment (`subscription.Payment`): its `id` is the payment's, so "I paid" is
+`POST /api/subscription/v1/payments/{id}/reconcile/` and the step history is
+`GET /api/subscription/v1/payments/{id}/status/` (both now answer a product session's
+buyer too). The views' docstrings (`subscription/checkout_views.py`) are the full
+contract.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET, POST` | `/api/v1/checkout/sessions/` | auth | `CheckoutSessionsView` |
+| `GET` | `/api/v1/checkout/sessions/{id}/` | auth | `CheckoutSessionDetailView` |
+
+The collection answers without the final slash too (`/api/v1/checkout/sessions`), as the
+spec names it.
+
+**Open** — `POST {"money_type", "item_id"}`: ONE open session per user per item; asking
+again answers the same session and reference (200, `already_open: true`; new: 201). A plan
+session is the subscription's one checkout, opened by the Pay button's own call (or the
+Renew button's while cover runs on that plan) — the same checkout `POST v1/gateways/`
+hands back. A product session prices the program in the caller's currency now and fixes
+the commission its sale is split at; confirmed, it delivers the caller's own copy and
+pays the trainer exactly as a wallet purchase (`buy/`) does, and a push says so
+(`routine_product_purchased`, `routine_product_sold`); expired or rejected, it delivers
+nothing. **Read** — `GET` the open ones (`{"results": [...]}`), or one by id in any
+state: `status` is `open | needs_review | confirmed | rejected | expired | refunded`
+(`payment_status` is the payment's own), with `amount`, `currency`, `reference`,
+`expires_at`, `payment_target` (`{adapter: "manual_transfer", gateway, account_id, amount,
+currency, note, payment_url}` — transfer exactly `amount` to `account_id` with `note`),
+`review`, and `result` once paid (`{subscription_id}` or `{purchase_id, purchase_status,
+routine_id}`).
+
+**Differs by build.** Opening: `web` and `apk` only (`play` / `ios`: 403
+`not_available_on_channel`, before anything is read; no channel: 400
+`app_channel_required`). Reading works on every build; a build that may not buy the
+session's kind of money gets no `amount`, `reference` or `payment_target`.
+
+Codes: `app_channel_required` (400), `not_available_on_channel` (403), `validation_error`
+(400; `field_errors.money_type[0].code` `required` / `invalid_choice` — coaching and
+wallet money are never sold here — or `field_errors.item_id`), `invalid_plan` (400),
+`payment_not_required` (400), `plan_change_while_active` (409), `checkout_open` (409,
+`payment_id`, `status`, `expires_at`), `price_changed` (409, `expected_amount`,
+`expected_currency`), `not_renewable` (400), `not_found` (404), `own_product` (403),
+`clients_only` (403), `already_owned` (409, `purchase_id`, `routine_id`),
+`product_not_for_sale` (409), `exchange_rate_missing` / `exchange_rate_stale` (409),
+`gateway_unavailable` (503), `currency_not_chargeable` (503), `gateway_error` (400),
+`throttled` (429). A review of a product session can carry the reasons `already_owned`
+and `product_unavailable` besides the plan's: money arrived for a program that cannot be
+delivered, and is handed back.
 
 ### Subscriptions & Payments
 

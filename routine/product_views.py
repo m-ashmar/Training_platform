@@ -66,6 +66,8 @@ def _refusal_text(code):
         "already_owned": _("You already own this program."),
         "idempotency_key_reused": _("This idempotency key was already used for a different "
                                     "request."),
+        "checkout_open": _("A payment for this program is already open. Complete it, or "
+                           "wait for it to close."),
     }.get(code, _("Request could not be completed."))
 
 
@@ -474,6 +476,7 @@ class ProductBuyView(APIView):
     | 403 | `own_product` | the caller wrote it |
     | 403 | `clients_only` | the caller is not a client (the code the coaching and transfer routes answer for the same fact) |
     | 409 | `already_owned` | a confirmed purchase exists; `purchase_id`, `routine_id` |
+    | 409 | `checkout_open` | the caller has a checkout of this product open (`POST /api/v1/checkout/sessions/`, the web hub): paying both would pay twice; `payment_id` is that checkout (read it at `GET /api/v1/checkout/sessions/{payment_id}/`) |
     | 409 | `product_not_for_sale` | it stopped being on sale while this request ran (retired, its program changed, or its trainer's verification was revoked) |
     | 409 | `exchange_rate_missing` / `exchange_rate_stale` | the price has to be converted and the operator's rate is missing or too old |
     | 402 | `insufficient_balance` | the wallet holds less than the price; `amount`, `currency` |
