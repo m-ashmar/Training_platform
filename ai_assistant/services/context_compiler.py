@@ -33,13 +33,17 @@ def _safe(value):
 class ContextCompiler:
     """Build the system prompt from user data and cached insights."""
 
-    def compile(self, user, flagged_input: bool = False) -> str:
+    def compile(self, user, flagged_input: bool = False, store_safe: bool = False) -> str:
         """
         Build a complete system prompt.
 
         Args:
             user: The authenticated CustomUser instance.
             flagged_input: If True, adds an injection-resistance warning.
+            store_safe: The build may not sell the store-billed goods
+                (`ai_assistant.store_safe.payment_talk_blocked`): adds
+                `STORE_BUILD_RULES`, the rule for the payment questions the recogniser
+                does not catch. Decided by the build alone, never by the user.
 
         Returns:
             System prompt string.
@@ -50,8 +54,17 @@ class ContextCompiler:
             self._cached_insights(user),
             self._recent_ratings(user),
             self._rules(flagged_input),
+            self._store_rules(store_safe),
         ]
         return "\n\n".join(s for s in sections if s)
+
+    def _store_rules(self, store_safe: bool) -> str:
+        """The store build's rule (spec §3 "Not sold in app", §10), or nothing."""
+        if not store_safe:
+            return ""
+        from ai_assistant.store_safe import STORE_BUILD_RULES
+
+        return "\n".join(STORE_BUILD_RULES)
 
     def _recent_ratings(self, user) -> str:
         """What this person thought of the coach's recent replies (the owner, F12,

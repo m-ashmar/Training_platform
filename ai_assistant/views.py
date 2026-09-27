@@ -121,10 +121,31 @@ class ChatSessionDetailView(generics.RetrieveAPIView):
 
 class ChatMessageListView(generics.ListAPIView):
     """
-    GET /api/ai/sessions/<uuid>/messages/
+    GET /api/ai/sessions/<uuid>/messages/[?page_size=N][&cursor=...]
 
-    Get paginated chat messages for a specific session.
-    Orders newest first (for cursor consistency)
+    Headers: `Authorization: Bearer <access>`, `Accept-Language`, and the build's
+    `X-App-Channel` / `X-App-Version`, as on every call.
+
+    Get paginated chat messages for a specific session, newest first (for cursor
+    consistency): 200 `{next, previous, results: [{id, role, content, tool_calls,
+    tokens_used, created_at, feedback, medical_disclaimer}]}`.
+
+    `medical_disclaimer` (spec §9 B4, additive): on every `assistant` message, the
+    sentence the app shows under an AI coach reply — the AI coach can be wrong and is
+    not a substitute for a trainer or a doctor — in the reader's language; null on
+    `user` messages. The same on every build.
+
+    **Differs by build.** On a build that may not sell plans or routine products
+    (`ai_assistant.store_safe.payment_talk_blocked` — today `play`, `ios`, and a call
+    that declares no channel), an assistant reply whose question was about paying,
+    prices, subscribing or buying (`store_safe.is_payment_question`, the recogniser the
+    socket answers with) is shown as the store-safe reply, whole: a reply written on
+    the direct APK is not read back with its price or instructions on a store build.
+    Every other message is shown exactly as written, and on `apk` and `web` all of them
+    are. The question is found even when it sits on another page.
+
+    Refusals: 401 `not_authenticated`; 403 `no_entitlement` / `feature_not_in_plan`;
+    403 `ai_consent_required`.
     """
     serializer_class = ChatMessageSerializer
     permission_classes = AI_PERMISSIONS
@@ -136,6 +157,21 @@ class ChatMessageListView(generics.ListAPIView):
             session__session_id=session_id,
             session__user=self.request.user
         ).order_by('-created_at')
+
+    def list(self, request, *args, **kwargs):
+        from .store_safe import build_of_request, payment_talk_blocked, store_safe_reply_ids
+
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        rows = list(page) if page is not None else list(queryset)
+        replaced = (store_safe_reply_ids(rows)
+                    if payment_talk_blocked(*build_of_request(request)) else set())
+        serializer = self.get_serializer(
+            rows, many=True,
+            context={**self.get_serializer_context(), 'store_safe_ids': replaced})
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
 
 class FeedbackView(APIView):

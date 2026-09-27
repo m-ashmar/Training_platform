@@ -26,6 +26,11 @@ from ai_assistant.services.cost_tracker import CostTracker
 # The one consent predicate. `moderation.services` imports no models at module level,
 # precisely so a service like this one can import it without pulling half the app in.
 from moderation.services import has_ai_consent
+# What the coach may say about money on this build, and the disclaimer every reply
+# carries (spec §9 B4, §10). Neither imports a model at module level.
+from ai_assistant.store_safe import (
+    is_payment_question, payment_talk_blocked, store_safe_reply)
+from training_platform.disclaimers import ai_coach_disclaimer
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +68,14 @@ class ChatService:
             await websocket.send(json.dumps(event))
     """
 
-    def __init__(self):
+    def __init__(self, build=None):
         config = getattr(settings, 'AI_ASSISTANT_CONFIG', {})
+        #: The build this service answers for, `(channel, version)` as
+        #: `policy.channels` reads them. The socket sets it from its handshake
+        #: (`ai_assistant.store_safe.build_of_scope`); None is a caller that declared
+        #: nothing, which policy answers with its strictest flags — so a new caller
+        #: that forgets to say which build it serves gets the store-safe coach.
+        self.build = build
         self.model = config.get('MODEL', 'gpt-4o-mini')
         self.max_response_tokens = config.get('MAX_RESPONSE_TOKENS', 2000)
         self.temperature = config.get('TEMPERATURE', 0.7)
@@ -88,8 +99,18 @@ class ChatService:
           {"type": "status", "content": "...", "code": "..."}
           {"type": "tool_used", "name": "...", "display": "..."}
           {"type": "token", "content": "partial text"}
-          {"type": "complete", "session_id": "...", "message_id": ..., "tools_used": [...]}
+          {"type": "complete", "session_id": "...", "message_id": ..., "tools_used": [...],
+           "medical_disclaimer": "..."}
           {"type": "error", "content": "...", "code": "..."}
+
+        What differs by build (`self.build`, and nothing else): on a build that may not
+        sell the store-billed goods (`store_safe.payment_talk_blocked` — `play`, `ios`,
+        or no build declared), a payment / price / purchase question
+        (`store_safe.is_payment_question`) is answered with the fixed
+        `store_safe_reply()` — one `token` frame and a `complete`, saved like any reply
+        — and the model is never called; every other question reaches the model with
+        the store rule in its system prompt. On `apk` and `web` nothing changes. The
+        model's own reply is streamed and saved as written on every build.
         """
         start_time = time.monotonic()
 
@@ -116,6 +137,18 @@ class ChatService:
             }
             return
 
+        # The build decides what the coach may say about money (spec §3, §10: no store
+        # build answers "how do I pay" with instructions). Read per turn, like the REST
+        # flags, so an operator's change reaches an open socket on its next message. A
+        # recognised payment question gets the fixed reply without the model — before
+        # the budget gate, because it costs nothing — and is kept like any other turn.
+        channel, version = self.build or (None, None)
+        store_safe = await database_sync_to_async(payment_talk_blocked)(channel, version)
+        if store_safe and is_payment_question(content):
+            async for event in self._store_safe_turn(user, content, session_id):
+                yield event
+            return
+
         # 2. Budget gate — checked BEFORE any completion is requested. Cost used to be
         # recorded only afterwards, and the hourly task merely logged CRITICAL, so there
         # was nothing anywhere that could actually stop spending.
@@ -139,7 +172,7 @@ class ChatService:
         # 4. Build system prompt
         system_prompt = await database_sync_to_async(
             self.context_compiler.compile
-        )(user, flagged_input=flagged)
+        )(user, flagged_input=flagged, store_safe=store_safe)
         
         # Inject language instruction based on user preference (prepend for higher LLM weight)
         lang = getattr(user, 'preferred_language', 'en')
@@ -357,6 +390,31 @@ class ChatService:
             "session_id": str(session.session_id),
             "message_id": msg_id,
             "tools_used": tools_display,
+            # Spec §9 B4: every AI coach reply carries the medical disclaimer, in the
+            # reader's language. Additive.
+            "medical_disclaimer": ai_coach_disclaimer(),
+        }
+
+    async def _store_safe_turn(self, user, content: str, session_id=None):
+        """Answer a payment question on a store-safe build: the fixed reply, no model.
+
+        Kept like any other turn — the question and the reply are saved to the chat
+        (so the history, the title and 👍/👎 work), and the turn ends on `complete`, so
+        the socket charges it like any answered message. Nothing is sent to the model,
+        nothing is counted as cost, and no training copy is kept: the sentence is ours,
+        not the model's. The same frames for every user of the build.
+        """
+        reply = store_safe_reply()
+        session = await self._get_or_create_session(user, session_id)
+        msg_id = await self._save_messages(session, content, reply, [])
+        await self._update_session(session, content)
+        yield {"type": "token", "content": reply}
+        yield {
+            "type": "complete",
+            "session_id": str(session.session_id),
+            "message_id": msg_id,
+            "tools_used": [],
+            "medical_disclaimer": ai_coach_disclaimer(),
         }
 
     def _iteration_status(self, iteration: int) -> dict:
