@@ -48,6 +48,21 @@ Two more that fail silently (found building `payouts`, 2026-09-24):
   get_form` removes a declared form field whose name is in `readonly_fields`, so the
   POSTed value never reaches `cleaned_data` and the page still answers 302. Name console
   inputs apart from the model's columns (`transfer_id`, not `shamcash_transaction_id`).
+- **The ledger refuses UPDATE and DELETE at the database** (`wallet/migrations/0021`,
+  2026-09-27), like the audit log and the agent receivable. `Transaction.objects.filter(
+  ...).update(created_at=...)` in a test now fails with "append-only"; back-date a row
+  with `tests/ledger_rows.py backdate(pk, when)`, and never write production code that
+  edits a row — a correction is a new row (`reverses`). A wallet that has ledger rows
+  can no longer be deleted either.
+- **A periodic task over every user takes a page and hands the rest on**
+  (`training_platform/batching.py`, 2026-09-27). A new beat task that loops over users
+  uses `Batch` the same way, and its per-row work must be idempotent: a retried page
+  runs again. A test that wants to see the pages patches the task's `apply_async` (see
+  `tests/test_prod_data.py _drain`); under eager Celery the hand-on runs nested.
+- **Stored files leave storage through a task after the commit**
+  (`training_platform/storage_cleanup.py`). Code that deletes rows holding files calls
+  `delete_after_commit(field_label(field), names)`; never `storage.delete()` inline in
+  a request (identity documents are the one deliberate exception).
 - **A `DietPlan` can be a trainer's unsent draft** (`is_draft`, BACKEND_BUGS B-132,
   2026-09-25): inactive, empty, and not the client's yet. A read that filters
   `is_active=True` or goes through `DietPlan.governing` already skips it; a CLIENT read
