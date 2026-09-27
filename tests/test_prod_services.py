@@ -367,16 +367,18 @@ def _run(call):
 
 
 @pytest.fixture
-def worker_retries(monkeypatch):
+def worker_retries(settings):
     """Let the eager executor RETRY the way a worker does.
 
-    With `task_eager_propagates` (settings_base), Celery hands a task's `Retry` back to the
-    caller instead of re-running it, so no retry ever ran in the suite. Off, the eager
-    executor re-applies the task on `Retry` — the production retry path, minus the
-    countdown — and records a final failure instead of raising it."""
+    With `CELERY_TASK_EAGER_PROPAGATES` (settings_base), Celery hands a task's `Retry` back
+    to the caller instead of re-running it, so no retry ever ran in the suite. Off, the
+    eager executor re-applies the task on `Retry` — the production retry path, minus the
+    countdown — and records a final failure instead of raising it. The Celery app reads
+    the Django setting on every lookup, so the override reaches it (and is undone)."""
     from users.tasks import send_account_code_email
 
-    monkeypatch.setattr(send_account_code_email.app.conf, "task_eager_propagates", False)
+    settings.CELERY_TASK_EAGER_PROPAGATES = False
+    assert send_account_code_email.app.conf.task_eager_propagates is False
 
 
 @pytest.fixture
