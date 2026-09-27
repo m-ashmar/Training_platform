@@ -100,6 +100,13 @@ PROCLITIC_MIN_LETTERS = 3
 _LETTER_TABLE = str.maketrans({"ک": "ك", "ی": "ي", "ۍ": "ي", "ې": "ي", "ھ": "ه",
                                "ە": "ه", "ۀ": "ه", "ہ": "ه"})
 _SPACES = re.compile(r"\s+")
+#: Invisible format characters (Unicode category Cf): zero-width spaces and joiners,
+#: direction marks and isolates, the soft hyphen, the byte-order mark. Typed inside a
+#: word they hide it from a plain match and change nothing a reader sees.
+_FORMAT_CHARS = re.compile("[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]")
+#: Combining marks left after NFKD: Latin accents ("ü" -> "u"), and the Arabic
+#: annotation marks `_fold` does not already drop.
+_COMBINING = re.compile("[\u0300-\u036f\u0483-\u0489\u0591-\u05bd\u05bf\u05c1-\u05c2\u05c4-\u05c5\u05c7\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06dc\u06df-\u06e4\u06e7-\u06e8\u06ea-\u06ed\u08d3-\u08e1\u08e3-\u08ff\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]")
 
 #: Joined Arabic proclitics, longest first so the regex prefers the fuller reading:
 #: و ف (and, so), ب ك ل (with, like, for), ال (the), لل (for the), and يا (the
@@ -110,10 +117,15 @@ PROCLITICS = tuple(sorted({
     "يا",
 }, key=lambda p: (-len(p), p)))
 
-#: Punctuation (or underscores) between two letters of a word: "f.u.c.k", "f_u_c_k".
-#: Possessive: it never overlaps the letters on either side, so giving nothing back
-#: costs nothing and keeps a long run of dots linear.
-_SEP = r"(?:[^\w\s]|_)*+"
+#: Folding cuts every run of one character to this many ("fuuuuuck" -> "fuuuck"), so
+#: a term's repeated-letter tolerance never scans further than this.
+MAX_RUN = 3
+_LONG_RUN = re.compile(r"(.)\1{%d,}" % MAX_RUN, re.DOTALL)
+#: Punctuation between two letters of a word: "f.u.c.k", "f-u-c-k" (and "f_u_c_k":
+#: `normalise` turns "_" into "-"), at most this many characters of it. One character
+#: class, possessive: it never overlaps the letters on either side.
+MAX_SEPARATOR = 3
+_SEP = r"[^\w\s]{0,%d}+" % MAX_SEPARATOR
 #: The start of a word, checked AFTER its first letter is consumed (`(?<!\w.)` looks at
 #: the character before that letter). With the letter first, every alternative of the
 #: combined pattern starts with a literal, which lets the regex engine skip to the
@@ -128,11 +140,15 @@ def normalise(text) -> str:
     if not isinstance(text, str) or not text:
         return ""
     text = unicodedata.normalize("NFKC", text)
-    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    if not text.isascii():
+        text = _FORMAT_CHARS.sub("", text)
     text = _fold(text).translate(_LETTER_TABLE)
-    text = "".join(ch for ch in unicodedata.normalize("NFKD", text)
-                   if not unicodedata.combining(ch))
-    return _SPACES.sub(" ", text).strip()
+    if not text.isascii():
+        text = _COMBINING.sub("", unicodedata.normalize("NFKD", text))
+    # "_" joins words in a username ("zorblax_99") and splits letters ("f_u_c_k"); as
+    # punctuation it is a word boundary and a separator, as it reads.
+    text = _SPACES.sub(" ", text.replace("_", "-")).strip()
+    return _LONG_RUN.sub(lambda m: m.group(1) * MAX_RUN, text)
 
 
 def letter_count(folded: str) -> int:
@@ -160,19 +176,28 @@ def _runs(folded: str) -> list[list]:
 
 
 def _body_tokens(folded: str) -> list[str]:
-    """The term as regex tokens; the first token is its first character alone."""
+    """The term as regex tokens; the first token is its first character alone.
+
+    Every quantifier is bounded (a run is at most `MAX_RUN` in folded text, a separator
+    at most `MAX_SEPARATOR`) and possessive, so a term costs a few steps at each place
+    it could start, whatever the text holds: no backtracking, no quadratic run scan.
+    """
     runs = _runs(folded)
     tokens: list[str] = []
     for index, (ch, count) in enumerate(runs):
         if ch.isspace():
-            tokens.append(r"\s++")
+            tokens.append(" ")          # folded text has single spaces only
             continue
         if index and ch.isalnum() and runs[index - 1][0].isalnum():
             tokens.append(_SEP)
         literal = re.escape(ch)
         tokens.append(literal)
-        # The run itself: one or more (the term's own count or more).
-        tokens.append(f"{literal}*+" if count == 1 else f"{literal}{{{count - 1},}}+")
+        # The run itself: the term's own count or more, up to what folding leaves.
+        count = min(count, MAX_RUN)
+        if count < MAX_RUN:
+            tokens.append(f"{literal}{{{count - 1},{MAX_RUN - 1}}}+")
+        else:
+            tokens.append(f"{literal}{{{MAX_RUN - 1}}}")
     return tokens
 
 

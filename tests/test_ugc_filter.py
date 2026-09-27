@@ -182,10 +182,12 @@ def test_a_long_text_is_matched_quickly():
     for index in range(150):
         _ban(f"zorb{index:03d}lax", whole_word=bool(index % 2))
     _ban("wa.me/", whole_word=False, category="spam")
-    text = ("zzzz" + "." * 5000 + "wa" + "." * 5000 + " ") * 4
-    started = time.monotonic()
-    assert _filter().find_banned(text) is None
-    assert time.monotonic() - started < 1.0
+    _filter().find_banned("warm")               # compile outside the timing
+    for text in (("zzzz" + "." * 5000 + "wa" + "." * 5000 + " ") * 4,
+                 "z" * 20000, "zo" * 10000, "z." * 10000, "zor-" * 5000):
+        started = time.monotonic()
+        assert _filter().find_banned(text) is None
+        assert time.monotonic() - started < 1.0, text[:12]
 
 
 # ------------------------------------------------------------------- the console
