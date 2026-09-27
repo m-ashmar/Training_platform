@@ -75,6 +75,69 @@ class UserNotificationPreference(models.Model):
                 return False
         return True
 
+class EmailDelivery(models.Model):
+    """One email the notification system owes a person — and whether it left.
+
+    The email channel (`notifications/channels/email.py`; the payments spec, section 7:
+    the receipt on a confirmed payment, the 7-day plan notice, the expired plan, and a
+    trainer's withdrawal requested / paid / failed). The row is written where the event
+    happens, and the worker sends it (`notifications.send_email`): never the request.
+
+    `dedup_key` is what makes it once-only, per recipient, for good: a redelivered event,
+    the reminder job's next run, `payment_completed` sent again for an owed payout — each
+    finds its row and sends nothing twice. `context` holds the facts the email is written
+    from (ids, a number, a date), never a rendered sentence: the text is written at send
+    time in the recipient's saved language, like a push.
+
+    `status`: queued -> sending -> sent, or `skipped` (the account cannot or does not
+    want to receive it any more; `error` says which), or `failed` (the mail server
+    refused it for good, or every retry failed; reported once). No address is stored:
+    it is read from the account when the email is sent.
+    """
+
+    QUEUED = 'queued'
+    SENDING = 'sending'
+    SENT = 'sent'
+    SKIPPED = 'skipped'
+    FAILED = 'failed'
+    STATUSES = [(QUEUED, 'Queued'), (SENDING, 'Sending'), (SENT, 'Sent'),
+                (SKIPPED, 'Skipped'), (FAILED, 'Failed')]
+
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                  related_name='email_deliveries')
+    #: The inbox row this email went with, when it went with one (the receipt and the
+    #: 7-day notice are email only).
+    notification = models.ForeignKey(Notification, on_delete=models.SET_NULL, null=True,
+                                     blank=True, related_name='emails')
+    kind = models.CharField(max_length=50)
+    dedup_key = models.CharField(max_length=255)
+    context = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=16, choices=STATUSES, default=QUEUED,
+                              db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    #: The language it was written in, when it was sent.
+    language = models.CharField(max_length=10, blank=True, default='')
+    #: Why it was skipped or failed: a reason code or an exception's class name, never
+    #: an address or a message body.
+    error = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['recipient', 'dedup_key'],
+                                    name='unique_email_delivery_dedup'),
+        ]
+        indexes = [
+            models.Index(fields=['status', 'created_at'], name='email_delivery_status_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} email for user {self.recipient_id} ({self.status})"
+
+
 class NotificationFailure(models.Model):
     """Dead Letter Queue for failed notification events."""
     event_type = models.CharField(max_length=100)

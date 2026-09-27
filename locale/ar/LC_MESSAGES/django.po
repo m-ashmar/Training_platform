@@ -5717,3 +5717,69 @@ msgstr "اترك هذا الحقل فارغاً"
 #: legal/templates/legal/delete_account.html
 msgid "Send the request"
 msgstr "أرسل الطلب"
+
+#. The email channel (notifications/channels/email.py): the title of the email that
+#. carries the PDF receipt of a confirmed payment.
+#: notifications/channels/email.py
+msgid "Payment confirmed"
+msgstr "تم تأكيد الدفع"
+
+#: notifications/channels/email.py
+#, python-format
+msgid ""
+"We received your payment for %(item)s. Your receipt is attached to this email."
+msgstr "استلمنا دفعتك مقابل %(item)s. إيصال الدفع مرفق بهذه الرسالة."
+
+#. The 7-day email before a plan ends.
+#: notifications/channels/email.py
+#, python-format
+msgid "Your subscription ends in %(days)s day."
+msgid_plural "Your subscription ends in %(days)s days."
+msgstr[0] "ينتهي اشتراكك خلال %(days)s يوم."
+msgstr[1] "ينتهي اشتراكك خلال يوم واحد."
+msgstr[2] "ينتهي اشتراكك خلال يومين."
+msgstr[3] "ينتهي اشتراكك خلال %(days)s أيام."
+msgstr[4] "ينتهي اشتراكك خلال %(days)s يوماً."
+msgstr[5] "ينتهي اشتراكك خلال %(days)s يوم."
+
+#: notifications/channels/email.py
+msgid ""
+"When it ends, your diet plan and routine stay saved and you can still see them. "
+"Using them needs an active subscription."
+msgstr ""
+"عند انتهائه تبقى خطتك الغذائية وبرنامجك التدريبي محفوظين ويمكنك الاطلاع عليهما. "
+"استخدامهما يحتاج إلى اشتراك فعّال."
+
+#. A label beside the date a plan ends.
+#: notifications/channels/email.py
+msgid "Ends on"
+msgstr "ينتهي في"
+
+#. A label beside the date a plan ended.
+#: notifications/channels/email.py
+msgid "Ended on"
+msgstr "انتهى في"
+
+#: notifications/channels/email.py
+msgid "Withdrawal number"
+msgstr "رقم طلب السحب"
+
+#. A label beside a sum of money.
+#: notifications/channels/email.py
+msgid "Amount"
+msgstr "المبلغ"
+
+#: notifications/channels/email.py
+msgid "You can choose which emails you receive in the app's notification settings."
+msgstr "يمكنك اختيار الرسائل التي تصلك بالبريد الإلكتروني من إعدادات الإشعارات في التطبيق."
+
+#. The first line of a notification email, with the person's first name.
+#: notifications/channels/email.py
+#, python-format
+msgid "Hello %(name)s,"
+msgstr "مرحبًا %(name)s،"
+
+#. The first line of a notification email, for someone with no first name saved.
+#: notifications/channels/email.py
+msgid "Hello,"
+msgstr "مرحبًا،"

@@ -2,7 +2,7 @@ import logging
 import hashlib
 
 from django.utils import timezone
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, InterfaceError, OperationalError, transaction
 from notifications.models import Notification, UserNotificationPreference
 from notifications.utils.deduplication import DeduplicationService
 from notifications.channels.fcm import FCMChannel
@@ -179,9 +179,22 @@ class NotificationService:
                 except Exception:
                     logger.debug("could not record the FCM failure", exc_info=True)
             
-        # Email (Future)
-        # if UserNotificationPreference.is_channel_enabled(recipient, event_type, 'email'):
-        #     EmailChannel.send(notification)
+        # Email, for the types whose row of the spec's table says so (section 7:
+        # `subscription_expired`, `withdrawal_requested` / `_paid` / `_failed`). Only
+        # QUEUED here — one `EmailDelivery` row, keyed so a re-dispatch of this row (the
+        # FCM retry drain calls this again) owes nothing twice — and sent by the worker
+        # after the commit (notifications/channels/email.py). The preferences and the
+        # verified address are asked there. A database fault is raised like the INSERT's,
+        # so the event is retried; anything else is logged: the push above already went
+        # and the inbox row stands.
+        try:
+            from notifications.channels import email as email_channel
+
+            email_channel.from_notification(notification)
+        except (OperationalError, InterfaceError):
+            raise
+        except Exception:
+            logger.exception("Email dispatch failed for notification %s", notification.id)
 
 
 def blank_previews(**filters) -> int:

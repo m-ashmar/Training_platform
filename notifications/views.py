@@ -45,9 +45,12 @@ class UserNotificationPreferenceSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError(_("event_type is required."))
         # One of the types `event_types/` lists. A typo answered 201 and muted nothing
-        # (BACKEND_BUGS B-014).
+        # (BACKEND_BUGS B-014). An email-only type (`payment_confirmed`, the receipt) is
+        # one of them too: `email_event_types`.
+        from notifications.channels.email import email_preference_types
         from notifications.channels.fcm import EVENT_CLASS_REGISTRY
-        if value != 'all' and value not in EVENT_CLASS_REGISTRY:
+        if (value != 'all' and value not in EVENT_CLASS_REGISTRY
+                and value not in email_preference_types()):
             raise serializers.ValidationError(_("Unknown notification type."),
                                               code="unknown_event_type")
         return value
@@ -63,11 +66,21 @@ class NotificationPreferenceViewSet(viewsets.ModelViewSet):
     DELETE /api/notifications/preferences/{id}/       revert to default (enabled)
     GET    /api/notifications/preferences/event_types/  discoverable event types
 
-    What a preference does: it governs PUSHES only. `event_type: "all"` is the master
-    switch — `is_enabled: false` (or `channels: {"fcm": false}`) stops every push; a
-    type's own row can then stop that type's pushes. The in-app inbox always receives
-    the notification, whatever the settings (BACKEND_BUGS B-014). An `event_type` that is
-    neither `all` nor one `event_types/` lists answers 400 `unknown_event_type`.
+    What a preference does: it governs DELIVERY — the push (`channels.fcm`) and the
+    email (`channels.email`). `event_type: "all"` is the master switch — `is_enabled:
+    false` stops every push and every email, `channels: {"fcm": false}` every push,
+    `channels: {"email": false}` every email; a type's own row can then stop that type's
+    the same way. The in-app inbox always receives the notification, whatever the
+    settings (BACKEND_BUGS B-014). An `event_type` that is neither `all` nor one
+    `event_types/` lists (in `event_types` or `email_event_types`) answers 400
+    `unknown_event_type`.
+
+    Which types send an email at all (the payments spec, section 7): the ones
+    `event_types/` lists in `email_event_types` — `payment_confirmed` (the receipt, as a
+    PDF; email only, there is no push of that type), `subscription_expiring` (the 7-day
+    notice only), `subscription_expired`, `withdrawal_requested`, `withdrawal_paid`,
+    `withdrawal_failed`. An email goes only to a verified address. `channels.email` on
+    any other type is accepted and changes nothing.
     """
     serializer_class = UserNotificationPreferenceSerializer
     permission_classes = [IsAuthenticated]
@@ -98,6 +111,15 @@ class NotificationPreferenceViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def event_types(self, request):
-        """List the event types that can be toggled (from the FCM registry)."""
+        """The event types that can be toggled.
+
+        200 `{"event_types": [...push types..., "all"], "email_event_types": [...]}`.
+        `event_types` is every push type (the FCM registry) and `all`; `email_event_types`
+        is the types that also send an email, whose `channels.email` therefore means
+        something — one of them, `payment_confirmed`, has no push and is in this list
+        only. Same answer on every build.
+        """
+        from .channels.email import email_preference_types
         from .channels.fcm import EVENT_CLASS_REGISTRY
-        return Response({'event_types': sorted(EVENT_CLASS_REGISTRY.keys()) + ['all']})
+        return Response({'event_types': sorted(EVENT_CLASS_REGISTRY.keys()) + ['all'],
+                         'email_event_types': email_preference_types()})

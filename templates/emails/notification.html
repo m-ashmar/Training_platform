@@ -1,0 +1,114 @@
+{% load i18n %}
+<!DOCTYPE html>
+<html lang="{{ LANGUAGE_CODE }}" dir="{{ LANGUAGE_BIDI|yesno:'rtl,ltr' }}">
+{% comment %}
+The HTML part of every notification email (notifications/channels/email.py `render`).
+The words arrive already written in the recipient's language; the plain-text part carries
+the same words. No link and no button of any kind: emails are not per build, so they say
+the fact and nothing that sells (the payments spec, section 7).
+{% endcomment %}
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - {{ brand }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f4f4;
+        }
+
+        [dir="rtl"] body {
+            text-align: right;
+        }
+
+        .container {
+            background-color: #ffffff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 24px;
+        }
+
+        .header h1 {
+            color: #2c3e50;
+            margin: 0;
+        }
+
+        .facts {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        .facts td {
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+            vertical-align: top;
+        }
+
+        .facts .label {
+            color: #777;
+            width: 40%;
+        }
+
+        /* Numbers, dates and references always read left to right, in either script. */
+        .facts .value {
+            font-weight: bold;
+            unicode-bidi: plaintext;
+        }
+
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            font-size: 12px;
+            color: #777;
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{{ brand }}</h1>
+        </div>
+
+        <div class="content">
+            <h2>{{ title }}</h2>
+            <p>{{ greeting }}</p>
+            {% for paragraph in paragraphs %}
+            <p>{{ paragraph }}</p>
+            {% endfor %}
+
+            {% if rows %}
+            <table class="facts" role="presentation">
+                {% for label, value in rows %}
+                <tr>
+                    <td class="label">{{ label }}</td>
+                    <td class="value">{{ value }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+        </div>
+
+        <div class="footer">
+            {% for line in footer %}
+            <p>{{ line }}</p>
+            {% endfor %}
+            <p>&copy; {% now "Y" %} {{ brand }}. {% trans "All rights reserved." %}</p>
+        </div>
+    </div>
+</body>
+
+</html>
