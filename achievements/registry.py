@@ -34,6 +34,25 @@ class AchievementDef:
             'unit': self.unit,
         }
 
+    def model_defaults(self) -> dict:
+        """The `Achievement` columns this definition sets, apart from `key`.
+
+        One place, for both writers: `sync_achievements` (which makes existing rows
+        agree with this file) and `bootstrap_platform` (which only creates the missing
+        ones), so the two cannot write different rows for the same key.
+        """
+        return {
+            'name': self.name,
+            'description': self.description,
+            'category': self.category,
+            'criteria': self.to_criteria(),
+            'points': self.points,
+            'badge_color': self.badge_color,
+            'is_rare': self.is_rare,
+            'is_secret': self.is_secret,
+            'is_active': True,
+        }
+
 
 # =============================================================================
 # ACHIEVEMENT DEFINITIONS
