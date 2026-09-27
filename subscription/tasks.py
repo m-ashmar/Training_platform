@@ -139,7 +139,7 @@ def settle_owed_payouts(batch_size=200):
     max_retries=3,
 )
 @no_retry_on_timeout
-def send_renewal_reminders(now=None):
+def send_renewal_reminders(now=None, phase="expiring", after=None):
     """Remind before the plan ends, and keep asking after it ended (the owner,
     2026-09-19: "we show a renewal reminder 3 days before ... after it ends ... keep
     asking to re-subscribe").
@@ -152,7 +152,16 @@ def send_renewal_reminders(now=None):
         each step of SUBSCRIPTION_LAPSED_REMINDER_DAYS it reaches after its end (the
         latest one, so a missed run is made up), then no more.
     Every subscriber, whatever `auto_renew` says: nothing charges a plan automatically.
-    The in-app row is always written; a muted type sends no push. Returns the counts.
+    The in-app row is always written; a muted type sends no push. Returns the counts —
+    this invocation's.
+
+    In pages (`training_platform.batching`): each invocation takes at most
+    `PERIODIC_BATCH_SIZE` subscriptions, the expiring pass first, and hands the rest on
+    to a fresh invocation with the same `now`, `phase` and the last id done. Both passes
+    over every subscriber in one task, with an FCM send per notice, is the shape the
+    production-readiness audit (2026-09-25) found cut off part-way under the 300 s soft
+    limit. A notice is found by its key before it is written, so a redelivered page
+    sends nothing twice.
     """
     from math import ceil
 
@@ -161,10 +170,12 @@ def send_renewal_reminders(now=None):
     from django.utils import timezone
 
     from notifications.services import NotificationService
+    from training_platform.batching import Batch, as_datetime, carry
 
     from .models import Subscription
 
-    now = now or timezone.now()
+    now = as_datetime(now) or timezone.now()
+    batch = Batch()
     lead = timedelta(days=int(getattr(settings, 'SUBSCRIPTION_RENEWAL_NOTICE_DAYS', 3)))
     steps = sorted(getattr(settings, 'SUBSCRIPTION_LAPSED_REMINDER_DAYS', (0, 3, 7, 14, 30)))
     counts = {'expiring': 0, 'expired': 0}
@@ -177,7 +188,10 @@ def send_renewal_reminders(now=None):
             .filter(Q(end_date__gt=now, end_date__lte=now + lead)
                     | Q(trial_end_date__gt=now, trial_end_date__lte=now + lead))
             .select_related('user'))
-    for sub in soon.iterator(chunk_size=500):
+    for sub in (batch.page(soon, after) if phase == "expiring" else ()):
+        if batch.spent():
+            break
+        batch.done(sub.pk)
         end = sub.effective_end
         if not sub.is_active or end is None or not (now < end <= now + lead):
             continue
@@ -195,13 +209,22 @@ def send_renewal_reminders(now=None):
                                    'ends_at': end.isoformat()}}) is not None:
             counts['expiring'] += 1
 
+    if phase == "expiring":
+        if batch.hand_on(send_renewal_reminders, now=carry(now), phase="expiring"):
+            logger.info("Subscription reminders: %s", counts)
+            return counts
+        phase, after = "lapsed", None
+
     if steps:
         oldest = now - timedelta(days=steps[-1] + 1)
         lapsed = (Subscription.objects.filter(user__is_active=True)
                   .filter(Q(end_date__lte=now, end_date__gt=oldest)
                           | Q(trial_end_date__lte=now, trial_end_date__gt=oldest))
                   .select_related('user'))
-        for sub in lapsed.iterator(chunk_size=500):
+        for sub in batch.page(lapsed, after):
+            if batch.spent():
+                break
+            batch.done(sub.pk)
             end = sub.effective_end
             if end is None or end > now or not sub.is_frozen:
                 continue
@@ -218,6 +241,7 @@ def send_renewal_reminders(now=None):
                                        'subscription_id': str(sub.pk),
                                        'ended_at': end.isoformat()}}) is not None:
                 counts['expired'] += 1
+        batch.hand_on(send_renewal_reminders, now=carry(now), phase="lapsed")
 
     logger.info("Subscription reminders: %s", counts)
     return counts

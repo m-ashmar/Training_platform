@@ -492,6 +492,26 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 # A hung external call (LLM, Edamam, FCM) previously held its worker slot forever.
 CELERY_TASK_SOFT_TIME_LIMIT = int(get_env('CELERY_TASK_SOFT_TIME_LIMIT', 300))
 CELERY_TASK_TIME_LIMIT = int(get_env('CELERY_TASK_TIME_LIMIT', 360))
+
+# Periodic jobs over every user run a PAGE per invocation and hand the rest on to a
+# fresh one (training_platform/batching.py): one task for every client under the soft
+# limit above was cut off part-way once the platform grew, and whoever sorted later was
+# silently skipped (the production-readiness audit, 2026-09-25). Rows a page; seconds a
+# page may spend (the production boot check refuses a value that leaves no room under
+# CELERY_TASK_SOFT_TIME_LIMIT); rows a page for scans whose per-row work is a comparison.
+PERIODIC_BATCH_SIZE = get_int_env('PERIODIC_BATCH_SIZE', 200)
+PERIODIC_BATCH_SECONDS = get_int_env('PERIODIC_BATCH_SECONDS', 120)
+PERIODIC_SCAN_SIZE = get_int_env('PERIODIC_SCAN_SIZE', 5000)
+
+# Export and erasure read, delete and anonymise a person's rows this many at a time
+# (training_platform/privacy/registry.py), and an export larger than the spool limit is
+# written to a temporary file and streamed from there instead of held in memory.
+PRIVACY_BATCH_ROWS = get_int_env('PRIVACY_BATCH_ROWS', 1000)
+PRIVACY_EXPORT_SPOOL_BYTES = get_int_env('PRIVACY_EXPORT_SPOOL_BYTES', 8 * 1024 * 1024)
+
+# Stored files of deleted rows leave storage after the commit, through a Celery task,
+# this many names a message (training_platform/storage_cleanup.py).
+STORAGE_DELETE_BATCH = get_int_env('STORAGE_DELETE_BATCH', 100)
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
@@ -1179,6 +1199,26 @@ EXERCISE_MEDIA_ALLOWED_HOSTS = _exercise_media_allowed_hosts(
 # Objects under this prefix are PRIVATE: nothing ever hands out a URL to one, and the
 # bucket grants no public read. Keep it out of any prefix served as public app content.
 QUARANTINE_LOCATION = get_env('QUARANTINE_LOCATION', 'quarantine').strip('/')
+
+# How many images one process decodes at once (training_platform/image_budget.py): each
+# decode may hold DECODE_BUDGET_BYTES (128 MB), and three together took a 512 MB machine
+# and every connection on it down (the production-readiness audit, 2026-09-25). The
+# count is what the machine's memory (its cgroup limit, else its RAM) holds beside
+# IMAGE_DECODE_RESERVED_BYTES — two on 512 MB. IMAGE_DECODE_SLOTS overrides it, and
+# IMAGE_DECODE_MEMORY_BYTES states the memory where it cannot be read; the production
+# boot check refuses slots the memory cannot hold. An upload that waits
+# IMAGE_DECODE_WAIT_SECONDS without a slot is answered 503 `upload_busy`, with
+# `Retry-After: IMAGE_DECODE_RETRY_AFTER_SECONDS`.
+IMAGE_DECODE_SLOTS = get_int_env('IMAGE_DECODE_SLOTS', 0) or None
+IMAGE_DECODE_MEMORY_BYTES = get_int_env('IMAGE_DECODE_MEMORY_BYTES', 0) or None
+IMAGE_DECODE_RESERVED_BYTES = get_int_env('IMAGE_DECODE_RESERVED_BYTES', 192 * 1024 * 1024)
+try:
+    IMAGE_DECODE_WAIT_SECONDS = float(get_env('IMAGE_DECODE_WAIT_SECONDS', '2'))
+except ValueError:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured("Environment variable 'IMAGE_DECODE_WAIT_SECONDS' must be "
+                               "a number of seconds.")
+IMAGE_DECODE_RETRY_AFTER_SECONDS = get_int_env('IMAGE_DECODE_RETRY_AFTER_SECONDS', 5)
 
 # How many assets one trainer may hold on ONE exercise (mediakit/trainer_views.py).
 # Storage and egress are paid per byte and a library is per trainer PER EXERCISE, so

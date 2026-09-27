@@ -725,7 +725,15 @@ def process_uploaded_image(file, max_bytes=None, quarantine=True):
     # decoded is the one the checks read: a second `Image.open` of a WebP would be a
     # second decoder, with canvases of its own.
     try:
-        encoded = _reencode(probe, fmt, n_frames, plan)
+        # One of the process's decode slots for the decode and the re-encode, the peak
+        # the plan above prices (`image_budget.decode_slot`). None free in time: the
+        # image is not decoded and the caller is told to retry (`upload_busy`, 503).
+        with image_budget.decode_slot():
+            encoded = _reencode(probe, fmt, n_frames, plan)
+    except image_budget.DecodeBusy as busy:
+        from training_platform.api_exceptions import upload_busy_from
+
+        raise upload_busy_from(busy)
     except image_budget.OverBudget as over:
         raise _too_many_pixels(over.max_pixels, budget=True)
     except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):

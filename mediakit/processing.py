@@ -92,6 +92,22 @@ def process_upload(upload, slot: Slot) -> ProcessedImage:
     from training_platform.file_security import process_uploaded_image
     process_uploaded_image(upload)
 
+    # The grade decodes the image a second time and holds it, and every form made of
+    # it, until the last one is encoded: one of the process's decode slots for all of
+    # it (`image_budget.decode_slot`), taken AFTER the guard has given its own back —
+    # never nested. None free in time: `upload_busy`, 503, retry.
+    from training_platform import image_budget
+    from training_platform.api_exceptions import upload_busy_from
+
+    try:
+        with image_budget.decode_slot():
+            return _grade(upload, slot)
+    except image_budget.DecodeBusy as busy:
+        raise upload_busy_from(busy)
+
+
+def _grade(upload, slot: Slot) -> ProcessedImage:
+    """Decode `upload` upright and make every stored form of it (`process_upload`)."""
     upload.seek(0)
     img = Image.open(upload)
     if (img.format or "").upper() not in ACCEPTED_FORMATS:

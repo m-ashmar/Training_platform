@@ -27,3 +27,27 @@ PASSTHROUGH_EXCEPTIONS = (
     DjangoPermissionDenied,  # Django's, NOT a subclass of APIException
     APIException,            # every DRF exception, base class of all of them
 )
+
+
+class UploadBusy(APIException):
+    """503 `upload_busy`: every image-decode slot of this process is taken
+    (`training_platform.image_budget.decode_slot`), so the upload was NOT decoded, stored
+    or refused on its merits. Retryable: `Retry-After` (and `retry_after_seconds` in the
+    body) says when. An APIException, so it passes every view's broad handler
+    (`PASSTHROUGH_EXCEPTIONS`) instead of becoming a 500."""
+
+    status_code = 503
+    default_code = "upload_busy"
+
+    def __init__(self, retry_after: int = 5):
+        from django.utils.translation import gettext as _
+
+        super().__init__(_("The server is busy with other photos right now. Please try "
+                           "again in a few seconds."))
+        #: DRF's handler turns `wait` into the `Retry-After` header.
+        self.wait = max(1, int(retry_after))
+
+
+def upload_busy_from(exc) -> UploadBusy:
+    """The `upload_busy` answer for an `image_budget.DecodeBusy`."""
+    return UploadBusy(getattr(exc, "retry_after", 5))

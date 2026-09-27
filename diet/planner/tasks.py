@@ -20,9 +20,18 @@ logger = logging.getLogger(__name__)
     max_retries=3,
 )
 @no_retry_on_timeout
-def refresh_food_weights():
-    """Nightly: turn what users actually ate into planner ranking weights."""
+def refresh_food_weights(after=None):
+    """Nightly: turn what users actually ate into planner ranking weights.
+
+    A page of users per invocation (`training_platform.batching`), the rest handed on to
+    a fresh invocation: every user with a diet history in one task under the 300 s soft
+    limit was cut off part-way once the platform grew, and the later users never learned
+    anything (the production-readiness audit, 2026-09-25). `update_weights` recomputes a
+    user's weights from their history, so a redelivered page changes nothing.
+    """
     from django.contrib.auth import get_user_model
+
+    from training_platform.batching import Batch
 
     from .learning import update_weights
 
@@ -32,9 +41,13 @@ def refresh_food_weights():
     total = 0
     # Only people with a diet history: every trainer, admin and client who never took a
     # plan cost two queries a night for nothing.
-    users = (User.objects.filter(is_active=True, diet_plans__isnull=False)
-             .distinct().iterator(chunk_size=500))
+    batch = Batch()
+    users = batch.page(User.objects.filter(is_active=True, diet_plans__isnull=False)
+                       .distinct(), after)
     for user in users:
+        if batch.spent():
+            break
+        batch.done(user.pk)
         try:
             total += len(update_weights(user))
         except (OperationalError, InterfaceError):
@@ -44,4 +57,5 @@ def refresh_food_weights():
             raise
         except Exception:
             logger.exception("Weight refresh failed for user %s", user.pk)
+    batch.hand_on(refresh_food_weights)
     return f"adjusted {total} food weights"

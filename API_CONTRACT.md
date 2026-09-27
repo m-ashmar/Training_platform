@@ -142,6 +142,7 @@ the top level for compatibility.
 | 405 | `method_not_allowed` | client bug |
 | 429 | `rate_limited` | back off; honour the `Retry-After` header |
 | 500 | `server_error` | retry with backoff; do not loop |
+| 503 | `upload_busy` | an image upload arrived while the server was already decoding as many images as its memory holds; NOTHING was stored or judged. Send the same file again after `Retry-After` seconds (also `retry_after_seconds` in the body). Any route that takes a photo can answer it (added 2026-09-27) |
 
 **These are the status DEFAULTS, not what a refusal answers.** Since the owner's decision
 of 2026-09-24 every refusal a view writes names its OWN `code` (listed in that view's
@@ -570,7 +571,9 @@ body), `parse_error` (400, a multipart body that cannot be parsed), `not_found` 
 refused here —, `corrupt_image`, `invalid_aspect_ratio` (over 10:1), `unreadable_image`
 (a truncated photo), `unsupported_format`, `image_dimensions_too_large`,
 `image_too_many_pixels`, and `mime_detection_failed` / `file_validation_error` when the
-guard itself fails). The push quotes the caption, or says "Photo" / "Voice note" /
+guard itself fails), and for a photo `upload_busy` (503, 2026-09-27: every image-decode
+slot of the server is taken — nothing was stored or counted; send it again after
+`Retry-After`). The push quotes the caption, or says "Photo" / "Voice note" /
 "Video" in the recipient's language — never a link. A chat video has no poster frame (no
 ffmpeg in the image) and a WebM or Ogg file declares no duration, so `duration_seconds`
 may be null.
@@ -1483,6 +1486,12 @@ blocked, created_at}` for the blocks this person MADE, never one made against th
 An erasure also removes rows about the person that other people hold — blocks made
 against them, and the chat notices they sent, which sit in the other side's inbox with
 their name and words — and never counts them in the preview or the report.
+
+Both are bounded however long the person has used the app (2026-09-27): rows are read,
+deleted and anonymised a page at a time, and a large export is streamed (the same JSON
+document and headers; read the body to its end). The stored files of an erasure leave
+storage shortly AFTER it answers, through a background task — a photo URL signed before
+the erasure may still load for a few moments.
 
 ### Routines & Workouts
 

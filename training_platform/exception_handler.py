@@ -40,6 +40,7 @@ from rest_framework.views import exception_handler as drf_exception_handler
 # Re-exported so `from training_platform.exception_handler import PASSTHROUGH_EXCEPTIONS`
 # also works; the definition lives in api_exceptions to keep it importable early.
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS  # noqa: F401
+from training_platform.api_exceptions import UploadBusy
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import Http404
 
@@ -250,6 +251,10 @@ def api_exception_handler(exc, context):
     data["code"] = code
     if field_errors:
         data["field_errors"] = field_errors
+    if isinstance(exc, UploadBusy):
+        # The wait in the body too, as the rate limiter's 429 does: `Retry-After` is the
+        # standard, and a body field is what a mobile client reads without header code.
+        data["retry_after_seconds"] = exc.wait
 
     response.data = data
     return Response(data, status=response.status_code, headers=_safe_headers(response))

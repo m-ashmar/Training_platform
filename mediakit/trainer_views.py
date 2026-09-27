@@ -131,6 +131,7 @@ class TrainerExerciseMediaView(APIView):
     | `403` | `not_a_trainer` | the caller has no library here |
     | `404` | `not_found` | an exercise this caller may not see, or no such exercise |
     | `413` | `payload_too_large` | the body itself is over the ceiling |
+    | `503` | `upload_busy` | an image slot, while the server is already decoding as many images as its memory holds (`training_platform/image_budget.py`): nothing was decoded or stored; send it again after `Retry-After` seconds (`retry_after_seconds` in the body) |
 
     Nothing here varies by build (`X-App-Channel`): it sells nothing and moves no
     money. Media URLs are signed and expire (`MEDIA_SIGNED_URL_TTL`, an hour) — use

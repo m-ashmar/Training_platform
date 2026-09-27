@@ -27,7 +27,7 @@ The files leave storage with their rows, but not through a per-row delete receiv
 that would cost Django's fast delete on this table (`chat.models.Message`). The two bulk
 paths that delete messages sweep the files instead (`delete_conversation_files`, and
 the erasure step in `training_platform/privacy/sources.py`), both through
-`delete_files_on_commit`.
+`delete_files_on_commit`, which hands them to a Celery task once the delete commits.
 
 The file is stored on the default storage — the media kit's backend: GCS in production,
 the signed filesystem in development and tests — under the extension the guard DETECTED
@@ -50,7 +50,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.base import File
-from django.db import DEFAULT_DB_ALIAS, connections, transaction
+from django.db import DEFAULT_DB_ALIAS
 from django.utils import timezone
 from django.utils.translation import gettext as _
 
@@ -190,53 +190,26 @@ def attachment_names(messages) -> list[str]:
                 .values_list('attachment', flat=True))
 
 
-class _FileSweep:
-    """An `on_commit` callback that deletes chat files. Sweeps of one transaction merge
-    into one where a rollback cannot tell them apart (`delete_files_on_commit`), so a
-    file that two bulk paths both reach is deleted once."""
-
-    def __init__(self, names):
-        self.names = dict.fromkeys(names)
-
-    def add(self, names):
-        self.names.update(dict.fromkeys(names))
-
-    def __call__(self):
-        storage = Message._meta.get_field('attachment').storage
-        for name in self.names:
-            try:
-                storage.delete(name)
-            except Exception:       # noqa: BLE001 — storage may be unreachable
-                logger.warning("could not delete chat file %s", name, exc_info=True)
+#: The field whose storage holds a chat file (`training_platform.storage_cleanup`).
+CHAT_FILES = "chat.Message.attachment"
 
 
 def delete_files_on_commit(names, using=DEFAULT_DB_ALIAS) -> None:
     """Delete these chat files once the surrounding transaction COMMITS. On a rollback
     they stay, with the rows that still point at them.
 
-    Inside a transaction, a sweep already waiting under EVERY savepoint that is open
-    now takes the names instead of a second callback, so an erasure — whose
-    conversation receiver and messages step both reach the person's own files —
-    deletes each file once. That merge is safe because Django drops an `on_commit`
-    callback when a savepoint it was registered under rolls back: a sweep registered
-    under all the open savepoints is dropped by every rollback that would drop these
-    names. (The other savepoints in its set were released already and cannot roll
-    back; `None` marks an `atomic(savepoint=False)`, which never does.) Anything
-    else — a sweep from a savepoint since released, or an unexpected shape — gets a
-    callback of its own: a second delete of a name is a no-op, a missed one is not.
+    Through `training_platform.storage_cleanup.delete_after_commit`: after the commit
+    the names go to the `delete_stored_files` task, off the request, which retries what
+    storage refuses. They used to be deleted one storage call at a time inside the
+    request that removed the rows — an erasure of a coach with thousands of photos
+    spent that many round trips in the DELETE (the production-readiness audit,
+    2026-09-25). Sweeps of one transaction still merge into one callback where a
+    rollback cannot tell them apart, so an erasure — whose conversation receiver and
+    messages step both reach the person's own files — hands each file over once.
     """
-    names = [name for name in names if name]
-    if not names:
-        return
-    connection = connections[using]
-    if connection.in_atomic_block:
-        open_now = {sid for sid in connection.savepoint_ids if sid}
-        for entry in connection.run_on_commit:
-            savepoints, callback = entry[0], entry[1]
-            if isinstance(callback, _FileSweep) and open_now <= set(savepoints):
-                callback.add(names)
-                return
-    transaction.on_commit(_FileSweep(names), using=using)
+    from training_platform.storage_cleanup import delete_after_commit
+
+    delete_after_commit(CHAT_FILES, names, using=using)
 
 
 def delete_conversation_files(sender, instance, using=None, **kwargs):

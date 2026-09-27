@@ -271,6 +271,7 @@ class MediaMessageView(APIView):
     | 400 | `media_not_audio`, `media_audio_too_large`, `media_audio_too_long`, `empty_file` | a voice note the guard refused: not M4A/Ogg/WebM by its bytes, over 10 MB, declaring over 90 s, or empty |
     | 400 | `file_too_large`, `empty_file`, `dangerous_extension`, `invalid_mime_type`, `corrupt_image`, `invalid_aspect_ratio`, `unreadable_image`, `unsupported_format`, `image_dimensions_too_large`, `image_too_many_pixels` | a photo the platform's image guard refused, respectively: over 5 MB; empty; a file name ending in an executable's extension; not JPEG/PNG/GIF/WebP by its bytes (a HEIC is refused here); broken at its header; longer than 10:1 on one side; broken past its header (a truncated or half-downloaded photo); a format the re-encoder does not write; over 10,000 px a side; over 40 MP (or an animation over its frame budget) |
     | 400 | `mime_detection_failed`, `file_validation_error` | the image guard itself failed on the file |
+    | 503 | `upload_busy` | a photo, while the server is already decoding as many images as its memory holds (`training_platform/image_budget.py`): nothing was decoded, stored or counted against the allowance; send it again after `Retry-After` seconds (`retry_after_seconds` in the body) |
 
     Nothing here differs by build: a message is not a product.
     """

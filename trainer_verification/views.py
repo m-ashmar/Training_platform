@@ -146,6 +146,7 @@ class DocumentView(APIView):
     | `409` | `verification_in_review` | the application is `pending`, and this is not an empty optional slot |
     | `409` | `verification_already_verified` | the account is verified; nothing changes now |
     | `413` | `payload_too_large` | the request body itself is over 15 MB |
+    | `503` | `upload_busy` | a photo, while the server is already decoding as many images as its memory holds (`training_platform/image_budget.py`): nothing was decoded or stored; send it again after `Retry-After` seconds (`retry_after_seconds` in the body) |
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]

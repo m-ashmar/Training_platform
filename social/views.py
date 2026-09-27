@@ -400,6 +400,11 @@ class PostViewSet(viewsets.ModelViewSet):
     `PATCH`/`DELETE` of someone else's post is 403 `not_owner` (was
     `permission_denied`, the owner's decision 9, 2026-09-24); a post the caller cannot
     read is 404 `not_found`.
+
+    A POST/PUT/PATCH carrying an `image` answers 503 `upload_busy` while the server is
+    already decoding as many images as its memory holds (`training_platform/
+    image_budget.py`): nothing was saved; send it again after `Retry-After` seconds
+    (`retry_after_seconds` in the body).
     """
     serializer_class = PostSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -882,6 +887,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           (`status: "completed"`), which moves the end to the moment of the close, so
           the review window runs from when it really ended.
     Changing `metric` or the dates of a RUNNING challenge still recounts everyone.
+
+    A POST/PUT/PATCH carrying an `image` answers 503 `upload_busy` while the server is
+    already decoding as many images as its memory holds (`training_platform/
+    image_budget.py`): nothing was saved; send it again after `Retry-After` seconds
+    (`retry_after_seconds` in the body).
     """
     #: What a finished challenge keeps: `challenge_over` if a PATCH changes one.
     FIXED_ONCE_OVER = ('metric', 'start_date', 'end_date', 'target_value')

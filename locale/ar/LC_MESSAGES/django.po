@@ -5498,7 +5498,9 @@ msgstr "لا توجد وجبة محفوظة بهذا المعرّف."
 msgid "name and food_items are required"
 msgstr "الاسم وfood_items مطلوبان"
 
-msgid "This plan starts on a day that has passed. Choose a start date from today on, then send it."
+msgid ""
+"This plan starts on a day that has passed. Choose a start date from today "
+"on, then send it."
 msgstr "تبدأ هذه الخطة في يوم مضى. اختر تاريخ بدء من اليوم فصاعداً، ثم أرسلها."
 
 #. The subject of the sign-up code email; %(brand)s is the platform's name ("يلا جيم").
@@ -5520,6 +5522,13 @@ msgid ""
 msgstr "شكرًا لتسجيلك! لإكمال التسجيل وتفعيل حسابك، استخدم رمز التحقق أدناه:"
 
 #. The account emails' footer, after "© <year> <brand>.".
-#: templates/emails/otp_verification.html templates/emails/password_reset_otp.html
+#: templates/emails/otp_verification.html
+#: templates/emails/password_reset_otp.html
 msgid "All rights reserved."
 msgstr "جميع الحقوق محفوظة."
+
+#: training_platform/api_exceptions.py
+msgid ""
+"The server is busy with other photos right now. Please try again in a few "
+"seconds."
+msgstr "الخادم مشغول بصور أخرى الآن. يُرجى المحاولة مرة أخرى بعد بضع ثوانٍ."

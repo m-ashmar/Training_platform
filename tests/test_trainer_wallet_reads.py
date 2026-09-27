@@ -266,13 +266,16 @@ def _row(source, destination, amount, when, *, money_type="WALLET_MOVE",
     """One ledger row at `when`. Written straight to the table, as the ledger's own gate
     test does: these tests are about READING rows, and the money functions stamp
     `created_at` with now."""
+    from tests.ledger_rows import backdate
     from wallet.models import Transaction
 
     row = Transaction.objects.create(
         source_wallet=source, destination_wallet=destination, amount=D(amount),
         tx_type=tx_type, money_type=money_type, metadata=metadata or {}, actor=actor,
         currency=(destination or source).currency)
-    Transaction.objects.filter(pk=row.pk).update(created_at=when)
+    # Shared setup, changed deliberately: the ledger refuses UPDATE at the database
+    # since wallet/0021, so the back-dating goes through the one test-only escape.
+    backdate(row.pk, when)
     row.refresh_from_db()
     return row
 

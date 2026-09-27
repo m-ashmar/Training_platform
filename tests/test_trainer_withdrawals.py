@@ -132,9 +132,11 @@ def _payout_row(trainer):
 
 
 def _age(tx, days):
-    from wallet.models import Transaction
+    # Shared setup, changed deliberately: the ledger refuses UPDATE at the database
+    # since wallet/0021, so the back-dating goes through the one test-only escape.
+    from tests.ledger_rows import backdate
 
-    Transaction.objects.filter(pk=tx.pk).update(created_at=tx.created_at - timedelta(days=days))
+    backdate(tx.pk, tx.created_at - timedelta(days=days))
 
 
 # ===========================================================================
