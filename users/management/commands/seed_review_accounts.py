@@ -266,8 +266,6 @@ class Command(BaseCommand):
                     f"{EMAIL_ENV} must be an address such as review@example.com or "
                     f"review-{{role}}@example.com; it gave {address!r} for {role}.")
             addresses[role] = address.lower()
-        if len(set(addresses.values())) != len(addresses):
-            raise CommandError(f"{EMAIL_ENV} must give each role its own address.")
         return addresses
 
     def _check_password(self, password):
@@ -440,9 +438,10 @@ class Command(BaseCommand):
         from users.views import approve_trainer_relation
 
         trainer = self.users["trainer"]
-        currency, money = self._money()
-        if trainer.trainer_hourly_rate != money["fee"]:
-            # The trainer's monthly fee, in their own currency, before anyone asks.
+        _currency, money = self._money()
+        if not trainer.trainer_hourly_rate:
+            # The trainer's monthly fee, in their own currency, before anyone asks. Set
+            # once: a fee an operator changed later is theirs.
             trainer.trainer_hourly_rate = money["fee"]
             trainer.save(update_fields=["trainer_hourly_rate"])
         for role in (*COACHED, "prospect"):

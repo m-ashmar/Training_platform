@@ -383,7 +383,7 @@ def test_seed_refuses_on_a_database_that_was_not_bootstrapped(db, review_env):
 
 
 def test_seed_never_takes_over_an_account_that_is_not_a_review_account(
-        seeded_catalogue, review_env, make_user):
+        db, seeded_catalogue, review_env, make_user):
     from django.core.management.base import CommandError
 
     _bootstrap("--skip-food-catalogue")
@@ -398,7 +398,7 @@ def test_seed_never_takes_over_an_account_that_is_not_a_review_account(
 
 
 def test_seed_builds_what_the_reviewers_need_and_a_second_run_changes_nothing(
-        seeded_catalogue, review_env, storage_roots, settings, monkeypatch,
+        db, seeded_catalogue, review_env, storage_roots, settings, monkeypatch,
         django_capture_on_commit_callbacks):
     from datetime import timedelta
     from decimal import Decimal
@@ -506,6 +506,8 @@ def test_seed_builds_what_the_reviewers_need_and_a_second_run_changes_nothing(
         second = _seed()
     assert _review_tables() == counts, "the second run wrote something"
     assert "nothing to change" in second, second
+    listed = _seed("--list")
+    assert all(f"store-review+{role}@yalla-review.test" in listed for role in ROLES)
 
     # Later runs keep the time-bound parts current, and a new password rotates it.
     Subscription.objects.filter(pk=subscription.pk).update(
@@ -520,18 +522,21 @@ def test_seed_builds_what_the_reviewers_need_and_a_second_run_changes_nothing(
     assert _review_tables() == counts
 
 
-def test_seed_takes_an_address_pattern_with_the_role_in_it(
-        seeded_catalogue, review_env, storage_roots, monkeypatch):
-    from users.models import CustomUser
+def test_seed_derives_six_addresses_from_one_mailbox_or_a_pattern():
+    """`{role}` goes where the pattern says; a plain mailbox is plus-addressed. (The
+    whole seed is exercised above with a plain mailbox; generating a meal plan takes
+    long enough that a second full run for the other spelling is not worth it.)"""
+    from django.core.management.base import CommandError
 
-    _bootstrap("--skip-food-catalogue")
-    monkeypatch.delenv("REVIEW_ACCOUNTS_EMAIL")
-    _seed("--email", "yalla-{role}@review-mail.test")
-    emails = set(CustomUser.objects.filter(groups__name="Store review accounts")
-                 .values_list("email", flat=True))
-    assert emails == {f"yalla-{role}@review-mail.test" for role in ROLES}
-    listed = _seed("--list")
-    assert all(f"yalla-{role}@review-mail.test" in listed for role in ROLES)
+    from users.management.commands.seed_review_accounts import Command
+
+    assert Command()._addresses("yalla-{role}@Review-Mail.test") == {
+        role: f"yalla-{role}@review-mail.test" for role in ROLES}
+    assert Command()._addresses("review@x-mail.test") == {
+        role: f"review+{role}@x-mail.test" for role in ROLES}
+    for wrong in ("review", "review@", "{role}"):
+        with pytest.raises(CommandError, match="REVIEW_ACCOUNTS_EMAIL"):
+            Command()._addresses(wrong)
 
 
 # ======================================================================== the scans
