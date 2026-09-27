@@ -103,7 +103,12 @@ def test_anonymous_gets_no_5xx_and_reaches_only_public_endpoints(api):
                # Spec B6/B7: the privacy policy, the terms and the account-deletion page
                # are public web pages by definition — a store listing links to them and
                # the deletion page exists for people who cannot sign in.
-               "/legal/privacy/", "/legal/terms/", "/legal/delete-account/"}
+               "/legal/privacy/", "/legal/terms/", "/legal/delete-account/",
+               # Payments spec, section 5 ("Returning to the app"): the Android App Links
+               # and iOS Universal Links association files. Anonymous by definition —
+               # Google's and Apple's verifiers fetch them with no account — and the same
+               # for everyone. 404 until configured, 200 once the ids are set.
+               "/.well-known/assetlinks.json", "/.well-known/apple-app-site-association"}
     errors, reachable = [], []
     for path in _routes():
         resp = anon.get(path)

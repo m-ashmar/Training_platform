@@ -542,10 +542,18 @@ def sweep_unmatched_transfers(now=None):
         left to the pollers, which match it exactly or hold it within minutes;
       * its note names a checkout paid or closed for good: queued against it
         (`duplicate_transfer` / `checkout_closed`) — money to hand back;
+      * no usable reference, its exact amount and currency, and a sender whose ShamCash
+        address exactly one customer saved on their profile (`PayerAddress`, the spec's
+        second signal, section 6): that customer's checkout opened before it — open, or
+        closed within the late-money window — is held for review (`reference_missing`)
+        with the match as evidence (`TransferReview.sender_match_payment_ids`, the
+        event's `sender_address_matched`) and the other checkouts the amount fits as
+        candidates. Never completed on the address;
       * no reference, and its amount and currency fit exactly ONE open checkout opened
         before it: that checkout is held for review (`reference_missing`);
       * otherwise queued alone (`no_candidate` / `several_candidates`, with the
-        candidates) for an operator to attach or dismiss.
+        candidates) for an operator to attach or dismiss; any of them whose customer
+        saved the sender's address is named on the row.
 
     Every ten minutes. A window the gateway could not read in full changes nothing it
     did not see.
@@ -555,6 +563,7 @@ def sweep_unmatched_transfers(now=None):
     from django.utils import timezone
     from django.utils.dateparse import parse_datetime
 
+    from . import payer_address
     from .models import HELD_PAYMENT_STATUSES, OPEN_PAYMENT_STATUSES, Payment, TransferReview
     from .services.payment_gateways import PaymentGatewayError, PaymentGatewayService
     from .services.payment_service import By, PaymentError, PaymentService
@@ -622,18 +631,35 @@ def sweep_unmatched_transfers(now=None):
             occurred = fact.get('occurred_at')
             occurred = parse_datetime(occurred) if isinstance(occurred, str) else occurred
             candidates = []
+            likely = None
             if amount is not None:
-                candidates = list(
-                    Payment.objects
-                    .filter(status__in=OPEN_PAYMENT_STATUSES, amount=amount,
-                            currency=fact.get('currency'))
-                    .exclude(status__in=HELD_PAYMENT_STATUSES)
-                    .exclude(gateway_transaction_reference__isnull=True)
-                    .exclude(gateway_transaction_reference='')
-                    .filter(**({'created_at__lte': occurred} if hasattr(occurred, 'tzinfo')
-                               and occurred is not None else {}))
-                    .order_by('created_at', 'id').values_list('id', flat=True))
-            if len(candidates) == 1:
+                fits = (Payment.objects
+                        .filter(amount=amount, currency=fact.get('currency'))
+                        .exclude(gateway_transaction_reference__isnull=True)
+                        .exclude(gateway_transaction_reference='')
+                        .filter(**({'created_at__lte': occurred}
+                                   if hasattr(occurred, 'tzinfo') and occurred is not None
+                                   else {})))
+                open_fits = (fits.filter(status__in=OPEN_PAYMENT_STATUSES)
+                             .exclude(status__in=HELD_PAYMENT_STATUSES))
+                candidates = list(open_fits.order_by('created_at', 'id')
+                                  .values_list('id', flat=True))
+                # THE SECOND SIGNAL (the spec, section 6): the sender's saved ShamCash
+                # address. With the right amount and no usable reference, the checkout of
+                # the one customer who saved the sender's address is the likely one — an
+                # open one, or one closed within the late-money window — even among
+                # several the amount fits. It is HELD for an operator with the match as
+                # evidence and the other candidates beside it; it is never completed on
+                # the address (`subscription/payer_address.py`).
+                likely = payer_address.likely_payment(
+                    fact, open_fits,
+                    fits.filter(status='expired', created_at__gte=now - late_window))
+            if likely is not None:
+                if PaymentService.hold_for_review(
+                        likely, fact, reason='reference_missing', by=By.SWEEP,
+                        candidates=[c for c in candidates if c != likely]):
+                    held += 1
+            elif len(candidates) == 1:
                 if PaymentService.hold_for_review(candidates[0], fact,
                                                   reason='reference_missing', by=By.SWEEP):
                     held += 1

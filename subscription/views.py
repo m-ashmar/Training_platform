@@ -214,6 +214,18 @@ def _checkout_open(payment):
         status=status.HTTP_409_CONFLICT)
 
 
+def gateway_state(gateway_name):
+    """`{state, since, last_success_at}` of the gateway a checkout is paid through — the
+    spec's "ShamCash is not responding, your payment is safe, we will keep checking"
+    (section 6). `state` is `ok` or `degraded`; `since` is when it stopped answering
+    (null while `ok`); `last_success_at` the last time the server read the merchant
+    account. The same for every build and every customer: it describes the gateway, not
+    the payment, and nothing is decided on it (`subscription/gateway_health.py`)."""
+    from .gateway_health import state_for
+
+    return state_for(gateway_name)
+
+
 def review_of(payment):
     """`{reason, held_at}` for a payment a person is checking or has rejected, else None.
 
@@ -530,11 +542,12 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             {"message": "<translated>", "payment_id": "<uuid>", "reference": "...",
              "status": "pending", "amount": "5000.00", "currency": "SYP",
              "payment_url": null | "...", "instructions": {...} | null,
-             "expires_at": "<iso>" | null}
+             "expires_at": "<iso>" | null, "gateway_state": {...}}
 
         `amount`/`currency` are what this checkout charges, in the buyer's currency —
         for a checkout that was already open, what it was opened at. `expires_at` is
-        when the server closes the checkout, as `POST v1/gateways/` answers it.
+        when the server closes the checkout, as `POST v1/gateways/` answers it, and
+        `gateway_state` is `payments/{id}/status/`'s (ShamCash answering or not).
 
         Codes it can answer (branch on `code`, never on the text):
 
@@ -619,6 +632,8 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 # Pay screen's countdown needed a second call on the renewal path
                 # (BACKEND_BUGS B-052).
                 'expires_at': checkout_expires_at(payment),
+                # Whether the server can read ShamCash right now (spec section 6).
+                'gateway_state': gateway_state(payment.payment_method),
             })
 
         except PASSTHROUGH_EXCEPTIONS:
@@ -776,7 +791,8 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         what the checkout will charge (`409 price_changed` otherwise). 200: ::
 
             {"success": true, "payment_id", "reference", "amount", "currency",
-             "payment_url", "instructions", "expires_at", "upgrade": {<the quote>}}
+             "payment_url", "instructions", "expires_at", "gateway_state",
+             "upgrade": {<the quote>}}
 
         If an upgrade to this same plan is already open, ITS figure is the price: `GET`
         answers that checkout's quote with `payment_id`, and `POST` hands the checkout
@@ -937,6 +953,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             'payment_url': resp.get('payment_url'),
             'instructions': resp.get('instructions'),
             'expires_at': resp.get('expires_at') or checkout_expires_at(payment),
+            'gateway_state': gateway_state(payment.payment_method),
             # What this checkout was struck at: the quote as it was when it opened.
             'upgrade': (payment.quote.as_payload() if getattr(payment, 'quote', None)
                         else _upgrade_payload_from_record(payment, record)),
@@ -1601,10 +1618,14 @@ class PaymentGatewayView(APIView):
             {"success": true, "payment_id": "<uuid>", "reference": "...",
              "amount": "5000.00", "currency": "SYP",
              "payment_url": null | "...", "instructions": {...} | null,
-             "expires_at": "<ISO 8601>"}
+             "expires_at": "<ISO 8601>",
+             "gateway_state": {"state": "ok" | "degraded", "since": ..., "last_success_at": ...}}
 
         `amount`/`currency` are what the returned reference charges, in the buyer's
         currency — draw THESE on the Pay screen, not a figure from the plan list.
+        `gateway_state` is `payments/{id}/status/`'s: `degraded` means the server cannot
+        read ShamCash right now — the checkout is open all the same and nothing is lost;
+        the Pay screen says so.
 
         Codes it can answer (branch on `code`, never on the text):
 
@@ -1815,6 +1836,8 @@ class PaymentGatewayView(APIView):
                 # enforces. It used to be the gateway's key alone, and the ShamCash
                 # adapter has never set it, so this was null on every checkout.
                 'expires_at': resp.get('expires_at') or checkout_expires_at(payment),
+                # Whether the server can read ShamCash right now (spec section 6).
+                'gateway_state': gateway_state(payment.payment_method),
             })
 
         except PaymentGatewayError as e:
@@ -1864,6 +1887,15 @@ class PaymentStatusView(APIView):
     than the history: the state it was in then, at the best time its row gave. Never
     the evidence (a transfer's details are its sender's) and never which operator.
     Identical on every build: a history carries no price.
+
+    `gateway_state` (the spec, section 6): `{state, since, last_success_at}` of the
+    gateway this payment is paid through. `state` is `ok`, or `degraded` when the server
+    has not been able to read the merchant account for a while (`since`: when it
+    stopped answering; null while `ok`). Draw "ShamCash is not responding. Your payment
+    is safe; we will keep checking." while it is `degraded` and the payment is still
+    open: nothing is expired or refused because of it, the pollers keep asking, and a
+    transfer already made is found when ShamCash answers again. `last_success_at` is the
+    last successful read (null if none yet). The same answer for every customer.
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1896,6 +1928,8 @@ class PaymentStatusView(APIView):
             'review': review_of(payment),
             # Every step it went through (plan step 5), without the evidence.
             'events': [event.for_app() for event in payment.events.all()],
+            # Whether the server can read ShamCash right now (spec section 6).
+            'gateway_state': gateway_state(payment.payment_method),
         })
 
 
@@ -1907,10 +1941,13 @@ class PaymentReconcileView(APIView):
     only on a verified match, completes it via PaymentService. It never trusts a bare
     status flag and never activates on unverified data.
 
-    200 `{success, payment_id, status, invoice_number}` — `status` is whatever the
-    payment is after asking: still `pending` when the gateway has seen nothing yet, and
-    `needs_review` when a transfer quoting this reference arrived with another amount or
-    currency — a person is checking it (BACKEND_BUGS B-051).
+    200 `{success, payment_id, status, invoice_number, gateway_state}` — `status` is
+    whatever the payment is after asking: still `pending` when the gateway has seen
+    nothing yet, and `needs_review` when a transfer quoting this reference arrived with
+    another amount or currency — a person is checking it (BACKEND_BUGS B-051).
+    `gateway_state` is `payments/{id}/status/`'s, read after this ask: `degraded` means
+    ShamCash is not answering — the payment is safe and the server keeps checking; the
+    answer is still 200 with the payment's unchanged `status`.
     Refusals, each with its `code` (BACKEND_BUGS B-048):
       404 `not_found`               no such payment, or not the caller's
       400 `no_gateway_reference`    the checkout never reached the gateway
@@ -1939,7 +1976,8 @@ class PaymentReconcileView(APIView):
             PaymentService.redeliver_payout(payment)
             return Response({'success': True, 'payment_id': str(payment.id),
                              'status': 'completed',
-                             'invoice_number': payment.invoice_number})
+                             'invoice_number': payment.invoice_number,
+                             'gateway_state': gateway_state(payment.payment_method)})
 
         if not payment.gateway_transaction_reference:
             return Response({'error': _('Payment has no gateway reference to reconcile'),
@@ -1985,6 +2023,8 @@ class PaymentReconcileView(APIView):
             'payment_id': str(payment.id),
             'status': payment.status,
             'invoice_number': payment.invoice_number,
+            # Read after the ask above, which recorded whether ShamCash answered.
+            'gateway_state': gateway_state(payment.payment_method),
         })
 
 

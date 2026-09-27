@@ -1683,6 +1683,35 @@ CDN) is named by its HTTPS URL with the checksum and size from the build pipelin
 published release never changes its file or build; raising its `min_supported_build`
 later is how a fix becomes a required update, and unticking "published" withdraws it.
 
+### Returning to the app (payments spec §5: Android App Links, iOS Universal Links)
+
+JSON association files for the stores' verifiers, served at the root of the host; they
+must answer on the HUB's domain over HTTPS with no redirect (a separate hub site forwards
+these two paths here). No authentication runs, no header is read, the answer is the same
+for everyone. `Content-Type: application/json`, `Cache-Control: public, max-age=3600`.
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/.well-known/assetlinks.json` | public | `AndroidAssetLinksView` |
+| `GET` | `/.well-known/apple-app-site-association` | public | `AppleAppSiteAssociationView` |
+
+- `assetlinks.json`: `[{relation: ["delegate_permission/common.handle_all_urls"], target:
+  {namespace: "android_app", package_name, sha256_cert_fingerprints: ["AB:CD:..."]}}]`,
+  one statement per package in `APP_LINKS_ANDROID_PACKAGES`, each with every fingerprint
+  in `APP_LINKS_ANDROID_SHA256_FINGERPRINTS` (the direct APK's signing key, and Play's
+  app-signing key once there is a Play build). The paths the app opens are its manifest's
+  intent filters.
+- `apple-app-site-association`: `{applinks: {apps: [], details: [{appIDs: ["TEAM.bundle"],
+  components: [{"/": "/app/*"}]}, {appID: "TEAM.bundle", paths: ["/app/*"]}]}}` from
+  `APP_LINKS_IOS_TEAM_ID`, `APP_LINKS_IOS_BUNDLE_IDS` and `APP_LINKS_PATHS` (the second
+  spelling is for iOS before 13).
+- `404 app_links_not_configured` for a file whose values are not set (or are malformed,
+  which is logged): no id is ever guessed.
+- **The link carries no secret and no entitlement.** The hub's "Open the app" is a plain
+  URL on the hub (e.g. `https://<hub>/app/payments/<payment_id>`): an id at most, never a
+  token or a price. The app, opened on it, re-fetches what the customer holds
+  (`payments/{id}/status/`, `subscriptions/current/`); the link grants nothing.
+
 ### Public pages (spec B6, B7): privacy policy, terms, account deletion
 
 HTML for a browser, not JSON — opened from the app (their URLs are in capabilities
@@ -2121,6 +2150,36 @@ B-051, 2026-09-23).
   `coaching_fee_held` / `coaching_fee_released` / `coaching_fee_refunded` to BOTH people
   (`data.role` says which side the recipient is on). The fact only, on every build: no
   amount, no button, no link.
+
+**Around the checkout: the sender's saved address, and "ShamCash is not responding"**
+(the spec, sections 5 and 6; 2026-09-27). Additive: no route, key or `code` changed.
+
+- `GET / PUT / DELETE /api/subscription/v1/payer-address/` — the public ShamCash account
+  address the caller pays FROM, on their profile. `PUT {address, address_confirm}` (typed
+  twice; spaces and dashes ignored, case-insensitive, 8-64 ASCII letters and digits)
+  saves or replaces it; `GET` answers `{address, saved_at, updated_at}` (`address`
+  grouped in fours, or all three null); `DELETE` 204 (also when none). Refusals:
+  `400 payer_address_required`, `payer_address_invalid`, `payer_address_mismatch`,
+  `validation_error`. Never a password, PIN, OTP or session. Identical on every build;
+  encrypted at rest; exported and erased with the account.
+- What it does: a transfer with the right amount and a missing or mistyped reference,
+  sent FROM the address exactly one customer saved, holds that customer's checkout for
+  review (`status: "needs_review"`, `review.reason: "reference_missing"`, the push
+  `payment_needs_review`) — even when several checkouts fit the amount, and for a
+  checkout closed within the last 72 hours. It never confirms a payment: only the
+  reference with the exact amount does, or an operator. So the reference still goes in
+  the transfer's note.
+- `gateway_state` on `payments/{payment_id}/status/`, `payments/{payment_id}/reconcile/`,
+  `POST v1/gateways/`, `subscriptions/{id}/renew/` and `POST subscriptions/{id}/upgrade/`:
+  `{state: "ok" | "degraded", since, last_success_at}` of the gateway the payment is paid
+  through. `degraded` once the server has failed to read the merchant account at least
+  `PAYMENT_GATEWAY_DEGRADED_AFTER_FAILURES` (2) times in a row over at least
+  `PAYMENT_GATEWAY_DEGRADED_AFTER_SECONDS` (60); `since` is when it stopped answering
+  (null while `ok`); `last_success_at` the last read that answered (null before any).
+  Draw "ShamCash is not responding. Your payment is safe; we will keep checking." while it
+  is `degraded`: nothing is expired, failed or refused because of it, the pollers keep
+  asking, and a transfer already made is found when ShamCash answers again. Operators
+  see the same state in the console (`/dj-admin/subscription/gatewayhealth/`).
 
 **What wiring the trainer money screens found: escrow and the ledger's reads**
 (BACKEND_BUGS B-096, B-101, 2026-09-24). Additive; identical on every build (money that
@@ -3282,6 +3341,7 @@ A post, comment or challenge whose text holds a term on the banned-terms list an
 | `GET` | `/api/subscription/v1/payments/{payment_id}/receipt/` | auth | `PaymentReceiptView` |
 | `POST` | `/api/subscription/v1/payments/{payment_id}/reconcile/` | auth | `PaymentReconcileView` |
 | `GET` | `/api/subscription/v1/payments/{payment_id}/status/` | auth | `PaymentStatusView` |
+| `DELETE, GET, PUT` | `/api/subscription/v1/payer-address/` | auth | `PayerAddressView` |
 | `GET` | `/api/subscription/v1/plans/` | public | `SubscriptionPlanViewSet` |
 | `GET` | `/api/subscription/v1/plans/available/` | public | `SubscriptionPlanViewSet` |
 | `GET` | `/api/subscription/v1/plans/{id}/` | public | `SubscriptionPlanViewSet` |

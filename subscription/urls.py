@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
+from .payer_views import PayerAddressView
 
 app_name = 'subscription'
 
@@ -50,6 +51,10 @@ urlpatterns = [
     # The receipt for a completed payment: JSON, or ?format=pdf. A record of a payment
     # already made, so it is answered on every channel (see PaymentReceiptView).
     path('v1/payments/<uuid:payment_id>/receipt/', views.PaymentReceiptView.as_view(), name='payment-receipt'),
+
+    # The ShamCash address the caller pays from, on their profile: the second signal the
+    # review queue matches a transfer by (spec section 6). See payer_views.py.
+    path('v1/payer-address/', PayerAddressView.as_view(), name='payer-address'),
 
     # Webhook Endpoints (for payment gateway notifications)
     path('webhook/<str:gateway_name>/', views.PaymentWebhookView.as_view(), name='payment-webhook'),

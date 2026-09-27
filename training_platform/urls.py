@@ -5,6 +5,7 @@ from django.urls import path, include, re_path
 from django.conf import settings
 from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 
+from releases.app_links import AndroidAssetLinksView, AppleAppSiteAssociationView
 from training_platform.media_views import serve_media
 from trainer_verification.storage import serve_private_document
 
@@ -60,6 +61,14 @@ urlpatterns = [
     # The newest build of each channel, for the update prompt and the APK download
     # (releases/views.py). Only the direct APK is ever handed a file.
     path('api/v1/app/', include('releases.urls', namespace='releases')),
+    # Returning from the web payment hub to the app (payments spec, section 5): the
+    # Android App Links and iOS Universal Links association files, from the environment,
+    # 404 until configured. The link they enable carries no secret and no entitlement.
+    # See releases/app_links.py.
+    path('.well-known/assetlinks.json', AndroidAssetLinksView.as_view(),
+         name='android-assetlinks'),
+    path('.well-known/apple-app-site-association', AppleAppSiteAssociationView.as_view(),
+         name='apple-app-site-association'),
     # Public HTML pages: the privacy policy, the terms of use and how to delete an
     # account (legal/views.py). Their URLs reach the app through capabilities.
     path('legal/', include('legal.urls', namespace='legal')),

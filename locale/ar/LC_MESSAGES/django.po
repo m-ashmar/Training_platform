@@ -5870,3 +5870,9 @@ msgstr "حدّث برنامجك"
 #, python-format
 msgid "Your program was updated · %(routine)s"
 msgstr "حدّث برنامجك · %(routine)s"
+
+#. The .well-known association files (Android App Links, iOS Universal Links) are
+#. not configured on this server: releases/app_links.py.
+#: releases/app_links.py
+msgid "Links that open the app are not set up on this server."
+msgstr "روابط فتح التطبيق غير مُعدّة على هذا الخادم."

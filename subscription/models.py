@@ -9,6 +9,7 @@ import uuid
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from decimal import Decimal
+from training_platform.encrypted_fields import EncryptedTextField
 from training_platform.model_validation import RowValidationMixin
 from policy.money import EntitlementSource, MoneyType
 from wallet.currencies import SUPPORTED_CURRENCIES as _SUPPORTED_CURRENCIES
@@ -681,6 +682,11 @@ class TransferReview(models.Model):
                                 related_name='transfer_reviews')
     #: Every checkout the amount fits, when there is more than one.
     candidate_payment_ids = models.JSONField(default=list, blank=True)
+    #: The second signal (the spec, section 6): the checkouts — this row's `payment` and
+    #: its candidates — whose customer saved the transfer's sender address on their
+    #: profile (`PayerAddress`). Evidence for the operator, written when the row is
+    #: queued; it never confirms anything, and the address is self-declared.
+    sender_match_payment_ids = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=10, choices=STATUSES, default='open', db_index=True)
     resolved_by = models.ForeignKey(CustomUser, null=True, blank=True,
                                     on_delete=models.SET_NULL,
@@ -697,6 +703,81 @@ class TransferReview(models.Model):
 
     def __str__(self):
         return f"{self.transaction_id} {self.amount} {self.currency} ({self.reason}, {self.status})"
+
+
+class PayerAddress(models.Model):
+    """The public ShamCash account address a customer pays FROM, saved on their profile
+    (the spec, section 6: "Save the address, not the account").
+
+    An identifier, like an IBAN — never a password, PIN, OTP or session, which nothing
+    here or anywhere asks for. One per account; typed twice, editable and removable
+    (`payer-address/`, `subscription/payer_address.py`). Encrypted at rest like a
+    trainer's payout address (`payouts.PayoutMethod`); `address_digest`, a keyed hash of
+    the normalised address, is what a transfer's sender is compared with, since a
+    randomised ciphertext cannot be.
+
+    What it is used for, and nothing else: the SECOND signal when a transfer reaches the
+    merchant account with the right amount and a missing or mistyped reference. A match
+    points the operator's review queue at this customer's checkout, with the match as
+    evidence (`TransferReview.sender_match_payment_ids`). It never confirms a payment on
+    its own: only the reference and the exact amount do, or an operator.
+    """
+
+    user = models.OneToOneField(CustomUser, on_delete=models.CASCADE,
+                                related_name='payer_address')
+    #: Normalised (no spaces or dashes, lower case). Encrypted.
+    address = EncryptedTextField(default='')
+    #: `subscription.payer_address.address_digest` of `address`. Not unique: two accounts may type
+    #: the same address, and refusing the second would tell a stranger that somebody
+    #: saved it. A digest held by more than one account points at nobody.
+    address_digest = models.CharField(max_length=64, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-id']
+        verbose_name = "Payer ShamCash address"
+        verbose_name_plural = "Payer ShamCash addresses"
+
+    def __str__(self):
+        return f"payer address of user {self.user_id}"
+
+
+class GatewayHealth(models.Model):
+    """Whether the server can read a payment gateway's merchant account right now (the
+    spec, section 6: "Every payment screen needs a 'ShamCash is not responding, your
+    payment is safe, we will keep checking' state").
+
+    One row per gateway, written by every read of the merchant account — the pollers,
+    the sweep, a customer's "check my payment" — through `PaymentGatewayService`
+    (`subscription/gateway_health.py`): a read that answered moves `last_success_at`
+    and clears the streak; one that could not reach the gateway adds to
+    `consecutive_failures`, and the first failure of a streak sets `failing_since`.
+    `state()` turns that into `ok` or `degraded`, which the payment reads answer as
+    `gateway_state`. Nothing decides on it: a checkout is never expired, failed or
+    completed because of this row (an unanswered read closes nothing,
+    `subscription.tasks.poll_open_payments`). Operators see it in the console.
+    """
+
+    gateway = models.CharField(max_length=30, unique=True)
+    #: The last read of the merchant account that answered (in full or not).
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    #: The last read that could not reach the gateway, and why (operators only).
+    last_failure_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=500, blank=True, default='')
+    #: Reads that failed since the last one that answered.
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    #: When the current streak of failures began; null while the gateway answers.
+    failing_since = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['gateway', 'id']
+        verbose_name = "Gateway health"
+        verbose_name_plural = "Gateway health"
+
+    def __str__(self):
+        return f"{self.gateway}: {self.consecutive_failures} failure(s)"
 
 
 class ImmutablePaymentEvent(PermissionError):

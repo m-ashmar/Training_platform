@@ -225,6 +225,18 @@ OPS_CONSOLE_BASE_URL = get_env("OPS_CONSOLE_BASE_URL", "")
 # or forwards `/legal/...`. The capabilities answer hands these URLs to every build
 # (legal/links.py). Empty means the host the API request came to.
 PUBLIC_PAGES_BASE_URL = get_env("PUBLIC_PAGES_BASE_URL", "")
+# Returning from the web payment hub to the app (the payments spec, section 5): the
+# Android App Links and iOS Universal Links association files at /.well-known/
+# (releases/app_links.py). Each list is comma-separated. Empty means that file answers
+# 404 `app_links_not_configured` — an id is never guessed. The Android fingerprints are
+# the SHA-256 of every release-signing certificate (the direct APK's own key, and the
+# Play app-signing key once there is a Play build); the paths are the hub URLs the app
+# opens (e.g. "/app/*"), which iOS reads from the file and Android from the manifest.
+APP_LINKS_ANDROID_PACKAGES = get_env("APP_LINKS_ANDROID_PACKAGES", "")
+APP_LINKS_ANDROID_SHA256_FINGERPRINTS = get_env("APP_LINKS_ANDROID_SHA256_FINGERPRINTS", "")
+APP_LINKS_IOS_TEAM_ID = get_env("APP_LINKS_IOS_TEAM_ID", "")
+APP_LINKS_IOS_BUNDLE_IDS = get_env("APP_LINKS_IOS_BUNDLE_IDS", "")
+APP_LINKS_PATHS = get_env("APP_LINKS_PATHS", "")
 
 # REST Auth
 REST_AUTH_SERIALIZERS = {
@@ -382,6 +394,12 @@ PAYMENT_POLL_BATCH = 100
 # poll_expired_checkouts): the ShamCash adapter's own lookback, since nothing older
 # could be found on the merchant account anyway.
 PAYMENT_LATE_MONEY_WINDOW_HOURS = 72
+# When the payment screens say "ShamCash is not responding, your payment is safe, we
+# will keep checking" (the spec, section 6; subscription/gateway_health.py): after this
+# many reads of the merchant account in a row could not reach it, over at least this
+# many seconds. What the screens SAY only — nothing is expired or refused on it.
+PAYMENT_GATEWAY_DEGRADED_AFTER_FAILURES = get_int_env("PAYMENT_GATEWAY_DEGRADED_AFTER_FAILURES", 2)
+PAYMENT_GATEWAY_DEGRADED_AFTER_SECONDS = get_int_env("PAYMENT_GATEWAY_DEGRADED_AFTER_SECONDS", 60)
 
 SUBSCRIPTION_RENEWAL_NOTICE_DAYS = 3
 SUBSCRIPTION_LAPSED_REMINDER_DAYS = (0, 3, 7, 14, 30)
