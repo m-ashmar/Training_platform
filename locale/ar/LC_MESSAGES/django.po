@@ -5548,15 +5548,24 @@ msgid ""
 "before changing how you eat, especially if you have a health condition or a "
 "severe allergy."
 msgstr ""
-"هذه الخطة إرشادات عامة وليست نصيحة طبية. استشر طبيبك قبل أن تغيّر طريقة "
-"أكلك، خاصةً إذا كانت لديك حالة صحية أو حساسية شديدة."
+"هذه الخطة إرشادات عامة وليست نصيحة طبية. استشر طبيبك قبل أن تغيّر طريقة أكلك، "
+"خاصةً إذا كانت لديك حالة صحية أو حساسية شديدة."
 
 #. The AI coach's whole answer to a payment question on a build that sells
 #. nothing (spec §3, §10). No price, no place, no link, no hint of paying elsewhere.
 #: ai_assistant/store_safe.py
 msgid ""
-"I'm the AI coach, so I can't help with payments, prices or subscriptions. Ask "
-"me about your training, your meals or your progress."
+"I'm the AI coach, so I can't help with payments, prices or subscriptions. "
+"Ask me about your training, your meals or your progress."
 msgstr ""
 "أنا المدرب الذكي، لذلك لا أستطيع المساعدة في الدفع أو الأسعار أو الاشتراكات. "
 "اسألني عن تمارينك أو وجباتك أو تقدّمك."
+
+#. The banned-terms filter refused a post, comment, challenge, profile name or
+#. username (spec B1). It never names the word.
+#: moderation/exceptions.py
+msgid ""
+"This contains words that are not allowed here. Please change them and try "
+"again."
+msgstr ""
+"يحتوي هذا النص على كلمات غير مسموح بها هنا. يُرجى تعديلها والمحاولة مرة أخرى."

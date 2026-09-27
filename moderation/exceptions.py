@@ -6,7 +6,7 @@ working the moment the user picks Arabic.
 """
 from django.utils.translation import gettext_lazy as _
 from rest_framework import status
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, ValidationError
 
 
 class AIConsentRequired(APIException):
@@ -27,3 +27,24 @@ class UserIsBlocked(APIException):
     status_code = status.HTTP_403_FORBIDDEN
     default_code = "user_blocked"
     default_detail = _("This is not available between these two accounts.")
+
+
+class ContentNotAllowed(ValidationError):
+    """A write holds a term on the banned-terms list (`moderation/ugc_filter.py`).
+
+    A `ValidationError`, so the envelope carries `field_errors`: one entry per refused
+    field, each with this code. `service_code` makes it the top-level `code` too
+    (`training_platform/exception_handler.py`), where a plain field error would answer
+    `validation_error`. The message never names the term: that would let anyone read
+    the list one guess at a time.
+    """
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    default_code = "content_not_allowed"
+    service_code = "content_not_allowed"
+    default_detail = _("This contains words that are not allowed here. "
+                       "Please change them and try again.")
+
+    def __init__(self, fields):
+        super().__init__({name: [self.default_detail] for name in fields},
+                         code=self.default_code)

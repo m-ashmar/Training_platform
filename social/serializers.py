@@ -28,6 +28,9 @@ from training_platform.file_security import SecureImageField
 # One query, both directions (moderation/services.py). It imports no model at module
 # level, which is why it can be imported from here at all.
 from moderation.services import blocked_ids
+# The banned-terms filter (spec B1): posts, comments and challenge text refuse a listed
+# term with 400 `content_not_allowed`, on create and edit (moderation/ugc_filter.py).
+from moderation.ugc_filter import BannedTermsFilter
 # Who may be shown to other people (the owner's decision 8, 2026-09-24).
 from users.visibility import hidden_q, is_public, public_q
 import logging
@@ -381,8 +384,13 @@ class PostListSerializer(serializers.ListSerializer):
             self.child._shares = None
 
 
-class PostSerializer(serializers.ModelSerializer):
+class PostSerializer(BannedTermsFilter, serializers.ModelSerializer):
     """Serializer for social posts
+
+    **The banned-terms filter** (spec B1). A create or edit whose `title` or `content`
+    holds a term on the operators' list answers 400 `content_not_allowed` (top-level
+    `code`, and `field_errors.<field>[0].code`) and writes nothing. Only the fields the
+    request writes are checked. Same on every build (`moderation/ugc_filter.py`).
 
     **The share card** (2026-09-24, BACKEND_BUGS B-080). A post can carry the finished
     workout or the badge it shares — the card Write attaches and the Feed draws.
@@ -419,6 +427,8 @@ class PostSerializer(serializers.ModelSerializer):
         write_only=True, required=False, allow_null=True, min_value=1)
     share_achievement = serializers.IntegerField(
         write_only=True, required=False, allow_null=True, min_value=1)
+
+    banned_terms_fields = ('title', 'content')
 
     class Meta:
         model = Post
@@ -574,9 +584,15 @@ class PostSerializer(serializers.ModelSerializer):
         return False
 
 
-class CommentSerializer(serializers.ModelSerializer):
-    """Serializer for post comments"""
-    
+class CommentSerializer(BannedTermsFilter, serializers.ModelSerializer):
+    """Serializer for post comments
+
+    A create or edit whose `content` holds a banned term answers 400
+    `content_not_allowed` and writes nothing (spec B1, `moderation/ugc_filter.py`).
+    """
+
+    banned_terms_fields = ('content',)
+
     author = UserMinimalSerializer(read_only=True)
     # Same reason as `PostSerializer.likes_count`: the stored counter counts a blocked
     # person's like, and the viewer cannot see it.
@@ -654,8 +670,12 @@ class CommentSerializer(serializers.ModelSerializer):
         return False
 
 
-class ChallengeSerializer(serializers.ModelSerializer):
+class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
     """Serializer for community challenges
+
+    A create or edit whose `title`, `description`, `rules`, `reward_description` or
+    `unit` holds a banned term answers 400 `content_not_allowed` naming the field, and
+    writes nothing (spec B1, `moderation/ugc_filter.py`).
 
     `creator` is `{id, username, user_type, profile_picture}`, or null when the creator's
     account is not publicly visible — suspended or erased (the owner's decision 8,
@@ -689,6 +709,8 @@ class ChallengeSerializer(serializers.ModelSerializer):
     #: `ChallengeViewSet.get_queryset`; counted here only for a row read elsewhere.
     winner_min_participants = serializers.SerializerMethodField()
     active_participants = serializers.SerializerMethodField()
+
+    banned_terms_fields = ('title', 'description', 'rules', 'reward_description', 'unit')
 
     class Meta:
         model = Challenge

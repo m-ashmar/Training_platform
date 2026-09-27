@@ -1,4 +1,5 @@
-"""The operator console: the reports queue, and read-only views of blocks and consent.
+"""The operator console: the reports queue, read-only views of blocks and consent, and
+the banned-terms list (`BannedTermAdmin`, editable behind its own permissions).
 
 Registered onto the console in `admin_dashboard/admin.py` (the site at `/dj-admin/`),
 the way every other page there is. The changelist gives the queue its filters, its
@@ -24,7 +25,7 @@ from django.utils.html import format_html
 
 from training_platform.admin_utils import log_admin_action
 
-from .models import AIConsent, Block, Report, ReportStatus
+from .models import AIConsent, BannedTerm, Block, Report, ReportStatus
 from .services import open_report_count
 from .targets import console_link
 
@@ -192,3 +193,73 @@ class AIConsentAdmin(OperatorOnlyMixin, admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+@admin.register(BannedTerm)
+class BannedTermAdmin(admin.ModelAdmin):
+    """The banned-terms list (spec B1; `moderation/ugc_filter.py` says how it is
+    matched and where).
+
+    **Who may do it.** Operators only, like the rest of this module: a bare staff
+    account gets 403. Reading the list is enough to be an operator; ADDING a term needs
+    the add permission, CHANGING one the change permission, DELETING one the delete
+    permission (`moderation.<action>_bannedterm`) — a superuser has all three. Adding a
+    word to this list decides what every account may write, so it is a permission of
+    its own, like deciding a verification or a withdrawal.
+
+    Every save and delete takes effect at the next write anywhere (the model's signals
+    move the cache's version); Django's admin log records who changed what. The two
+    actions go row by row through `save()`, never a bulk update, so each change is
+    logged and moves the version.
+
+    The seeded starter list arrives with "needs review" set: filter on it, and untick it
+    (or use "Mark as reviewed") once the owner has read a term.
+    """
+
+    list_display = ("term", "normalized", "whole_word", "language", "category",
+                    "is_active", "needs_review", "updated_at")
+    list_filter = ("needs_review", "is_active", "category", "language", "whole_word")
+    search_fields = ("term", "normalized", "notes")
+    ordering = ("normalized", "id")
+    readonly_fields = ("normalized", "created_at", "updated_at")
+    fields = ("term", "whole_word", "language", "category", "notes", "is_active",
+              "needs_review", "normalized", "created_at", "updated_at")
+    actions = ["mark_reviewed", "switch_off"]
+
+    def _may(self, request, action):
+        return (_is_operator(request.user)
+                and request.user.has_perm(f"moderation.{action}_bannedterm"))
+
+    def has_module_permission(self, request):
+        return _is_operator(request.user)
+
+    def has_view_permission(self, request, obj=None):
+        return _is_operator(request.user)
+
+    def has_add_permission(self, request):
+        return self._may(request, "add")
+
+    def has_change_permission(self, request, obj=None):
+        return self._may(request, "change")
+
+    def has_delete_permission(self, request, obj=None):
+        return self._may(request, "delete")
+
+    def _each(self, request, queryset, message, **fields):
+        changed = 0
+        for term in queryset:
+            for name, value in fields.items():
+                setattr(term, name, value)
+            term.save()
+            log_admin_action(request, term, message)
+            changed += 1
+        self.message_user(request, f"{changed} term(s): {message}.", messages.SUCCESS)
+
+    @admin.action(description="Mark as reviewed (keep as it is)", permissions=["change"])
+    def mark_reviewed(self, request, queryset):
+        self._each(request, queryset, "reviewed", needs_review=False)
+
+    @admin.action(description="Switch off (keep listed, match nowhere)",
+                  permissions=["change"])
+    def switch_off(self, request, queryset):
+        self._each(request, queryset, "switched off", is_active=False)

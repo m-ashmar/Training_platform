@@ -220,3 +220,107 @@ class AIConsent(models.Model):
         if self.granted_at is None:
             return False
         return self.revoked_at is None or self.revoked_at <= self.granted_at
+
+
+class BannedTerm(models.Model):
+    """One word or phrase nobody may write where other people read it (spec B1).
+
+    Edited by operators in the console (`/dj-admin/moderation/bannedterm/`); matched by
+    `moderation/ugc_filter.py`, whose docstring says what is checked, how a term is
+    matched and how the list is cached. Every save and delete moves the cache's version,
+    so the next write anywhere obeys the change.
+
+    Console-only: nothing here reaches the app (a refusal never names the term), so the
+    labels are plain English like every other console page.
+    """
+
+    class Language(models.TextChoices):
+        ARABIC = "ar", "Arabic"
+        ENGLISH = "en", "English"
+        ANY = "any", "Any / mixed"
+
+    class Category(models.TextChoices):
+        OBSCENITY = "obscenity", "Obscenity or sexual"
+        INSULT = "insult", "Insult"
+        HATE = "hate", "Slur or hate"
+        SPAM = "spam", "Spam or contact-for-sale"
+        OTHER = "other", "Other"
+
+    #: As the operator typed it. Matching compares its folded form (`normalized`).
+    term = models.CharField(max_length=100)
+    #: `term` folded the way text is folded before matching (`ugc_filter.normalise`).
+    #: Unique, so the same word cannot be listed twice under two spellings.
+    normalized = models.CharField(max_length=200, unique=True, editable=False)
+    whole_word = models.BooleanField(
+        default=True,
+        help_text="On: the term must stand as its own word (\"cunt\" does not match "
+                  "\"Scunthorpe\"). Off: it matches inside other words too (\"fuck\" "
+                  "matches \"motherfucker\"): only for stems no innocent word "
+                  "contains.")
+    language = models.CharField(max_length=3, choices=Language.choices,
+                                default=Language.ANY,
+                                help_text="For the operator's own sorting. Every term "
+                                          "is matched in every text.")
+    category = models.CharField(max_length=10, choices=Category.choices,
+                                default=Category.OTHER)
+    notes = models.TextField(blank=True, default="",
+                             help_text="Why it is listed, where it was seen.")
+    is_active = models.BooleanField(default=True,
+                                    help_text="Off: kept in the list, matched nowhere.")
+    #: The seeded starter list is written with this set: the owner reviews every seeded
+    #: term (keep, change, switch off) before launch. An operator's own row is False.
+    needs_review = models.BooleanField(
+        default=False, help_text="Seeded, and not yet reviewed by the owner.")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Banned term"
+        verbose_name_plural = "Banned terms"
+        ordering = ["normalized", "id"]
+
+    def __str__(self):
+        return self.term
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        from .ugc_filter import MIN_TERM_LETTERS, letter_count, normalise
+
+        folded = normalise(self.term)
+        if letter_count(folded) < MIN_TERM_LETTERS:
+            raise ValidationError({"term": f"A term needs at least {MIN_TERM_LETTERS} "
+                                           "letters: a single letter matches everywhere."})
+        if len(folded) > self._meta.get_field("normalized").max_length:
+            raise ValidationError({"term": "This term is too long once folded."})
+        taken = BannedTerm.objects.filter(normalized=folded).exclude(pk=self.pk).first()
+        if taken is not None:
+            raise ValidationError({"term": f"Already listed as \"{taken.term}\" "
+                                           "(the same word once folded)."})
+
+    def save(self, *args, **kwargs):
+        from .ugc_filter import normalise
+
+        self.term = (self.term or "").strip()
+        self.normalized = normalise(self.term)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "term" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "normalized"}
+        super().save(*args, **kwargs)
+
+
+def _banned_terms_changed(**_kwargs):
+    """Every process drops its compiled list: now (this process, and any that reads
+    before the commit sees the old rows) and again once the change is committed."""
+    from django.db import transaction
+
+    from . import ugc_filter
+
+    ugc_filter.invalidate()
+    transaction.on_commit(ugc_filter.invalidate)
+
+
+models.signals.post_save.connect(_banned_terms_changed, sender=BannedTerm,
+                                 dispatch_uid="moderation.banned_terms.saved")
+models.signals.post_delete.connect(_banned_terms_changed, sender=BannedTerm,
+                                   dispatch_uid="moderation.banned_terms.deleted")
