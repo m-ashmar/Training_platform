@@ -23,6 +23,14 @@ Trust levels
 
 **Unknown is not the same as safe.** A checker must report an unverified food as
 needing review rather than passing it silently; see `diet/services/meal_validator.py`.
+
+Complete tagging (spec B4)
+--------------------------
+Verified is necessary and not sufficient. `food_tagging_gaps` and `dish_tagging_gaps`
+say when a row's tagging is INCOMPLETE — the codes are the `GAP_*` constants below — and
+`declares_allergy` says when a client declared an allergy at all. The planner refuses
+every incomplete food and dish to such a client (`diet/planner/constraints.py`, where the
+before/after measurement is recorded).
 """
 
 from __future__ import annotations
@@ -251,6 +259,123 @@ def food_allergen_tags(food) -> Set[str]:
     """
     stored = {t for t in (getattr(food, "allergens", None) or []) if t in ALLERGENS}
     return stored | infer_allergens(food_text(food))
+
+
+# --- Complete tagging (spec B4) ---------------------------------------------------
+#
+# The owner's rule: "until allergen tagging is corrected, exclude any dish with
+# incomplete tags from plans for users who declared an allergy". These are the reasons
+# a row's tagging is incomplete, as codes. The planner reads only whether the list is
+# empty (`diet/planner/constraints.py ClientConstraints`); the codes are for whoever
+# fixes the row.
+
+#: `allergen_source` is not `verified`: `inferred` is a guess from the name, `unknown`
+#: was never populated. Neither says what is NOT in the food.
+GAP_UNVERIFIED = "unverified_source"
+#: `allergens` is not a list of vocabulary tags — `["nuts"]`, `"peanut"`, `null`.
+#: `food_allergen_tags` drops what it cannot read, so such a row read as carrying
+#: nothing at all. Nothing refuses it on write (`validate_tags` is never called).
+GAP_MALFORMED = "malformed_tags"
+#: The row's own English name or ingredient list implies a tag its stored list lacks.
+#: The checker still catches THAT allergen (it unions the two), but a curation that
+#: missed what the name says has vouched for nothing the name does not say.
+GAP_IMPLIED = "implied_not_tagged"
+#: A dish with an incomplete line is an incomplete dish.
+GAP_INGREDIENT = "ingredient_incomplete"
+#: A dish with no lines has nothing that vouches for it.
+GAP_NO_INGREDIENTS = "no_ingredients"
+
+
+def _audit_food(food) -> tuple[Set[str], list[str]]:
+    """(every tag this food carries, why its tagging is incomplete), in one reading.
+
+    The tags are `food_allergen_tags` without its one failure: a non-list `allergens`
+    (a number, a string) is read as no stored tags rather than iterated or raised on.
+    """
+    gaps: list[str] = []
+    if (getattr(food, "allergen_source", None) or "unknown") != "verified":
+        gaps.append(GAP_UNVERIFIED)
+    stored = getattr(food, "allergens", None)
+    if isinstance(stored, (list, tuple)):
+        readable = {t for t in stored if isinstance(t, str) and t in ALLERGENS}
+        wellformed = all(isinstance(t, str) and t in ALLERGENS for t in stored)
+    else:
+        readable, wellformed = set(), False
+    if not wellformed:
+        gaps.append(GAP_MALFORMED)
+    implied = infer_allergens(food_text(food))
+    if implied - readable:
+        gaps.append(GAP_IMPLIED)
+    return readable | implied, gaps
+
+
+def food_tagging_gaps(food) -> list[str]:
+    """Why this food's allergen tagging is incomplete; an empty list when it is complete.
+
+    COMPLETE means all three: `allergen_source == "verified"`; `allergens` is a list of
+    tags from `ALLERGENS` and nothing else; and every tag the food's own English name and
+    `ingredients_text` imply (`infer_allergens`) is among the stored ones. A complete row
+    is one a person has vouched for AND whose data does not contradict itself.
+    """
+    return _audit_food(food)[1]
+
+
+def dish_text(recipe) -> str:
+    """What a dish SAYS it is, in English: its name, description, method and line notes.
+
+    Read from the prefetched lines (`recipe.ingredients.all()`); adding `select_related`
+    here would discard the planner's prefetch and query once per dish per meal.
+    """
+    parts = [getattr(recipe, "name_en", None) or getattr(recipe, "name", "") or "",
+             getattr(recipe, "description_en", None) or getattr(recipe, "description", "")
+             or "",
+             getattr(recipe, "instructions", "") or ""]
+    parts += [line.note or "" for line in recipe.ingredients.all()]
+    return " ".join(p for p in parts if p)
+
+
+def dish_tagging_gaps(recipe) -> list[str]:
+    """Why this dish's allergen tagging is incomplete; an empty list when it is complete.
+
+    A dish carries no tags of its own — it is its lines (`Recipe.allergen_tags`). So a
+    dish is COMPLETE when it has at least one line, every line's food is complete
+    (`food_tagging_gaps`), and nothing the dish's own text says (`dish_text`: `Chicken
+    Satay`, "drizzle with tahini", a line noted "cooked in ghee") implies an allergen
+    that none of its lines carries. That last one is the under-tagged dish of the brief:
+    the peanut sauce was never written down as a line, so every line check passed.
+    """
+    lines = list(recipe.ingredients.all())
+    if not lines:
+        return [GAP_NO_INGREDIENTS]
+    gaps: list[str] = []
+    carried: Set[str] = set()
+    for line in lines:
+        tags, line_gaps = _audit_food(line.food)
+        if line_gaps and GAP_INGREDIENT not in gaps:
+            gaps.append(GAP_INGREDIENT)
+        carried |= tags
+    if infer_allergens(dish_text(recipe)) - carried:
+        gaps.append(GAP_IMPLIED)
+    return gaps
+
+
+#: A letter the English vocabulary cannot read: any word character that is not an ASCII
+#: letter, a digit or an underscore — Arabic, above all.
+_UNREADABLE_LETTER = re.compile(r"[^\W\d_a-zA-Z]")
+
+
+def declares_allergy(raw: str | None) -> bool:
+    """Did the client declare an allergy at all — whether or not we can read which?
+
+    True when `parse_user_allergies` finds a tag or a free term, AND when the text holds
+    letters the English vocabulary cannot read. `فول سوداني` parses to nothing (the
+    word pattern is `[a-z']`), so the checker was inactive and that client was treated
+    as declaring nothing; for the completeness rule an allergy we cannot read is still
+    an allergy. Blank text and "no allergies" (qualifiers only) declare nothing.
+    """
+    if parse_user_allergies(raw):
+        return True
+    return bool(_UNREADABLE_LETTER.search(raw or ""))
 
 
 def parse_user_allergies(raw: str | None) -> Set[str]:

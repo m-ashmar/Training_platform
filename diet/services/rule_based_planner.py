@@ -721,19 +721,23 @@ class RuleBasedPlanner:
 
         base = f"no dish or meal shape can be built for {meal_name} from this client's pool"
         constraints = self._constraints()
-        if not constraints.checks_allergens:
+        # `requires_complete_tags`, not `checks_allergens`: a declaration the vocabulary
+        # cannot read (Arabic) leaves the checker inactive and still refuses every food
+        # whose tagging is incomplete (spec B4), which is the commoner cause here.
+        if not constraints.requires_complete_tags:
             return base
-        unvetted = (FoodItem.objects.filter(needs_review=False)
-                    .exclude(allergen_source="verified").count())
-        total = FoodItem.objects.filter(needs_review=False).count()
+        servable = list(FoodItem.objects.filter(needs_review=False))
+        total = len(servable)
+        unvetted = sum(1 for food in servable if constraints.incompletely_tagged(food))
         if total and unvetted == total:
             return (f"{base}. Every one of the {total} food(s) in the catalogue has an "
-                    f"unverified allergen composition, so none of them can be cleared for "
-                    f"a client who has declared an allergy. Run "
+                    f"unverified or incomplete allergen composition, so none of them can "
+                    f"be cleared for a client who has declared an allergy. Run "
                     f"`manage.py curate_food_allergens --apply`.")
         if unvetted:
-            return (f"{base}. {unvetted} of {total} food(s) have an unverified allergen "
-                    f"composition and cannot be served to a client with a declared allergy.")
+            return (f"{base}. {unvetted} of {total} food(s) have an unverified or "
+                    f"incomplete allergen composition and cannot be served to a client "
+                    f"with a declared allergy.")
         return base
 
     def _plan_meal_from_template(self, meal_name: str, ctx: PlannerContext,

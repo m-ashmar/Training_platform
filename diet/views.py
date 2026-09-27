@@ -1574,6 +1574,14 @@ class GenerateDietPlanRuleBasedView(APIView):
     - 422 `no_servable_meal` — one meal cannot be built from the foods allowed.
     - 429 `quota_exhausted` — today's allowance is spent.
     - 500 `persistence_failed` — the plan could not be saved; 500 `server_error`.
+
+    What "allowed" means for a client who declared an allergy (spec B4): besides their
+    declared allergens, no food and no dish whose allergen tagging is incomplete is ever
+    planned (`diet/allergens.py` `food_tagging_gaps`, `dish_tagging_gaps`), whichever
+    allergy they declared and in whatever language they wrote it. A client with no
+    declared allergy is not affected. Same answer on every build; no new code or field —
+    on a catalogue with many incomplete rows such a client may meet `no_servable_meal`.
+    The async route (`v1/plans/generate/`) plans by the same rule.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
 
@@ -3531,7 +3539,9 @@ class ClientMealInteractionView(APIView):
     - 400 `bad_kind` — `event` with a `kind` other than `viewed` / `accepted`.
     - 400 `bad_actual_quantity` — `actual_quantity` not a number, or outside 0–1000 g.
     - 400 `food_not_allowed` — `swap_food` to a food the client's allergies or
-      exclusions forbid; `error` says why.
+      exclusions forbid; `error` says why. For a client who declared an allergy that
+      includes any food whose allergen tagging is incomplete (spec B4), which the offers
+      leave out too.
     - 403 `clients_only` — the caller is not a client.
     - 403 `no_entitlement` / `feature_not_in_plan` — no diet access (a frozen
       subscription is refused here: every action is a use, not a read).
