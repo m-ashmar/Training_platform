@@ -163,6 +163,15 @@ def test_a_redis_that_serves_only_database_zero_can_hold_the_broker():
     assert got["caches"]["default"] == "redis://redis.internal:6379/0"
 
 
+def test_a_broker_that_is_not_redis_is_accepted_but_not_on_localhost():
+    """Celery is not tied to Redis: a managed RabbitMQ is a reasonable broker. The old
+    check let one through; the Redis rules must not start refusing it."""
+    got = _booted(CELERY_BROKER_URL="amqps://yalla:pw@rabbit.broker-provider.test/yalla")
+    assert got["broker"] == "amqps://yalla:pw@rabbit.broker-provider.test/yalla"
+    _refused("CELERY_BROKER_URL", "localhost",
+             CELERY_BROKER_URL="amqp://guest:guest@localhost:5672//")
+
+
 def test_a_broker_in_another_database_of_the_cache_redis_is_accepted():
     got = _booted(REDIS_URL=None, REDIS_CACHE_URL="redis://one.internal:6379/0",
                   REDIS_CHANNELS_URL="redis://one.internal:6379/0",

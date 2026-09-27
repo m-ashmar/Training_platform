@@ -25,6 +25,9 @@ What production refuses (`problems`), and why:
   every queued job with it: sign-up codes, notifications, renewals. Another database of
   the same server, or another server, is fine.
 - **Any role on localhost.** There is no Redis inside the app container.
+- **A cache or channel layer URL that is not Redis.** The broker and the result store
+  may be any URL Celery takes (a managed RabbitMQ, `amqps://...`); only the localhost
+  rule applies to those.
 - **A `rediss://` broker or result store without `ssl_cert_reqs`.** kombu then connects
   WITHOUT checking the server's certificate (it logs a warning and uses CERT_NONE), and
   the Redis result backend raises on first use — inside the request that queued a task.
@@ -107,9 +110,16 @@ def describe(url):
 
 
 def is_local(url):
-    """Whether `url` points inside the machine it is read on."""
+    """Whether `url` points inside the machine it is read on — a Redis URL, or any other
+    `scheme://host` a Celery broker or result store may be (amqp://, sqs://, ...)."""
     found = endpoint(url)
-    return found is not None and (found[0] in _LOCAL_HOSTS or found[0].startswith("unix:"))
+    if found is not None:
+        return found[0] in _LOCAL_HOSTS or found[0].startswith("unix:")
+    try:
+        host = (urlsplit((url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _LOCAL_HOSTS
 
 
 def problems(roles, broker):
@@ -123,15 +133,18 @@ def problems(roles, broker):
     """
     found = []
     for variable, what, url, consequence in roles:
+        # Celery is not tied to Redis: a managed RabbitMQ (amqps://) broker is a
+        # reasonable choice, so only the caches and the channel layer must be Redis.
+        celery = variable.startswith("CELERY_")
         if not url:
             found.append(f"{variable} is empty — {what} has no Redis; {consequence}")
-        elif endpoint(url) is None:
+        elif endpoint(url) is None and not celery:
             found.append(f"{variable} is not a redis://, rediss:// or unix:// URL — "
                          f"{what} cannot connect; {consequence}")
         elif is_local(url):
             found.append(f"{variable} points {what} at localhost ({describe(url)}); "
                          f"there is no Redis inside the app container — {consequence}")
-        elif (variable.startswith("CELERY_")
+        elif (celery
               and urlsplit(url).scheme.lower() == "rediss"
               and "ssl_cert_reqs" not in parse_qs(urlsplit(url).query)):
             found.append(

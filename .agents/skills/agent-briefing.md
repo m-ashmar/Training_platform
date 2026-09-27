@@ -55,6 +55,21 @@ Two more that fail silently (found building `payouts`, 2026-09-24):
   (`MyDietPlansView` and the two plan reads do). A write that retires plans must
   filter `is_active=True`, never "not mine", or it will retire a draft nobody follows.
 
+Three more about tests of background work (found building `fx/prod-services`, 2026-09-27):
+
+- **No Celery retry ever runs in the suite.** Tasks run eagerly with
+  `CELERY_TASK_EAGER_PROPAGATES = True`, and then Celery hands a task's `Retry` back to
+  the CALLER instead of re-running it. To test a retry, set
+  `settings.CELERY_TASK_EAGER_PROPAGATES = False` (the Celery app reads the Django
+  setting on every lookup; assigning `app.conf.task_eager_propagates` does NOTHING).
+- **`caplog` never sees the `users`, `diet`, `routine`, `subscription` or `challenges`
+  loggers**: `settings_base` LOGGING sets `propagate: False` on them. Add
+  `caplog.handler` to the logger itself (`tests/test_prod_services.py` `users_log`).
+- **A production boot test needs every required variable**: the shared environments are
+  `tests/test_media_storage.py` `_production_boot` and `tests/test_fx_media.py`
+  `_prod_env`. A new `require_env` in `settings_production.py` goes into both, with the
+  reason, or every "boots" assertion fails for a reason that is not theirs.
+
 ## Working in a worktree
 
 Worktrees are how several agents build at once. The setup is done for you; what bites is:
