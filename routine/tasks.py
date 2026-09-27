@@ -72,8 +72,10 @@ def send_async_notification(user_id, notif_type, message, related_object_id=None
 #: app may sync a workout up to 30 days late (routine/views.py MAX_BACKLOG_DAYS).
 SWEEP_WINDOW_DAYS = 30
 
-#: At most this many open days a run. A night that hits it says so and the next run
-#: takes the rest.
+#: At most this many open days an INVOCATION (and never more than `PERIODIC_BATCH_SIZE`).
+#: The rest is handed on to a fresh invocation the same night (`training_platform.
+#: batching`); it used to wait for the next night, so a backlog larger than this never
+#: drained and the same days were left open night after night.
 SWEEP_MAX_DAYS = 500
 
 
@@ -85,8 +87,14 @@ SWEEP_MAX_DAYS = 500
     retry_jitter=True,
     max_retries=3,
 )
-def close_open_training_days(before=None):
+def close_open_training_days(before=None, after=None):
     """Record what was left of training days that were opened and never closed.
+
+    A page of open days per invocation (`training_platform.batching`: at most
+    `PERIODIC_BATCH_SIZE`, and `SWEEP_MAX_DAYS`), in id order after `after`, and the rest
+    handed on to a fresh invocation with the same `before`. `capped` says this
+    invocation handed on. Each day is recorded at most once (the outcome is looked for
+    first), so a redelivered page records nothing twice.
 
     A person who starts a day, logs half of it and never taps anything leaves a
     `RoutineProgress` row at `in_progress` and no outcome, so the missed work would
@@ -102,12 +110,13 @@ def close_open_training_days(before=None):
 
     from django.utils import timezone
 
+    from training_platform.batching import Batch, as_date, batch_size, carry
     from users.coaching import training_refusal
 
     from .models import DayOutcome, ExerciseSetLog, RoutineProgress
     from .outcomes import record_day_quietly
 
-    before = before or timezone.localdate()
+    before = as_date(before) or timezone.localdate()
     # A trailing window, not all of history: without it the first run would reconstruct
     # every half-finished day ever left behind, measure it against TODAY's plan and turn
     # years-old days into streak breaks.
@@ -141,18 +150,22 @@ def close_open_training_days(before=None):
         | (models.Q(workout_session__routine_id=models.OuterRef('routine_id'))
            & (models.Q(workout_session__day__isnull=True)
               | models.Q(workout_session__day=models.OuterRef('day')))))
-    open_days = (RoutineProgress.objects
-                 .filter(status__in=('in_progress', 'not_started'),
-                         date__lt=before, date__gte=window_start)
-                 .annotate(already=models.Exists(recorded), worked=models.Exists(worked))
-                 .filter(already=False)
-                 .filter(models.Q(status='in_progress')
-                         | models.Q(exercises_completed__gt=0) | models.Q(worked=True))
-                 .select_related('user', 'routine')
-                 .order_by('date', 'id')[:SWEEP_MAX_DAYS])
+    batch = Batch(size=min(batch_size(), SWEEP_MAX_DAYS))
+    open_days = batch.page(
+        RoutineProgress.objects
+        .filter(status__in=('in_progress', 'not_started'),
+                date__lt=before, date__gte=window_start)
+        .annotate(already=models.Exists(recorded), worked=models.Exists(worked))
+        .filter(already=False)
+        .filter(models.Q(status='in_progress')
+                | models.Q(exercises_completed__gt=0) | models.Q(worked=True))
+        .select_related('user', 'routine'), after)
 
     closed = skipped = 0
     for row in open_days:
+        if batch.spent():
+            break
+        batch.done(row.pk)
         if training_refusal(row.user, row.routine, row.date):
             skipped += 1
             continue
@@ -163,25 +176,9 @@ def close_open_training_days(before=None):
             closed += 1
     if closed or skipped:
         logger.info("Closed %s open training days (%s skipped: not trainable)", closed, skipped)
-    capped = closed + skipped >= SWEEP_MAX_DAYS
-    if capped:
-        # Said out loud: the rest is picked up by the next run, and a cap that binds
-        # every night means the window or the cap is wrong.
-        logger.warning("Open-day sweep hit its %s-row cap; the remainder waits for the "
-                       "next run", SWEEP_MAX_DAYS)
+    # The rest, the same night, by a fresh invocation measuring against the same day.
+    capped = batch.hand_on(close_open_training_days, before=carry(before))
     return {'closed': closed, 'skipped': skipped, 'capped': capped}
-
-
-def _coaching_rosters() -> dict:
-    """`{trainer_id: [client_id, ...]}` for every approved coaching relation."""
-    from users.models import TrainerClientRelation
-
-    rosters: dict = {}
-    for trainer_id, client_id in (TrainerClientRelation.objects
-                                  .filter(status='approved')
-                                  .values_list('trainer_id', 'client_id')):
-        rosters.setdefault(trainer_id, []).append(client_id)
-    return rosters
 
 
 @shared_task(
@@ -192,8 +189,16 @@ def _coaching_rosters() -> dict:
     retry_jitter=True,
     max_retries=3,
 )
-def send_weekly_progress(now=None):
+def send_weekly_progress(now=None, phase="clients", after=None):
     """The week, once a week: a recap to each client, a digest to each trainer.
+
+    In pages (`training_platform.batching`): each invocation takes at most
+    `PERIODIC_BATCH_SIZE` people — clients first, then trainers — and hands the rest on
+    to a fresh invocation with the same `now`, `phase` and the last id done. Every client
+    on the platform and every roster in one task, with an FCM send per person, was the
+    shape the production-readiness audit (2026-09-25) found cut off part-way under the
+    300 s soft limit. A page reads only its own people's weeks and coaching states. The
+    counts returned are this invocation's.
 
     The owner (2026-09-20): this is what brings people back, and what keeps a coach
     looking at their clients. Both texts are facts — sets planned and done, days with
@@ -214,31 +219,87 @@ def send_weekly_progress(now=None):
 
     from notifications.models import UserNotificationPreference
     from notifications.services import NotificationService
+    from training_platform.batching import Batch, as_datetime, carry
     from users.coaching import refusals_for
+    from users.models import TrainerClientRelation
 
     from .outcomes import attention, week_totals
 
-    now = now or timezone.now()
+    now = as_datetime(now) or timezone.now()
     today = timezone.localdate(now)
     start = today - timedelta(days=6)
     week_key = f"{today.isocalendar().year}-W{today.isocalendar().week:02d}"
     User = get_user_model()
+    batch = Batch()
+    sent_clients = sent_trainers = 0
 
     # --- each client's own week ------------------------------------------------
-    clients = list(User.objects.filter(user_type='client', is_active=True)
-                   .only('id', 'preferred_language'))
-    totals = week_totals([client.pk for client in clients], start, today)
-    sent_clients = 0
-    # Who is frozen, ended or unpaid — per COACH, for the whole roster at once. Asking
-    # one arbitrary routine (the most recently updated one assigned to the client) let a
-    # client with two coaches be judged by the wrong one, and cost a handful of queries
-    # per client besides.
-    frozen: set = set()
-    for trainer_id, client_ids in _coaching_rosters().items():
-        for client_id, refusal in refusals_for(trainer_id, client_ids).items():
-            if refusal is not None:
-                frozen.add(client_id)
+    if phase == "clients":
+        clients = batch.page(User.objects.filter(user_type='client', is_active=True)
+                             .only('id', 'preferred_language'), after)
+        totals = week_totals([client.pk for client in clients], start, today)
+        # Who is frozen, ended or unpaid — per COACH, for this page's clients. Asking one
+        # arbitrary routine (the most recently updated one assigned to the client) let a
+        # client with two coaches be judged by the wrong one, and cost a handful of
+        # queries per client besides.
+        rosters: dict = {}
+        for trainer_id, client_id in (TrainerClientRelation.objects
+                                      .filter(status='approved',
+                                              client_id__in=[c.pk for c in clients])
+                                      .values_list('trainer_id', 'client_id')):
+            rosters.setdefault(trainer_id, []).append(client_id)
+        frozen: set = set()
+        for trainer_id, client_ids in rosters.items():
+            for client_id, refusal in refusals_for(trainer_id, client_ids).items():
+                if refusal is not None:
+                    frozen.add(client_id)
+        sent_clients = _recaps(clients, batch, totals, frozen, week_key)
+        if batch.cut:
+            batch.hand_on(send_weekly_progress, now=carry(now), phase="clients")
+            logger.info("Weekly progress: %s clients so far", sent_clients)
+            return {'clients': sent_clients, 'trainers': 0, 'week': week_key}
+        phase, after = "trainers", None
+
+    # --- each trainer's roster -------------------------------------------------
+    coaching = TrainerClientRelation.objects.filter(status='approved')
+    for trainer in batch.page(User.objects.filter(
+            pk__in=coaching.values('trainer_id'), is_active=True).only('id'), after):
+        if batch.spent():
+            break
+        batch.done(trainer.pk)
+        # The opt-out decides before the work, not after it: a trainer who turned the
+        # digest off used to pay for a full roster scan every week to be skipped.
+        if not UserNotificationPreference.is_channel_enabled(trainer, 'trainer_weekly_digest'):
+            continue
+        ids = list(coaching.filter(trainer=trainer).order_by('client_id')
+                   .values_list('client_id', flat=True))
+        week = week_totals(ids, start, today)
+        trained = sum(1 for client_id in ids if week.get(client_id, {}).get('logged_sets'))
+        needs = attention(trainer, ids, today=today)
+        if NotificationService.create_and_send(
+                recipient=trainer, event_type="trainer_weekly_digest",
+                related_object_id=week_key,
+                metadata={'context': {'clients': len(ids), 'trained': trained,
+                                      'attention': len(needs)},
+                          'data': {'type': 'trainer_weekly_digest', 'week': week_key,
+                                   'attention': str(len(needs))}}) is not None:
+            sent_trainers += 1
+    batch.hand_on(send_weekly_progress, now=carry(now), phase="trainers")
+
+    logger.info("Weekly progress: %s clients, %s trainers", sent_clients, sent_trainers)
+    return {'clients': sent_clients, 'trainers': sent_trainers, 'week': week_key}
+
+
+def _recaps(clients, batch, totals, frozen, week_key) -> int:
+    """Each client's own week, for one page of clients (`send_weekly_progress`)."""
+    from notifications.models import UserNotificationPreference
+    from notifications.services import NotificationService
+
+    sent = 0
     for client in clients:
+        if batch.spent():
+            break
+        batch.done(client.pk)
         week = totals.get(client.pk)
         if not week or not week.get('planned_sets'):
             continue
@@ -256,36 +317,13 @@ def send_weekly_progress(now=None):
                                       'perfect': week['perfect_days']},
                           'data': {'type': 'weekly_recap', 'week': week_key,
                                    'missed_sets': str(week['missed_sets'])}}) is not None:
-            sent_clients += 1
-
-    # --- each trainer's roster -------------------------------------------------
-    rosters = _coaching_rosters()
-    sent_trainers = 0
-    for trainer in User.objects.filter(pk__in=rosters, is_active=True).only('id'):
-        # The opt-out decides before the work, not after it: a trainer who turned the
-        # digest off used to pay for a full roster scan every week to be skipped.
-        if not UserNotificationPreference.is_channel_enabled(trainer, 'trainer_weekly_digest'):
-            continue
-        ids = rosters[trainer.pk]
-        week = week_totals(ids, start, today)
-        trained = sum(1 for client_id in ids if week.get(client_id, {}).get('logged_sets'))
-        needs = attention(trainer, ids, today=today)
-        if NotificationService.create_and_send(
-                recipient=trainer, event_type="trainer_weekly_digest",
-                related_object_id=week_key,
-                metadata={'context': {'clients': len(ids), 'trained': trained,
-                                      'attention': len(needs)},
-                          'data': {'type': 'trainer_weekly_digest', 'week': week_key,
-                                   'attention': str(len(needs))}}) is not None:
-            sent_trainers += 1
-
-    logger.info("Weekly progress: %s clients, %s trainers", sent_clients, sent_trainers)
-    return {'clients': sent_clients, 'trainers': sent_trainers, 'week': week_key}
+            sent += 1
+    return sent
 
 
-#: At most this many forgotten sessions a run. A night that hits it says so and the next
-#: run takes the rest; nothing user-facing waits on it, because every reader applies the
-#: read rule itself (`routine/sessions.py`).
+#: Forgotten sessions a page (one UPDATE). Pages follow each other within an invocation
+#: and then in fresh ones (`abandon_forgotten_sessions`); nothing user-facing waits on
+#: them, because every reader applies the read rule itself (`routine/sessions.py`).
 SESSION_SWEEP_MAX = 500
 
 
@@ -297,7 +335,7 @@ SESSION_SWEEP_MAX = 500
     retry_jitter=True,
     max_retries=3,
 )
-def abandon_forgotten_sessions(now=None):
+def abandon_forgotten_sessions(now=None, after=None):
     """Close the workouts nobody ever finished (SIDE_BUGS S-022).
 
     `WorkoutSession.status` has carried an `abandoned` value since the model was
@@ -325,25 +363,37 @@ def abandon_forgotten_sessions(now=None):
     sweep RECONSTRUCTS a day and must not measure a year-old one against today's plan,
     while this one only stops a row lying about the present, which is right at any age.
     `SESSION_SWEEP_MAX` is the bound instead, oldest first so a backlog drains.
+
+    `SESSION_SWEEP_MAX` is a PAGE, not the night's total: pages follow one another until
+    none is left or `PERIODIC_BATCH_SECONDS` is spent, and then the rest is handed on to
+    a fresh invocation (`training_platform.batching`) — it used to wait for the next
+    night, so a backlog larger than one page never drained. `capped` says this
+    invocation handed on. `after` is accepted for the hand-on and not needed: an
+    abandoned session leaves the query.
     """
+    from training_platform.batching import Batch, as_datetime, carry
+
     from .models import WorkoutSession
     from .sessions import forgotten
 
-    stale = list(forgotten(WorkoutSession.objects.all(), now=now)
-                 .order_by('start_time', 'id')
-                 .values_list('pk', flat=True)[:SESSION_SWEEP_MAX])
-    if not stale:
-        return {'abandoned': 0, 'capped': False}
-    # `status='active'` again in the UPDATE: a session finished between the SELECT and
-    # here is a completed workout, and this must not overwrite it.
-    abandoned = (WorkoutSession.objects
-                 .filter(pk__in=stale, status='active')
-                 .update(status='abandoned'))
-    logger.info("Abandoned %s forgotten workout sessions", abandoned)
-    capped = len(stale) >= SESSION_SWEEP_MAX
-    if capped:
-        # Said out loud: the rest is picked up by the next run, and a cap that binds
-        # every night means the cap is wrong.
-        logger.warning("Forgotten-session sweep hit its %s-row cap; the remainder waits "
-                       "for the next run", SESSION_SWEEP_MAX)
+    now = as_datetime(now)
+    batch = Batch()
+    abandoned = 0
+    while not batch.spent():
+        stale = list(forgotten(WorkoutSession.objects.all(), now=now)
+                     .order_by('start_time', 'id')
+                     .values_list('pk', flat=True)[:SESSION_SWEEP_MAX])
+        if not stale:
+            break
+        batch.handled += 1
+        # `status='active'` again in the UPDATE: a session finished between the SELECT
+        # and here is a completed workout, and this must not overwrite it.
+        abandoned += (WorkoutSession.objects
+                      .filter(pk__in=stale, status='active')
+                      .update(status='abandoned'))
+        if len(stale) < SESSION_SWEEP_MAX:
+            break
+    if abandoned:
+        logger.info("Abandoned %s forgotten workout sessions", abandoned)
+    capped = batch.hand_on(abandon_forgotten_sessions, now=carry(now))
     return {'abandoned': abandoned, 'capped': capped}

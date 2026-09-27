@@ -216,8 +216,16 @@ REMINDER_CATCH_UP_HOURS = 2
     retry_jitter=True,
     max_retries=3,
 )
-def send_workout_reminders():
+def send_workout_reminders(now=None, after=None):
     """Remind each client about today's training, in their own evening.
+
+    In pages (`training_platform.batching`): each invocation takes at most
+    `PERIODIC_BATCH_SIZE` candidates and hands the rest on to a fresh invocation with
+    the SAME `now`, so one hour's cohort is judged by one clock however many pages it
+    takes. Every candidate on the platform in one task, with an FCM send per reminder,
+    is what the catch-up window below had to paper over when the 300 s soft limit cut a
+    run off (the production-readiness audit, 2026-09-25); the dedup key still makes a
+    redelivered page send nothing twice.
 
     Runs hourly and sends only to users whose local hour — resolved through their own
     `preferred_timezone` — matches their `workout_reminder_hour`. A single daily sweep
@@ -249,9 +257,10 @@ def send_workout_reminders():
 
     from notifications.services import NotificationService
     from routine.models import RoutineProgress
+    from training_platform.batching import Batch, as_datetime, carry
 
     User = get_user_model()
-    now = timezone.now()
+    now = as_datetime(now) or timezone.now()
 
     candidates = (
         User.objects.filter(
@@ -264,7 +273,11 @@ def send_workout_reminders():
     )
 
     sent = 0
-    for user in candidates.iterator(chunk_size=500):
+    batch = Batch()
+    for user in batch.page(candidates, after):
+        if batch.spent():
+            break
+        batch.done(user.pk)
         try:
             tz = ZoneInfo(user.preferred_timezone or "UTC")
         except (ZoneInfoNotFoundError, ValueError):
@@ -383,4 +396,5 @@ def send_workout_reminders():
             sent += 1
 
     logger.info("workout reminders sent: %d", sent)
+    batch.hand_on(send_workout_reminders, now=carry(now))
     return sent

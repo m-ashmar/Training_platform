@@ -258,6 +258,76 @@ def _gcs_key_problem(name):
     return None
 
 
+def heavy_work_problems(memory=None) -> list:
+    """What is unsafe about how much this process may do at once. Empty when nothing.
+
+    * Image decodes (`training_platform/image_budget.py`): each may hold
+      DECODE_BUDGET_BYTES, so the slots, times that, beside IMAGE_DECODE_RESERVED_BYTES,
+      must fit in the machine's memory — IMAGE_DECODE_MEMORY_BYTES when set, else what
+      the process can read (its cgroup limit, else its RAM). A count the memory cannot
+      hold is refused rather than trusted, and so is a machine too small for even one.
+    * Periodic pages (`training_platform/batching.py`): a page must leave the row in
+      progress room to finish, so it may spend at most half of
+      CELERY_TASK_SOFT_TIME_LIMIT.
+    * Privacy pages and the export spool (`training_platform/privacy/registry.py`): a
+      page of at least one row, and a spool that stays small — past 64 MB in memory the
+      export is not bounded any more.
+    """
+    from training_platform import image_budget
+
+    g = globals()
+    mb = 1024 * 1024
+    problems = []
+
+    slots = g.get("IMAGE_DECODE_SLOTS")
+    reserved = int(g.get("IMAGE_DECODE_RESERVED_BYTES") or image_budget.DEFAULT_RESERVED_BYTES)
+    budget = image_budget.DECODE_BUDGET_BYTES
+    memory = memory or g.get("IMAGE_DECODE_MEMORY_BYTES") or image_budget.machine_memory_bytes()
+    if slots is not None and int(slots) < 1:
+        problems.append(f"IMAGE_DECODE_SLOTS is {slots}; it must be at least 1")
+    if reserved < 0:
+        problems.append("IMAGE_DECODE_RESERVED_BYTES must not be negative")
+    if memory:
+        if memory < reserved + budget:
+            problems.append(
+                f"the machine has {memory // mb} MB, and one image decode needs "
+                f"{budget // mb} MB beside the {reserved // mb} MB the process keeps "
+                "(IMAGE_DECODE_RESERVED_BYTES): give the machine more memory")
+        elif slots is not None and int(slots) >= 1 \
+                and int(slots) * budget + reserved > memory:
+            problems.append(
+                f"IMAGE_DECODE_SLOTS={slots} lets {int(slots) * budget // mb} MB of image "
+                f"decodes run at once beside {reserved // mb} MB, and the machine has "
+                f"{memory // mb} MB: at most "
+                f"{image_budget.slots_for(memory, reserved=reserved)} fit — unset it to "
+                "size the slots from the memory, or set IMAGE_DECODE_MEMORY_BYTES if the "
+                "memory was misread")
+    wait = g.get("IMAGE_DECODE_WAIT_SECONDS")
+    if wait is not None and float(wait) < 0:
+        problems.append("IMAGE_DECODE_WAIT_SECONDS must not be negative")
+
+    soft = int(g.get("CELERY_TASK_SOFT_TIME_LIMIT") or 300)
+    if int(g.get("PERIODIC_BATCH_SIZE") or 0) < 1:
+        problems.append("PERIODIC_BATCH_SIZE must be at least 1")
+    if int(g.get("PERIODIC_SCAN_SIZE") or 0) < 1:
+        problems.append("PERIODIC_SCAN_SIZE must be at least 1")
+    seconds = int(g.get("PERIODIC_BATCH_SECONDS") or 0)
+    if seconds < 1 or seconds * 2 > soft:
+        problems.append(
+            f"PERIODIC_BATCH_SECONDS is {seconds}; a periodic page must spend between 1 "
+            f"and {soft // 2} seconds (half of CELERY_TASK_SOFT_TIME_LIMIT={soft}), or "
+            "the soft limit cuts it off part-way")
+    if int(g.get("PRIVACY_BATCH_ROWS") or 0) < 1:
+        problems.append("PRIVACY_BATCH_ROWS must be at least 1")
+    spool = int(g.get("PRIVACY_EXPORT_SPOOL_BYTES") or 0)
+    if spool < 0 or spool > 64 * mb:
+        problems.append("PRIVACY_EXPORT_SPOOL_BYTES must be between 0 and 64 MB: past it "
+                        "a data export is held in memory instead of on disk")
+    if int(g.get("STORAGE_DELETE_BATCH") or 0) < 1:
+        problems.append("STORAGE_DELETE_BATCH must be at least 1")
+    return problems
+
+
 def enforce_production_safety():
     """
     Runtime invariant checks. Any violation crashes the process.
@@ -404,6 +474,9 @@ def enforce_production_safety():
     # --- SECRET_KEY strength ---
     if ('django-insecure' in (SECRET_KEY or '')) or (len(SECRET_KEY or '') < 32):
         errors.append("SECRET_KEY is weak or a Django dev placeholder in production")
+
+    # --- Heavy work in requests and jobs (the production-readiness audit, 2026-09-25) ---
+    errors.extend(heavy_work_problems())
 
     # Note: AWS Secrets are strictly validated automatically during settings import via get_secret()
 

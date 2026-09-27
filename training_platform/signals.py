@@ -320,16 +320,30 @@ def _delete_after_commit(file_obj, label):
 
     Deleting inline would destroy the bytes even when the save/delete is rolled
     back afterwards, leaving a live row pointing at a file that no longer exists.
+
+    And not in the request either: after the commit the name goes to the
+    `delete_stored_files` task (`training_platform.storage_cleanup`), which retries
+    what storage refuses. Deleting here meant one storage round trip per file inside
+    the request — per photo of an erased account, per rendition of a media-kit
+    picture — and a storage error lost the file for good (the production-readiness
+    audit, 2026-09-25). Every file one transaction removes goes over in one sweep.
     """
     from django.db import transaction
 
-    def _do_delete():
-        try:
-            file_obj.delete(save=False)
-        except Exception as exc:  # storage may be unreachable; never raise here
-            logger.warning("Could not delete %s (%s): %s", label, file_obj.name, exc)
+    from training_platform.storage_cleanup import delete_after_commit, field_label
 
-    transaction.on_commit(_do_delete)
+    try:
+        target = field_label(file_obj.field)
+    except Exception:  # a file with no field to name its storage: as before, here
+        def _do_delete():
+            try:
+                file_obj.delete(save=False)
+            except Exception as exc:  # storage may be unreachable; never raise here
+                logger.warning("Could not delete %s (%s): %s", label, file_obj.name, exc)
+
+        transaction.on_commit(_do_delete)
+        return
+    delete_after_commit(target, [file_obj.name])
 
 
 def _is_shared(sender, field_name, file_name, exclude_pk=None):

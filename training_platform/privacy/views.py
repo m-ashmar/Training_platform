@@ -6,13 +6,12 @@ erasure without touching this module.
 import logging
 
 from django.db import transaction
-from django.http import JsonResponse
 from django.utils.translation import gettext as _
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .registry import ErasureRefused, erase_user_data, export_user_data
+from .registry import ErasureRefused, erase_user_data
 
 logger = logging.getLogger(__name__)
 
@@ -33,19 +32,67 @@ class PersonalDataExportView(APIView):
     user_feedback}`, with the ranges and the scrubbed text and without the keyed
     pseudonym it is stored under. The list is empty when none is kept. Identical on
     every build.
+
+    The document is written a page of rows at a time (`registry.write_user_data`,
+    `PRIVACY_BATCH_ROWS`) into a spool that moves to a temporary file past
+    `PRIVACY_EXPORT_SPOOL_BYTES`; a small export is answered as one body, a large one is
+    streamed from that file. Either way it is the same JSON document with the same
+    headers — a long-time user's export used to be built whole in memory, every row a
+    dict, and could take a 512 MB machine down with it (the production-readiness audit,
+    2026-09-25).
     """
 
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        data = export_user_data(request.user)
+        import tempfile
+
+        from django.conf import settings
+        from django.http import HttpResponse, StreamingHttpResponse
+
+        from .registry import write_user_data
+
+        limit = int(getattr(settings, "PRIVACY_EXPORT_SPOOL_BYTES", 8 * 1024 * 1024))
+        spool = tempfile.SpooledTemporaryFile(max_size=limit, mode="w+b")
+        try:
+            write_user_data(request.user, spool)
+        except BaseException:
+            spool.close()
+            raise
         logger.info("Personal-data export generated for user %s", request.user.pk)
-        response = JsonResponse(data, json_dumps_params={"indent": 2})
+        if not getattr(spool, "_rolled", False):     # still in memory: under the limit
+            spool.seek(0)
+            body = spool.read()
+            spool.close()
+            response = HttpResponse(body, content_type="application/json")
+        else:
+            spool.seek(0)
+            response = StreamingHttpResponse(_chunks(spool), content_type="application/json")
+            # Closed when the response is, whether or not it was read to the end.
+            response._resource_closers.append(spool.close)
         response["Content-Disposition"] = (
             f'attachment; filename="personal-data-{request.user.pk}.json"'
         )
         response["Cache-Control"] = "no-store"
         return response
+
+
+#: How much of a spooled export one streamed chunk carries.
+EXPORT_CHUNK_BYTES = 64 * 1024
+
+
+async def _chunks(spool):
+    """The spooled export, a chunk at a time. An ASYNC iterator on purpose: under ASGI
+    (Daphne) Django consumes a synchronous one by reading it whole into a list first,
+    which would put the file back into memory."""
+    from asgiref.sync import sync_to_async
+
+    read = sync_to_async(spool.read, thread_sensitive=False)
+    while True:
+        chunk = await read(EXPORT_CHUNK_BYTES)
+        if not chunk:
+            break
+        yield chunk
 
 
 class PersonalDataEraseView(APIView):
@@ -65,6 +112,15 @@ class PersonalDataEraseView(APIView):
     Rows about the caller that other people hold go too and are never counted in the
     preview or the report: blocks made against them, and the chat notices they sent,
     which sit in the other side's inbox with their name and words.
+
+    Bounded however long the person has used the app: rows are deleted and anonymised a
+    page of `PRIVACY_BATCH_ROWS` at a time, in the one transaction, and the stored files
+    of what was deleted (chat photos, voice notes, videos, media-kit pictures, the
+    profile picture) leave storage AFTER the commit, through a background task that
+    retries what storage refuses — not one storage call per file inside this request
+    (`training_platform/storage_cleanup.py`). A trainer's verification documents are the
+    exception: deleted from storage first, synchronously, so storage refusing them still
+    refuses the erasure (`erasure_refused`, below).
 
     Answers:
       200 `{message, detail}`   erased.

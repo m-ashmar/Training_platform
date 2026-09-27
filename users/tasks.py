@@ -62,21 +62,42 @@ def refresh_ages_from_birth_dates(after=None):
     max_retries=3,
 )
 @no_retry_on_timeout
-def renew_coaching_periods():
+def renew_coaching_periods(phase="remind", after=None):
     """Remind 3 days ahead, charge every coaching month that has ended, freeze what the
     wallet cannot cover and keep reminding it.
 
     See users/coaching.py. Every step is idempotent, so a retried run charges nothing
     twice; a relation that failed is retried with the rest. Returns the renewal counts,
-    plus `renewal_reminders` when any "renews soon" notice went out.
+    plus `renewal_reminders` when any "renews soon" notice went out — this invocation's.
+
+    In pages (`training_platform.batching`): at most `PERIODIC_BATCH_SIZE` relations an
+    invocation — the reminders, then the on-time renewals, then the frozen ones with
+    something to do — and the rest handed on to a fresh invocation with `phase` and the
+    last relation id done. A month-end with thousands of renewals in one task under the
+    300 s soft limit was cut off part-way, and the relations that sorted later waited an
+    hour, or several (the production-readiness audit, 2026-09-25). The continuation is
+    enqueued BEFORE a failure is raised for the retry, so one bad relation does not hold
+    the rest back; the retry re-runs this page only.
     """
+    from training_platform.batching import Batch
+
     from .coaching import remind_upcoming, renew_due
 
-    reminded = remind_upcoming()
-    result = renew_due()
-    counts = dict(result['counts'])
-    if reminded:
-        counts['renewal_reminders'] = reminded
+    batch = Batch()
+    counts: dict = {}
+    if phase == "remind":
+        reminded = remind_upcoming(batch=batch, after=after)
+        if reminded:
+            counts['renewal_reminders'] = reminded
+        if batch.hand_on(renew_coaching_periods, phase="remind"):
+            logger.info("Coaching renewals: %s", counts)
+            return counts
+        phase, after = "on_time", None
+    result = renew_due(batch=batch, phase=phase, after=after)
+    counts = {**result['counts'], **counts}
+    following = result.get('next')
+    if following:
+        renew_coaching_periods.apply_async(kwargs=following)
     if counts:
         logger.info("Coaching renewals: %s", counts)
     if result['failed']:

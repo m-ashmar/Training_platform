@@ -142,9 +142,77 @@ def register(source: PersonalDataSource) -> PersonalDataSource:
 
 
 # ---------------------------------------------------------------- Art. 15: access
+#: Rows one page reads, deletes or anonymises, for export and erasure alike
+#: (`PRIVACY_BATCH_ROWS`). What a page holds — the rows as dicts, or the instances
+#: Django collects to delete them — is bounded by this, never by how long the person
+#: has used the app: 180 days of activity log, years of set logs and messages.
+DEFAULT_BATCH_ROWS = 1000
+
+
+def batch_rows() -> int:
+    from django.conf import settings
+
+    return max(1, int(getattr(settings, "PRIVACY_BATCH_ROWS", DEFAULT_BATCH_ROWS)))
+
+
+def _export_columns(source, model) -> list[str]:
+    # Concrete COLUMNS only. `ManyToManyField.concrete` is True, so this list used to
+    # include every M2M on the model and `.values()` turned each one into a LEFT JOIN:
+    # `diet.UserFoodPreference` has seven, and one client with eight likes, eight
+    # dislikes and four foods in each of five choice lists produced 8 x 8 x 4^5 =
+    # 65,536 rows for a single record. The request hung, the broad handler filed the
+    # section as an error, and the person received a silently incomplete export of
+    # their own data.
+    return source.fields or [
+        f.name for f in model._meta.get_fields()
+        if getattr(f, "concrete", False) and not f.many_to_many
+    ]
+
+
+def section_pages(source, user, *, size: int | None = None):
+    """Yield one registered source's rows for `user`, a page (a list of dicts) at a time,
+    in the section's own order (the model's default ordering, as before).
+
+    Only the section's primary keys are held whole — a few bytes a row, in order —
+    and `size` rows at a time are read as dicts, with their many-to-many ids attached
+    by one query per relation for the page. The whole section used to be one
+    `list(qs.values(...))`, and then every row again as a model instance to read its
+    many-to-many ids one query per row (the production-readiness audit, 2026-09-25).
+    """
+    size = size or batch_rows()
+    model = source.get_model()
+    names = _export_columns(source, model)
+    ids = list(source.queryset_for(user).values_list("pk", flat=True))
+    links = [f for f in model._meta.get_fields()
+             if f.many_to_many and getattr(f, "concrete", False)]
+    manager = model._default_manager
+    for start in range(0, len(ids), size):
+        page_ids = ids[start:start + size]
+        by_pk = {}
+        for row in manager.filter(pk__in=page_ids).values("pk", *names):
+            key = row["pk"]
+            if "pk" not in names:
+                del row["pk"]
+            by_pk[key] = row
+        # The M2M contents are still theirs: attached as lists of ids, in the related
+        # model's own order, as the per-object manager read them.
+        for link in links:
+            back = link.related_query_name()
+            found: dict = {}
+            for owner, target in (link.related_model._default_manager
+                                  .filter(**{f"{back}__in": page_ids})
+                                  .values_list(back, "pk")):
+                found.setdefault(owner, []).append(target)
+            for key, row in by_pk.items():
+                row[link.name] = found.get(key, [])
+        yield [by_pk[key] for key in page_ids if key in by_pk]
+
+
 def export_user_data(user) -> dict:
-    """Everything the platform holds about `user`, as JSON-serialisable data."""
-    from django.core.serializers.json import DjangoJSONEncoder  # noqa: F401
+    """Everything the platform holds about `user`, as JSON-serialisable data.
+
+    The whole export in memory, for code that wants it as a dict. The route writes it
+    a page at a time instead (`write_user_data`)."""
     from django.utils import timezone
 
     out = {
@@ -154,35 +222,57 @@ def export_user_data(user) -> dict:
     }
     for source in registry.values():
         try:
-            qs = source.queryset_for(user)
-            model = source.get_model()
-            # Concrete COLUMNS only. `ManyToManyField.concrete` is True, so this list
-            # used to include every M2M on the model and `.values()` turned each one into
-            # a LEFT JOIN: `diet.UserFoodPreference` has seven, and one client with eight
-            # likes, eight dislikes and four foods in each of five choice lists produced
-            # 8 x 8 x 4^5 = 65,536 rows for a single record. The request hung, the broad
-            # handler below filed the section as an error, and the person received a
-            # silently incomplete export of their own data.
-            names = source.fields or [
-                f.name for f in model._meta.get_fields()
-                if getattr(f, "concrete", False) and not f.many_to_many
-            ]
-            rows = list(qs.values(*names))
-            # The M2M contents are still theirs. Attached as lists of ids, one extra
-            # query per relation, instead of multiplying the row out.
-            links = [f for f in model._meta.get_fields()
-                     if f.many_to_many and getattr(f, "concrete", False)]
-            if links and rows:
-                for row, obj in zip(rows, qs):
-                    for link in links:
-                        row[link.name] = list(
-                            getattr(obj, link.name).values_list("pk", flat=True))
+            rows = []
+            for page in section_pages(source, user):
+                rows.extend(page)
             out["sections"][source.label] = rows
         except Exception:
             # One unexportable model must not deny the whole request.
             logger.exception("Export failed for %s", source.model)
             out["sections"][source.label] = {"error": "could not be exported"}
     return out
+
+
+def write_user_data(user, out) -> None:
+    """`export_user_data`, written to the binary file `out` as JSON, a page at a time.
+
+    The same document — `{generated_at, user_id, sections: {<label>: [rows]}}`, a
+    section that cannot be exported answering `{"error": "could not be exported"}` —
+    but never more than one page of rows in memory: the export route spools this to
+    disk past `PRIVACY_EXPORT_SPOOL_BYTES` and streams it from there
+    (`privacy.views.PersonalDataExportView`). A section that fails part-way is cut back
+    to where it began, so the file is always valid JSON.
+    """
+    import json
+
+    from django.core.serializers.json import DjangoJSONEncoder
+    from django.utils import timezone
+
+    def dump(value) -> bytes:
+        return json.dumps(value, cls=DjangoJSONEncoder).encode("utf-8")
+
+    out.write(b'{"generated_at": ' + dump(timezone.now().isoformat())
+              + b', "user_id": ' + dump(user.pk) + b', "sections": {')
+    for index, source in enumerate(registry.values()):
+        if index:
+            out.write(b", ")
+        out.write(dump(source.label) + b": ")
+        began = out.tell()
+        try:
+            out.write(b"[")
+            first = True
+            for page in section_pages(source, user):
+                for row in page:
+                    out.write((b"" if first else b", ") + dump(row))
+                    first = False
+            out.write(b"]")
+        except Exception:
+            # One unexportable model must not deny the whole request.
+            logger.exception("Export failed for %s", source.model)
+            out.seek(began)
+            out.truncate()
+            out.write(dump({"error": "could not be exported"}))
+    out.write(b"}}")
 
 
 # --------------------------------------------------------------- Art. 17: erasure
@@ -217,7 +307,11 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
                 if action == "delete" and source.delete_rows is not None:
                     source.delete_rows(user, qs)
                 elif action == "delete":
-                    qs.delete()
+                    # A page of primary keys per DELETE: a model with cascades, a
+                    # SET_NULL pointing at it or a delete receiver is loaded row by row
+                    # to be deleted, and one `qs.delete()` loaded all of a long-time
+                    # user's rows at once (`_delete_in_batches`).
+                    _delete_in_batches(qs, batch=batch_rows())
                 elif action == "anonymise":
                     values = {
                         k: (v(user) if callable(v) else v)
@@ -225,14 +319,24 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
                     }
                     # save() per row, not queryset.update(): update() skips every signal,
                     # so clearing an ImageField would leave the file on disk forever —
-                    # the same defect found in the admin's bulk actions.
-                    for obj in qs:
-                        for key, value in values.items():
-                            setattr(obj, key, value)
-                        obj.save(update_fields=list(values))
+                    # the same defect found in the admin's bulk actions. A page of rows
+                    # at a time, walked by primary key.
+                    last = None
+                    while True:
+                        page = qs.order_by("pk")
+                        if last is not None:
+                            page = page.filter(pk__gt=last)
+                        rows = list(page[:batch_rows()])
+                        if not rows:
+                            break
+                        for obj in rows:
+                            for key, value in values.items():
+                                setattr(obj, key, value)
+                            obj.save(update_fields=list(values))
+                        last = rows[-1].pk
             if source.erase_also is not None and not dry_run:
                 # Not counted: see `PersonalDataSource.erase_also`.
-                source.erase_also(user).delete()
+                _delete_in_batches(source.erase_also(user), batch=batch_rows())
             report[source.label] = {"rows": count, "action": action,
                                     **extra.get(source.label, {})}
 
@@ -251,7 +355,7 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
 PURGE_BATCH = 2000
 
 
-def _delete_in_batches(queryset) -> int:
+def _delete_in_batches(queryset, batch: int = PURGE_BATCH) -> int:
     """Delete a queryset a page at a time, and return how many rows went.
 
     `queryset.delete()` looks cheap and is not. Django can only issue a bare
@@ -270,7 +374,9 @@ def _delete_in_batches(queryset) -> int:
     model = queryset.model
     removed = 0
     while True:
-        ids = list(queryset.values_list("pk", flat=True)[:PURGE_BATCH])
+        # `order_by()`: which rows go first does not matter, and an ordering column is
+        # one more thing a DISTINCT (every erasure queryset has one) must select.
+        ids = list(queryset.order_by().values_list("pk", flat=True)[:batch])
         if not ids:
             return removed
         n, _detail = model._default_manager.filter(pk__in=ids).delete()

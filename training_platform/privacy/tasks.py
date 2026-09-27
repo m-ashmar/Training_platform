@@ -81,3 +81,36 @@ def flush_expired_tokens(after=None):
                     blacklisted, outstanding)
     batch.hand_on(flush_expired_tokens)
     return {"blacklisted": blacklisted, "outstanding": outstanding}
+
+
+#: How often the delete task asks storage again for a file it refused, and how long it
+#: waits between asks at most. Eight tries with exponential backoff capped at an hour
+#: span about four hours of storage outage.
+STORAGE_DELETE_MAX_RETRIES = 8
+STORAGE_DELETE_BACKOFF_MAX = 3600
+
+
+@shared_task(name="training_platform.privacy.delete_stored_files", bind=True,
+             max_retries=STORAGE_DELETE_MAX_RETRIES)
+def delete_stored_files(self, label, names):
+    """Delete stored files whose rows are gone, off the request path
+    (`training_platform.storage_cleanup`). `label` names the field whose storage holds
+    them (`"chat.Message.attachment"`); `names` is one chunk of `STORAGE_DELETE_BATCH`.
+
+    What storage refuses is retried — only those names, with exponential backoff — up
+    to `STORAGE_DELETE_MAX_RETRIES` times; then the names are logged as an error for an
+    operator, because no row points at them any more. A name already gone counts as
+    deleted, so a redelivered message is harmless.
+    """
+    from training_platform.storage_cleanup import delete_now
+
+    refused = delete_now(label, names)
+    if not refused:
+        return {"deleted": len(names), "refused": 0}
+    if self.request.retries >= (self.max_retries or 0):
+        logger.error("Storage refused %d file(s) of %s after %d attempts; they are "
+                     "orphaned and need an operator: %s", len(refused), label,
+                     self.request.retries + 1, refused[:20])
+        return {"deleted": len(names) - len(refused), "refused": len(refused)}
+    countdown = min(STORAGE_DELETE_BACKOFF_MAX, 30 * (2 ** self.request.retries))
+    raise self.retry(args=(label, refused), countdown=countdown)

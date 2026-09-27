@@ -305,6 +305,12 @@ def due_relation_ids(now=None) -> list[int]:
     run's time limit starved the on-time renewals behind them. Decided on one unlocked
     read; `renew` re-checks everything under its locks.
     """
+    on_time, waking = _due(now)
+    return on_time + waking
+
+
+def _due(now=None) -> tuple[list[int], list[int]]:
+    """`due_relation_ids` as its two queues, each in id order: `(on_time, waking)`."""
     from wallet.models import Wallet
 
     from .models import CoachingPeriod, TrainerClientRelation
@@ -324,7 +330,7 @@ def due_relation_ids(now=None) -> list[int]:
     on_time = [pk for pk, _client, frozen, _n, _p in rows if frozen is None]
     frozen = [row for row in rows if row[2] is not None]
     if not frozen:
-        return on_time
+        return on_time, []
     balances = dict(Wallet.objects.filter(owner_id__in={row[1] for row in frozen})
                     .values_list('owner_id', 'balance'))
     steps = frozen_reminder_days()
@@ -333,7 +339,7 @@ def due_relation_ids(now=None) -> list[int]:
         reached = sum(1 for d in steps if d <= (now - frozen_at).days)
         if balances.get(client_id, Decimal('0')) >= price or reached > (notices or 0):
             waking.append(pk)
-    return on_time + waking
+    return on_time, waking
 
 
 def renew(relation_id, now=None) -> str:
@@ -439,13 +445,16 @@ def renew(relation_id, now=None) -> str:
         return 'renewed'
 
 
-def remind_upcoming(now=None) -> int:
+def remind_upcoming(now=None, *, batch=None, after=None) -> int:
     """Tell every client whose paid month ends within COACHING_RENEWAL_REMINDER_DAYS that
     it renews soon (the owner, 2026-09-19: every client, whether or not the wallet covers
     it). Once per month (`renewal_reminder_sent_at`); not when the trainer is ending the
     coaching. Returns how many were told.
 
     Kept out of `renew_due`, whose counts the beat task returns unchanged.
+
+    With a `batch` (`training_platform.batching.Batch`, the beat task's), only one page
+    of relations with an id after `after`; `batch.cut` then says more remain.
     """
     from notifications.domain.dispatcher import emit_event
     from notifications.domain.trainer_client_events import CoachingRenewalSoonEvent
@@ -455,15 +464,22 @@ def remind_upcoming(now=None) -> int:
     now = now or timezone.now()
     lead = reminder_lead()
     latest = CoachingPeriod.objects.filter(relation=OuterRef('pk')).order_by('-number')
-    ids = list(TrainerClientRelation.objects
-               .filter(status='approved', ends_at_period_end=False)
-               .annotate(last_id=Subquery(latest.values('pk')[:1]))
-               .filter(last_id__in=CoachingPeriod.objects.filter(
-                   status='settled', renewal_reminder_sent_at__isnull=True,
-                   ends_at__gt=now, ends_at__lte=now + lead).values('pk'))
-               .order_by('pk').values_list('pk', flat=True))
+    due = (TrainerClientRelation.objects
+           .filter(status='approved', ends_at_period_end=False)
+           .annotate(last_id=Subquery(latest.values('pk')[:1]))
+           .filter(last_id__in=CoachingPeriod.objects.filter(
+               status='settled', renewal_reminder_sent_at__isnull=True,
+               ends_at__gt=now, ends_at__lte=now + lead).values('pk')))
+    if batch is None:
+        ids = list(due.order_by('pk').values_list('pk', flat=True))
+    else:
+        ids = [row.pk for row in batch.page(due.only('pk'), after)]
     told = 0
     for relation_id in ids:
+        if batch is not None:
+            if batch.spent():
+                break
+            batch.done(relation_id)
         with transaction.atomic():
             relation = (TrainerClientRelation.objects.select_for_update(of=('self',))
                         .select_related('trainer')
@@ -527,7 +543,7 @@ def end_coaching(relation, *, reason):
     transaction.on_commit(lambda: [emit_event(e) for e in events])
 
 
-def renew_due(now=None, *, max_months=12) -> dict:
+def renew_due(now=None, *, max_months=12, batch=None, phase=None, after=None) -> dict:
     """Renew every due relation, catching up at most `max_months` per relation per run.
 
     One relation's failure does not stop the others; failures are counted and the
@@ -537,13 +553,23 @@ def renew_due(now=None, *, max_months=12) -> dict:
     allows it (`settle_owed_payouts`); `trainer_payouts_settled` is counted when any
     was. An owed share that still cannot be paid is not a failure of this run: it waits
     for the operator's rate and is retried every hour.
+
+    With a `batch` (`training_platform.batching.Batch`, the beat task's), at most one
+    page of relations: the on-time queue first, then the frozen ones with something to
+    do (`_due`), each in id order from `after` within `phase`. When relations remain,
+    the result also carries `next`: `{'phase', 'after'}` for the next invocation. Paging
+    changes nothing about a renewal — `renew` locks and re-checks each relation — it
+    only stops one hour's run from being cut off part-way by the soft time limit, which
+    left whoever sorted later unrenewed (the production-readiness audit, 2026-09-25).
     """
     counts: dict[str, int] = {}
     failed = []
-    owed = settle_owed_payouts(now)
-    if owed['paid']:
-        counts['trainer_payouts_settled'] = owed['paid']
-    for relation_id in due_relation_ids(now):
+    if batch is None or (phase in (None, 'on_time') and after is None):
+        owed = settle_owed_payouts(now)
+        if owed['paid']:
+            counts['trainer_payouts_settled'] = owed['paid']
+
+    def renew_one(relation_id):
         for _month in range(max_months):
             try:
                 outcome = renew(relation_id, now)
@@ -554,6 +580,27 @@ def renew_due(now=None, *, max_months=12) -> dict:
             counts[outcome] = counts.get(outcome, 0) + 1
             if outcome != 'renewed':
                 break
+
+    on_time, waking = _due(now)
+    if batch is None:
+        for relation_id in on_time + waking:
+            renew_one(relation_id)
+        return {'counts': counts, 'failed': failed}
+
+    queues = [('on_time', on_time), ('waking', waking)]
+    start = 1 if phase == 'waking' else 0
+    for index, (name, ids) in enumerate(queues[start:]):
+        cursor = after if index == 0 else None
+        last = cursor
+        for relation_id in ids:
+            if cursor is not None and relation_id <= cursor:
+                continue
+            if batch.handled >= batch.size or batch.spent():
+                return {'counts': counts, 'failed': failed,
+                        'next': {'phase': name, 'after': last}}
+            batch.done(relation_id)
+            last = relation_id
+            renew_one(relation_id)
     return {'counts': counts, 'failed': failed}
 
 
