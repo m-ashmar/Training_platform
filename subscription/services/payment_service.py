@@ -62,6 +62,16 @@ subscription lock, and one transfer confirms one payment through
 Two transitions the spec's diagram does not draw are deliberate: `expired -> completed`
 and `expired -> needs_review`, because money that arrives for a checkout the server
 already closed is still the customer's money (late money, SIDE_BUGS S-077).
+
+The web hub reads and opens these rows as sessions (`POST/GET api/v1/checkout/sessions/`,
+`subscription/checkout_views.py`): a plan's through `start_payment` / `start_renewal`,
+the Pay and Renew buttons' own calls, and a ROUTINE PRODUCT's through
+`start_product_checkout` — a payment with a `buyer` and a `routine_product` and no
+subscription (`_lock_subscription_and_payment` then locks the payment alone, and the
+order continues payment -> product -> purchase -> user row -> wallets). Every other
+method here treats both alike; where they differ (completion delivers the program
+instead of cover, a refund reverses the sale instead of cover) the method says so. The
+payment step each checkout opens through is an adapter (`subscription/payment_step.py`).
 """
 from __future__ import annotations
 
@@ -182,10 +192,10 @@ class PaymentService:
                 evidence: dict | None = None) -> PaymentEvent:
         """The checkout's first event, once its row is saved: '' -> its status. Opened
         by the customer unless the caller says otherwise, and then `actor` defaults to
-        the subscriber."""
+        the payer (the subscriber, or a product checkout's buyer)."""
         actor_id = getattr(actor, 'pk', None)
         if actor_id is None and str(by) == By.CUSTOMER:
-            actor_id = payment.subscription.user_id
+            actor_id = payment.payer_id
         return PaymentEvent.objects.create(
             payment=payment, from_status='', to_status=payment.status,
             actor_id=actor_id, actor_role=str(by),
@@ -217,6 +227,14 @@ class PaymentService:
         the gateway's ids and figures from `verified_data`, plus `evidence`. On commit
         the customer is told (`payment_confirmed`, push and inbox: the receipt is ready)
         — only for a completion, never for a replay.
+
+        A ROUTINE PRODUCT's checkout completes the same way, from the same callers (the
+        pollers, the webhook, "check my payment", the review queue, the console), and
+        what it buys is delivered in the same transaction: the buyer's copy and the
+        sale's ledger rows, split as a wallet sale is (`routine.products.grant_checkout`).
+        If the program cannot be delivered (`checkout_refusal`: owned already, or no
+        longer deliverable) the money is held for review instead and the payment is
+        returned `needs_review`.
         """
         with transaction.atomic():
             subscription, payment = cls._lock_subscription_and_payment(payment_id)
@@ -250,6 +268,28 @@ class PaymentService:
                     f"Gateway status '{reported_status}' is not a success state"
                 )
 
+            if payment.routine_product_id is not None:
+                # A product's program must be deliverable before its money is taken as
+                # paid for it. When it is not — the buyer owns it already, or it can no
+                # longer be written or paid out — the money is real and is HELD for an
+                # operator, never taken for nothing (`routine.products.checkout_refusal`).
+                from routine.products import checkout_refusal
+
+                refusal = checkout_refusal(payment)
+                if refusal is not None:
+                    raw = verified_data.get('gateway_data')
+                    raw = raw if isinstance(raw, dict) else {}
+                    cls.hold_for_review(payment.id, {
+                        'note': raw.get('note') or raw.get('description') or '',
+                        'sender': raw.get('sender') or raw.get('from') or '',
+                        **verified_data,
+                        'transaction_id': verified_data.get('transaction_id') or event_id,
+                    }, reason=refusal, by=by, actor=actor)
+                    payment.refresh_from_db()
+                    logger.warning("Payment %s: money arrived for a program that cannot be "
+                                   "delivered (%s); held for review", payment.id, refusal)
+                    return payment
+
             # --- Apply completion ---
             cls._move(payment, 'completed', by=by, actor=actor,
                       evidence={**_gateway_facts(verified_data), **(evidence or {})})
@@ -276,6 +316,23 @@ class PaymentService:
                 TransferReview.objects.filter(transaction_id=txn, status='open').update(
                     status='approved', payment=payment, resolved_at=timezone.now(),
                     resolution_note='Settled automatically: this transfer completed the payment')
+
+            if payment.routine_product_id is not None:
+                # --- A routine product: the buyer's copy and the sale's ledger rows ---
+                # In THIS transaction, under the payment lock: completion and delivery are
+                # one fact, so there is no payout left owed (`payout_settled_at` now) and
+                # `payment_completed` — a plan's payout and its receipt email — is not
+                # sent. The pushes are the sale's own (`routine_product_purchased`,
+                # `routine_product_sold`), on commit.
+                from routine.products import grant_checkout
+
+                payment.save()
+                grant_checkout(payment)
+                payment.payout_settled_at = timezone.now()
+                payment.save(update_fields=['payout_settled_at', 'updated_at'])
+                logger.info("Payment %s completed (invoice %s): routine product %s delivered",
+                            payment.id, payment.invoice_number, payment.routine_product_id)
+                return payment
 
             # --- Activate / extend the subscription, and record what that bought ---
             # The plan and the period THIS payment was sold (its checkout's snapshot),
@@ -459,6 +516,23 @@ class PaymentService:
                 payment.gateway_error = reason[:2000]
             payment.save()
 
+            if payment.routine_product_id is not None:
+                # A routine product bought through a checkout: the sale is reversed and
+                # the buyer's copy revoked, as the console's purchase refund does (it
+                # comes here for such a sale). Refused — and nothing moves, this state
+                # included — when a wallet the sale paid into no longer holds its part.
+                from routine.products import ReviewConflict as SaleNotRefundable
+                from routine.products import refund_checkout
+
+                try:
+                    refund_checkout(payment, actor, reason)
+                except SaleNotRefundable as exc:
+                    raise PaymentError(str(exc)) from exc
+                logger.warning("Payment %s refunded (%s); routine product %s sale reversed",
+                               payment.id, reason or 'no reason given',
+                               payment.routine_product_id)
+                return payment
+
             now = timezone.now()
             # What THIS payment bought comes off — no more, no less. An earlier version
             # set `end_date = now` whatever else had been paid, so refunding a customer's
@@ -590,7 +664,7 @@ class PaymentService:
                 payment.save(update_fields=['status', 'metadata', 'updated_at'])
                 logger.warning("Payment %s held for review (%s, transfer %s)",
                                payment.id, reason, txn_id)
-                recipient_id = subscription.user_id
+                recipient_id = payment.payer_id
                 transaction.on_commit(lambda: cls._notify_review(
                     'payment_needs_review', recipient_id, payment.id))
             return review
@@ -671,6 +745,15 @@ class PaymentService:
                                       ).exclude(pk=payment.pk).exists():
                 raise ReviewConflict(f"Transfer {review.transaction_id} already confirmed "
                                      f"another payment")
+            if payment.routine_product_id is not None:
+                # Accepting money for a program that cannot be delivered would take it
+                # for nothing: such a transfer is rejected and handed back.
+                from routine.products import checkout_refusal
+
+                refusal = checkout_refusal(payment)
+                if refusal is not None:
+                    raise ReviewConflict(f"This program cannot be delivered ({refusal}): "
+                                         f"reject the transfer and hand the money back")
             meta = dict(payment.metadata or {})
             record = dict(meta.get('review') or {})
             record.update({'approved_by': operator.pk if operator else None,
@@ -731,7 +814,7 @@ class PaymentService:
                     'transaction_id': review.transaction_id})
                 payment.gateway_error = (note or 'Rejected on review')[:2000]
                 payment.save(update_fields=['status', 'gateway_error', 'updated_at'])
-                recipient_id = payment.subscription.user_id
+                recipient_id = payment.payer_id
                 transaction.on_commit(lambda: cls._notify_review(
                     'payment_rejected', recipient_id, payment.id))
             return review
@@ -774,7 +857,7 @@ class PaymentService:
                                     'amount': str(review.amount),
                                     'currency': review.currency})
                 payment.save(update_fields=['status', 'metadata', 'updated_at'])
-                recipient_id = subscription.user_id
+                recipient_id = payment.payer_id
                 transaction.on_commit(lambda: cls._notify_review(
                     'payment_needs_review', recipient_id, payment.id))
             return review
@@ -1038,6 +1121,63 @@ class PaymentService:
             return payment
 
     @classmethod
+    def start_product_checkout(cls, product_id, buyer, initiate, *, by: str = By.CUSTOMER,
+                               actor=None, evidence: dict | None = None) -> Payment:
+        """A routine product's checkout (the web hub, the spec's section 5): the buyer's
+        open checkout for this product, opening one if there is none.
+
+        ONE OPEN CHECKOUT PER BUYER PER PRODUCT, decided under the PRODUCT's row lock —
+        the lock a wallet sale of it takes first (`routine.products.buy`) — so a double
+        tap waits and then receives the first tap's checkout, reference and all
+        (`already_open`); `uniq_open_product_checkout` is the database's backstop. A
+        checkout held for review is still open and still the one handed back.
+
+        A new one is priced now and snapshotted on the row (`routine.products.
+        checkout_terms`): the price in the buyer's own currency at the operator's rate,
+        the price of record, and the commission rate the sale will be split at — "at
+        the moment the price is locked" (the spec, section 8). `initiate` is the payment
+        step's opener (`subscription/payment_step.py`), run under the lock. Its first
+        event is written here (`_opened`).
+
+        Raises `routine.products.ProductNotForSale` / `AlreadyOwned` and
+        `ExchangeRateUnavailable` before anything is written. The CALLER has already
+        asked `require_purchase_allowed(request, ROUTINE_PRODUCT)`.
+        """
+        from policy.money import MoneyType
+
+        from routine import products
+
+        with transaction.atomic():
+            product = products.lock_for_checkout(product_id)
+            open_checkout = (Payment.objects
+                             .filter(buyer=buyer, routine_product=product,
+                                     status__in=OPEN_PAYMENT_STATUSES)
+                             .order_by('created_at', 'id').first())
+            if open_checkout is not None:
+                logger.info("Checkout %s already open for product %s", open_checkout.id,
+                            product.pk)
+                open_checkout.already_open = True
+                return open_checkout
+            priced, snapshot = products.checkout_terms(product, buyer)
+            payment = Payment(
+                buyer=buyer, routine_product=product, status='pending',
+                money_type=MoneyType.ROUTINE_PRODUCT,
+                amount=priced.amount, currency=priced.currency,
+                price_amount=priced.price_amount, price_currency=priced.price_currency,
+                exchange_rate=priced.rate,
+                exchange_rate_value=getattr(priced.rate, 'rate', None),
+                description=f"Routine product {product.pk}",
+                metadata={'kind': 'routine_product', 'product': snapshot})
+            method, reference, response = initiate(payment)
+            payment.payment_method = method
+            payment.gateway_transaction_reference = reference
+            payment.gateway_response = response or {}
+            payment.save()
+            cls._opened(payment, by=by, actor=actor, evidence=evidence)
+            payment.already_open = False
+            return payment
+
+    @classmethod
     def _checkout_under_lock(cls, subscription: Subscription, open_payments, kind: str,
                              initiate, *, by: str = By.CUSTOMER, actor=None,
                              evidence: dict | None = None) -> Payment:
@@ -1185,13 +1325,18 @@ class PaymentService:
         also locked the PLAN row, so every completion for any subscriber on a plan queued
         behind every other one, and so did creating a subscription on it (the foreign key
         check needs a share lock the update lock excludes).
+
+        A routine product's checkout has no subscription: `(None, payment)`, the payment
+        row locked alone. Its own order continues payment -> product -> purchase -> the
+        buyer's user row -> wallets (`routine/products.py`).
         """
-        subscription_id = (Payment.objects.filter(pk=payment_id)
-                           .values_list('subscription_id', flat=True).first())
-        if subscription_id is None:
+        row = Payment.objects.filter(pk=payment_id).values('subscription_id').first()
+        if row is None:
             raise Payment.DoesNotExist(f"Payment {payment_id} does not exist")
+        if row['subscription_id'] is None:
+            return None, Payment.objects.select_for_update().get(pk=payment_id)
         subscription = (Subscription.objects.select_for_update(of=('self',))
-                        .select_related('plan').get(pk=subscription_id))
+                        .select_related('plan').get(pk=row['subscription_id']))
         payment = Payment.objects.select_for_update().get(pk=payment_id)
         payment.subscription = subscription
         return subscription, payment

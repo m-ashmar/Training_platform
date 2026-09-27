@@ -401,8 +401,29 @@ def _snapshot_name(snap: dict) -> str:
     return snap.get('name', '')
 
 
+def paid_by(user) -> Q:
+    """The payments `user` made: a plan's (through their subscription) or a routine
+    product's checkout (`buyer`). The one filter for "the caller's own payment"."""
+    return Q(subscription__user=user) | Q(buyer=user)
+
+
 class Payment(RowValidationMixin, models.Model):
-    """Payment history for subscriptions"""
+    """One checkout and the money that settles it: THE CHECKOUT SESSION of the payments
+    spec, section 5 (the mapping is in `PaymentService`'s docstring).
+
+    It pays for ONE of two things, and the database holds it to that
+    (`payment_pays_for_one_thing`):
+
+    * a PLAN — `subscription` is set, `buyer` and `routine_product` are not. Every row
+      written before the web hub is one of these, and so is every row the app's own
+      buttons open;
+    * a ROUTINE PRODUCT bought through a checkout (the hub, `api/v1/checkout/sessions/`)
+      — `buyer` and `routine_product` are set, `subscription` is not, and `money_type`
+      is ROUTINE_PRODUCT. Its confirmation, through `PaymentService` like a plan's,
+      writes the buyer's copy and the sale's ledger rows (`routine.products.
+      grant_checkout`). A buyer holds at most one OPEN checkout per product
+      (`uniq_open_product_checkout`).
+    """
     PAYMENT_STATUS = [
         ('pending', 'Pending'),
         ('processing', 'Processing'),
@@ -432,12 +453,21 @@ class Payment(RowValidationMixin, models.Model):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # NULL only on a routine product's checkout (see the class docstring).
     subscription = models.ForeignKey(
-        Subscription, 
-        on_delete=models.PROTECT, 
+        Subscription,
+        on_delete=models.PROTECT,
         related_name='payments',
-        db_index=True
+        db_index=True,
+        null=True,
+        blank=True,
     )
+    #: A routine product's checkout: who is buying, and which program. Both NULL on a
+    #: plan's payment. PROTECT, like the subscription: a record of money is kept.
+    buyer = models.ForeignKey(CustomUser, null=True, blank=True, on_delete=models.PROTECT,
+                              related_name='product_payments')
+    routine_product = models.ForeignKey('routine.RoutineProduct', null=True, blank=True,
+                                        on_delete=models.PROTECT, related_name='checkouts')
     amount = models.DecimalField(
         max_digits=10, 
         decimal_places=2,
@@ -586,6 +616,23 @@ class Payment(RowValidationMixin, models.Model):
             ),
             models.CheckConstraint(condition=Q(money_type__in=MoneyType.values),
                                    name='payment_money_type_known'),
+            # A plan's payment, or a routine product's checkout — never both, never
+            # neither (the class docstring).
+            models.CheckConstraint(
+                condition=(Q(subscription__isnull=False, buyer__isnull=True,
+                             routine_product__isnull=True)
+                           | Q(subscription__isnull=True, buyer__isnull=False,
+                               routine_product__isnull=False,
+                               money_type=MoneyType.ROUTINE_PRODUCT)),
+                name='payment_pays_for_one_thing'),
+            # One open checkout per buyer per product (the spec, section 5: "one open
+            # session per user per item"). `PaymentService.start_product_checkout`
+            # decides it under the product's row lock; this is the backstop.
+            models.UniqueConstraint(
+                fields=['buyer', 'routine_product'],
+                condition=Q(routine_product__isnull=False,
+                            status__in=OPEN_PAYMENT_STATUSES),
+                name='uniq_open_product_checkout'),
         ]
         verbose_name = "Payment"
         verbose_name_plural = "Payments"
@@ -621,19 +668,37 @@ class Payment(RowValidationMixin, models.Model):
         checkout request happened to be in put Arabic on an English receipt.
 
         Rows opened before the snapshot existed fall back to the subscription's plan —
-        what every row said before, and right while plans could not change.
+        what every row said before, and right while plans could not change. A routine
+        product's checkout bought no plan: every value is empty.
         """
         snap = (self.metadata or {}).get('plan')
         if isinstance(snap, dict) and snap.get('id') is not None:
             return {'plan_id': snap['id'], 'plan_name': _snapshot_name(snap),
                     'plan_type': snap.get('plan_type', ''),
                     'duration_days': snap.get('duration_days')}
+        if self.subscription_id is None:
+            return {'plan_id': None, 'plan_name': '', 'plan_type': '', 'duration_days': None}
         plan = self.subscription.plan
         return {'plan_id': plan.id, 'plan_name': plan.name,
                 'plan_type': plan.plan_type, 'duration_days': plan.duration_days}
 
+    @property
+    def payer_id(self):
+        """The person paying: the buyer of a product's checkout, else the subscriber."""
+        if self.buyer_id is not None:
+            return self.buyer_id
+        return self.subscription.user_id if self.subscription_id is not None else None
+
+    @property
+    def payer(self):
+        if self.buyer_id is not None:
+            return self.buyer
+        return self.subscription.user if self.subscription_id is not None else None
+
     def __str__(self):
-        return f"{self.subscription.user.username} - {self.amount} {self.currency} ({self.status})"
+        payer = self.payer
+        return (f"{getattr(payer, 'username', '-')} - {self.amount} {self.currency} "
+                f"({self.status})")
 
 class TransferReview(models.Model):
     """A transfer on the merchant account that no checkout claimed exactly: the review
@@ -656,6 +721,11 @@ class TransferReview(models.Model):
         ('no_candidate', 'No open checkout matches'),
         ('checkout_closed', 'The reference of a checkout no longer open'),
         ('duplicate_transfer', 'The reference of a checkout already paid'),
+        # A routine product's checkout whose money arrived but whose program cannot be
+        # delivered (`routine.products.checkout_refusal`): the buyer owns it already, or
+        # it can no longer be written or paid out. Money to hand back.
+        ('already_owned', 'A program the buyer already owns'),
+        ('product_unavailable', 'A program that can no longer be delivered'),
     ]
     STATUSES = [
         ('open', 'Open'),

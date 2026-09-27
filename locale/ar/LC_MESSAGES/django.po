@@ -5870,3 +5870,9 @@ msgstr "حدّث برنامجك"
 #, python-format
 msgid "Your program was updated · %(routine)s"
 msgstr "حدّث برنامجك · %(routine)s"
+
+#. A wallet purchase of a program the buyer has a checkout open for (the web hub):
+#. paying both would pay twice (`checkout_open`).
+#: routine/product_views.py
+msgid "A payment for this program is already open. Complete it, or wait for it to close."
+msgstr "يوجد دفع مفتوح لهذا البرنامج. أكمله، أو انتظر حتى يُغلق."

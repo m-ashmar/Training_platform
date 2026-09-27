@@ -860,11 +860,14 @@ register(PersonalDataSource(label="template_exercises", model="routine.RoutineTe
                             data_types=("user_content",)))
 # Financial, and therefore kept: a payment is part of the ledger the wallet sources
 # already protect.
+# A routine product bought through a checkout (the web hub) is a payment too, with its
+# buyer and no subscription: both routes reach the person.
 register(PersonalDataSource(label="payments", model="subscription.Payment",
-                            user_field="subscription__user", on_erase="keep",
-                            purpose=("Each payment for a plan: amount, currency, state, the "
-                                     "gateway's reference, invoice number and the period "
-                                     "it pays for. A record of money."),
+                            user_field=("subscription__user", "buyer"), on_erase="keep",
+                            purpose=("Each payment for a plan, or for a routine product "
+                                     "bought through a checkout: amount, currency, state, "
+                                     "the gateway's reference, invoice number and what it "
+                                     "pays for. A record of money."),
                             recipients=("payment_gateway",),
                             data_types=("purchases",)))
 register(PersonalDataSource(label="subscription_usage", model="subscription.SubscriptionUsage",
@@ -881,7 +884,7 @@ register(PersonalDataSource(label="subscription_usage", model="subscription.Subs
 # SENDER's — a transfer with no reference is attributed to a checkout by its amount, so
 # the sender may be someone else — and the candidates are other customers' payments.
 register(PersonalDataSource(label="transfer_reviews", model="subscription.TransferReview",
-                            user_field="payment__subscription__user",
+                            user_field=("payment__subscription__user", "payment__buyer"),
                             fields=["id", "reason", "status", "amount", "currency",
                                     "occurred_at", "created_at", "resolved_at"],
                             on_erase="keep",
@@ -896,7 +899,7 @@ register(PersonalDataSource(label="transfer_reviews", model="subscription.Transf
 # took them, not the evidence (a transfer's details are its sender's, a note is the
 # operator's) and not which operator.
 register(PersonalDataSource(label="payment_events", model="subscription.PaymentEvent",
-                            user_field="payment__subscription__user",
+                            user_field=("payment__subscription__user", "payment__buyer"),
                             fields=["id", "payment", "from_status", "to_status",
                                     "actor_role", "backfill", "created_at"],
                             on_erase="keep",

@@ -64,6 +64,14 @@ Two more that fail silently (found building `payouts`, 2026-09-24):
   caller passes `by` (`PaymentEvent.By`: who or what it is). A test that writes
   `Payment.objects.create(status=...)` directly gets a payment with NO events — fine for
   what it tests, but not a payment the app would ever see.
+- **A payment can have NO subscription** (`build/hub-checkout`, 2026-09-27). A routine
+  product bought through the web hub's checkout (`api/v1/checkout/sessions/`) is a
+  `Payment` with `buyer` and `routine_product` set and `subscription` NULL
+  (`payment_pays_for_one_thing`). Code that reads `payment.subscription.user` crashes on
+  one: read `payment.payer` / `payment.payer_id`, and filter "the caller's payments" with
+  `subscription.models.paid_by(user)`. `PaymentService._lock_subscription_and_payment`
+  answers `(None, payment)` for one. `payment_completed` is NOT sent for it (its program
+  and ledger rows are written inside the completion, `routine.products.grant_checkout`).
 - **A periodic task over every user takes a page and hands the rest on**
   (`training_platform/batching.py`, 2026-09-27). A new beat task that loops over users
   uses `Batch` the same way, and its per-row work must be idempotent: a retried page
