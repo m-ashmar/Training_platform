@@ -58,10 +58,16 @@ class MediaAssetForm(forms.ModelForm):
         upload = cleaned.get("upload")
         self.processed = None
         if upload:
+            from training_platform.api_exceptions import UploadBusy
+
             try:
                 self.processed = process_upload(upload, resolve(slot_key))
             except ValidationError as exc:
                 raise ValidationError({"upload": exc.messages})
+            except UploadBusy as busy:
+                # Every decode slot is taken (`image_budget.decode_slot`): the console
+                # says so on the form instead of answering a 500.
+                raise ValidationError({"upload": [str(busy.detail)]})
         elif not self.instance.pk:
             raise ValidationError({"upload": "A new slot needs an image."})
         return cleaned

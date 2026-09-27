@@ -2677,6 +2677,7 @@ class ProfilePictureUploadView(APIView):
         | `400` | the image validator's own code: `file_too_large`, `empty_file`, `no_filename`, `dangerous_extension`, `mime_detection_failed`, `unknown_file_type`, `invalid_mime_type`, `corrupt_image`, `invalid_aspect_ratio`, `unreadable_image`, `unsupported_format`, `image_dimensions_too_large`, `image_too_many_pixels`, `invalid_file_object`, `no_file`, `file_validation_error` (the validator failed unexpectedly), or `invalid_image` when it names none | the image is refused (`training_platform/file_security.py` `process_uploaded_image`, which runs `FileSecurityValidator.validate_file` without the content scan) |
         | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
         | `415` | `unsupported_media_type` | the body is not multipart/form-data |
+        | `503` | `upload_busy` | the server is already decoding as many images as its memory holds (`training_platform/image_budget.py`): nothing was decoded or stored; send it again after `Retry-After` seconds (`retry_after_seconds` in the body) |
         | `500` | `upload_failed` | storage failed |
         """
         try:

@@ -342,9 +342,21 @@ def test_the_file_task_retries_only_what_storage_refused(settings, tmp_path, mon
         return real_delete(self, name)
 
     monkeypatch.setattr(FileSystemStorage, "delete", flaky)
-    delete_stored_files.apply(args=("chat.Message.attachment", [stuck, fine]))
+    # As a worker runs it: each retry is a new message carrying the retry's own args.
+    from celery.exceptions import Retry
+
+    args, retries, waits = ("chat.Message.attachment", [stuck, fine]), 0, []
+    while True:
+        assert retries < 10, "the task never finished"
+        try:
+            delete_stored_files.apply(args=args, retries=retries)
+            break
+        except Retry as retry:
+            args, retries = retry.sig.args, retries + 1
+            waits.append(retry.when)
 
     assert not default_storage.exists(stuck) and not default_storage.exists(fine)
+    assert waits == sorted(waits) and waits[0] < waits[-1], "no backoff"
     assert asked.count(fine) == 1, "a deleted file was asked for again"
     assert asked.count(stuck) == 3
 

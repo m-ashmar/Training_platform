@@ -207,7 +207,13 @@ def _date_or_none(value):
 
 class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
-    """ViewSet for managing exercises."""
+    """ViewSet for managing exercises.
+
+    A POST/PUT/PATCH carrying an `image` answers 503 `upload_busy` while the server is
+    already decoding as many images as its memory holds (`training_platform/
+    image_budget.py`): nothing was saved; send it again after `Retry-After` seconds
+    (`retry_after_seconds` in the body).
+    """
     queryset = Exercise.objects.all()
     serializer_class = ExerciseSerializer
     permission_classes = [IsAdminOrOwnerOrReadOnly]
@@ -330,6 +336,11 @@ class ExerciseCreateWithImageView(APIView):
     `unsupported_format`, `image_dimensions_too_large`, `image_too_many_pixels`, and
     the guard's other refusals; `invalid_image` when it names none (SIDE_BUGS S-118).
     For a photo the sentence says which one.
+
+    **503 `upload_busy`**: the server is already decoding as many images as its memory
+    holds (`training_platform/image_budget.py`). Nothing was created or stored; send
+    the same request again after `Retry-After` seconds (`retry_after_seconds` in the
+    body).
 
     **Extra photos are stored by NAME.** Each is saved under
     `exercise_media/<exercise id>/` and its `ExerciseMedia` row keeps the storage name;
@@ -4631,7 +4642,7 @@ class ExerciseImageUploadView(APIView):
 
     | Method | Answers |
     |---|---|
-    | `POST` | `200` `{message, exercise}` · `400` `image_required` (no `image`) · `400` refused upload · `403` `permission_denied` · `404` `not_found` · `500` `image_upload_failed` |
+    | `POST` | `200` `{message, exercise}` · `400` `image_required` (no `image`) · `400` refused upload · `403` `permission_denied` · `404` `not_found` · `503` `upload_busy` (every image-decode slot is taken: nothing stored; retry after `Retry-After` seconds, also `retry_after_seconds` in the body) · `500` `image_upload_failed` |
     | `DELETE` | `200` `{message}` · `404` `no_image` `{message, error}` when the exercise has no image · `403` `permission_denied` · `404` `not_found` · `500` `image_removal_failed` |
 
     `image_required` and `no_image` are the owner's decision of 2026-09-24 (every
