@@ -238,43 +238,52 @@ def _image(data: bytes, digest: str) -> ProcessedDocument:
             _("This photo is too small to read. It needs at least %(px)s pixels on each side.")
             % {"px": MIN_IMAGE_SIDE}, min_side=MIN_IMAGE_SIDE)
 
-    # A baseline JPEG over the cap is drafted to the least reduction within it; what
-    # will actually be decoded is checked again (`draft` may decline).
+    # One of the process's decode slots from the decode to the last encode, the peak
+    # the plan above prices (`image_budget.decode_slot`). None free in time: the photo
+    # is not decoded, and the trainer is told to retry (`upload_busy`, 503).
     try:
-        image_budget.shrink(img, plan)
-    except image_budget.OverBudget as over:
-        raise _too_large(over.max_pixels)
+        with image_budget.decode_slot():
+            # A baseline JPEG over the cap is drafted to the least reduction within it; what
+            # will actually be decoded is checked again (`draft` may decline).
+            try:
+                image_budget.shrink(img, plan)
+            except image_budget.OverBudget as over:
+                raise _too_large(over.max_pixels)
 
-    try:
-        img.load()
-        orientation = img.getexif().get(ExifTags.Base.Orientation, 1)
-        if img.mode in ("RGBA", "LA", "PA") \
-                or (img.mode == "P" and "transparency" in img.info):
-            if img.mode != "RGBA":
-                img = img.convert("RGBA")
-            flat = Image.new("RGB", img.size, (255, 255, 255))
-            flat.paste(img, mask=img)          # the alpha band is the mask
-            img, flat = flat, None
-        elif img.mode != "RGB":
-            img = img.convert("RGB")
-        turn = image_budget.UPRIGHT.get(orientation)
-        if turn is not None:
-            img = img.transpose(getattr(Image.Transpose, turn))
-    except Exception:
-        raise _unreadable()
-    # The encoder re-emits what `info` holds (EXIF, GPS included): none of it is kept.
-    img.info = {}
+            try:
+                img.load()
+                orientation = img.getexif().get(ExifTags.Base.Orientation, 1)
+                if img.mode in ("RGBA", "LA", "PA") \
+                        or (img.mode == "P" and "transparency" in img.info):
+                    if img.mode != "RGBA":
+                        img = img.convert("RGBA")
+                    flat = Image.new("RGB", img.size, (255, 255, 255))
+                    flat.paste(img, mask=img)          # the alpha band is the mask
+                    img, flat = flat, None
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+                turn = image_budget.UPRIGHT.get(orientation)
+                if turn is not None:
+                    img = img.transpose(getattr(Image.Transpose, turn))
+            except Exception:
+                raise _unreadable()
+            # The encoder re-emits what `info` holds (EXIF, GPS included): none of it is kept.
+            img.info = {}
 
-    width, height = img.size
-    # Not `optimize`d: libjpeg would buffer every coefficient of the image to build its
-    # Huffman tables (3 bytes a pixel, 48 MB at the cap) to save a few percent of a file
-    # nobody but an operator downloads.
-    content = _jpeg(img, quality=90, optimize=False)
-    img.thumbnail((THUMBNAIL_SIDE, THUMBNAIL_SIDE), Image.LANCZOS)
-    img.info = {}
-    return ProcessedDocument(kind=IMAGE, content=content, extension="jpg",
-                             content_type="image/jpeg", thumbnail=_jpeg(img, quality=80),
-                             sha256=digest, size=len(content), width=width, height=height)
+            width, height = img.size
+            # Not `optimize`d: libjpeg would buffer every coefficient of the image to build its
+            # Huffman tables (3 bytes a pixel, 48 MB at the cap) to save a few percent of a file
+            # nobody but an operator downloads.
+            content = _jpeg(img, quality=90, optimize=False)
+            img.thumbnail((THUMBNAIL_SIDE, THUMBNAIL_SIDE), Image.LANCZOS)
+            img.info = {}
+            return ProcessedDocument(kind=IMAGE, content=content, extension="jpg",
+                                     content_type="image/jpeg", thumbnail=_jpeg(img, quality=80),
+                                     sha256=digest, size=len(content), width=width, height=height)
+    except image_budget.DecodeBusy as busy:
+        from training_platform.api_exceptions import upload_busy_from
+
+        raise upload_busy_from(busy)
 
 
 def _jpeg(img, *, quality: int, optimize: bool = True) -> bytes:

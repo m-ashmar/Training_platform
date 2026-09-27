@@ -124,28 +124,44 @@ def generate_rule_based_plan(self, user_id, meal_count=3, snack_count=1, start_d
     retry_jitter=True,
     max_retries=3,
 )
-def generate_daily_advice(user_id=None):
+def generate_daily_advice(user_id=None, after=None):
     """
     Enhanced asynchronous task to generate daily dietary advice for a user.
     Now includes data collection for advice effectiveness tracking.
 
     Args:
         user_id (int, optional): ID of the user. If None, advice is generated for all users.
+        after (int, optional): the daily sweep's cursor — only clients with a larger id.
+
+    The daily sweep (no `user_id`) takes one page of clients per invocation
+    (`training_platform.batching`, `PERIODIC_BATCH_SIZE`) and hands the rest on to a
+    fresh invocation of itself. It used to walk every client in one task under the 300 s
+    soft limit: past a few thousand clients it was cut off every morning, and whoever
+    sorted later never got advice at all (the production-readiness audit, 2026-09-25).
+    One row per client per day (`update_or_create`), so a redelivered page writes nothing
+    twice.
     """
+    from training_platform.batching import Batch
+
+    batch = None
     try:
         if user_id:
             users = [get_user_model().objects.get(id=user_id)]
         else:
-            # Clients with an active plan, in batches. This was `objects.all()` —
+            # Clients with an active plan, a page at a time. This was `objects.all()` —
             # every account on the platform, trainers and admins included, held in
             # memory, and one user whose profile raised aborted every remaining one.
-            users = (get_user_model().objects
-                     .filter(user_type='client', is_active=True,
-                             diet_plans__is_active=True)
-                     .distinct()
-                     .iterator(chunk_size=200))
-            
+            batch = Batch()
+            users = batch.page(get_user_model().objects
+                               .filter(user_type='client', is_active=True,
+                                       diet_plans__is_active=True)
+                               .distinct(), after)
+
         for user in users:
+            if batch is not None:
+                if batch.spent():
+                    break
+                batch.done(user.pk)
             try:
                 # Generate personalized advice based on user data
                 advice_text = _generate_personalized_advice(user)
@@ -201,7 +217,10 @@ def generate_daily_advice(user_id=None):
                 # which logged once against user_id=None and stopped.
                 logger.exception("daily advice failed for user %s", user.id)
                 continue
-            
+
+        if batch is not None:
+            batch.hand_on(generate_daily_advice)
+
     except TRANSIENT_ERRORS:
         # Let Celery retry. The blanket `except Exception` below swallowed these too, so
         # `autoretry_for=TRANSIENT_ERRORS` on the decorator could never fire and a

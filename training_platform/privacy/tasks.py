@@ -44,7 +44,7 @@ def purge_expired_personal_data():
     max_retries=3,
 )
 @no_retry_on_timeout
-def flush_expired_tokens():
+def flush_expired_tokens(after=None):
     """Delete refresh tokens that can no longer be used.
 
     `ROTATE_REFRESH_TOKENS` and `BLACKLIST_AFTER_ROTATION` are both on, so every refresh
@@ -55,17 +55,29 @@ def flush_expired_tokens():
     day, so 10,000 daily users is 250,000 rows and 217 MB of heap per day.
 
     The blacklist rows go first, because they reference the outstanding rows.
+
+    A page of `PERIODIC_SCAN_SIZE` rows per DELETE (`training_platform.batching
+    delete_in_pages`), and once `PERIODIC_BATCH_SECONDS` is spent the rest is handed on
+    to a fresh invocation. One bare `.delete()` of a day's 250,000 outstanding tokens
+    loaded every row — the token text included — to cascade to the blacklist, whose FK
+    is CASCADE (the production-readiness audit, 2026-09-25). `after` is accepted for the
+    hand-on and not needed: a deleted row leaves the query.
     """
     from django.utils import timezone
 
     from rest_framework_simplejwt.token_blacklist.models import (
         BlacklistedToken, OutstandingToken)
 
+    from training_platform.batching import Batch, delete_in_pages, scan_size
+
     now = timezone.now()
-    blacklisted, _d = BlacklistedToken.objects.filter(
-        token__expires_at__lt=now).delete()
-    outstanding, _d = OutstandingToken.objects.filter(expires_at__lt=now).delete()
+    batch = Batch(size=scan_size())
+    blacklisted = delete_in_pages(
+        BlacklistedToken.objects.filter(token__expires_at__lt=now), batch)
+    outstanding = 0 if batch.cut else delete_in_pages(
+        OutstandingToken.objects.filter(expires_at__lt=now), batch)
     if blacklisted or outstanding:
         logger.info("Flushed %d blacklisted and %d outstanding expired token(s)",
                     blacklisted, outstanding)
+    batch.hand_on(flush_expired_tokens)
     return {"blacklisted": blacklisted, "outstanding": outstanding}

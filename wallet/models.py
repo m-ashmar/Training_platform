@@ -360,6 +360,14 @@ class IdempotencyKey(models.Model):
 
 
 class Transaction(models.Model):
+    """One movement of money. APPEND-ONLY: a row is written once and never edited or
+    deleted — a correction is a new row (`reverses`), never a rewrite.
+
+    Enforced at the database (migration wallet/0021, a row trigger refusing UPDATE and
+    DELETE) and here on the two instance paths, like the audit log, the agent receivable
+    and a withdrawal's events. The one change the database allows is `actor` becoming
+    NULL when that account is deleted (`on_delete=SET_NULL`).
+    """
     TX_TYPES = [
         ("topup", "TopUp"),
         ("transfer", "Transfer"),
@@ -461,6 +469,17 @@ class Transaction(models.Model):
             models.CheckConstraint(condition=Q(money_type__in=MoneyType.values),
                                    name="tx_money_type_known"),
         ]
+
+    def save(self, *args, **kwargs):
+        # `_state.adding`, not `pk`: a row is written once, by `move_funds_atomic`
+        # (`objects.create`), and never saved again. The database refuses the UPDATE as
+        # well (wallet/0021); this says so before a statement is sent.
+        if not self._state.adding:
+            raise ImmutableRecord("a ledger row is never edited; write a reversal")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecord("a ledger row is never deleted; write a reversal")
 
 
 class WalletAuditLog(models.Model):
@@ -913,7 +932,8 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
                       actor_id=None, tx_type="transfer", metadata=None, reverses=None,
                       currency: str | None = None,
                       money_type: str | None = None,
-                      exchange_rate=None, exchange_reference: str = "") -> Transaction:
+                      exchange_rate=None, exchange_reference: str = "",
+                      reference_id: str | None = None) -> Transaction:
     """
     Atomically move funds between wallets. If source is None, it's a credit (e.g., top-up).
     If destination is None, it's a debit. Creates a Transaction record on success.
@@ -925,7 +945,10 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
     this depth is indistinguishable from a 1:1 transfer at the call site. Money that
     genuinely crosses goes through `exchange_funds_atomic`, which calls this twice and
     stamps both legs with the rate row it used; `exchange_rate`/`exchange_reference` are
-    how it does that and are not for anyone else to pass.
+    how it does that and are not for anyone else to pass. Nor is `reference_id`: the
+    exchange chooses its debit leg's reference BEFORE writing it, so the leg can carry
+    its own reference as `exchange_reference` in the one INSERT — the ledger is
+    append-only (wallet/0021) and a leg cannot be stamped afterwards.
 
     `money_type` says which kind of money this is (`policy.money.MoneyType`). A reversal
     that names none takes the kind of the transaction it reverses; anything else that
@@ -1044,6 +1067,7 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
             exchange_reference=exchange_reference,
             metadata=metadata,
             reverses=reverses,
+            **({"reference_id": reference_id} if reference_id else {}),
         )
 
     return tx
@@ -1104,17 +1128,19 @@ def exchange_funds_atomic(source: Wallet, destination: Wallet, amount, *, amount
             f"{credited} {destination.currency}")
 
     common = dict(metadata or {})
+    # The debit's reference names the pair, so the link exists before the credit is
+    # written and a partial read can never find a credit with no debit. Chosen HERE and
+    # written with the leg: it used to be stamped onto the debit by an UPDATE after the
+    # INSERT, and the ledger refuses every UPDATE (wallet/0021).
+    pair = generate_reference_id()
     with transaction.atomic():
         debit = move_funds_atomic(
             source, None, debited, actor_id=actor_id, tx_type="transfer",
             currency=source.currency, money_type=money_type, exchange_rate=rate_row,
+            reference_id=pair, exchange_reference=pair,
             metadata={**common, "exchange": "out",
                       "exchange_to": destination.currency,
                       "exchange_to_amount": str(credited)})
-        # The debit's reference names the pair, so the link exists before the credit
-        # is written and a partial read can never find a credit with no debit.
-        Transaction.objects.filter(pk=debit.pk).update(exchange_reference=debit.reference_id)
-        debit.exchange_reference = debit.reference_id
         credit = move_funds_atomic(
             None, destination, credited, actor_id=actor_id, tx_type="transfer",
             currency=destination.currency, money_type=money_type, exchange_rate=rate_row,

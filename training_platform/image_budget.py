@@ -21,9 +21,23 @@ which libjpeg holds at full size whatever `draft` asks for (`coefficient_bytes`)
 
 Nothing here decodes anything, and nothing here is user-facing: each caller turns
 `OverBudget` into its own `code` and sentence.
+
+HOW MANY AT ONCE. The budget bounds ONE decode; a web process serves many requests at a
+time (fly.toml lets a machine take 15), and three large photos decoding together passed
+512 MB and took every connection on the machine down with them (the production-readiness
+audit, 2026-09-25). So every decode also holds a SLOT (`decode_slot`): a per-process
+bounded semaphore with as many slots as the machine's memory, less what the process
+needs besides (`IMAGE_DECODE_RESERVED_BYTES`), has room for decodes at the budget — two
+on a 512 MB machine. A request that cannot get a slot within `IMAGE_DECODE_WAIT_SECONDS`
+is not decoded: `decode_slot` raises `DecodeBusy`, and the caller answers the retryable
+`upload_busy` (503, with `Retry-After`). `IMAGE_DECODE_SLOTS` overrides the count; the
+production boot check refuses a count the memory cannot hold.
 """
 from __future__ import annotations
 
+import os
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 #: The most one decode may add to a web process at its peak, estimated from the header.
@@ -233,3 +247,133 @@ def upright(img):
     if turn is None:
         return img
     return img.transpose(getattr(Image.Transpose, turn))
+
+
+# ------------------------------------------------------------------ how many at once
+#: What a process needs besides its decodes: Django itself (about 110 MB, measured) and
+#: the ordinary requests it serves beside them. The decode slots share what is left.
+DEFAULT_RESERVED_BYTES = 192 * 1024 * 1024
+
+#: How long a request waits for a slot before it is answered `upload_busy`. Long enough
+#: to ride out one decode finishing (they take about a second); short enough that the
+#: request is not left holding a connection behind a queue.
+DEFAULT_WAIT_SECONDS = 2.0
+
+#: What the refusal tells the app to wait before trying again (`Retry-After`).
+DEFAULT_RETRY_AFTER_SECONDS = 5
+
+_CGROUP_LIMITS = ("/sys/fs/cgroup/memory.max",                      # cgroup v2
+                  "/sys/fs/cgroup/memory/memory.limit_in_bytes")    # cgroup v1
+
+
+class DecodeBusy(Exception):
+    """Every decode slot of this process is taken, and none came free in time. Not
+    user-facing: each caller answers it as `upload_busy` (`api_exceptions.UploadBusy`)."""
+
+    def __init__(self, retry_after: int):
+        super().__init__(f"no decode slot free; retry after {retry_after} s")
+        self.retry_after = retry_after
+
+
+def machine_memory_bytes() -> int | None:
+    """The memory this process may use: its container's cgroup limit when it has one,
+    else the machine's. None when neither can be read. A cgroup with no limit reports
+    "max" (v2) or a number near 2**63 (v1), so the smaller of the two figures wins."""
+    figures = []
+    for path in _CGROUP_LIMITS:
+        try:
+            with open(path) as handle:
+                raw = handle.read().strip()
+        except OSError:
+            continue
+        if raw.isdigit():
+            figures.append(int(raw))
+    try:
+        figures.append(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+    except (AttributeError, OSError, ValueError):
+        pass
+    figures = [f for f in figures if f > 0]
+    return min(figures) if figures else None
+
+
+def slots_for(memory: int | None, *, reserved: int = DEFAULT_RESERVED_BYTES,
+              budget: int = DECODE_BUDGET_BYTES) -> int:
+    """How many decodes at the budget fit in `memory` beside `reserved`: whole budgets
+    only, and never fewer than one (a machine too small for one is refused at boot, not
+    by refusing every upload). 512 MB -> 2, 1 GB -> 6, 2 GB -> 14."""
+    if not memory:
+        return 1
+    return max(1, (int(memory) - int(reserved)) // int(budget))
+
+
+def _setting(name, default):
+    try:
+        from django.conf import settings
+
+        value = getattr(settings, name, None)
+    except Exception:           # settings not configured: a script, not a request
+        value = None
+    return default if value in (None, "") else value
+
+
+def configured_slots() -> int:
+    """`IMAGE_DECODE_SLOTS` when set; otherwise what the memory holds (`slots_for`),
+    measured from `IMAGE_DECODE_MEMORY_BYTES` when set, else from the machine."""
+    explicit = _setting("IMAGE_DECODE_SLOTS", None)
+    if explicit is not None:
+        return max(1, int(explicit))
+    memory = _setting("IMAGE_DECODE_MEMORY_BYTES", None) or machine_memory_bytes()
+    return slots_for(memory, reserved=int(_setting("IMAGE_DECODE_RESERVED_BYTES",
+                                                   DEFAULT_RESERVED_BYTES)))
+
+
+_slots_lock = threading.Lock()
+_slots: tuple[int, threading.BoundedSemaphore] | None = None
+
+
+def _semaphore() -> threading.BoundedSemaphore:
+    """The process's slots, made on first use — when the settings are loaded."""
+    global _slots
+    if _slots is None:
+        with _slots_lock:
+            if _slots is None:
+                count = configured_slots()
+                _slots = (count, threading.BoundedSemaphore(count))
+    return _slots[1]
+
+
+def slot_count() -> int:
+    _semaphore()
+    return _slots[0]
+
+
+def reset_decode_slots(count: int | None = None) -> int:
+    """Make the slots again, `count` of them or as configured. For tests and for a
+    process whose settings changed; a decode holding a slot of the old semaphore gives
+    it back there, harmlessly."""
+    global _slots
+    with _slots_lock:
+        count = max(1, int(count)) if count else configured_slots()
+        _slots = (count, threading.BoundedSemaphore(count))
+    return count
+
+
+@contextmanager
+def decode_slot(wait: float | None = None):
+    """Hold one of the process's decode slots for the decode inside the block.
+
+    Waits up to `wait` seconds (`IMAGE_DECODE_WAIT_SECONDS`) for one to come free, then
+    raises `DecodeBusy` — the image is NOT decoded. Never nest it: a path takes a slot
+    around its own decode and gives it back before another decode begins (the media
+    kit runs the platform guard, and then its own grade, one after the other).
+    """
+    if wait is None:
+        wait = float(_setting("IMAGE_DECODE_WAIT_SECONDS", DEFAULT_WAIT_SECONDS))
+    semaphore = _semaphore()
+    if not semaphore.acquire(timeout=max(0.0, wait)):
+        raise DecodeBusy(int(_setting("IMAGE_DECODE_RETRY_AFTER_SECONDS",
+                                      DEFAULT_RETRY_AFTER_SECONDS)))
+    try:
+        yield
+    finally:
+        semaphore.release()

@@ -39,27 +39,38 @@ logger = logging.getLogger(__name__)
     retry_jitter=True,
     max_retries=3,
 )
-def close_idle_sessions():
+def close_idle_sessions(after=None):
     """
     Deactivate sessions that have been idle longer than the configured
     timeout. Generate session summaries for long-term memory.
+
+    A page of sessions per invocation (`training_platform.batching`), the rest handed on
+    to a fresh invocation: each close reads the session's messages to summarise them,
+    and every idle session on the platform in one task under the 300 s soft limit is
+    the shape the production-readiness audit (2026-09-25) found in the daily jobs. A
+    closed session leaves the query, so a redelivered page closes nothing twice.
     """
     from ai_assistant.models import ChatSession, UserInsight
     from ai_assistant.services.memory_service import MemoryService
+    from training_platform.batching import Batch
 
     config = getattr(settings, 'AI_ASSISTANT_CONFIG', {})
     timeout_minutes = config.get('SESSION_TIMEOUT_MINUTES', 30)
     cutoff = timezone.now() - timedelta(minutes=timeout_minutes)
 
-    idle_sessions = ChatSession.objects.filter(
+    batch = Batch()
+    idle_sessions = batch.page(ChatSession.objects.filter(
         is_active=True,
         updated_at__lt=cutoff,
-    ).select_related('user')
+    ).select_related('user'), after)
 
     memory = MemoryService()
     closed_count = 0
 
     for session in idle_sessions:
+        if batch.spent():
+            break
+        batch.done(session.pk)
         try:
             # Generate summary for long-term memory
             summary = memory.generate_summary(session)
@@ -80,6 +91,7 @@ def close_idle_sessions():
 
     if closed_count > 0:
         logger.info(f"Closed {closed_count} idle AI chat sessions")
+    batch.hand_on(close_idle_sessions)
 
     return f"Closed {closed_count} sessions"
 
@@ -92,24 +104,30 @@ def close_idle_sessions():
     retry_jitter=True,
     max_retries=3,
 )
-def compute_all_user_insights():
+def compute_all_user_insights(after=None):
     """
     Daily task to refresh analyzer caches for all users who have
     used the AI assistant.
+
+    A page of users per invocation (`training_platform.batching`), the rest handed on to
+    a fresh invocation of itself. It walked every user x three analyzers in one task
+    under the 300 s soft limit, so past a few thousand users it was cut off part-way
+    every day and the later ones were never refreshed (the production-readiness audit,
+    2026-09-25). `update_or_create` per user and insight type, so a redelivered page
+    writes nothing twice.
     """
     from ai_assistant.models import ChatSession, UserInsight
     from ai_assistant.analyzers.training_analyzer import TrainingAnalyzer
     from ai_assistant.analyzers.diet_analyzer import DietAnalyzer
     from ai_assistant.analyzers.behavior_profiler import BehaviorProfiler
-
-    # Only compute for users who have active sessions
-    user_ids = ChatSession.objects.filter(
-        is_active=True,
-    ).values_list('user_id', flat=True).distinct()
+    from training_platform.batching import Batch
 
     from django.contrib.auth import get_user_model
     User = get_user_model()
-    users = User.objects.filter(id__in=user_ids)
+    # Only compute for users who have active sessions: a subquery, never a list of ids.
+    batch = Batch()
+    users = batch.page(User.objects.filter(
+        id__in=ChatSession.objects.filter(is_active=True).values('user_id')), after)
 
     expires = timezone.now() + timedelta(hours=24)
     analyzers = [
@@ -120,6 +138,9 @@ def compute_all_user_insights():
 
     updated = 0
     for user in users:
+        if batch.spent():
+            break
+        batch.done(user.pk)
         for insight_type, analyzer in analyzers:
             try:
                 result = analyzer.analyze(user)
@@ -136,7 +157,8 @@ def compute_all_user_insights():
             except Exception as e:
                 logger.warning(f"Analyzer {insight_type} failed for user {user.id}: {e}")
 
-    logger.info(f"Computed {updated} insights for {len(user_ids)} users")
+    logger.info(f"Computed {updated} insights for {batch.handled} users")
+    batch.hand_on(compute_all_user_insights)
     return f"Updated {updated} insights"
 
 
