@@ -70,6 +70,13 @@ Worktrees are how several agents build at once. The setup is done for you; what 
   If you need to know you have not broken a neighbour, say so in your report and let the
   merge prove it.
 - The scratchpad is **shared**. Write logs to a filename nobody else would pick.
+  Its path contains `-Git-`, and in a worktree-isolated agent a command that redirects
+  into it (`pytest ... > <scratchpad>/x.log`) or chains `mkdir && git ...` can be refused
+  as "names git in a form too complex to verify" (2026-09-27). Run the command plainly
+  and pipe to `tail`, or run it with `run_in_background`, whose output file is kept for
+  you; make the directory in a command of its own.
+- `seeded_catalogue` loads the food catalogue but does NOT give the test database
+  access: a test that takes it and no `db` fails with "Database access not allowed".
 - `.venv` in a worktree is a **symlink**. `.gitignore` now covers both spellings, but check
   `git status` before `git add -A` all the same.
 - `tests/security/*.py` used to hardcode the main checkout's path, so from a worktree they
