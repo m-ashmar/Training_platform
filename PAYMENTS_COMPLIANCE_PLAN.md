@@ -28,6 +28,27 @@ and order live in `BACKEND_DELTA.md`, not here.
 | 11 | Web hub, deep links, APK hosting, `GET /api/v1/app/latest` | TODO | Next.js, separate deploy |
 | 12 | Demo seeding command, review notes, privacy + data inventory docs | TODO | `training_platform/privacy/registry.py` already lists every personal-data model — generate the inventory from it |
 
+## Production readiness run (started 2026-09-27) — resume here
+
+The owner asked for everything the backend session can finish alone, in this order; the
+owner chooses the providers (Postgres, Redis, email, Sentry, Firebase, ShamCash
+credentials, domains) and does what only they can (store accounts, signing keys,
+pushes, the Flutter repo's remote). Each phase: parallel worktree builders -> adversarial
+review -> fixes with tests proven on the old code -> full gate. The audit that set the
+list: a read-only production-readiness audit of 2026-09-25 (backend code 8/10,
+production readiness 5/10).
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Hardening: Django 5.2 LTS + pinned deps; stdout logs; worker/beat split + heartbeat; Fly health check, capacity, no volume; client IP behind Fly; DB-enforced append-only ledger; bounded erasure/export; image-decode cap; batched daily jobs; Redis per role; email for any provider, sent async, in the recipient's language; CI on this branch | BUILDING (`fx/prod-platform`, `fx/django-lts`, `fx/prod-services`, `fx/prod-data`) |
+| 2 | Launch data: `bootstrap_platform`, `seed_review_accounts` (spec §10), starter exercise catalogue | BUILDING (`build/bootstrap`) |
+| 3 | Store review (spec §9): AI refuses payment instructions on play/ios; banned-terms filter; medical disclaimers; incomplete-allergen dishes out of allergic users' plans; APK hosting + `GET /api/v1/app/latest`; privacy + terms pages (draft text for the owner) with URLs via capabilities; web account-deletion request page | TODO |
+| 4 | Review documents: review notes, data inventory from the privacy registry, privacy-label / Data safety source | TODO |
+| 5 | Step 5 remainder: an immutable event row per payment transition; email channel + receipt email; push on payment confirmed; trainer-fee pushes both sides | TODO |
+| 6 | Deploy runbook rewritten from the final config: every secret, backup/restore + key custody, staging config | TODO |
+| 7 | Backlog: SIDE_BUGS (S-106 first), BACKEND_DELTA leftovers, program cards in chat, video poster frames | TODO |
+| 8 | Step 11 web hub (Next.js) | TODO |
+
 ## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
 
 The money screens are `yalla_gym/design/yalla-gym-design/screens/07-money/`. They are the
