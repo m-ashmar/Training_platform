@@ -23,9 +23,9 @@ the Arabic privacy policy, the English one, then the same for the terms.
    `[LAWYER: ...]`, `[APP: ...]`, `[المالك: ...]` and `[المحامي: ...]` must be filled
    and its brackets removed. The console does not check this.
 2. Open **Legal documents** (`/dj-admin/legal/legaldocument/`).
-3. Tick the published version 1 of that kind and language, choose the action **Start a
-   new draft from this version**, then open the new draft (it has the next version
-   number). Or use **Add legal document** and pick the kind and the language.
+3. Tick the published version 1 of that kind and language, choose the action
+   **Start a new draft from this version**, then open the new draft (it has the next
+   version number). Or use **Add legal document** and pick the kind and the language.
 4. **Title**: the page's heading, e.g. "Privacy policy" / "سياسة الخصوصية".
    **Body**: paste the approved text, from below the BODY line. The body is plain text:
    a blank line starts a paragraph, a line starting with `## ` is a heading, lines
