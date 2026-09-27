@@ -322,6 +322,11 @@ ORDINARY_QUESTIONS = [
     "هل الأوزان الحرة أفضل؟",
     "يا غالي كيف تمريني اليوم؟",
     "بدي ادفع حالي أكتر بالتمرين",
+    # "بروتين" is not ب + "روتين" (a routine), and a routine is renewed by training
+    "بدي اشتري بروتين",
+    "شو سعر البروتين؟",
+    "renew my routine, it feels stale",
+    "Should I get a personal trainer?",
 ]
 
 
