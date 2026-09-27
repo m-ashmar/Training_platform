@@ -96,51 +96,112 @@ def featured_trainers(person, *, request, flags) -> dict | None:
     return {'trainers': matches}
 
 
-def ready_programs(*, request, flags) -> dict | None:
-    """Ready-made programmes: the public templates a client can start from.
+def ready_programs(person, *, request, flags) -> dict | None:
+    """Ready-made programmes: the routine products on sale (plan step 10), newest
+    listing first.
 
-    Left out ENTIRELY on a build that may not show prices (BuildGuide's store rule):
-    a programme sold to many buyers is a digital good, which `play` and `ios` bill
-    themselves, so the section is absent there rather than price-less. The gate is on
-    today even though nothing here carries a price yet — when it does, it will already
-    be behind the right flag.
+    Left out ENTIRELY on a build that may not show prices (BuildGuide's store rule:
+    "home sections may not carry prices, purchase buttons or payment links into play or
+    ios builds: the media_banner and ready_programs sections are filtered by the same
+    flags"). A programme sold to many buyers is ROUTINE_PRODUCT money, which `play` and
+    `ios` bill themselves, so the section is absent there rather than price-less — and
+    that is the rule today: those builds read the programmes on their own screen
+    (`GET /api/v1/products/`), which shows them without a price or a buy action.
 
-    WHAT IS NOT HERE, because the schema has none of it (plan step 10, routine
-    products, is not built): a price, a currency, a length in weeks, an equipment
-    answer, and any notion of a free trial workout. A card therefore carries the name,
-    the cycle length in days and how many exercises it holds; `trial` is on every card
-    and false, so the app can draw the artboard's free card from this same list the day
-    one exists. `price` and `money_type: ROUTINE_PRODUCT` join it additively.
+    A card IS the catalogue's row — `routine/product_serializers.py
+    CatalogueProductSerializer` with the catalogue's own context
+    (`routine/product_views.py _buyer_context`) over the catalogue's own queryset
+    (`routine/products.py catalogue_for`: published, still backed by the version the
+    review saw, a verified and visible trainer, nobody blocked) — so the home card and
+    the programmes screen cannot disagree about what is for sale, at what price, or
+    whether this person may buy it. Its price keys are there only because this build
+    may show a ROUTINE_PRODUCT price (`can_show_price`); on top of the row, a card
+    carries the keys the section always had, from the product now, and three new ones:
 
-    One query, and `.only(...)` rather than `.values(...)`: `RoutineTemplate.name` is a
-    modeltranslation column and a values query returns the raw one, which is how
-    English names reached Arabic screens elsewhere.
+      name, description        the product's title and description, in the reader's
+                               language (the other one when that is empty)
+      goal, days_per_cycle     the program's template: its goal, training days a week
+      exercises                rows the program's week holds
+      trial                    true when the first `preview_days` days can be read free
+                               before buying (`GET /api/v1/products/{id}/` answers them)
+      equipment                the codes the program's exercises name
+                               (`routine.models.EQUIPMENT_CHOICES` order), `[]` when
+                               none says
+      no_equipment             true only when EVERY exercise says `bodyweight`; an
+                               exercise that says nothing makes it false
+      money_type               "ROUTINE_PRODUCT", beside `price`, only when `price` is
+
+    `id` is the PRODUCT's id (it was a public template's before products existed; no
+    route took that id from this card).
+
+    A fixed number of queries whatever the cards: the catalogue's (the blocked set, the
+    page, what the reader owns, the build's flags, their currency, the rate when a
+    price must cross), and ONE more for every card's exercise count and equipment.
     """
     if not flags.get('can_show_prices'):
         return None
 
-    from django.db.models import Count
-    from routine.models import RoutineTemplate
+    from routine import products
+    from routine.product_serializers import CatalogueProductSerializer
+    from routine.product_views import _buyer_context
 
-    rows = (RoutineTemplate.objects.filter(is_public=True)
-            # NOT `exercises=`: `RoutineTemplate.exercises` is the m2m field, and
-            # annotating over a model field raises "The annotation 'exercises'
-            # conflicts with a field on the model" — a 500 on every first-day home.
-            .annotate(exercise_count=Count('routinetemplateexercise'))
-            .only('id', 'name', 'description', 'goal', 'days')
-            .order_by('-created_at', '-id')[:READY_PROGRAMS])
-    programs = [{
-        'id': row.pk,
-        'name': row.name,
-        'description': row.description,
-        'goal': row.goal,
-        'days_per_cycle': row.days,
-        'exercises': row.exercise_count,
-        'trial': False,
-    } for row in rows]
-    if not programs:
+    rows = list(products.catalogue_for(person)
+                .select_related('trainer', 'source_template', 'cover')
+                .order_by('-published_at', '-id')[:READY_PROGRAMS])
+    if not rows:
         return None
+
+    cards = CatalogueProductSerializer(rows, many=True,
+                                       context=_buyer_context(request, rows)).data
+    facts = _program_facts([row.source_template_id for row in rows])
+    programs = []
+    for product, card in zip(rows, cards):
+        template = product.source_template
+        exercises, equipment, bodyweight_only = facts.get(template.pk, (0, [], False))
+        card = dict(card)
+        card.update({
+            'name': card['title'],
+            'goal': template.goal,
+            'days_per_cycle': template.days,
+            'exercises': exercises,
+            'trial': bool(product.preview_days),
+            'equipment': equipment,
+            'no_equipment': bodyweight_only,
+        })
+        if 'price' in card:
+            from policy.money import MoneyType
+
+            card['money_type'] = MoneyType.ROUTINE_PRODUCT.value
+        programs.append(card)
     return {'programs': programs}
+
+
+def _program_facts(template_ids) -> dict:
+    """`{template_id: (exercise rows, equipment codes, bodyweight only)}`, one query.
+
+    `equipment` is in `EQUIPMENT_CHOICES` order, so two loads never reorder it.
+    `bodyweight only` is true when there is at least one row and every row's exercise
+    says `bodyweight`: an exercise that says nothing (null) is not evidence of no
+    equipment.
+    """
+    from django.db.models import Count
+    from routine.models import EQUIPMENT_CHOICES, RoutineTemplateExercise
+
+    order = [code for code, _label in EQUIPMENT_CHOICES]
+    counted: dict = {}
+    for row in (RoutineTemplateExercise.objects
+                .filter(template_id__in=template_ids)
+                .order_by()
+                .values('template_id', 'exercise__equipment')
+                .annotate(n=Count('id'))):
+        counted.setdefault(row['template_id'], {})[row['exercise__equipment']] = row['n']
+    facts = {}
+    for template_id, by_code in counted.items():
+        total = sum(by_code.values())
+        said = [code for code in order if by_code.get(code)]
+        facts[template_id] = (total, said,
+                              total > 0 and by_code.get('bodyweight', 0) == total)
+    return facts
 
 
 def media_banner(*, request, flags) -> dict | None:

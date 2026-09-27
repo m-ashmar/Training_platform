@@ -2809,6 +2809,30 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     `effort_out_of_range`; the database carries the same bound as a check constraint).
     It feeds `progression` on `analytics/strength/` and on the coach's client screen.
 
+    **The records of a finished workout** (BACKEND_DELTA item 12; the completion
+    screen's record card). The answer that FINISHES a session — the PATCH or PUT that
+    moves `status` to `completed`, or the POST that creates one already completed (an
+    offline sync) — carries `personal_records`; no other answer does (not a re-sent
+    finish of a finished session, not a replayed POST, not a read). Each entry is one
+    exercise that set a personal record in THIS session (sets logged with
+    `workout_session` = this session), in the order they set it; `[]` when none did::
+
+        "personal_records": [{"exercise": {"id": 3, "name": "Bench press"},
+                              "set_log_id": 91, "weight": 82.5, "reps": 8,
+                              "date": "2026-09-19",
+                              "previous_best": {"weight": 80.0, "reps": 8,
+                                                "date": "2026-09-12"} | null,
+                              "gain_kg": 2.5 | null}]
+
+    Nothing is judged at the finish: a set is a record exactly when its own logging
+    answer said `personal_record: true`, and `previous_best` is what that answer said
+    it beat (`routine/strength.py session_records`). Per exercise the entry is the
+    session's heaviest record set, and `previous_best` is the best that stood before the
+    session's first record of it, so two records in one workout read as one gain over
+    last time. `gain_kg` is `weight` less `previous_best.weight`, null when the best is
+    unknown (a record kept before 2026-09-24). The key is absent if the records could
+    not be read; the workout is finished either way. Identical on every build.
+
     **A workout that is still running** is `active` AND begun within the last twelve
     hours (`routine/sessions.py SESSION_MAX_SECONDS`). Past that it was forgotten, not
     left running: `?status=active` does not list it, `home/` does not offer to continue
@@ -3040,7 +3064,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         """PATCH or PUT: the client marks the session completed, and finishing it
         notifies and records the day. `partial_update` delegates here, so a PUT that
-        finishes a session is treated exactly like a PATCH — it was not.
+        finishes a session is treated exactly like a PATCH — it was not. The answer that
+        finishes it carries `personal_records` (see the class docstring); only that one.
         """
         # Was it already finished BEFORE this request? The branch below keyed on
         # "the payload says completed", not on a transition, so a double-tapped finish
@@ -3116,6 +3141,17 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
             record_day_quietly(instance.user, instance.routine, instance.day,
                                timezone.localdate(instance.start_time), via='session',
                                session=instance)
+
+        # The completion screen's record card (BACKEND_DELTA item 12): the records set
+        # in this session, as their logging answers gave them. On THIS answer only — the
+        # one that finished the workout. A failure costs the card, never the finish: it
+        # is logged and the key is left out, which the app reads as "no card".
+        from .strength import session_records
+        try:
+            response.data['personal_records'] = session_records(instance)
+        except Exception:       # noqa: BLE001 — the workout is finished whatever happens
+            logger.warning("could not read the records of session %s", instance.pk,
+                           exc_info=True)
 
 
 def _queue_milestones(user_id):

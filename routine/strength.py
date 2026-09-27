@@ -412,6 +412,70 @@ def record_beaten(log):
     return previous
 
 
+def session_records(session) -> list[dict]:
+    """The personal records set in one workout session, one per exercise — the record
+    card of the completion screen (`screens/04-train/Complete.png`: «رقم شخصي جديد»,
+    the lift, and «+2.5 kg» over the previous best).
+
+    Nothing is judged here. A set is a record exactly when its logging answer said so,
+    and that verdict and the best it beat are KEPT on the set
+    (`ExerciseSetLog.personal_record`, `previous_best`, written by the one judgement,
+    `record_beaten`, in `routine/views.py _celebrate_personal_record`). Reading them
+    back is what keeps this card, the logging answer, the push and the coach's review
+    (`workout-sessions/{id}/?expand=sets`) on one verdict: recomputed now, a set
+    corrected or deleted since would make them disagree.
+
+    Only the sets logged IN this session (`workout_session`). For each exercise:
+
+      the record   the heaviest record set of the session (most reps among equal
+                   weights, then the earliest)
+      what it beat the `previous_best` stored on the session's FIRST record of that
+                   exercise — the best that stood before this workout's records began,
+                   so two records in one session read «+5 kg» over last week, not «+2.5»
+                   over the set before
+      gain_kg      the record's weight less that best's, null when the best is unknown
+                   (a record kept before `previous_best` existed, 2026-09-24)
+
+    In the order the exercises first set a record. One query.
+    """
+    from .models import ExerciseSetLog
+
+    first: dict = {}
+    top: dict = {}
+    for log in (ExerciseSetLog.objects
+                .filter(workout_session=session, personal_record=True)
+                .select_related('user_exercise_progress__exercise')
+                .order_by('pk')):
+        progress = log.user_exercise_progress
+        if progress is None or not log.weight or not log.reps:
+            continue
+        key = progress.exercise_id
+        first.setdefault(key, log)
+        kept = top.get(key)
+        if kept is None or (float(log.weight), log.reps) > (float(kept.weight), kept.reps):
+            top[key] = log
+    records = []
+    for key, opener in first.items():
+        best = top[key]
+        previous = opener.previous_best or None
+        gain = None
+        if previous and previous.get('weight') is not None:
+            gain = round(float(best.weight) - float(previous['weight']), 2)
+        exercise = best.user_exercise_progress.exercise
+        records.append({
+            # Read off the instance: modeltranslation serves the name in the active
+            # language only through the attribute.
+            'exercise': {'id': exercise.pk, 'name': exercise.name},
+            'set_log_id': best.pk,
+            'weight': float(best.weight),
+            'reps': int(best.reps),
+            'date': best.date.isoformat() if best.date else None,
+            'previous_best': previous,
+            'gain_kg': gain,
+        })
+    return records
+
+
 def is_personal_record(log) -> bool:
     """True when this set is heavier than everything this person has logged for that
     exercise (`record_beaten`).

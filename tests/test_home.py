@@ -220,7 +220,19 @@ def _banner():
 
 
 def _public_template(trainer, tag):
-    from routine.models import Exercise, RoutineTemplate, RoutineTemplateExercise
+    """A ready programme exists: a public template, LISTED FOR SALE.
+
+    Deliberate contract change (build/home-records, BACKEND_DELTA item 9): the
+    `ready_programs` cards are the routine products on sale (plan step 10), not public
+    templates, so "a ready programme exists" now means a published product. The tests
+    that call this still assert exactly what they were written to protect — which
+    builds receive the section, that no price reaches a store build, that the cache
+    separates builds, and that a coached client gets no first-day list.
+    """
+    from decimal import Decimal
+
+    from routine.models import (Exercise, RoutineProduct, RoutineTemplate,
+                                RoutineTemplateExercise)
 
     template = RoutineTemplate.objects.create(
         name=f"ready {tag}", description="a ready programme", goal="Strength",
@@ -228,6 +240,14 @@ def _public_template(trainer, tag):
     exercise = Exercise.objects.create(name=f"tmpl ex {tag}", created_by=trainer)
     RoutineTemplateExercise.objects.create(template=template, exercise=exercise,
                                            day=1, order=1, sets=3, reps=10)
+    # On sale needs a verified trainer and the template version the review saw
+    # (`RoutineProduct.is_on_sale`); the review itself is `routine/products.py`'s test.
+    type(trainer).objects.filter(pk=trainer.pk).update(trainer_is_verified=True)
+    template.refresh_from_db()
+    RoutineProduct.objects.create(
+        trainer=trainer, source_template=template, title_en=f"ready {tag}",
+        price=Decimal("2500.00"), currency="SYP", status="published",
+        template_version=template.updated_at, published_at=timezone.now())
     return template
 
 

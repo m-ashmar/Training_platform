@@ -573,7 +573,9 @@ duration_seconds, width, height}` otherwise) and `exercise` (`{id, name}` on a v
 that names its move, else null). `media.url` is PRIVATE: signed, expiring (an hour on
 GCS), and handed out only in answers the two people in the thread receive — use it,
 never store it. A message taken back serves `media: null`. The conversation list's
-`last_message` and the home card's `trainer_message` carry `kind` and never the media.
+`last_message` carries `kind` and never the media; the home card's `trainer_message`
+carries it for a VOICE note only (`audio_url`, `duration_seconds`, `state`, 2026-09-27),
+signed the same way and served only to the client of the thread.
 
 **Photos, voice notes and videos** are sent with `POST /api/v1/chat/media/`
 (`multipart/form-data`: `conversation`, `kind`, `file`, optional `body` as the caption,
@@ -842,6 +844,32 @@ Additive in `workout_hero`: an open session begun while the coaching was paid an
 server still accepts its sets and its finish (judged at the session's start). Additive
 in `trainer_message`: `message.deleted` (bool). A newest message its sender took back
 keeps the card with `body: ""` and `deleted: true`, as the conversation list shows it.
+
+**What the home-records build added** (BACKEND_DELTA items 9 and 12, 2026-09-27).
+Additive: no route, section type, key or `code` renamed or removed; no new route.
+
+- **The day timeline** is `nutrition_today.timeline`, not a new section type: the
+  canvas's closed set of types has none for it, its «يومك» is the meal list with the
+  workout placed among it, and a key inside the existing card is invisible to every
+  installed build (a new type would also be skipped, but would move the section order
+  and draw the same meals twice). Entries `{kind: "meal", at, state, meal_id,
+  meal_type, name, calories}` and at most one `{kind: "workout", at, at_source, state,
+  routine_id, routine_name, day, muscles, exercises, sets, estimated_minutes}` (+
+  `session_id` while a session on it is open, + `refusal` when the hero's button is
+  `refused`). `state` `done | now | next`, a meal's being its card's `state` renamed;
+  `at_source` `session | reminder_hour`. No diet section, no timeline.
+- **`ready_programs` cards are the routine products on sale** — each is the
+  `GET /api/v1/products/` row, plus the section's old keys from the product (`id` is
+  now the PRODUCT's; `name`, `description`, `goal`, `days_per_cycle`, `exercises`,
+  `trial` = a free preview exists) and `equipment` (codes), `no_equipment`, and
+  `money_type: "ROUTINE_PRODUCT"` beside `price`. The section is still ABSENT on a
+  build whose `can_show_prices` is off (`play`, `ios`, no channel), per the BuildGuide.
+- **`trainer_message` of `kind: "voice"`** adds `audio_url` (PRIVATE: signed and
+  expiring, like the thread's `media.url`), `duration_seconds` and `state`
+  (`ready | unavailable`). Only that kind carries them.
+- **`PATCH/PUT workout-sessions/{id}/` that finishes a session** (and a `POST` of one
+  already `completed`) answers `personal_records` — see "What wiring the train screens
+  found" below.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -2517,6 +2545,16 @@ Prefix `/api/routine/`.
   most reps, then the latest; an earlier set of the same batch counts): exactly the
   record it beat (`strength.record_beaten`). Null when the set is not a record, and on
   a replay, a PATCH or a list read.
+- **The records of a finished workout** (BACKEND_DELTA item 12, 2026-09-27). The answer
+  that FINISHES a session — `PATCH/PUT workout-sessions/{id}/` moving `status` to
+  `completed`, or `POST workout-sessions/` of one already `completed` — carries
+  `personal_records`, one entry per exercise that set a record among the sets logged
+  in that session: `{exercise: {id, name}, set_log_id, weight, reps, date,
+  previous_best: {weight, reps, date} | null, gain_kg | null}` — the session's heaviest
+  record set, beside the best that stood before the session's first record of it. Read
+  from the verdicts the logging answers gave (never re-judged). `[]` when none; absent
+  on every other answer (a re-sent finish, a replay, a read). `analytics/summary/`
+  `prs` was already real (B-013).
 
 **What the review of the routine-logging build found** (2026-09-24). No route, key or
 `code` changed. One new column (`routine/0029`, `ExerciseSetLog.previous_best`, what a
