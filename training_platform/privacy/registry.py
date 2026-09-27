@@ -182,7 +182,8 @@ def section_pages(source, user, *, size: int | None = None):
     size = size or batch_rows()
     model = source.get_model()
     names = _export_columns(source, model)
-    ids = list(source.queryset_for(user).values_list("pk", flat=True))
+    # Once each, in order: an ordering through a join can repeat a row's key.
+    ids = list(dict.fromkeys(source.queryset_for(user).values_list("pk", flat=True)))
     links = [f for f in model._meta.get_fields()
              if f.many_to_many and getattr(f, "concrete", False)]
     manager = model._default_manager
@@ -197,11 +198,21 @@ def section_pages(source, user, *, size: int | None = None):
         # The M2M contents are still theirs: attached as lists of ids, in the related
         # model's own order, as the per-object manager read them.
         for link in links:
-            back = link.related_query_name()
             found: dict = {}
-            for owner, target in (link.related_model._default_manager
-                                  .filter(**{f"{back}__in": page_ids})
-                                  .values_list(back, "pk")):
+            back = link.related_query_name()
+            if back.endswith("+"):
+                # No reverse name to join through: the through table, in its own order.
+                through = link.remote_field.through
+                source_column = through._meta.get_field(link.m2m_field_name()).attname
+                target_column = through._meta.get_field(link.m2m_reverse_field_name()).attname
+                pairs = (through._default_manager
+                         .filter(**{f"{source_column}__in": page_ids})
+                         .order_by("pk").values_list(source_column, target_column))
+            else:
+                pairs = (link.related_model._default_manager
+                         .filter(**{f"{back}__in": page_ids})
+                         .values_list(back, "pk"))
+            for owner, target in pairs:
                 found.setdefault(owner, []).append(target)
             for key, row in by_pk.items():
                 row[link.name] = found.get(key, [])
