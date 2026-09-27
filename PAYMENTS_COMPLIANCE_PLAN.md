@@ -33,8 +33,14 @@ and order live in `BACKEND_DELTA.md`, not here.
 The owner asked for everything the backend session can finish alone, in this order; the
 owner chooses the providers (Postgres, Redis, email, Sentry, Firebase, ShamCash
 credentials, domains) and does what only they can (store accounts, signing keys,
-pushes, the Flutter repo's remote). Each phase: parallel worktree builders -> adversarial
-review -> fixes with tests proven on the old code -> full gate. The audit that set the
+pushes, the Flutter repo's remote). Each phase: parallel worktree builders -> merge only
+what passes -> full gate. The owner's rule (2026-09-27): bugs found by reviews or by the
+final testing are LOGGED in SIDE_BUGS.md with evidence and fixed in a SEPARATE run — no
+fix-and-rescan loops inside this run. The run ends with the full gate plus an end-to-end
+smoke of the main app journeys on a fresh database (bootstrap + review accounts). The
+Django 5.2 upgrade lands only with conservative, checked pins (django-allauth stays on
+0.63.x unless it fails on 5.2; cachalot 2.9.x; DRF 3.16.x; Pillow 12 only if the
+measured-memory tests pass) and a green full gate. The audit that set the
 list: a read-only production-readiness audit of 2026-09-25 (backend code 8/10,
 production readiness 5/10).
 
