@@ -4,7 +4,7 @@
 
 What the platform's server holds about a person, why, who else receives it, what the person can download and what happens when they delete their account (spec §9 B3). `privacy_labels.md` (Apple's App Privacy answers and Google's Data safety answers) and the privacy-policy drafts in `docs/legal/` are written from it, and must list the same data.
 
-88 sources, in the order they are registered.
+89 sources, in the order they are registered.
 
 ## What every source has in common
 
@@ -54,7 +54,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 | `health` | Health information | Health & Fitness > Health | Health and fitness > Health info | `profile`, `diet_plans`, `food_preferences`, `performance_metrics`, `ai_training_data`, `goals`, `daily_advice` |
 | `fitness` | Fitness and training activity | Health & Fitness > Fitness | Health and fitness > Fitness info | `profile`, `workout_sessions`, `exercise_progress`, `routine_progress`, `day_outcomes`, `diet_plans`, `food_preferences`, `performance_metrics`, `behaviour_events`, `goals`, `dashboard`, `daily_advice`, `daily_progress`, `food_category_preferences`, `learned_food_weights`, `meal_swaps`, `meal_events`, `meals`, `meal_components`, `ai_insights`, `routines_created`, `challenge_participation`, `exercise_set_logs`, `routine_exercises` |
 | `purchases` | Purchase and payment history | Purchases > Purchase History | Financial info > Purchase history | `subscriptions`, `trainer_relations`, `coaching_periods`, `routine_purchases`, `transactions`, `idempotency_keys`, `payments`, `transfer_reviews`, `payment_events` |
-| `financial` | Wallet and payout details | Financial Info > Other Financial Info | Financial info > Other financial info | `payout_methods`, `withdrawals`, `withdrawal_events`, `wallet`, `agent_profile`, `agent_receivable`, `agent_settlements`, `transactions`, `wallet_audit_log`, `transfer_reviews` |
+| `financial` | Wallet and payout details | Financial Info > Other Financial Info | Financial info > Other financial info | `payout_methods`, `withdrawals`, `withdrawal_events`, `wallet`, `agent_profile`, `agent_receivable`, `agent_settlements`, `transactions`, `wallet_audit_log`, `transfer_reviews`, `payer_address` |
 | `messages` | Chat messages | User Content > Emails or Text Messages | Messages > Other in-app messages | `conversations`, `messages_sent` |
 | `ai_conversations` | Conversations with the AI coach | User Content > Other User Content | Messages > Other in-app messages | `chat_sessions`, `ai_training_data`, `ai_insights`, `assistant_messages` |
 | `photos_videos` | Photos and videos | User Content > Photos or Videos | Photos and videos > Photos, Videos | `profile`, `media_kit`, `posts`, `messages_sent`, `exercises_created`, `challenges_created`, `routine_products` |
@@ -157,6 +157,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 | `payments` | `subscription.Payment` | `purchases` | `payment_gateway` | kept | - |
 | `subscription_usage` | `subscription.SubscriptionUsage` | `app_activity` | nobody | kept | - |
 | `transfer_reviews` | `subscription.TransferReview` | `purchases`, `financial` | nobody | kept | - |
+| `payer_address` | `subscription.PayerAddress` | `financial` | nobody | deleted | - |
 | `payment_events` | `subscription.PaymentEvent` | `purchases` | nobody | kept | - |
 | `agent_api_keys` | `wallet.AgentAPIKey` | `credentials` | nobody | deleted | - |
 
@@ -1712,13 +1713,31 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Purchase and payment history (`purchases`); Wallet and payout details (`financial`).
 
-**Fields stored.** `id`, `gateway`, `transaction_id`, `amount`, `currency`, `note`, `sender`, `occurred_at`, `raw`, `reason`, `payment`, `candidate_payment_ids`, `status`, `resolved_by`, `resolved_at`, `resolution_note`, `created_at`.
+**Fields stored.** `id`, `gateway`, `transaction_id`, `amount`, `currency`, `note`, `sender`, `occurred_at`, `raw`, `reason`, `payment`, `candidate_payment_ids`, `sender_match_payment_ids`, `status`, `resolved_by`, `resolved_at`, `resolution_note`, `created_at`.
 
-**In the export.** `id`, `reason`, `status`, `amount`, `currency`, `occurred_at`, `created_at`, `resolved_at`. Not exported: `gateway`, `transaction_id`, `note`, `sender`, `raw`, `payment`, `candidate_payment_ids`, `resolved_by`, `resolution_note`.
+**In the export.** `id`, `reason`, `status`, `amount`, `currency`, `occurred_at`, `created_at`, `resolved_at`. Not exported: `gateway`, `transaction_id`, `note`, `sender`, `raw`, `payment`, `candidate_payment_ids`, `sender_match_payment_ids`, `resolved_by`, `resolution_note`.
 
 **On erasure.** Kept.
 
 **Retention.** Kept for good, and after erasure.
+
+### `payer_address` — `subscription.PayerAddress`
+
+**Why.** The ShamCash account address the person pays from (encrypted), so an operator can match a transfer with a missing reference to their checkout.
+
+**Whose.** Rows whose `user` is the account.
+
+**Who else receives it.** Nobody outside the platform.
+
+**Data types.** Wallet and payout details (`financial`).
+
+**Fields stored.** `id`, `user`, `address`, `address_digest`, `created_at`, `updated_at`.
+
+**In the export.** `id`, `address`, `created_at`, `updated_at`. Not exported: `user`, `address_digest`.
+
+**On erasure.** Deleted.
+
+**Retention.** While the account exists.
 
 ### `payment_events` — `subscription.PaymentEvent`
 

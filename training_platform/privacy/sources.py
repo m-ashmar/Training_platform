@@ -893,6 +893,20 @@ register(PersonalDataSource(label="transfer_reviews", model="subscription.Transf
                                      "ShamCash reported them. A record of money."),
                             recipients=(),
                             data_types=("purchases", "financial")))
+# The public ShamCash address a customer pays from, saved on their profile (the spec,
+# section 6: "Save the address, not the account"). Personal data and nothing else —
+# encrypted at rest, like a trainer's payout address — so it goes with the account. Used
+# only as evidence that a transfer came from this customer; the digest is a keyed hash
+# and is not exported.
+register(PersonalDataSource(label="payer_address", model="subscription.PayerAddress",
+                            user_field="user",
+                            fields=["id", "address", "created_at", "updated_at"],
+                            on_erase="delete",
+                            purpose=("The ShamCash account address the person pays from "
+                                     "(encrypted), so an operator can match a transfer "
+                                     "with a missing reference to their checkout."),
+                            recipients=(),
+                            data_types=("financial",)))
 # Every state a customer's payment went through (plan step 5; immutable at the database,
 # `subscription/migrations/0016`). A record of money like the payment it belongs to:
 # kept on erasure, exported to the customer. The export lists the steps and who or what

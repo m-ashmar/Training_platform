@@ -124,19 +124,49 @@ class PaymentGatewayService:
 
     def fetch_payment_status(self, reference: str, expected: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Authoritatively look up + verify a payment at the provider."""
+        self._start_read()
         try:
-            return self.gateway.fetch_payment_status(reference, expected=expected)
+            result = self.gateway.fetch_payment_status(reference, expected=expected)
         except Exception as e:
             logger.error(f"Failed to fetch payment status: {str(e)}")
+            self._record_read(raised=True)
             raise PaymentGatewayError(f"Status check failed: {str(e)}")
+        self._record_read()
+        return result
 
     def list_transactions(self, start, end):
         """`(transactions, complete)` in a window (`BaseGateway.list_transactions`)."""
+        self._start_read()
         try:
-            return self.gateway.list_transactions(start, end)
+            listed = self.gateway.list_transactions(start, end)
         except Exception as e:
             logger.error(f"Failed to list transactions: {str(e)}")
+            self._record_read(raised=True)
             raise PaymentGatewayError(f"Transaction listing failed: {str(e)}")
+        self._record_read()
+        return listed
+
+    def _start_read(self) -> None:
+        if hasattr(self.gateway, 'last_read_error'):
+            self.gateway.last_read_error, self.gateway.reads_answered = None, 0
+
+    def _record_read(self, raised: bool = False) -> None:
+        """Write what a read of the merchant account came to into the gateway's health
+        (`subscription.gateway_health`): the state every payment screen shows as
+        `gateway_state`. Only a gateway that reports its reads (`last_read_error`,
+        `reads_answered`: the ShamCash adapter) is recorded, and only by what those say:
+        a lookup that could not reach the gateway is a failure, one that answered a
+        success. A call that raised for another reason (a fault of ours) says nothing
+        about the gateway. Never decides anything and never raises."""
+        from ..gateway_health import record_failure, record_success
+
+        gateway = self.gateway
+        if not hasattr(gateway, 'last_read_error'):
+            return
+        if gateway.last_read_error:
+            record_failure(self.gateway_name, gateway.last_read_error)
+        elif getattr(gateway, 'reads_answered', 0) and not raised:
+            record_success(self.gateway_name)
 
     def transaction_facts(self, txn) -> Dict[str, Any]:
         return self.gateway.transaction_facts(txn)

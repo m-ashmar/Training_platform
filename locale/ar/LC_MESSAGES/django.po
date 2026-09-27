@@ -5874,5 +5874,13 @@ msgstr "حدّث برنامجك · %(routine)s"
 #. A wallet purchase of a program the buyer has a checkout open for (the web hub):
 #. paying both would pay twice (`checkout_open`).
 #: routine/product_views.py
-msgid "A payment for this program is already open. Complete it, or wait for it to close."
+msgid ""
+"A payment for this program is already open. Complete it, or wait for it to "
+"close."
 msgstr "يوجد دفع مفتوح لهذا البرنامج. أكمله، أو انتظر حتى يُغلق."
+
+#. The .well-known association files (Android App Links, iOS Universal Links) are
+#. not configured on this server: releases/app_links.py.
+#: releases/app_links.py
+msgid "Links that open the app are not set up on this server."
+msgstr "روابط فتح التطبيق غير مُعدّة على هذا الخادم."

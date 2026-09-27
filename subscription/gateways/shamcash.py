@@ -56,6 +56,11 @@ class ShamCashGateway(PaymentGateway):
         self.sig_header = config.get('webhook_signature_header', 'X-ShamCash-Signature')
         self.ts_header = config.get('webhook_timestamp_header', 'X-ShamCash-Timestamp')
         self.signature_expiry = int(config.get('signature_expiry', 300))
+        # What the last read of the merchant account came to, for the gateway's health
+        # (`subscription.gateway_health`, recorded by `PaymentGatewayService`): how many
+        # lookups answered, and the error of one that could not reach ShamCash.
+        self.reads_answered = 0
+        self.last_read_error = None
 
     # ------------------------------------------------------------------ #
     def _headers(self) -> Dict[str, str]:
@@ -228,6 +233,7 @@ class ShamCashGateway(PaymentGateway):
         seen = []
         lookups = 0
         truncated = False
+        self.reads_answered, self.last_read_error = 0, None
         while windows:
             if lookups >= self.MAX_LOOKUPS:
                 truncated = True
@@ -244,7 +250,9 @@ class ShamCashGateway(PaymentGateway):
                 envelope = self._get('/transactions', params)
             except Exception as e:
                 logger.warning(f"ShamCash status lookup failed for {reference or 'the sweep'}: {e}")
+                self.last_read_error = str(e) or type(e).__name__
                 return None, seen, truncated, str(e)
+            self.reads_answered += 1
 
             txns = (envelope.get('data') or []) if isinstance(envelope, dict) else []
             txns = [t for t in txns if isinstance(t, dict)]

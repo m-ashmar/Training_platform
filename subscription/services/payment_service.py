@@ -607,7 +607,7 @@ class PaymentService:
     @classmethod
     def hold_for_review(cls, payment_id, facts: dict, *, reason: str,
                         gateway: str = 'shamcash', by: str = By.SYSTEM,
-                        actor=None) -> TransferReview | None:
+                        actor=None, candidates=()) -> TransferReview | None:
         """Hold money that is almost right for an operator, never drop it.
 
         `facts` is what the gateway saw (`transaction_facts`: transaction id, amount,
@@ -615,6 +615,13 @@ class PaymentService:
         transaction, ever: seeing the same transfer again returns the row it already has,
         and a transfer that already confirmed a payment is not queued at all (returns
         None) — one transfer confirms one payment, once.
+
+        `candidates` are the OTHER checkouts the transfer could be for (the sweep names
+        them when the sender's saved address chose this one among several), kept on the
+        row for the operator. Whether the transfer's sender is the address this
+        checkout's customer saved (`PayerAddress`, the spec's second signal) is written
+        onto the row and into the event's evidence (`sender_address_matched`): evidence,
+        never a confirmation.
 
         A checkout that can still take money (open, or expired within the late-money
         window) becomes `needs_review`: it keeps its reference, blocks a second checkout,
@@ -651,6 +658,8 @@ class PaymentService:
                 reason = ('duplicate_transfer' if payment.status in ('completed', 'refunded')
                           else 'checkout_closed')
             review = cls._queue_transfer(facts, txn_id, reason=reason, payment=payment,
+                                         candidates=[c for c in candidates
+                                                     if str(c) != str(payment.pk)],
                                          gateway=gateway)
             if holds and payment.status != 'needs_review':
                 meta = dict(payment.metadata or {})
@@ -660,7 +669,9 @@ class PaymentService:
                 cls._move(payment, 'needs_review', by=by, actor=actor, evidence={
                     'review_id': str(review.pk), 'reason': reason, 'gateway': gateway,
                     'transaction_id': txn_id, 'amount': str(review.amount),
-                    'currency': review.currency})
+                    'currency': review.currency,
+                    'sender_address_matched':
+                        str(payment.pk) in (review.sender_match_payment_ids or [])})
                 payment.save(update_fields=['status', 'metadata', 'updated_at'])
                 logger.warning("Payment %s held for review (%s, transfer %s)",
                                payment.id, reason, txn_id)
@@ -672,8 +683,12 @@ class PaymentService:
     @staticmethod
     def _queue_transfer(facts, txn_id, *, reason, payment=None, candidates=(),
                         gateway='shamcash') -> TransferReview:
-        """The queue row for one transfer (the caller has checked it is new)."""
+        """The queue row for one transfer (the caller has checked it is new), with the
+        second signal written on it: which of its checkouts belong to a customer who
+        saved the transfer's sender address (`sender_match_payment_ids`)."""
         from django.utils.dateparse import parse_datetime
+
+        from ..payer_address import sender_matches
 
         try:
             amount = Decimal(str(facts.get('amount'))).quantize(Decimal('0.01'))
@@ -689,7 +704,9 @@ class PaymentService:
             note=str(facts.get('note') or '')[:500], sender=str(facts.get('sender') or '')[:255],
             occurred_at=occurred if hasattr(occurred, 'tzinfo') else None,
             raw=raw if isinstance(raw, dict) else {}, reason=reason, payment=payment,
-            candidate_payment_ids=[str(c) for c in candidates])
+            candidate_payment_ids=[str(c) for c in candidates],
+            sender_match_payment_ids=sender_matches(
+                facts, [payment.pk if payment is not None else None, *candidates]))
 
     @classmethod
     def queue_unclaimed_transfer(cls, facts: dict, *, candidates=(),

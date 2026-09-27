@@ -59,8 +59,8 @@ from diet.admin import (
     ImprovedUserFoodCategoryPreferenceAdmin as DietFoodChoiceAdmin,
 )
 from subscription.models import (
-    SubscriptionPlan, Subscription, Payment, 
-    SubscriptionFeature, SubscriptionUsage, TransferReview
+    SubscriptionPlan, Subscription, Payment,
+    SubscriptionFeature, SubscriptionUsage, TransferReview, GatewayHealth
 )
 from social.models import (
     Post, Comment, UserFollow, Challenge, ChallengeParticipation,
@@ -446,13 +446,24 @@ class TransferReviewAdmin(admin.ModelAdmin):
     form = TransferReviewForm
     list_select_related = ('payment', 'resolved_by')
     list_display = ('created_at', 'reason', 'status', 'amount', 'currency', 'note',
-                    'sender', 'payment')
+                    'sender', 'sender_is_saved_payer', 'payment')
     list_filter = ('status', 'reason', 'currency')
     search_fields = ('transaction_id', 'note', 'sender', 'payment__id',
                      'payment__gateway_transaction_reference')
     readonly_fields = ('gateway', 'transaction_id', 'amount', 'currency', 'note', 'sender',
                        'occurred_at', 'reason', 'payment', 'candidate_payment_ids',
+                       'sender_match_payment_ids',
                        'status', 'resolved_by', 'resolved_at', 'raw', 'created_at')
+
+    @admin.display(boolean=True, description="Sender = saved payer address")
+    def sender_is_saved_payer(self, obj):
+        """The second signal (the spec, section 6): the transfer's sender is the ShamCash
+        address the held checkout's customer saved on their profile. Evidence — the
+        address is self-declared — never a reason to approve on its own. The checkouts
+        it points at are `sender_match_payment_ids` on the row."""
+        if obj.payment_id is None:
+            return bool(obj.sender_match_payment_ids)
+        return str(obj.payment_id) in (obj.sender_match_payment_ids or [])
     actions = ['approve', 'reject', 'dismiss']
 
     def has_add_permission(self, request):
@@ -517,6 +528,37 @@ class TransferReviewAdmin(admin.ModelAdmin):
                                            f"review.", messages.SUCCESS)
             except (InvalidPaymentTransition, PaymentError, Payment.DoesNotExist) as exc:
                 self.message_user(request, f"Not attached: {exc}", messages.ERROR)
+
+
+class GatewayHealthAdmin(admin.ModelAdmin):
+    """Whether the server can read each payment gateway's merchant account right now —
+    what every payment screen shows as "ShamCash is not responding, your payment is
+    safe, we will keep checking" (the spec, section 6; `subscription/gateway_health.py`).
+
+    Written by the pollers, the sweep and "check my payment", never by hand. `State` is
+    what the customers are shown now; `last_error` is the operator's alone. While a
+    gateway is degraded nothing is expired: the checkouts wait, the pollers keep asking,
+    and agents remain the second rail.
+    """
+    list_display = ('gateway', 'state', 'failing_since', 'consecutive_failures',
+                    'last_success_at', 'last_failure_at', 'last_error')
+    readonly_fields = ('gateway', 'state', 'failing_since', 'consecutive_failures',
+                       'last_success_at', 'last_failure_at', 'last_error', 'updated_at')
+    fields = readonly_fields
+
+    @admin.display(description="State shown to customers")
+    def state(self, obj):
+        from subscription.gateway_health import is_degraded
+        return "degraded" if is_degraded(obj) else "ok"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 # ============================================================================
@@ -754,6 +796,7 @@ admin_site.register(SubscriptionPlan, SubscriptionPlanAdmin)
 admin_site.register(Subscription, SubscriptionAdmin)
 admin_site.register(Payment, PaymentAdmin)
 admin_site.register(TransferReview, TransferReviewAdmin)
+admin_site.register(GatewayHealth, GatewayHealthAdmin)
 admin_site.register(SubscriptionFeature)
 admin_site.register(SubscriptionUsage)
 
