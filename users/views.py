@@ -361,15 +361,16 @@ class CustomRegisterView(RegisterView):
         # Create the user: enabled, unverified, and holding no credential
         user = self.perform_create(serializer)
         
-        # Generate and send OTP for email verification
+        # Issue the sign-up code. Its email is QUEUED for the worker, in the language just
+        # saved on the account (users/utils.py `queue_otp_email`); nothing here waits on
+        # a mail server, and a mail failure is reported there, not here.
         from .utils import create_otp
         try:
             create_otp(user)
-            logger.info(f"OTP sent to {user.email} for user {user.id}")
-        except Exception as e:
-            logger.error(f"Failed to send OTP to {user.email}: {str(e)}")
+        except Exception:
+            logger.exception("Sign-up code could not be issued for user %s", user.pk)
             # Continue even if OTP sending fails (user can request resend)
-        
+
         # Return response without tokens (user needs to verify OTP first)
         user_info = {
             'id': user.id,
@@ -379,6 +380,9 @@ class CustomRegisterView(RegisterView):
             'last_name': user.last_name,
             'user_type': user.user_type,
             'profile_picture': user.profile_picture.url if user.profile_picture else None,
+            # Additive (2026-09-27): the language saved for this person's emails and
+            # pushes — the field, else Accept-Language, else Arabic.
+            'preferred_language': user.preferred_language,
         }
         
         headers = self.get_success_headers(serializer.data)
@@ -482,6 +486,11 @@ class ResendOTPView(APIView):
     the seconds really left in the hour (BACKEND_BUGS B-022); the same for every address.
     400 `email_required` (with `field`) when `email` is missing or not text — it
     answered the generic `bad_request` before (the owner, 2026-09-24).
+
+    The email is sent by the worker, not this request, in the account's SAVED language
+    (`preferred_language`), whatever `Accept-Language` this request carries; a send that
+    fails is retried for about seven minutes (users/tasks.py). A code replaced by a newer
+    one is never sent late. The answer is unchanged by any of this.
     """
     permission_classes = [AllowAny]
 
@@ -2803,6 +2812,9 @@ class PasswordResetRequestView(APIView):
     Body: `{email}`, matched lower-cased. Limit: 3 an hour per address, then 429
     `{error, detail, code: "throttled", retry_after_seconds}` with `Retry-After` — the
     seconds really left in the hour (BACKEND_BUGS B-022); the same for every address.
+
+    The email is sent by the worker, in the account's SAVED language, not this
+    request's (see `ResendOTPView`).
     """
     permission_classes = [AllowAny]
 

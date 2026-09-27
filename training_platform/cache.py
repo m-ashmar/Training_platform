@@ -6,13 +6,15 @@ This ensures the correct Redis DB segment is used for each data type,
 and gracefully falls back to 'default' in environments that only define it
 (e.g., local dev with LocMemCache).
 
-Redis DB segmentation (production):
+Redis DB segmentation (production, on REDIS_URL alone):
     DB0 — sessions        → caches['default']
     DB1 — rate limiting   → caches['ratelimit']
     DB2 — public cache    → caches['public']
     DB3 — private cache   → caches['private']
     DB4 — Edamam API      → caches['edamam']
     DB5 — channel layer   → channels_redis (not Django CACHES)
+With REDIS_CACHE_URL set, the five caches share the one database it names and are kept
+apart by their KEY_PREFIX (training_platform/redis_layout.py).
 """
 from django.core.cache import caches
 

@@ -103,194 +103,256 @@ def _hash_otp(otp_code: str) -> str:
         hashlib.sha256,
     ).hexdigest()
 
-def send_otp_email(user, otp_code):
+#: How long a sign-up or reset code is good for. The rule itself is unchanged (10
+#: minutes, API_CONTRACT.md §1); it is named because the email's seal expires with it.
+OTP_LIFETIME_MINUTES = 10
+
+
+def _otp_seal():
+    """The cipher a code is sealed with between the request and the worker.
+
+    The code has to reach the worker that emails it, through the broker — a Redis whose
+    keys any operator, backup or `MONITOR` can read. The row keeps only a keyed hash, so
+    the plain code would otherwise exist nowhere but there. Fernet (authenticated,
+    timestamped) under a key derived from SECRET_KEY, which the web and worker processes
+    share and the broker never sees; SECRET_KEY_FALLBACKS still open a seal made just
+    before a key rotation.
     """
-    Send OTP code to user's email address.
-    
-    Args:
-        user: CustomUser instance
-        otp_code: 6-digit OTP code to send
-    
-    Returns:
-        bool: True if email was sent successfully, False otherwise
-    """
-    from training_platform.i18n import LanguageContext
-    from django.utils.translation import gettext as _, get_language
-    from django.utils.translation import get_language_bidi
+    import base64
+
+    from cryptography.fernet import Fernet, MultiFernet
+
+    keys = [settings.SECRET_KEY, *(getattr(settings, "SECRET_KEY_FALLBACKS", None) or [])]
+    return MultiFernet([
+        Fernet(base64.urlsafe_b64encode(
+            hashlib.sha256(b"users.otp-email-seal:" + key.encode("utf-8")).digest()))
+        for key in keys if key
+    ])
+
+
+def seal_otp_code(otp_code):
+    """`otp_code` sealed for the broker (see `_otp_seal`). A new token every call."""
+    return _otp_seal().encrypt(str(otp_code).encode("utf-8")).decode("ascii")
+
+
+def open_otp_code(sealed):
+    """The code inside `sealed`, or None when it is forged, damaged or older than the
+    code's own lifetime — a seal copied out of the broker later opens to nothing."""
+    from cryptography.fernet import InvalidToken
 
     try:
-        with LanguageContext.for_user(user):
-            subject = str(_('Verify Your Email - Training Platform'))
-            
-            # Try to render HTML template, fallback to plain text
-            try:
-                html_message = render_to_string('emails/otp_verification.html', {
-                    'user': user,
-                    'otp_code': otp_code,
-                    'LANGUAGE_CODE': get_language(),
-                    'LANGUAGE_BIDI': get_language_bidi(),
-                })
-                plain_message = str(_("Your OTP verification code is: %(code)s\n\nThis code will expire in 10 minutes.\n\nIf you didn't request this code, please ignore this email.")) % {"code": otp_code}
-            except Exception as e:
-                logger.warning(f"Could not render email template: {e}. Using plain text.")
-                html_message = None
-                plain_message = str(_("Your OTP verification code is: %(code)s\n\nThis code will expire in 10 minutes.\n\nIf you didn't request this code, please ignore this email.")) % {"code": otp_code}
-            
-            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@trainingplatform.com')
-            
-            send_mail(
-                subject=subject,
-                message=plain_message,
-                from_email=from_email,
-                recipient_list=[user.email],
-                html_message=html_message,
-                fail_silently=False,
-            )
-        
-        logger.info(f"OTP email sent to {user.email} for user {user.id}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error sending OTP email to {user.email}: {str(e)}")
-        return False
+        return _otp_seal().decrypt(str(sealed).encode("ascii"),
+                                   ttl=OTP_LIFETIME_MINUTES * 60).decode("utf-8")
+    except (InvalidToken, UnicodeError, TypeError, ValueError):
+        return None
 
-def create_otp(user):
+
+def _brand():
+    """The name the account emails go out under, in the active language: "Yalla Gym" /
+    "يلا جيم", or PLATFORM_NAME verbatim — the same rule as the receipt
+    (`subscription.receipts`). They said "Training Platform", which is no product."""
+    from django.utils.translation import gettext as _
+
+    return str(getattr(settings, "PLATFORM_NAME", "") or _("Yalla Gym"))
+
+
+def _send_code_email(user, *, subject, plain_message, template, otp_code):
+    """Render `template` in the ACTIVE language and send it with `plain_message`.
+
+    Raises when the send fails — the worker's task retries it and reports the last
+    failure (users/tasks.py). This used to log a line and `return False`, and the caller
+    never looked, so a sign-up whose code never left looked exactly like one that did.
     """
-    Create a new OTP verification record for a user (registration).
-    
-    Args:
-        user: CustomUser instance
-    
-    Returns:
-        OTPVerification: Created OTP verification instance
+    from django.utils.translation import get_language, get_language_bidi
+
+    try:
+        html_message = render_to_string(template, {
+            'user': user,
+            'otp_code': otp_code,
+            'brand': _brand(),
+            'LANGUAGE_CODE': get_language(),
+            'LANGUAGE_BIDI': get_language_bidi(),
+        })
+    except Exception:
+        # A broken template must not cost the person their code: the plain text part
+        # carries it on its own.
+        logger.warning("Account email template %s did not render; sending plain text",
+                       template, exc_info=True)
+        html_message = None
+    send_mail(
+        subject=subject,
+        message=plain_message,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[user.email],
+        html_message=html_message,
+        fail_silently=False,
+    )
+    return True
+
+
+def send_otp_email(user, otp_code):
+    """Email the sign-up code, in the recipient's SAVED language (`preferred_language`).
+
+    Not the request's language and not the server's default: this runs in the worker,
+    where there is no request, and the person reads it in the language they chose —
+    saved at sign-up (users/serializers.py `CustomRegisterSerializer`) and switchable on
+    `user/update/`. Returns True; RAISES when the send fails (see `_send_code_email`).
+    """
+    from training_platform.i18n import LanguageContext
+    from django.utils.translation import gettext as _
+
+    with LanguageContext.for_user(user):
+        _send_code_email(
+            user,
+            subject=_('Verify your email - %(brand)s') % {'brand': _brand()},
+            plain_message=_(
+                "Your OTP verification code is: %(code)s\n\nThis code will expire in 10 "
+                "minutes.\n\nIf you didn't request this code, please ignore this email."
+            ) % {"code": otp_code},
+            template='emails/otp_verification.html',
+            otp_code=otp_code,
+        )
+    logger.info("Sign-up code email sent for user %s", user.pk)
+    return True
+
+
+def queue_otp_email(otp, otp_code):
+    """Hand the email carrying `otp_code` to the worker; never raise into the request.
+
+    The request used to send it itself, through SMTP with no timeout: a stalled mail
+    server held the sign-up request open, and a failure was swallowed. Now the request
+    only publishes a task (bounded: one retry, and the broker connect timeout in
+    settings_base) and answers exactly as before. The code travels SEALED
+    (`seal_otp_code`) and the row by id, so the worker can tell a replaced or expired
+    code and send nothing.
+
+    No `transaction.on_commit`: every caller runs in autocommit (there is no
+    ATOMIC_REQUESTS), so the row is committed when this runs, and the task retries a row
+    it cannot see yet for any future caller that is not.
+
+    A task that could not be PUBLISHED is logged and alerted here (the person can ask for
+    a new code); a send that fails in the worker is retried and reported there.
+    """
+    from celery.exceptions import Retry
+
+    from .tasks import AccountEmailUndelivered, send_account_code_email
+
+    try:
+        send_account_code_email.apply_async(
+            args=(otp.pk, seal_otp_code(otp_code)),
+            retry=True,
+            retry_policy={"max_retries": 1, "interval_start": 0, "interval_step": 1,
+                          "interval_max": 1},
+        )
+    except AccountEmailUndelivered:
+        # Eager mode (development, tests) runs the task inline, and its final failure
+        # propagates here — already logged and alerted by the task itself.
+        return False
+    except Retry as retry:
+        # Eager mode with task_eager_propagates (settings_base) hands a retry back to the
+        # caller instead of running it — there is no broker to re-deliver through. The
+        # send failed and will not be tried again: report it as the worker would after
+        # its last retry. A real worker never gets here.
+        report_account_email_failure(otp.purpose, otp.user_id, retry.exc or retry,
+                                     stage="send")
+        return False
+    except Exception as exc:
+        report_account_email_failure(otp.purpose, otp.user_id, exc, stage="queue")
+        return False
+    logger.info("Account email queued: purpose=%s user=%s otp=%s",
+                otp.purpose, otp.user_id, otp.pk)
+    return True
+
+
+def report_account_email_failure(purpose, user_id, exc, *, stage):
+    """Log and alert an account email that did not go out: ONE error line, naming the
+    account by id — never its address — and one Sentry event when Sentry is configured.
+
+    Sentry's logging integration turns this error record into an event, and the explicit
+    capture below is dropped as a duplicate of it (same exception object); the explicit
+    one is there so the alert does not depend on that integration staying enabled.
+    """
+    logger.error("An account email was not delivered: purpose=%s user=%s stage=%s (%s)",
+                 purpose, user_id, stage, type(exc).__name__,
+                 exc_info=(type(exc), exc, exc.__traceback__))
+    try:
+        import sentry_sdk
+
+        sentry_sdk.capture_exception(exc)
+    except Exception:
+        logger.debug("Sentry capture failed", exc_info=True)
+
+
+def _issue_otp(user, purpose):
+    """Replace `user`'s pending `purpose` code with a new one, and queue its email.
+
+    The rules are unchanged: any pending code of that purpose is retired (marked used),
+    the new one is six digits from the CSPRNG, stored only as a keyed hash, good for
+    `OTP_LIFETIME_MINUTES`. What changed is the email: the request no longer sends it —
+    it is queued for the worker (`queue_otp_email`), which sends it in the recipient's
+    saved language, retries a failed send, and reports one that never leaves.
     """
     from .models import OTPVerification
-    
-    # Invalidate any existing unverified OTPs for this user
+
     OTPVerification.objects.filter(
         user=user,
         is_verified=False,
-        purpose='registration',
+        purpose=purpose,
         expires_at__gt=timezone.now()
     ).update(is_verified=True)  # Mark as used to invalidate
-    
-    # Generate new OTP and store its hash (never plaintext)
+
     otp_code = generate_otp()
-    otp_hash = _hash_otp(otp_code)
-    expires_at = timezone.now() + timedelta(minutes=10)
-    
     otp = OTPVerification.objects.create(
         user=user,
-        otp_code=otp_hash,  # keyed HMAC-SHA256, never the plaintext code
+        otp_code=_hash_otp(otp_code),  # keyed HMAC-SHA256, never the plaintext code
         email=user.email,
-        purpose='registration',
-        expires_at=expires_at
+        purpose=purpose,
+        expires_at=timezone.now() + timedelta(minutes=OTP_LIFETIME_MINUTES),
     )
-    
-    # Send OTP email
-    send_otp_email(user, otp_code)
-    
-    logger.info(f"OTP created for user {user.id} ({user.email})")
+    queue_otp_email(otp, otp_code)
+    logger.info("OTP created: purpose=%s user=%s", purpose, user.pk)
     return otp
+
+
+def create_otp(user):
+    """Issue a new sign-up (`registration`) code for `user` and queue its email.
+
+    Returns the `OTPVerification` row. See `_issue_otp`.
+    """
+    return _issue_otp(user, 'registration')
 
 
 def create_password_reset_otp(user):
+    """Issue a new `password_reset` code for `user` and queue its email.
+
+    Returns the `OTPVerification` row. See `_issue_otp`.
     """
-    Create a new OTP verification record for password reset.
-    
-    Args:
-        user: CustomUser instance
-    
-    Returns:
-        OTPVerification: Created OTP verification instance
-    """
-    from .models import OTPVerification
-    
-    # Invalidate any existing unverified password reset OTPs for this user
-    OTPVerification.objects.filter(
-        user=user,
-        is_verified=False,
-        purpose='password_reset',
-        expires_at__gt=timezone.now()
-    ).update(is_verified=True)
-    
-    # Generate new OTP and store its hash (never plaintext)
-    otp_code = generate_otp()
-    otp_hash = _hash_otp(otp_code)
-    expires_at = timezone.now() + timedelta(minutes=10)
-    
-    otp = OTPVerification.objects.create(
-        user=user,
-        otp_code=otp_hash,  # keyed HMAC-SHA256, never the plaintext code
-        email=user.email,
-        purpose='password_reset',
-        expires_at=expires_at
-    )
-    
-    # Send password reset email
-    send_password_reset_email(user, otp_code)
-    
-    logger.info(f"Password reset OTP created for user {user.id} ({user.email})")
-    return otp
+    return _issue_otp(user, 'password_reset')
 
 
 def send_password_reset_email(user, otp_code):
-    """
-    Send password reset OTP code to user's email address.
-    
-    Args:
-        user: CustomUser instance
-        otp_code: 6-digit OTP code
-    
-    Returns:
-        bool: True if email was sent successfully
+    """Email the password-reset code, in the recipient's SAVED language.
+
+    Whatever language the reset was REQUESTED in: the person reads the email in the one
+    they chose (see `send_otp_email`). Returns True; RAISES when the send fails.
     """
     from training_platform.i18n import LanguageContext
-    from django.utils.translation import gettext as _, get_language
-    from django.utils.translation import get_language_bidi
+    from django.utils.translation import gettext as _
 
-    try:
-        with LanguageContext.for_user(user):
-            subject = str(_('Password Reset - Training Platform'))
-            
-            try:
-                html_message = render_to_string('emails/password_reset_otp.html', {
-                    'user': user,
-                    'otp_code': otp_code,
-                    'LANGUAGE_CODE': get_language(),
-                    'LANGUAGE_BIDI': get_language_bidi(),
-                })
-                plain_message = str(_(
-                    "Your password reset code is: %(code)s\n\n"
-                    "This code will expire in 10 minutes.\n\n"
-                    "If you didn't request a password reset, please ignore this email."
-                )) % {"code": otp_code}
-            except Exception as e:
-                logger.warning(f"Could not render password reset template: {e}. Using plain text.")
-                html_message = None
-                plain_message = str(_(
-                    "Your password reset code is: %(code)s\n\n"
-                    "This code will expire in 10 minutes.\n\n"
-                    "If you didn't request a password reset, please ignore this email."
-                )) % {"code": otp_code}
-            
-            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@trainingplatform.com')
-            
-            send_mail(
-                subject=subject,
-                message=plain_message,
-                from_email=from_email,
-                recipient_list=[user.email],
-                html_message=html_message,
-                fail_silently=False,
-            )
-        
-        logger.info(f"Password reset email sent to {user.email}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error sending password reset email to {user.email}: {str(e)}")
-        return False
+    with LanguageContext.for_user(user):
+        _send_code_email(
+            user,
+            subject=_('Password reset - %(brand)s') % {'brand': _brand()},
+            plain_message=_(
+                "Your password reset code is: %(code)s\n\n"
+                "This code will expire in 10 minutes.\n\n"
+                "If you didn't request a password reset, please ignore this email."
+            ) % {"code": otp_code},
+            template='emails/password_reset_otp.html',
+            otp_code=otp_code,
+        )
+    logger.info("Password reset email sent for user %s", user.pk)
+    return True
 
 
 def _get_otp_attempt_cache_key(email: str, purpose: str) -> str:

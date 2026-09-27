@@ -16,6 +16,12 @@ from django.utils.translation import gettext_lazy as _
 
 logger = logging.getLogger(__name__)
 
+#: The language an account is saved with when its sign-up names none and its
+#: `Accept-Language` names none the platform serves: Arabic, the primary language of a
+#: platform built for the Syrian market. NOT settings.LANGUAGE_CODE (`en`), which stays
+#: the API's fallback for a request that names no language.
+SIGNUP_DEFAULT_LANGUAGE = 'ar'
+
 
 # ---------------------------------------------------------------------------------
 # Date of birth and the onboarding answers (design v2)
@@ -167,10 +173,36 @@ class CustomRegisterSerializer(RegisterSerializer):
     `email_taken` or `username_taken` on its field (a malformed address stays
     `invalid`; phone numbers are not unique); passwords answer the validators' codes
     (`password_too_short`, `password_too_common`, `password_entirely_numeric`).
+
+    `preferred_language` (`ar` | `en`, optional; additive 2026-09-27) is the language
+    of this person's emails and pushes, saved on the account — beginning with the
+    sign-up code this request queues. Omitted, the account takes the language the
+    request's `Accept-Language` names, if the platform serves it; failing that,
+    Arabic, the platform's primary language (`SIGNUP_DEFAULT_LANGUAGE`). Anything else
+    is refused with `field_errors.preferred_language[0].code` = `invalid_choice`. The
+    answer's `user` carries the saved value. Changed later on `user/update/`.
     """
     phone_number = serializers.CharField(max_length=15,  required=True)
     user_type = serializers.ChoiceField(choices=[('client', 'Client'), ('trainer', 'Trainer'), ('agent', 'Agent'), ('admin', 'Administrator')], required=False, default='client')
     date_of_birth = serializers.DateField(required=True)
+    preferred_language = serializers.ChoiceField(choices=settings.LANGUAGES, required=False)
+
+    def _language_to_save(self, request):
+        """The field; else what `Accept-Language` names, if served; else Arabic.
+
+        The column's default is `en` (settings.LANGUAGE_CODE), and sign-up did not take a
+        language at all, so an Arabic user's first email — the sign-up code — was
+        English. The app always sends `Accept-Language`; the header is read with the
+        same rule as every request's language (`LanguageResolutionMiddleware`), so a
+        `*` or an unserved `fr-FR` says nothing.
+        """
+        chosen = self.validated_data.get('preferred_language')
+        if chosen:
+            return chosen
+        from training_platform.middleware import LanguageResolutionMiddleware
+        header = request.headers.get('Accept-Language') if request is not None else None
+        spoken = LanguageResolutionMiddleware._supported_language_in(header) if header else None
+        return spoken or SIGNUP_DEFAULT_LANGUAGE
 
     def validate_date_of_birth(self, value):
         return check_date_of_birth(value)
@@ -226,7 +258,7 @@ class CustomRegisterSerializer(RegisterSerializer):
     class Meta:
         model = CustomUser
         fields = ['username', 'email', 'phone_number', 'password1', 'password2', 'user_type',
-                  'date_of_birth']
+                  'date_of_birth', 'preferred_language']
 
     def save(self, request):
         logger.info("CustomRegisterSerializer.save() called")
@@ -235,6 +267,9 @@ class CustomRegisterSerializer(RegisterSerializer):
             user.phone_number = self.validated_data.get('phone_number')
             user.user_type = self.validated_data.get('user_type', 'client')
             user.date_of_birth = self.validated_data.get('date_of_birth')
+            # Saved before the sign-up code is queued, so that email — the first the
+            # person ever gets — is already in their language.
+            user.preferred_language = self._language_to_save(request)
             if user.user_type == 'trainer':
                 # Closed until the trainer opens: `trainer_is_available` defaults to True,
                 # so an empty profile was listed, and matched, the moment the address was

@@ -101,8 +101,12 @@ STORAGES = {
 CELERY_TASK_STORE_EAGER_RESULT = True
 CELERY_RESULT_BACKEND = 'cache+memory://'
 
-# Email — console backend for local dev
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+# Email — the console backend for local dev unless EMAIL_BACKEND names another: locmem
+# for a scripted run, or smtp against a local catcher (with EMAIL_HOST/EMAIL_PORT).
+# pytest-django swaps in locmem for the test suite whatever this says.
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND') or 'django.core.mail.backends.console.EmailBackend'
+EMAIL_HOST = os.environ.get('EMAIL_HOST') or 'localhost'
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT') or 25)
 
 # CORS — relaxed for local dev
 CORS_ALLOWED_ORIGINS = [

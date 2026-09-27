@@ -5,7 +5,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% trans "Email Verification - Training Platform" %}</title>
+    <title>{% trans "Email Verification" %} - {{ brand }}</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -89,14 +89,14 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>{% trans "Training Platform" %}</h1>
+            <h1>{{ brand }}</h1>
         </div>
 
         <div class="content">
             <h2>{% trans "Email Verification" %}</h2>
             <p>{% trans "Hello" %}{% if user.first_name %} {{ user.first_name }}{% endif %},</p>
 
-            <p>{% trans "Thank you for registering with Training Platform! To complete your registration and activate your account, please use the verification code below:" %}</p>
+            <p>{% trans "Thank you for registering! To complete your registration and activate your account, please use the verification code below:" %}</p>
 
             <div class="otp-code">
                 {{ otp_code }}
@@ -113,7 +113,7 @@
 
         <div class="footer">
             <p>{% trans "This is an automated message. Please do not reply to this email." %}</p>
-            <p>&copy; {{ "now"|date:"Y" }} {% trans "Training Platform. All rights reserved." %}</p>
+            <p>&copy; {{ "now"|date:"Y" }} {{ brand }}. {% trans "All rights reserved." %}</p>
         </div>
     </div>
 </body>

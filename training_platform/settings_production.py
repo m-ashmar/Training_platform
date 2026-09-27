@@ -16,7 +16,10 @@ import sys
 
 # Import all shared configuration
 from .settings_base import *  # noqa: F401, F403
-from .settings_secrets import require_env, get_env, get_int_env, get_secret
+from .settings_secrets import (require_env, get_env, get_int_env, get_secret,
+                               get_bool_env_optional)
+from . import redis_layout
+from django.core.exceptions import ImproperlyConfigured
 import logging
 
 logger = logging.getLogger(__name__)
@@ -58,14 +61,60 @@ DATABASES = {
 }
 
 # ========================
-# Redis Cache — Segmented by logical DB (zero cross-contamination)
+# Redis — a URL per role, each defaulting to its database of REDIS_URL
 # ========================
-_REDIS_URL_BASE = require_env("REDIS_URL")
+# The layout, what the boot check refuses and why the broker's Redis must be
+# `noeviction`: training_platform/redis_layout.py. In short:
+#   REDIS_CACHE_URL        the five caches below   (default REDIS_URL/0 ... /4)
+#   REDIS_CHANNELS_URL     the channel layer       (default REDIS_URL/5)
+#   CELERY_BROKER_URL      the job queue           (default REDIS_URL/6)
+#   CELERY_RESULT_BACKEND  Celery results          (default REDIS_URL/7)
+# REDIS_URL is required only while some role has no URL of its own.
+_REDIS_URL_BASE = get_env("REDIS_URL", "").strip()
 
+
+def _redis_url_for(variable, database):
+    """The role's own URL when `variable` is set, else `database` of REDIS_URL.
+
+    Refuses rather than guesses: with neither set there is nothing to connect to (the old
+    defaults were localhost, a Redis that does not exist in the container), and a
+    REDIS_URL that already names a database would be silently overridden by every role.
+    """
+    explicit = get_env(variable, "").strip()
+    if explicit:
+        return explicit
+    if not _REDIS_URL_BASE:
+        raise ImproperlyConfigured(
+            f"{variable} is not set, and there is no REDIS_URL to take it from "
+            f"(REDIS_URL/{database}). Set REDIS_URL for one Redis with a database per "
+            f"role, or {variable} and the other role URLs for a Redis per role — see "
+            "training_platform/redis_layout.py.")
+    if redis_layout.names_database(_REDIS_URL_BASE):
+        raise ImproperlyConfigured(
+            f"REDIS_URL names a database ({redis_layout.describe(_REDIS_URL_BASE)}); it "
+            "must be the server only, because each role adds its own: caches /0-/4, "
+            "channels /5, broker /6, results /7. To put a role on a particular "
+            "database, give it its own URL (REDIS_CACHE_URL, REDIS_CHANNELS_URL, "
+            "CELERY_BROKER_URL, CELERY_RESULT_BACKEND).")
+    return redis_layout.with_database(_REDIS_URL_BASE, database)
+
+
+CHANNEL_LAYERS = {  # a new dict: settings_base's is shared by every settings module
+    "default": {
+        **CHANNEL_LAYERS["default"],  # noqa: F405
+        "CONFIG": {**CHANNEL_LAYERS["default"]["CONFIG"],  # noqa: F405
+                   "hosts": [_redis_url_for("REDIS_CHANNELS_URL", 5)]},
+    },
+}
+CELERY_BROKER_URL = _redis_url_for("CELERY_BROKER_URL", 6)
+CELERY_RESULT_BACKEND = _redis_url_for("CELERY_RESULT_BACKEND", 7)
+
+# One knob for every cache: with REDIS_CACHE_URL set, all five share the database it
+# names (a managed Redis that serves only database 0), kept apart by KEY_PREFIX.
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": f"{_REDIS_URL_BASE}/0",  # DB0: sessions
+        "LOCATION": _redis_url_for("REDIS_CACHE_URL", 0),  # DB0: sessions
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
             "SOCKET_CONNECT_TIMEOUT": 5,
@@ -78,7 +127,7 @@ CACHES = {
     },
     "ratelimit": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": f"{_REDIS_URL_BASE}/1",  # DB1: rate limiting
+        "LOCATION": _redis_url_for("REDIS_CACHE_URL", 1),  # DB1: rate limiting
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
         },
@@ -87,7 +136,7 @@ CACHES = {
     },
     "public": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": f"{_REDIS_URL_BASE}/2",  # DB2: public cache
+        "LOCATION": _redis_url_for("REDIS_CACHE_URL", 2),  # DB2: public cache
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
             # Non-sensitive catalog cache: on a Redis blip, degrade to the DB
@@ -99,7 +148,7 @@ CACHES = {
     },
     "private": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": f"{_REDIS_URL_BASE}/3",  # DB3: private user cache
+        "LOCATION": _redis_url_for("REDIS_CACHE_URL", 3),  # DB3: private user cache
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
         },
@@ -108,7 +157,7 @@ CACHES = {
     },
     "edamam": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": f"{_REDIS_URL_BASE}/4",  # DB4: Edamam API cache
+        "LOCATION": _redis_url_for("REDIS_CACHE_URL", 4),  # DB4: Edamam API cache
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
             # External-API cache: on a Redis blip, degrade to a live lookup.
@@ -129,14 +178,36 @@ SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "default"
 
 # ========================
-# Email — SMTP in production
+# Email — SMTP, any provider, every part from the environment
 # ========================
+# Every transactional provider speaks SMTP (SES, Postmark, SendGrid, Mailgun, Brevo,
+# Resend, a Workspace mailbox), so the provider is four variables, not code. This used
+# to hard-code Gmail: a personal mailbox caps sending at a few hundred a day, and mail
+# from a datacenter IP with a From that does not match the account is rewritten or
+# junked — while the sign-up code is the only way to open an account.
+#
+#   EMAIL_HOST            the provider's SMTP host                            required
+#   EMAIL_PORT            587 (STARTTLS), 465 with EMAIL_USE_SSL, or 2525/25  587
+#   EMAIL_USE_TLS / _SSL  'True' / 'False'; STARTTLS unless EMAIL_USE_SSL=True
+#   EMAIL_HOST_USER       the SMTP user (an address, or a key id like 'apikey') required
+#   EMAIL_HOST_PASSWORD   the SMTP password / key (secret store or environment) required
+#   EMAIL_TIMEOUT         seconds a stalled connection may take                 10
+#   DEFAULT_FROM_EMAIL    'Yalla Gym <no-reply@your-domain>', on a domain the
+#                         provider has verified (SPF and DKIM)                  required
+#   SERVER_EMAIL          From of the error mails to ADMINS          DEFAULT_FROM_EMAIL
+#
+# The combinations that cannot work are refused at boot (enforce_production_safety).
+# The account emails are sent by the worker (users/tasks.py), not the request.
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
+EMAIL_HOST = require_env('EMAIL_HOST')
+EMAIL_USE_SSL = get_bool_env_optional('EMAIL_USE_SSL', default=False)
+EMAIL_USE_TLS = get_bool_env_optional('EMAIL_USE_TLS', default=not EMAIL_USE_SSL)
+EMAIL_PORT = get_int_env('EMAIL_PORT', 465 if EMAIL_USE_SSL else 587)
 EMAIL_HOST_USER = require_env('EMAIL_HOST_USER')
-EMAIL_HOST_PASSWORD = require_env('EMAIL_HOST_PASSWORD')
+EMAIL_HOST_PASSWORD = get_secret('EMAIL_HOST_PASSWORD')
+EMAIL_TIMEOUT = get_int_env('EMAIL_TIMEOUT', 10)
+DEFAULT_FROM_EMAIL = require_env('DEFAULT_FROM_EMAIL')
+SERVER_EMAIL = get_env('SERVER_EMAIL', '').strip() or DEFAULT_FROM_EMAIL
 
 # ========================
 # Celery — use real workers in production
@@ -258,6 +329,38 @@ def _gcs_key_problem(name):
     return None
 
 
+#: Domains no provider will send for: the development placeholder settings_base ships
+#: (`noreply@trainingplatform.com` — the From every email had until 2026-09-27) and the
+#: names reserved for documentation (RFC 2606).
+_PLACEHOLDER_MAIL_DOMAINS = {"trainingplatform.com", "example.com", "example.net",
+                             "example.org", "localhost"}
+
+
+def _from_address_problem(value):
+    """Why `value` cannot be the From of the platform's email, or None when it can.
+
+    A display name is welcome (`Yalla Gym <no-reply@yallagym.com>`). The domain must be
+    one the provider has verified — nothing here can check that, but a placeholder or a
+    malformed address is certainly not, and the provider would refuse or junk every
+    sign-up code sent from it.
+    """
+    from email.utils import parseaddr
+
+    if not value or "\n" in value or "\r" in value:
+        return "is empty or spans lines"
+    _name, address = parseaddr(value)
+    local, _at, domain = address.rpartition("@")
+    domain = domain.lower().rstrip(".")
+    if not local or "." not in domain:
+        return (f"is not an email address ({value!r}); write it as "
+                "'Yalla Gym <no-reply@your-domain>'")
+    if domain in _PLACEHOLDER_MAIL_DOMAINS or domain.endswith((".example", ".invalid",
+                                                                ".localhost")):
+        return (f"is on a placeholder domain ({domain}); use an address on a domain "
+                "your email provider has verified (SPF and DKIM)")
+    return None
+
+
 def enforce_production_safety():
     """
     Runtime invariant checks. Any violation crashes the process.
@@ -271,42 +374,64 @@ def enforce_production_safety():
     if os.environ.get("WALLET_DEV_MODE") == "True":
         errors.append("WALLET_DEV_MODE is True in production environment")
 
-    # --- Background job infrastructure ---
-    # The broker default is a localhost URL. Nothing in fly.toml or the Dockerfile ever
-    # set CELERY_BROKER_URL, so production pointed at a Redis that does not exist inside
-    # the container — every queued job was lost with no error anywhere. Fail at boot
-    # rather than discovering it from notifications that never arrive.
-    _broker = os.environ.get("CELERY_BROKER_URL", "")
-    if not _broker:
-        errors.append("CELERY_BROKER_URL is not set — background jobs would be lost")
-    elif "localhost" in _broker or "127.0.0.1" in _broker:
-        errors.append(
-            f"CELERY_BROKER_URL points at localhost ({_broker!r}); "
-            "there is no broker inside the app container"
-        )
-    elif _broker.rstrip('/').endswith(('/0', '/1', '/2', '/3', '/4', '/5')):
-        # DB0-DB5 are the six segmented caches (sessions, ratelimit, public, private,
-        # edamam, channels). The broker must not share a keyspace with them.
-        errors.append(
-            f"CELERY_BROKER_URL uses a Redis DB reserved for caches ({_broker!r}); "
-            "use DB6 or higher"
-        )
-
-    # --- WebSocket group layer ---
-    # Same failure shape as the broker: the channel layer used to be assembled from
-    # REDIS_HOST/REDIS_PORT, which nothing in the deploy sets, so it defaulted to a
-    # localhost Redis that does not exist in the container. It now comes from REDIS_URL
-    # like every cache; this refuses to boot if something puts it back on localhost.
+    # --- Redis: caches, WebSocket group layer, job queue, results ---
+    # Every role is checked where it ACTUALLY points (the settings above), not where an
+    # environment variable says: the broker used to default to localhost and nothing in
+    # fly.toml set it, so every queued job was lost with no error anywhere; the channel
+    # layer was assembled from REDIS_HOST/REDIS_PORT, which nothing set either. What is
+    # refused and why — localhost, a TLS broker that would not check its certificate,
+    # and above all a broker in the same database as a cache — is in
+    # training_platform/redis_layout.py. The old rule ("the broker must be on DB6 or
+    # higher", on ANY host) could not boot on a Redis that serves only database 0.
     try:
         _channel_hosts = CHANNEL_LAYERS["default"]["CONFIG"]["hosts"]  # noqa: F405
     except (KeyError, TypeError):
         _channel_hosts = []
-    for _host in _channel_hosts:
-        if isinstance(_host, str) and ("localhost" in _host or "127.0.0.1" in _host):
-            errors.append(
-                f"CHANNEL_LAYERS points at localhost ({_host!r}); "
-                "there is no Redis inside the app container — WebSockets would be dead"
-            )
+    _redis_roles = [
+        ("REDIS_CACHE_URL", f"the {alias!r} cache", config.get("LOCATION", ""),
+         "sessions, rate limits and cached reads would fail")
+        for alias, config in CACHES.items()
+        if "redis" in str(config.get("BACKEND", "")).lower()
+    ] + [
+        ("REDIS_CHANNELS_URL", "the channel layer (CHANNEL_LAYERS)",
+         _host.get("address", "") if isinstance(_host, dict) else str(_host),
+         "WebSockets would be dead")
+        for _host in _channel_hosts
+    ] + [
+        ("CELERY_BROKER_URL", "the Celery broker", CELERY_BROKER_URL,
+         "background jobs would be lost"),
+        ("CELERY_RESULT_BACKEND", "Celery results", CELERY_RESULT_BACKEND,
+         "a task's outcome could not be read"),
+    ]
+    errors.extend(redis_layout.problems(_redis_roles, broker=CELERY_BROKER_URL))
+
+    # --- Email ---
+    # The sign-up code is the only way to open an account, so an email setup that cannot
+    # deliver is as fatal as a missing database. Refused here rather than discovered from
+    # the first person who never receives a code.
+    if EMAIL_USE_TLS and EMAIL_USE_SSL:
+        errors.append(
+            "EMAIL_USE_TLS and EMAIL_USE_SSL are both True; they are two different ways "
+            "to encrypt — set EMAIL_USE_SSL for port 465, EMAIL_USE_TLS for 587")
+    elif not (EMAIL_USE_TLS or EMAIL_USE_SSL):
+        errors.append(
+            "EMAIL_USE_TLS and EMAIL_USE_SSL are both False — the SMTP password and every "
+            "sign-up code would cross the internet in clear text")
+    elif EMAIL_PORT == 465 and not EMAIL_USE_SSL:
+        errors.append(
+            "EMAIL_PORT is 465, which speaks implicit TLS: set EMAIL_USE_SSL=True "
+            "(STARTTLS there stalls until the timeout and no email leaves)")
+    elif EMAIL_PORT == 587 and EMAIL_USE_SSL:
+        errors.append(
+            "EMAIL_PORT is 587, which speaks STARTTLS: set EMAIL_USE_TLS=True, not "
+            "EMAIL_USE_SSL")
+    if not isinstance(EMAIL_TIMEOUT, int) or EMAIL_TIMEOUT <= 0:
+        errors.append(
+            "EMAIL_TIMEOUT must be a positive number of seconds — without one a stalled "
+            "SMTP server holds a worker for ever")
+    _from_problem = _from_address_problem(DEFAULT_FROM_EMAIL)
+    if _from_problem:
+        errors.append(f"DEFAULT_FROM_EMAIL {_from_problem}")
 
     # --- Payment gateway (ShamCash) production readiness ---
     # PAYMENT_DEBUG must never be on in production.

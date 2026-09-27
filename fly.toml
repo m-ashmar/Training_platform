@@ -34,11 +34,13 @@ release_command = "python manage.py migrate --noinput"
   # Multipart bodies buffer here before any view runs. Unset it lands on the
   # container rootfs; on the volume it shares the same (monitored) disk as media.
   FILE_UPLOAD_TEMP_DIR = "/data/tmp"
-  # Broker/result backend on DB6/DB7 — outside the six segmented cache DBs.
-  # Set these to the managed Redis URL; enforce_production_safety() refuses to boot
-  # if they are unset, point at localhost, or land on a cache DB.
-  # CELERY_BROKER_URL     = "redis://<managed-redis>:6379/6"
-  # CELERY_RESULT_BACKEND = "redis://<managed-redis>:6379/7"
+  # Redis is set as SECRETS, not here (URLs carry passwords). One Redis: REDIS_URL alone
+  # (caches /0-/4, channels /5, broker /6, results /7). A Redis per role, e.g. a managed
+  # one that serves only database 0: REDIS_CACHE_URL, REDIS_CHANNELS_URL,
+  # CELERY_BROKER_URL, CELERY_RESULT_BACKEND. enforce_production_safety() refuses a
+  # broker in the same database as a cache, any role on localhost, and a rediss://
+  # broker without ?ssl_cert_reqs=required. The broker's Redis must be
+  # maxmemory-policy noeviction (training_platform/redis_layout.py).
 
 # Persistent volume for user-uploaded media (profile pictures, exercise images).
 # Create it once before deploying:
