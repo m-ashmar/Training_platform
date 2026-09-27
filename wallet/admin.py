@@ -301,10 +301,12 @@ class ExchangeRateAdmin(admin.ModelAdmin):
             # A row read outside the changelist queryset (a detail page).
             live = current_rate()
             live_pk = live.pk if live is not None else None
+        # The label is an argument: format_html() with none is deprecated since Django
+        # 5.0 and a TypeError in 6.0.
         if obj.effective_from > timezone.now():
-            return format_html('<span style="color:#888">queued</span>')
+            return format_html('<span style="color:#888">{}</span>', 'queued')
         if live_pk != obj.pk:
-            return format_html('<span style="color:#888">superseded</span>')
+            return format_html('<span style="color:#888">{}</span>', 'superseded')
         age = rate_age_days(obj) or 0
         if is_stale(obj):
             return format_html(

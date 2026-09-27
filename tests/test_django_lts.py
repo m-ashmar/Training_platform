@@ -19,11 +19,22 @@ with the reason it is there). `requirements.lock` is generated from it and pins 
 package, transitive ones included, with hashes; the Dockerfile installs only the lock.
 How to refresh it is written at the top of `requirements.txt`.
 
-These tests read files and installed-package metadata only: no database.
+The last section holds the upgrade's own debts: the project starts with no deprecation
+warning and no system-check issue, and nothing calls an API Django 6.0 removes.
+
+These tests read files, installed-package metadata and a `manage.py check` subprocess
+only: no database.
 """
+import ast
 import importlib.metadata
+import os
 import re
+import subprocess
+import sys
+import warnings
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from packaging.requirements import Requirement
@@ -205,3 +216,147 @@ def test_the_packages_the_audit_named_are_pinned(name):
     reqs = [_parse(line)[0] for line in _logical_lines(HUMAN)]
     (req,) = [r for r in reqs if canonicalize_name(r.name) == canonicalize_name(name)]
     assert _exact_version(req), f"{name} is not pinned in requirements.txt: {req}"
+
+
+# ---------------------------------------------------------------------------
+# 3. What the upgrade deprecated, and what Django 6.0 removes
+# ---------------------------------------------------------------------------
+
+#: Directories that are not this project's source: vendored environments, the
+#: abandoned clients, other worktrees under .claude/, and the tests themselves.
+_NOT_SOURCE = {".venv", "venv", "_excluded", "mobile", "flutter", "yalla_gym", "tests",
+               "node_modules", ".claude", ".git", "staticfiles", "media", "__pycache__"}
+
+
+def _project_sources():
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in _NOT_SOURCE]
+        for name in filenames:
+            if name.endswith(".py"):
+                path = Path(dirpath) / name
+                yield path.relative_to(ROOT), path
+
+
+def test_the_project_starts_without_a_deprecation_warning_or_a_check_issue():
+    """Deprecations are how the NEXT upgrade breaks. On b204be6 the start-up printed
+    RemovedInDjango60Warning (`CheckConstraint(check=...)` in diet/models.py) and
+    drf-yasg's compat-renderer DeprecationWarning; after the 5.2 upgrade, allauth 65
+    added three system-check warnings for the settings it renamed. A subprocess, because
+    the warnings fire once, at import, and pytest.ini ignores DeprecationWarning."""
+    result = subprocess.run(
+        [sys.executable, "-W", "always::DeprecationWarning",
+         "-W", "always::PendingDeprecationWarning",
+         "manage.py", "check", "--settings=training_platform.settings_local"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output[-3000:]
+    assert "System check identified no issues" in output, output[-3000:]
+    deprecations = [line for line in output.splitlines()
+                    if re.search(r"(Deprecation|RemovedInDjango\d+)Warning", line)]
+    assert not deprecations, "\n".join(deprecations)
+
+
+def test_nothing_calls_what_django_6_removes():
+    """Two calls that warn on 5.2 and fail on 6.0, found by this upgrade:
+    `format_html()` with no arguments (a TypeError in 6.0; seven admin badges called
+    it) and `CheckConstraint(check=...)` (the keyword is `condition`). The admin ones
+    warn only when a page renders, so start-up alone would never show them."""
+    offenders = []
+    for rel, path in _project_sources():
+        tree = ast.parse(path.read_text(), filename=str(rel))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            starred = any(isinstance(a, ast.Starred) for a in node.args)
+            if (name == "format_html" and len(node.args) <= 1 and not node.keywords
+                    and not starred):
+                offenders.append(f"{rel}:{node.lineno} format_html() without arguments")
+            if name == "CheckConstraint" and any(k.arg == "check" for k in node.keywords):
+                offenders.append(f"{rel}:{node.lineno} CheckConstraint(check=...)")
+    assert not offenders, "\n".join(offenders)
+
+
+class _MealRows:
+    """Stands in for `plan.meals.values(...).annotate(...)`."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def values(self, *fields):
+        return self
+
+    def annotate(self, **aggregates):
+        return self.rows
+
+
+def test_the_admin_badges_render_on_5_2_without_the_6_0_warning():
+    """Each badge the scan above rewrote, rendered with Django's own 6.0 warning turned
+    into an error: same markup as before, text passed as an argument."""
+    from django.contrib import admin
+    from django.utils import timezone
+    from django.utils.deprecation import RemovedInDjango60Warning
+
+    from django.contrib.auth import get_user_model
+
+    from diet.admin import ImprovedDietPlanAdmin, ImprovedFoodItemAdmin, RecipeAdmin
+    from diet.models import DietPlan, FoodItem, Recipe
+    from users.admin import CustomUserAdmin
+    from wallet.admin import ExchangeRateAdmin
+    from wallet.currencies import RATE_BASE, RATE_QUOTE
+    from wallet.models import ExchangeRate
+
+    foods = ImprovedFoodItemAdmin(FoodItem, admin.site)
+    plans = ImprovedDietPlanAdmin(DietPlan, admin.site)
+    recipes = RecipeAdmin(Recipe, admin.site)
+    users = CustomUserAdmin(get_user_model(), admin.site)
+    rates = ExchangeRateAdmin(ExchangeRate, admin.site)
+    rice = SimpleNamespace(name="<i>Rice</i>", calories=130, household_unit="", unit_grams=0)
+    dish = SimpleNamespace(
+        pk=1, nutrition=lambda: {"calories": 195, "protein": 4, "carbs": 42, "fat": 0.4},
+        ingredients=SimpleNamespace(all=lambda: [SimpleNamespace(food=rice, grams=150)]))
+    today = timezone.localdate()
+    later = timezone.now() + timedelta(days=1)
+    earlier = timezone.now() - timedelta(days=1)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RemovedInDjango60Warning)
+        assert ">needs review</span>" in foods.review_badge(SimpleNamespace(needs_review=True))
+        assert ">✓</span>" in foods.review_badge(SimpleNamespace(needs_review=False))
+        assert ">none</span>" in foods.slots_display(SimpleNamespace(meal_slots=[]))
+        assert ">no unit</span>" in foods.unit_display(
+            SimpleNamespace(household_unit=None, unit_grams=None))
+        assert plans.status_badge(SimpleNamespace(
+            start_date=today - timedelta(days=9), end_date=today - timedelta(days=2))) \
+            == '<span style="background:gray;">Completed</span>'
+        assert plans.status_badge(SimpleNamespace(
+            start_date=today - timedelta(days=1), end_date=today + timedelta(days=1))) \
+            == '<span style="background:green;">Active</span>'
+        assert plans.status_badge(SimpleNamespace(
+            start_date=today + timedelta(days=1), end_date=today + timedelta(days=3))) \
+            == '<span style="background:blue;">Upcoming</span>'
+        assert ">queued</span>" in rates.status(SimpleNamespace(
+            base=RATE_BASE, quote=RATE_QUOTE, fx_live_pk=None, pk=1, effective_from=later))
+        assert ">superseded</span>" in rates.status(SimpleNamespace(
+            base=RATE_BASE, quote=RATE_QUOTE, fx_live_pk=2, pk=1, effective_from=earlier))
+        assert users.password_status(SimpleNamespace(
+            password="x", has_usable_password=lambda: True)) \
+            == '<span style="color: green;">✓ Set</span>'
+        assert users.password_status(SimpleNamespace(
+            password="", has_usable_password=lambda: False)) \
+            == '<span style="color: red;">✗ Not Set</span>'
+        panel = recipes.nutrition_panel(dish)
+        breakdown = plans.meal_breakdown(SimpleNamespace(meals=_MealRows([
+            {"meal_type": "breakfast", "count": 7},
+            {"meal_type": "<b>lunch</b>", "count": 3},
+        ])))
+    assert ('<tr><td style="padding:2px 12px 2px 0">&lt;i&gt;Rice&lt;/i&gt;</td>'
+            '<td style="padding:2px 12px 2px 0">150 g</td>'
+            '<td style="padding:2px 12px 2px 0">150 g</td>'
+            '<td style="padding:2px 12px 2px 0">195 kcal</td></tr>') in panel, panel
+    assert "<i>" not in panel, "a food name is escaped, not pasted into the markup"
+    assert breakdown == (
+        '<div style="font-family: monospace;"><strong>Meal Distribution:</strong><br>'
+        'breakfast: 7<br>&lt;b&gt;lunch&lt;/b&gt;: 3<br></div>'), \
+        "a stored value is escaped, not pasted into the markup"

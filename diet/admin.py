@@ -5,7 +5,10 @@ This module provides a clean, powerful admin interface with proper permissions a
 
 from django.contrib import admin
 from django.contrib.admin import SimpleListFilter
-from django.utils.html import format_html
+# format_html() with no arguments is deprecated since Django 5.0 and a TypeError in
+# 6.0: every badge below passes its text as an argument (escaped), and a list is built
+# with format_html_join, never by concatenating strings into format_html.
+from django.utils.html import format_html, format_html_join
 from django.db.models import Count, Sum, Avg, Q
 from django.urls import path, reverse
 from django.shortcuts import redirect, render
@@ -156,20 +159,20 @@ class ImprovedFoodItemAdmin(TranslAdmin):
         if obj.needs_review:
             return format_html(
                 '<span style="background:#b00;color:#fff;padding:2px 7px;'
-                'border-radius:3px">needs review</span>')
-        return format_html('<span style="color:#080">✓</span>')
+                'border-radius:3px">{}</span>', 'needs review')
+        return format_html('<span style="color:#080">{}</span>', '✓')
 
     @admin.display(description='meals')
     def slots_display(self, obj):
         slots = obj.meal_slots or []
         if not slots:
-            return format_html('<span style="color:#b00" title="never planned">none</span>')
+            return format_html('<span style="color:#b00" title="never planned">{}</span>', 'none')
         return ', '.join(s[:2] for s in slots)
 
     @admin.display(description='serving')
     def unit_display(self, obj):
         if not obj.household_unit or not obj.unit_grams:
-            return format_html('<span style="color:#b00">no unit</span>')
+            return format_html('<span style="color:#b00">{}</span>', 'no unit')
         return f"{obj.household_unit} = {obj.unit_grams:g} g"
 
     @admin.display(description='What the planner sees')
@@ -187,11 +190,11 @@ class ImprovedFoodItemAdmin(TranslAdmin):
             blocked.append('needs review, so it is never planned')
         if not (obj.meal_slots or []):
             blocked.append('no meal slots, so it is never planned')
-        note = ('<p style="color:#b00"><b>{}</b></p>'.format('; '.join(blocked))
+        note = (format_html('<p style="color:#b00"><b>{}</b></p>', '; '.join(blocked))
                 if blocked else '')
         return format_html(
             '{}<p>macro slot: <b>{}</b></p><p>servings it can be given in:<br>{}</p>',
-            format_html(note), classify_food(obj), ladder)
+            note, classify_food(obj), ladder)
 
     @admin.action(description='Approve: allow the planner to serve these')
     def approve_foods(self, request, queryset):
@@ -681,12 +684,12 @@ class ImprovedDietPlanAdmin(admin.ModelAdmin):
     def status_badge(self, obj):
         from datetime import date
         if obj.end_date < timezone.localdate():
-            badge = '<span style="background:gray;">Completed</span>'
+            color, label = 'gray', 'Completed'
         elif obj.start_date <= timezone.localdate() <= obj.end_date:
-            badge = '<span style="background:green;">Active</span>'
+            color, label = 'green', 'Active'
         else:
-            badge = '<span style="background:blue;">Upcoming</span>'
-        return format_html(badge)
+            color, label = 'blue', 'Upcoming'
+        return format_html('<span style="background:{};">{}</span>', color, label)
     status_badge.short_description = 'Status'
     
     def nutrition_summary(self, obj):
@@ -722,11 +725,13 @@ class ImprovedDietPlanAdmin(admin.ModelAdmin):
     def meal_breakdown(self, obj):
         from django.db.models import Count
         breakdown = obj.meals.values('meal_type').annotate(count=Count('id'))
-        html = '<div style="font-family: monospace;"><strong>Meal Distribution:</strong><br>'
-        for item in breakdown:
-            html += f"{item['meal_type']}: {item['count']}<br>"
-        html += '</div>'
-        return format_html(html)
+        # The rows go through format_html_join, so a stored meal_type is escaped instead
+        # of being pasted into markup (and format_html is never called without args).
+        rows = format_html_join(
+            '', '{}: {}<br>', ((item['meal_type'], item['count']) for item in breakdown))
+        return format_html(
+            '<div style="font-family: monospace;"><strong>Meal Distribution:</strong><br>'
+            '{}</div>', rows)
     meal_breakdown.short_description = 'Meal Breakdown'
 
 
@@ -954,20 +959,25 @@ class RecipeAdmin(TranslAdmin):
         if obj is None or obj.pk is None:
             return 'Save the dish first, then its lines appear here.'
         n = obj.nutrition()
-        rows = ''.join(
+        # format_html_join escapes each value. The rows were built with str.format and
+        # then passed alone to format_html(), which escapes nothing without arguments —
+        # so a food name was pasted into the page as markup — and which Django 6.0
+        # refuses outright (TypeError).
+        rows = format_html_join(
+            '',
             '<tr><td style="padding:2px 12px 2px 0">{}</td>'
             '<td style="padding:2px 12px 2px 0">{}</td>'
             '<td style="padding:2px 12px 2px 0">{} g</td>'
-            '<td style="padding:2px 12px 2px 0">{} kcal</td></tr>'.format(
-                line.food.name, describe(line.food, float(line.grams or 0)),
-                round(float(line.grams or 0)),
-                round(float(line.food.calories or 0) * float(line.grams or 0) / 100))
-            for line in obj.ingredients.all() if line.food)
+            '<td style="padding:2px 12px 2px 0">{} kcal</td></tr>',
+            ((line.food.name, describe(line.food, float(line.grams or 0)),
+              round(float(line.grams or 0)),
+              round(float(line.food.calories or 0) * float(line.grams or 0) / 100))
+             for line in obj.ingredients.all() if line.food))
         return format_html(
             '<table style="border-collapse:collapse">{}</table>'
             '<p style="margin-top:8px"><b>{} kcal</b> &nbsp; protein {} g &nbsp; '
             'carbs {} g &nbsp; fat {} g</p>',
-            format_html(rows), n['calories'], n['protein'], n['carbs'], n['fat'])
+            rows, n['calories'], n['protein'], n['carbs'], n['fat'])
 
     # Logged per dish. Marking a recipe reviewed is the sign-off that its grams and its
     # allergens were checked by a person; `queryset.update()` recorded the date and not
