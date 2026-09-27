@@ -96,9 +96,11 @@ class CustomUserAdmin(UserAdmin):
     # click turned a trainer into a reader of every client's analytics, because the
     # analytics permissions are `is_staff`. Grant roles from the change form.
     list_editable = ('is_active', 'trainer_is_available')
+    # `groups`: how an operator finds the store-review demo accounts
+    # (`seed_review_accounts` puts them in one group; nothing else reads it).
     list_filter = (
-        'user_type', 'is_active', 'is_staff', 'trainer_is_verified', 
-        'trainer_is_available', 'date_joined'
+        'user_type', 'is_active', 'is_staff', 'trainer_is_verified',
+        'trainer_is_available', 'date_joined', 'groups'
     )
     search_fields = ('username', 'email', 'phone_number', 'first_name', 'last_name')
     ordering = ('-date_joined',)

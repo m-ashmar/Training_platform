@@ -55,21 +55,9 @@ class Command(BaseCommand):
                     continue
 
                 # Create or update achievement
-                defaults = {
-                    'name': achievement_def.name,
-                    'description': achievement_def.description,
-                    'category': achievement_def.category,
-                    'criteria': achievement_def.to_criteria(),
-                    'points': achievement_def.points,
-                    'badge_color': achievement_def.badge_color,
-                    'is_rare': achievement_def.is_rare,
-                    'is_secret': achievement_def.is_secret,
-                    'is_active': True,
-                }
-
                 achievement, created = Achievement.objects.update_or_create(
                     key=achievement_def.key,
-                    defaults=defaults
+                    defaults=achievement_def.model_defaults()
                 )
 
                 if created:
