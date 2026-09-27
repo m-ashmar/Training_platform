@@ -1,3 +1,4 @@
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.db.models import Q
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -696,6 +697,92 @@ class TransferReview(models.Model):
 
     def __str__(self):
         return f"{self.transaction_id} {self.amount} {self.currency} ({self.reason}, {self.status})"
+
+
+class ImmutablePaymentEvent(PermissionError):
+    """A payment event was asked to change or go. It never does: write a new one."""
+
+
+class PaymentEvent(models.Model):
+    """One state transition of one payment, never edited (the spec, section 7: "every
+    transition writes an immutable event row (who or what, when, from, to, evidence)").
+
+    Written by `PaymentService` in the SAME transaction as the transition it records —
+    the one place a payment's state moves (`PaymentService._move`) — so a transition
+    that rolls back takes its event with it, and one that commits cannot lack it. A
+    checkout's opening is the first event (`from_status` empty).
+
+    `save()` and `delete()` refuse an existing row, and a database trigger refuses
+    UPDATE and DELETE for every other path (`QuerySet.update()`, a shell, the next bulk
+    job): migration 0016, the reasoning of `wallet/migrations/0021` and
+    `payouts/migrations/0002`. The one UPDATE it allows is `actor` becoming NULL with
+    nothing else changed, because the column is `on_delete=SET_NULL`.
+
+    Payments older than this table carry ONE event for the state they were in when it
+    was created, marked `backfill` (migration 0016): what happened before that was never
+    recorded, and the row says so rather than inventing a history.
+    """
+
+    class By(models.TextChoices):
+        #: The customer: they opened the checkout, or asked "check my payment"
+        #: (`payments/{id}/reconcile/`). `actor` is them.
+        CUSTOMER = 'customer', 'Customer'
+        #: A signed gateway webhook delivery.
+        GATEWAY = 'gateway', 'Gateway webhook'
+        #: The server asking the gateway about a checkout: the 60-second poller and the
+        #: late-money poller (`subscription.tasks`).
+        POLLER = 'poller', 'Poller'
+        #: The ten-minute sweep of transfers no checkout claimed.
+        SWEEP = 'sweep', 'Unclaimed-transfer sweep'
+        #: A person in the operator console. `actor` is them.
+        OPERATOR = 'operator', 'Operator'
+        #: Anything else in the server, and every backfilled row.
+        SYSTEM = 'system', 'System'
+
+    payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name='events')
+    #: Empty for the checkout's opening (and for a backfilled row: unknown).
+    from_status = models.CharField(max_length=20, blank=True, default='')
+    to_status = models.CharField(max_length=20, choices=Payment.PAYMENT_STATUS)
+    #: The person, when a person did it (`actor_role` customer or operator). Null for a
+    #: gateway, a poller, the system, or once that account is gone.
+    actor = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
+                              related_name='+')
+    actor_role = models.CharField(max_length=16, choices=By.choices)
+    #: What the transition rested on: the gateway's transaction id, event id, reference,
+    #: amount and currency; the review row and the operator's note; the build that opened
+    #: the checkout; the reason a checkout was closed. Ids and figures, never the raw
+    #: gateway payload (that is `Payment.gateway_response`). The operator's to read: the
+    #: app is shown `from`, `to`, when and `by` only.
+    evidence = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
+    #: Written by migration 0016 for a payment older than this table: the state it was
+    #: in then, at the best time its row could give (`evidence['at_from']` says which).
+    backfill = models.BooleanField(default=False)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        indexes = [models.Index(fields=['payment', 'created_at', 'id'],
+                                name='payment_event_timeline_idx')]
+        verbose_name = "Payment event"
+        verbose_name_plural = "Payment events"
+
+    def __str__(self):
+        return f"{self.payment_id}: {self.from_status or '-'} -> {self.to_status}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ImmutablePaymentEvent("a payment event is never edited; write a new one")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutablePaymentEvent("a payment event is never deleted")
+
+    def for_app(self) -> dict:
+        """What the customer's app is shown: the step, when, and who or what took it —
+        never the evidence (a transfer's details are its sender's, a note is the
+        operator's) and never which operator."""
+        return {'from_status': self.from_status or None, 'to_status': self.to_status,
+                'at': self.created_at, 'by': self.actor_role, 'backfill': self.backfill}
 
 
 class SubscriptionFeature(models.Model):

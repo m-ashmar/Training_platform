@@ -5717,3 +5717,46 @@ msgstr "اترك هذا الحقل فارغاً"
 #: legal/templates/legal/delete_account.html
 msgid "Send the request"
 msgstr "أرسل الطلب"
+
+#: notifications/domain/money_events.py
+msgid "Payment confirmed"
+msgstr "تم تأكيد الدفع"
+
+#: notifications/domain/money_events.py
+msgid "We received your payment. Your receipt is ready in your payment history."
+msgstr "استلمنا دفعتك. إيصالك جاهز في سجل مدفوعاتك."
+
+#: notifications/domain/money_events.py
+msgid "Coaching fee held"
+msgstr "رسوم التدريب محجوزة"
+
+#: notifications/domain/money_events.py
+#, python-format
+msgid ""
+"The first month's fee for coaching between you and %(name)s is held. It is "
+"paid to the trainer when the first program is sent."
+msgstr ""
+"رسوم الشهر الأول من التدريب بينك وبين %(name)s محجوزة، وتُدفع للمدرب عند "
+"إرسال أول برنامج."
+
+#: notifications/domain/money_events.py
+msgid "Coaching fee paid out"
+msgstr "صُرفت رسوم التدريب"
+
+#: notifications/domain/money_events.py
+#, python-format
+msgid ""
+"The fee for month %(month)s of coaching between you and %(name)s was paid to "
+"the trainer."
+msgstr "صُرفت للمدرب رسوم الشهر %(month)s من التدريب بينك وبين %(name)s."
+
+#: notifications/domain/money_events.py
+msgid "Coaching fee returned"
+msgstr "أُعيدت رسوم التدريب"
+
+#: notifications/domain/money_events.py
+#, python-format
+msgid ""
+"The held fee for coaching between you and %(name)s was returned to the "
+"client's wallet."
+msgstr "أُعيدت الرسوم المحجوزة للتدريب بينك وبين %(name)s إلى محفظة المتدرب."

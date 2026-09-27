@@ -54,6 +54,13 @@ EVENT_CLASS_REGISTRY = {
     # The review queue (subscription.services.payment_service, B-051).
     'payment_needs_review': 'notifications.domain.subscription_events.PaymentNeedsReviewEvent',
     'payment_rejected': 'notifications.domain.subscription_events.PaymentRejectedEvent',
+    # The spec's table (section 7, plan step 5): a payment confirmed (the receipt is
+    # ready), and a month of coaching money held / paid out / returned, to both sides.
+    # Fact only on every build: no price, button or link.
+    'payment_confirmed': 'notifications.domain.money_events.PaymentConfirmedEvent',
+    'coaching_fee_held': 'notifications.domain.money_events.CoachingFeeHeldEvent',
+    'coaching_fee_released': 'notifications.domain.money_events.CoachingFeeReleasedEvent',
+    'coaching_fee_refunded': 'notifications.domain.money_events.CoachingFeeRefundedEvent',
     # A trainer's verification was decided (trainer_verification/services.py).
     'trainer_verification_approved': 'notifications.domain.verification_events.TrainerVerificationApprovedEvent',
     'trainer_verification_rejected': 'notifications.domain.verification_events.TrainerVerificationRejectedEvent',

@@ -206,11 +206,15 @@ so parse ids client-side.
 | `coaching_payment_due` | `trainer_id`, `status` (`frozen`) — the month ended unpaid, so the coaching is paused; repeated on each reminder step while it stays paused |
 | `coaching_ended` | `user_id` — the other person. The grace period ran out unpaid; sent to both |
 | `coaching_finished` | `user_id` — the other person. Coaching ended for a reason other than money; sent to both |
+| `coaching_fee_held` | `period_id`, `month`, `role` (`client` / `trainer`: the recipient's side), `user_id` — the other person. Month 1 was charged into escrow when the trainer accepted; sent to both. The fact only, no amount, on every build |
+| `coaching_fee_released` | `period_id`, `month`, `role`, `user_id` — a month's fee left escrow for the trainer. Month 1 (the first program arrived): sent to both. A renewal: to the trainer only (the client's notice is `coaching_renewed`). The trainer hears it when their share lands: a share owed for a stale exchange rate is announced when it is paid |
+| `coaching_fee_refunded` | `period_id`, `month`, `role`, `user_id` — a held month went back to the client's wallet (declined, left or ended before the first program); sent to both |
 | `subscription_expiring` | `subscription_id`, `ends_at` (ISO 8601) |
 | `subscription_expired` | `subscription_id`, `ended_at` (ISO 8601) |
 | `checkout_expired` | `payment_id` — the checkout was not completed in time |
 | `payment_needs_review` | `payment_id` — a transfer arrived for it that is not exactly what it asked for; a person is checking it (B-051) |
 | `payment_rejected` | `payment_id` — the transfer held for it could not be accepted; it goes back to its sender by hand (B-051) |
+| `payment_confirmed` | `payment_id`, `invoice_number` — the payment cleared (whoever confirmed it: the poller, a webhook, "check my payment", an operator) and its receipt is ready: `GET /api/subscription/v1/payments/{payment_id}/receipt/`. The fact only — no amount, button or link — on every build |
 | `trainer_verification_approved` | `application_id` — an operator accepted the trainer's documents; the account is verified |
 | `trainer_verification_rejected` | `application_id`, `reason` — the application needs changes (or a verification was revoked); `reason` is the operator's words, also in the body |
 | `withdrawal_requested` | `withdrawal_id`, `number` — the trainer's withdrawal was received; the money is held for it |
@@ -1314,7 +1318,10 @@ month, and that month starts when it is paid. After a coaching ends the same wri
 answer 403 `coaching_ended` (`coaching_unpaid` while support has returned the month of a
 coaching that still stands). Training inside a paid month (offline sync) is always
 accepted. Other pushes: `coaching_renewed`, `coaching_finished` (the trainer stopped at
-the month's end, or an account was suspended). A trainer cannot end a paid month the
+the month's end, or an account was suspended), and the money of each month to both
+people: `coaching_fee_held` (month 1 into escrow), `coaching_fee_released` (out of escrow
+to the trainer; on a renewal to the trainer only) and `coaching_fee_refunded` (a held
+month back to the client) — §4. A trainer cannot end a paid month the
 client is in (`trainer/unassign-client/` answers 409 `coaching_month_active`;
 `at_period_end: true` stops the renewal instead), and cannot delete the account while
 coaching anyone (`DELETE privacy/erase/` answers 409 `trainer_has_active_clients`).
@@ -1995,6 +2002,35 @@ B-051, 2026-09-23).
   approve, reject, dismiss, or attach a transfer to the checkout it was for. A sweep
   reads the merchant account every ten minutes for transfers no checkout claimed. One
   ShamCash transaction confirms one payment, once.
+
+**Every step of a payment is on the record** (the spec, section 7; plan step 5,
+2026-09-27). Additive: no route, key or `code` changed; identical on every build.
+
+- `GET /api/subscription/v1/payments/{payment_id}/status/` and `GET
+  /api/subscription/v1/payments/{id}/` gain `events`: every state the payment went
+  through, oldest first, `[{from_status, to_status, at, by, backfill}]`. `from_status` is
+  null for the checkout's opening. `by` is who or what moved it: `customer` (opened the
+  checkout, or "check my payment"), `gateway` (a webhook), `poller` (the server's own
+  look at the merchant account), `sweep` (transfers no checkout claimed), `operator` (a
+  person in the console) or `system`. A payment made before this existed carries ONE
+  event with `backfill: true`: the state it was in then, `from_status` null, `at` the
+  best time its row gave. The list (`GET payments/`) does not carry `events`. The app
+  never sees the evidence (a transfer's details are its sender's) or which operator.
+- Each event is written by `PaymentService` in the same transaction as the step, and the
+  database refuses to change or delete one. Operators read them, with their evidence, on
+  the payment in the console (`/dj-admin/subscription/payment/{id}/change/`).
+- The spec's checkout session IS the payment: its states map onto `status` as OPEN =
+  `pending`, CONFIRMED = `completed`, NEEDS_REVIEW = `needs_review`, REJECTED =
+  `rejected`, EXPIRED = `expired` (also `failed` / `cancelled` when a gateway says so),
+  REFUNDED = `refunded`. MATCHING is never stored: a match runs inside one poll, webhook,
+  reconcile or sweep and ends in the same step as `completed`, `needs_review` or no
+  change. `money_type`, `amount`, `currency`, `reference` and `expires_at` are already on
+  every payment read.
+- Pushes, in the spec's table: `payment_confirmed` (push and inbox, `data.payment_id`,
+  `data.invoice_number`: the receipt is ready) and, for a month of coaching,
+  `coaching_fee_held` / `coaching_fee_released` / `coaching_fee_refunded` to BOTH people
+  (`data.role` says which side the recipient is on). The fact only, on every build: no
+  amount, no button, no link.
 
 **What wiring the trainer money screens found: escrow and the ledger's reads**
 (BACKEND_BUGS B-096, B-101, 2026-09-24). Additive; identical on every build (money that

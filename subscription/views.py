@@ -24,7 +24,7 @@ from .models import (
 from .serializers import (
     SubscriptionPlanSerializer, SubscriptionSerializer,
     SubscriptionCreateSerializer, SubscriptionUpdateSerializer,
-    SubscriptionCancelSerializer, PaymentSerializer,
+    SubscriptionCancelSerializer, PaymentSerializer, PaymentDetailSerializer,
     PaymentCreateSerializer, SubscriptionFeatureSerializer,
     SubscriptionUsageSerializer, SubscriptionPlanListSerializer,
     UserSubscriptionSummarySerializer
@@ -43,7 +43,7 @@ from .services.payment_gateways import (
     CurrencyNotChargeable, PaymentGatewayError, PaymentGatewayService,
 )
 from .services.payment_service import (
-    AmountMismatch, CheckoutOpen, PaymentService, PaymentError, InvalidPaymentTransition,
+    AmountMismatch, By, CheckoutOpen, PaymentService, PaymentError, InvalidPaymentTransition,
     PaymentVerificationError, PlanChanged, SubscriptionAlreadyActive, UpgradePriceMoved,
 )
 from .upgrade import UpgradeNotPayable, UpgradeRefused, quote_upgrade
@@ -93,6 +93,17 @@ def _checkout_opener(request, subscription, gateway_name, gateway_service):
         )
         return gateway_name, reference, init.get('response', {})
     return initiate
+
+
+def _opened_from(request) -> dict:
+    """What a checkout's opening event records about the build that asked for it: its
+    declared channel and version (`policy.channels`). Evidence only — nothing reads it
+    to decide anything; the build was already checked by `require_purchase_allowed`."""
+    from policy.channels import channel_of, version_of
+
+    version = version_of(request)
+    return {'channel': channel_of(request),
+            'app_version': '.'.join(str(n) for n in version) if version else None}
 
 
 def _currency_not_chargeable():
@@ -563,6 +574,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                         # Through the manager, so an unconfigured gateway refuses instead
                         # of handing out transfer instructions to an empty account.
                         lambda: PaymentGatewayManager.get_service_for_initiation(gateway_name)),
+                    by=By.CUSTOMER, actor=request.user, evidence=_opened_from(request),
                 )
             except ExchangeRateUnavailable as exc:
                 # The plan is priced in the other currency and the operator's rate is
@@ -877,7 +889,8 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 # under the lock rather than opening a checkout nobody quoted.
                 expected_from_plan_id=subscription.plan_id,
                 expected_to_pay=quote.to_pay if quote is not None else None,
-                gateway_name=gateway_name)
+                gateway_name=gateway_name,
+                by=By.CUSTOMER, actor=request.user, evidence=_opened_from(request))
         except UpgradePriceMoved as exc:
             return _price_changed(exc.quote.to_pay, exc.quote.currency)
         except PlanChanged:
@@ -1000,9 +1013,20 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     gateway-initiate flow, and completed only by PaymentService (webhook/reconcile).
     There is deliberately no create/update/confirm surface here — clients can never
     mutate payment state.
+
+    `GET payments/{id}/` answers the list row plus `events`: every state the payment
+    went through, oldest first — `[{from_status, to_status, at, by, backfill}]`, where
+    `from_status` is null for the checkout's opening, `by` is who or what moved it
+    (`customer`, `gateway`, `poller`, `sweep`, `operator`, `system`) and `backfill: true`
+    marks the one event of a payment older than the history (its state then; `at` is
+    the best time its row gave). Never the evidence or which operator. The list does not
+    carry `events`. Identical on every build.
     """
     serializer_class = PaymentSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def get_serializer_class(self):
+        return PaymentDetailSerializer if self.action == 'retrieve' else PaymentSerializer
 
     def get_queryset(self):
         return Payment.objects.filter(
@@ -1425,7 +1449,8 @@ class PaymentWebhookView(APIView):
         try:
             if gateway_status in SUCCESS_STATUSES:
                 try:
-                    PaymentService.complete_payment(payment.id, payment_data)
+                    PaymentService.complete_payment(payment.id, payment_data,
+                                                    by=By.GATEWAY)
                 except AmountMismatch as mismatch:
                     # Money for this checkout, but not the amount or currency it asked
                     # for. Refusing it made the gateway redeliver for ever and left the
@@ -1445,11 +1470,12 @@ class PaymentWebhookView(APIView):
                         reason=('currency_differs' if str(payment_data.get('currency', '')
                                                           ).upper() not in ('', str(payment.currency).upper())
                                 else 'amount_differs'),
-                        gateway=gateway_name)
+                        gateway=gateway_name, by=By.GATEWAY)
                     return
                 logger.info(f"Webhook completed payment {payment.id} via {gateway_name}")
             elif gateway_status in FAILURE_STATUSES:
-                PaymentService.fail_payment(payment.id, payment_data.get('error_message', 'Payment failed'))
+                PaymentService.fail_payment(payment.id, payment_data.get('error_message', 'Payment failed'),
+                                            by=By.GATEWAY)
                 logger.info(f"Webhook marked payment {payment.id} failed")
             elif gateway_status in CANCELLATION_STATUSES:
                 # An abandoned checkout is not a refund. These words were in
@@ -1458,7 +1484,8 @@ class PaymentWebhookView(APIView):
                 # payment page and walks away — produced a 400 and an endless
                 # redelivery loop against a row that stayed `pending` for ever.
                 PaymentService.cancel_payment(
-                    payment.id, payment_data.get('error_message', gateway_status))
+                    payment.id, payment_data.get('error_message', gateway_status),
+                    by=By.GATEWAY)
                 logger.info(f"Webhook cancelled payment {payment.id} via {gateway_name}")
             elif gateway_status in REFUND_STATUSES:
                 PaymentService.refund_payment(
@@ -1467,7 +1494,7 @@ class PaymentWebhookView(APIView):
                     # while completion verifies both — so a signed webhook claiming
                     # 1.00 USD against a 5,000.00 SYP payment revoked the whole
                     # subscription and unwound the whole ledger.
-                    gateway_data=payment_data,
+                    gateway_data=payment_data, by=By.GATEWAY,
                 )
                 logger.info(f"Webhook refunded payment {payment.id} via {gateway_name}")
             else:
@@ -1740,6 +1767,7 @@ class PaymentGatewayView(APIView):
                     # `change-plan` from the customer's other device that commits in
                     # between would otherwise open a checkout at a price nobody quoted.
                     expected_plan_id=plan.id,
+                    by=By.CUSTOMER, actor=request.user, evidence=_opened_from(request),
                 )
             except PlanChanged:
                 return _plan_moved(subscription.pk, request, _price_changed)
@@ -1815,8 +1843,8 @@ class PaymentStatusView(APIView):
     To reconcile a pending payment against the gateway, use `POST .../reconcile/`.
 
     200 `{success, payment_id, status, amount, currency, payment_method, invoice_number,
-    created_at, updated_at, expires_at, reference, review}` (`expires_at` null once the
-    checkout is no longer open, and while it is held for review).
+    created_at, updated_at, expires_at, reference, review, events}` (`expires_at` null
+    once the checkout is no longer open, and while it is held for review).
 
     `status` can be `needs_review` (BACKEND_BUGS B-051): money arrived that is almost
     right — the reference with another amount or currency, or the amount with no
@@ -1826,6 +1854,16 @@ class PaymentStatusView(APIView):
     `{"reason": "amount_differs" | "currency_differs" | "reference_missing" | ...,
     "held_at": "<iso>"}`. 404 `not_found` — no such payment, or not the caller's
     (one answer for both).
+
+    `events` (plan step 5): every state the payment went through, oldest first —
+    `[{from_status, to_status, at, by, backfill}]`. `from_status` is null for the
+    checkout's opening; `by` is who or what moved it: `customer` (opened it, or "check
+    my payment"), `gateway` (a webhook), `poller` (the server's own look at the merchant
+    account), `sweep` (the transfers no checkout claimed), `operator` (a person in the
+    console) or `system`. `backfill: true` marks the single event of a payment older
+    than the history: the state it was in then, at the best time its row gave. Never
+    the evidence (a transfer's details are its sender's) and never which operator.
+    Identical on every build: a history carries no price.
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1856,6 +1894,8 @@ class PaymentStatusView(APIView):
             # `rejected` (B-051): a code the app draws PayMatching from. Never the
             # transfer's details — they are the sender's.
             'review': review_of(payment),
+            # Every step it went through (plan step 5), without the evidence.
+            'events': [event.for_app() for event in payment.events.all()],
         })
 
 
@@ -1924,13 +1964,15 @@ class PaymentReconcileView(APIView):
             # (B-051). The answer is 200 with `status: "needs_review"`.
             try:
                 PaymentService.hold_for_review(payment.id, result,
-                                               reason=result.get('reason') or 'amount_differs')
+                                               reason=result.get('reason') or 'amount_differs',
+                                               by=By.CUSTOMER, actor=request.user)
                 payment.refresh_from_db()
             except (PaymentVerificationError, InvalidPaymentTransition) as e:
                 logger.warning(f"Reconcile could not hold {payment.id}: {str(e)}")
         elif str(result.get('status', '')).lower() in ('completed', 'success', 'succeeded', 'paid'):
             try:
-                PaymentService.complete_payment(payment.id, result)
+                PaymentService.complete_payment(payment.id, result,
+                                                by=By.CUSTOMER, actor=request.user)
                 payment.refresh_from_db()
             except (PaymentVerificationError, InvalidPaymentTransition) as e:
                 logger.warning(f"Reconcile rejected for {payment.id}: {str(e)}")

@@ -95,6 +95,42 @@ def lock_wallets(actor_id, wallets) -> dict:
     return {w.pk: w for w in Wallet.objects.select_for_update().filter(pk__in=ids).order_by('pk')}
 
 
+def notify_fee(kind, period, *, client=True, trainer=True) -> None:
+    """Tell each side, on commit, what happened to a month's money: `kind` is 'held'
+    (month 1 into escrow), 'released' (out of escrow to the trainer) or 'refunded' (a
+    held month back to the client). The spec's table (section 7): "Trainer fee held,
+    released, refunded — push yes, both sides; in-app yes; email no".
+
+    Who hears which, decided by the callers: every fact goes to both people, except that
+    a trainer hears "released" only when their share has actually landed — a share left
+    owed for a stale rate is announced when `settle_owed_payouts` pays it. A RENEWAL is
+    not announced through here: the month is charged and paid out in one step, so it is
+    never "held", and its one event (`CoachingRenewedEvent`) tells the client
+    (`coaching_renewed`) and the trainer (`coaching_fee_released`) from its listeners.
+    Each notice is written once per month and person (the listeners key it on the month).
+
+    On commit and `robust`: a notice that cannot be queued is logged and never undoes,
+    delays or blocks the money it describes. No amount in it (`money_events`).
+    """
+    from notifications.domain import money_events
+    from notifications.domain.dispatcher import emit_event
+
+    Event = {'held': money_events.CoachingFeeHeldEvent,
+             'released': money_events.CoachingFeeReleasedEvent,
+             'refunded': money_events.CoachingFeeRefundedEvent}[kind]
+    events = []
+    if client:
+        events.append(Event(recipient_id=period.client_id, actor_id=period.trainer_id,
+                            other_name=period.trainer.full_name, period_id=period.pk,
+                            month=period.number, role='client'))
+    if trainer:
+        events.append(Event(recipient_id=period.trainer_id, actor_id=period.client_id,
+                            other_name=period.client.full_name, period_id=period.pk,
+                            month=period.number, role='trainer'))
+    for event in events:
+        transaction.on_commit(lambda e=event: emit_event(e), robust=True)
+
+
 def open_period(relation, hold_tx, *, priced=None, inherit=None):
     """Record month N for money just moved client -> escrow. Caller holds the relation.
 
@@ -285,6 +321,10 @@ def settle_owed_payouts(now=None) -> dict:
                 period.payout_owed_since = None
                 period.save(update_fields=['payout_reference', 'payout_owed_since',
                                            'updated_at'])
+                if payout is not None:
+                    # The share landed now: the trainer hears it. The client was told
+                    # when the month was paid out (`notify_fee`).
+                    notify_fee('released', period, client=False)
                 paid += 1
         except ExchangeRateUnavailable as exc:
             logger.warning("Owed coaching payouts wait for a fresh rate: %s", exc)
@@ -438,6 +478,9 @@ def renew(relation_id, now=None) -> str:
         # spent paused were not coached.
         pay_out(period, actor_id=None, starts_at=now if last.frozen_at else last.ends_at,
                 trainer_purpose='coaching_renewal_payout')
+        # ONE event for the renewal. Its listeners tell the client (`coaching_renewed`)
+        # and, once the share has landed, the trainer (`coaching_fee_released`,
+        # `notifications/listeners/money_listeners.py`).
         event = CoachingRenewedEvent(actor_id=relation.trainer_id,
                                      recipient_id=relation.client_id,
                                      trainer_name=trainer_name, period_id=period.pk)

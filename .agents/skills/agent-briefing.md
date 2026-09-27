@@ -54,6 +54,15 @@ Two more that fail silently (found building `payouts`, 2026-09-24):
   with `tests/ledger_rows.py backdate(pk, when)`, and never write production code that
   edits a row — a correction is a new row (`reverses`). A wallet that has ledger rows
   can no longer be deleted either.
+- **A payment's status moves in ONE line, and that line writes an event**
+  (`PaymentService._move`, 2026-09-27). `subscription.PaymentEvent` refuses UPDATE and
+  DELETE at the database (migration `subscription/0016`), like the ledger, and a source
+  scan (`tests/test_payment_events.py`) fails on any other `payment.status = ...` or a
+  `Payment.objects...update(status=...)` outside the service. A new service method that
+  moves a state calls `_move(payment, to, by=..., actor=..., evidence=...)`; a new
+  caller passes `by` (`PaymentEvent.By`: who or what it is). A test that writes
+  `Payment.objects.create(status=...)` directly gets a payment with NO events — fine for
+  what it tests, but not a payment the app would ever see.
 - **A periodic task over every user takes a page and hands the rest on**
   (`training_platform/batching.py`, 2026-09-27). A new beat task that loops over users
   uses `Batch` the same way, and its per-row work must be idempotent: a retried page
