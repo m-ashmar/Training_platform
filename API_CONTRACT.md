@@ -561,7 +561,9 @@ body), `parse_error` (400, a multipart body that cannot be parsed), `not_found` 
 refused here —, `corrupt_image`, `invalid_aspect_ratio` (over 10:1), `unreadable_image`
 (a truncated photo), `unsupported_format`, `image_dimensions_too_large`,
 `image_too_many_pixels`, and `mime_detection_failed` / `file_validation_error` when the
-guard itself fails). The push quotes the caption, or says "Photo" / "Voice note" /
+guard itself fails), and for a photo `upload_busy` (503, 2026-09-27: every image-decode
+slot of the server is taken — nothing was stored or counted; send it again after
+`Retry-After`). The push quotes the caption, or says "Photo" / "Voice note" /
 "Video" in the recipient's language — never a link. A chat video has no poster frame (no
 ffmpeg in the image) and a WebM or Ogg file declares no duration, so `duration_seconds`
 may be null.

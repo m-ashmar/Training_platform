@@ -533,6 +533,10 @@ REACHABLE = {
     'invalid_aspect_ratio', 'unreadable_image', 'unsupported_format',
     'image_dimensions_too_large', 'image_too_many_pixels', 'mime_detection_failed',
     'file_validation_error',
+    # A deliberate contract change (2026-09-27, the production-readiness audit): a photo
+    # arriving while every image-decode slot of the process is taken is answered 503
+    # `upload_busy` and not decoded (`training_platform/image_budget.py decode_slot`).
+    'upload_busy',
 }
 #: What the image guard can say elsewhere and never here: the file is never None
 #: (`media_file_required` first), Django's multipart parser drops a part with no file
