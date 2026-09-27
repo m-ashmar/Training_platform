@@ -5825,3 +5825,48 @@ msgstr "مرحبًا %(name)s،"
 #: notifications/channels/email.py
 msgid "Hello,"
 msgstr "مرحبًا،"
+
+#: chat/services.py
+msgid ""
+"This route sends text and program cards. Send photos, voice notes and videos "
+"to /api/v1/chat/media/."
+msgstr ""
+"هذا المسار يرسل النصوص وبطاقات البرامج. أرسل الصور والرسائل الصوتية ومقاطع "
+"الفيديو إلى /api/v1/chat/media/."
+
+#: chat/services.py
+msgid "Only the trainer sends program cards."
+msgstr "المدرب وحده يرسل بطاقات البرامج."
+
+#: chat/services.py
+msgid "Name exactly one of routine_id or template_id."
+msgstr "حدّد واحدًا فقط من routine_id أو template_id."
+
+#: chat/services.py
+#, python-format
+msgid "This routine has %(days)s days."
+msgstr "عدد أيام هذا البرنامج %(days)s."
+
+#: chat/services.py
+msgid "There is no such program of yours."
+msgstr "لا يوجد لديك برنامج كهذا."
+
+#: chat/services.py
+msgid "This client is not on that routine."
+msgstr "هذا العميل ليس على هذا البرنامج."
+
+#: chat/services.py
+msgid "This client has no routine written from that template yet."
+msgstr "لا يوجد لهذا العميل بعد برنامج مكتوب من هذا القالب."
+
+#. The lock-screen preview of a coach's program card sent without a caption.
+#: chat/events.py
+msgid "Your program was updated"
+msgstr "حدّث برنامجك"
+
+#. The lock-screen preview of a coach's program card sent without a caption, with the
+#. routine's name («حدّث برنامجك · برنامج القوة», screens/05-chat-utility/Chat.png).
+#: chat/events.py
+#, python-format
+msgid "Your program was updated · %(routine)s"
+msgstr "حدّث برنامجك · %(routine)s"

@@ -27,7 +27,8 @@ The files leave storage with their rows, but not through a per-row delete receiv
 that would cost Django's fast delete on this table (`chat.models.Message`). The two bulk
 paths that delete messages sweep the files instead (`delete_conversation_files`, and
 the erasure step in `training_platform/privacy/sources.py`), both through
-`delete_files_on_commit`, which hands them to a Celery task once the delete commits.
+`stored_names` (the attachment AND a video's poster) and `delete_stored_on_commit`,
+which hands them to a Celery task once the delete commits.
 
 The file is stored on the default storage — the media kit's backend: GCS in production,
 the signed filesystem in development and tests — under the extension the guard DETECTED
@@ -35,10 +36,13 @@ the signed filesystem in development and tests — under the extension the guard
 `training_platform.media_storage.media_url()`: signed, expiring, and only inside an
 answer that the two people in the conversation receive.
 
-A video's poster frame and a WebM's duration need ffmpeg, which the production image does
-not ship (`mediakit/tasks.py`). So a chat video has no poster, and `duration_seconds` is
-what the container declares or null; the app draws its own placeholder, as the media
-kit's own videos do while they are `pending`.
+A video's POSTER frame (2026-09-27) is cut after the video is stored, off the request:
+the send queues `chat.tasks.cut_video_poster` once the row commits (`queue_poster`), a
+worker cuts one JPEG near the start with ffmpeg (`mediakit.tasks`, the media kit's own
+helpers) and stores it beside the video, private and signed the same way. Until then —
+and for good where the worker has no ffmpeg or cannot read the video — `poster_url` is
+null and the app draws its own placeholder. Nothing on the request decodes a frame.
+A WebM's `duration_seconds` is still what the container declares, or null.
 """
 from __future__ import annotations
 
@@ -192,6 +196,47 @@ def attachment_names(messages) -> list[str]:
 
 #: The field whose storage holds a chat file (`training_platform.storage_cleanup`).
 CHAT_FILES = "chat.Message.attachment"
+#: The field whose storage holds a video's poster frame.
+CHAT_POSTERS = "chat.Message.poster"
+
+
+def stored_names(messages) -> dict[str, list[str]]:
+    """`{field label: [stored names]}` for EVERY file behind `messages` — the attachment
+    and the poster a worker cut from a video — read as two columns of one query, never
+    as rows. What a bulk delete of messages must sweep: a sweep of `attachment_names`
+    alone left each video's poster in the bucket for ever."""
+    attachments, posters = [], []
+    for attachment, poster in (messages.exclude(attachment='', poster='').order_by()
+                               .values_list('attachment', 'poster')):
+        if attachment:
+            attachments.append(attachment)
+        if poster:
+            posters.append(poster)
+    return {CHAT_FILES: attachments, CHAT_POSTERS: posters}
+
+
+def delete_stored_on_commit(names_by_field, using=DEFAULT_DB_ALIAS) -> None:
+    """`delete_files_on_commit` for what `stored_names` read: each field's files through
+    the same after-commit hand-over, under that field's own label."""
+    from training_platform.storage_cleanup import delete_after_commit
+
+    for label, names in names_by_field.items():
+        if names:
+            delete_after_commit(label, names, using=using)
+
+
+def queue_poster(message_id) -> None:
+    """Hand a stored video to the worker that cuts its poster. Called on COMMIT, so the
+    worker finds the row, and never raises: a broker that cannot take the message
+    costs the poster, not the message (`poster_url` stays null; the app draws its own
+    placeholder)."""
+    try:
+        from .tasks import cut_video_poster
+
+        cut_video_poster.delay(message_id)
+    except Exception:       # noqa: BLE001 — the video is sent whatever happens here
+        logger.warning("could not queue the poster of chat video %s", message_id,
+                       exc_info=True)
 
 
 def delete_files_on_commit(names, using=DEFAULT_DB_ALIAS) -> None:
@@ -219,22 +264,30 @@ def delete_conversation_files(sender, instance, using=None, **kwargs):
     receiver, so it keeps Django's fast path); their files are read here, as one
     column, while the rows still exist, and deleted once the delete commits. It runs
     however a conversation goes: its own delete, an erasure, the cascade from a deleted
-    account.
+    account. The posters cut from its videos go with them (`stored_names`).
     """
     using = using or DEFAULT_DB_ALIAS
-    delete_files_on_commit(
-        attachment_names(Message.objects.using(using).filter(conversation_id=instance.pk)),
+    delete_stored_on_commit(
+        stored_names(Message.objects.using(using).filter(conversation_id=instance.pk)),
         using=using)
 
 
 def payload(message, request=None) -> dict | None:
-    """The `media` object of a message: None for text and for anything taken back.
+    """The `media` object of a message: None for text, for a program card and for
+    anything taken back.
 
         {"url": "<signed, expires>", "duration_seconds": 18.4 | null,
-         "width": 1080 | null, "height": 1350 | null}
+         "width": 1080 | null, "height": 1350 | null,
+         "poster_url": "<signed, expires>" | null}
 
     `url` is private and short-lived (`media_url()`: a V4 signature of an hour on GCS, a
     bucketed HMAC the serve view checks on the filesystem). Use it now; never store it.
+
+    `poster_url` (additive, 2026-09-27) is a VIDEO's poster frame, under exactly the
+    same rules as `url`; null on a photo and a voice note, and on a video until the
+    worker has cut it (usually seconds after the send, announced over the socket as
+    `message.updated`) — or for good, where the worker has no ffmpeg or could not read
+    the video. `width` / `height` stay the photo's: a video's are not measured.
     """
     if message.kind not in (KIND_IMAGE, KIND_VOICE, KIND_VIDEO):
         return None
@@ -242,9 +295,12 @@ def payload(message, request=None) -> dict | None:
         return None
     from training_platform.media_storage import media_url
 
+    poster = (media_url(message.poster, request)
+              if message.kind == KIND_VIDEO and message.poster else None)
     return {
         'url': media_url(message.attachment, request),
         'duration_seconds': message.duration_seconds,
         'width': message.width,
         'height': message.height,
+        'poster_url': poster,
     }

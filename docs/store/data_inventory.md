@@ -616,7 +616,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 ### `messages_sent` — `chat.Message`
 
-**Why.** What the person sent in the trainer-client chat: text, photos, voice notes and videos, a form-check video naming an exercise.
+**Why.** What the person sent in the trainer-client chat: text, photos, voice notes and videos, a form-check video naming an exercise, a coach's card pointing at the client's program.
 
 **Whose.** Rows whose `sender` is the account.
 
@@ -624,9 +624,9 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Chat messages (`messages`); Photos and videos (`photos_videos`); Voice notes (`audio`).
 
-**Fields stored.** `id`, `conversation`, `sender`, `body`, `kind`, `attachment`, `duration_seconds`, `width`, `height`, `size_bytes`, `exercise`, `created_at`, `client_uuid`, `read_at`, `deleted_at`.
+**Fields stored.** `id`, `conversation`, `sender`, `body`, `kind`, `attachment`, `duration_seconds`, `width`, `height`, `size_bytes`, `exercise`, `poster`, `routine`, `program_day`, `program_changes`, `created_at`, `client_uuid`, `read_at`, `deleted_at`.
 
-**In the export.** `id`, `conversation`, `kind`, `body`, `exercise`, `duration_seconds`, `created_at`, `read_at`, `deleted_at`. Not exported: `sender`, `attachment`, `width`, `height`, `size_bytes`, `client_uuid`.
+**In the export.** `id`, `conversation`, `kind`, `body`, `exercise`, `duration_seconds`, `routine`, `program_day`, `created_at`, `read_at`, `deleted_at`. Not exported: `sender`, `attachment`, `width`, `height`, `size_bytes`, `poster`, `program_changes`, `client_uuid`.
 
 **On erasure.** Deleted.
 

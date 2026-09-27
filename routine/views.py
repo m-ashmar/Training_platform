@@ -660,26 +660,17 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         if source is not None:
             queryset = queryset.filter(source_template_id=source)
 
-        if user.is_admin:
-            # Admins can see all routines
-            return queryset.all()
-        elif user.is_trainer:
-            # Trainers can see routines they created and routines assigned to their clients
-            # `accessible_user_ids` is the one predicate that means "this trainer may see
-        # this client": it requires an APPROVED relation. These querysets filtered on
-        # the `assigned_trainer` pointer instead, which is a second definition of the
-        # same thing — and two definitions drift. Dropping the database does not fix
-        # it, because fresh rows flow through the same code.
-            ids = accessible_user_ids(user)
-            if ids is None:
-                return queryset.all()
-            return queryset.filter(
-                models.Q(created_by=user) |
-                models.Q(assigned_to__id__in=ids)
-            ).distinct()
-        else:
-            # Clients can see routines assigned to them
-            return queryset.filter(assigned_to=user)
+        # Admins see every routine; a trainer the routines they wrote and those their
+        # clients are on; anyone else the routines they are on. `readable_routines` is
+        # that rule, and the chat's program card asks the same function whether a
+        # client may still open the routine a card names (`chat.serializers`).
+        # `accessible_user_ids` inside it is the one predicate that means "this
+        # trainer may see this client": it requires an APPROVED relation. These
+        # querysets filtered on the `assigned_trainer` pointer once, which is a second
+        # definition of the same thing — and two definitions drift.
+        from .permissions import readable_routines
+
+        return readable_routines(user, queryset)
 
     def get_serializer_class(self):
         """Use different serializers based on user role"""

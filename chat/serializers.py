@@ -27,39 +27,67 @@ class MessageSerializer(serializers.ModelSerializer):
     column and the file still hold what was sent — the row is a record, not a display —
     and no endpoint serves either.
 
-    `kind` says what the message IS — `text`, `image`, `voice` or `video` — so the app
-    switches on it before reading anything else, and draws a value it does not know as
-    a placeholder rather than guessing from which fields happen to be present
-    (BACKEND_BUGS B-042). The media fields are ADDITIVE (B-091) and present on every
-    message:
+    `kind` says what the message IS — `text`, `image`, `voice`, `video` or `program` —
+    so the app switches on it before reading anything else, and draws a value it does
+    not know as a placeholder rather than guessing from which fields happen to be
+    present (BACKEND_BUGS B-042). The media fields are ADDITIVE (B-091), and so is
+    `program` (2026-09-27); all three are present on every message:
 
         "media": null | {"url": "<signed, expires within the hour>",
                          "duration_seconds": 18.4 | null,   voice, video
-                         "width": 1080 | null, "height": 1350 | null},   image
+                         "width": 1080 | null, "height": 1350 | null,   image
+                         "poster_url": "<signed>" | null},   video, once cut
         "exercise": null | {"id": 12, "name": "Deadlift"}   the move a video shows
+        "program": null | {"routine_id": 41,        open it as GET /api/routine/
+                                                    routines/41/ (and its `day`)
+                           "template_id": 7 | null, the template it was written from
+                           "name": "برنامج القوة",   the routine's name, now, in the
+                                                    reader's language
+                           "day": 2 | null,         the day the card opens, or the
+                                                    whole routine
+                           "day_name": "دفع" | null, that day's name now (B-104)
+                           "exercises": 6,          rows on that day WHEN SENT
+                           "changes": null | {"since", "added", "edited",
+                                              "removed" | null}}   since the previous
+                                                    card for this routine, WHEN SENT
 
     A CLIENT's video with an `exercise` is a form check: it sits in the trainer's
     attention queue (`GET /api/v1/trainer/attention/`) until the trainer writes in the
-    thread after it. `media.url` is private: it appears only in answers the two people
-    in this conversation receive, it is signed, and it expires — use it, never store it.
+    thread after it. `media.url` and `media.poster_url` are private: they appear only in
+    answers the two people in this conversation receive, they are signed, and they
+    expire — use them, never store them. `poster_url` is null until a worker has cut
+    the video's poster frame; the socket then sends `message.updated`.
+
+    A PROGRAM CARD (`kind: "program"`) is sent by the trainer only (`chat.services.
+    _send_program`) and names a routine they wrote that this client is on. `program` is
+    served to a reader only while they may READ that routine — the rule the routine
+    routes use (`routine.permissions.readable_routines`): the trainer who wrote it, a
+    trainer the client has approved, and the client while they are on it. So a
+    client whose coaching is frozen, unpaid or ended still opens the card (reading is
+    not training; starting the routine is what `training_refusal` refuses), and a card
+    whose routine was taken off the client, or deleted, stays in the thread with
+    `program: null` — draw it as a program that is no longer available. `body` is the
+    card's caption and may be empty. A taken-back card has `program: null` too.
     """
     body = serializers.CharField(max_length=MAX_BODY_CHARS, allow_blank=False,
                                  trim_whitespace=False)
     deleted = serializers.SerializerMethodField()
     media = serializers.SerializerMethodField()
     exercise = serializers.SerializerMethodField()
+    program = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
         fields = ['id', 'conversation', 'sender', 'kind', 'body', 'media', 'exercise',
-                  'client_uuid', 'created_at', 'read_at', 'deleted_at', 'deleted']
+                  'program', 'client_uuid', 'created_at', 'read_at', 'deleted_at',
+                  'deleted']
         # `client_uuid` is read-only HERE and written by `chat.services.send_message`:
         # the id is the key of an idempotent replay, not a field, and the replay has to
         # run before validation — a retry of a message sent while the coaching was
         # still paid must be ANSWERED, not refused.
         read_only_fields = ['id', 'conversation', 'sender', 'kind', 'media', 'exercise',
-                            'client_uuid', 'created_at', 'read_at', 'deleted_at',
-                            'deleted']
+                            'program', 'client_uuid', 'created_at', 'read_at',
+                            'deleted_at', 'deleted']
 
     def get_deleted(self, obj):
         return obj.deleted_at is not None
@@ -76,6 +104,29 @@ class MessageSerializer(serializers.ModelSerializer):
         # Read off the instance, not `.values()`: modeltranslation serves the name in the
         # active language only through the attribute.
         return {'id': exercise.pk, 'name': exercise.name}
+
+    def get_program(self, obj):
+        """The card, or None: not a card, taken back, its routine gone, or a routine
+        this reader may no longer read.
+
+        Who may read is decided for a whole page at once when the caller passes
+        `readable_routines` (the history route: a fixed number of queries for the
+        page, `readable_routine_ids`); otherwise it is asked here for this one message, of
+        the request's user. With neither — a serializer given no reader at all — the
+        card is withheld: a missing reader must never mean "everyone".
+        """
+        from .models import KIND_PROGRAM
+
+        if (obj.kind != KIND_PROGRAM or obj.deleted_at is not None
+                or obj.routine_id is None):
+            return None
+        readable = self.context.get('readable_routines')
+        if readable is None:
+            request = self.context.get('request')
+            readable = readable_routine_ids(getattr(request, 'user', None), [obj])
+        if obj.routine_id not in readable:
+            return None
+        return program_card(obj)
 
     def validate_body(self, value):
         if not value.strip():
@@ -101,6 +152,72 @@ class MediaMessageSerializer(serializers.Serializer):
     body = serializers.CharField(max_length=MAX_BODY_CHARS, allow_blank=True,
                                  required=False, default='', trim_whitespace=False)
     exercise_id = serializers.IntegerField(required=False, allow_null=True, default=None)
+
+
+class ProgramCardSerializer(serializers.Serializer):
+    """The body of a program card, `kind: "program"` on `POST .../messages/` (or the
+    socket's `message.send`), other than `kind` and `client_uuid`.
+
+    Exactly one of `routine_id` (a routine the trainer wrote that this client is on) and
+    `template_id` (a template the trainer owns, resolved to this client's routine
+    written from it) — `program_target_required` otherwise. `day` is optional (1-based;
+    the whole routine when absent). `body` is the caption: optional, capped like a text
+    message, stored as typed.
+    """
+    routine_id = serializers.IntegerField(required=False, allow_null=True, default=None,
+                                          min_value=1)
+    template_id = serializers.IntegerField(required=False, allow_null=True, default=None,
+                                           min_value=1)
+    day = serializers.IntegerField(required=False, allow_null=True, default=None,
+                                   min_value=1, max_value=32767)
+    body = serializers.CharField(max_length=MAX_BODY_CHARS, allow_blank=True,
+                                 required=False, default='', trim_whitespace=False)
+
+
+def readable_routine_ids(user, messages) -> set:
+    """The routines named by the program cards among `messages` that `user` may READ,
+    in a fixed number of queries whatever the page size (one for a client; two for a
+    trainer, whose approved clients are read first) — through `routine.permissions.
+    readable_routines`, the rule the routine routes use, so a card and the routine it
+    opens can never disagree. Empty for no user, or a page without cards."""
+    wanted = {m.routine_id for m in messages if getattr(m, 'routine_id', None)}
+    if not wanted or user is None:
+        return set()
+    from routine.permissions import readable_routines
+
+    return set(readable_routines(user).filter(pk__in=wanted)
+               .values_list('pk', flat=True))
+
+
+def program_card(message) -> dict:
+    """`program` for a card this reader may read (see `MessageSerializer`).
+
+    `name` and `day_name` are the routine's NOW — renaming it renames the card, as it
+    renames the routine the card opens — with the name in the active language
+    (`Routine.translations`, then the column: `TranslatedJSONFieldMixin`'s rule).
+    `exercises` and `changes` are what the card said when it was sent
+    (`chat.services.program_summary`). `day_name` is null for a day the routine has no
+    name for, and for a day past its `days` since it was shortened.
+    """
+    from django.utils.translation import get_language
+
+    routine = message.routine
+    day = message.program_day
+    names = routine.day_names if isinstance(routine.day_names, dict) else {}
+    day_name = names.get(str(day)) if day is not None and day <= routine.days else None
+    translations = routine.translations if isinstance(routine.translations, dict) else {}
+    translated = translations.get(get_language() or '') or {}
+    name = (translated.get('name') if isinstance(translated, dict) else None) or routine.name
+    summary = message.program_changes if isinstance(message.program_changes, dict) else {}
+    return {
+        'routine_id': routine.pk,
+        'template_id': routine.source_template_id,
+        'name': name,
+        'day': day,
+        'day_name': day_name or None,
+        'exercises': summary.get('exercises'),
+        'changes': summary.get('changes'),
+    }
 
 
 def person_card(user, request):

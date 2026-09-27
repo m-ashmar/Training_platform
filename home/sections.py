@@ -443,10 +443,11 @@ def trainer_message(person, relation, *, request) -> dict | None:
     blocked (`moderation/`). NOT left out when the newest message was taken back by its
     sender: the card then carries `body: ""` and `deleted: true`, the tombstone the
     conversation list shows for the same thread. `kind` is the message's own: `text`,
-    `image`, `voice` or `video` (BACKEND_BUGS B-091). A photo, voice note or video sent
-    without a caption has an empty `body`; the card says what it is from `kind` and
-    opens the thread, which is the only place its media is served (signed, to the two
-    people in it). Nothing the app already reads moved.
+    `image`, `voice` or `video` (BACKEND_BUGS B-091), or `program` (a coach's program
+    card, 2026-09-27). A photo, voice note, video or program card sent without a
+    caption has an empty `body`; the card says what it is from `kind` and opens the
+    thread, which is the only place its media and its program card are served. Nothing
+    the app already reads moved.
 
     `POST /api/notifications/message-client/` does NOT write a chat message (it only
     pushes a notification), so a coach who used that route does not appear here. That

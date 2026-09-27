@@ -1,5 +1,6 @@
-"""`/api/v1/chat/` — messages between a trainer and their client: text, and (B-091) a
-photo, a voice note or a video with an optional caption.
+"""`/api/v1/chat/` — messages between a trainer and their client: text, (B-091) a
+photo, a voice note or a video with an optional caption, and (2026-09-27) a trainer's
+program card pointing at one of the client's routines.
 
 Every route here is authenticated (`401 not_authenticated` without a token) and nothing
 on it differs by build: a message is not a product, so `X-App-Channel` and
@@ -59,7 +60,12 @@ class ConversationListView(APIView):
          "other": {"id", "first_name", "last_name", "profile_picture"},   absolute URL
          "last_message": {"id", "sender", "kind", "body" (200 chars), "deleted",
                           "created_at"}
-                         | null,
+                         | null,             `kind` as on a message: `text`, `image`,
+                                             `voice`, `video` or `program` (a trainer's
+                                             program card; `body` is its caption,
+                                             often empty — say what it is from
+                                             `kind`). Never the media or the card:
+                                             the list is not the thread
          "last_message_at": datetime,        what the list is ordered by
          "unread_count": 3,                  messages from the other person since the
                                              caller last opened the thread
@@ -160,27 +166,56 @@ class ConversationMessagesView(APIView):
     start. A message is::
 
         {"id", "conversation", "sender", "kind", "body", "media", "exercise",
-         "client_uuid", "created_at", "read_at", "deleted_at", "deleted"}
+         "program", "client_uuid", "created_at", "read_at", "deleted_at", "deleted"}
 
-    `kind` is `text`, `image`, `voice` or `video`; `media` is null on a text message
-    and `{url, duration_seconds, width, height}` on the others, where `url` is signed
-    and expires (use it now, never store it); `exercise` is `{id, name}` on a video
-    that names its move, else null (see `MediaMessageView` and `MessageSerializer`).
-    A message the sender took back is still in the list with `deleted: true`, an
-    empty `body` and `media: null`, so the thread does not renumber under a scroll.
+    `kind` is `text`, `image`, `voice`, `video` or `program`; `media` is null on a text
+    message and a program card and `{url, duration_seconds, width, height, poster_url}`
+    on the others, where `url` and `poster_url` are signed and expire (use them now,
+    never store them) and `poster_url` is a video's poster frame, null until a worker
+    has cut it; `exercise` is `{id, name}` on a video that names its move, else null
+    (see `MediaMessageView` and `MessageSerializer`). `program` is the card
+    `{routine_id, template_id, name, day, day_name, exercises, changes}` on a program
+    card the CALLER may still read — the rule of `GET /api/routine/routines/{id}/`, so a
+    frozen, unpaid or ended coaching still shows it — and null otherwise (a card whose
+    routine was taken off the client or deleted: draw it as no longer available). That
+    is decided for the whole page at once, in a fixed number of queries. A message the
+    sender took back is still in
+    the list with `deleted: true`, an empty `body`, `media: null` and `program: null`,
+    so the thread does not renumber under a scroll.
 
     Photos, voice notes and videos are SENT through `POST /api/v1/chat/media/`; this
-    POST takes text only.
+    POST takes text and program cards.
 
     **POST** — send. Body `{"body": "...", "client_uuid": "..."}` (`client_uuid`
-    optional). `body` is capped at 4000 characters and is stored exactly as typed;
-    it is not checked against the banned-terms list (see the module docstring).
+    optional; `kind` absent or `"text"`). `body` is capped at 4000 characters and is
+    stored exactly as typed; it is not checked against the banned-terms list (see the
+    module docstring).
     201 with the message. A repeat of a `client_uuid` already used answers **200** with
     the FIRST message and writes nothing, so a retry after a lost answer is safe.
     400 `validation_error` (an empty or whitespace-only body: `blank_message` on
     `field_errors.body`). 400 `invalid_client_uuid` — a `client_uuid` that is not a
     UUID; that is the top-level `code`, and `field_errors.client_uuid` carries it too.
+    400 `invalid_kind` — a `kind` that is not `text` or `program` (a photo, voice note
+    or video goes to `POST /api/v1/chat/media/`).
     409 `idempotency_conflict` — that id is already the other person's message here.
+
+    **A PROGRAM CARD** (the trainer only; «حدّث برنامجك · برنامج القوة · يوم الدفع»):
+    `{"kind": "program", "routine_id": 41 | "template_id": 7, "day": 2, "body": "...",
+    "client_uuid": "..."}`. Exactly one of `routine_id` (a routine the trainer wrote
+    that this client is on — their private copy) or `template_id` (a template the
+    trainer owns: the card then names this client's routine written from it, the newest
+    active one). `day` optional (the whole routine without it); `body` the optional
+    caption. 201 with the message, `program` filled; the same replay, pair rule and
+    socket/push fan-out as text (the push reads the caption, or «حدّث برنامجك ·
+    <routine>» in the client's language). Its refusals, in the order decided (after
+    the replay): 403 `program_trainer_only` (the client sent it); 400
+    `validation_error` (a malformed field, named in `field_errors`); 400
+    `program_target_required` (neither or both ids); 400 `unknown_program` (no routine
+    or template of THIS trainer's by that id — another trainer's answers the same);
+    400 `program_not_for_this_client` (the trainer's routine, but the client is not on
+    it; or the trainer's template, and the client has no routine written from it yet —
+    deliver it first with `templates/{id}/generate/`); 400 `day_out_of_range` (past the
+    routine's `days`); then the 403s below.
     403 `no_relation` — the two are not an approved trainer and client, and never had a
     paid coaching month.
     403 `blocked` — either of the two has blocked the other. The thread stays readable.
@@ -192,12 +227,19 @@ class ConversationMessagesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, conversation_id):
+        from .serializers import readable_routine_ids
+
         conversation = _mine_or_404(request.user, conversation_id)
         rows, next_before = services.history(
             conversation, before=request.query_params.get('before'),
             limit=request.query_params.get('limit'))
-        return Response({'results': MessageSerializer(
-                            rows, many=True, context={'request': request}).data,
+        # Which program cards on this page the caller may still open: decided for the
+        # whole page at once (one query for a client, two for a trainer), however many
+        # cards it holds.
+        context = {'request': request,
+                   'readable_routines': readable_routine_ids(request.user, rows)}
+        return Response({'results': MessageSerializer(rows, many=True,
+                                                      context=context).data,
                          'next_before': next_before})
 
     def post(self, request, conversation_id):
@@ -253,6 +295,13 @@ class MediaMessageView(APIView):
     and stores nothing — it is answered even past the daily allowance. The other side
     hears `message.new` on the socket and gets the `chat_message` push (the caption, or
     "Photo" / "Voice note" / "Video" in their language — never a link).
+
+    A VIDEO's `media.poster_url` is null in this answer: its poster frame is cut AFTER
+    the send, by a worker with ffmpeg (`chat.tasks.cut_video_poster`), never on this
+    request. Once it is stored both sockets hear `message.updated` with the message as
+    it now reads, and every later read carries it — signed and expiring like `url`.
+    Where the worker has no ffmpeg, or cannot read the video, it stays null for good;
+    draw a placeholder.
 
     Every refusal, and its `code`, in the order it is decided — this is every code the
     route can answer:
