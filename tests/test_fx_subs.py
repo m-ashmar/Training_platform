@@ -600,15 +600,14 @@ def test_s139_withdrawing_prices_from_a_build_reaches_the_plan_list_at_once(make
 
 
 def test_s139_withdrawing_prices_from_a_build_reaches_its_home_at_once(make_user, api):
-    from routine.models import Exercise, RoutineTemplate, RoutineTemplateExercise
+    from tests.test_home import _public_template
 
     trainer = make_user("fx_s139_t", user_type="trainer")
-    template = RoutineTemplate.objects.create(
-        name="fx ready", description="ready", goal="Strength", days=3,
-        created_by=trainer, is_public=True)
-    RoutineTemplateExercise.objects.create(
-        template=template, exercise=Exercise.objects.create(name="fx ex", created_by=trainer),
-        day=1, order=1, sets=3, reps=10)
+    # Deliberate contract change (build/home-records, BACKEND_DELTA item 9): the
+    # `ready_programs` cards are the routine products on sale, not public templates, so
+    # the setup that stands for "a ready programme exists" lists one for sale. What this
+    # test protects is unchanged: withdrawing prices removes the section at once.
+    _public_template(trainer, "fx_s139")
     person = _person(make_user, "fx_s139_home")
     row = _apk_row()
     c = api(person)

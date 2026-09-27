@@ -259,6 +259,15 @@ def bust_home_on_a_relation_change(sender, instance, **kwargs):
     bust_home_on_commit(instance.client_id)
 
 
+@receiver(post_save, sender='routine.RoutinePurchase')
+def bust_home_on_a_purchase(sender, instance, **kwargs):
+    """A programme bought or refunded changes the buyer's own `ready_programs` card
+    (`owned`, `routine_id`, `can_buy`) and gives them, or takes from them, the routine
+    the hero reads. Left to the 120 s, the card went on offering to sell the buyer what
+    they had just bought (build/home-records)."""
+    bust_home_on_commit(instance.buyer_id)
+
+
 # ---------------------------------------------------------------------------
 # Orphaned upload cleanup
 # ---------------------------------------------------------------------------

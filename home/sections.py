@@ -446,8 +446,16 @@ def trainer_message(person, relation, *, request) -> dict | None:
     `image`, `voice` or `video` (BACKEND_BUGS B-091), or `program` (a coach's program
     card, 2026-09-27). A photo, voice note, video or program card sent without a
     caption has an empty `body`; the card says what it is from `kind` and opens the
-    thread, which is the only place its media and its program card are served. Nothing
-    the app already reads moved.
+    thread, which is where its media and its program card are served — a voice note is
+    the one exception, below. Nothing the app already reads moved.
+
+    A VOICE note is the exception the artboard draws (`Home.png`: the coach's note plays
+    on the card), so `kind: "voice"` adds three keys — `voice_fields` — and only that
+    kind carries them: `audio_url` (signed and expiring, the same `media_url()` the
+    thread's `media.url` is, handed only to this client, who is one of the two people
+    in the thread), `duration_seconds` (what the container declared, or null) and
+    `state`. The URL outlives the 120 s the home is cached for by the signature's own
+    life (an hour on GCS).
 
     `POST /api/notifications/message-client/` does NOT write a chat message (it only
     pushes a notification), so a coach who used that route does not appear here. That
@@ -461,7 +469,7 @@ def trainer_message(person, relation, *, request) -> dict | None:
     if is_blocked(person, relation.trainer_id):
         return None
 
-    from chat.models import Message
+    from chat.models import KIND_VOICE, Message
     from chat.serializers import person_card, conversation_queryset
 
     thread = (conversation_queryset(person)
@@ -470,7 +478,8 @@ def trainer_message(person, relation, *, request) -> dict | None:
     if thread is None or not thread['last_message_id']:
         return None
     last = (Message.objects.filter(pk=thread['last_message_id'])
-            .values('id', 'sender_id', 'kind', 'body', 'created_at', 'deleted_at')
+            .values('id', 'sender_id', 'kind', 'body', 'created_at', 'deleted_at',
+                    'attachment', 'duration_seconds')
             .first())
     if last is None:
         return None
@@ -481,21 +490,50 @@ def trainer_message(person, relation, *, request) -> dict | None:
     # (SIDE_BUGS S-100).
     deleted = last['deleted_at'] is not None
 
+    message = {
+        'id': last['id'],
+        # `text`, `image`, `voice` or `video` (B-091). A photo or a video stays in the
+        # thread; a voice note plays on the card (`voice_fields`).
+        'kind': last['kind'],
+        'body': '' if deleted else last['body'][:MESSAGE_PREVIEW_CHARS],
+        'deleted': deleted,
+        'sent_at': last['created_at'],
+    }
+    if last['kind'] == KIND_VOICE:
+        message.update(voice_fields(last, request, deleted=deleted))
     return {
         'conversation_id': thread['id'],
         'unread_count': thread['unread_count'],
         'from': person_card(relation.trainer, request),
         'from_coach': last['sender_id'] == relation.trainer_id,
-        'message': {
-            'id': last['id'],
-            # `text`, `image`, `voice` or `video` (B-091). The card never carries the
-            # media itself: the thread serves it, signed, to the two people in it.
-            'kind': last['kind'],
-            'body': '' if deleted else last['body'][:MESSAGE_PREVIEW_CHARS],
-            'deleted': deleted,
-            'sent_at': last['created_at'],
-        },
+        'message': message,
     }
+
+
+#: What a voice note on the card can be. A closed set; values may be added, never
+#: renamed. `ready`: `audio_url` plays. `unavailable`: there is nothing to play — the
+#: sender took the note back, or the row holds no stored file — and `audio_url` and
+#: `duration_seconds` are null.
+VOICE_READY, VOICE_UNAVAILABLE = 'ready', 'unavailable'
+
+
+def voice_fields(row, request, *, deleted) -> dict:
+    """`audio_url`, `duration_seconds` and `state` of a voice note, from a `.values()`
+    row holding `attachment` and `duration_seconds`.
+
+    The URL is `training_platform.media_storage.media_url()`, the one function every
+    private file of the platform is handed out through, exactly as the thread's
+    `media.url` (`chat/media.py payload`): signed and expiring. A note taken back serves
+    nothing, as the thread serves it `media: null`.
+    """
+    from training_platform.media_storage import media_url
+
+    playable = not deleted and bool(row['attachment'])
+    if not playable:
+        return {'audio_url': None, 'duration_seconds': None, 'state': VOICE_UNAVAILABLE}
+    return {'audio_url': media_url(row['attachment'], request),
+            'duration_seconds': row['duration_seconds'],
+            'state': VOICE_READY}
 
 
 def ai_advice(person, *, on_date) -> dict | None:
@@ -569,7 +607,118 @@ def ai_advice(person, *, on_date) -> dict | None:
     }
 
 
-def nutrition_today(person, plan, *, on_date, request) -> dict | None:
+#: A timeline entry's state, from the meal's own (`_meal_state`): one rule for both, so
+#: a meal card and its place in the day can never disagree.
+TIMELINE_STATE_OF_MEAL = {'eaten': 'done', 'now': 'now', 'upcoming': 'next'}
+
+
+def timeline_workout(person, routine, hero, *, on_date, clock) -> dict | None:
+    """Today's workout as one entry of the day timeline (`nutrition_today.timeline`), or
+    None when today asks for no training.
+
+    Built from the hero that was just built (`workout_hero`) — the same routine, the
+    same day of the cycle (`day_of`: `Routine.start_date` over `Routine.days`), the same
+    counts and the same refusal — so the timeline and the hero cannot describe two
+    different days. None without a hero, on a rest day (the day prescribes nothing),
+    and outside the routine's own window (`_in_program`: before it starts or after it
+    ends there is no plan, as the week strip says).
+
+    WHEN. The platform holds no scheduled time for a workout, so `at` is the best fact
+    there is, and `at_source` says which:
+
+      `session`        the start of today's session on this routine day (the open one,
+                       else the earliest one begun today that was not abandoned)
+      `reminder_hour`  otherwise, `CustomUser.workout_reminder_hour` on the hour — the
+                       hour the person asked to be reminded to train (18 by default),
+                       the only time of day the platform keeps for training
+
+    STATE, the meal's rule applied to the workout: `done` once the day is closed (the
+    hero's `outcome`); `now` while it is under way (an open session on it, or a set
+    already logged today) or once its time has come; `next` before that.
+
+    At most one query: the session of the day, when none is open.
+    """
+    from datetime import datetime, time as clock_time
+
+    if hero is None or routine is None or not hero['counts']['exercises']:
+        return None
+    if not _in_program(routine, on_date):
+        return None
+
+    day = hero['day']
+    session = hero.get('session')
+    open_here = (session is not None and session['routine_id'] == routine.pk
+                 and session['day'] == day)
+    started = session['started_at'] if open_here else None
+    if started is None:
+        from routine.models import WorkoutSession
+
+        midnight = timezone.make_aware(datetime.combine(on_date, clock_time.min))
+        started = (WorkoutSession.objects
+                   .filter(user=person, routine=routine, day=day,
+                           start_time__gte=midnight,
+                           start_time__lt=midnight + timedelta(days=1))
+                   .exclude(status='abandoned')
+                   .order_by('start_time', 'id')
+                   .values_list('start_time', flat=True).first())
+    if started is not None:
+        at, source = timezone.localtime(started).time().replace(second=0, microsecond=0), \
+            'session'
+    else:
+        at, source = clock_time(hour=int(person.workout_reminder_hour)), 'reminder_hour'
+
+    if 'outcome' in hero:
+        state = 'done'
+    elif open_here or (hero.get('sets') or {}).get('logged'):
+        state = 'now'
+    else:
+        state = 'now' if at <= clock else 'next'
+
+    entry = {
+        'kind': 'workout',
+        'at': at,
+        'at_source': source,
+        'state': state,
+        'routine_id': routine.pk,
+        'routine_name': hero['routine_name'],
+        'day': day,
+        'muscles': hero['muscles'],
+        'exercises': hero['counts']['exercises'],
+        'sets': hero['counts']['sets'],
+        'estimated_minutes': hero['counts']['estimated_minutes'],
+    }
+    if open_here:
+        entry['session_id'] = session['id']
+    cta = hero.get('cta') or {}
+    if cta.get('state') == 'refused':
+        # Readable, not startable (the owner, 2026-09-19): the same code the hero's
+        # button and every training write answer.
+        entry['refusal'] = cta['refusal']
+    return entry
+
+
+def _timeline(meals, workout) -> list:
+    """The day in order: the meals as the plan orders them (`scheduled_time`, a meal
+    with no time last), the workout placed after every timed meal at or before its own
+    time. Deterministic, so two loads of one day never reorder."""
+    entries = [{
+        'kind': 'meal',
+        'at': meal['at'],
+        'state': TIMELINE_STATE_OF_MEAL[meal['state']],
+        'meal_id': meal['id'],
+        'meal_type': meal['meal_type'],
+        'name': meal['name'],
+        'calories': meal['calories'],
+    } for meal in meals]
+    if workout is not None:
+        place = sum(1 for entry in entries
+                    if entry['at'] is not None and entry['at'] <= workout['at'])
+        entries.insert(place, workout)
+    return entries
+
+
+def nutrition_today(person, plan, *, on_date, request, workout=None,
+                    clock=None) -> dict | None:
     """The day's meals in order, and the day against its targets.
 
     Gated by the rule the diet endpoints apply
@@ -583,6 +732,10 @@ def nutrition_today(person, plan, *, on_date, request) -> dict | None:
     meal differently. Three queries: the meals, their components with the food, and
     the day's `DailyProgress` row. No writes and no recompute — the row is kept fresh
     by the ticks that change it.
+
+    `timeline` is the same meals with `workout` (`timeline_workout`) interleaved by
+    time — the artboard's «يومك» — built from the rows already read: no query of its
+    own. `clock` is the one reading of the time the view makes for both.
     """
     from subscription.permissions import HasDietAccessOrFrozenRead
 
@@ -593,7 +746,7 @@ def nutrition_today(person, plan, *, on_date, request) -> dict | None:
     from diet.models import DailyProgress, Meal, MealComponent
     from diet.services.meal_payload import meal_payload
 
-    now = timezone.localtime().time()
+    now = clock or timezone.localtime().time()
     meals = []
     for meal in (Meal.objects
                  .filter(diet_plan=plan, date=on_date)
@@ -637,6 +790,7 @@ def nutrition_today(person, plan, *, on_date, request) -> dict | None:
             'day_completed': bool(eaten.get('is_day_completed', False)),
         },
         'readable_only': bool(subscription is not None and subscription.is_frozen),
+        'timeline': _timeline(meals, workout),
     }
 
 

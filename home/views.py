@@ -210,13 +210,28 @@ class HomeView(APIView):
         `deleted` is `true`, the tombstone `GET /api/v1/chat/conversations/` shows for
         the same thread, and `unread_count` still counts the messages before it.
 
-        `kind` is `text` on every message in this build — chat is text only
-        (`chat/models.py`). A voice note arrives as an attachment (BACKEND_DELTA item
-        8) and will add `audio_url`, `duration_seconds` and `state` beside
-        `kind: "voice"`; the app must branch on `kind` from today so nothing moves when
-        it does. `body` is cut at 200 characters, the same preview the conversation
-        list sends. `unread_count` is the same number `GET /api/v1/chat/conversations/`
-        reports, by construction.
+        `kind` is the message's own: `text`, `image`, `voice` or `video` — branch on
+        it, and draw a value you do not know as a placeholder. A photo or a video is
+        opened in the thread, which serves its media. A VOICE note plays on the card,
+        so `kind: "voice"` — and only that kind — adds three keys beside the rest::
+
+            "message": {"id": 92, "kind": "voice", "body": "", "deleted": false,
+                        "sent_at": "...",
+                        "audio_url": "https://…" | null,
+                        "duration_seconds": 24.0 | null,
+                        "state": "ready" | "unavailable"}
+
+        `state` is a closed set (values may be added, never renamed): `ready` —
+        `audio_url` plays; `unavailable` — nothing to play (the sender took the note
+        back, or no file is stored), and `audio_url` and `duration_seconds` are null.
+        `audio_url` is PRIVATE: signed and expiring (an hour on GCS), the same
+        `media_url()` the thread's `media.url` is, handed only to this client, who is
+        one of the two people in the thread — play it, never store it; a later home
+        load carries a fresh one. `duration_seconds` is what the recording's container
+        declares, null when it declares nothing readable (a WebM, an Ogg). `body` is the
+        caption, often empty. `body` is cut at 200 characters, the same preview the
+        conversation list sends. `unread_count` is the same number
+        `GET /api/v1/chat/conversations/` reports, by construction.
 
     ``nutrition_today`` — the day's meals and the day's totals. Omitted with no plan
     covering today, and omitted when the subscription never entitled diet — never a 403
@@ -232,10 +247,44 @@ class HomeView(APIView):
                     "eaten": {"calories": 1420.0, "protein_g": 96.0,
                               "carbs_g": 150.0, "fat_g": 41.0},
                     "meals_completed": 2, "meals_total": 4, "day_completed": false},
-         "readable_only": true}               the subscription lapsed: read it, do not
+         "readable_only": true,               the subscription lapsed: read it, do not
                                               use it (the owner, 2026-09-19)
+         "timeline": [ … the day, see below … ]}
 
         A meal with no scheduled time reads as `now`, not as for ever upcoming.
+
+        ``timeline`` — the artboard's «يومك»: the same meals, with today's workout
+        placed among them by time. Always present in this section (`[]` on a day with
+        no meals and no training), and nowhere else: a day with no diet section has no
+        timeline, because without the meals it would only repeat the hero. Two kinds
+        of entry, in the day's order::
+
+            {"kind": "meal", "at": "08:00:00" | null, "state": "done",
+             "meal_id": 31, "meal_type": "Breakfast", "name": "…", "calories": 520.0}
+
+            {"kind": "workout", "at": "18:00:00", "at_source": "reminder_hour",
+             "state": "now", "routine_id": 12, "routine_name": "Upper body", "day": 5,
+             "muscles": ["Upper Chest", "Triceps"], "exercises": 6, "sets": 21,
+             "estimated_minutes": 45 | null,
+             "session_id": 88,                only while a session on it is open
+             "refusal": "coaching_frozen"}    only when the hero's button is `refused`
+
+        `state` is `done`, `now` or `next`. A meal's is its own `state` above, renamed
+        (`eaten` -> `done`, `now` -> `now`, `upcoming` -> `next`), so the card and the
+        timeline cannot disagree. The workout's: `done` once the day is closed (the
+        hero's `outcome`); `now` while it is under way (a session open on it, or a set
+        already logged) or once its time has come; `next` before that. More than one
+        entry can be `now` when an earlier one was left undone: the «الآن» pill
+        belongs to the LAST `now`.
+
+        The workout entry is the hero's own day — the same routine, day of the cycle,
+        counts and refusal — and is left out on a rest day and outside the routine's
+        own dates. The platform stores no time for a workout, so `at_source` says where
+        `at` came from: `session` — the start of today's session on it (the open one,
+        else the earliest begun today); `reminder_hour` — the hour the person asked to
+        be reminded to train (`workout_reminder_hour`, 18 unless they changed it). A
+        meal with no time sorts last; the workout goes after every timed meal at or
+        before its own time. Times are wall-clock times of the day, as a meal's is.
 
     ``week_stats`` — the three tiles. Omitted for someone who has never trained::
 
@@ -295,18 +344,42 @@ class HomeView(APIView):
         Same function, same cards, same reason codes as the trainers screen. On `ios`
         today the two price keys are ABSENT — never null, never zero.
 
-    ``ready_programs`` — ready-made programmes. **Left out entirely on a build that may
-    not show prices** (`play`, `ios`, and a caller that declares no channel)::
+    ``ready_programs`` — the programmes on sale (routine products, plan step 10), newest
+    listing first, at most four. Only for a client with no coach. **Left out entirely
+    on a build that may not show prices** (`play`, `ios`, and a caller that declares no
+    channel) — those builds read the programmes on `GET /api/v1/products/`, without a
+    price or a buy action::
 
-        {"programs": [{"id": 5, "name": "Strength for beginners", "description": "…",
+        {"programs": [{"id": 5,                    the PRODUCT (`/api/v1/products/5/`)
+                       "name": "Strength for beginners", "description": "…",
                        "goal": "Strength", "days_per_cycle": 3, "exercises": 18,
-                       "trial": false}]}
+                       "trial": true,              `preview_days` > 0: the first days
+                                                   can be read free before buying
+                       "preview_days": 1,
+                       "weeks": 8 | null, "session_count": 24 | null,
+                       "equipment": ["barbell", "dumbbell"],
+                       "no_equipment": false,
+                       "price": "2500.00", "currency": "SYP",
+                       "money_type": "ROUTINE_PRODUCT",
+                       "can_buy": true,
+                       … and every other key of a `GET /api/v1/products/` row …}]}
 
-        No price today: routine products are plan step 10 and the schema has no price,
-        no currency, no length in weeks, no equipment answer and no free-trial flag.
-        `price` and `money_type: "ROUTINE_PRODUCT"` join a card additively when that
-        step lands, and the free trial workout is a card with `trial: true` and no
-        price in this same list.
+        A card IS the catalogue's row (`routine/product_serializers.py
+        CatalogueProductSerializer`, same queryset, same context): `title`,
+        `title_ar`, `title_en`, `description_ar`, `description_en`, `trainer`,
+        `days`, `weeks`, `session_count`, `preview_days`, `cover`, `owned`,
+        `routine_id`, `published_at`, `can_buy`, and the price keys of the plans'
+        shape (`price` and `currency` in the reader's currency, `price_converted`,
+        `exchange_rate`, `price_of_record`, `price_of_record_currency`). On top of it,
+        the keys this section always carried, now from the product — `name` (= `title`),
+        `description`, `goal`, `days_per_cycle` (the program's training days a week),
+        `exercises` (rows in that week), `trial` — and `equipment` (the codes of
+        `routine.models.EQUIPMENT_CHOICES` its exercises name, in that order, `[]` when
+        none says), `no_equipment` (true only when EVERY exercise says `bodyweight`)
+        and `money_type: "ROUTINE_PRODUCT"` beside `price`. `weeks` and
+        `session_count` are null while the trainer has not said how many weeks it
+        runs. Before products existed `id` was a public template's; no route took it
+        from this card.
 
     ``media_banner`` — the app's own 21:9 banner. **Left out entirely on a build that
     may not show prices**, and when no banner is uploaded::
@@ -331,6 +404,10 @@ class HomeView(APIView):
     * `featured_trainers` stays on every build (a coach is a person-to-person service),
       and the card's own `coaching_price` / `money_type` are dropped by the flag that
       governs a coaching fee. On `ios` today they are absent.
+    * Inside `ready_programs` — which only a build that may show prices receives — the
+      price keys and `money_type` are also asked of `can_show_price(request,
+      ROUTINE_PRODUCT)` card by card, and `can_buy` of `require_purchase_allowed`, as
+      the catalogue asks them.
     * Nothing else in this payload carries a price, an amount or a link to the web hub,
       on any build.
 
@@ -419,13 +496,21 @@ class HomeView(APIView):
         relation, _status = sections.coaching_of(person)
         plan = sections.active_diet_plan(person, on_date)
         coached = relation is not None
+        # One reading of the clock for every state that depends on it: a meal and the
+        # workout beside it in the timeline are judged against the same minute.
+        clock = timezone.localtime().time()
 
+        hero = sections.workout_hero(person, routine, week, on_date=on_date,
+                                     refusal=refusal)
         built = {
-            'workout_hero': sections.workout_hero(person, routine, week, on_date=on_date,
-                                                  refusal=refusal),
+            'workout_hero': hero,
             'trainer_message': sections.trainer_message(person, relation, request=request),
-            'nutrition_today': sections.nutrition_today(person, plan, on_date=on_date,
-                                                        request=request),
+            'nutrition_today': sections.nutrition_today(
+                person, plan, on_date=on_date, request=request, clock=clock,
+                # Asked only when the section exists: the timeline lives inside it.
+                workout=(sections.timeline_workout(person, routine, hero,
+                                                   on_date=on_date, clock=clock)
+                         if plan is not None else None)),
             'week_stats': sections.week_stats(person, routine, week, week_payload,
                                               on_date=on_date),
             'ai_advice': sections.ai_advice(person, on_date=on_date),
@@ -438,7 +523,7 @@ class HomeView(APIView):
             'featured_trainers': None if coached else first_day.featured_trainers(
                 person, request=request, flags=flags),
             'ready_programs': None if coached else first_day.ready_programs(
-                request=request, flags=flags),
+                person, request=request, flags=flags),
             'media_banner': first_day.media_banner(request=request, flags=flags),
         }
         answer['sections'] = [{'type': name, 'data': built[name]}
