@@ -111,7 +111,9 @@ def test_apple_app_site_association_routes_the_hub_paths_to_the_app(api, app_lin
 
 def test_the_association_is_the_same_for_every_build_and_every_caller(
         api, make_user, app_links):
-    anonymous = api().get(AASA).content
+    first = api().get(AASA)
+    assert first.status_code == 200
+    anonymous = first.content
     for channel in ("apk", "play", "ios", "web"):
         assert api(make_user(f"al_{channel}")).get(
             AASA, HTTP_X_APP_CHANNEL=channel).content == anonymous

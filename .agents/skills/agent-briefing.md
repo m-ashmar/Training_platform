@@ -107,6 +107,15 @@ Three more about tests of background work (found building `fx/prod-services`, 20
   `_prod_env`. A new `require_env` in `settings_production.py` goes into both, with the
   reason, or every "boots" assertion fails for a reason that is not theirs.
 
+One about the merchant account (found building `build/hub-signals`, 2026-09-27):
+
+- **Every read of ShamCash now writes `subscription.GatewayHealth`** (through
+  `PaymentGatewayService.fetch_payment_status` / `list_transactions`). A test that makes
+  `ShamCashGateway._get` raise leaves failures counted, and two in a row over 60 s turn
+  `gateway_state` on every payment read to `degraded`. It decides nothing — never expire,
+  fail or complete a payment on it — and a transfer's `sender` matching a customer's
+  saved `PayerAddress` is evidence for the review queue, never a confirmation.
+
 One about counting queries (found building `build/chat-cards-posters`, 2026-09-27):
 
 - **django-cachalot answers a repeated read from its cache**, so one request costs N
