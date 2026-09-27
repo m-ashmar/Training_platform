@@ -856,6 +856,22 @@ from routine.product_models import RoutineProduct, RoutinePurchase  # noqa: E402
 admin_site.register(RoutineProduct, RoutineProductAdmin)
 admin_site.register(RoutinePurchase, RoutinePurchaseAdmin)
 
+# App releases (plan step 11, the APK part): every build of every channel, the APK file
+# or where it is hosted, and the published tick the update prompt reads. Operator-only;
+# adding needs the add permission, publishing the change permission — see
+# releases/admin.py. A published release is a record and never changes its file.
+from releases.admin import AppReleaseAdmin  # noqa: E402
+from releases.models import AppRelease  # noqa: E402
+admin_site.register(AppRelease, AppReleaseAdmin)
+
+# The privacy policy and terms (versioned, per language; a published version is read-only)
+# and the queue of account-deletion requests made on the public page, which an operator
+# closes after erasing the account. Operator-only — see legal/admin.py.
+from legal.admin import AccountDeletionRequestAdmin, LegalDocumentAdmin  # noqa: E402
+from legal.models import AccountDeletionRequest, LegalDocument  # noqa: E402
+admin_site.register(LegalDocument, LegalDocumentAdmin)
+admin_site.register(AccountDeletionRequest, AccountDeletionRequestAdmin)
+
 # Console sign-ins from the operator's phone (B-120, admin_dashboard/console_login.py):
 # the audit trail — who made each link, which computer opened it, when it was approved
 # and used, or why not. Read-only, operators only; nothing here signs anyone in.

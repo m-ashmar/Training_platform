@@ -456,6 +456,41 @@ register(PersonalDataSource(label="capability_changes", model="policy.Capability
 # signed off by a person. Kept.
 register(PersonalDataSource(label="theme_changes", model="policy.ThemeChangeLog",
                             user_field="changed_by", on_erase="keep"))
+# Which operator published which app build (releases/). Names an operator, never a
+# customer, and it is the record of who told every phone to install what. Kept.
+register(PersonalDataSource(label="app_releases_published", model="releases.AppRelease",
+                            user_field="published_by",
+                            fields=["id", "channel", "version_name", "build_number",
+                                    "published_at"],
+                            on_erase="keep"))
+# Which operator published which wording of the privacy policy and terms (legal/). The
+# published text is what people were shown and agreed to: kept.
+register(PersonalDataSource(label="legal_documents_published", model="legal.LegalDocument",
+                            user_field="published_by",
+                            fields=["id", "kind", "language", "version", "published_at"],
+                            on_erase="keep"))
+# A request to delete an account, made on the public web page by someone who could not
+# open the app (legal/, spec B6). Keyed by the ADDRESS the requester typed, never by an
+# account — the page must not look one up — so it is matched to a person by their email.
+# Exported to them; on their erasure the record that a request was made and handled
+# stays and the address and the words go (anonymised). Retention: 180 days after an
+# operator handled it; an open request waits for its operator. The operator named in
+# `handled_by` is the platform's record of who answered, in no one's export.
+def _deletion_request_address(user):
+    """An account without an address matches no request — not every anonymised one,
+    whose address is "". A request is never stored with a space in its address."""
+    return user.email or " "
+
+
+register(PersonalDataSource(label="account_deletion_requests",
+                            model="legal.AccountDeletionRequest",
+                            user_field="email__iexact",
+                            user_value=_deletion_request_address,
+                            fields=["id", "email", "reason", "status", "created_at",
+                                    "handled_at"],
+                            on_erase="anonymise",
+                            anonymise={"email": "", "reason": ""},
+                            retention_days=180, retention_field="handled_at"))
 
 # --- reachable only through another row ---------------------------------------
 # Everything below holds data about a person but does not point at them directly, so

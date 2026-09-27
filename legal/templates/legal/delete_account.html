@@ -1,0 +1,36 @@
+{% extends "legal/base.html" %}{% load i18n %}
+{% block content %}
+<h1>{{ heading }}</h1>
+{% if sent %}
+<p class="note"><strong>{% trans "Request received" %}</strong><br>{% trans "Thank you. If an account uses this address, we will write to it to confirm the request before anything is deleted." %}</p>
+{% endif %}
+
+<h2>{% trans "The quickest way is in the app" %}</h2>
+<ol>
+  <li>{% trans "Open the app and sign in." %}</li>
+  <li>{% trans "Open the Me tab, then “Privacy and data”." %}</li>
+  <li>{% trans "Choose “Delete my account” and confirm." %}</li>
+</ol>
+<p>{% trans "Deletion is permanent and cannot be undone." %}</p>
+
+<h2>{% trans "What is deleted" %}</h2>
+<p>{% trans "Your workouts, progress, measurements and goals; your diet plans and food preferences; your posts, badges and points; your link with your trainer." %}</p>
+<h2>{% trans "What we keep, because the law requires it" %}</h2>
+<p>{% trans "Payment and wallet records, without your name." %} {% trans "If you have money in your wallet, contact support to get it back before you delete your account." %}</p>
+
+{% if not sent %}
+<h2>{% trans "Can't open the app?" %}</h2>
+<p>{% trans "Send us the email address of your account. We will write to that address to confirm the request comes from its owner before anything is deleted." %}</p>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="{{ delete_url }}">
+  {% csrf_token %}
+  <input type="hidden" name="lang" value="{{ lang }}">
+  <label for="email">{% trans "Email address of the account" %}</label>
+  <input type="email" id="email" name="email" value="{{ email }}" maxlength="254" required autocomplete="email" dir="ltr">
+  <label for="reason">{% trans "Why are you leaving? (optional)" %}</label>
+  <textarea id="reason" name="reason" maxlength="{{ reason_max }}">{{ reason }}</textarea>
+  <div class="trap" aria-hidden="true"><label for="website">{% trans "Leave this field empty" %}</label><input type="text" id="website" name="website" tabindex="-1" autocomplete="off"></div>
+  <button type="submit">{% trans "Send the request" %}</button>
+</form>
+{% endif %}
+{% endblock %}

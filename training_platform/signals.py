@@ -280,6 +280,8 @@ LOCAL_APPS_FOR_FILE_CLEANUP = {
     # `chat.Message` is in `FILES_DELETED_EXPLICITLY` below, so its files leave with
     # its rows through chat's own sweep, not through the delete receiver.
     'chat',
+    # An uploaded APK: a draft release deleted in the console takes its file with it.
+    'releases',
 }
 
 #: Models with a FileField whose files are deleted by their own app, in bulk, and which

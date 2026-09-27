@@ -5532,3 +5532,151 @@ msgid ""
 "The server is busy with other photos right now. Please try again in a few "
 "seconds."
 msgstr "الخادم مشغول بصور أخرى الآن. يُرجى المحاولة مرة أخرى بعد بضع ثوانٍ."
+
+#: releases/exceptions.py
+msgid "There are no app releases for this channel."
+msgstr "لا توجد إصدارات للتطبيق على هذه القناة."
+
+#: releases/exceptions.py
+msgid "This version of the app can only ask about its own releases."
+msgstr "لا يمكن لهذه النسخة من التطبيق أن تسأل إلا عن إصداراتها."
+
+#: releases/exceptions.py
+msgid "The build number must be a whole number."
+msgstr "يجب أن يكون رقم البناء عدداً صحيحاً."
+
+#: legal/views.py legal/templates/legal/base.html
+msgid "Privacy policy"
+msgstr "سياسة الخصوصية"
+
+#: legal/views.py legal/templates/legal/base.html
+msgid "Terms of use"
+msgstr "شروط الاستخدام"
+
+#: legal/views.py legal/templates/legal/base.html
+msgid "Delete your account"
+msgstr "حذف حسابك"
+
+#: legal/views.py
+msgid "Too many requests from this network. Please try again in an hour."
+msgstr "طلبات كثيرة من هذه الشبكة. يُرجى المحاولة مرة أخرى بعد ساعة."
+
+#: legal/views.py
+msgid "Please enter a valid email address."
+msgstr "يُرجى إدخال بريد إلكتروني صحيح."
+
+#: legal/views.py
+msgid "The reason is too long. Keep it under 1000 characters."
+msgstr "السبب طويل جداً. اجعله أقل من 1000 حرف."
+
+#: legal/templates/legal/base.html
+msgid "Contact us:"
+msgstr "تواصل معنا:"
+
+#: legal/templates/legal/document.html
+msgid ""
+"This document is not yet available in your language. It is shown in the "
+"other language."
+msgstr "هذه الوثيقة غير متاحة بلغتك بعد، لذا نعرضها باللغة الأخرى."
+
+#. A legal document's version number follows it: "Version 2".
+#: legal/templates/legal/document.html
+msgid "Version"
+msgstr "الإصدار"
+
+#. The date follows it, as 2026-09-27.
+#: legal/templates/legal/document.html
+msgid "Last updated"
+msgstr "آخر تحديث"
+
+#: legal/templates/legal/missing.html
+msgid "This document has not been published yet."
+msgstr "لم تُنشر هذه الوثيقة بعد."
+
+#: legal/templates/legal/delete_account.html
+msgid "Request received"
+msgstr "وصلنا طلبك"
+
+#: legal/templates/legal/delete_account.html
+msgid ""
+"Thank you. If an account uses this address, we will write to it to confirm "
+"the request before anything is deleted."
+msgstr ""
+"شكراً لك. إن كان هناك حساب يستخدم هذا العنوان، فسنراسله لتأكيد الطلب قبل "
+"حذف أي شيء."
+
+#: legal/templates/legal/delete_account.html
+msgid "The quickest way is in the app"
+msgstr "أسرع طريقة من داخل التطبيق"
+
+#: legal/templates/legal/delete_account.html
+msgid "Open the app and sign in."
+msgstr "افتح التطبيق وسجّل الدخول."
+
+#. The labels in quotes are the app's own: the Privacy screen and its delete row.
+#: legal/templates/legal/delete_account.html
+msgid "Open the Me tab, then “Privacy and data”."
+msgstr "افتح تبويب حسابك، ثم «الخصوصية والبيانات»."
+
+#: legal/templates/legal/delete_account.html
+msgid "Choose “Delete my account” and confirm."
+msgstr "اختر «احذف حسابي» ثم أكّد."
+
+#: legal/templates/legal/delete_account.html
+msgid "Deletion is permanent and cannot be undone."
+msgstr "الحذف نهائي ولا يمكن التراجع عنه."
+
+#: legal/templates/legal/delete_account.html
+msgid "What is deleted"
+msgstr "ما يُحذف"
+
+#: legal/templates/legal/delete_account.html
+msgid ""
+"Your workouts, progress, measurements and goals; your diet plans and food "
+"preferences; your posts, badges and points; your link with your trainer."
+msgstr ""
+"تمارينك وتقدّمك وقياساتك وأهدافك؛ خططك الغذائية وتفضيلاتك؛ منشوراتك وشاراتك "
+"ونقاطك؛ وعلاقتك بمدربك."
+
+#: legal/templates/legal/delete_account.html
+msgid "What we keep, because the law requires it"
+msgstr "ما نحتفظ به بحكم القانون"
+
+#: legal/templates/legal/delete_account.html
+msgid "Payment and wallet records, without your name."
+msgstr "سجلات المدفوعات والمحفظة، دون اسمك."
+
+#: legal/templates/legal/delete_account.html
+msgid ""
+"If you have money in your wallet, contact support to get it back before you "
+"delete your account."
+msgstr "إن كان في محفظتك رصيد، فتواصل مع الدعم لاسترداده قبل حذف حسابك."
+
+#: legal/templates/legal/delete_account.html
+msgid "Can't open the app?"
+msgstr "لا تستطيع فتح التطبيق؟"
+
+#: legal/templates/legal/delete_account.html
+msgid ""
+"Send us the email address of your account. We will write to that address to "
+"confirm the request comes from its owner before anything is deleted."
+msgstr ""
+"أرسل إلينا البريد الإلكتروني لحسابك. سنراسل هذا العنوان لنتأكد أن الطلب من "
+"صاحبه قبل حذف أي شيء."
+
+#: legal/templates/legal/delete_account.html
+msgid "Email address of the account"
+msgstr "البريد الإلكتروني للحساب"
+
+#: legal/templates/legal/delete_account.html
+msgid "Why are you leaving? (optional)"
+msgstr "لماذا تغادر؟ (اختياري)"
+
+#. The label of a hidden field that only a bot fills in.
+#: legal/templates/legal/delete_account.html
+msgid "Leave this field empty"
+msgstr "اترك هذا الحقل فارغاً"
+
+#: legal/templates/legal/delete_account.html
+msgid "Send the request"
+msgstr "أرسل الطلب"

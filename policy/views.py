@@ -15,15 +15,34 @@ class CapabilitiesView(APIView):
     Open to everyone and blind to who is asking: no authentication class runs, and the
     answer is computed from the channel and version headers alone. The app fetches it at
     launch and after sign-in and must get the same answer both times.
+
+    **Response.** `{channel, <the nine boolean flags>, links}`. `links` (additive,
+    2026-09-27, spec B7) is where the public pages are, per language, so the app can open
+    them — and they can move — without a release:
+
+        "links": {
+          "privacy_policy":   {"ar": "https://.../legal/privacy/?lang=ar", "en": "..."},
+          "terms_of_use":     {"ar": "https://.../legal/terms/?lang=ar", "en": "..."},
+          "account_deletion": {"ar": "https://.../legal/delete-account/?lang=ar", "en": "..."}
+        }
+
+    The same links for every channel and version (`legal/links.py`): the pages carry no
+    price, no purchase and no hub link, so a store build may open them like any other.
+
+    **Codes.** `app_channel_required` (400): no `X-App-Channel`, or one this server does
+    not know.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def get(self, request):
+        from legal.links import legal_links
+
         channel = channel_of(request)
         if channel is None:
             raise AppChannelRequired()
-        return Response({"channel": channel, **flags_for(channel, version_of(request))})
+        return Response({"channel": channel, **flags_for(channel, version_of(request)),
+                         "links": legal_links(request)})
 
 
 def _if_none_match(header: str | None) -> set:

@@ -1,0 +1,50 @@
+{% load i18n %}<!doctype html>
+<html lang="{{ lang }}" dir="{{ dir }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ heading }} · {{ platform_name }}</title>
+<style nonce="{{ request.csp_nonce }}">
+  :root { color-scheme: light; --ink: #1d1d1f; --muted: #5c5c66; --line: #e3e3e8; --accent: #c2410c; --bg: #fafafa; --card: #ffffff; --danger: #b42318; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.7 "Noto Sans Arabic", "Segoe UI", Tahoma, "Helvetica Neue", Arial, sans-serif; }
+  header, main, footer { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  header { padding-top: 24px; display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: baseline; justify-content: space-between; }
+  .brand { font-weight: 700; font-size: 20px; color: var(--accent); }
+  nav a { margin-inline-end: 16px; color: var(--muted); text-decoration: none; white-space: nowrap; }
+  nav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+  .switch { color: var(--accent); text-decoration: none; font-weight: 600; }
+  main { background: var(--card); border: 1px solid var(--line); border-radius: 14px; margin-top: 20px; margin-bottom: 20px; padding: 24px 28px; }
+  h1 { font-size: 28px; line-height: 1.3; margin: 0 0 6px; }
+  h2 { font-size: 20px; margin: 28px 0 8px; }
+  .meta { color: var(--muted); font-size: 14px; margin: 0 0 20px; }
+  .note { background: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px; padding: 10px 14px; }
+  .error { background: #fef3f2; border: 1px solid #fecdca; color: var(--danger); border-radius: 10px; padding: 10px 14px; }
+  ol, ul { padding-inline-start: 22px; }
+  label { display: block; font-weight: 600; margin: 16px 0 6px; }
+  input[type=email], textarea { width: 100%; font: inherit; padding: 10px 12px; border: 1px solid #c9c9d1; border-radius: 10px; background: #fff; }
+  textarea { min-height: 110px; }
+  button { margin-top: 18px; font: inherit; font-weight: 600; color: #fff; background: var(--danger); border: 0; border-radius: 10px; padding: 12px 20px; cursor: pointer; }
+  .trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  footer { color: var(--muted); font-size: 14px; padding-bottom: 32px; }
+  footer a, main a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">{{ platform_name }}</span>
+  <nav>
+    <a href="{{ privacy_url }}"{% if page == "privacy" %} aria-current="page"{% endif %}>{% trans "Privacy policy" %}</a>
+    <a href="{{ terms_url }}"{% if page == "terms" %} aria-current="page"{% endif %}>{% trans "Terms of use" %}</a>
+    <a href="{{ delete_url }}"{% if page == "delete" %} aria-current="page"{% endif %}>{% trans "Delete your account" %}</a>
+  </nav>
+  <a class="switch" href="{{ switch_url }}" hreflang="{{ other_lang }}" lang="{{ other_lang }}">{% if other_lang == "ar" %}العربية{% else %}English{% endif %}</a>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>
+  {% if contact_email %}<p>{% trans "Contact us:" %} <a href="mailto:{{ contact_email }}">{{ contact_email }}</a></p>{% endif %}
+</footer>
+</body>
+</html>

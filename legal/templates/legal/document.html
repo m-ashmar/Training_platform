@@ -1,0 +1,9 @@
+{% extends "legal/base.html" %}{% load i18n %}
+{% block content %}
+{% if fallback %}<p class="note">{% trans "This document is not yet available in your language. It is shown in the other language." %}</p>{% endif %}
+<article lang="{{ document_lang }}" dir="{{ document_dir }}">
+<h1>{{ document.title }}</h1>
+<p class="meta">{% trans "Version" %} {{ document.version }} · {% trans "Last updated" %} {{ updated }}</p>
+{{ body }}
+</article>
+{% endblock %}
