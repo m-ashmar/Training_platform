@@ -944,6 +944,31 @@ class ClientTransferToTrainerView(APIView):
         return Response(resp, status=status.HTTP_200_OK)
 
 
+def _program_sale_leg(original):
+    """409 `routine_product_leg` when `original` is a leg of a routine product's sale (or
+    of its refund), else None (SIDE_BUGS S-237; see `AdminReversalView`).
+
+    Read off what the row says of itself, which never changes: a `purchase_id` in its
+    metadata (every leg `routine/products.py` writes carries one) or a `routine_product_`
+    purpose, so a leg whose purchase id went missing is refused all the same."""
+    metadata = original.metadata or {}
+    purpose = metadata.get("purpose")
+    purchase_id = metadata.get("purchase_id")
+    if not purchase_id and not (isinstance(purpose, str)
+                                and purpose.startswith("routine_product_")):
+        return None
+    from routine.models import RoutinePurchase
+
+    purchase = None
+    if isinstance(purchase_id, int) or (isinstance(purchase_id, str) and purchase_id.isdigit()):
+        purchase = (RoutinePurchase.objects.filter(pk=int(purchase_id))
+                    .values("id", "status", "paid_with").first())
+    return Response({"error": _("This is one leg of a program sale and cannot be reversed "
+                                "on its own. Refund the purchase instead."),
+                     "code": "routine_product_leg", "purchase": purchase},
+                    status=status.HTTP_409_CONFLICT)
+
+
 class AdminReversalView(APIView):
     """`POST /api/wallet/admin/reversal/` — support puts one ledger row back.
 
@@ -959,6 +984,7 @@ class AdminReversalView(APIView):
     | 409 | `not_reversible` | it is itself a reversal |
     | 409 | `exchange_leg` | it is one half of a currency exchange (see below); `exchange_reference` names the pair |
     | 409 | `withdrawal_leg` | it is one leg of a trainer's withdrawal (see below); `withdrawal` `{id, number, state}` names it, or is null if no withdrawal names the row any more |
+    | 409 | `routine_product_leg` | it is one leg of a routine product's sale or of its refund (see below); `purchase` `{id, status, paid_with}` names it, or is null if no purchase has that id any more |
     | 400 | `insufficient_balance` | the wallet that received the money no longer holds it, so it cannot be taken back |
     | 400 | `currency_mismatch` | a wallet on either side changed currency since the row was written |
     | 400 | `reversal_refused` | the ledger refused the reversal for any other reason; nothing moved |
@@ -986,6 +1012,19 @@ class AdminReversalView(APIView):
     the payout minted money into clearing. Undoing a withdrawal is `fail` (or the
     trainer's `cancel`) in the payouts console, which moves the money once and records
     it on the withdrawal.
+
+    NO LEG OF A PROGRAM SALE IS REVERSED ON ITS OWN (SIDE_BUGS S-237). A routine
+    product's sale is three legs (`routine/products.py`): the money coming in (the
+    buyer's wallet -> escrow for a wallet sale, or minted into escrow from ShamCash for a
+    checkout), escrow -> the trainer's share, escrow -> the platform's commission.
+    Reversing the checkout's mint burned the shared per-currency escrow — which backs
+    every other client's coaching hold — while the purchase stayed confirmed and both
+    shares stayed paid, and the proper refund then refused with "already reversed by
+    hand"; reversing one share alone did the same to the other side. Any row whose
+    metadata names a `purchase_id`, or whose `purpose` is a `routine_product_*` one, is
+    refused: undoing a sale is the purchase's refund (`/dj-admin/routine/
+    routinepurchase/`, «refund») or, for a checkout, its payment's refund, which reverses
+    every leg together and revokes the buyer's copy.
 
     A reversed AGENT top-up also comes off the agent's receivable (the cash they hold
     for the platform; plan step 9), in the same transaction: the agent hands the cash
@@ -1032,6 +1071,10 @@ class AdminReversalView(APIView):
                                              "state": withdrawal.state}
                                             if withdrawal is not None else None)},
                             status=status.HTTP_409_CONFLICT)
+        # The same: decided on what the row says of itself (S-237).
+        sale_leg = _program_sale_leg(original)
+        if sale_leg is not None:
+            return sale_leg
 
         idem_key = serializer.validated_data["idempotency_key"]
         try:

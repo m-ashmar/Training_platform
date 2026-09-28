@@ -1965,7 +1965,11 @@ operator maintains in the console. Four things the app needs:
 - **Support.** `POST wallet/admin/reversal/` refuses one leg of a currency exchange,
   `409 exchange_leg` with `exchange_reference` (SIDE_BUGS S-161), and any leg of a
   trainer's withdrawal, `409 withdrawal_leg` with `withdrawal` (the payouts review,
-  2026-09-24).
+  2026-09-24), and any leg of a routine product's sale or its refund — the checkout's
+  mint into escrow, the wallet sale's charge, the trainer's share, the commission —
+  `409 routine_product_leg` with `purchase` `{id, status, paid_with}` (null if the
+  purchase is gone; SIDE_BUGS S-237). Undoing a sale is the purchase's refund, or its
+  payment's for a checkout, which reverses every leg together.
   `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
   (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
   top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).

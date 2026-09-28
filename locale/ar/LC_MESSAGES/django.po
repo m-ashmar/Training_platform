@@ -5884,3 +5884,13 @@ msgstr "يوجد دفع مفتوح لهذا البرنامج. أكمله، أو 
 #: releases/app_links.py
 msgid "Links that open the app are not set up on this server."
 msgstr "روابط فتح التطبيق غير مُعدّة على هذا الخادم."
+
+#. The generic admin reversal refuses one leg of a routine product's sale
+#. (`routine_product_leg`, SIDE_BUGS S-237): undoing a sale is the purchase's refund.
+#: wallet/views.py
+msgid ""
+"This is one leg of a program sale and cannot be reversed on its own. Refund the "
+"purchase instead."
+msgstr ""
+"هذه إحدى حركات بيع برنامج ولا يمكن عكسها وحدها. استرجع ثمن الشراء بدلًا من "
+"ذلك."
