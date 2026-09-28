@@ -227,10 +227,11 @@ class HomeView(APIView):
         `deleted` is `true`, the tombstone `GET /api/v1/chat/conversations/` shows for
         the same thread, and `unread_count` still counts the messages before it.
 
-        `kind` is the message's own: `text`, `image`, `voice` or `video` — branch on
-        it, and draw a value you do not know as a placeholder. A photo or a video is
-        opened in the thread, which serves its media. A VOICE note plays on the card,
-        so `kind: "voice"` — and only that kind — adds three keys beside the rest::
+        `kind` is the message's own: `text`, `image`, `voice`, `video` or `program` —
+        branch on it, and draw a value you do not know as a placeholder. A photo or a
+        video is opened in the thread, which serves its media. A VOICE note plays on
+        the card, so `kind: "voice"` — and only that kind — adds three keys beside the
+        rest::
 
             "message": {"id": 92, "kind": "voice", "body": "", "deleted": false,
                         "sent_at": "...",
@@ -249,6 +250,23 @@ class HomeView(APIView):
         caption, often empty. `body` is cut at 200 characters, the same preview the
         conversation list sends. `unread_count` is the same number
         `GET /api/v1/chat/conversations/` reports, by construction.
+
+        A coach's PROGRAM card names its routine on the card («حدّث برنامجك ·
+        <routine>»), so `kind: "program"` — and only that kind — adds one key
+        (BACKEND_BUGS B-175)::
+
+            "message": {"id": 93, "kind": "program", "body": "…", "deleted": false,
+                        "sent_at": "...",
+                        "program": {"routine_id": 12, "template_id": 3 | null,
+                                    "name": "Upper body", "day": 2 | null,
+                                    "day_name": "…" | null, "exercises": 6 | null,
+                                    "changes": {…} | null} | null}
+
+        `program` is the thread's own `program` for the same message
+        (`GET /api/v1/chat/conversations/{id}/messages/`), by the same rule: null when
+        the card was taken back, its routine was deleted, or the routine is no longer
+        one this client may read (taken off them). A frozen or ended coaching still
+        reads it — reading is not training.
 
     ``nutrition_today`` — the day's meals and the day's totals. Omitted with no plan
     covering today, and omitted when the subscription never entitled diet — never a 403

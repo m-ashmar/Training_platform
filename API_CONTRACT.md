@@ -578,7 +578,10 @@ use them, never store them. A message taken back serves `media: null` and
 `program: null`. The conversation list's `last_message` carries `kind` and never the
 media or the card; the home card's `trainer_message` carries `kind`, and for a VOICE note
 only it also carries `audio_url`, `duration_seconds` and `state` (2026-09-27), signed the
-same way and served only to the client of the thread.
+same way and served only to the client of the thread. For a PROGRAM card only, the home
+card carries `program` (2026-09-28, BACKEND_BUGS B-175): the thread's own `program` for
+the same message, by the same rule (null when taken back, deleted, or no longer readable
+by the client).
 
 **Video poster frames** (2026-09-27). `media.poster_url` is a video's poster: one JPEG
 frame near its start (at most 720 px a side, no metadata), cut AFTER the send by a
@@ -905,6 +908,11 @@ Additive: no route, section type, key or `code` renamed or removed; no new route
 - **`trainer_message` of `kind: "voice"`** adds `audio_url` (PRIVATE: signed and
   expiring, like the thread's `media.url`), `duration_seconds` and `state`
   (`ready | unavailable`). Only that kind carries them.
+- **`trainer_message` of `kind: "program"`** (2026-09-28, BACKEND_BUGS B-175) adds
+  `program`: `{routine_id, template_id, name, day, day_name, exercises, changes}` — the
+  thread's own card for the same message — or null when the card was taken back, its
+  routine deleted, or the routine is no longer one the client may read. Only that kind
+  carries it; a text message still has exactly its five keys.
 - **`PATCH/PUT workout-sessions/{id}/` that finishes a session** (and a `POST` of one
   already `completed`) answers `personal_records` — see "What wiring the train screens
   found" below.

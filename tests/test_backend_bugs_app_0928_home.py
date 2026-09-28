@@ -108,3 +108,59 @@ def test_b182_a_coached_client_is_also_shown_the_programmes_on_sale(make_user, a
     for channel in ("play", "ios", ""):
         assert "ready_programs" not in _types(_home(api, client,
                                                     HTTP_X_APP_CHANNEL=channel)), channel
+
+
+# ============================================================================ B-175
+def test_b175_a_program_card_on_the_home_names_its_routine(make_user, api):
+    """«حدّث برنامجك · <routine>»: the home card of a coach's program card carries the
+    thread's own `program` for the same message, and only while the client may still
+    read that routine — never the name of a routine taken off them."""
+    from chat.services import open_conversation
+    from tests.test_chat_cards_posters import _card, _history
+    from tests.test_chat_cards_posters import _program as _card_program
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("b175_t", user_type="trainer")
+    client = make_user("b175_c")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client,
+                                         status="approved", initiated_by="client")
+    conversation = open_conversation(trainer, client)
+    routine = _card_program(trainer, client)
+    sent = _card(api, trainer, conversation, routine_id=routine.pk, day=2,
+                 body="خففت وزن ضغط الأكتاف")
+    assert sent.status_code == 201, sent.content
+    _bust()
+
+    message = _data(_home(api, client), "trainer_message")["message"]
+    [row] = _history(api, client, conversation)
+    assert (message["id"], message["kind"]) == (row["id"], "program")
+    assert row["program"] is not None
+    assert message["program"] == row["program"]
+    assert (message["program"]["routine_id"], message["program"]["day"]) == (routine.pk, 2)
+
+    routine.assigned_to.remove(client)
+    _bust()
+    message = _data(_home(api, client), "trainer_message")["message"]
+    assert message["kind"] == "program"
+    assert message["program"] is None, "the card named a routine the client lost"
+
+
+def test_b175_a_program_card_taken_back_names_nothing(make_user, api):
+    from chat.services import open_conversation
+    from tests.test_chat_cards_posters import _card
+    from tests.test_chat_cards_posters import _program as _card_program
+    from users.models import TrainerClientRelation
+
+    trainer = make_user("b175b_t", user_type="trainer")
+    client = make_user("b175b_c")
+    TrainerClientRelation.objects.create(trainer=trainer, client=client,
+                                         status="approved", initiated_by="client")
+    conversation = open_conversation(trainer, client)
+    routine = _card_program(trainer, client)
+    card = _card(api, trainer, conversation, routine_id=routine.pk).json()
+    assert api(trainer).delete(f"{CHAT}/messages/{card['id']}/").status_code == 200
+    _bust()
+
+    message = _data(_home(api, client), "trainer_message")["message"]
+    assert (message["kind"], message["deleted"], message["program"]) == \
+        ("program", True, None)
