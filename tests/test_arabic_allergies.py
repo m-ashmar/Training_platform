@@ -110,3 +110,63 @@ def test_an_arabic_peanut_allergic_clients_pool_holds_no_peanut(seeded_catalogue
               if "peanut" in food_allergen_tags(f)]
     assert not peanut, f"peanut foods in an Arabic peanut-allergic client's pool: {peanut}"
     assert arabic == _pool_ids(_client("s212pe", "peanut"))
+
+
+# ------------------------------------------------- S-243, S-216: "none" is no allergy
+NONE_ARABIC = ["لا يوجد", "لا", "لا شيء", "ما في", "لا توجد حساسية", "بدون", "لا يوجد.",
+               "ما عندي حساسية", "ليس لدي حساسية", "لا يوجد حساسية من أي شيء", "لايوجد",
+               "مافي شي"]
+NONE_ENGLISH = ["none", "None.", "N/A", "n/a", "nothing", "nil", "no known allergies",
+                "not applicable"]
+
+
+@pytest.mark.parametrize("raw", NONE_ARABIC + NONE_ENGLISH)
+def test_none_declares_no_allergy(raw):
+    """«لا يوجد» counted as a declared allergy on 554c604 (any Arabic letter did), and
+    "none" / "N/A" parsed to the free terms `none`, `n`, `a`."""
+    from diet.allergens import declares_allergy, parse_user_allergies
+
+    assert parse_user_allergies(raw) == set()
+    assert declares_allergy(raw) is False
+
+
+@pytest.mark.parametrize("raw, tags", [
+    ("لا يوجد، فول سوداني", {"peanut"}),     # "none" beside a real allergy is still one
+    ("بدون حليب", {"milk"}),                  # "without milk" is a milk allergy
+    ("none, peanuts", {"peanut"}),
+    ("N/A, sesame", {"sesame"}),
+])
+def test_none_beside_a_real_allergy_is_still_that_allergy(raw, tags):
+    from diet.allergens import declares_allergy, parse_user_allergies
+
+    assert parse_user_allergies(raw) == tags
+    assert declares_allergy(raw) is True
+
+
+@pytest.mark.parametrize("raw", ["عندي حساسية", "لا أعرف"])
+def test_arabic_that_is_not_none_still_declares(raw):
+    """«عندي حساسية» ("I have an allergy") names no allergen and is not a "none"; «لا
+    أعرف» ("I don't know") is not either. Both keep the completeness rule."""
+    from diet.allergens import declares_allergy
+
+    assert declares_allergy(raw) is True
+
+
+@pytest.mark.parametrize("allergies", ["لا يوجد", "ما في", "none", "N/A"])
+def test_a_client_who_wrote_none_keeps_the_whole_pool(under_tagged, allergies):
+    """The effect: on 554c604 the Arabic "none" put the spec-B4 exclusion on this client
+    and the English "none" made the checker refuse every unverified food, so each lost
+    every incompletely tagged food (swaps refused with "we cannot confirm what this
+    contains"). Now their pool is the unconstrained pool, as for "no allergies"."""
+    from diet.planner.constraints import ClientConstraints
+
+    user = _client(f"s243n{len(allergies)}{allergies.isascii()}", allergies)
+    limits = ClientConstraints.for_user(user)
+    assert not limits.requires_complete_tags
+    assert not limits.checks_allergens
+    unknown = _food("S243 Mystery Plate", kcal=120, protein=10, carbs=10, fat=4,
+                    source="unknown")
+    assert not limits.forbids(unknown)
+    pool = _pool_ids(user)
+    assert {f.id for f in under_tagged.values()} <= _flat(pool)
+    assert pool == _pool_ids(user, constraints=ClientConstraints())

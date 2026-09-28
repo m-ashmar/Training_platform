@@ -130,8 +130,15 @@ _USER_SYNONYMS: dict[str, set[str]] = {
 #: Words people attach to an allergy that are not part of the allergen's name. Written
 #: as "nut free" or "allergic to dairy", both of which reached the vocabulary as terms
 #: it had never seen and fell through to a free-text match that finds nothing.
+#:
+#: "none", "nothing", "nil", "na", "not applicable", "no known allergies" say there is
+#: no allergy at all; they became the free terms `none`, `nothing`... and an active
+#: checker for a client who had declared nothing (SIDE_BUGS S-216). "N/A" is removed
+#: before the split (`_NOT_APPLICABLE`).
 _QUALIFIERS = ("free", "allergy", "allergies", "allergic", "to", "intolerance",
-               "intolerant", "sensitivity", "sensitive", "no", "avoid")
+               "intolerant", "sensitivity", "sensitive", "no", "avoid",
+               "none", "nothing", "nil", "null", "na", "not", "applicable", "known",
+               "any")
 
 #: Phrases that contain a marker word without containing the allergen. "Peanut butter"
 #: is not dairy and neither is almond milk, but "butter" and "milk" are milk markers, so
@@ -543,14 +550,23 @@ def declares_allergy(raw: str | None) -> bool:
     """Did the client declare an allergy at all — whether or not we can read which?
 
     True when `parse_user_allergies` finds a tag or a free term, AND when the text holds
-    letters the English vocabulary cannot read. `فول سوداني` parses to nothing (the
-    word pattern is `[a-z']`), so the checker was inactive and that client was treated
-    as declaring nothing; for the completeness rule an allergy we cannot read is still
-    an allergy. Blank text and "no allergies" (qualifiers only) declare nothing.
+    words the vocabulary cannot read: an Arabic word it does not know («فراولة»), or a
+    letter of any other script. For the completeness rule an allergy we cannot read is
+    still an allergy.
+
+    Blank text and "none" declare nothing, in either language: "no allergies", "none",
+    "N/A" (qualifiers only, `_QUALIFIERS`), and «لا يوجد», «لا», «لا شيء», «ما في»,
+    «بدون», «ما عندي حساسية» (`_AR_NONE`). Any Arabic letter used to count (SIDE_BUGS
+    S-243), so a client who wrote «لا يوجد» lost every incompletely tagged food and dish
+    and could be refused a plan for an allergy they had said they did not have.
     """
     if parse_user_allergies(raw):
         return True
-    return bool(_UNREADABLE_LETTER.search(raw or ""))
+    text = raw or ""
+    if _arabic_says_something(text):
+        return True
+    # Arabic is decided above; a letter of any other script still counts.
+    return bool(_UNREADABLE_LETTER.search(_AR_WORD_RE.sub(" ", _ar_fold(text))))
 
 
 def parse_user_allergies(raw: str | None) -> Set[str]:
@@ -568,7 +584,8 @@ def parse_user_allergies(raw: str | None) -> Set[str]:
     tagging is incomplete reaches them.
     """
     tags: Set[str] = _arabic_allergens(raw)
-    for chunk in re.split(r"[,;/&،؛]|\band\b|\bplus\b", (raw or "").lower()):
+    text = _NOT_APPLICABLE.sub(" ", (raw or "").lower())
+    for chunk in re.split(r"[,;/&،؛]|\band\b|\bplus\b", text):
         words = [w for w in _WORD_RE.findall(chunk) if w not in _QUALIFIERS]
         term = " ".join(words).strip()
         if not term:
