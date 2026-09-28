@@ -945,3 +945,34 @@ def test_the_trainer_sets_a_place_on_the_draft(make_user, api):
     assert (cleared.status_code, cleared.json()["place"]) == (200, None)
     gym = api(trainer).patch(url, {"place": "gym"}, content_type=JSON)
     assert gym.json()["place"] == "gym"
+
+
+def test_a_program_row_counts_its_confirmed_buyers(make_user, api):
+    """BACKEND_BUGS B-154 (the owner, privacy first, 2026-09-28): `buyers` on the
+    catalogue and detail rows counts confirmed purchases (a refunded one is out), and
+    is null until five people own the program. On 554c604 the key is absent."""
+    from routine import products
+
+    _trainer_, _template_, product_id = _published(make_user, api, "buyers")
+    reader = _client(make_user, "buyers_reader")
+
+    def buyers():
+        listed = api(reader).get("/api/v1/products/").json()["results"]
+        (row,) = [r for r in listed if r["id"] == product_id]
+        one = api(reader).get(f"/api/v1/products/{product_id}/", HTTP_X_APP_CHANNEL="ios")
+        assert "buyers" in row and "buyers" in one.json()
+        assert row["buyers"] == one.json()["buyers"], "the same on every read and build"
+        return row["buyers"]
+
+    assert buyers() is None
+    purchases = []
+    for n in range(5):
+        resp = _buy(api, _client(make_user, f"buyers{n}"), product_id)
+        assert resp.status_code == 200, resp.content
+        purchases.append(resp.json()["purchase"]["id"])
+        assert buyers() == (5 if n == 4 else None)
+
+    products.refund(purchases[0], _operator(make_user, "buyers_op"), "duplicate")
+    assert buyers() is None, "four owners: a refunded purchase is not a buyer"
+    assert _buy(api, _client(make_user, "buyers5"), product_id).status_code == 200
+    assert buyers() == 5

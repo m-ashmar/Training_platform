@@ -424,7 +424,10 @@ class ProductCatalogueView(APIView):
     `preview_days`, `goal` (one of the closed list above, read from the program's
     template; null when the template's goal is none of them — such a program is only
     under «الكل»), `place` (`home` | `gym`, or null while the trainer has not said),
-    `cover` (as the trainer's route, or null), `owned`, `routine_id`
+    `buyers` (how many people own it — confirmed purchases, whichever way they were
+    paid, a refunded one excluded — or NULL while fewer than 5 do: a smaller count
+    would all but name the buyers; the same on every build, it is not a price;
+    BACKEND_BUGS B-154), `cover` (as the trainer's route, or null), `owned`, `routine_id`
     (the caller's copy when `owned`), `can_buy`, `published_at`; and on a build that
     may show a price: `price` and `currency` IN THE READER'S CURRENCY, with
     `price_converted`, `exchange_rate`, `price_of_record`, `price_of_record_currency`
@@ -477,6 +480,8 @@ class ProductCatalogueView(APIView):
                             "bad_search", status.HTTP_400_BAD_REQUEST)
         if search:
             queryset = _searched(queryset, search)
+        queryset = queryset.annotate(buyers_count=Count(
+            "purchases", filter=Q(purchases__status=PurchaseStatus.CONFIRMED)))
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
         page = list(page or [])
@@ -487,7 +492,8 @@ class ProductCatalogueView(APIView):
 class ProductDetailView(APIView):
     """`GET /api/v1/products/{id}/` — one program, with its free preview.
 
-    The row of `GET /api/v1/products/` plus `preview`: the first `preview_days` days of
+    The row of `GET /api/v1/products/` (with its `buyers`: null while fewer than 5
+    people own it) plus `preview`: the first `preview_days` days of
     the program as the buyer's copy will hold them — `[{day, exercises: [{exercise_id,
     name, target_muscle, sets, reps, rest_time, order}]}]` (empty when `preview_days`
     is 0). Readable by anyone it is offered to, by a buyer who owns it (a retired one
@@ -506,6 +512,7 @@ class ProductDetailView(APIView):
         if product is None:
             return _not_found()
         context = _buyer_context(request, [product], preview=products.preview_of(product))
+        product.buyers_count = products.confirmed_buyers(product)
         return Response(CatalogueProductSerializer(product, context=context).data)
 
 

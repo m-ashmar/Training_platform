@@ -149,10 +149,14 @@ class CatalogueProductSerializer(serializers.Serializer):
     """A product as a buyer reads it. See the module docstring for what a store build
     is not sent. `owned` / `routine_id`: the reader bought it, and `routine_id` is
     their copy (an ordinary routine of theirs, on every build). `can_buy`: this build
-    may buy it, the reader is a client, it is on sale and not already theirs."""
+    may buy it, the reader is a client, it is on sale and not already theirs.
+    `buyers`: the product's `buyers_count` (the view annotates or sets it) as
+    `routine.products.buyers_shown` shows it — null below five."""
 
     def to_representation(self, product):
         from subscription.pricing import price_for
+
+        from .products import buyers_shown
 
         request = self.context.get("request")
         user = getattr(request, "user", None)
@@ -175,6 +179,7 @@ class CatalogueProductSerializer(serializers.Serializer):
             "preview_days": product.preview_days,
             "goal": _goal(product),
             "place": product.place or None,
+            "buyers": buyers_shown(getattr(product, "buyers_count", None)),
             "cover": _cover(product, request),
             "owned": product.pk in owned,
             "routine_id": owned.get(product.pk),

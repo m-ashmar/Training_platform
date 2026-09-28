@@ -113,6 +113,24 @@ MAX_REASON = 1000
 #: IntegrityError inside the completion, and every poller run stopped at that row:
 #: nobody's checkout after it was confirmed or expired (SIDE_BUGS S-234).
 CHECKOUT_KEY_PREFIX = "checkout:"
+#: A program's buyer count is shown (`buyers` on the catalogue and detail rows) only
+#: once this many people own it: below that, a count of 1 or 2 would all but name who
+#: bought (the owner, privacy first, 2026-09-28; BACKEND_BUGS B-154).
+BUYERS_SHOWN_FROM = 5
+
+
+def buyers_shown(count) -> int | None:
+    """`count` confirmed buyers as a row shows them: the number from
+    `BUYERS_SHOWN_FROM` up, None below it."""
+    return count if count is not None and count >= BUYERS_SHOWN_FROM else None
+
+
+def confirmed_buyers(product) -> int:
+    """How many people own `product`: its confirmed purchases, however they paid (a
+    refunded one is not a sale). One confirmed purchase per buyer is the database's
+    rule (`routine_purchase_one_confirmed`), so purchases are buyers."""
+    return RoutinePurchase.objects.filter(product=product,
+                                          status=PurchaseStatus.CONFIRMED).count()
 
 
 # ---------------------------------------------------------------- refusals
@@ -899,12 +917,13 @@ def _notify_on_commit(what, product, *, purchase=None, reason="") -> None:
 
 
 __all__ = [
-    "AlreadyOwned", "CHECKOUT_KEY_PREFIX", "CheckoutOpen", "GOAL_WORDS",
+    "AlreadyOwned", "BUYERS_SHOWN_FROM", "CHECKOUT_KEY_PREFIX", "CheckoutOpen", "GOAL_WORDS",
     "IdempotencyKeyReused", "MAX_PREVIEW_DAYS",
     "MAX_PROGRAM_DAYS", "PreviewCoversProgram", "ProductAlreadyRetired", "ProductIncomplete",
     "ProductNotEditable", "ProductNotForSale", "ProductNotSubmittable", "ProductRefusal",
     "ProgramTooLong", "ReviewConflict", "TrainerNotVerified", "approve", "buy",
-    "catalogue_for", "checkout_refusal", "checkout_terms", "goal_code",
+    "buyers_shown", "catalogue_for", "checkout_refusal", "checkout_terms",
+    "confirmed_buyers", "goal_code",
     "goal_code_expression", "grant_checkout",
     "lock_for_checkout", "net_of", "open_checkout_for", "owned_purchase", "preview_of",
     "program_days", "refund", "refund_checkout", "reject", "retire", "submit",
