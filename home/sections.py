@@ -905,7 +905,6 @@ def challenge_rank(person) -> dict | None:
            # returns only the columns it lists, annotations included.
            .values('place', 'standing', 'challenge_id', 'current_value', 'progress_percentage',
                    'challenge__end_date', 'challenge__unit', 'challenge__target_value',
-                   'challenge__participants_count',
                    'challenge__title_ar', 'challenge__title_en')
            .order_by('challenge__end_date', 'challenge_id').first())
     if row is None:

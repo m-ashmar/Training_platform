@@ -18,7 +18,7 @@ on sale (`ready_programs`, same build gating, an owned one `owned: true`,
 
 See home/views.py — its docstring is the contract.
 """
-from datetime import datetime, time, timedelta
+from datetime import time, timedelta
 from unittest import mock
 
 import pytest
