@@ -441,3 +441,80 @@ def test_s241_an_operators_approval_proves_nothing_and_a_new_address_is_unproven
     assert _proven(sub.user) is not None, "saving the same address again keeps the proof"
     payer_address.save(sub.user, "1111222233334444", "1111222233334444")
     assert _proven(sub.user) is None, "another address is unproven"
+
+
+# ============================================================ S-240
+BUYER_ADDRESS = "b0b0cafe55556666"
+
+
+def _two_buyers_of_one_program(make_user, api, tag):
+    """Two buyers, each with an open 2,500 SYP session for the SAME program — the
+    normal case for a product."""
+    from tests.test_hub_checkout import _session
+
+    _trainer, buyer_a, _c, product_id, session_a = _product_session(make_user, api, tag)
+    buyer_b = _person(make_user, f"{tag}_b")
+    resp = _session(api(buyer_b), "ROUTINE_PRODUCT", product_id)
+    assert resp.status_code == 201, resp.content
+    return buyer_a, session_a, buyer_b, resp.json()
+
+
+def test_s240_a_proven_address_holds_the_buyers_product_checkout(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    from subscription import payer_address
+    from subscription.models import PayerAddress, TransferReview
+
+    _a, session_a, buyer_b, session_b = _two_buyers_of_one_program(make_user, api, "s240a")
+    payer_address.save(buyer_b, BUYER_ADDRESS, BUYER_ADDRESS)
+    # Proven, as an earlier transfer from it by reference proves it (S-241).
+    PayerAddress.objects.filter(user=buyer_b).update(verified_at=timezone.now())
+    _account(monkeypatch, [_txn("tx-s240a", "2500.00", note="", sender=BUYER_ADDRESS)])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _sweep()["held"] == 1
+
+    review = TransferReview.objects.get(transaction_id="tx-s240a")
+    assert (review.reason, str(review.payment_id)) == ("reference_missing", session_b["id"])
+    assert review.sender_match_payment_ids == [session_b["id"]]
+    assert review.candidate_payment_ids == [session_a["id"]]
+    assert (_status(session_b["id"]), _status(session_a["id"])) == ("needs_review", "pending")
+
+
+def test_s240_the_match_on_a_product_checkout_is_written_down_for_the_operator(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    """Unproven: no checkout is picked among the two, but the queue row names the
+    buyer's session as the sender's (it said [] for every product checkout)."""
+    from subscription import payer_address
+    from subscription.models import TransferReview
+
+    _a, _sa, buyer_b, session_b = _two_buyers_of_one_program(make_user, api, "s240b")
+    payer_address.save(buyer_b, BUYER_ADDRESS, BUYER_ADDRESS)
+    _account(monkeypatch, [_txn("tx-s240b", "2500.00", note="", sender=BUYER_ADDRESS)])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _sweep()["queued"] == 1
+
+    review = TransferReview.objects.get(transaction_id="tx-s240b")
+    assert (review.reason, review.payment_id) == ("several_candidates", None)
+    assert review.sender_match_payment_ids == [session_b["id"]]
+
+
+def test_s240_a_proven_address_finds_the_buyers_closed_product_checkout(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    from subscription import payer_address
+    from subscription.models import PayerAddress, TransferReview
+    from subscription.services.payment_service import PaymentService
+
+    _trainer, buyer, _c, _product_id, body = _product_session(make_user, api, "s240c")
+    _aged(body["id"], timedelta(hours=2))
+    PaymentService.expire_payment(body["id"], "window closed")
+    payer_address.save(buyer, BUYER_ADDRESS, BUYER_ADDRESS)
+    PayerAddress.objects.filter(user=buyer).update(verified_at=timezone.now())
+    _account(monkeypatch, [_txn("tx-s240c", "2500.00", note="", sender=BUYER_ADDRESS)])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _sweep()["held"] == 1
+
+    review = TransferReview.objects.get(transaction_id="tx-s240c")
+    assert (review.reason, str(review.payment_id)) == ("reference_missing", body["id"])
+    assert _status(body["id"]) == "needs_review"

@@ -176,10 +176,19 @@ def sender_matches(facts, payment_ids) -> list[str]:
     owners = owners_of_sender(facts) if ids else set()
     if not owners:
         return []
-    mine = {str(pk) for pk in Payment.objects.filter(pk__in=ids,
-                                                     subscription__user_id__in=owners)
+    mine = {str(pk) for pk in Payment.objects.filter(_paid_by_any(owners), pk__in=ids)
             .values_list('pk', flat=True)}
     return [str(pid) for pid in ids if str(pid) in mine]
+
+
+def _paid_by_any(owners):
+    """The checkouts `owners` pay for: a plan's (their subscription) or a routine
+    product's from the web hub (`buyer`, no subscription) — `models.paid_by` for a set of
+    ids. Filtering on the subscription alone left every product checkout without the
+    second signal (SIDE_BUGS S-240)."""
+    from django.db.models import Q
+
+    return Q(subscription__user_id__in=owners) | Q(buyer_id__in=owners)
 
 
 def likely_payment(facts, open_qs, closed_qs=None):
@@ -190,19 +199,19 @@ def likely_payment(facts, open_qs, closed_qs=None):
     (`verified_at`, S-241): an unproven address is evidence on the queue row
     (`sender_matches`) and never decides — the caller then holds the sole checkout the
     amount fits, or queues `several_candidates`, as it would with no address at all.
-    That account's checkout in `open_qs` (a subscription has one open checkout at a
-    time), else its newest in `closed_qs` (checkouts closed within the
-    late-money window, which `hold_for_review` can still hold). Both are already
-    narrowed by the caller to the transfer's exact amount and currency and to checkouts
-    opened before it."""
+    That account's checkout in `open_qs` — a plan's or a routine product's (S-240) —
+    when it has exactly one there (two of the same price stay ambiguous), else its
+    newest in `closed_qs` (checkouts closed within the late-money window, which
+    `hold_for_review` can still hold). Both are already narrowed by the caller to the
+    transfer's exact amount and currency and to checkouts opened before it."""
     owners = owners_of_sender(facts, proven_only=True)
     if len(owners) != 1:
         return None
-    mine = list(open_qs.filter(subscription__user_id__in=owners)
+    mine = list(open_qs.filter(_paid_by_any(owners))
                 .order_by('created_at', 'id').values_list('pk', flat=True)[:2])
     if mine:
         return mine[0] if len(mine) == 1 else None
     if closed_qs is None:
         return None
-    return (closed_qs.filter(subscription__user_id__in=owners)
+    return (closed_qs.filter(_paid_by_any(owners))
             .order_by('-created_at', '-id').values_list('pk', flat=True).first())
