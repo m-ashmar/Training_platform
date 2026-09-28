@@ -1431,15 +1431,32 @@ class AgentMeView(APIView):
         {user_id,
          profile: {display_name, city, area, opening_hours, public_phone, status,
                    is_listed},
-         status, can_top_up, blocked_reason, next_settlement_on,
+         status, can_top_up, blocked_reason, next_settlement_on, currency, today,
+         time_zone,
          currencies: {"SYP": {...}, "USD": {...}}}
 
-    `status` is the account's (`active`, `suspended`, `banned`). `can_top_up` is false
+    `status` is the agent's own status, `AgentProfile.status` (`active`, `suspended`,
+    `banned`) — the same value as `profile.status`, kept at the top level too (BACKEND_BUGS
+    B-148). There is no account-level status beside it: a disabled account never reaches
+    this route (401 `user_inactive`). `can_top_up` is false
     and `blocked_reason` names the code a top-up would be refused with when the ACCOUNT
     stops it: `agent_not_active`, or `agent_key_revoked` (revoked, no new key yet); null
     otherwise. `next_settlement_on` (YYYY-MM-DD) is the next settlement as an operator
     set it in the console, while it is today or later — NOTHING SCHEDULES SETTLEMENTS,
     so it is null unless a person wrote one; the app shows no date then.
+
+    `currency` (BACKEND_BUGS B-144) is the agent's own wallet currency
+    (`wallet.models.currency_for`), so the app picks `currencies[currency]` to draw
+    without reading `wallet/balance/`. Nothing on the agent path depends on it: a
+    top-up's currency is the cash's, checked against the CLIENT's.
+
+    `today` (YYYY-MM-DD) and `time_zone` (the IANA name, "Asia/Damascus") are the
+    server's day and zone (BACKEND_BUGS B-146): the day `count_today` / `used_today`
+    count and the day `since` / `until` on `agent/ledger/` are read in. A phone in
+    another zone sends `today` as `since` to agree with the caps. The ledger's,
+    receipts' and settlements' timestamps (and the key's `paired_at` /
+    `last_signature_at`) are written with the server's offset (+03:00), like
+    `wallet/transactions/` rows: the same instants they always were.
 
     One object per currency the platform trades in, every amount a string in that
     currency: `per_transaction_limit` (null: none of its own), `daily_limit`,

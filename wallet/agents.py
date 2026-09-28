@@ -334,7 +334,10 @@ def key_body(api_key) -> dict:
 
 
 def _iso(value):
-    return value.isoformat() if value is not None else None
+    """ISO 8601 in the SERVER's zone (BACKEND_BUGS B-146): the same instant it always
+    was, now with the offset `wallet/transactions/` rows carry (+03:00), so the date
+    part of a row's `created_at` is the day `since` / `until` and the caps count it in."""
+    return timezone.localtime(value).isoformat() if value is not None else None
 
 
 # ------------------------------------------------------------------ the push
@@ -379,8 +382,12 @@ def person(user) -> dict | None:
 
 
 def account_body(profile) -> dict:
-    """`GET wallet/agent/me/` (BACKEND_BUGS B-113)."""
+    """`GET wallet/agent/me/` (BACKEND_BUGS B-113; `currency` B-144, `today` and
+    `time_zone` B-146)."""
+    from django.conf import settings
+
     from .currencies import CURRENCY_CODES
+    from .models import currency_for
 
     blocked = ("agent_not_active" if profile.status != "active"
                else "agent_key_revoked" if key_revoked(profile) else None)
@@ -418,6 +425,12 @@ def account_body(profile) -> dict:
         "can_top_up": blocked is None,
         "blocked_reason": blocked,
         "next_settlement_on": day.isoformat() if day else None,
+        # The agent's own wallet currency (B-144): which of `currencies` to draw first.
+        "currency": currency_for(profile.user_id),
+        # The server's day and zone (B-146): the caps' "today" and the day `since` /
+        # `until` on agent/ledger/ are read in.
+        "today": timezone.localdate().isoformat(),
+        "time_zone": settings.TIME_ZONE,
         "currencies": currencies,
     }
 

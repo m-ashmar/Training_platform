@@ -2013,7 +2013,14 @@ field and code; in short:
   `blocked_reason`, `next_settlement_on` (null unless an operator set one — nothing
   schedules settlements) and, per currency, caps, used today / this month, counts,
   remaining, `receivable`, `receivable_ceiling`, `receivable_room`, `max_topup`,
-  `blocked_reason`, `last_settlement`.
+  `blocked_reason`, `last_settlement`. Additive (2026-09-28): `currency`, the agent's
+  own wallet currency, so the app picks `currencies[currency]` without reading
+  `wallet/balance/` (BACKEND_BUGS B-144); `today` (YYYY-MM-DD) and `time_zone`
+  ("Asia/Damascus"), the server's day and zone that the caps and `since`/`until` are
+  read in (B-146). The top-level `status` is `AgentProfile.status`, the same value as
+  `profile.status` (B-148). The agent ledger's, receipts' and settlements' timestamps
+  and the key's `paired_at` / `last_signature_at` now carry the server's offset
+  (+03:00), like `wallet/transactions/`: the same instants.
 - `GET /api/wallet/agent/ledger/` — the agent's own top-ups, settlements and reversed
   top-ups, newest first (`?since=&until=&kind=&currency=`); `GET
   /api/wallet/agent/settlements/`; `GET /api/wallet/agent/receipts/{reference_id}/` — a

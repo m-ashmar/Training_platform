@@ -136,3 +136,81 @@ def test_b145_ensure_from_another_phone_is_refused_and_create_moves_the_key(make
         (200, moved.json()["key_id"], "iPhone 15")
     assert _code(api(agent).post(ensure, {"device_name": "Samsung A54"},
                                  content_type=JSON)) == (409, "key_paired_elsewhere")
+
+
+# ===========================================================================
+# B-144, B-146, B-148: GET /api/wallet/agent/me/
+# ===========================================================================
+ME = "/api/wallet/agent/me/"
+
+
+def _agent(make_user, name, **fields):
+    from wallet.models import ensure_agent_profile
+
+    agent = make_user(name, user_type="agent")
+    profile = ensure_agent_profile(agent)
+    profile.status = "active"
+    for key, value in fields.items():
+        setattr(profile, key, value)
+    profile.save()
+    return agent, profile
+
+
+def test_b144_agent_me_names_the_agents_currency(make_user, api):
+    """The answer carried caps per currency and never said which one is the agent's
+    own, so the phone read `wallet/balance/` to know which object to draw."""
+    from wallet.models import set_currency_for
+
+    dollar, _p = _agent(make_user, "w1b144_usd")
+    set_currency_for(dollar, "USD", "agent")
+    body = api(dollar).get(ME).json()
+    assert body["currency"] == "USD"
+    assert body["currencies"]["USD"]["currency"] == "USD"
+
+    pound, _p = _agent(make_user, "w1b144_syp")
+    assert api(pound).get(ME).json()["currency"] == "SYP"
+
+
+def test_b146_agent_me_says_the_servers_day_and_the_ledger_reads_in_it(
+        make_user, api, settings, monkeypatch):
+    """The caps' "today" and `since`/`until` are the server's day (Asia/Damascus), and
+    nothing told the phone which day or zone that is; the agent ledger's `created_at`
+    was written in UTC, unlike `wallet/transactions/`."""
+    import datetime
+
+    from django.utils import timezone
+
+    from wallet.models import AgentReceivableEntry
+
+    agent, profile = _agent(make_user, "w1b146_a", daily_limit=D("100000"),
+                            monthly_limit=D("100000"), receivable_ceiling=D("100000"))
+    client = make_user("w1b146_c")
+    top = api(agent).post("/api/wallet/agent/topup/proxy/", {
+        "client_identifier": str(client.id), "amount": "400.00", "currency": "SYP",
+        "idempotency_key": "w1b146-1"}, content_type=JSON)
+    assert top.status_code == 200, top.content
+    (row,) = api(agent).get("/api/wallet/agent/ledger/").json()["results"]
+    entry = AgentReceivableEntry.objects.get(agent=profile)
+    assert row["created_at"] == timezone.localtime(entry.created_at).isoformat()
+    receipt = api(agent).get(f"/api/wallet/agent/receipts/{top.json()['reference_id']}/")
+    assert receipt.json()["created_at"] == \
+        timezone.localtime(entry.transaction.created_at).isoformat()
+
+    # 22:30 UTC is 01:30 the next day in Damascus: the server's day is the next one.
+    late = datetime.datetime(2026, 9, 27, 22, 30, tzinfo=datetime.timezone.utc)
+    monkeypatch.setattr(timezone, "now", lambda: late)
+    body = api(agent).get(ME).json()
+    assert body["time_zone"] == settings.TIME_ZONE
+    assert body["today"] == timezone.localdate(late).isoformat()
+    if settings.TIME_ZONE == "Asia/Damascus":
+        assert body["today"] == "2026-09-28"
+
+
+def test_b148_agent_me_docstring_names_the_profile_status():
+    """The docstring said the top-level `status` was the account's; it is the agent's
+    own `AgentProfile.status`, the same value as `profile.status`."""
+    from wallet.views import AgentMeView
+
+    doc = AgentMeView.__doc__
+    assert "`status` is the account's" not in doc
+    assert "AgentProfile.status" in doc
