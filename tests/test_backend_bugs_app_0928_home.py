@@ -164,3 +164,67 @@ def test_b175_a_program_card_taken_back_names_nothing(make_user, api):
     message = _data(_home(api, client), "trainer_message")["message"]
     assert (message["kind"], message["deleted"], message["program"]) == \
         ("program", True, None)
+
+
+# ============================================================================ B-176
+def _full_client(make_user, api, tag, django_capture_on_commit_callbacks):
+    """test_home.py's full client: a coach, a closed day, a plan with meals, a message,
+    a challenge, a smart note and a week of history."""
+    from home.sections import week_start
+    from routine.models import Routine
+    from tests.test_home import (_challenge, _close_day, _consent, _diet_day, _log_sets,
+                                 _message)
+
+    trainer, client, relation, routine, rows = _coached(make_user, api, tag)
+    Routine.objects.filter(pk=routine.pk).update(
+        start_date=week_start(timezone.localdate()))
+    _subscribe(client, tag)
+    _diet_day(client)
+    _consent(client)
+    _message(trainer, client)
+    _challenge(client, tag)
+    _log_sets(client, api, rows[0], 3)
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _close_day(api, client, routine).status_code == 200
+    return trainer, client, routine
+
+
+def test_b176_the_home_answers_the_artboards_order(make_user, api,
+                                                    django_capture_on_commit_callbacks):
+    """`Home.html`: «يومك» (the rail), then «هذا الأسبوع» (the week tiles), then
+    «سعرات اليوم» (the calories card). The rail is its own section now, so the order
+    can be answered; `nutrition_today.timeline` stays for the builds already installed."""
+    _t, client, routine = _full_client(make_user, api, "b176",
+                                       django_capture_on_commit_callbacks)
+
+    body = _home(api, client)
+    types = _types(body)
+    assert "day_timeline" in types, types
+    assert types.index("day_timeline") < types.index("week_stats") < \
+        types.index("nutrition_today"), types
+
+    rail = _data(body, "day_timeline")
+    nutrition = _data(body, "nutrition_today")
+    assert set(rail) == {"date", "timeline"}
+    assert rail["date"] == nutrition["date"] == timezone.localdate().isoformat()
+    assert rail["timeline"] == nutrition["timeline"], "one rail, one builder"
+    assert [entry["kind"] for entry in rail["timeline"]].count("workout") == 1
+
+
+def test_b176_no_diet_section_no_rail_and_an_empty_day_is_not_a_section(make_user, api):
+    from diet.models import DietPlan
+
+    trainer, client, routine, rows = _program(make_user, "b176_bare")
+    body = _home(api, client)                        # no plan at all
+    assert "day_timeline" not in _types(body) and "nutrition_today" not in _types(body)
+
+    # A plan covering today with no meal today, and no training today: nothing to say.
+    person = make_user("b176_empty")
+    _subscribe(person, "b176_empty")
+    today = timezone.localdate()
+    DietPlan.objects.create(user=person, goal="Maintain", daily_calories=2000.0,
+                            start_date=today, end_date=today + timedelta(days=3),
+                            duration_weeks=1)
+    body = _home(api, person)
+    assert _data(body, "nutrition_today")["timeline"] == []
+    assert "day_timeline" not in _types(body), "an empty rail was sent as a section"

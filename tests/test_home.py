@@ -44,6 +44,25 @@ QUERY_CEILING = 48
 #: first-day sections, and the banner stays for everyone.
 FIRST_DAY_SECTIONS = ("find_trainer_hero", "setup_checklist", "featured_trainers")
 
+#: The canvas's closed set of section types (BuildGuide layer 4) the home may answer.
+#: Deliberate contract change (the owner, 2026-09-28, BACKEND_BUGS B-176): a 12th type,
+#: `day_timeline` — the «يومك» rail as a section of its own, so the server's order can
+#: be the artboard's (rail, then the week tiles, then the calories card). Additive:
+#: `nutrition_today.timeline` stays, and an installed build skips a type it does not
+#: know. The tests that read this still assert that no type outside the set is sent.
+SECTION_TYPES = frozenset({
+    "workout_hero", "find_trainer_hero", "setup_checklist", "trainer_message",
+    "day_timeline", "nutrition_today", "week_stats", "ai_advice", "challenge_rank",
+    "featured_trainers", "ready_programs", "media_banner"})
+
+#: What the full client of `test_a_full_client_gets_every_section_in_a_sensible_order`
+#: is answered, in order. Same deliberate change as `SECTION_TYPES` (B-176): the rail
+#: (`day_timeline`) comes after the coach's message, then `week_stats`, then
+#: `nutrition_today` — `Home.html`'s «يومك», «هذا الأسبوع», «سعرات اليوم». The test still
+#: asserts every section of a full client, in one documented order.
+FULL_CLIENT_SECTIONS = ["workout_hero", "trainer_message", "day_timeline", "week_stats",
+                        "nutrition_today", "ai_advice", "challenge_rank"]
+
 
 @pytest.fixture(autouse=True)
 def owners_rules(settings):
@@ -341,8 +360,7 @@ def test_a_full_client_gets_every_section_in_a_sensible_order(make_user, api,
 
     body = _home(api, client)
 
-    assert _types(body) == ["workout_hero", "trainer_message", "nutrition_today",
-                            "week_stats", "ai_advice", "challenge_rank"]
+    assert _types(body) == FULL_CLIENT_SECTIONS
 
     hero = _data(body, "workout_hero")
     assert (hero["routine_id"], hero["week"], hero["day"], hero["days_in_cycle"]) == \

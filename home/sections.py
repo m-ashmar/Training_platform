@@ -3,8 +3,10 @@
 The closed set of section types is the design canvas's
 (`yalla_gym/design/yalla-gym-design/docs/BuildGuide.md`, layer 4), not this file's
 invention. The ones here are the sections of the active-client artboard `Home.png`:
-`workout_hero`, `week_stats`, `nutrition_today`, `trainer_message`, `ai_advice` and
-`challenge_rank`. The first-day artboard's sections live in `home/first_day.py`.
+`workout_hero`, `day_timeline` (its «يومك» rail, a 12th type the owner added on
+2026-09-28 so the artboard's order can be answered), `week_stats`, `nutrition_today`,
+`trainer_message`, `ai_advice` and `challenge_rank`. The first-day artboard's sections
+live in `home/first_day.py`.
 
 Three rules hold in every builder, and the view relies on all three:
 
@@ -827,6 +829,22 @@ def nutrition_today(person, plan, *, on_date, request, workout=None,
         'readable_only': bool(subscription is not None and subscription.is_frozen),
         'timeline': _timeline(meals, workout),
     }
+
+
+def day_timeline(nutrition) -> dict | None:
+    """The artboard's «يومك» rail as a section of its own: `{date, timeline}`.
+
+    `Home.html` draws the rail, then the week tiles, then the calories card; the rail
+    lived only inside `nutrition_today`, so the calories card was forced between the
+    rail and the week and the server's order could not be the artboard's (BACKEND_BUGS
+    B-176, the owner, 2026-09-28). It is the SAME list `nutrition_today.timeline`
+    carries — one builder (`_timeline`), one rule: no diet section, no rail — and that
+    key stays for the builds already installed. Left out when the day has nothing on it
+    (no meal today and no training): a section with nothing to say is not sent.
+    """
+    if not nutrition or not nutrition.get('timeline'):
+        return None
+    return {'date': nutrition['date'], 'timeline': nutrition['timeline']}
 
 
 def _meal_state(meal, now) -> str:

@@ -857,7 +857,8 @@ routine starts or after it ends is `rest` and is not counted in `week_stats.work
 
 The closed set of types: `workout_hero`, `week_stats`, `nutrition_today`,
 `trainer_message`, `ai_advice`, `challenge_rank`, `find_trainer_hero`,
-`setup_checklist`, `featured_trainers`, `ready_programs`, `media_banner`. The two home
+`setup_checklist`, `featured_trainers`, `ready_programs`, `media_banner`, and
+`day_timeline` (the owner, 2026-09-28 — below). The two home
 artboards are two lists out of that one set — a client with no coach gets the first-day
 sections — and every `data` shape, every code and everything that differs by build is
 written out in the docstring of `home/views.py HomeView`, which is the contract.
@@ -916,6 +917,27 @@ Additive: no route, section type, key or `code` renamed or removed; no new route
 - **`PATCH/PUT workout-sessions/{id}/` that finishes a session** (and a `POST` of one
   already `completed`) answers `personal_records` — see "What wiring the train screens
   found" below.
+
+**What wiring the home found, 2026-09-28** (BACKEND_BUGS B-175, B-176, B-178, B-179,
+B-182; the owner's decisions of that day). Additive: no route, key or `code` renamed or
+removed; no new route.
+
+- **`day_timeline`, a 12th section type** (B-176): `{date, timeline}`, the SAME list as
+  `nutrition_today.timeline` (one builder, one rule: no diet section, no rail; left out
+  when the day is empty), answered where `Home.html` draws the rail. The order is now
+  `workout_hero`, `find_trainer_hero`, `setup_checklist`, `trainer_message`,
+  `day_timeline`, `week_stats`, `nutrition_today`, `ai_advice`, `challenge_rank`,
+  `featured_trainers`, `ready_programs`, `media_banner` — `nutrition_today` (the
+  calories card) moved after `week_stats`. `nutrition_today.timeline` stays for the
+  builds already installed, which skip the type they do not know.
+- **One hero** (B-182): `find_trainer_hero` is not sent beside a `workout_hero` — a
+  client with no coach who bought a programme gets the day's hero alone. The one state
+  that answers both is a client with no coach whose day is `refused` (a former client
+  whose coaching ended): `find_trainer_hero` then comes FIRST, `workout_hero` right
+  after it.
+- **`ready_programs` for a coached client too** (the owner): same build gating (absent
+  where prices may not show), same place; a programme already bought is `owned: true`,
+  `can_buy: false`.
 
 | Method | Path | Auth | View |
 |---|---|---|---|

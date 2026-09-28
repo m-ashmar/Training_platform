@@ -1,8 +1,9 @@
 """`GET /api/v1/home` — the one screen the app opens on.
 
-The section types are the design canvas's closed set (BuildGuide layer 4); the builders
-live in `home/sections.py` (the training client's own state) and `home/first_day.py`
-(the first-day list and the two store-sensitive slots).
+The section types are the design canvas's closed set (BuildGuide layer 4), plus the
+owner's `day_timeline` (2026-09-28: the «يومك» rail as a section, so the order can be the
+artboard's); the builders live in `home/sections.py` (the training client's own state)
+and `home/first_day.py` (the first-day list and the two store-sensitive slots).
 """
 from __future__ import annotations
 
@@ -35,8 +36,9 @@ SECTION_ORDER = (
     'find_trainer_hero',   # … or the first day — never both, but for one state below
     'setup_checklist',
     'trainer_message',
-    'nutrition_today',
-    'week_stats',
+    'day_timeline',        # «يومك», the rail …
+    'week_stats',          # … then «هذا الأسبوع» …
+    'nutrition_today',     # … then «سعرات اليوم» (`Home.html`, BACKEND_BUGS B-176)
     'ai_advice',
     'challenge_rank',
     'featured_trainers',
@@ -268,6 +270,37 @@ class HomeView(APIView):
         one this client may read (taken off them). A frozen or ended coaching still
         reads it — reading is not training.
 
+    ``day_timeline`` — the artboard's «يومك» rail, as a section of its own, so the
+    order can be the artboard's: the rail, then `week_stats`, then `nutrition_today`
+    (the calories card) — BACKEND_BUGS B-176, the owner, 2026-09-28. Omitted exactly
+    when `nutrition_today` is (no plan covering today, no diet entitlement), and when
+    the day has nothing on it (the timeline would be `[]`)::
+
+        {"date": "2026-09-20",
+         "timeline": [ … `nutrition_today.timeline`, the same entries … ]}
+
+        One builder, one list: the entries, their order and their states are exactly
+        `nutrition_today.timeline`'s (below), which stays for the builds already
+        installed. A build that draws this section draws the rail from it and not a
+        second time from `nutrition_today`.
+
+    ``week_stats`` — the three tiles. Omitted for someone who has never trained::
+
+        {"workouts": {"done": 4, "planned": 6},       this week, Saturday to today;
+                                              `planned` is how many days of this week
+                                              the routine's cycle asks for work, and is
+                                              null when no routine is assigned
+         "volume_kg": {"logged": 14250.0, "previous": 13200.0, "change_percent": 8.0},
+         "streak": {"current": 12, "longest": 20},
+         "approximate": false}                a day was filled in afterwards, so the
+                                              numbers are the best that can be said
+
+        `done` counts days finished with nothing missing — the platform's own
+        definition of a training day, the one the streak counts. `volume_kg.logged` is
+        the seven days ending today, the same window and the same number
+        `GET /api/routine/v1/analytics/recent-progress/` reports, from the same cache
+        entry; `previous` is the seven days before those.
+
     ``nutrition_today`` — the day's meals and the day's totals. Omitted with no plan
     covering today, and omitted when the subscription never entitled diet — never a 403
     for the whole screen::
@@ -290,9 +323,10 @@ class HomeView(APIView):
 
         ``timeline`` — the artboard's «يومك»: the same meals, with today's workout
         placed among them by time. Always present in this section (`[]` on a day with
-        no meals and no training), and nowhere else: a day with no diet section has no
-        timeline, because without the meals it would only repeat the hero. Two kinds
-        of entry, in the day's order::
+        no meals and no training), and answered again as the `day_timeline` section
+        (above) — the same list: a day with no diet section has no timeline, because
+        without the meals it would only repeat the hero. Two kinds of entry, in the
+        day's order::
 
             {"kind": "meal", "at": "08:00:00" | null, "state": "done",
              "meal_id": 31, "meal_type": "Breakfast", "name": "…", "calories": 520.0}
@@ -320,23 +354,6 @@ class HomeView(APIView):
         be reminded to train (`workout_reminder_hour`, 18 unless they changed it). A
         meal with no time sorts last; the workout goes after every timed meal at or
         before its own time. Times are wall-clock times of the day, as a meal's is.
-
-    ``week_stats`` — the three tiles. Omitted for someone who has never trained::
-
-        {"workouts": {"done": 4, "planned": 6},       this week, Saturday to today;
-                                              `planned` is how many days of this week
-                                              the routine's cycle asks for work, and is
-                                              null when no routine is assigned
-         "volume_kg": {"logged": 14250.0, "previous": 13200.0, "change_percent": 8.0},
-         "streak": {"current": 12, "longest": 20},
-         "approximate": false}                a day was filled in afterwards, so the
-                                              numbers are the best that can be said
-
-        `done` counts days finished with nothing missing — the platform's own
-        definition of a training day, the one the streak counts. `volume_kg.logged` is
-        the seven days ending today, the same window and the same number
-        `GET /api/routine/v1/analytics/recent-progress/` reports, from the same cache
-        entry; `previous` is the seven days before those.
 
     ``ai_advice`` — the smart note. Omitted without AI consent, and omitted when the
     week has nothing worth saying::
@@ -541,15 +558,17 @@ class HomeView(APIView):
                                      refusal=refusal)
         refused_day = (not coached and hero is not None
                        and hero['cta']['state'] == 'refused')
+        nutrition = sections.nutrition_today(
+            person, plan, on_date=on_date, request=request, clock=clock,
+            # Asked only when the section exists: the timeline lives inside it.
+            workout=(sections.timeline_workout(person, routine, hero,
+                                               on_date=on_date, clock=clock)
+                     if plan is not None else None))
         built = {
             'workout_hero': hero,
             'trainer_message': sections.trainer_message(person, relation, request=request),
-            'nutrition_today': sections.nutrition_today(
-                person, plan, on_date=on_date, request=request, clock=clock,
-                # Asked only when the section exists: the timeline lives inside it.
-                workout=(sections.timeline_workout(person, routine, hero,
-                                                   on_date=on_date, clock=clock)
-                         if plan is not None else None)),
+            'day_timeline': sections.day_timeline(nutrition),
+            'nutrition_today': nutrition,
             'week_stats': sections.week_stats(person, routine, week, week_payload,
                                               on_date=on_date),
             'ai_advice': sections.ai_advice(person, on_date=on_date),
