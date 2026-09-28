@@ -129,9 +129,12 @@ class HomeView(APIView):
         {"role": "client",                    the account's shell: client | trainer |
                                               agent | admin (admin is the operator)
          "as_of": "2026-09-20T18:04:11Z",     when this payload was built
-         "refresh_after_seconds": 120,        do not ask again sooner than this; on a
-                                              page served from the cache it is the
-                                              time LEFT (1-120), not a fresh 120
+         "refresh_after_seconds": 120,        do not ask again sooner than this: 120,
+                                              or less when a meal or the workout on
+                                              today's timeline turns due sooner (the
+                                              seconds until then, B-179); on a page
+                                              served from the cache it is the time
+                                              LEFT (1-120), not a fresh number
          "sections": [{"type": "...", "data": {...}}, ...]}
 
     A section object is `{"type", "data"}` and nothing else. A section with nothing to
@@ -473,7 +476,9 @@ class HomeView(APIView):
     One build of the screen is a bounded batch of queries with no N+1
     (`tests/test_home.py` asserts the number and that it does not follow the data), and
     the result is cached per user, per build and per language for 120 s (private cache,
-    DB3). The entry is retired the moment a workout session is started, changed or
+    DB3) — or until the first `next` entry of today's timeline turns due, when that is
+    sooner, so a meal or the workout never stays `upcoming`/`next` past its time
+    (BACKEND_BUGS B-179; midnight is not a boundary). The entry is retired the moment a workout session is started, changed or
     finished, a day closes, a chat message arrives or is taken back, the client reads
     the thread, a block is made or lifted between the client and anyone, or the
     client's coaching relation changes (`training_platform/signals.py`). Everything
@@ -511,11 +516,16 @@ class HomeView(APIView):
         except Exception:
             cached = None
         if cached is not None:
-            return Response(_with_time_left(cached))
+            served = _with_time_left(cached)
+            if served is not None:
+                return Response(served)
 
         payload = self.build(request, person, channel=channel)
         try:
-            private_cache().set(key, payload, CACHE_SECONDS)
+            # The page's OWN life: 120 s, or less when a meal or the workout turns due
+            # sooner (`_time_to_live`, BACKEND_BUGS B-179).
+            private_cache().set(key, payload,
+                                payload.get('refresh_after_seconds') or CACHE_SECONDS)
         except Exception:
             # A cache that cannot be written is not an outage; the screen is built.
             logger.warning("Could not cache the home screen for user %s", person.pk,
@@ -524,9 +534,10 @@ class HomeView(APIView):
 
     def build(self, request, person, *, channel) -> dict:
         """Every section, in order, with the ones that have nothing to say left out."""
+        built_at = timezone.now()
         answer = {
             'role': person.user_type,
-            'as_of': timezone.now(),
+            'as_of': built_at,
             'refresh_after_seconds': CACHE_SECONDS,
             'sections': [],
         }
@@ -554,8 +565,9 @@ class HomeView(APIView):
         plan = sections.active_diet_plan(person, on_date)
         coached = relation is not None
         # One reading of the clock for every state that depends on it: a meal and the
-        # workout beside it in the timeline are judged against the same minute.
-        clock = timezone.localtime().time()
+        # workout beside it in the timeline are judged against the same minute, and it
+        # is the moment `as_of` names, so the page's life is counted from it.
+        clock = timezone.localtime(built_at).time()
 
         hero = sections.workout_hero(person, routine, week, on_date=on_date,
                                      refusal=refusal)
@@ -600,20 +612,59 @@ class HomeView(APIView):
                  else SECTION_ORDER)
         answer['sections'] = [{'type': name, 'data': built[name]}
                               for name in order if built.get(name)]
+        answer['refresh_after_seconds'] = _time_to_live(nutrition, on_date=on_date,
+                                                        built_at=built_at)
         return answer
 
 
-def _with_time_left(payload: dict) -> dict:
-    """The cached page, with `refresh_after_seconds` counted from when it was BUILT.
+def _time_to_live(nutrition, *, on_date, built_at) -> int:
+    """How long the page just built stays TRUE: `CACHE_SECONDS`, or the seconds until
+    the first entry of today's timeline that is still `next` turns due, when that comes
+    sooner (at least 1).
+
+    Every time-of-day state on the page — a meal's `upcoming`, the workout's `next` —
+    is read off the clock once, when the page is built. A page cached for the full
+    120 s kept a meal due inside that window `upcoming` until the entry expired
+    (BACKEND_BUGS B-179). The timeline holds every one of them (each meal, renamed, and
+    the workout), so it is the one list to read. Midnight is deliberately not a
+    boundary: a new day is a new page within 120 s anyway, and a page whose life
+    depended on the date would make every test that runs near midnight flaky.
+    """
+    import math
+    from datetime import datetime, time as clock_time
+
+    life = CACHE_SECONDS
+    for entry in (nutrition or {}).get('timeline') or ():
+        at = entry.get('at')
+        if entry.get('state') != 'next' or at is None:
+            continue
+        if isinstance(at, str):
+            at = clock_time.fromisoformat(at)
+        due = timezone.make_aware(datetime.combine(on_date, at))
+        life = min(life, max(1, math.ceil((due - built_at).total_seconds())))
+    return life
+
+
+def _with_time_left(payload: dict) -> dict | None:
+    """The cached page, with `refresh_after_seconds` counted from when it was BUILT, or
+    None when the page has outlived its own life and must be built again.
 
     It used to say `CACHE_SECONDS` on every answer, so a page served from a cache entry
     already 119 seconds old told the app to wait another 120 — up to four minutes
     between the change and the screen (BACKEND_BUGS B-043). The entry itself is not
     touched: this copy only corrects the one number that describes it.
+
+    The life is the page's OWN `refresh_after_seconds` as built (`_time_to_live`: 120,
+    or less when a meal or the workout turns due sooner, B-179), not a fixed 120. The
+    cache would drop the entry at that moment too; asking here as well means the page
+    is judged by the same clock that dated it (`as_of`), whatever the cache's own.
     """
     built = payload.get('as_of')
     if not hasattr(built, 'tzinfo'):
         return payload
+    life = payload.get('refresh_after_seconds') or CACHE_SECONDS
     age = (timezone.now() - built).total_seconds()
-    left = max(1, int(CACHE_SECONDS - age))
+    if age >= life:
+        return None
+    left = max(1, int(life - age))
     return {**payload, 'refresh_after_seconds': left}

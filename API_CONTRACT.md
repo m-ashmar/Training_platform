@@ -847,8 +847,9 @@ which is what lets an old build survive a new section.
 `{"role", "as_of", "refresh_after_seconds", "sections": [{"type", "data"}]}`. A section
 is `{"type", "data"}` and nothing else, and one with nothing to say is left out rather
 than sent empty. `refresh_after_seconds` is how long until the page may change: 120 on a
-freshly built page, and the time LEFT (1-120, counted from `as_of`) on one served from
-the cache (BACKEND_BUGS B-043). In the `workout_hero` week strip a day before the
+freshly built page — or fewer, the seconds until the first `next` entry of today's
+timeline turns due, when that is sooner (BACKEND_BUGS B-179, 2026-09-28) — and the time
+LEFT (counted from `as_of`) on one served from the cache (BACKEND_BUGS B-043). In the `workout_hero` week strip a day before the
 routine starts or after it ends is `rest` and is not counted in `week_stats.workouts
 .planned` (B-045); `counts.estimated_minutes` is null when the coach set no duration
 (B-044); `challenge_rank.participants` is counted by the same rule as `rank` (B-046). `role` is the account's shell (`client`, `trainer`, `agent`, `admin` —
@@ -942,6 +943,10 @@ removed; no new route.
 - **`ready_programs` for a coached client too** (the owner): same build gating (absent
   where prices may not show), same place; a programme already bought is `owned: true`,
   `can_buy: false`.
+- **The page lives until its next state change** (B-179): a fresh page's
+  `refresh_after_seconds` (and its cache entry) is 120, or the seconds until the first
+  `next` meal or workout on today's timeline turns due when that is sooner, so a meal
+  due inside the window is `now` once its time comes. Midnight is not a boundary.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
