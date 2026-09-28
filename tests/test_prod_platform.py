@@ -63,6 +63,12 @@ def _prod_env(**overrides):
         "REDIS_URL": "redis://redis.internal:6379",
         "CELERY_BROKER_URL": "redis://redis.internal:6379/6",
         "EMAIL_HOST_USER": "a@example.com", "EMAIL_HOST_PASSWORD": "y" * 12,
+        # Deliberate contract change (fx/prod-services, merged first): production no
+        # longer hard-codes Gmail, so the SMTP host and the From address are required
+        # from the environment (tests/test_prod_services.py), as in
+        # tests/test_media_storage.py's environment.
+        "EMAIL_HOST": "smtp.mail-provider.test",
+        "DEFAULT_FROM_EMAIL": "Yalla Gym <no-reply@yallagym.test>",
         "CORS_ALLOWED_ORIGINS": "https://app.example.com",
         "CSRF_TRUSTED_ORIGINS": "https://app.example.com",
         "DJANGO_SECRET_KEY": "s" * 64,
