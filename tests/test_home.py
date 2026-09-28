@@ -36,6 +36,14 @@ JSON = "application/json"
 #: (`routine/recent.py STRENGTH_LIMIT`).
 QUERY_CEILING = 48
 
+#: The first-day list: the sections only a client with NO coach receives.
+#: Deliberate contract change (the owner, 2026-09-28, BACKEND_BUGS B-182):
+#: `ready_programs` left this list — a coached client is also shown the programmes on
+#: sale, by the same build rule (absent where prices may not show). The test that reads
+#: this still asserts what it was written for: a client with a coach gets none of the
+#: first-day sections, and the banner stays for everyone.
+FIRST_DAY_SECTIONS = ("find_trainer_hero", "setup_checklist", "featured_trainers")
+
 
 @pytest.fixture(autouse=True)
 def owners_rules(settings):
@@ -534,8 +542,7 @@ def test_a_client_with_a_coach_gets_no_first_day_list(make_user, api):
     _banner()
 
     types = _types(_home(api, client))
-    for first_day_section in ("find_trainer_hero", "setup_checklist",
-                              "featured_trainers", "ready_programs"):
+    for first_day_section in FIRST_DAY_SECTIONS:
         assert first_day_section not in types, types
     assert "media_banner" in types, "the banner is for everyone"
 

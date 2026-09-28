@@ -32,7 +32,7 @@ CACHE_SECONDS = 120
 #: mode flag. A type that is not in this tuple is never sent.
 SECTION_ORDER = (
     'workout_hero',        # the active day …
-    'find_trainer_hero',   # … or the first day
+    'find_trainer_hero',   # … or the first day — never both, but for one state below
     'setup_checklist',
     'trainer_message',
     'nutrition_today',
@@ -43,6 +43,13 @@ SECTION_ORDER = (
     'ready_programs',
     'media_banner',
 )
+
+#: The one state that answers both heroes, and the order it answers them in: a client
+#: with no coach whose day is REFUSED — a former client whose coaching ended and who
+#: keeps the coach's routine readable and unstartable (the owner, 2026-09-28,
+#: BACKEND_BUGS B-182). The find-a-trainer hero leads; the day stays readable behind it.
+REFUSED_DAY_ORDER = ('find_trainer_hero',) + tuple(
+    name for name in SECTION_ORDER if name != 'find_trainer_hero')
 
 
 def _stamp_key(user_id) -> str:
@@ -133,7 +140,12 @@ class HomeView(APIView):
 
     THE CLOSED SET OF TYPES, in the order they are answered. The two artboards are two
     lists out of this one set: a client with a coach gets the first group, a client
-    without one gets the first-day group, and the state is what decides.
+    without one gets the first-day group, and the state is what decides. There is ONE
+    hero: `workout_hero` when a routine is assigned, else `find_trainer_hero`. The one
+    state that answers both is a client with no coach whose day is `refused` (a former
+    client whose coaching ended, who keeps the coach's routine readable): then
+    `find_trainer_hero` comes FIRST and `workout_hero` right after it, every other
+    section in its usual place (the owner, 2026-09-28, BACKEND_BUGS B-182).
 
     ``workout_hero`` — today's training. Omitted when no active routine is assigned::
 
@@ -175,8 +187,13 @@ class HomeView(APIView):
         session answers `continue` with its `session_id`, not `refused`. Which day of the routine today is,
         is counted from `Routine.start_date` over `Routine.days`.
 
-    ``find_trainer_hero`` — the first day. Only for a client with no coach, and only
-    once they have chosen a goal::
+    ``find_trainer_hero`` — the first day. Only for a client with no coach, only once
+    they have chosen a goal, and only when there is no `workout_hero` to lead — a
+    client with no coach who bought a programme is training, and gets the day's hero
+    alone (BACKEND_BUGS B-182; the checklist's `coach` step and `featured_trainers`
+    still carry the call to find a coach). The exception is a day that cannot be
+    started: with `workout_hero.cta.state` `refused` this hero is sent too, and LEADS
+    the list (see above)::
 
         {"goal": "build_muscle",              the stored code, never a label
          "matches": 3}                        trainers available who suit that goal
@@ -345,10 +362,12 @@ class HomeView(APIView):
         today the two price keys are ABSENT — never null, never zero.
 
     ``ready_programs`` — the programmes on sale (routine products, plan step 10), newest
-    listing first, at most four. Only for a client with no coach. **Left out entirely
-    on a build that may not show prices** (`play`, `ios`, and a caller that declares no
-    channel) — those builds read the programmes on `GET /api/v1/products/`, without a
-    price or a buy action::
+    listing first, at most four. For every client, with a coach or without one (the
+    owner, 2026-09-28: it was first-day only before); a programme this client already
+    bought stays in the row with `owned: true` and `can_buy: false`. **Left out
+    entirely on a build that may not show prices** (`play`, `ios`, and a caller that
+    declares no channel) — those builds read the programmes on `GET /api/v1/products/`,
+    without a price or a buy action::
 
         {"programs": [{"id": 5,                    the PRODUCT (`/api/v1/products/5/`)
                        "name": "Strength for beginners", "description": "…",
@@ -502,6 +521,8 @@ class HomeView(APIView):
 
         hero = sections.workout_hero(person, routine, week, on_date=on_date,
                                      refusal=refusal)
+        refused_day = (not coached and hero is not None
+                       and hero['cta']['state'] == 'refused')
         built = {
             'workout_hero': hero,
             'trainer_message': sections.trainer_message(person, relation, request=request),
@@ -517,17 +538,28 @@ class HomeView(APIView):
             'challenge_rank': sections.challenge_rank(person),
             # The first-day list. The artboard shows these to a client who has no coach
             # yet and none of them to one who has, so the state decides, not a flag.
-            'find_trainer_hero': None if coached else first_day.find_trainer_hero(person),
+            # The find-a-trainer hero is a HERO: a client with no coach who is already
+            # training (a programme they bought) has the day's hero, and the two
+            # artboards never stack two (BACKEND_BUGS B-182). Only a day that cannot be
+            # started — the coaching ended and the routine is `refused` — keeps it, in
+            # the lead (`REFUSED_DAY_ORDER`, the owner, 2026-09-28).
+            'find_trainer_hero': (None if coached or (hero is not None and not refused_day)
+                                  else first_day.find_trainer_hero(person)),
             'setup_checklist': None if coached else first_day.setup_checklist(
                 person, routine=routine, plan=plan, coached=coached),
             'featured_trainers': None if coached else first_day.featured_trainers(
                 person, request=request, flags=flags),
-            'ready_programs': None if coached else first_day.ready_programs(
-                person, request=request, flags=flags),
+            # The programmes on sale are for every client, coached or not (the owner,
+            # 2026-09-28): the build decides whether the section exists, and an owned
+            # programme's card says `owned: true`, `can_buy: false`.
+            'ready_programs': first_day.ready_programs(person, request=request,
+                                                       flags=flags),
             'media_banner': first_day.media_banner(request=request, flags=flags),
         }
+        order = (REFUSED_DAY_ORDER if refused_day and built['find_trainer_hero']
+                 else SECTION_ORDER)
         answer['sections'] = [{'type': name, 'data': built[name]}
-                              for name in SECTION_ORDER if built.get(name)]
+                              for name in order if built.get(name)]
         return answer
 
 
