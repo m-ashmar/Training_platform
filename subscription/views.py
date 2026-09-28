@@ -2153,10 +2153,21 @@ class PaymentReceiptView(APIView):
             "payer": {"id", "name", "email"},
             "platform": {"name", "legal_name", "contact_email", "website"},
             "plan_duration_days": 30,
-            "pdf_url": "<this path>?format=pdf"}}
+            "pdf_url": "<this path>?format=pdf",
+            "email": {"status": "sent" | "queued" | "failed" | "skipped" | "none",
+                      "sent_at": "<iso>" | null}}}
 
     A receipt for a converted charge must say so: when `exchange` is not null, draw
     the price of record and `rate_text` beside the amount (SIDE_BUGS S-137).
+
+    `email` (BACKEND_BUGS B-171) says whether the confirmation email carrying this
+    receipt as a PDF left: say «وصلك الإيصال بالبريد» only for `sent` (`sent_at`: when).
+    `queued`: owed, the worker sends it shortly (the screen right after a confirmation
+    usually reads this); `skipped`: not sent (the account could no longer be emailed, or
+    muted it in between); `failed`: the mail server refused it; `none`: never owed —
+    the payer's notification preferences stop email for `payment_confirmed`, their
+    address is not verified, or it predates receipt emails. JSON only (not on the PDF),
+    and the same on every build.
 
     Errors (branch on `code`):
 
@@ -2176,7 +2187,7 @@ class PaymentReceiptView(APIView):
     renderer_classes = [JSONRenderer, BrowsableAPIRenderer, ReceiptPDFRenderer]
 
     def get(self, request, payment_id):
-        from .receipts import receipt_data, render_pdf
+        from .receipts import receipt_data, receipt_email, render_pdf
 
         qs = Payment.objects.select_related('subscription', 'subscription__plan',
                                             'subscription__user', 'buyer',
@@ -2210,4 +2221,6 @@ class PaymentReceiptView(APIView):
             return response
 
         data['pdf_url'] = request.build_absolute_uri(f'{request.path}?format=pdf')
+        # Whether its email left (B-171). JSON only: the PDF is the document itself.
+        data['email'] = receipt_email(payment)
         return Response({'receipt': data})

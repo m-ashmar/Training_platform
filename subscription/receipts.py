@@ -186,6 +186,37 @@ def exchange_of(payment) -> dict | None:
     }
 
 
+#: `EmailDelivery.status` -> what the receipt says of its email. `sending` is still on
+#: its way, as far as the reader is concerned.
+EMAIL_STATES = {"queued": "queued", "sending": "queued", "sent": "sent",
+                "failed": "failed", "skipped": "skipped"}
+
+
+def receipt_email(payment) -> dict:
+    """Whether the receipt email for this payment left (BACKEND_BUGS B-171):
+    `{"status": "sent" | "queued" | "failed" | "skipped" | "none", "sent_at": <when> |
+    null}`.
+
+    Read from the one `EmailDelivery` the receipt email is owed under
+    (`payment_receipt:<payment id>`, `notifications.channels.email.queue_receipt`).
+    `queued`: owed and not sent yet (the worker sends it shortly); `sent`: it left, at
+    `sent_at`; `skipped`: the worker did not send it (the account could no longer be
+    emailed, or muted it in between); `failed`: the mail server refused it for good, or
+    every retry failed; `none`: it was never owed — the person's notification
+    preferences stop email for `payment_confirmed`, the address is not verified, or the
+    payment was confirmed before receipts were emailed. Only `sent` means "the receipt
+    is in your inbox". The same on every build; never on the PDF."""
+    from notifications.models import EmailDelivery
+
+    row = (EmailDelivery.objects
+           .filter(recipient_id=payment.payer_id, dedup_key=f"payment_receipt:{payment.pk}")
+           .values("status", "sent_at").first())
+    if row is None:
+        return {"status": "none", "sent_at": None}
+    state = EMAIL_STATES.get(row["status"], "queued")
+    return {"status": state, "sent_at": row["sent_at"] if state == "sent" else None}
+
+
 def receipt_data(payment, *, invoice_number: str | None = None) -> dict:
     """The receipt for one completed payment, as data. The app draws it.
 
