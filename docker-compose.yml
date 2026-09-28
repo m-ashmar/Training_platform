@@ -2,6 +2,10 @@
 services:
   db:
     image: postgres:15
+    # Postgres' parallel queries and several test databases built at once need more
+    # than Docker's default 64 MB /dev/shm: on 2026-09-28 it ran out, the server
+    # segfaulted and restarted into recovery with every database on it (SIDE_BUGS S-244).
+    shm_size: 512mb
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
