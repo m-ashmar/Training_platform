@@ -267,21 +267,62 @@ def queue_otp_email(otp, otp_code):
     return True
 
 
+#: The logger of that one error line. Sentry's logging integration ignores it
+#: (`training_platform.observability.start_sentry`), so the explicit, sanitized capture
+#: below is the one event. Its records still reach the `users` handlers.
+EMAIL_FAILURE_LOGGER = "users.email_failures"
+_email_failure_log = logging.getLogger(EMAIL_FAILURE_LOGGER)
+
+
+def _smtp_code(exc):
+    """The mail server's numeric answer, if the failure carries one."""
+    code = getattr(exc, "smtp_code", None)
+    if code is None and isinstance(getattr(exc, "recipients", None), dict):
+        codes = sorted({answer[0] for answer in exc.recipients.values()
+                        if isinstance(answer, tuple) and answer})
+        code = codes[0] if codes else None
+    return code if isinstance(code, int) else None
+
+
 def report_account_email_failure(purpose, user_id, exc, *, stage):
     """Log and alert an account email that did not go out: ONE error line, naming the
     account by id — never its address — and one Sentry event when Sentry is configured.
 
-    Sentry's logging integration turns this error record into an event, and the explicit
-    capture below is dropped as a duplicate of it (same exception object); the explicit
-    one is there so the alert does not depend on that integration staying enabled.
+    **Neither carries the live exception** (SIDE_BUGS S-242). Its traceback's frames hold
+    the plaintext code (`otp_code`, `plain_message`) and the address (`recipient_list`),
+    Sentry records every frame's locals by default and its scrubber knows none of those
+    names — so a failed send put a code, still good for ten minutes, in front of anyone
+    reading the Sentry project. What leaves is the exception's TYPE, the mail server's
+    code, the purpose, the stage and the account id: enough to see an outage and its
+    cause (a 535 is a dead SMTP credential), nothing to act on. The line is logged on
+    `EMAIL_FAILURE_LOGGER`, which Sentry's logging integration ignores, so the event
+    below is the only one.
     """
-    logger.error("An account email was not delivered: purpose=%s user=%s stage=%s (%s)",
-                 purpose, user_id, stage, type(exc).__name__,
-                 exc_info=(type(exc), exc, exc.__traceback__))
+    kind = type(exc).__name__
+    smtp_code = _smtp_code(exc)
+    detail = f"{kind}, smtp {smtp_code}" if smtp_code is not None else kind
+    _email_failure_log.error(
+        "An account email was not delivered: purpose=%s user=%s stage=%s (%s)",
+        purpose, user_id, stage, detail)
     try:
         import sentry_sdk
 
-        sentry_sdk.capture_exception(exc)
+        sentry_sdk.capture_event({
+            "level": "error",
+            "logger": EMAIL_FAILURE_LOGGER,
+            # Shaped as an exception so it groups and alerts as one, but built by hand:
+            # no stack, no frames, no locals, no message text from the server.
+            "exception": {"values": [{
+                "type": kind,
+                "module": type(exc).__module__,
+                "value": f"account email not delivered: purpose={purpose} stage={stage}"
+                         + (f" smtp_code={smtp_code}" if smtp_code is not None else ""),
+                "mechanism": {"type": "account_email", "handled": True},
+            }]},
+            "tags": {"email_purpose": str(purpose), "email_stage": str(stage),
+                     "smtp_code": str(smtp_code) if smtp_code is not None else "none"},
+            "extra": {"user_id": user_id},
+        })
     except Exception:
         logger.debug("Sentry capture failed", exc_info=True)
 

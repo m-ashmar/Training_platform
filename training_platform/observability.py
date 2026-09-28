@@ -18,6 +18,12 @@ settings, so both processes carry the integration, which the check-ins need.
 Privacy: `send_default_pii=False` keeps user fields and request bodies out, and
 `before_send` / `before_breadcrumb` mask email addresses in message text and exception
 values, which that flag does not cover (`training_platform/log_privacy.py`).
+`include_local_variables=False`: Sentry records every frame's locals by default, and
+neither that flag nor its scrubber covers them — a failed account email sent the live
+sign-up code and the recipient's address that way (SIDE_BUGS S-242). The account-email
+failure line is not turned into an event by the logging integration either: its
+reporter sends one sanitized event of its own (`users.utils.
+report_account_email_failure`).
 """
 import re
 
@@ -59,7 +65,11 @@ def start_sentry(dsn, *, beat_schedule, monitored, environment, traces_sample_ra
     import sentry_sdk
     from sentry_sdk.integrations.celery import CeleryIntegration
     from sentry_sdk.integrations.django import DjangoIntegration
+    from sentry_sdk.integrations.logging import ignore_logger
 
+    # `users.utils.EMAIL_FAILURE_LOGGER`, by name: settings import this module, and
+    # nothing that imports Django models may load here.
+    ignore_logger("users.email_failures")
     sentry_sdk.init(
         dsn=dsn,
         integrations=[
@@ -73,6 +83,8 @@ def start_sentry(dsn, *, beat_schedule, monitored, environment, traces_sample_ra
         environment=environment,
         # Never ship PII (emails, request bodies) to a third party.
         send_default_pii=False,
+        # Nor a frame's locals: a code, an address, a message body (S-242).
+        include_local_variables=False,
         before_send=_scrub_event,
         before_breadcrumb=_scrub_breadcrumb,
     )
