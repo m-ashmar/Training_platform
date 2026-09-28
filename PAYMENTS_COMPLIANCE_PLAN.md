@@ -66,12 +66,17 @@ client, trainer, agent; the plan checkout sold on apk, refused on ios). The log-
 findings (3 HIGH), logged with evidence as SIDE_BUGS S-232..S-243, nothing fixed; S-244
 and S-245 came from the gate itself.
 
-**The separate fix run (the owner schedules it) takes, in this order:** the HIGH rows
-S-234 (poller halted by a checkout purchase key), S-235 (review agent account), S-236
-(bootstrap duplicates a renamed plan), S-212, S-213; then the MEDIUM and LOW rows S-214..S-245;
-BACKEND_BUGS B-136..B-166 and whatever the app sessions file after (B-136 the JIT
-slowdown, mitigated in production by the runbook; B-137 trainer macro split; B-138..B-166
-from the app's delta walks; B-164 is P1); BACKEND_DELTA item 20 gaps.
+**The separate fix run (the owner schedules it) takes, in this order:**
+1. The HIGH rows and the app's P1s, which break a user journey: S-234 (poller halted by a
+   checkout purchase key), S-235 (review agent account), S-236 (bootstrap duplicates a
+   renamed plan), S-212, S-213; B-172 (sign-up refused `content_not_allowed` on the
+   username allauth derives from the e-mail), B-167 (a routine-product buyer gets 404 on
+   `payments/{id}/` and the receipt: the views filter `subscription__user`, the payment
+   has `buyer`; same root as S-240), B-164, B-175 (home's program card names no routine).
+2. The MEDIUM and LOW rows S-214..S-245.
+3. BACKEND_BUGS P2 rows B-136..B-179 and whatever the app sessions file after (B-136 the
+   JIT slowdown, mitigated in production by the runbook; B-137 trainer macro split).
+4. BACKEND_DELTA item 20 gaps.
 
 ## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
 
