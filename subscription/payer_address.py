@@ -27,16 +27,31 @@ from django.db import transaction
 from django.utils.crypto import salted_hmac
 from django.utils.translation import gettext as _
 
-from payouts.services import address_is_valid, grouped, normalise_address
+from payouts.services import address_is_valid, digest_keys, grouped, normalise_address
 
 #: The keys of a raw ShamCash transaction that may hold the sender's account address.
 SENDER_KEYS = ('sender_address', 'sender_account', 'from_account', 'from', 'sender')
 
+_DIGEST_SALT = 'subscription.payer_address'
+
 
 def address_digest(normalised: str) -> str:
     """The keyed hash a sender is compared by. Its own key, not the payout table's, so
-    the two tables of addresses cannot be joined on their digests."""
-    return salted_hmac('subscription.payer_address', normalised).hexdigest()
+    the two tables of addresses cannot be joined on their digests. This is the digest a
+    row is WRITTEN with: under the current `SECRET_KEY`."""
+    return salted_hmac(_DIGEST_SALT, normalised).hexdigest()
+
+
+def address_digests(normalised: str) -> list[str]:
+    """Every digest a saved row of this address can carry, for MATCHING: under the
+    current key and under each `SECRET_KEY_FALLBACKS` entry (SIDE_BUGS S-232). Without
+    the fallbacks a key rotation orphaned every saved address: the second signal went
+    quiet for every customer, and a stranger who saved a victim's address after the
+    rotation became its only owner. `manage.py rekey_address_digests` rewrites old rows
+    under the current key before the old key is dropped."""
+    digests = [salted_hmac(_DIGEST_SALT, normalised, secret=key).hexdigest()
+               for key in digest_keys()]
+    return list(dict.fromkeys(digests))
 
 
 class Refused(Exception):
@@ -104,7 +119,7 @@ def sender_digests(facts) -> set[str]:
             continue
         normalised = normalise_address(value)
         if normalised and address_is_valid(normalised):
-            digests.add(address_digest(normalised))
+            digests.update(address_digests(normalised))
     return digests
 
 

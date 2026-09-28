@@ -200,3 +200,116 @@ def test_s238_a_held_row_its_completion_re_holds_does_not_pin_the_pass(
             _poll()
     assert _status(b.pk) == "completed"
     assert _status(body["id"]) == "needs_review", "an operator still decides the owned one"
+
+
+# ============================================================ S-232
+OLD_KEY = "w1-s232-the-key-before-the-rotation-" + "x" * 30
+NEW_KEY = "w1-s232-the-key-after-the-rotation-" + "y" * 30
+ADDRESS = "0a3f91c27be455d0"
+
+
+def _rotate(settings):
+    """The owner's rotation (DEPLOY_CHECKLIST section 4): the old key moves to
+    `DJANGO_OLD_SECRET_KEY_1`, i.e. `SECRET_KEY_FALLBACKS`, and a new one is set."""
+    settings.SECRET_KEY_FALLBACKS = [OLD_KEY]
+    settings.SECRET_KEY = NEW_KEY
+
+
+def test_s232_a_saved_payer_address_still_matches_after_a_key_rotation(
+        make_user, api, shamcash, settings):
+    from subscription import payer_address
+
+    settings.SECRET_KEY, settings.SECRET_KEY_FALLBACKS = OLD_KEY, []
+    _c, sub, payment = _open_checkout(api, make_user, "s232_payer",
+                                      _plan("s232", "4321.00"))
+    customer = sub.user
+    payer_address.save(customer, ADDRESS, ADDRESS)
+    assert payer_address.owners_of_sender({"sender": ADDRESS}) == {customer.pk}
+
+    _rotate(settings)
+    assert payer_address.owners_of_sender({"sender": "0A3F-91C2-7BE4-55D0"}) == \
+        {customer.pk}, "the row saved under the old key is still this customer's"
+    assert payer_address.sender_matches({"sender": ADDRESS}, [payment.pk]) == \
+        [str(payment.pk)], "the queue's evidence still names the customer's checkout"
+
+    # A stranger who saves the same address after the rotation does not become its
+    # only owner: an address saved by two accounts points at nobody, as before.
+    stranger = _person(make_user, "s232_stranger")
+    payer_address.save(stranger, ADDRESS, ADDRESS)
+    assert payer_address.owners_of_sender({"sender": ADDRESS}) == {customer.pk, stranger.pk}
+
+
+def test_s232_a_payout_address_saved_before_a_rotation_is_not_saved_twice(
+        make_user, settings):
+    from payouts import services
+    from payouts.models import PayoutMethod
+
+    settings.SECRET_KEY, settings.SECRET_KEY_FALLBACKS = OLD_KEY, []
+    trainer = make_user("s232_trainer", user_type="trainer", trainer_is_verified=True)
+    first = services.add_method(trainer, kind="shamcash", address=ADDRESS,
+                                address_confirm=ADDRESS, holder_name="Rami")
+    _rotate(settings)
+    with pytest.raises(services.Refused) as refused:
+        services.add_method(trainer, kind="shamcash", address="0a3f 91c2 7be4 55d0",
+                            address_confirm=ADDRESS, holder_name="Rami")
+    assert refused.value.code == "payout_method_exists"
+    assert list(PayoutMethod.objects.filter(trainer=trainer).values_list("pk", flat=True)) \
+        == [first.pk]
+
+
+def test_s232_a_withdrawal_confirmed_after_a_rotation_verifies_its_method(
+        make_user, api, settings, django_capture_on_commit_callbacks):
+    from payouts import services
+    from payouts.models import PayoutMethod
+    from tests.test_trainer_withdrawals import _fund as _fund_wallet
+    from tests.test_trainer_withdrawals import _operator, _request, _shamcash, _trainer
+
+    settings.SECRET_KEY, settings.SECRET_KEY_FALLBACKS = OLD_KEY, []
+    trainer = _trainer(make_user)
+    _fund_wallet(trainer, "100000.00", "trainer")
+    method = _shamcash(api, trainer)
+    made = _request(api, trainer, "40000").json()
+    operator = _operator(make_user)
+    services.approve(made["id"], operator)
+    services.mark_sent(made["id"], operator, "SC-TX-S232")
+
+    _rotate(settings)
+    with django_capture_on_commit_callbacks(execute=True):
+        services.confirm(made["id"], operator)
+    assert PayoutMethod.objects.get(pk=method["id"]).verified_at is not None
+
+
+def test_s232_rekey_rewrites_old_digests_so_the_old_key_can_be_dropped(
+        make_user, settings):
+    import io
+
+    from django.core.management import call_command
+
+    from payouts import services
+    from payouts.models import PayoutMethod
+    from subscription import payer_address
+    from subscription.models import PayerAddress
+
+    settings.SECRET_KEY, settings.SECRET_KEY_FALLBACKS = OLD_KEY, []
+    customer = _person(make_user, "s232_rekey")
+    payer_address.save(customer, ADDRESS, ADDRESS)
+    trainer = make_user("s232_rekey_t", user_type="trainer", trainer_is_verified=True)
+    method = services.add_method(trainer, kind="shamcash", address=ADDRESS,
+                                 address_confirm=ADDRESS, holder_name="Rami")
+    old_digest = PayerAddress.objects.get(user=customer).address_digest
+
+    _rotate(settings)
+    dry = io.StringIO()
+    call_command("rekey_address_digests", "--dry-run", stdout=dry)
+    assert "would rewrite 1" in dry.getvalue()
+    assert PayerAddress.objects.get(user=customer).address_digest == old_digest, \
+        "a dry run writes nothing"
+    call_command("rekey_address_digests", stdout=io.StringIO())
+
+    settings.SECRET_KEY_FALLBACKS = []                  # the old key is dropped
+    assert payer_address.owners_of_sender({"sender": ADDRESS}) == {customer.pk}
+    assert PayoutMethod.objects.get(pk=method.pk).address_digest == \
+        services.address_digest(ADDRESS)
+    with pytest.raises(services.Refused):
+        services.add_method(trainer, kind="shamcash", address=ADDRESS,
+                            address_confirm=ADDRESS, holder_name="Rami")
