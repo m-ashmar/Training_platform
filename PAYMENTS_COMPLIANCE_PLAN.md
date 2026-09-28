@@ -60,16 +60,18 @@ production readiness 5/10).
 lock): 2,508 passed, 3 failed, all three failing on the old head as well:
 `test_store_docs` x2 (order-dependent, SIDE_BUGS S-231) and the diet week timing test
 (S-245, red since 2026-09-24). End-to-end smoke (`tools/smoke_journeys.py`) on a fresh
-database: see below. The log-only review (money, security/privacy, data) confirmed 11
+database under Django 5.2 (`migrate`, `bootstrap_platform` 250 rows,
+`seed_review_accounts`, Daphne): 34 of 34 journeys answered as expected (anonymous,
+client, trainer, agent; the plan checkout sold on apk, refused on ios). The log-only review (money, security/privacy, data) confirmed 11
 findings (3 HIGH), logged with evidence as SIDE_BUGS S-232..S-243, nothing fixed; S-244
 and S-245 came from the gate itself.
 
 **The separate fix run (the owner schedules it) takes, in this order:** the HIGH rows
 S-234 (poller halted by a checkout purchase key), S-235 (review agent account), S-236
 (bootstrap duplicates a renamed plan), S-212, S-213; then the MEDIUM and LOW rows S-214..S-245;
-BACKEND_BUGS B-136..B-152 (filed by the app sessions during this run: B-136 the JIT
-slowdown, mitigated in production by the runbook; B-137 trainer macro split; B-138..B-152
-from the app's delta walks); BACKEND_DELTA item 20 gaps.
+BACKEND_BUGS B-136..B-166 and whatever the app sessions file after (B-136 the JIT
+slowdown, mitigated in production by the runbook; B-137 trainer macro split; B-138..B-166
+from the app's delta walks; B-164 is P1); BACKEND_DELTA item 20 gaps.
 
 ## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
 
