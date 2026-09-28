@@ -57,10 +57,13 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements.lock
       - name: Install system libraries
         run: sudo apt-get update && sudo apt-get install -y libmagic1
+      # The lock, exactly as the Dockerfile installs it: the gate must run on the
+      # versions that deploy (tests/test_django_lts.py fails otherwise).
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install --require-hashes -r requirements.lock
 
       # settings_base reads the Django secret key and the RS256 JWT pair at import, and
       # a CI checkout has no .env. Throwaway values, made for this run and gone with it:
@@ -149,8 +152,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements.lock
       - run: sudo apt-get update && sudo apt-get install -y libmagic1
-      - run: pip install -r requirements.txt
+      - run: pip install --require-hashes -r requirements.lock
       - name: Route sweeps
         run: |
           set -e
@@ -172,9 +176,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      # `safety check` scans what is installed, so it must be the lock — the versions
+      # the image ships — before the scanners are added beside it.
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install --require-hashes -r requirements.lock
           pip install bandit safety semgrep
 
       # Layer 1: Static Analysis — Bandit (Python security linter)

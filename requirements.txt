@@ -1,50 +1,87 @@
+# requirements.txt — THE LIST A PERSON EDITS. The image does not install this file.
+#
+# Every direct dependency is pinned to ONE exact version here, with the reason it is in
+# the list. `requirements.lock` is generated from this file and pins every package the
+# app needs, transitive ones included, each with its hashes; the Dockerfile installs
+# ONLY the lock, in hash-checking mode. So the versions the test suite passed on are the
+# versions that deploy (tests/test_django_lts.py fails if the lock is stale, if anything
+# here is unpinned, or if the environment running the tests is not the lock).
+#
+# Why: this file used to carry `daphne>=4.0.0`, `openai>=1.0.0`, `firebase-admin>=6.0.0`
+# and two bare names, nothing pinned the transitive packages, and the Dockerfile ran a
+# second unpinned `pip install daphne` — so every `fly deploy` installed whatever was
+# newest that day (production-readiness audit, 2026-09-26).
+#
+# TO CHANGE A VERSION (or add or remove a package):
+#   1. Edit the pin below.
+#   2. Regenerate the lock. It is a UNIVERSAL resolution (one file that installs on the
+#      macOS dev machines and on the linux image alike), which is why it uses uv:
+#          pip install uv        # once, anywhere; it is a tool, not a dependency
+#          uv pip compile requirements.txt --universal --python-version 3.12 \
+#              --generate-hashes --no-annotate --output-file requirements.lock \
+#              --custom-compile-command "see the header of requirements.txt"
+#      Add `--upgrade-package <name>` to move one transitive package to its newest
+#      version that the pins allow; `--upgrade` moves them all.
+#   3. Install it where the tests run:
+#          .venv/bin/pip install --require-hashes -r requirements.lock
+#   4. Run the gate (CLAUDE.md), and commit requirements.txt and requirements.lock
+#      together.
+#
 # NOTE: pytest, pytest-django, coverage and flake8 are KEPT — they are used by
 # the regression gate (pytest.ini + tests/) and by CI.
 # Removed as unreferenced: certifi, django-extensions, factory-boy, isort, pytz, setuptools, urllib3
+
 # Django Core
-Django==5.1.3
-djangorestframework==3.15.2
-django-cors-headers==4.6.0
-django-filter==24.3
+# 5.2 is the LTS line: security fixes until April 2028. 5.1 stopped receiving them in
+# December 2025 (and 5.1.3 had missed every later 5.1 security release). Do not move to
+# 6.x without its own migration work: the next LTS after 5.2 is 6.2.
+Django==5.2.17
+djangorestframework==3.18.1
+django-cors-headers==4.9.0
+django-filter==26.1
 
 # Database
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.13
 
 # Secrets Management
 # REQUIRED IN PRODUCTION: settings_secrets.get_secret() fetches from AWS Secrets
 # Manager via boto3. Without it every secret load raises ImproperlyConfigured and
 # the container cannot start.
-boto3==1.42.83
+boto3==1.43.103
 
 
 # Authentication & Security
-djangorestframework-simplejwt==5.3.1
-django-allauth==0.63.6
-dj-rest-auth==7.0.0
-whitenoise==6.8.2  # serves /static/ in production; MIDDLEWARE has no other static handler
-cryptography==46.0.6  # was 42.0.5 — the deploy shipped a version nobody tested; 42.x also carries known CVEs
+djangorestframework-simplejwt==5.5.1
+# allauth and dj-rest-auth move together: dj-rest-auth 7.0.0 predates allauth 64/65.
+django-allauth==65.19.4
+dj-rest-auth==7.2.0
+whitenoise==6.12.0  # serves /static/ in production; MIDDLEWARE has no other static handler
+cryptography==50.0.1  # never ship a version nobody tested; the lock holds the whole tree
 
 # Payment & Financial
 # NOTE: ShamCash is the active gateway (subscription/gateways/shamcash.py) and is
 # called over plain HTTP via `requests`. `stripe` was removed — there is no Stripe
 # integration in the codebase.
-requests==2.32.2
+requests==2.34.2
 
 # Async & Background Tasks
-celery==5.5.3
-redis==6.2.0
-django-redis==5.4.0
-channels==4.0.0
-channels-redis==4.1.0
+celery==5.6.3
+# redis-py is capped by kombu (celery's transport): kombu 5.6 declares redis<6.5 for its
+# redis transport, and the broker is Redis. channels-redis needs >=4.6 and django-redis
+# >=4.0.2, so the newest 6.4 satisfies all three. Move it only with kombu.
+redis==6.4.0
+django-redis==7.0.0
+channels==4.3.2
+channels-redis==4.3.0
 
 # API & Serialization
-drf-yasg==1.21.8
+drf-yasg==1.21.15
 
 # Environment & Configuration
 # (python-decouple / django-environ removed — settings_secrets.py handles all env
 #  parsing and secret loading; neither package was imported anywhere.)
 # Used by manage.py and settings_local.py to load a local .env file.
-python-dotenv==1.0.1
+python-dotenv==1.2.3
 
 # PDF receipts (subscription/receipts.py). Every confirmed payment has a receipt, and
 # Arabic is the primary language it is written in — which takes three pieces, not one:
@@ -56,18 +93,20 @@ python-dotenv==1.0.1
 #                   "Premium · 30 يوماً" comes out in the order a reader expects.
 # The font is Noto Naskh Arabic, in subscription/fonts/ under the OFL — see the module
 # docstring for why the app's own brand font cannot render this document.
-fpdf2==2.8.2
-arabic-reshaper==3.0.0
-python-bidi==0.6.6
+fpdf2==2.8.8
+arabic-reshaper==3.0.1
+python-bidi==0.6.11
 
 # Image Processing
-Pillow==11.0.0
+# Pillow decodes every image a user uploads (training_platform/file_security.py), so it
+# is kept on the newest release; tests/test_django_lts.py holds its floor.
+Pillow==12.3.0
 
 # Object storage. Media lives in Google Cloud Storage in production (the owner,
 # 2026-09-19: video lives on GCS) and on the filesystem in development and in the test
 # suite — MEDIA_BACKEND decides, and the GCS module is imported only when it says 'gcs',
 # so nothing here is loaded (and no network is touched) by a local run or by the gate.
-django-storages[google]==1.14.4
+django-storages[google]==1.14.6
 
 # Date & Time
 python-dateutil==2.9.0.post0
@@ -75,49 +114,56 @@ python-dateutil==2.9.0.post0
 # HTTP & Networking
 
 # Development & Testing
-pytest==8.3.3
-pytest-django==4.9.0
-coverage==7.6.1
+pytest==9.1.1
+pytest-django==4.14.0
+coverage==7.16.1
 
 # Code Quality
-black==24.10.0
-flake8==7.1.1
+black==26.5.1
+flake8==7.4.1
 
 # Monitoring & Logging
-sentry-sdk==2.18.0
-structlog==25.4.0
+sentry-sdk==2.70.0
+structlog==26.1.0
 # Required by notifications/metrics.py. Without it every metrics call site
 # silently no-ops via `except ImportError: pass`, so notification/FCM metrics
 # were never recorded.
-prometheus-client==0.21.1
+prometheus-client==0.26.0
 
 # Production
-# Daphne is the production server (see Dockerfile CMD / ASGI + WebSockets).
-daphne>=4.0.0
+# Daphne is the production server (see Dockerfile CMD / ASGI + WebSockets). Installed
+# from the lock like everything else — the Dockerfile's separate `pip install daphne`
+# is gone.
+daphne==4.2.3
 # (gunicorn and dj-database-url removed — Daphne serves prod and DATABASES is
 #  constructed explicitly in settings_production.py.)
 
 # Retries & Backoff
-tenacity==8.2.2
+tenacity==9.1.4
 
 # File Security & Validation
 python-magic==0.4.27
 
 # Push Notifications
-firebase-admin>=6.0.0
+firebase-admin==7.7.0
 
 # Caching & Performance
-django-ratelimit>=4.1.0
-django-cachalot==2.6.*
+django-ratelimit==4.1.0
+django-cachalot==2.9.1
 
 # AI Assistant / Diet AI pipeline
-openai>=1.0.0
-tiktoken>=0.5.0
-# langchain-core: prompt + PydanticOutputParser used by diet/ai_services.py and
-# diet/services/ai_response_handler.py.
+# openai 3.x swapped its HTTP client from httpx to httpx2; ai_assistant/services/
+# chat_service.py builds a plain AsyncOpenAI(api_key=...) and configures no client of
+# its own, so nothing here changes with it.
+openai==3.19.2
+tiktoken==0.14.0
 # pydantic: diet/ai_models.py defines DietPlanOutput/AIMeal/AIIngredient, which the
 # RULE-BASED planner also imports — without it diet generation fails entirely.
-langchain-core==1.2.26
-pydantic==2.12.5
-django-modeltranslation
-matplotlib
+# (langchain-core removed, 2026-09-27: the two modules that imported it,
+#  diet/ai_services.py and diet/services/ai_response_handler.py, no longer exist, and
+#  nothing else names it. It pulled in langsmith and a second HTTP stack for nothing.)
+pydantic==2.13.5
+django-modeltranslation==0.20.6
+# routine/admin.py imports it at module load (a completion chart on a Django admin
+# changelist), so without it the admin module fails to import.
+matplotlib==3.11.2

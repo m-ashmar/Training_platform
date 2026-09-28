@@ -61,8 +61,10 @@ cd Training_platform
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies: the lock, exactly as the image installs it (every package
+# pinned and hashed). requirements.txt is the list you edit; its header says how to
+# regenerate the lock.
+pip install --require-hashes -r requirements.lock
 
 # Environment configuration
 cp .env.example .env

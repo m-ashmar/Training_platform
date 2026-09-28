@@ -165,14 +165,12 @@ class CustomUserAdmin(UserAdmin):
         """Display password status in admin list"""
         # Ask the model, not the hash prefix: `startswith('pbkdf2')` labels every account
         # "Not Set" the day the hasher changes to argon2 or bcrypt.
+        # The label is an argument: format_html() with none is deprecated since Django
+        # 5.0 and a TypeError in 6.0.
         if obj.password and obj.has_usable_password():
-            return format_html(
-                '<span style="color: green;">✓ Set</span>'
-            )
+            return format_html('<span style="color: green;">{}</span>', '✓ Set')
         else:
-            return format_html(
-                '<span style="color: red;">✗ Not Set</span>'
-            )
+            return format_html('<span style="color: red;">{}</span>', '✗ Not Set')
     password_status.short_description = 'Password Status'
 
     def has_delete_permission(self, request, obj=None):

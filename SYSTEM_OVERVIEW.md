@@ -22,8 +22,8 @@ A **production-grade Django REST backend** serving a Flutter mobile application 
 | Layer | Technology |
 |---|---|
 | **Language** | Python 3.12 |
-| **Framework** | Django 5.1.3 |
-| **API** | Django REST Framework 3.15.2 |
+| **Framework** | Django 5.2 LTS (5.2.17; security fixes until April 2028) |
+| **API** | Django REST Framework 3.18 |
 | **ASGI Server** | Daphne 4.x (WebSocket support) |
 | **WSGI Server** | Gunicorn 24.x (fallback / HTTP-only) |
 | **Database (prod)** | PostgreSQL (via `psycopg2-binary`) |
@@ -31,13 +31,13 @@ A **production-grade Django REST backend** serving a Flutter mobile application 
 | **ORM** | Django ORM |
 | **Cache** | Redis + `django-redis` (5 segmented logical DBs) |
 | **ORM-level cache** | `django-cachalot` (transparent query caching) |
-| **Background Jobs** | Celery 5.5 + Redis broker |
+| **Background Jobs** | Celery 5.6 + Redis broker |
 | **WebSockets** | Django Channels 4.x + `channels-redis` |
 | **Auth** | JWT (RS256 asymmetric) via `djangorestframework-simplejwt` |
 | **Auth extras** | `django-allauth`, `dj-rest-auth` (custom OTP gating) |
 | **Push Notifications** | Firebase Cloud Messaging (`firebase-admin`) |
 | **File Validation** | `python-magic` (MIME-type server-side enforcement) |
-| **Image Processing** | Pillow 11.x |
+| **Image Processing** | Pillow 12.x |
 | **AI / LLM** | OpenAI (`gpt-4o-mini` default) + HuggingFace API |
 | **Nutrition API** | Edamam (cached on Redis DB4) |
 | **Payments** | Stripe + custom gateways (Baraka, Bemo, Syriatel) |
