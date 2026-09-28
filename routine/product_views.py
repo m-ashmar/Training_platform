@@ -501,6 +501,17 @@ class ProductDetailView(APIView):
     a price, so it is the same on every build; prices and `can_buy` differ exactly as
     in the catalogue.
 
+    **The shape of a program: one week, repeated.** A program is ONE week of `days`
+    training days that repeats `weeks` times (`session_count` = `days` x `weeks`;
+    `weeks` null while the trainer has not said): week 2 and every week after it are
+    week 1 again, row for row — the buyer's copy is written that way
+    (`routine/assignment.py`). There are no per-week titles and no week outline, and
+    none is planned (the owner, 2026-09-28; BACKEND_BUGS B-156). Draw «داخل البرنامج»
+    as `weeks` x the repeated week: the preview days are the first days of week 1, and
+    the rest of that week — and so of every week — is locked until bought. The preview
+    is always shorter than the week (`preview_covers_program` refuses a longer one at
+    submission), so a preview never shows the whole program.
+
     | Status | `code` | When |
     |---|---|---|
     | 404 | `not_found` | no such product, or not one the caller may read |

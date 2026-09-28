@@ -991,3 +991,23 @@ def test_the_buy_docstring_says_what_a_concurrent_repeat_answers():
     assert "while the first is still running" in doc
     assert "waits for the first to finish" in doc
     assert "never answers `request_in_flight`" in doc
+
+
+def test_the_detail_says_a_program_is_one_week_repeated(make_user, api):
+    """BACKEND_BUGS B-156 (the owner, 2026-09-28: keep one repeated week, no model
+    change). The detail's contract says the program is week 1 repeated `weeks` times,
+    so the app draws `weeks` x the repeated week with the rest locked; the row carries
+    what that needs. On 554c604 the docstring says nothing of weeks."""
+    import inspect
+
+    from routine.product_views import ProductDetailView
+
+    doc = " ".join((inspect.getdoc(ProductDetailView) or "").split())
+    assert "ONE week of `days` training days that repeats `weeks` times" in doc
+    assert "no per-week titles and no week outline" in doc
+    assert "the rest of that week — and so of every week — is locked" in doc
+
+    _trainer_, _template_, product_id = _published(make_user, api, "weeks1", preview_days=2)
+    one = api(_client(make_user, "weeks1")).get(f"/api/v1/products/{product_id}/").json()
+    assert (one["days"], one["weeks"], one["session_count"]) == (3, 4, 12)
+    assert [day["day"] for day in one["preview"]] == [1, 2], "the first days of week 1"
