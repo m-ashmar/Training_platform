@@ -101,7 +101,9 @@ from .product_models import (
 logger = logging.getLogger(__name__)
 
 #: The longest program a product may sell, in training days — a routine of the buyer's
-#: gets one day per session, and a day costs about five queries to scaffold.
+#: gets one day per session. A limit on what a program may be, no longer on what a sale
+#: costs: the copy and its progress rows are written in bulk, so a purchase runs the
+#: same number of queries whatever the program's length (BACKEND_BUGS B-180).
 MAX_PROGRAM_DAYS = 365
 #: The longest reason an operator may give; the trainer is shown it.
 MAX_REASON = 1000

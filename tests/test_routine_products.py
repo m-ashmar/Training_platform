@@ -1075,3 +1075,58 @@ def test_the_purchased_push_row_says_routine_id_may_be_empty(
     notice = Notification.objects.filter(recipient=buyer,
                                          event_type="routine_product_purchased").latest("id")
     assert notice.metadata["data"]["routine_id"] == ""
+
+
+def test_a_purchase_costs_the_same_queries_whatever_the_programs_length(make_user, api):
+    """BACKEND_BUGS B-180: buying the seeded 4-week x 3-day program ran 148 queries and a
+    12-week x 5-day one 364, inside the sale's transaction: the assignment signal
+    scaffolded each program day with a COUNT and a get_or_create. The cost no longer
+    follows the program's length, and the buyer's copy still has one progress row per
+    program day with its exercise count. On 554c604 the two counts differ by ~200."""
+    from cachalot.api import cachalot_disabled
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from routine import products
+    from routine.models import Exercise, RoutineProgress, RoutineTemplate, RoutineTemplateExercise
+
+    def listed(tag, days, weeks):
+        trainer = _trainer(make_user, tag)
+        template = RoutineTemplate.objects.create(name=f"len {tag}", goal="strength",
+                                                  days=days, weeks=weeks, created_by=trainer)
+        moves = [Exercise.objects.create(name=f"len {tag} {n}", created_by=trainer)
+                 for n in range(6)]
+        RoutineTemplateExercise.objects.bulk_create([
+            RoutineTemplateExercise(template=template, exercise=move, day=day, order=n + 1,
+                                    sets=3, reps=10)
+            for day in range(1, days + 1) for n, move in enumerate(moves)])
+        product = _draft(api, trainer, template)
+        assert api(trainer).post(f"/api/v1/trainer/products/{product['id']}/submit/") \
+            .status_code == 200
+        products.approve(product["id"], _operator(make_user, tag))
+        return product["id"]
+
+    short, long_ = listed("len_short", 3, 4), listed("len_long", 5, 12)
+    # The first sale of a test creates the escrow and revenue wallets and warms the
+    # policy reads; it is not what is measured.
+    warm = listed("len_warm", 2, 1)
+    assert _buy(api, _client(make_user, "len_warm"), warm, key="warm").status_code == 200
+    costs, bought = {}, {}
+    for name, product_id in (("short", short), ("long", long_)):
+        buyer = _client(make_user, f"len_{name}")
+        c = api(buyer)
+        with cachalot_disabled(), CaptureQueriesContext(connection) as queries:
+            resp = c.post(f"/api/v1/products/{product_id}/buy/", {"idempotency_key": name},
+                          content_type=JSON)
+        assert resp.status_code == 200, resp.content
+        costs[name] = len(queries)
+        bought[name] = (buyer, resp.json()["purchase"]["routine_id"])
+
+    assert abs(costs["long"] - costs["short"]) <= 5, costs
+    for name, days in (("short", 12), ("long", 60)):
+        buyer, routine_id = bought[name]
+        rows = RoutineProgress.objects.filter(user=buyer, routine_id=routine_id)
+        assert rows.count() == days, (name, rows.count())
+        assert set(rows.values_list("total_exercises", flat=True)) == {6}
+        assert set(rows.values_list("status", flat=True)) == {"not_started"}
+        assert sorted(rows.values_list("day", flat=True)) == list(range(1, days + 1))

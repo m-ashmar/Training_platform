@@ -632,28 +632,15 @@ class Routine(RowValidationMixin, models.Model):
         return False
 
     def save(self, *args, **kwargs):
-        """Override save to initialize progress for each user and day."""
-        is_new = self.pk is None
         self.validate_row()
         super().save(*args, **kwargs)
-        
-        # Scaffold rows are anchored to the routine's start_date. Actual training
-        # sessions create/update the row for the date they happened on, so a routine
-        # repeated over weeks now accumulates history instead of overwriting it.
-        plan_date = self.start_date or timezone.localdate()
-        if is_new:
-            # Initialize progress for all users
-            for user in self.assigned_to.all():
-                for day in range(1, self.days + 1):
-                    RoutineProgress.objects.get_or_create(
-                        user=user, routine=self, day=day, date=plan_date,
-                        defaults={'status': 'not_started'}
-                    )
-        # NOTE: no scaffolding branch for existing routines. It previously re-ran
-        # get_or_create for every (user x day) on EVERY save — 142 queries just to
-        # rename a routine with 20 clients x 7 days, scaling to ~700 at 100 clients.
-        # New assignments are already scaffolded by the m2m_changed receiver below,
-        # which is the correct trigger.
+        # NOTE: no progress scaffolding here. It re-ran get_or_create for every
+        # (user x day) on EVERY save — 142 queries just to rename a routine with 20
+        # clients x 7 days — and its "new routine" branch read the assignees of a row
+        # that had just been created, which has none: one wasted query per copy
+        # (BACKEND_BUGS B-180). Assignments are scaffolded by the m2m_changed receiver
+        # below (`_scaffold_progress`), anchored to the routine's start_date; actual
+        # training sessions create/update the row for the date they happened on.
 
     def update_progress(self, user, day, status, progress_date=None):
         """Update or create progress for the user, day and calendar date."""
@@ -1734,6 +1721,30 @@ def _recalc_locked(progress_pk, routine_pk=None, day_scope=None):
 
 # --- M2M SIGNAL FOR AUTOMATIC ROUTINEPROGRESS CREATION ---
 
+def _scaffold_progress(routine, user_ids):
+    """One `not_started` RoutineProgress per (user, program day) at the routine's start
+    date, each with its day's exercise count — in TWO queries whatever the program's
+    length: one count of the exercises per day, one INSERT of every row.
+
+    It was a COUNT and a `get_or_create` (SELECT, SAVEPOINT, INSERT, RELEASE) per day
+    per user, so buying a 4-week x 3-day program cost 148 queries and a 12-week x 5-day
+    one 364, all inside the sale's transaction with the product row locked (BACKEND_BUGS
+    B-180). `ignore_conflicts` on the `(user, routine, day, date)` key keeps
+    get_or_create's rule: a row that already exists is never touched. Nothing listens
+    for a RoutineProgress save, so the bulk write skips no receiver."""
+    from django.db.models import Count
+
+    counts = dict(routine.routine_exercises.order_by().values_list('day')
+                  .annotate(n=Count('id')))
+    plan_date = routine.start_date or timezone.localdate()
+    RoutineProgress.objects.bulk_create(
+        [RoutineProgress(user_id=user_id, routine=routine, day=day, date=plan_date,
+                         status='not_started', exercises_completed=0,
+                         total_exercises=counts.get(day, 0))
+         for user_id in sorted(user_ids) for day in range(1, routine.days + 1)],
+        ignore_conflicts=True, batch_size=1000)
+
+
 @receiver(m2m_changed, sender=Routine.assigned_to.through)
 def create_routine_progress_on_assignment(sender, instance, action, pk_set, **kwargs):
     """
@@ -1747,31 +1758,14 @@ def create_routine_progress_on_assignment(sender, instance, action, pk_set, **kw
     (views, admin, shell, etc.).
     """
     if action == 'post_add' and pk_set:
-        from users.models import CustomUser
-        
-        routine = instance
-        
-        # Get newly added users
-        new_users = CustomUser.objects.filter(pk__in=pk_set)
-        
-        for user in new_users:
-            for day in range(1, routine.days + 1):
-                # Get count of exercises for this day
-                exercises_count = routine.routine_exercises.filter(day=day).count()
-                
-                # Create progress record if it doesn't exist
-                RoutineProgress.objects.get_or_create(
-                    user=user,
-                    routine=routine,
-                    day=day,
-                    date=(routine.start_date or timezone.localdate()),
-                    defaults={
-                        'status': 'not_started',
-                        'exercises_completed': 0,
-                        'total_exercises': exercises_count
-                    }
-                )
-    
+        if kwargs.get('reverse'):
+            # `user.assigned_routines.add(...)`: the instance is the user, `pk_set` the
+            # routines. Nothing calls it that way today; it raised AttributeError.
+            for routine in Routine.objects.filter(pk__in=pk_set):
+                _scaffold_progress(routine, [instance.pk])
+        else:
+            _scaffold_progress(instance, pk_set)
+
     elif action == 'post_remove' and pk_set:
         # Optional: Clean up RoutineProgress when users are unassigned
         # Currently keeping progress records for historical data
