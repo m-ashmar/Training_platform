@@ -108,6 +108,8 @@ def handle_routine_product_purchased(event: RoutineProductPurchasedEvent):
         recipient, title = _recipient_and_title(event)
         if recipient is None:
             return
+        # The buyer's copy; "" when none exists any more (FCM data is strings only, so
+        # never null — API_CONTRACT.md §4 says so; BACKEND_BUGS B-170).
         routine_id = (Routine.objects.filter(purchase_id=event.purchase_id)
                       .values_list('pk', flat=True).first())
         NotificationService.create_and_send(

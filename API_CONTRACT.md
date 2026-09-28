@@ -223,7 +223,7 @@ so parse ids client-side.
 | `routine_product_approved` | `product_id` — an operator published the trainer's program (plan step 10). Like every routine-product notice: the fact only, no price, button or link, on every build |
 | `routine_product_rejected` | `product_id`, `reason` — the program went back to draft; `reason` is the operator's words, also in the body |
 | `routine_product_sold` | `product_id`, `purchase_id` — to the trainer; the buyer is never named |
-| `routine_product_purchased` | `product_id`, `purchase_id`, `routine_id` — to the buyer; `routine_id` is their own copy |
+| `routine_product_purchased` | `product_id`, `purchase_id`, `routine_id` — to the buyer; `routine_id` is their own copy, or `""` (empty, never null: push data is strings) when no copy exists any more — then open the program by `product_id` |
 | `routine_product_refunded` | `product_id`, `purchase_id` — to the buyer: the price is back in the wallet and the copy is gone |
 | `routine_product_sale_refunded` | `product_id`, `purchase_id` — to the trainer: a sale was refunded and their share went back |
 | `wallet_topped_up` | `reference_id`, `amount`, `currency` — an agent credited the client's wallet with cash; `reference_id` opens the row (`GET wallet/transactions/{reference_id}/`). Every build: a cash top-up is WALLET_MOVE, and the text names the shop, never the amount (BACKEND_BUGS B-115) |

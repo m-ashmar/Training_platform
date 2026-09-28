@@ -1046,3 +1046,32 @@ def test_the_buyers_ledger_row_names_the_program(make_user, api):
                                reference_id="ledgerp-plain")
     (plain,) = rows(other, "ar")
     assert "product" in plain and plain["product"] is None
+
+
+def test_the_purchased_push_row_says_routine_id_may_be_empty(
+        make_user, api, django_capture_on_commit_callbacks):
+    """BACKEND_BUGS B-170: the push sends `routine_id: ""` when the buyer's copy is not
+    found (FCM data is strings, so never null), and the contract row said only «their
+    own copy». On 554c604 the row does not say so."""
+    import re
+    from pathlib import Path
+
+    from notifications.domain.dispatcher import emit_event
+    from notifications.domain.product_events import RoutineProductPurchasedEvent
+    from notifications.models import Notification
+    from routine.models import Routine
+
+    contract = Path("API_CONTRACT.md").read_text(encoding="utf-8")
+    (row,) = re.findall(r"^\| `routine_product_purchased` \|.*$", contract, re.M)
+    assert '`""`' in row and "no copy exists" in row and "never null" in row, row
+
+    _trainer_, _template_, product_id = _published(make_user, api, "pushrid")
+    buyer = _client(make_user, "pushrid")
+    purchase_id = _buy(api, buyer, product_id).json()["purchase"]["id"]
+    Routine.objects.filter(purchase_id=purchase_id).update(purchase=None)
+    with django_capture_on_commit_callbacks(execute=True):
+        emit_event(RoutineProductPurchasedEvent(recipient_id=buyer.pk, product_id=product_id,
+                                                purchase_id=purchase_id))
+    notice = Notification.objects.filter(recipient=buyer,
+                                         event_type="routine_product_purchased").latest("id")
+    assert notice.metadata["data"]["routine_id"] == ""
