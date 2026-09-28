@@ -5680,8 +5680,15 @@ msgid "What we keep, because the law requires it"
 msgstr "ما نحتفظ به بحكم القانون"
 
 #: legal/templates/legal/delete_account.html
-msgid "Payment and wallet records, without your name."
-msgstr "سجلات المدفوعات والمحفظة، دون اسمك."
+msgid ""
+"Payment, wallet and coaching records, attached to the anonymised account. A "
+"withdrawal keeps the account and the name it was paid to, and a transfer "
+"checked against your payment keeps the sender and the note the payment "
+"service reported."
+msgstr ""
+"سجلات المدفوعات والمحفظة والتدريب، مرتبطةً بالحساب بعد إخفاء هويته. ويحتفظ "
+"كل سحب بالحساب والاسم اللذين دُفع إليهما، وتحتفظ كل حوالة رُوجعت مقابل دفعتك "
+"باسم المرسل والملاحظة كما أبلغت عنهما خدمة الدفع."
 
 #: legal/templates/legal/delete_account.html
 msgid ""

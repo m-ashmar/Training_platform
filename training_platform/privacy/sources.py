@@ -30,6 +30,19 @@ register(PersonalDataSource(
         # beside them say nothing once these are gone, but go too.
         "date_of_birth": None, "injury_areas": [],
         "training_goal": "", "training_place": "", "training_days_per_week": None,
+        # The body measurements and the rest of what the app plans from (SIDE_BUGS
+        # S-213). They stayed on the deactivated row while the deletion page promised
+        # "your measurements" are deleted. `activity_level` has a CHECK that admits only
+        # a declared level, so it goes back to its default with the stamp cleared, which
+        # is how the column says "never asked".
+        "height": None, "weight": None, "age": None, "gender": None,
+        "activity_level": "Sedentary", "activity_level_answered_at": None,
+        "client_preferences": {},
+        # A trainer's professional profile, written by them and shown on the public
+        # directory: an erased trainer is not a card anyone should be able to rebuild.
+        "trainer_bio": None, "trainer_specializations": [], "trainer_certifications": [],
+        "trainer_experience_years": None, "trainer_hourly_rate": None,
+        "trainer_goal_focus": [], "trainer_injury_focus": [], "trainer_training_places": [],
         # The denormalised pointer to the trainer. The relation rows are deleted by the
         # trainer_relations source below; leaving this set would keep the display name
         # of a trainer on an erased account, and leave the two sources of truth
