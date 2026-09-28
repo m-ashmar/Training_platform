@@ -231,27 +231,30 @@ def net_of(price, rate=None):
     return split(Decimal(price), commission_rate() if rate is None else rate)
 
 
-#: How a template's goal reads as one of the closed list (`ProductGoal`), in order: the
-#: first word the lower-cased goal contains decides. TrainerRoutineForm writes the codes
-#: themselves (each contains its own word); the rest is the older free text the app
-#: reads the same way (`ProgramGoal.fromWire`: "Hypertrophy", "Strength"), and the
-#: Arabic. A goal matching none is no goal: the program is listed under «الكل» only.
+#: The closed list's codes, as the template route stores them (TrainerRoutineForm
+#: writes exactly these).
+GOAL_CODES = ("build_muscle", "strength", "fat_loss", "rehab")
+#: How a template goal that is NOT one of the codes reads — the older free text,
+#: exactly as the app reads it (`ProgramGoal.fromWire`: "Hypertrophy", "Strength"), and
+#: the Arabic words: in order, the first word the lower-cased goal contains decides. A
+#: goal matching none is no goal: the program is listed under «الكل» only.
 GOAL_WORDS = (
-    ("build_muscle", "build_muscle"), ("strength", "strength"), ("fat_loss", "fat_loss"),
-    ("rehab", "rehab"),
     ("hyper", "build_muscle"), ("muscle", "build_muscle"), ("عضل", "build_muscle"),
-    ("قوة", "strength"),
+    ("strength", "strength"), ("قوة", "strength"),
     ("fat", "fat_loss"), ("loss", "fat_loss"), ("دهون", "fat_loss"), ("تنحيف", "fat_loss"),
-    ("تأهيل", "rehab"),
+    ("rehab", "rehab"), ("تأهيل", "rehab"),
 )
 
 
 def goal_code(text) -> str | None:
-    """The closed-list goal (`ProductGoal`) a template's free-text `goal` means, or None
-    (`GOAL_WORDS`). `goal_code_expression` is the same reading in SQL."""
+    """The closed-list goal (`ProductGoal`) a template's free-text `goal` means, or None:
+    the code itself (trimmed, any case), else `GOAL_WORDS`. `goal_code_expression` is
+    the same reading in SQL."""
     lowered = (text or "").strip().lower()
     if not lowered:
         return None
+    if lowered in GOAL_CODES:
+        return lowered
     for word, code in GOAL_WORDS:
         if word in lowered:
             return code
@@ -262,14 +265,15 @@ def goal_code_expression(field="source_template__goal"):
     """`goal_code` of `field` as a SQL expression, for a filter on it (`?goal=`)."""
     from django.db.models import Case, CharField, Value, When
     from django.db.models.functions import Lower, StrIndex, Trim
-    from django.db.models.lookups import GreaterThan
+    from django.db.models.lookups import Exact, GreaterThan
 
     lowered = Lower(Trim(field))
-    # "contains" as a position (`StrIndex` > 0), not LIKE: the `_` in `build_muscle`
-    # is a letter here, never a wildcard.
-    return Case(*[When(GreaterThan(StrIndex(lowered, Value(word)), 0), then=Value(code))
-                  for word, code in GOAL_WORDS],
-                default=Value(None), output_field=CharField())
+    exact = [When(Exact(lowered, Value(code)), then=Value(code)) for code in GOAL_CODES]
+    # "contains" as a position (`StrIndex` > 0), not LIKE: no character of a word is
+    # ever a wildcard.
+    contains = [When(GreaterThan(StrIndex(lowered, Value(word)), 0), then=Value(code))
+                for word, code in GOAL_WORDS]
+    return Case(*exact, *contains, default=Value(None), output_field=CharField())
 
 
 def catalogue_for(user):
@@ -930,7 +934,8 @@ def _notify_on_commit(what, product, *, purchase=None, reason="") -> None:
 
 
 __all__ = [
-    "AlreadyOwned", "BUYERS_SHOWN_FROM", "CHECKOUT_KEY_PREFIX", "CheckoutOpen", "GOAL_WORDS",
+    "AlreadyOwned", "BUYERS_SHOWN_FROM", "CHECKOUT_KEY_PREFIX", "CheckoutOpen", "GOAL_CODES",
+    "GOAL_WORDS",
     "IdempotencyKeyReused", "MAX_PREVIEW_DAYS",
     "MAX_PROGRAM_DAYS", "PreviewCoversProgram", "ProductAlreadyRetired", "ProductIncomplete",
     "ProductNotEditable", "ProductNotForSale", "ProductNotSubmittable", "ProductRefusal",

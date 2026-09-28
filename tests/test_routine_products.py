@@ -931,6 +931,33 @@ def test_the_catalogue_carries_goal_and_filters_by_goal_and_search(make_user, ap
         assert (refused.status_code, refused.json().get("code")) == (400, code), query
 
 
+def test_the_goal_reads_the_same_in_python_and_in_sql(make_user):
+    """B-153: the row's `goal` (`goal_code`) and the `?goal=` filter
+    (`goal_code_expression`) are one reading — the codes themselves, then the older
+    free text as the app reads it (`ProgramGoal.fromWire`), then the Arabic."""
+    from routine.models import RoutineTemplate
+    from routine.products import goal_code, goal_code_expression
+
+    trainer = _trainer(make_user, "goalsql")
+    expected = {
+        "build_muscle": "build_muscle", " Fat_Loss ": "fat_loss", "rehab": "rehab",
+        "strength": "strength", "Hypertrophy": "build_muscle",
+        "Strength & muscle": "build_muscle", "Fat burn": "fat_loss",
+        "Weight loss": "fat_loss", "Knee rehab": "rehab", "بناء عضل": "build_muscle",
+        "قوة": "strength", "خسارة دهون": "fat_loss", "تأهيل الكتف": "rehab",
+        "Endurance": None, "x_y": None,
+    }
+    assert goal_code("") is None and goal_code(None) is None
+    ids = {RoutineTemplate.objects.create(name=f"gs {n}", goal=text, days=1,
+                                          created_by=trainer).pk: text
+           for n, text in enumerate(expected)}
+    in_sql = dict(RoutineTemplate.objects.filter(pk__in=ids)
+                  .annotate(code=goal_code_expression("goal")).values_list("pk", "code"))
+    for pk, text in ids.items():
+        assert goal_code(text) == expected[text], text
+        assert in_sql[pk] == expected[text], text
+
+
 def test_the_trainer_sets_a_place_on_the_draft(make_user, api):
     """B-153: the place is set on the product form (the owner, 2026-09-28)."""
     trainer = _trainer(make_user, "place")
