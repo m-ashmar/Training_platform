@@ -711,8 +711,8 @@ register(PersonalDataSource(label="coaching_periods", model="users.CoachingPerio
 register(PersonalDataSource(
     label="routine_products", model="routine.RoutineProduct", user_field="trainer",
     fields=["id", "title_ar", "title_en", "description_ar", "description_en", "price",
-            "currency", "preview_days", "status", "review_decision", "review_reason",
-            "submitted_at", "published_at", "retired_at", "created_at"],
+            "currency", "preview_days", "place", "status", "review_decision",
+            "review_reason", "submitted_at", "published_at", "retired_at", "created_at"],
     on_erase="keep",
     purpose=("Routines a trainer lists for sale: title, description, price, cover, review "
              "state. Kept, because buyers own copies."),

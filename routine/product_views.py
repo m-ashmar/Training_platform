@@ -36,7 +36,9 @@ from policy.services import require_purchase_allowed
 from wallet.throttles import ChargingRateThrottle
 
 from . import products
-from .product_models import ProductStatus, PurchaseStatus, RoutineProduct, RoutinePurchase
+from .product_models import (
+    ProductGoal, ProductPlace, ProductStatus, PurchaseStatus, RoutineProduct, RoutinePurchase,
+)
 from .product_serializers import (
     BuySerializer, CatalogueProductSerializer, TrainerProductSerializer,
     TrainerProductWriteSerializer, build_may_buy, build_may_show_price,
@@ -137,8 +139,10 @@ class TrainerProductsView(APIView):
     A `product`: `id`, `status` (`draft` | `in_review` | `published` | `retired`),
     `on_sale` (published, its template unchanged since the review, and you still
     verified), `template_changed`, `title_ar`, `title_en`, `description_ar`,
-    `description_en`, `preview_days`, `template` (`{id, name, days, weeks,
-    session_count, program_days}` or null), `cover` (`{asset_id, slot, url_1x, url_2x,
+    `description_en`, `preview_days`, `goal` (the template's goal as one of the closed
+    list `build_muscle` | `strength` | `fat_loss` | `rehab`, or null when it is none of
+    them), `place` (`home` | `gym`, or null while not said), `template` (`{id, name,
+    days, weeks, session_count, program_days}` or null), `cover` (`{asset_id, slot, url_1x, url_2x,
     blur, focal, brightness, alt_ar, alt_en}` or null), `price`, `currency`,
     `net_price` (the price less today's commission: the form's «صافي لك بعد العمولة»),
     `commission_rate`, `sales_count`, `gross`, `gross_currency`, `net`,
@@ -150,7 +154,9 @@ class TrainerProductsView(APIView):
     templates), and optionally `title_ar`, `title_en` (≤120), `description_ar`,
     `description_en` (≤2000), `price` (0.01 – 10,000,000, in your currency — the server
     sets `currency`), `preview_days` (0-7), `cover_asset_id` (a picture in your media
-    kit, or null). 201 with the product.
+    kit, or null), `place` (`home` | `gym` — where the program is trained, the
+    catalogue's «في المنزل» chip — or `""` / null for not said). A program's goal is
+    its template's (`goal` on the template route). 201 with the product.
 
     **Differs by build.** A build that may not show a price (`can_show_prices` off:
     `play`, `ios`; or no `X-App-Channel`) is not sent `price`, `currency` or
@@ -161,7 +167,7 @@ class TrainerProductsView(APIView):
 
     | Status | `code` | When |
     |---|---|---|
-    | 400 | `validation_error` | a field is malformed; `field_errors.<field>[0].code` is `required` (`source_template_id`), `template_not_yours`, `price_out_of_range`, `preview_days_out_of_range`, `cover_not_yours`, or DRF's own (`max_length`, `invalid`, `max_decimal_places`, ...) |
+    | 400 | `validation_error` | a field is malformed; `field_errors.<field>[0].code` is `required` (`source_template_id`), `template_not_yours`, `price_out_of_range`, `preview_days_out_of_range`, `cover_not_yours`, `bad_place`, or DRF's own (`max_length`, `invalid`, `max_decimal_places`, ...) |
     | 400 | `app_channel_required` | a `price` was sent with no `X-App-Channel` |
     | 403 | `not_a_trainer` | the caller is not a trainer |
     | 403 | `not_available_on_channel` | a `price` was sent from a build that may not show one |
@@ -340,6 +346,24 @@ class TrainerProductRetireView(APIView):
                                                  context=_trainer_context(request)).data)
 
 
+def _searched(queryset, search):
+    """`queryset` narrowed to the programs whose title or description (either
+    language), or whose trainer's name, contains `search` (`ProductCatalogueView`)."""
+    from django.db.models import Value
+    from django.db.models.functions import Concat
+
+    return (queryset
+            .annotate(trainer_full_name=Concat("trainer__first_name", Value(" "),
+                                               "trainer__last_name"))
+            .filter(Q(title_ar__icontains=search) | Q(title_en__icontains=search)
+                    | Q(description_ar__icontains=search)
+                    | Q(description_en__icontains=search)
+                    | Q(trainer__first_name__icontains=search)
+                    | Q(trainer__last_name__icontains=search)
+                    | Q(trainer_full_name__icontains=search)
+                    | Q(trainer__username__icontains=search)))
+
+
 def _buyer_context(request, product_list, **extra):
     """What every product on the page needs, read once: which of them the reader owns
     (and their copies), the reader's currency and — only when some price has to cross
@@ -369,20 +393,38 @@ def _buyer_context(request, product_list, **extra):
     return context
 
 
+#: The longest `?search=` the catalogue reads; the rest is ignored.
+MAX_SEARCH = 100
+
+
 class ProductCatalogueView(APIView):
     """`GET /api/v1/products/` — the programs for sale. Signed-in callers, any role.
 
-    Paginated (`?page`, `?page_size` up to 100), newest listing first; `?trainer_id=`
-    narrows to one trainer. Lists products that are published and still backed by the
-    version of the program their review saw, by a trainer who is still verified (an
-    operator's revocation takes their products off sale), publicly visible, and has
-    not blocked (or been blocked by) the caller.
+    Paginated (`?page`, `?page_size` up to 100), newest listing first. Lists products
+    that are published and still backed by the version of the program their review
+    saw, by a trainer who is still verified (an operator's revocation takes their
+    products off sale), publicly visible, and has not blocked (or been blocked by) the
+    caller. Filters, each optional and combined with AND (BACKEND_BUGS B-153):
+
+    * `?trainer_id=` — one trainer's programs.
+    * `?goal=` — one of the closed list `build_muscle` | `strength` | `fat_loss` |
+      `rehab`: the programs whose `goal` is it (the chips «بناء عضل», «خسارة دهون»,
+      «تأهيل»).
+    * `?place=` — `home` | `gym`: the programs the trainer said are trained there (the
+      chip «في المنزل» is `?place=home`). A program whose trainer has not said is in
+      neither.
+    * `?search=` — words the program's title or description (either language), or its
+      trainer's first name, last name, full name or username, contain (case-insensitive).
+      Read up to its first 100 characters; blank is no filter.
 
     A row: `id`, `title` / `description` (in the request's language, the other one
     when that is empty), `title_ar`, `title_en`, `description_ar`, `description_en`,
     `trainer` (`{id, name}`), `days` (training days a week), `weeks`,
     `session_count` (`days` x `weeks`, null while the trainer has not said),
-    `preview_days`, `cover` (as the trainer's route, or null), `owned`, `routine_id`
+    `preview_days`, `goal` (one of the closed list above, read from the program's
+    template; null when the template's goal is none of them — such a program is only
+    under «الكل»), `place` (`home` | `gym`, or null while the trainer has not said),
+    `cover` (as the trainer's route, or null), `owned`, `routine_id`
     (the caller's copy when `owned`), `can_buy`, `published_at`; and on a build that
     may show a price: `price` and `currency` IN THE READER'S CURRENCY, with
     `price_converted`, `exchange_rate`, `price_of_record`, `price_of_record_currency`
@@ -390,11 +432,15 @@ class ProductCatalogueView(APIView):
 
     **Differs by build.** `play`, `ios` or no channel: no price key at all, and
     `can_buy` is false — the spec's "not sold in app": no price beside a call to
-    action. Listing and reading work everywhere; buying only on `apk` and `web`.
+    action. Listing, filtering and reading work everywhere; buying only on `apk` and
+    `web`.
 
     | Status | `code` | When |
     |---|---|---|
     | 400 | `bad_trainer_id` | `trainer_id` is not a whole number |
+    | 400 | `bad_goal` | `goal` is not one of `build_muscle`, `strength`, `fat_loss`, `rehab` |
+    | 400 | `bad_place` | `place` is not `home` or `gym` |
+    | 400 | `bad_search` | `search` holds a NUL character |
     | 400 | `validation_error` | a bad `page` / `page_size` (`field_errors`) |
     """
     permission_classes = [IsAuthenticated]
@@ -412,6 +458,25 @@ class ProductCatalogueView(APIView):
             except ValueError:
                 return _refusal(_("trainer_id must be a whole number."), "bad_trainer_id",
                                 status.HTTP_400_BAD_REQUEST)
+        goal = (request.query_params.get("goal") or "").strip()
+        if goal:
+            if goal not in ProductGoal.values:
+                return _refusal(_("goal must be one of build_muscle, strength, fat_loss, "
+                                  "rehab."), "bad_goal", status.HTTP_400_BAD_REQUEST)
+            queryset = (queryset.annotate(goal_code=products.goal_code_expression())
+                        .filter(goal_code=goal))
+        place = (request.query_params.get("place") or "").strip()
+        if place:
+            if place not in ProductPlace.values:
+                return _refusal(_("place must be home or gym."), "bad_place",
+                                status.HTTP_400_BAD_REQUEST)
+            queryset = queryset.filter(place=place)
+        search = (request.query_params.get("search") or "").strip()[:MAX_SEARCH].strip()
+        if "\x00" in search:
+            return _refusal(_("The search holds a character that cannot be searched for."),
+                            "bad_search", status.HTTP_400_BAD_REQUEST)
+        if search:
+            queryset = _searched(queryset, search)
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
         page = list(page or [])

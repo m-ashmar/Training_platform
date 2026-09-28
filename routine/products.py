@@ -200,6 +200,47 @@ def net_of(price, rate=None):
     return split(Decimal(price), commission_rate() if rate is None else rate)
 
 
+#: How a template's goal reads as one of the closed list (`ProductGoal`), in order: the
+#: first word the lower-cased goal contains decides. TrainerRoutineForm writes the codes
+#: themselves (each contains its own word); the rest is the older free text the app
+#: reads the same way (`ProgramGoal.fromWire`: "Hypertrophy", "Strength"), and the
+#: Arabic. A goal matching none is no goal: the program is listed under «الكل» only.
+GOAL_WORDS = (
+    ("build_muscle", "build_muscle"), ("strength", "strength"), ("fat_loss", "fat_loss"),
+    ("rehab", "rehab"),
+    ("hyper", "build_muscle"), ("muscle", "build_muscle"), ("عضل", "build_muscle"),
+    ("قوة", "strength"),
+    ("fat", "fat_loss"), ("loss", "fat_loss"), ("دهون", "fat_loss"), ("تنحيف", "fat_loss"),
+    ("تأهيل", "rehab"),
+)
+
+
+def goal_code(text) -> str | None:
+    """The closed-list goal (`ProductGoal`) a template's free-text `goal` means, or None
+    (`GOAL_WORDS`). `goal_code_expression` is the same reading in SQL."""
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return None
+    for word, code in GOAL_WORDS:
+        if word in lowered:
+            return code
+    return None
+
+
+def goal_code_expression(field="source_template__goal"):
+    """`goal_code` of `field` as a SQL expression, for a filter on it (`?goal=`)."""
+    from django.db.models import Case, CharField, Value, When
+    from django.db.models.functions import Lower, StrIndex, Trim
+    from django.db.models.lookups import GreaterThan
+
+    lowered = Lower(Trim(field))
+    # "contains" as a position (`StrIndex` > 0), not LIKE: the `_` in `build_muscle`
+    # is a letter here, never a wildcard.
+    return Case(*[When(GreaterThan(StrIndex(lowered, Value(word)), 0), then=Value(code))
+                  for word, code in GOAL_WORDS],
+                default=Value(None), output_field=CharField())
+
+
 def catalogue_for(user):
     """The products `user` may be offered: published, still backed by the template
     version their review saw, by a trainer who is still verified (`is_on_sale`),
@@ -858,11 +899,13 @@ def _notify_on_commit(what, product, *, purchase=None, reason="") -> None:
 
 
 __all__ = [
-    "AlreadyOwned", "CheckoutOpen", "IdempotencyKeyReused", "MAX_PREVIEW_DAYS",
+    "AlreadyOwned", "CHECKOUT_KEY_PREFIX", "CheckoutOpen", "GOAL_WORDS",
+    "IdempotencyKeyReused", "MAX_PREVIEW_DAYS",
     "MAX_PROGRAM_DAYS", "PreviewCoversProgram", "ProductAlreadyRetired", "ProductIncomplete",
     "ProductNotEditable", "ProductNotForSale", "ProductNotSubmittable", "ProductRefusal",
     "ProgramTooLong", "ReviewConflict", "TrainerNotVerified", "approve", "buy",
-    "catalogue_for", "checkout_refusal", "checkout_terms", "grant_checkout",
+    "catalogue_for", "checkout_refusal", "checkout_terms", "goal_code",
+    "goal_code_expression", "grant_checkout",
     "lock_for_checkout", "net_of", "open_checkout_for", "owned_purchase", "preview_of",
     "program_days", "refund", "refund_checkout", "reject", "retire", "submit",
     "visible_product",

@@ -866,3 +866,82 @@ def test_a_template_answers_its_weeks_and_its_session_count(make_user, api):
     listed = api(trainer).get("/api/routine/templates/my_templates/").json()["results"]
     row = next(r for r in listed if r["id"] == made.json()["id"])
     assert (row["days"], row["weeks"], row["session_count"]) == (3, 4, 12)
+
+
+# ============================================================ wave 1 (2026-09-28)
+def _listed_with_goal(make_user, api, tag, goal, **fields):
+    """A published product whose template's goal is `goal` (the template route's free
+    text: the app's code, or older words)."""
+    from routine import products
+    from routine.models import RoutineTemplate
+
+    trainer = _trainer(make_user, tag)
+    template = _template(trainer, tag)
+    RoutineTemplate.objects.filter(pk=template.pk).update(goal=goal)
+    product = _draft(api, trainer, template, **fields)
+    submitted = api(trainer).post(f"/api/v1/trainer/products/{product['id']}/submit/")
+    assert submitted.status_code == 200, submitted.content
+    products.approve(product["id"], _operator(make_user, tag))
+    return trainer, product["id"]
+
+
+def test_the_catalogue_carries_goal_and_filters_by_goal_and_search(make_user, api):
+    """BACKEND_BUGS B-153 (the owner, 2026-09-28): a closed goal list read from the
+    template, a place set on the product form, and `?goal=`, `?place=`, `?search=`.
+    On 554c604 a row carries neither key and every filter answers every row."""
+    _t1, rehab = _listed_with_goal(make_user, api, "g_rehab", "rehab", place="home",
+                                   title_en="Knee rehab at home", title_ar="تأهيل الركبة")
+    _t2, muscle = _listed_with_goal(make_user, api, "g_muscle", "build_muscle", place="gym",
+                                    title_en="Bench builder", title_ar="باني الصدر")
+    _t3, legacy = _listed_with_goal(make_user, api, "g_legacy", "Hypertrophy",
+                                    title_en="Classic split", title_ar="تقسيم كلاسيكي")
+    _t4, other = _listed_with_goal(make_user, api, "g_other", "Endurance",
+                                   title_en="Long runs", title_ar="جري طويل")
+    buyer = _client(make_user, "g_buyer")
+    c = api(buyer)
+
+    def ids(query=""):
+        resp = c.get(f"/api/v1/products/{query}")
+        assert resp.status_code == 200, resp.content
+        return {row["id"]: row for row in resp.json()["results"]}
+
+    rows = ids()
+    assert {pk: (row.get("goal"), row.get("place")) for pk, row in rows.items()} == {
+        rehab: ("rehab", "home"), muscle: ("build_muscle", "gym"),
+        legacy: ("build_muscle", None), other: (None, None)}
+    assert {"goal", "place"} <= set(rows[other])
+    detail = c.get(f"/api/v1/products/{rehab}/").json()
+    assert (detail.get("goal"), detail.get("place")) == ("rehab", "home")
+
+    assert set(ids("?goal=rehab")) == {rehab}
+    assert set(ids("?goal=build_muscle")) == {muscle, legacy}
+    assert set(ids("?goal=strength")) == set()
+    assert set(ids("?place=home")) == {rehab}
+    assert set(ids("?place=gym&goal=build_muscle")) == {muscle}
+    assert set(ids("?search=bench")) == {muscle}
+    assert set(ids("?search=الركبة")) == {rehab}
+    assert set(ids("?search=Rami Haddad")) == set(rows), "the trainer's full name"
+    assert set(ids("?search=%20%20")) == set(rows), "blank is no filter"
+    assert set(ids("?search=bench" + "%20" * 96 + "zzz")) == {muscle}, \
+        "read up to its first 100 characters"
+
+    for query, code in (("?goal=home", "bad_goal"), ("?goal=Rehab", "bad_goal"),
+                        ("?place=roof", "bad_place"), ("?search=a%00b", "bad_search")):
+        refused = c.get(f"/api/v1/products/{query}")
+        assert (refused.status_code, refused.json().get("code")) == (400, code), query
+
+
+def test_the_trainer_sets_a_place_on_the_draft(make_user, api):
+    """B-153: the place is set on the product form (the owner, 2026-09-28)."""
+    trainer = _trainer(make_user, "place")
+    template = _template(trainer, "place")
+    product = _draft(api, trainer, template, place="home")
+    assert (product.get("place"), product.get("goal")) == ("home", "rehab")
+    url = f"/api/v1/trainer/products/{product['id']}/"
+    bad = api(trainer).patch(url, {"place": "beach"}, content_type=JSON)
+    assert bad.status_code == 400, bad.content
+    assert bad.json()["field_errors"]["place"][0]["code"] == "bad_place"
+    cleared = api(trainer).patch(url, {"place": None}, content_type=JSON)
+    assert (cleared.status_code, cleared.json()["place"]) == (200, None)
+    gym = api(trainer).patch(url, {"place": "gym"}, content_type=JSON)
+    assert gym.json()["place"] == "gym"

@@ -19,7 +19,7 @@ from rest_framework import serializers
 from policy.money import MoneyType
 from wallet.exchange import READ_THE_RATE
 
-from .product_models import MAX_PREVIEW_DAYS, MAX_PRICE, RoutineProduct
+from .product_models import MAX_PREVIEW_DAYS, MAX_PRICE, ProductPlace, RoutineProduct
 
 #: The keys the trainer's own product carries only on a build that may show a price:
 #: the price they set and its net. (A buyer's product is given its price keys —
@@ -77,6 +77,16 @@ def _money(value):
     return None if value is None else str(Decimal(value).quantize(Decimal("0.01")))
 
 
+def _goal(product):
+    """The program's goal from the closed list (`ProductGoal`: `build_muscle`,
+    `strength`, `fat_loss`, `rehab`), read from its template's goal
+    (`routine.products.goal_code`), or None when that says none of them."""
+    from .products import goal_code
+
+    template = product.source_template
+    return goal_code(template.goal) if template is not None else None
+
+
 class TrainerProductSerializer(serializers.Serializer):
     """The trainer's own product (TrainerProducts, TrainerProductForm).
 
@@ -107,6 +117,8 @@ class TrainerProductSerializer(serializers.Serializer):
             "description_ar": product.description_ar,
             "description_en": product.description_en,
             "preview_days": product.preview_days,
+            "goal": _goal(product),
+            "place": product.place or None,
             "template": _template(product),
             "cover": _cover(product, request),
             "price": _money(product.price),
@@ -161,6 +173,8 @@ class CatalogueProductSerializer(serializers.Serializer):
             "weeks": template.weeks if template else None,
             "session_count": template.session_count if template else None,
             "preview_days": product.preview_days,
+            "goal": _goal(product),
+            "place": product.place or None,
             "cover": _cover(product, request),
             "owned": product.pk in owned,
             "routine_id": owned.get(product.pk),
@@ -200,9 +214,10 @@ class BuySerializer(serializers.Serializer):
 
 class TrainerProductWriteSerializer(serializers.Serializer):
     """The trainer's draft. Every field optional on an edit; `source_template_id` is
-    required to create one. Field codes (`field_errors.<field>[0].code`):
-    `template_not_yours`, `price_out_of_range`, `preview_days_out_of_range`,
-    `cover_not_yours`, and DRF's own (`required`, `max_length`, `invalid`, ...)."""
+    required to create one. `place` is `home`, `gym`, or `""` / null for "not said".
+    Field codes (`field_errors.<field>[0].code`): `template_not_yours`,
+    `price_out_of_range`, `preview_days_out_of_range`, `cover_not_yours`, `bad_place`,
+    and DRF's own (`required`, `max_length`, `invalid`, ...)."""
     source_template_id = serializers.IntegerField(required=False)
     title_ar = serializers.CharField(max_length=120, required=False, allow_blank=True)
     title_en = serializers.CharField(max_length=120, required=False, allow_blank=True)
@@ -212,6 +227,8 @@ class TrainerProductWriteSerializer(serializers.Serializer):
                                      allow_null=True)
     preview_days = serializers.IntegerField(required=False)
     cover_asset_id = serializers.IntegerField(required=False, allow_null=True)
+    place = serializers.CharField(max_length=16, required=False, allow_blank=True,
+                                  allow_null=True)
 
     def _trainer(self):
         return self.context["request"].user
@@ -245,6 +262,13 @@ class TrainerProductWriteSerializer(serializers.Serializer):
                 code="preview_days_out_of_range")
         return value
 
+    def validate_place(self, value):
+        value = (value or "").strip()
+        if value and value not in ProductPlace.values:
+            raise serializers.ValidationError(
+                _("Choose where the program is trained: home or gym."), code="bad_place")
+        return value
+
     def validate_cover_asset_id(self, value):
         from mediakit.models import MediaAsset
         from mediakit.slots import IMAGE
@@ -263,7 +287,7 @@ class TrainerProductWriteSerializer(serializers.Serializer):
         if "source_template_id" in data:
             product.source_template = data["source_template_id"]
         for name in ("title_ar", "title_en", "description_ar", "description_en", "price",
-                     "preview_days"):
+                     "preview_days", "place"):
             if name in data:
                 value = data[name]
                 setattr(product, name, value.strip() if isinstance(value, str) else value)
