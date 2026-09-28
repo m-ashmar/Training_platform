@@ -609,7 +609,9 @@ class TrainerProfileView(APIView):
     `GET` 200: the profile (`TrainerProfileSerializer`), including the read-only
     `verification_status` (`not_started` | `pending` | `rejected` | `verified`; the
     application itself is `GET /api/v1/trainer/verification/`). `POST` (JSON or
-    multipart, a partial update of the writable fields) 200 `{message}`.
+    multipart, a partial update of the writable fields) 200: the saved profile, read
+    back from the database in the shape `GET` answers, plus `message` (additive,
+    BACKEND_BUGS B-173; it answered `{message}` alone before).
 
     | status | `code` | when |
     |---|---|---|
@@ -637,7 +639,12 @@ class TrainerProfileView(APIView):
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        return Response({'message': _('Trainer profile updated successfully!')}, status=status.HTTP_200_OK)
+        # Read back what was stored and answer it as GET does, so the app needs no
+        # second request to see it (BACKEND_BUGS B-173, as `user/update/` does, B-057).
+        request.user.refresh_from_db()
+        saved = TrainerProfileSerializer(request.user).data
+        return Response({**saved, 'message': _('Trainer profile updated successfully!')},
+                        status=status.HTTP_200_OK)
 
 class TrainerClientsView(APIView):
     """GET /api/auth/trainer/clients/ — the clients assigned to this trainer.
