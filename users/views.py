@@ -2173,6 +2173,11 @@ class ClientPendingTrainerInvitesView(APIView):
     `agreed_currency` names the trainer's currency. Both null on a build that may not
     show a coaching fee.
 
+    Additive (BACKEND_BUGS B-165): `trainer_is_verified` (bool — the platform verified
+    the trainer's documents; the name the other trainer payloads use) and
+    `trainer_profile_picture` (a URL, or null when the trainer has no picture). No
+    gender: the owner decided (2026-09-28) that no payload exposes a trainer's gender.
+
     An invitation from a trainer whose account is suspended or erased is not listed
     (the owner's decision 8, 2026-09-24: a suspended trainer is never offered; accepting
     one answered 409 `trainer_unavailable` anyway). It is listed again if the account is
@@ -2184,6 +2189,8 @@ class ClientPendingTrainerInvitesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from training_platform.media_storage import media_url
+
         from .models import TrainerClientRelation
         from .visibility import public_q
 
@@ -2209,6 +2216,10 @@ class ClientPendingTrainerInvitesView(APIView):
             # The trainer's note with this invitation (B-093); every row here is one
             # the trainer sent, so the row's note is theirs.
             'note': '' if r.trainer_id in blocked else r.client_note,
+            # The Invitations card's «مدرب موثّق» / «غير موثّق بعد» and its picture
+            # (B-165), from the trainer row already joined: no query per row.
+            'trainer_is_verified': bool(r.trainer.trainer_is_verified),
+            'trainer_profile_picture': media_url(r.trainer.profile_picture, request) or None,
         } for r in rows]})
 
 
