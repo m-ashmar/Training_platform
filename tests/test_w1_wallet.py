@@ -90,3 +90,49 @@ def test_s237_no_leg_of_a_program_sale_is_reversed_on_its_own(
     assert sale.status == "refunded"
     assert Transaction.objects.filter(metadata__purchase_id=sale.pk,
                                       tx_type="reversal").count() == 3
+
+
+# ===========================================================================
+# B-145: one agent, one device — ensure/ from another phone is refused
+# ===========================================================================
+
+def test_b145_ensure_from_another_phone_is_refused_and_create_moves_the_key(make_user, api):
+    """ensure/ recorded a device name only on a key that had none, so a second phone
+    was answered "already paired" and shown the first phone's name. The owner
+    (2026-09-28): another device is refused with `key_paired_elsewhere`, naming the
+    device the key is on; `create/` moves the key on purpose."""
+    from wallet.models import AgentAPIKey, ensure_agent_profile
+
+    agent = make_user("w1b145_a", user_type="agent")
+    profile = ensure_agent_profile(agent)
+    ensure = "/api/wallet/agent/apikey/ensure/"
+
+    first = api(agent).post(ensure, {"device_name": "Samsung A54"}, content_type=JSON)
+    assert first.status_code == 201, first.content
+    key = AgentAPIKey.objects.get(agent=profile, is_active=True)
+
+    other = api(agent).post(ensure, {"device_name": "iPhone 15"}, content_type=JSON)
+    assert _code(other) == (409, "key_paired_elsewhere"), other.content
+    assert other.json()["device_name"] == "Samsung A54"
+    assert other.json()["fingerprint"] == first.json()["fingerprint"]
+    assert other.json()["paired_at"] == first.json()["paired_at"]
+    status = api(agent).get("/api/wallet/agent/apikey/status/").json()
+    assert (status["key_id"], status["device_name"]) == (key.key_id, "Samsung A54")
+    assert AgentAPIKey.objects.filter(agent=profile, is_active=True).count() == 1
+
+    # The paired phone, or a caller that names no device, is answered as before.
+    same = api(agent).post(ensure, {"device_name": "samsung a54"}, content_type=JSON)
+    assert (same.status_code, same.json()["created"], same.json()["key_id"]) == \
+        (200, False, key.key_id)
+    bare = api(agent).post(ensure, {}, content_type=JSON)
+    assert (bare.status_code, bare.json()["key_id"]) == (200, key.key_id)
+
+    # Moving the key is create/, on purpose; then the new phone is the paired one.
+    moved = api(agent).post("/api/wallet/agent/apikey/create/",
+                            {"device_name": "iPhone 15"}, content_type=JSON)
+    assert moved.status_code == 201, moved.content
+    again = api(agent).post(ensure, {"device_name": "iPhone 15"}, content_type=JSON)
+    assert (again.status_code, again.json()["key_id"], again.json()["device_name"]) == \
+        (200, moved.json()["key_id"], "iPhone 15")
+    assert _code(api(agent).post(ensure, {"device_name": "Samsung A54"},
+                                 content_type=JSON)) == (409, "key_paired_elsewhere")

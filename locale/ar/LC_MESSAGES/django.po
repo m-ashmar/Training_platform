@@ -5894,3 +5894,11 @@ msgid ""
 msgstr ""
 "هذه إحدى حركات بيع برنامج ولا يمكن عكسها وحدها. استرجع ثمن الشراء بدلًا من "
 "ذلك."
+
+#. ensure/ from a phone other than the one the agent's signing key is paired on
+#. (`key_paired_elsewhere`, BACKEND_BUGS B-145): «جدّد المفتاح» moves it.
+#: wallet/views.py
+msgid ""
+"Your signing key is paired with another device. Pair this device to move the key "
+"to it."
+msgstr "مفتاح التوقيع لديك مقترن بجهاز آخر. اقرن هذا الجهاز لنقل المفتاح إليه."

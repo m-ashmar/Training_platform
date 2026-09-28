@@ -1237,7 +1237,7 @@ class AgentApiKeyStatusView(APIView):
 class AgentApiKeyEnsureView(APIView):
     """`POST /api/wallet/agent/apikey/ensure/` — make sure the agent has an active key.
 
-    Body (optional): `device_name`, recorded on a key that has none yet.
+    Body (optional): `device_name` — the device asking ("Samsung A54").
 
     201 `{created: true, key_id, fingerprint, device_name, paired_at}` when it made one
     (the secret stays server-side, encrypted, for the app's top-ups the server signs);
@@ -1246,8 +1246,17 @@ class AgentApiKeyEnsureView(APIView):
     the docstring promised `key_id` and the code answered only `created`. Making a key
     after `revoke/` lets top-ups resume.
 
-    Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent.
-    Identical on every build.
+    ONE AGENT, ONE DEVICE (BACKEND_BUGS B-145; the owner, 2026-09-28). The active key
+    belongs to the device it was paired on. A `device_name` is recorded on an active key
+    that has none yet; the same name (case aside) or no name at all is answered 200 as
+    above; a DIFFERENT name is another phone asking, and it is refused, never relabelled
+    and never told it is paired: 409 `key_paired_elsewhere` with `device_name` (the
+    device the key is paired on), `fingerprint` and `paired_at`. Nothing changes. The
+    agent moves the key on purpose with `create/` (AgentKey «جدّد المفتاح»), which pairs
+    the asking device and deactivates the old key.
+
+    Refusals: 401 (the framework's), 403 `agents_only` — the caller is not an agent;
+    409 `key_paired_elsewhere`. Identical on every build.
     """
     permission_classes = [IsAuthenticated, IsAgent]
 
@@ -1267,6 +1276,20 @@ class AgentApiKeyEnsureView(APIView):
             elif device_name and not api_key.device_name:
                 AgentAPIKey.objects.filter(pk=api_key.pk).update(device_name=device_name)
                 api_key.device_name = device_name
+            elif (device_name
+                  and device_name.casefold() != api_key.device_name.strip().casefold()):
+                # Another phone (B-145): refused, and nothing changes.
+                paired = agents.key_body(api_key)
+                audit("wallet.agent.apikey.ensure_refused", request,
+                      {"key_id": api_key.key_id})
+                return Response(
+                    {"error": _("Your signing key is paired with another device. Pair "
+                                "this device to move the key to it."),
+                     "code": "key_paired_elsewhere",
+                     "device_name": paired["device_name"],
+                     "fingerprint": paired["fingerprint"],
+                     "paired_at": paired["paired_at"]},
+                    status=status.HTTP_409_CONFLICT)
         body = agents.key_body(api_key)
         body.pop("last_signature_at")
         if created:

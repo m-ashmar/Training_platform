@@ -2027,7 +2027,10 @@ field and code; in short:
   `revoked_at`, `topups_stopped`; `POST apikey/revoke/` deactivates the key without a
   replacement and stops the app's top-ups (`403 agent_key_revoked`) until a new key is
   paired. The signed endpoint refuses a key that is not the caller's (`401
-  agent_auth_invalid`).
+  agent_auth_invalid`). One agent, one device (BACKEND_BUGS B-145, the owner
+  2026-09-28): `ensure/` with a `device_name` other than the active key's is `409
+  key_paired_elsewhere` with `device_name` (the device the key is on), `fingerprint`
+  and `paired_at`, and nothing changes; `create/` moves the key on purpose.
 - A top-up to a suspended or erased account answers `404 not_found`, exactly as a
   missing one (`users.visibility`).
 
