@@ -72,9 +72,11 @@ and S-245 came from the gate itself.
    renamed plan), S-212, S-213; B-172 (sign-up refused `content_not_allowed` on the
    username allauth derives from the e-mail), B-167 (a routine-product buyer gets 404 on
    `payments/{id}/` and the receipt: the views filter `subscription__user`, the payment
-   has `buyer`; same root as S-240), B-164, B-175 (home's program card names no routine).
+   has `buyer`; same root as S-240), B-164, B-175 (home's program card names no routine),
+   B-182 (home sends two heroes to a programme buyer), and every P1 the app sessions file
+   after these.
 2. The MEDIUM and LOW rows S-214..S-245.
-3. BACKEND_BUGS P2 rows B-136..B-179 and whatever the app sessions file after (B-136 the
+3. BACKEND_BUGS P2/P3 rows from B-136 on, and whatever the app sessions file after (B-136 the
    JIT slowdown, mitigated in production by the runbook; B-137 trainer macro split).
 4. BACKEND_DELTA item 20 gaps.
 
