@@ -228,3 +228,99 @@ def test_b176_no_diet_section_no_rail_and_an_empty_day_is_not_a_section(make_use
     body = _home(api, person)
     assert _data(body, "nutrition_today")["timeline"] == []
     assert "day_timeline" not in _types(body), "an empty rail was sent as a section"
+
+
+# ============================================================================ B-178
+def test_b178_the_now_pill_goes_to_a_timed_entry(make_user, api):
+    """A meal with no time is `now` all day and sorts last, so "the pill belongs to the
+    LAST `now`" gave it to the untimed snack even while a timed workout was under way.
+    The contract names the timed entry, which is what the app already draws."""
+    from home.views import HomeView
+    from tests.test_home_records import _meals, _reminder_at
+
+    doc = " ".join((HomeView.__doc__ or "").split())
+    assert ("the «الآن» pill belongs to the last `now` entry that has a time "
+            "(`at` not null); only when no timed entry is `now`, to the last untimed "
+            "`now`") in doc
+
+    trainer, client, routine, rows = _program(make_user, "b178")
+    _subscribe(client, "b178")
+    _meals(client)
+    _reminder_at(client, 0)
+
+    timeline = _data(_home(api, client), "nutrition_today")["timeline"]
+    nows = [entry for entry in timeline if entry["state"] == "now"]
+    timed = [entry for entry in nows if entry["at"] is not None]
+    assert timed and timed[-1]["kind"] == "workout", timeline
+    assert (nows[-1]["kind"], nows[-1]["at"]) == ("meal", None), \
+        "the case the rule exists for: the last `now` overall is the untimed snack"
+
+
+# ============================================================================ B-179
+def test_b179_a_meal_due_inside_the_window_shortens_the_refresh(make_user, api):
+    """The states are read off the clock once, and the page was cached for 120 s
+    whatever was due: a meal due in a minute stayed `upcoming` for two."""
+    from diet.models import DietPlan, Meal
+
+    moment = timezone.localtime()
+    due = (moment + timedelta(seconds=60)).replace(microsecond=0)
+    if moment.time() >= time(23, 57):
+        pytest.skip("within 3 minutes of midnight the day itself turns")
+
+    client = make_user("b179_c")
+    _subscribe(client, "b179")
+    today = timezone.localdate()
+    plan = DietPlan.objects.create(user=client, goal="Maintain", daily_calories=2000.0,
+                                   start_date=today, end_date=today + timedelta(days=3),
+                                   duration_weeks=1)
+    meal = Meal.objects.create(diet_plan=plan, date=today, meal_type="Lunch",
+                               name="Lunch soon", scheduled_time=due.time())
+
+    def state(body):
+        return {m["id"]: m["state"] for m in _data(body, "nutrition_today")["meals"]}[
+            meal.pk]
+
+    first = _home(api, client)
+    assert state(first) == "upcoming"
+    assert 1 <= first["refresh_after_seconds"] <= 61, first["refresh_after_seconds"]
+
+    later = timezone.now() + timedelta(seconds=62)
+    with mock.patch("home.views.timezone.now", return_value=later):
+        second = _home(api, client)
+    assert second["as_of"] != first["as_of"], "the stale page was served past its life"
+    assert state(second) == "now"
+
+
+def test_b179_a_page_with_nothing_due_keeps_the_full_window(make_user, api):
+    """Only a state that will change shortens the page's life: nothing due today (the
+    last meal eaten, or none timed) keeps the 120 s, and a cached page still counts
+    down from its own life."""
+    from home import views as home_views
+
+    trainer, client, routine, rows = _program(make_user, "b179_flat")
+    first = _home(api, client)
+    assert first["refresh_after_seconds"] == home_views.CACHE_SECONDS
+
+    later = timezone.now() + timedelta(seconds=30)
+    with mock.patch("home.views.timezone.now", return_value=later):
+        second = _home(api, client)
+    assert second["as_of"] == first["as_of"], "served from the cache"
+    assert 1 <= second["refresh_after_seconds"] <= 90
+
+
+# ============================================================================ S-193
+def test_s193_a_dropped_participant_is_not_counted_in_participants(make_user, api):
+    """`participants` is counted by the rule that ranks (`social/standing.py
+    in_standing`), not `Challenge.participants_count`: someone who dropped out is
+    neither ahead nor counted."""
+    from social.models import ChallengeParticipation
+    from tests.test_home import _challenge
+
+    person = make_user("s193_c")
+    challenge = _challenge(person, "s193", others=2)
+    rival = (ChallengeParticipation.objects.filter(challenge=challenge)
+             .exclude(user=person).order_by("-current_value", "id").first())
+    ChallengeParticipation.objects.filter(pk=rival.pk).update(status="dropped")
+
+    card = _data(_home(api, person), "challenge_rank")
+    assert (card["rank"], card["participants"]) == (2, 2), card

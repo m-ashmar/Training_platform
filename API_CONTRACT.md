@@ -899,7 +899,11 @@ Additive: no route, section type, key or `code` renamed or removed; no new route
   routine_id, routine_name, day, muscles, exercises, sets, estimated_minutes}` (+
   `session_id` while a session on it is open, + `refusal` when the hero's button is
   `refused`). `state` `done | now | next`, a meal's being its card's `state` renamed;
-  `at_source` `session | reminder_hour`. No diet section, no timeline.
+  `at_source` `session | reminder_hour`. No diet section, no timeline. The «الآن» pill
+  belongs to the last `now` entry that has a time (`at` not null); only when no timed
+  entry is `now`, to the last untimed `now` (2026-09-28, BACKEND_BUGS B-178: an untimed
+  meal is `now` all day and sorts last, so "the last `now`" gave it the pill over a
+  workout under way).
 - **`ready_programs` cards are the routine products on sale** — each is the
   `GET /api/v1/products/` row, plus the section's old keys from the product (`id` is
   now the PRODUCT's; `name`, `description`, `goal`, `days_per_cycle`, `exercises`,

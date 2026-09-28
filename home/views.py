@@ -343,8 +343,11 @@ class HomeView(APIView):
         timeline cannot disagree. The workout's: `done` once the day is closed (the
         hero's `outcome`); `now` while it is under way (a session open on it, or a set
         already logged) or once its time has come; `next` before that. More than one
-        entry can be `now` when an earlier one was left undone: the «الآن» pill
-        belongs to the LAST `now`.
+        entry can be `now` when an earlier one was left undone, and a meal with no time
+        is `now` all day and sorts last (BACKEND_BUGS B-178): the «الآن» pill belongs
+        to the last `now` entry that has a time (`at` not null); only when no timed
+        entry is `now`, to the last untimed `now`. Every other `now` entry is drawn lit,
+        without the pill.
 
         The workout entry is the hero's own day — the same routine, day of the cycle,
         counts and refusal — and is left out on a rest day and outside the routine's
