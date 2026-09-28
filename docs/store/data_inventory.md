@@ -1731,9 +1731,9 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Wallet and payout details (`financial`).
 
-**Fields stored.** `id`, `user`, `address`, `address_digest`, `created_at`, `updated_at`.
+**Fields stored.** `id`, `user`, `address`, `address_digest`, `verified_at`, `created_at`, `updated_at`.
 
-**In the export.** `id`, `address`, `created_at`, `updated_at`. Not exported: `user`, `address_digest`.
+**In the export.** `id`, `address`, `verified_at`, `created_at`, `updated_at`. Not exported: `user`, `address_digest`.
 
 **On erasure.** Deleted.
 

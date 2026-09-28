@@ -313,3 +313,131 @@ def test_s232_rekey_rewrites_old_digests_so_the_old_key_can_be_dropped(
     with pytest.raises(services.Refused):
         services.add_method(trainer, kind="shamcash", address=ADDRESS,
                             address_confirm=ADDRESS, holder_name="Rami")
+
+
+# ============================================================ S-241
+VICTIM_ADDRESS = "5ee0d00d1234abcd"
+
+
+def _proven(user):
+    from subscription.models import PayerAddress
+
+    return PayerAddress.objects.get(user=user).verified_at
+
+
+def test_s241_an_unproven_saved_address_cannot_pull_a_strangers_transfer_onto_a_checkout(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    """The review's attack: A saves the victim's sending address (nothing checks it) and
+    holds an expired checkout of the same price. V's is the ONLY open checkout the
+    amount fits. V's reference-less transfer from that address was held on A's checkout,
+    A was told, and V's was left to expire."""
+    from notifications.models import Notification
+    from subscription import payer_address
+    from subscription.models import TransferReview
+    from subscription.services.payment_service import PaymentService
+
+    plan = _plan("s241a", "7777.00")
+    _ca, sub_a, attacker_checkout = _open_checkout(api, make_user, "s241_attacker", plan,
+                                                   age=timedelta(hours=2))
+    PaymentService.expire_payment(attacker_checkout.pk, "window closed")
+    attacker = sub_a.user
+    payer_address.save(attacker, VICTIM_ADDRESS, VICTIM_ADDRESS)
+    _cv, sub_v, victim_checkout = _open_checkout(api, make_user, "s241_victim", plan)
+    _account(monkeypatch, [_txn("tx-s241a", "7777.00", note="", sender=VICTIM_ADDRESS)])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _sweep()["held"] == 1
+
+    review = TransferReview.objects.get(transaction_id="tx-s241a")
+    assert (review.reason, review.payment_id) == ("reference_missing", victim_checkout.pk)
+    assert (_status(victim_checkout.pk), _status(attacker_checkout.pk)) == \
+        ("needs_review", "expired")
+    assert not Notification.objects.filter(recipient=attacker,
+                                           event_type="payment_needs_review").exists()
+    assert _proven(attacker) is None
+
+
+def test_s241_an_unproven_match_is_evidence_and_never_picks_among_several(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    from subscription import payer_address
+    from subscription.models import TransferReview
+
+    plan = _plan("s241b", "7878.00")
+    _cv, _sv, victim_checkout = _open_checkout(api, make_user, "s241b_victim", plan)
+    _ca, sub_a, attacker_checkout = _open_checkout(api, make_user, "s241b_attacker", plan)
+    payer_address.save(sub_a.user, VICTIM_ADDRESS, VICTIM_ADDRESS)
+    _account(monkeypatch, [_txn("tx-s241b", "7878.00", note="", sender=VICTIM_ADDRESS)])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _sweep()["queued"] == 1
+
+    review = TransferReview.objects.get(transaction_id="tx-s241b")
+    assert (review.reason, review.payment_id) == ("several_candidates", None)
+    assert review.sender_match_payment_ids == [str(attacker_checkout.pk)], \
+        "the match is still written down for the operator"
+    assert (_status(victim_checkout.pk), _status(attacker_checkout.pk)) == \
+        ("pending", "pending")
+
+
+def test_s241_a_transfer_by_reference_proves_the_address_and_then_it_decides(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    """V pays their checkout by its reference FROM the saved address: the address is
+    proven. Later, with a stranger who saved the same address and a checkout of the same
+    price, V's reference-less transfer is held on V's own checkout."""
+    from subscription import payer_address
+    from subscription.models import TransferReview
+    from tests.test_hub_checkout import _session
+
+    plan = _plan("s241c", "7979.00")
+    cv, sub_v, first = _open_checkout(api, make_user, "s241c_victim", plan)
+    victim = sub_v.user
+    payer_address.save(victim, VICTIM_ADDRESS, VICTIM_ADDRESS)
+    assert _proven(victim) is None
+    _account(monkeypatch, [_txn("tx-s241c-1", "7979.00", note=first.gateway_transaction_reference,
+                                sender="5EE0-D00D-1234-ABCD")])
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _poll()["completed"] == 1
+    assert _proven(victim) is not None, "a transfer from it paid V's own checkout"
+
+    renewal = _session(cv, "PLATFORM_SUB", plan.id)
+    assert (renewal.status_code, renewal.json()["kind"]) == (201, "renewal"), renewal.content
+    _ca, sub_a, attacker_checkout = _open_checkout(api, make_user, "s241c_attacker", plan)
+    payer_address.save(sub_a.user, VICTIM_ADDRESS, VICTIM_ADDRESS)
+    _account(monkeypatch, [_txn("tx-s241c-2", "7979.00", note="", sender=VICTIM_ADDRESS)])
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _sweep()["held"] == 1
+
+    review = TransferReview.objects.get(transaction_id="tx-s241c-2")
+    assert (review.reason, str(review.payment_id)) == ("reference_missing",
+                                                       renewal.json()["id"])
+    assert review.candidate_payment_ids == [str(attacker_checkout.pk)]
+    assert _status(attacker_checkout.pk) == "pending"
+
+
+def test_s241_an_operators_approval_proves_nothing_and_a_new_address_is_unproven(
+        make_user, api, shamcash, monkeypatch, django_capture_on_commit_callbacks):
+    from subscription import payer_address
+    from subscription.models import TransferReview
+    from subscription.services.payment_service import PaymentService
+    from tests.test_routine_products import _operator
+
+    plan = _plan("s241d", "8080.00")
+    _c, sub, payment = _open_checkout(api, make_user, "s241d_payer", plan)
+    payer_address.save(sub.user, VICTIM_ADDRESS, VICTIM_ADDRESS)
+    # A near miss from the address (the reference, another amount), approved by hand.
+    _account(monkeypatch, [_txn("tx-s241d", "8000.00", note=payment.gateway_transaction_reference,
+                                sender=VICTIM_ADDRESS)])
+    with django_capture_on_commit_callbacks(execute=True):
+        _poll()
+        review = TransferReview.objects.get(transaction_id="tx-s241d")
+        PaymentService.approve_review(review.pk, _operator(make_user, "s241d"), "ok")
+    assert _status(payment.pk) == "completed"
+    assert _proven(sub.user) is None, "an operator's approval is not the customer's proof"
+
+    from subscription.models import PayerAddress
+
+    PayerAddress.objects.filter(user=sub.user).update(verified_at=timezone.now())
+    payer_address.save(sub.user, VICTIM_ADDRESS, VICTIM_ADDRESS)
+    assert _proven(sub.user) is not None, "saving the same address again keeps the proof"
+    payer_address.save(sub.user, "1111222233334444", "1111222233334444")
+    assert _proven(sub.user) is None, "another address is unproven"

@@ -11,10 +11,16 @@ session: nothing asks for one.
 
 Matching. A transfer's sender, as the gateway reports it, is normalised the same way
 and compared by its keyed digest. The match is EVIDENCE for the operator's review queue
-and nothing more: it can point the queue at one customer's checkout (`likely_payment`),
-and it is written onto the queue row (`TransferReview.sender_match_payment_ids`) and the
-held payment's event. It never completes a payment — only the reference with the exact
-amount does, or an operator. An address saved by more than one account points at nobody.
+and nothing more: it is written onto the queue row (`TransferReview.
+sender_match_payment_ids`) and the held payment's event, and it can point the queue at
+one customer's checkout (`likely_payment`) — but only once that customer's address is
+PROVEN (`PayerAddress.verified_at`, set by `verify_sender` when a transfer from it
+confirmed one of their own checkouts by its exact reference). Nothing checks that a
+person owns the address they type, and an unproven one let whoever saved a stranger's
+address have the stranger's reference-less transfer held on their own checkout
+(SIDE_BUGS S-241). It never completes a payment — only the reference with the exact
+amount does, or an operator. An address proven by more than one account points at
+nobody; an unproven one never outweighs a proven one.
 
 CONFIRM with ShamCash which field of a transaction carries the sender's ACCOUNT ADDRESS
 (the adapter reads `sender_address`, `sender_account`, `from_account`, `from` and
@@ -89,9 +95,15 @@ def save(user, address, address_confirm):
         row, _created = PayerAddress.objects.select_for_update().get_or_create(
             user=user, defaults={'address': address, 'address_digest': address_digest(address)})
         if not _created:
+            fields = ['address', 'address_digest', 'updated_at']
+            if row.address != address:
+                # Another address is unproven until a transfer from IT confirms one of
+                # this customer's checkouts (S-241). Saving the same one again keeps it.
+                row.verified_at = None
+                fields.append('verified_at')
             row.address = address
             row.address_digest = address_digest(address)
-            row.save(update_fields=['address', 'address_digest', 'updated_at'])
+            row.save(update_fields=fields)
     return row
 
 
@@ -123,15 +135,36 @@ def sender_digests(facts) -> set[str]:
     return digests
 
 
-def owners_of_sender(facts) -> set:
-    """The ids of the accounts that saved this transfer's sender address."""
+def owners_of_sender(facts, *, proven_only: bool = False) -> set:
+    """The ids of the accounts that saved this transfer's sender address — or, with
+    `proven_only`, only those whose saved address is proven (`verified_at`)."""
     from .models import PayerAddress
 
     digests = sender_digests(facts)
     if not digests:
         return set()
-    return set(PayerAddress.objects.filter(address_digest__in=digests)
-               .values_list('user_id', flat=True))
+    rows = PayerAddress.objects.filter(address_digest__in=digests)
+    if proven_only:
+        rows = rows.filter(verified_at__isnull=False)
+    return set(rows.values_list('user_id', flat=True))
+
+
+def verify_sender(payer_id, facts) -> bool:
+    """Mark `payer_id`'s saved address PROVEN when this transfer came from it. Called by
+    `PaymentService.complete_payment` for a transfer that confirmed the payer's own
+    checkout by its exact reference and amount — the gateway, the pollers, the sweep's
+    settlement or "check my payment", never an operator's approval (S-241). Whether it
+    was marked now."""
+    from django.utils import timezone
+
+    from .models import PayerAddress
+
+    digests = sender_digests(facts)
+    if payer_id is None or not digests:
+        return False
+    return bool(PayerAddress.objects.filter(user_id=payer_id, verified_at__isnull=True,
+                                            address_digest__in=digests)
+                .update(verified_at=timezone.now()))
 
 
 def sender_matches(facts, payment_ids) -> list[str]:
@@ -153,12 +186,16 @@ def likely_payment(facts, open_qs, closed_qs=None):
     """The checkout this transfer most likely paid, by its sender's saved address alone,
     or None.
 
-    Only when exactly ONE account saved the sender's address: that account's checkout in
-    `open_qs` (a subscription has one open checkout at a time), else its newest in
-    `closed_qs` (checkouts closed within the late-money window, which `hold_for_review`
-    can still hold). Both are already narrowed by the caller to the transfer's exact
-    amount and currency and to checkouts opened before it."""
-    owners = owners_of_sender(facts)
+    Only when exactly ONE account saved the sender's address AND proved it
+    (`verified_at`, S-241): an unproven address is evidence on the queue row
+    (`sender_matches`) and never decides — the caller then holds the sole checkout the
+    amount fits, or queues `several_candidates`, as it would with no address at all.
+    That account's checkout in `open_qs` (a subscription has one open checkout at a
+    time), else its newest in `closed_qs` (checkouts closed within the
+    late-money window, which `hold_for_review` can still hold). Both are already
+    narrowed by the caller to the transfer's exact amount and currency and to checkouts
+    opened before it."""
+    owners = owners_of_sender(facts, proven_only=True)
     if len(owners) != 1:
         return None
     mine = list(open_qs.filter(subscription__user_id__in=owners)

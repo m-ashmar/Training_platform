@@ -810,9 +810,12 @@ class PayerAddress(models.Model):
 
     What it is used for, and nothing else: the SECOND signal when a transfer reaches the
     merchant account with the right amount and a missing or mistyped reference. A match
-    points the operator's review queue at this customer's checkout, with the match as
-    evidence (`TransferReview.sender_match_payment_ids`). It never confirms a payment on
-    its own: only the reference and the exact amount do, or an operator.
+    is evidence on the operator's review queue (`TransferReview.sender_match_payment_ids`).
+    It picks the likely checkout among several only once the address is PROVEN
+    (`verified_at`): anyone can type anyone's address, and an unproven one let a person
+    who saved a stranger's address have that stranger's transfer held on their own
+    checkout (SIDE_BUGS S-241). It never confirms a payment on its own: only the
+    reference and the exact amount do, or an operator.
     """
 
     user = models.OneToOneField(CustomUser, on_delete=models.CASCADE,
@@ -823,6 +826,12 @@ class PayerAddress(models.Model):
     #: the same address, and refusing the second would tell a stranger that somebody
     #: saved it. A digest held by more than one account points at nobody.
     address_digest = models.CharField(max_length=64, db_index=True)
+    #: When a transfer FROM this address first confirmed one of this customer's own
+    #: checkouts by its exact reference and amount (`PaymentService.complete_payment`,
+    #: `payer_address.verify_sender`) — the proof that the customer pays from it. Null
+    #: until then, and again whenever the address is changed. Only a proven address
+    #: decides which checkout a reference-less transfer is held on (SIDE_BUGS S-241).
+    verified_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

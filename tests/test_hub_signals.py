@@ -41,8 +41,19 @@ def _put(c, address, confirm=None, **extra):
                  content_type="application/json", **extra)
 
 
-def _saved(api, user, address=ADDRESS):
+def _saved(api, user, address=ADDRESS, proven=True):
     assert _put(api(user), address).status_code == 200
+    if proven:
+        # Shared setup, changed deliberately (SIDE_BUGS S-241, 2026-09-28): a saved
+        # address decides which checkout a reference-less transfer is held on only once
+        # it is PROVEN — a transfer from it confirmed one of the customer's own checkouts
+        # by its exact reference (`payer_address.verify_sender`). These tests are about
+        # what the signal does for the customer who really pays from the address, so
+        # the customer's address is proven here, as that earlier payment would have
+        # proven it. What an unproven address does is `tests/test_side_bugs_payments_w1.py`.
+        from subscription.models import PayerAddress
+
+        PayerAddress.objects.filter(user=user).update(verified_at=timezone.now())
 
 
 def _events(payment):

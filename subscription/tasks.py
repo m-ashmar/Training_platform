@@ -598,8 +598,11 @@ def sweep_unmatched_transfers(now=None):
       * its note names a checkout paid or closed for good: queued against it
         (`duplicate_transfer` / `checkout_closed`) — money to hand back;
       * no usable reference, its exact amount and currency, and a sender whose ShamCash
-        address exactly one customer saved on their profile (`PayerAddress`, the spec's
-        second signal, section 6): that customer's checkout opened before it — open, or
+        address exactly one customer saved on their profile AND proved (`PayerAddress.
+        verified_at`: a transfer from it confirmed one of their checkouts by its
+        reference; SIDE_BUGS S-241 — an unproven address is evidence on the row and
+        decides nothing), the spec's second signal, section 6: that customer's
+        checkout opened before it — open, or
         closed within the late-money window — is held for review (`reference_missing`)
         with the match as evidence (`TransferReview.sender_match_payment_ids`, the
         event's `sender_address_matched`) and the other checkouts the amount fits as

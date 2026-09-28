@@ -317,6 +317,19 @@ class PaymentService:
                     status='approved', payment=payment, resolved_at=timezone.now(),
                     resolution_note='Settled automatically: this transfer completed the payment')
 
+            # The payer's saved ShamCash address is PROVEN when this transfer came from
+            # it and confirmed their own checkout by its exact reference and amount — the
+            # gateway, the pollers, the sweep's settlement, "check my payment"; never an
+            # operator accepting a near miss or marking it paid. Only a proven address
+            # decides which checkout a reference-less transfer is held on (S-241).
+            if (by in (By.GATEWAY, By.POLLER, By.SWEEP, By.CUSTOMER)
+                    and payment.gateway_transaction_reference
+                    and str(verified_data.get('reference') or '')
+                    == payment.gateway_transaction_reference):
+                from ..payer_address import verify_sender
+
+                verify_sender(payment.payer_id, verified_data)
+
             if payment.routine_product_id is not None:
                 # --- A routine product: the buyer's copy and the sale's ledger rows ---
                 # In THIS transaction, under the payment lock: completion and delivery are
