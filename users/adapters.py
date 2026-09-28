@@ -15,6 +15,23 @@ class CustomAccountAdapter(DefaultAccountAdapter):
     def is_open_for_signup(self, request):
         return False
 
+    def generate_unique_username(self, txts, regex=None):
+        """The name a sign-up with no `username` gets, from its e-mail's local part.
+
+        That name is public (posts, boards) and cannot be changed later, but nobody typed
+        it, so it is never refused: when it holds a term on the banned-terms list, or is
+        one of the platform's reserved ledger names (`platform_escrow`, ...), the account
+        is named `user`, `user1`, ... instead (the owner, 2026-09-28; BACKEND_BUGS B-172).
+        A `username` the request DOES send is checked by the register serializer.
+        """
+        from moderation.ugc_filter import find_banned
+        from wallet.utils import is_reserved_username
+
+        name = super().generate_unique_username(txts, regex)
+        if find_banned(name) or is_reserved_username(name):
+            return super().generate_unique_username(["user"], regex)
+        return name
+
     def get_client_ip(self, request):
         """The trusted client address, as the rate limiter decides it.
 

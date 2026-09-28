@@ -1,5 +1,7 @@
 # users/serializers.py
 
+from allauth.account import app_settings as allauth_account_settings
+from allauth.utils import get_username_max_length
 from dj_rest_auth.registration.serializers import RegisterSerializer
 from dj_rest_auth.serializers import LoginSerializer
 from .models import (CustomUser, DeviceToken, INJURY_AREAS, TRAINER_FOCUS, TRAINING_PLACES,
@@ -192,12 +194,25 @@ class CustomRegisterSerializer(RegisterSerializer):
     is refused with `field_errors.preferred_language[0].code` = `invalid_choice`. The
     answer's `user` carries the saved value. Changed later on `user/update/`.
 
-    A `username` that holds a term on the banned-terms list answers 400
-    `content_not_allowed` — the top-level `code`, and `field_errors.username[0].code` —
-    and no account is made (spec B1, `moderation/ugc_filter.py`). It is checked after
-    every other field, so a request with other mistakes answers `validation_error`
-    first. Same on every build.
+    `username` is OPTIONAL, and the app never sends it: omitted, the account's name is
+    derived from the e-mail's local part (allauth's adapter, `populate_username`), made
+    unique with a number when it is taken; a derived name holding a banned term, or one
+    of the platform's reserved names, becomes `user` / `userN` instead, never a refusal
+    (`users/adapters.py`). A `username` that IS sent and holds a term on
+    the banned-terms list answers 400 `content_not_allowed` — the top-level `code`, and
+    `field_errors.username[0].code` — and no account is made (spec B1,
+    `moderation/ugc_filter.py`). It is checked after every other field, so a request
+    with other mistakes answers `validation_error` first. Same on every build.
     """
+    # Declared here, not left to dj-rest-auth: since 7.2 it reads a field missing from
+    # allauth's ACCOUNT_SIGNUP_FIELDS as REQUIRED, so the Django 5.2 upgrade (allauth
+    # 65) made `username` required and refused every sign-up the app sends, which has
+    # none (BACKEND_BUGS B-172, 2026-09-28). The same field as before the upgrade.
+    username = serializers.CharField(
+        max_length=get_username_max_length(),
+        min_length=allauth_account_settings.USERNAME_MIN_LENGTH,
+        required=False,
+    )
     phone_number = serializers.CharField(max_length=15,  required=True)
     user_type = serializers.ChoiceField(choices=[('client', 'Client'), ('trainer', 'Trainer'), ('agent', 'Agent'), ('admin', 'Administrator')], required=False, default='client')
     date_of_birth = serializers.DateField(required=True)

@@ -211,8 +211,11 @@ AUTH_PASSWORD_VALIDATORS = [
 ACCOUNT_EMAIL_VERIFICATION = 'none'
 # allauth 65 replaced ACCOUNT_AUTHENTICATION_METHOD = 'email', ACCOUNT_EMAIL_REQUIRED =
 # True and ACCOUNT_USERNAME_REQUIRED = False with the two settings below — the exact
-# values its own deprecation warnings name for that combination, so sign-in and the
-# register serializer's required fields are unchanged (Django 5.2 upgrade, 2026-09-27).
+# values its own deprecation warnings name for that combination (Django 5.2 upgrade,
+# 2026-09-27). They did NOT keep the register serializer's fields: dj-rest-auth 7.2
+# reads a field missing from SIGNUP_FIELDS as required, so `username` became required
+# and every app sign-up (it sends none) was refused. users/serializers.py
+# `CustomRegisterSerializer` declares `username` optional itself (BACKEND_BUGS B-172).
 ACCOUNT_LOGIN_METHODS = {'email'}
 ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
 ACCOUNT_ADAPTER = "users.adapters.CustomAccountAdapter"
