@@ -1041,7 +1041,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     (`customer`, `gateway`, `poller`, `sweep`, `operator`, `system`) and `backfill: true`
     marks the one event of a payment older than the history (its state then; `at` is
     the best time its row gave). Never the evidence or which operator. The list does not
-    carry `events`. Identical on every build.
+    carry `events`. Identical on every build, with one exception (SIDE_BUGS S-239): an
+    OPEN payment's `amount` and `reference` (a payment instruction) are absent for a
+    build that may not buy its kind of money — see `PaymentSerializer`.
 
     The caller's payments are their plan's AND their routine product checkouts from the
     web hub (`api/v1/checkout/sessions/`; `subscription` is null on those, and `item`
@@ -1898,7 +1900,16 @@ class PaymentStatusView(APIView):
     console) or `system`. `backfill: true` marks the single event of a payment older
     than the history: the state it was in then, at the best time its row gave. Never
     the evidence (a transfer's details are its sender's) and never which operator.
-    Identical on every build: a history carries no price.
+    `events` are identical on every build: a history carries no price.
+
+    What differs by build (headers: `X-App-Channel`, `X-App-Version`; SIDE_BUGS S-239):
+    while the payment is OPEN (`pending`, `processing`, `authorized`, `needs_review`),
+    `amount` and `reference` are a payment instruction, so they are answered only to a
+    build that may buy this payment's kind of money (`require_purchase_allowed`) and
+    are ABSENT on any other (`play`, `ios` for a plan or a routine product; a request
+    that names no channel) — as `api/v1/checkout/sessions/{id}/` withholds them. Once
+    the payment is completed, refunded or closed they are a record of money that moved
+    and are answered on every build.
 
     `gateway_state` (the spec, section 6): `{state, since, last_success_at}` of the
     gateway this payment is paid through. `state` is `ok`, or `degraded` when the server
@@ -1918,9 +1929,9 @@ class PaymentStatusView(APIView):
             return Response({'error': _('Payment not found'), 'code': 'not_found'},
                             status=status.HTTP_404_NOT_FOUND)
 
-        from .utils import checkout_expires_at
+        from .utils import checkout_expires_at, payment_instruction_allowed
 
-        return Response({
+        body = {
             'success': True,
             'payment_id': str(payment.id),
             'status': payment.status,
@@ -1942,7 +1953,14 @@ class PaymentStatusView(APIView):
             'events': [event.for_app() for event in payment.events.all()],
             # Whether the server can read ShamCash right now (spec section 6).
             'gateway_state': gateway_state(payment.payment_method),
-        })
+        }
+        if not payment_instruction_allowed(request, payment):
+            # An OPEN checkout's amount and reference are a payment instruction: never
+            # to a build that may not sell this kind of money (spec section 4, rule
+            # zero; SIDE_BUGS S-239), as `checkout/sessions/{id}/` withholds them.
+            body.pop('amount')
+            body.pop('reference')
+        return Response(body)
 
 
 class PaymentReconcileView(APIView):

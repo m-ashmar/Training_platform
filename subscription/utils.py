@@ -35,6 +35,40 @@ def checkout_expires_at(payment):
         return None
     return payment.created_at + checkout_ttl()
 
+
+def payment_instruction_allowed(request, payment, cache: dict | None = None) -> bool:
+    """Whether a payment read may carry this payment's `amount` and `reference` to the
+    build that asked (SIDE_BUGS S-239).
+
+    While the payment is OPEN (`OPEN_PAYMENT_STATUSES`: pending, processing,
+    authorized, needs_review) they tell the reader what to pay and what to write in the
+    transfer's note — a payment instruction — so only a build that may buy this kind of
+    money gets them (`policy.services.require_purchase_allowed`; the spec, section 4,
+    rule zero), which is the rule `checkout/sessions/{id}/` already follows. A payment
+    completed, refunded or closed is a record of money that moved, answered on every
+    build. By build only. `cache` (money type -> answer) spares a list asking per row.
+    """
+    from policy.exceptions import AppChannelRequired, NotAvailableOnChannel
+    from policy.services import require_purchase_allowed
+
+    from .models import OPEN_PAYMENT_STATUSES
+
+    if payment.status not in OPEN_PAYMENT_STATUSES:
+        return True
+    if request is None:
+        return True          # server-side code (a task, the console): no build to ask
+    money_type = payment.money_type
+    if cache is not None and money_type in cache:
+        return cache[money_type]
+    try:
+        require_purchase_allowed(request, money_type)
+        allowed = True
+    except (AppChannelRequired, NotAvailableOnChannel):
+        allowed = False
+    if cache is not None:
+        cache[money_type] = allowed
+    return allowed
+
 def create_trial_subscription(user, plan_id, trial_days=7):
     """
     Create a trial subscription for a user.

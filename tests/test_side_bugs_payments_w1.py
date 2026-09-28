@@ -518,3 +518,66 @@ def test_s240_a_proven_address_finds_the_buyers_closed_product_checkout(
     review = TransferReview.objects.get(transaction_id="tx-s240c")
     assert (review.reason, str(review.payment_id)) == ("reference_missing", body["id"])
     assert _status(body["id"]) == "needs_review"
+
+
+# ============================================================ S-239
+STATUS = "/api/subscription/v1/payments/{}/status/"
+PAYMENTS = "/api/subscription/v1/payments/"
+
+
+def _rows(resp):
+    body = resp.json()
+    return body.get("results", body) if isinstance(body, dict) else body
+
+
+def test_s239_a_store_build_reads_no_payment_instruction_for_an_open_product_session(
+        make_user, api, shamcash):
+    """A buyer opens a product session on the web hub, then the iOS app polls the
+    payment's status: it answered the amount and the SHAMCASH_ reference, which
+    `checkout/sessions/{id}/` withholds from the same build."""
+    from tests.test_hub_checkout import SESSIONS
+
+    _trainer, _buyer, c, _product_id, body = _product_session(make_user, api, "s239p")
+    for channel in ("ios", "play", ""):
+        status = c.get(STATUS.format(body["id"]), HTTP_X_APP_CHANNEL=channel)
+        assert status.status_code == 200, (channel, status.content)
+        assert "amount" not in status.json() and "reference" not in status.json(), channel
+        assert status.json()["status"] == "pending"
+        session = c.get(f"{SESSIONS}{body['id']}/", HTTP_X_APP_CHANNEL=channel)
+        if session.status_code == 200:
+            assert "amount" not in session.json(), "the same rule as the session read"
+        row = next(r for r in _rows(c.get(PAYMENTS, HTTP_X_APP_CHANNEL=channel))
+                   if r["id"] == body["id"])
+        assert "amount" not in row and "reference" not in row, channel
+    web = c.get(STATUS.format(body["id"]), HTTP_X_APP_CHANNEL="web").json()
+    assert (web["amount"], web["reference"]) == ("2500.00", body["reference"])
+
+
+def test_s239_an_open_plan_checkout_on_a_store_build_and_the_record_once_paid(
+        make_user, api, shamcash, django_capture_on_commit_callbacks):
+    from subscription.services.payment_service import PaymentService
+
+    c, _sub, payment = _open_checkout(api, make_user, "s239_plan", _plan("s239", "13000.00"))
+    reference = payment.gateway_transaction_reference
+
+    apk = c.get(STATUS.format(payment.pk), HTTP_X_APP_CHANNEL="apk").json()
+    assert (apk["amount"], apk["reference"]) == ("13000.00", reference)
+    for channel in ("ios", "play"):
+        status = c.get(STATUS.format(payment.pk), HTTP_X_APP_CHANNEL=channel).json()
+        assert "amount" not in status and "reference" not in status, channel
+        row = next(r for r in _rows(c.get(PAYMENTS, HTTP_X_APP_CHANNEL=channel))
+                   if r["id"] == str(payment.pk))
+        assert "amount" not in row and "reference" not in row, channel
+        detail = c.get(f"{PAYMENTS}{payment.pk}/", HTTP_X_APP_CHANNEL=channel).json()
+        assert "amount" not in detail and "reference" not in detail, channel
+
+    with django_capture_on_commit_callbacks(execute=True):
+        PaymentService.complete_payment(payment.pk, {
+            "amount": "13000.00", "currency": "SYP", "status": "completed",
+            "transaction_id": "tx-s239", "reference": reference})
+    for channel in ("ios", "play", "apk"):
+        status = c.get(STATUS.format(payment.pk), HTTP_X_APP_CHANNEL=channel).json()
+        assert (status["amount"], status["reference"]) == ("13000.00", reference), channel
+        row = next(r for r in _rows(c.get(PAYMENTS, HTTP_X_APP_CHANNEL=channel))
+                   if r["id"] == str(payment.pk))
+        assert (row["amount"], row["reference"]) == ("13000.00", reference), channel

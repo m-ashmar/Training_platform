@@ -190,8 +190,16 @@ class PaymentSerializer(serializers.ModelSerializer):
     The "مدفوعات سابقة" list on the Receipt screen draws one row per payment as
     `item` ("Premium · 30 يوماً"), the date and the amount, with a receipt to open —
     so this answers `item`, `completed_at`, `reference` and `receipt_available`
-    alongside the stored columns. All of them describe money ALREADY PAID, which is a
-    record and not a sale, so nothing here is removed on a store build.
+    alongside the stored columns. Money ALREADY PAID (or a checkout closed) is a record
+    and not a sale, so its row is the same on every build. An OPEN payment (`pending`,
+    `processing`, `authorized`, `needs_review`) is different: its `amount` and
+    `reference` are a payment instruction, and they are ABSENT from the row for a build
+    that may not buy its kind of money (`play`/`ios` for a plan or a routine product, or
+    no `X-App-Channel`; SIDE_BUGS S-239 — `subscription.utils.
+    payment_instruction_allowed`).
+
+    A routine product's web-hub checkout is the buyer's row too: `subscription` is null
+    and `item` adds `product_id` and `product_title` (BACKEND_BUGS B-167).
     """
     item = serializers.SerializerMethodField()
     receipt_available = serializers.SerializerMethodField()
@@ -210,6 +218,8 @@ class PaymentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def to_representation(self, obj):
+        from .utils import payment_instruction_allowed
+
         data = super().to_representation(obj)
         # The review record is the operator's (who approved, which gateway transaction,
         # attached by whom): the customer's row carries only why and when (B-051).
@@ -218,6 +228,15 @@ class PaymentSerializer(serializers.ModelSerializer):
             review = meta['review']
             data['metadata'] = {**meta, 'review': {'reason': review.get('reason'),
                                                    'held_at': review.get('held_at')}}
+        # An OPEN payment's amount and reference are a payment instruction: absent for a
+        # build that may not buy its kind of money (SIDE_BUGS S-239), as
+        # `payments/{id}/status/` and `checkout/sessions/` answer. A paid or closed
+        # one is a record, on every build.
+        if not payment_instruction_allowed(self.context.get('request'), obj,
+                                           cache=self.context.setdefault(
+                                               '_payment_instruction_allowed', {})):
+            data.pop('amount', None)
+            data.pop('reference', None)
         return data
 
     def get_item(self, obj):
