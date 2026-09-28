@@ -88,6 +88,42 @@ class CalorieRangeFilter(SimpleListFilter):
             return queryset.filter(calories__gt=400)
 
 
+class FoodItemAdminForm(forms.ModelForm):
+    """The food form of both consoles (`/admin/` and `/dj-admin/`).
+
+    `allergens` is the vocabulary and nothing else (SIDE_BUGS S-215). The field's help
+    text said "Never free text" and nothing enforced it (`validate_tags` was never
+    called): `["nuts"]` was saved and read as allergen-free wherever the planner was not
+    asking. Refused HERE, on the form that edits the field, and not in `FoodItem.clean`:
+    that runs on every save (`validate_row`), so a row stored malformed before this rule
+    would become unsaveable on any write, the review tick included. Such a row is still
+    read whole (`diet.allergens._read_stored`) and kept from allergic clients (B4).
+    """
+
+    class Meta:
+        model = FoodItem
+        fields = '__all__'
+
+    def clean_allergens(self):
+        from django.utils.translation import gettext
+        from diet.allergens import ALLERGENS, validate_tags
+
+        value = self.cleaned_data.get('allergens')
+        bad = validate_tags(value)
+        if not bad:
+            return value
+        vocabulary = ', '.join(ALLERGENS)
+        if not isinstance(value, (list, tuple)):
+            raise forms.ValidationError(gettext(
+                'Must be a list of allergen tags, for example ["peanut", "milk"]. '
+                'The tags: %(vocabulary)s.') % {'vocabulary': vocabulary},
+                code='bad_allergens')
+        raise forms.ValidationError(gettext(
+            'Not allergen tags: %(bad)s. Use only these tags: %(vocabulary)s.') % {
+            'bad': ', '.join(repr(t) for t in bad), 'vocabulary': vocabulary},
+            code='bad_allergens')
+
+
 # Improved FoodItem Admin
 @admin.register(FoodItem)
 class ImprovedFoodItemAdmin(TranslAdmin):
@@ -103,6 +139,7 @@ class ImprovedFoodItemAdmin(TranslAdmin):
     never planned, which is what keeps the import endpoint from re-creating the 327
     rows of noise the catalogue rebuild removed.
     """
+    form = FoodItemAdminForm
     list_display = [
         'name', 'review_badge', 'category_badge', 'calories_display', 'macro_display',
         'slots_display', 'unit_display', 'cuisine', 'role'

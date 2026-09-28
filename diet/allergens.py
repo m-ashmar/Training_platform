@@ -36,7 +36,7 @@ before/after measurement is recorded).
 from __future__ import annotations
 
 import re
-from typing import Iterable, Set
+from typing import Set
 
 # The 14 EU / 9 US major allergens, merged. These tags are the ONLY values that may be
 # stored in FoodItem.allergens — free text is what caused the original bug.
@@ -428,6 +428,35 @@ def food_text(food) -> str:
     return f"{name} {getattr(food, 'ingredients_text', '') or ''}"
 
 
+def _read_stored(stored) -> tuple[Set[str], bool]:
+    """(the tags a stored `allergens` value names, whether it is well formed).
+
+    Well formed is a list of vocabulary tags and nothing else. Anything else is still
+    READ, never dropped (SIDE_BUGS S-215): a string entry outside the vocabulary
+    (`"nuts"`, `"Peanuts"`) is read the way a client's allergy text is
+    (`parse_user_allergies`, so "nuts" is peanut AND tree nut), a bare string is one
+    entry, and a number or an object names nothing. Dropping them made a verified row
+    tagged `["nuts"]` read allergen-free to every reader outside the planner, and a
+    number raised TypeError in the middle of a read.
+    """
+    if isinstance(stored, str):
+        entries, wellformed = [stored], False
+    elif isinstance(stored, (list, tuple)):
+        entries = list(stored)
+        wellformed = all(isinstance(t, str) and t in ALLERGENS for t in entries)
+    else:
+        return set(), False
+    tags: Set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, str):
+            continue
+        if entry in ALLERGENS:
+            tags.add(entry)
+        else:
+            tags |= {t for t in parse_user_allergies(entry) if t in ALLERGENS}
+    return tags, wellformed
+
+
 def food_allergen_tags(food) -> Set[str]:
     """Every tag of the vocabulary this food carries: its stored tags, plus what its name
     and ingredients imply.
@@ -436,10 +465,11 @@ def food_allergen_tags(food) -> Set[str]:
     (`diet/services/meal_validator.py AllergenChecker.check_food`) matches a client's
     declared allergens against exactly this set — so the plan generator's filter, the
     trainer write's `declared_allergen` refusal, the catalogue row's `allergens` and the
-    trainer picker's per-client marks (BACKEND_BUGS B-127) cannot disagree. Stored tags
-    outside the vocabulary are dropped: `validate_tags` refuses them on write.
+    trainer picker's per-client marks (BACKEND_BUGS B-127) cannot disagree. A stored
+    value that is not the vocabulary is read, not dropped (`_read_stored`), and
+    `FoodItem.clean` refuses it on write (`validate_tags`).
     """
-    stored = {t for t in (getattr(food, "allergens", None) or []) if t in ALLERGENS}
+    stored, _wellformed = _read_stored(getattr(food, "allergens", None))
     return stored | infer_allergens(food_text(food))
 
 
@@ -455,8 +485,9 @@ def food_allergen_tags(food) -> Set[str]:
 #: was never populated. Neither says what is NOT in the food.
 GAP_UNVERIFIED = "unverified_source"
 #: `allergens` is not a list of vocabulary tags — `["nuts"]`, `"peanut"`, `null`.
-#: `food_allergen_tags` drops what it cannot read, so such a row read as carrying
-#: nothing at all. Nothing refuses it on write (`validate_tags` is never called).
+#: `food_allergen_tags` reads what it can of such a value (`_read_stored`), and
+#: `FoodItem.clean` refuses it on write; a row stored that way before either is still
+#: not vouched for.
 GAP_MALFORMED = "malformed_tags"
 #: The row's own English name or ingredient list implies a tag its stored list lacks.
 #: The checker still catches THAT allergen (it unions the two), but a curation that
@@ -471,18 +502,13 @@ GAP_NO_INGREDIENTS = "no_ingredients"
 def _audit_food(food) -> tuple[Set[str], list[str]]:
     """(every tag this food carries, why its tagging is incomplete), in one reading.
 
-    The tags are `food_allergen_tags` without its one failure: a non-list `allergens`
-    (a number, a string) is read as no stored tags rather than iterated or raised on.
+    The tags are exactly `food_allergen_tags`: the stored value as `_read_stored` reads
+    it, plus what the name and ingredients imply.
     """
     gaps: list[str] = []
     if (getattr(food, "allergen_source", None) or "unknown") != "verified":
         gaps.append(GAP_UNVERIFIED)
-    stored = getattr(food, "allergens", None)
-    if isinstance(stored, (list, tuple)):
-        readable = {t for t in stored if isinstance(t, str) and t in ALLERGENS}
-        wellformed = all(isinstance(t, str) and t in ALLERGENS for t in stored)
-    else:
-        readable, wellformed = set(), False
+    readable, wellformed = _read_stored(getattr(food, "allergens", None))
     if not wellformed:
         gaps.append(GAP_MALFORMED)
     implied = infer_allergens(food_text(food))
@@ -612,6 +638,14 @@ def label(tag: str) -> str:
     return ALLERGENS.get(tag, tag)
 
 
-def validate_tags(tags: Iterable[str]) -> list[str]:
-    """Reject anything outside the canonical vocabulary (used by model validation)."""
-    return [t for t in tags if t not in ALLERGENS]
+def validate_tags(tags) -> list:
+    """What in a stored `allergens` value is not a tag of the vocabulary: empty when the
+    value is a list of `ALLERGENS` keys and nothing else. A value that is not a list at
+    all (a string, a number, null) is returned whole.
+
+    `FoodItem.clean` calls it (SIDE_BUGS S-215), so the console and every `full_clean`
+    refuse free text on write; it was defined for that and never called.
+    """
+    if not isinstance(tags, (list, tuple)):
+        return [tags]
+    return [t for t in tags if not (isinstance(t, str) and t in ALLERGENS)]

@@ -5912,3 +5912,19 @@ msgstr ""
 #, python-format
 msgid "Protein must be between %(low)d and %(high)d g a day for this goal."
 msgstr "يجب أن يكون البروتين بين %(low)d و%(high)d غرامًا في اليوم لهذا الهدف."
+
+#. The operator console refuses a food's allergens that are not a list of the
+#. vocabulary's tags (SIDE_BUGS S-215). The tags themselves stay in Latin letters.
+#: diet/admin.py
+#, python-format
+msgid ""
+"Must be a list of allergen tags, for example [\"peanut\", \"milk\"]. The tags: "
+"%(vocabulary)s."
+msgstr ""
+"يجب أن تكون قائمة بوسوم مسببات الحساسية، مثل [\"peanut\", \"milk\"]. الوسوم: "
+"%(vocabulary)s."
+
+#: diet/admin.py
+#, python-format
+msgid "Not allergen tags: %(bad)s. Use only these tags: %(vocabulary)s."
+msgstr "ليست وسوم مسببات حساسية: %(bad)s. استخدم هذه الوسوم فقط: %(vocabulary)s."
