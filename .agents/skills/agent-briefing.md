@@ -184,7 +184,17 @@ Worktrees are how several agents build at once. The setup is done for you; what 
 - `seeded_catalogue` loads the food catalogue but does NOT give the test database
   access: a test that takes it and no `db` fails with "Database access not allowed".
 - `.venv` in a worktree is a **symlink**. `.gitignore` now covers both spellings, but check
-  `git status` before `git add -A` all the same.
+  `git status` before `git add -A` all the same. It points at the ONE venv the main
+  checkout, every worktree and the app session's :8020 server share: never `pip install`
+  into it while anything else runs from it. To test a dependency change, build a venv of
+  your own from the lock and run pytest with that interpreter (2026-09-28, the Django 5.2
+  gate).
+- The Postgres on :5433 is ONE server for every worktree AND the app session's
+  `yalla_app_dev`. On 2026-09-28 several `--create-db` runs at once exhausted the
+  container's 64 MB shared memory, and the server segfaulted and restarted into recovery,
+  taking every database down (SIDE_BUGS S-244). One `--create-db` at a time. A run that
+  fails with "the database system is in recovery mode" is this, not your code: wait for
+  `pg_isready` and run again.
 - `tests/security/*.py` used to hardcode the main checkout's path, so from a worktree they
   exercised the main tree and passed on a broken branch. If you see that pattern anywhere
   else, it is a bug, not a convention.
