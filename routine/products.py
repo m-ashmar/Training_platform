@@ -127,6 +127,17 @@ def buyers_shown(count) -> int | None:
     return count if count is not None and count >= BUYERS_SHOWN_FROM else None
 
 
+def with_buyers(queryset):
+    """`queryset` of products with `buyers_count` (their confirmed purchases) annotated,
+    for `CatalogueProductSerializer`'s `buyers` — every surface that draws the
+    catalogue's row annotates it the same way (`ProductCatalogueView`, the home
+    `ready_programs` cards)."""
+    from django.db.models import Count, Q
+
+    return queryset.annotate(buyers_count=Count(
+        "purchases", filter=Q(purchases__status=PurchaseStatus.CONFIRMED)))
+
+
 def confirmed_buyers(product) -> int:
     """How many people own `product`: its confirmed purchases, however they paid (a
     refunded one is not a sale). One confirmed purchase per buyer is the database's
@@ -929,5 +940,5 @@ __all__ = [
     "goal_code_expression", "grant_checkout",
     "lock_for_checkout", "net_of", "open_checkout_for", "owned_purchase", "preview_of",
     "program_days", "refund", "refund_checkout", "reject", "retire", "submit",
-    "visible_product",
+    "visible_product", "with_buyers",
 ]

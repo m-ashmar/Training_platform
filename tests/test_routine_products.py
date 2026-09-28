@@ -977,6 +977,16 @@ def test_a_program_row_counts_its_confirmed_buyers(make_user, api):
     assert _buy(api, _client(make_user, "buyers5"), product_id).status_code == 200
     assert buyers() == 5
 
+    # The home `ready_programs` card IS the catalogue's row: the same count.
+    from training_platform.cache import private_cache
+
+    private_cache().clear()
+    home = api(reader).get("/api/v1/home").json()
+    (section,) = [s for s in home["sections"] if s["type"] == "ready_programs"]
+    (card,) = [p for p in section["data"]["programs"] if p["id"] == product_id]
+    assert card["buyers"] == 5
+    private_cache().clear()
+
 
 def test_the_buy_docstring_says_what_a_concurrent_repeat_answers():
     """BACKEND_BUGS B-155: the docstring is the contract, and it did not say what a

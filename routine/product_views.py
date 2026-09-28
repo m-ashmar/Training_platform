@@ -480,8 +480,7 @@ class ProductCatalogueView(APIView):
                             "bad_search", status.HTTP_400_BAD_REQUEST)
         if search:
             queryset = _searched(queryset, search)
-        queryset = queryset.annotate(buyers_count=Count(
-            "purchases", filter=Q(purchases__status=PurchaseStatus.CONFIRMED)))
+        queryset = products.with_buyers(queryset)
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
         page = list(page or [])
