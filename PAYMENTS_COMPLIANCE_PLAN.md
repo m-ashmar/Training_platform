@@ -80,6 +80,43 @@ and S-245 came from the gate itself.
    JIT slowdown, mitigated in production by the runbook; B-137 trainer macro split).
 4. BACKEND_DELTA item 20 gaps.
 
+## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — resume here
+
+**Review first.** Every open BACKEND_BUGS row B-136..B-183 was verified against the code
+(refute-first, probes on cloned databases), and every refutation or severity change was
+audited: 35 confirmed, 11 partly right, B-141 stale, B-151 refuted (both closed with notes).
+Only three stayed P1: B-136, B-167, B-172. B-172 turned out to be a REGRESSION of the
+Django 5.2 upgrade (dj-rest-auth 7.2 made `username` required, refusing every app
+sign-up); fixed first (`580b5e3`). B-183 fixed (`9924bfe`), S-244 fixed (`554c604`, the
+Postgres container recreated with 512 MB shm), S-245 fixed on `fx/s245` (JIT off for the
+local/test database), merged with wave 1.
+
+**Owner decisions (2026-09-28, in the backend session):**
+
+| Row | Decision |
+|---|---|
+| B-182 + home | A COACHED client also gets `ready_programs` (same build gating, owned rows `owned`/`can_buy: false`); an uncoached buyer gets the day hero only; a former client whose day is refused gets the find-a-trainer hero |
+| B-163 | A direct client->trainer transfer is a coaching payment: platform 20% / trainer 80%. Optional note, max 140, erasable row, both sides see it |
+| B-154 / B-164 / B-165 | Privacy-first: `buyers` shown from 5 buyers; follower lists private to their owner (no route); no trainer gender (verified badge + photo only) |
+| B-153 / B-156 | Keep one repeated week. Goals a closed list (build_muscle, strength, fat_loss, rehab) + a `place` attribute (home / gym); catalogue filters goal, place, search |
+| B-137 | Trainer macro split allowed: energy within ±10% of calories, protein within the engine's bounds, draft only, `bad_macro_split` |
+| B-145 | ensure/ from another device refuses 409 `key_paired_elsewhere` |
+| B-159 / B-160 | Leaving / removing reasons: the drawn codes, operators only, kept anonymised on erasure, feed nothing yet |
+| B-161 | `exercise_reps` (review threshold 500/day) and `streak_days` (current run; a day without a credible set breaks it); «عدد التمارين» = workouts finished |
+| B-162 | `audience` my_clients: hidden from and closed to non-clients; frozen clients count; ended clients stay in the standing; winner badge still needs 5 |
+| B-172 | A derived username with a banned term or a reserved platform name becomes user/userN, never refused |
+| B-174 | Production refuses to boot without an https `PUBLIC_PAGES_BASE_URL` |
+| B-176 | A 12th home section `day_timeline` in the artboard's order; `nutrition_today.timeline` kept |
+
+**Waves** (each: worktree builders from one base, tests proven on the old code, merged one
+branch at a time, then ONE full gate + the smoke; a review of the merged diff after):
+
+| Wave | Builders (rows) | State |
+|---|---|---|
+| 1 | payments (B-167, S-232, S-234b, S-238..S-241, B-171), programs (S-234a, B-153..B-156, B-169, B-170, B-180), routine-core (B-136, B-139, B-152, B-157, B-158, B-181 = S-164), diet (S-212, S-215, S-216, S-243, B-137, B-140), accounts (S-235, S-236, S-242, B-159, B-160, B-165, B-166, B-173), home (B-175, B-176, B-178, B-179, B-182, S-193), wallet (B-138, B-144..B-148, B-163, B-184, S-237), privacy (S-213, S-214, S-225, S-231, S-233, B-174), social (B-161, B-162, B-164, S-189, S-194, S-218, S-219) | BUILDING from `554c604`; briefs in the session scratchpad `fx-w1/` |
+| 2 | payments2 (S-052, S-180, S-184, S-185, S-228..S-230), routine2 (S-114, S-165..S-168, S-176, S-177, S-183), diet2 (S-198, S-217, B-142, B-143), accounts2 (S-106, S-181, S-200..S-202, S-223), wallet2 (S-162, S-179, S-221, S-222), platform (S-054, S-178, S-186, S-197, S-199, S-203, S-220, S-224), chat-media (B-149, B-150, B-177, S-187, S-188, S-211, S-226), notifications (B-168, S-196, S-206..S-208), ai-achievements (S-190..S-192, S-195, S-204, S-205) | briefs written; the older SIDE rows are re-verified before fixing |
+| 3 | routine3 (S-169..S-175, S-227), BACKEND_DELTA item 20 (verify each gap first), every BACKEND_BUGS row filed after B-184, what the wave reviews find | TODO |
+
 ## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
 
 The money screens are `yalla_gym/design/yalla-gym-design/screens/07-money/`. They are the
