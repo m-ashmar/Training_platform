@@ -997,6 +997,11 @@ class DayOutcomeSerializer(serializers.ModelSerializer):
     """What one training day planned against what was done (routine/outcomes.py).
 
     Read-only everywhere: these rows are written when a day closes, never by a client.
+
+    `quick_log` (BACKEND_BUGS B-157, additive): the day was logged after the fact in one
+    go («سجّل دفعة واحدة») — `update_progress` with `quick_log: true`, or
+    `bulk-complete` — rather than live. It is the coach's quick-log badge; `via` still
+    says what closed the day.
     """
     missed_reps = serializers.SerializerMethodField()
 
@@ -1009,7 +1014,7 @@ class DayOutcomeSerializer(serializers.ModelSerializer):
             'planned_volume_kg', 'logged_volume_kg',
             'exercises_planned', 'exercises_full', 'exercises_partial',
             'exercises_untouched', 'exercises_skipped',
-            'prescription_exact', 'detail',
+            'prescription_exact', 'detail', 'quick_log',
         ]
         read_only_fields = fields
 
@@ -1084,6 +1089,10 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
             'planned_sets': planned,
             'logged_sets': getattr(obj, 'outcome_logged_sets', 0),
             'missed_sets': getattr(obj, 'outcome_missed_sets', 0),
+            # Additive (BACKEND_BUGS B-157): the coach's quick-log badge, and `via`,
+            # which the viewset's docstring already promised and this never carried.
+            'quick_log': getattr(obj, 'outcome_quick_log', None),
+            'via': getattr(obj, 'outcome_via', None),
         }
 
     def get_completion_percentage(self, obj):

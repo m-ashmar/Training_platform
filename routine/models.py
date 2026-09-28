@@ -999,6 +999,11 @@ class DayOutcome(models.Model):
     via = models.CharField(max_length=20, choices=VIA_CHOICES)
     #: The person was warned that sets were unlogged and closed the day anyway.
     confirmed_unlogged = models.BooleanField(default=False)
+    #: Logged after the fact in one go («سجّل دفعة واحدة», BACKEND_BUGS B-157) rather
+    #: than live: `update_progress` with `quick_log: true`, or `bulk-complete`. A mark on
+    #: the day, not a reason for closing it — `via` and the streak rules are untouched —
+    #: and, like `confirmed_unlogged`, a later close never takes it away.
+    quick_log = models.BooleanField(default=False)
     #: Nothing missing: every prescribed set of the day is accounted for.
     complete = models.BooleanField(default=False, db_index=True)
 

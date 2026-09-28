@@ -409,7 +409,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Fitness and training activity (`fitness`).
 
-**Fields stored.** `id`, `user`, `routine`, `day`, `date`, `via`, `confirmed_unlogged`, `complete`, `planned_sets`, `logged_sets`, `missed_sets`, `planned_reps`, `logged_reps`, `reps_known`, `planned_volume_kg`, `logged_volume_kg`, `exercises_planned`, `exercises_full`, `exercises_partial`, `exercises_untouched`, `exercises_skipped`, `prescription_exact`, `workout_session`, `detail`, `created_at`, `updated_at`.
+**Fields stored.** `id`, `user`, `routine`, `day`, `date`, `via`, `confirmed_unlogged`, `quick_log`, `complete`, `planned_sets`, `logged_sets`, `missed_sets`, `planned_reps`, `logged_reps`, `reps_known`, `planned_volume_kg`, `logged_volume_kg`, `exercises_planned`, `exercises_full`, `exercises_partial`, `exercises_untouched`, `exercises_skipped`, `prescription_exact`, `workout_session`, `detail`, `created_at`, `updated_at`.
 
 **In the export.** Every field.
 

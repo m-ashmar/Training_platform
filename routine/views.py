@@ -1117,19 +1117,33 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def update_progress(self, request, pk=None):
-        """POST /api/routine/routines/{id}/update_progress/ — set a day's status for today.
+        """POST /api/routine/routines/{id}/update_progress/ — set a day's status for a date
+        (today unless `date` says otherwise).
 
-        Body: `day`, `status` (`not_started | in_progress | completed | skipped`), and
-        `confirm_unlogged` (bool). Completing a day does not require every set to be
+        Body: `day`, `status` (`not_started | in_progress | completed | skipped`),
+        `confirm_unlogged` (bool), and two optional keys (BACKEND_BUGS B-157, additive):
+
+        `date`       `YYYY-MM-DD`, the calendar day being closed — a LogDay for
+                     yesterday closes yesterday, measured against the sets logged THAT
+                     day. Inside the training window, like `set-logs/sync/`: 400
+                     `bad_date`, `date_in_future`, `date_too_old`. Not sent: today.
+        `quick_log`  `true` when the day was logged after the fact in one go
+                     («سجّل دفعة واحدة») rather than live. Kept on the day's outcome as
+                     `outcome.quick_log`, and no later close takes it away
+                     (`bulk-complete` sets it too). It changes nothing else: `via`, the
+                     unlogged-sets warning and the streak rules are the same.
+
+        Completing a day does not require every set to be
         logged, but the person must be warned first (owner, 2026-09-19): while any
-        prescribed set of that day is unlogged today, `completed` answers
+        prescribed set of that day is unlogged on that date, `completed` answers
         409 `unlogged_sets` with `{prescribed, logged, unlogged}`, and the app sends the
         same request again with `confirm_unlogged: true` once the person has seen it.
         Closing a day (`completed` or `skipped`) answers `outcome`: what the day planned
         against what was done — `planned_sets`, `logged_sets`, `missed_sets`,
         `planned_reps`, `logged_reps`, `complete`, `confirmed_unlogged` (the owner,
-        2026-09-20). A day closed with sets missing does not count as a training day and
-        breaks the streak; `analytics/adherence/` reads these rows.
+        2026-09-20), `quick_log` (B-157) and `date`. A day closed with sets missing does
+        not count as a training day and breaks the streak; `analytics/adherence/` reads
+        these rows.
 
         Other codes (every refusal names its own since the owner's decision of
         2026-09-24; the ones marked new answered `bad_request` / `permission_denied`):
@@ -1141,6 +1155,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         | 400 | `bad_status` | `status` is not one of the four |
         | 400 | `day_out_of_range` (new) | `day` is outside 1..the routine's days |
         | 400 | `day_has_no_exercises` (new) | that day of the routine has no exercises |
+        | 400 | `bad_date` / `date_in_future` / `date_too_old` | `date` is not a date, is after today, or is before the training window (B-157) |
         | 403 | `routine_not_yours` (new) | the routine is not assigned to you |
         | 403 | `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` | with `trainer_id`, while the coaching this routine came from is unpaid or over — readable, not trainable (the owner) |
         | 404 | `not_found` | no such routine, or not one you can see |
@@ -1154,7 +1169,16 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         if user not in routine.assigned_to.all():
             return Response({"error": _("You are not authorized to update this routine."),
                              "code": "routine_not_yours"}, status=403)
-        _require_can_train(user, routine)
+        # The day being closed (B-157). Without it this route could only close TODAY,
+        # so a LogDay for yesterday was measured against today's sets (409, 0 logged)
+        # and, once confirmed, wrote a 0-of-N day today.
+        on = None
+        if request.data.get('date') not in (None, ''):
+            refused = _backlog_date_refused(request.data.get('date'))
+            if refused is not None:
+                return refused
+            on = _date_or_none(request.data.get('date'))
+        _require_can_train(user, routine, on)
 
         if not day or not status:
             return Response({"error": _("Day and status are required."),
@@ -1186,14 +1210,16 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             return _day_refused(routine, day_number)
 
         confirmed = _truthy(request.data.get('confirm_unlogged'))
-        counts = _day_set_counts(routine, user, day_number) if status in ('completed', 'skipped') else None
+        counts = (_day_set_counts(routine, user, day_number, date=on)
+                  if status in ('completed', 'skipped') else None)
         if status == 'completed' and not confirmed and counts['unlogged']:
             return Response({
                 'error': _('Some sets of this day are not logged yet.'),
                 'code': 'unlogged_sets', **counts}, status=409)
 
         try:
-            updated_progress = routine.update_progress(user=user, day=day_number, status=status)
+            updated_progress = routine.update_progress(user=user, day=day_number, status=status,
+                                                       progress_date=on)
         except ValueError as e:
             # `Routine.update_progress` raises it for one reason only: the day is outside
             # 1..days (a row left on a day the routine no longer has).
@@ -1210,9 +1236,10 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             via = ('skipped' if status == 'skipped'
                    else 'confirmed_unlogged' if counts['unlogged'] else 'completed')
             outcome = record_day_quietly(
-                user, routine, day_number, via=via,
+                user, routine, day_number, on, via=via,
                 # Only a completed day is ever warned: a skipped one saw nothing.
-                confirmed_unlogged=(status == 'completed' and bool(counts['unlogged'])))
+                confirmed_unlogged=(status == 'completed' and bool(counts['unlogged'])),
+                quick_log=_truthy(request.data.get('quick_log')))
 
         body = {"message": _("Progress updated successfully"),
                 "updated_progress": updated_progress}
@@ -1358,7 +1385,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
 
     Every row carries `outcome` since 2026-09-20: what that day actually came to, or
     null while the day is still open. `{complete, via, missed_sets, planned_sets,
-    logged_sets}` — `via` says what closed it (`completed`, `confirmed_unlogged`,
+    logged_sets, confirmed_unlogged, quick_log}` — `quick_log` (B-157) is true for a day
+    logged after the fact in one go, the coach's quick-log badge; `via` says what closed it (`completed`, `confirmed_unlogged`,
     `skipped`, `bulk_complete`, `session`, `auto`, `unclosed`), and `complete` is false
     for a day closed with sets still missing, which is the day that breaks the streak
     (the owner, 2026-09-20). The full per-exercise breakdown of one day is on
@@ -1434,6 +1462,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
             outcome_missed_sets=Subquery(outcome.values('missed_sets')[:1]),
             outcome_complete=Subquery(outcome.values('complete')[:1]),
             outcome_confirmed_unlogged=Subquery(outcome.values('confirmed_unlogged')[:1]),
+            outcome_quick_log=Subquery(outcome.values('quick_log')[:1]),
+            outcome_via=Subquery(outcome.values('via')[:1]),
         )
         
         if user.is_admin:
@@ -4671,8 +4701,9 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             # Logging a whole day closes it, so what it planned against what was done is
             # kept (the owner, 2026-09-20). This path records no set logs, so the day's
             # reps are not known and the week is shown as approximate.
+            # A whole day logged at once is a quick log by definition (B-157).
             from .outcomes import record_day_quietly
-            record_day_quietly(user, routine, day, date, via='bulk_complete')
+            record_day_quietly(user, routine, day, date, via='bulk_complete', quick_log=True)
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
 
