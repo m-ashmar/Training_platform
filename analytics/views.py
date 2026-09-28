@@ -22,6 +22,7 @@ from .serializers import (
     UserActivitySerializer, PerformanceMetricSerializer,
     UserSessionSerializer, UserGoalSerializer, AnalyticsDashboardSerializer
 )
+from training_platform.middleware import get_recordable_client_ip
 from training_platform.query_params import int_param
 
 
@@ -62,10 +63,10 @@ class UserActivityViewSet(viewsets.ModelViewSet):
         return UserActivity.objects.filter(user=user)
     
     def perform_create(self, serializer):
-        """Automatically set user and IP address"""
+        """Automatically set user and IP address (the client's, not the proxy's)."""
         serializer.save(
             user=self.request.user,
-            ip_address=self.request.META.get('REMOTE_ADDR'),
+            ip_address=get_recordable_client_ip(self.request),
             user_agent=self.request.META.get('HTTP_USER_AGENT', '')
         )
     
@@ -233,10 +234,11 @@ class UserSessionViewSet(viewsets.ModelViewSet):
         return UserSession.objects.filter(user=user)
     
     def perform_create(self, serializer):
-        """Automatically set user and session info"""
+        """Automatically set user and session info. The IP is the client's as the trusted
+        proxy chain gives it: behind Fly, REMOTE_ADDR is the edge proxy."""
         serializer.save(
             user=self.request.user,
-            ip_address=self.request.META.get('REMOTE_ADDR'),
+            ip_address=get_recordable_client_ip(self.request),
             user_agent=self.request.META.get('HTTP_USER_AGENT', '')
         )
     

@@ -40,17 +40,13 @@ ENV DJANGO_SETTINGS_MODULE=training_platform.settings_production
 
 # Non-root user for security.
 #
-# There is deliberately NO `USER appuser` here, and this is the fix for "no upload can
-# be written on the deployed app": /data is a Fly VOLUME, mounted over this path at run
-# time, and a mount replaces the directory — the chown below applies to a directory the
-# volume then hides, while what the process actually meets is the volume's own root,
-# owned by root:root. Running as appuser from the image therefore meant EACCES on every
-# write under /data, including the multipart spool (FILE_UPLOAD_TEMP_DIR=/data/tmp), so
-# uploads failed before any view ran.
-#
-# The entrypoint starts as root, chowns the mount AFTER it exists, and then drops to
-# appuser for the actual process — so nothing the app does runs as root.
-RUN useradd -m appuser && mkdir -p /data/media /data/tmp && chown -R appuser /app /data
+# There is deliberately NO `USER appuser` here. The entrypoint starts as root, creates
+# the multipart spool (FILE_UPLOAD_TEMP_DIR, under /tmp) for appuser at START — a
+# platform may mount a fresh tmpfs over /tmp, which would hide a directory made here at
+# build time, exactly as the media volume that used to be mounted here hid its own —
+# and then drops to appuser for the actual process, so nothing the app does runs as root.
+# There is no volume any more: media is object storage in production (fly.toml).
+RUN useradd -m appuser && chown -R appuser /app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

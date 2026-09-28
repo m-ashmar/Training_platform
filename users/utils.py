@@ -9,6 +9,9 @@ from django.db import InterfaceError, OperationalError
 from django.template.loader import render_to_string
 from django.utils.translation import gettext_lazy as _lazy
 
+# Addresses never reach a log line in clear (training_platform/log_privacy.py).
+from training_platform.log_privacy import mask_email, redact_emails
+
 #: What the caller is told when a code does not match. Translatable, because this API
 #: serves English and Arabic and these were the last auth messages hardcoded in English.
 _INVALID_OTP = _lazy("Invalid or expired code. Please request a new one.")
@@ -547,7 +550,7 @@ def verify_otp_detailed(email, otp_code, purpose='registration'):
     # Check lockout BEFORE doing any DB work
     is_locked, remaining = _check_otp_lockout(email, purpose)
     if is_locked:
-        logger.warning(f"OTP lockout active for {email} ({purpose})")
+        logger.warning(f"OTP lockout active for {mask_email(email)} ({purpose})")
         return (False, None, str(_OTP_LOCKED_OUT), 'too_many_attempts',
                 otp_lockout_seconds_left(email, purpose))
     # A number or a list is a wrong code like any other, never a different answer: the
@@ -582,7 +585,7 @@ def verify_otp_detailed(email, otp_code, purpose='registration'):
         if not matched_otp:
             # Record failed attempt
             attempts = _record_otp_failure(email, purpose)
-            logger.warning(f"Failed OTP attempt {attempts}/5 for {email} ({purpose})")
+            logger.warning(f"Failed OTP attempt {attempts}/5 for {mask_email(email)} ({purpose})")
             
             # ONE message, whatever the reason. Splitting it on "does this email have a
             # pending OTP" made the endpoint an account oracle, inside the one function
@@ -607,7 +610,7 @@ def verify_otp_detailed(email, otp_code, purpose='registration'):
         # Clear attempt counter on success
         _clear_otp_attempts(email, purpose)
         
-        logger.info(f"OTP ({purpose}) verified for user {user.id} ({email})")
+        logger.info(f"OTP ({purpose}) verified for user {user.id} ({mask_email(email)})")
         return True, matched_otp, None, None, None
 
     except CustomUser.DoesNotExist:
@@ -617,11 +620,12 @@ def verify_otp_detailed(email, otp_code, purpose='registration'):
     except (OperationalError, InterfaceError):
         # The database, not the code. Answering "invalid" during an outage tells the user
         # their correct code is wrong and sends them to ask for another one.
-        logger.exception("OTP verification could not reach the database for %s", email)
+        logger.exception("OTP verification could not reach the database for %s",
+                         mask_email(email))
         raise
     except Exception as e:
         # The same answer as a wrong code, and counted as one: a distinct answer here
         # told a caller which addresses have accounts.
-        logger.error(f"Error verifying OTP for {email}: {str(e)}")
+        logger.error(f"Error verifying OTP for {mask_email(email)}: {redact_emails(str(e))}")
         _record_otp_failure(email, purpose)
         return False, None, str(_INVALID_OTP), 'otp_invalid', None

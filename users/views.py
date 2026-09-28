@@ -48,6 +48,8 @@ from rest_framework.exceptions import (NotAuthenticated, NotFound, PermissionDen
                                        ValidationError as DRFValidationError)
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 from training_platform.query_params import body_dict
+# Addresses never reach a log line in clear (training_platform/log_privacy.py).
+from training_platform.log_privacy import mask_email, redact_emails
 from .trainer_directory import CoachingPriceBook
 
 logger = logging.getLogger(__name__)
@@ -473,7 +475,7 @@ class OTPVerificationView(APIView):
             'onboarding_completed': user.is_onboarding_completed,
         }
         
-        logger.info(f"User {user.id} ({email}) verified and activated")
+        logger.info(f"User {user.id} ({mask_email(email)}) verified and activated")
         
         return Response({
             'message': _('Email verified successfully. Your account has been activated.'),
@@ -2874,7 +2876,7 @@ class PasswordResetRequestView(APIView):
         except ValueError:
             rl.set(cache_key, 1, 3600)
 
-        logger.info(f"Password reset requested for email: {email}")
+        logger.info(f"Password reset requested for email: {mask_email(email)}")
 
         return Response({
             'message': _('If an account with this email exists, a password reset code has been sent.'),
@@ -2927,7 +2929,7 @@ class PasswordResetVerifyView(APIView):
         # keyed hash is stored, so the table cannot be read to reset someone's password.
         reset_token, raw_reset_token = PasswordResetToken.issue(user, minutes=15)
 
-        logger.info(f"Password reset OTP verified for user {user.id} ({email})")
+        logger.info(f"Password reset OTP verified for user {user.id} ({mask_email(email)})")
 
         return Response({
             'message': _('OTP verified successfully. Use the reset token to set your new password.'),
@@ -3010,7 +3012,7 @@ class PasswordResetConfirmView(APIView):
         from .utils import clear_login_attempts
         clear_login_attempts(user.email)
 
-        logger.info(f"Password reset completed for user {user.id} ({user.email})")
+        logger.info(f"Password reset completed for user {user.id} ({mask_email(user.email)})")
 
         return Response({
             'message': _('Your password has been reset successfully. You can now log in with your new password.'),
