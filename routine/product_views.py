@@ -526,7 +526,11 @@ class ProductBuyView(APIView):
     buyer's own copy of the program is written and assigned to them — see
     `routine/products.py`. A price in the other currency is converted at the
     operator's rate, which is snapshotted too. The same key again answers the same
-    purchase (200, nothing moves twice).
+    purchase (200, nothing moves twice). A second request with the same key sent
+    while the first is still running (a double tap) waits for the first to finish —
+    both queue on the product's row lock — and then answers the same purchase (200);
+    this route never answers `request_in_flight` (the wallet transfer and top-up
+    routes do). The wait lasts as long as the first request (BACKEND_BUGS B-155).
 
     200: `{purchase: {id, product_id, status: "confirmed", money_type:
     "ROUTINE_PRODUCT", amount, currency,

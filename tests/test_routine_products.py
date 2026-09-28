@@ -976,3 +976,18 @@ def test_a_program_row_counts_its_confirmed_buyers(make_user, api):
     assert buyers() is None, "four owners: a refunded purchase is not a buyer"
     assert _buy(api, _client(make_user, "buyers5"), product_id).status_code == 200
     assert buyers() == 5
+
+
+def test_the_buy_docstring_says_what_a_concurrent_repeat_answers():
+    """BACKEND_BUGS B-155: the docstring is the contract, and it did not say what a
+    second request with the same key answers while the first still runs. It waits on
+    the product's row lock and replays; `request_in_flight` is never answered here
+    (tests/test_zz_product_buy_race.py holds the behaviour)."""
+    import inspect
+
+    from routine.product_views import ProductBuyView
+
+    doc = " ".join((inspect.getdoc(ProductBuyView) or "").split())
+    assert "while the first is still running" in doc
+    assert "waits for the first to finish" in doc
+    assert "never answers `request_in_flight`" in doc
