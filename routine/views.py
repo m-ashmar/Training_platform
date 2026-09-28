@@ -205,6 +205,30 @@ def _date_or_none(value):
         return None
 
 
+class _WholeNumberFilter(django_filters.NumberFilter):
+    """A whole number or a 400. `NumberFilter` parses a Decimal, and an integer column
+    takes `int()` of it — so `?routine=1.5` would have read routine 1."""
+    field_class = django_forms.IntegerField
+
+
+class ExerciseFilter(django_filters.FilterSet):
+    """`?target_muscle=<key>&exclude=<id>` on the exercise list (BACKEND_BUGS B-158).
+
+    Both narrow the rows `visible_exercises_for` already allows, so neither can widen
+    them. `target_muscle` is one of `Exercise.target_muscle`'s stored keys (`Biceps`,
+    `Front Quads`, ...); anything else answers 400 `invalid_choice` on the field.
+    `exclude` is a plain number, never a lookup of the exercise row (the S-119 oracle):
+    an id that does not exist excludes nothing.
+    """
+    target_muscle = django_filters.ChoiceFilter(
+        choices=Exercise._meta.get_field('target_muscle').choices)
+    exclude = _WholeNumberFilter(field_name='pk', exclude=True)
+
+    class Meta:
+        model = Exercise
+        fields = ['target_muscle', 'exclude']
+
+
 class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     """ViewSet for managing exercises.
@@ -213,11 +237,19 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     already decoding as many images as its memory holds (`training_platform/
     image_budget.py`): nothing was saved; send it again after `Retry-After` seconds
     (`retry_after_seconds` in the body).
+
+    List filters (BACKEND_BUGS B-158): `?target_muscle=<key>` — only that muscle's
+    exercises (400 `validation_error`, `field_errors.target_muscle[0].code`
+    `invalid_choice`, for a value that is not one of the keys); `?exclude=<id>` — leave
+    that exercise out (the one being replaced). Both only narrow what the caller may
+    already read.
     """
     queryset = Exercise.objects.all()
     serializer_class = ExerciseSerializer
     permission_classes = [IsAdminOrOwnerOrReadOnly]
     pagination_class = StandardResultsSetPagination
+    filter_backends = [DjangoFilterBackend]
+    filterset_class = ExerciseFilter
 
     def get_queryset(self):
         """Filter exercises based on user role with optimized queries.
@@ -1251,12 +1283,6 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         # Placeholder for notification logic
         logger.info(f"Notification sent to client {client.id} about routine {routine.id} unassignment")
         pass
-
-
-class _WholeNumberFilter(django_filters.NumberFilter):
-    """A whole number or a 400. `NumberFilter` parses a Decimal, and an integer column
-    takes `int()` of it — so `?routine=1.5` would have read routine 1."""
-    field_class = django_forms.IntegerField
 
 
 class RoutineExerciseFilter(django_filters.FilterSet):
@@ -4337,6 +4363,17 @@ class ProgressExists(APIException):
         return self.default_code
 
 
+class UserExerciseProgressFilter(django_filters.FilterSet):
+    """`?exercise=<id>&date=YYYY-MM-DD` — `exercise` as a NUMBER, never a lookup of the
+    exercise row (SIDE_BUGS S-164, the S-119 oracle; see `UserExerciseProgressViewSet`)."""
+    exercise = _WholeNumberFilter(field_name='exercise_id')
+    date = django_filters.DateFilter(field_name='date')
+
+    class Meta:
+        model = UserExerciseProgress
+        fields = ['exercise', 'date']
+
+
 class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing UserExerciseProgress objects (per-user, per-exercise progress).
@@ -4350,12 +4387,76 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     that does not exist (SIDE_BUGS S-056); `date_in_future` / `date_too_old` on `date`
     outside the training window (SIDE_BUGS S-112). 400 `progress_exists` with the
     existing row's `id` for a second row on the same exercise and day.
+
+    **List filters.** `?exercise=<id>` and `?date=YYYY-MM-DD` narrow the rows the caller
+    may read. `exercise` is a plain whole number (SIDE_BUGS S-164): it was checked
+    against EVERY exercise, so a missing id answered 400 "Select a valid choice" while
+    another trainer's private exercise answered an empty 200, and exercise ids could be
+    probed. Both are an empty page now; a value that is not a whole number is 400
+    `validation_error` on `exercise`.
+
+    `?latest_for=<id>,<id>,...&before=YYYY-MM-DD` (BACKEND_BUGS B-181; «آخر مرة» beside
+    each exercise of a day, in ONE call instead of one per exercise): the newest TRAINED
+    row (`skipped` false, `completed_sets` > 0) of each named exercise dated before
+    `before` (any date when it is not sent) — one row per exercise for a client; for a
+    trainer, one per exercise per client they may read. At most 50 ids. 400
+    `bad_exercise_id` (+ `field`: `latest_for`) for an id that is not a whole number
+    from 1, 400 `too_many_exercise_ids` (+ `max`), 400 `bad_date` (+ `field`: `before`).
+    An id that names nothing, or nothing the caller may read, simply has no row.
+
+    Every list and detail row carries `top_set` (B-181): that day's «أفضل مجموعة» by the
+    owner's rule (the highest weight x reps, among equals the heavier weight;
+    `routine/strength.py`) as `{weight, reps, volume_kg}`, or null when no set of that day
+    has both a weight and reps — so «آخر مرة» needs no `daily-summary/` call per date.
     """
     queryset = UserExerciseProgress.objects.all()
     serializer_class = UserExerciseProgressSerializer
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['exercise', 'date']
+    filterset_class = UserExerciseProgressFilter
+
+    #: How many exercises one `?latest_for=` may name: a day, not the library.
+    LATEST_FOR_MAX = 50
+
+    def list(self, request, *args, **kwargs):
+        raw = request.query_params.get('latest_for')
+        if raw is None:
+            return super().list(request, *args, **kwargs)
+        ids = []
+        for part in raw.split(','):
+            number = _int_or_none(part.strip())
+            if number is None or number < 1 or str(number) != part.strip():
+                return Response({'error': _('latest_for must be exercise ids separated by '
+                                            'commas.'),
+                                 'code': 'bad_exercise_id', 'field': 'latest_for'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            ids.append(number)
+        if len(set(ids)) > self.LATEST_FOR_MAX:
+            return Response({'error': _('Ask for at most %(max)d exercises at a time.')
+                             % {'max': self.LATEST_FOR_MAX},
+                             'code': 'too_many_exercise_ids', 'max': self.LATEST_FOR_MAX},
+                            status=status.HTTP_400_BAD_REQUEST)
+        trained = Q(exercise_id__in=set(ids), skipped=False, completed_sets__gt=0)
+        before = request.query_params.get('before')
+        if before is not None:
+            day = _date_or_none(before)
+            if day is None:
+                return Response({'error': _('date must be in YYYY-MM-DD format.'),
+                                 'code': 'bad_date', 'field': 'before'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            trained &= Q(date__lt=day)
+        queryset = self.filter_queryset(self.get_queryset())
+        # The newest row per (person, exercise), chosen in a narrow subquery — only the
+        # key columns are DISTINCT ON'd — and read back through the scoped queryset, so
+        # the page keeps its ordinary order and joins.
+        newest = (queryset.filter(trained)
+                  .order_by('user_id', 'exercise_id', '-date', '-id')
+                  .distinct('user_id', 'exercise_id').values('pk'))
+        queryset = queryset.filter(pk__in=newest)
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(queryset, many=True).data)
 
     def get_serializer_class(self):
         """
@@ -4387,6 +4488,8 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         # and another for that exercise's media. Twenty-five rows was fifty queries
         # for one page.
         base = self.queryset.select_related('exercise').prefetch_related('exercise__media')
+        if self.action in ('list', 'retrieve'):
+            base = base.prefetch_related('set_logs')        # each row's `top_set`
         if user.is_admin:
             return base.all()
         elif user.is_trainer:

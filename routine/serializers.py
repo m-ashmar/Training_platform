@@ -967,9 +967,27 @@ class UserExerciseProgressDetailSerializer(UserExerciseProgressSerializer):
     Used for read operations (GET).
     """
     exercise = ExerciseSerializer(read_only=True)
+    top_set = serializers.SerializerMethodField()
 
     class Meta(UserExerciseProgressSerializer.Meta):
-        fields = UserExerciseProgressSerializer.Meta.fields
+        fields = UserExerciseProgressSerializer.Meta.fields + ['top_set']
+
+    def get_top_set(self, obj):
+        """That day's «أفضل مجموعة» (BACKEND_BUGS B-181): the set with the highest weight
+        x reps, among equals the heavier weight — the owner's rule, and the same key and
+        shape as `routine/strength.py` answers on `analytics/strength/`. `{weight, reps,
+        volume_kg}`, or null when no set of the day has both a weight and reps. Reads
+        the prefetched `set_logs` (the viewset prefetches them for list and detail)."""
+        from .strength import _set_volume_key, _top_set_payload
+
+        best = None
+        for log in obj.set_logs.all():
+            if not log.weight or not log.reps or log.weight <= 0 or log.reps <= 0:
+                continue
+            if best is None or (_set_volume_key(log.weight, log.reps)
+                                > _set_volume_key(*best)):
+                best = (log.weight, log.reps)
+        return _top_set_payload(*best) if best is not None else None
 
 
 

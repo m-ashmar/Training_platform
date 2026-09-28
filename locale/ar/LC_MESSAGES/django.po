@@ -5884,3 +5884,14 @@ msgstr "يوجد دفع مفتوح لهذا البرنامج. أكمله، أو 
 #: releases/app_links.py
 msgid "Links that open the app are not set up on this server."
 msgstr "روابط فتح التطبيق غير مُعدّة على هذا الخادم."
+
+#. user-exercise-progress/?latest_for= (BACKEND_BUGS B-181): a value that is not
+#. a list of exercise ids.
+#: routine/views.py
+msgid "latest_for must be exercise ids separated by commas."
+msgstr "يجب أن يكون latest_for معرّفات تمارين مفصولة بفواصل."
+
+#: routine/views.py
+#, python-format
+msgid "Ask for at most %(max)d exercises at a time."
+msgstr "اطلب %(max)d تمرينًا على الأكثر في المرة الواحدة."
