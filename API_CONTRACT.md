@@ -828,8 +828,22 @@ build.
 | `POST` | `/api/diet/v1/trainer/diet-plans/review/` | auth (trainer), HasDietAccess | `TrainerDraftPlanReviewView` |
 | `GET` | `/api/diet/v1/trainer/diet-plans/{plan_id}/review/` | auth (trainer), HasDietAccess | `TrainerPlanReviewView` |
 
-New codes: `bad_meals` (400: `meals` is not a non-empty list, or an item is not an
-object). Reused with their meaning: `bad_duration` (now also `duration_days`),
+**The trainer's macro split (B-137, the owner 2026-09-28).** `POST trainer/diet-plans/`
+and `POST trainer/diet-plans/review/` take optional `target_protein`, `target_carbs`,
+`target_fat` (grams a day, all three or none). Sent, they are the plan's target, stored
+as sent, when 4P + 4C + 9F is within 10 percent of `daily_calories` and the protein
+within the engine's bounds for the goal (60-250 g); otherwise 400 `bad_macro_split` and
+nothing is written. Not sent, the split is derived from the calories and the goal as
+before. It is set when the plan is written; no route edits a plan's split. The create's
+`diet_plan` gains `daily_targets` `{calories, protein, carbs, fat}`, the target the plan
+holds.
+
+**Whose plan (B-140).** The `plan` block of `plan/{id}/meals-with-ingredients/` gains
+`client_id`, the user whose plan it is.
+
+New codes: `bad_macro_split` (400, above). `bad_meals` (400: `meals` is not a non-empty
+list, or an item is not an object). Reused with their meaning: `bad_duration` (now also
+`duration_days`),
 `batch_too_large` (with `limit`), `duplicate_meal` and the meal refusals (with `index`),
 `not_a_trainer`, `not_assigned_client`, `not_plan_owner`, `plan_superseded`,
 `coaching_frozen`, `coaching_unpaid`, `coaching_ended`.
@@ -2802,7 +2816,7 @@ of its codes.
 | `diet/v1/plans/generate/` | 400 `bad_date`; 403 `trainers_cannot_generate` |
 | `diet/v1/plans/generate-rule/` | 400 `bad_date`; 403 `trainers_cannot_generate`; 422 `infeasible_calories` (the async route's code for the same refusal) |
 | `diet/v1/trainer/templates/` | 403 `not_a_trainer` |
-| `diet/v1/trainer/diet-plans/` | 400 `missing_fields` (with `fields`), `bad_client_id`, `bad_template_id`, `bad_date`, `bad_body`; 403 `not_a_trainer` |
+| `diet/v1/trainer/diet-plans/` | 400 `missing_fields` (with `fields`), `bad_client_id`, `bad_template_id`, `bad_date`, `bad_body`, `bad_macro_split` (also `trainer/diet-plans/review/`, BACKEND_BUGS B-137); 403 `not_a_trainer` |
 | `diet/v1/trainer/meals/`, `.../{meal_id}/` | 400 `missing_fields` (with `fields`), `bad_diet_plan_id`, `bad_date`, `bad_body`; 403 `not_a_trainer` |
 | `diet/v1/nutrition/plan/{plan_id}/`, `diet/v1/meals/{meal_id}/components/`, `diet/v1/plan/{plan_id}/meals-with-ingredients/` | 403 to a trainer: `not_plan_owner`, `not_assigned_client` or `plan_superseded` (the trainer service's own reason), `not_assigned_view` for any other |
 | `diet/v1/client/meals/{meal_id}/` | 403 `clients_only` |

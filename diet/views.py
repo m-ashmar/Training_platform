@@ -2025,8 +2025,18 @@ class TrainerDietPlanView(APIView):
     `POST v1/trainer/diet-plans/` — `client_id`, `template_id`, `start_date`
     (YYYY-MM-DD), all required; optional `duration_days` (1-364, BACKEND_BUGS B-133;
     wins over weeks when both are sent), `duration_weeks` (1-52, default 4; clamped
-    into range as before), `goal`, `daily_calories`, `meals`. The plan's last day is
-    `start_date + days - 1`.
+    into range as before), `goal`, `daily_calories`, `meals`, and the macro split
+    `target_protein`, `target_carbs`, `target_fat` (BACKEND_BUGS B-137). The plan's last
+    day is `start_date + days - 1`.
+
+    The macro split (the owner, 2026-09-28). Grams a day, all three or none. Sent, they
+    are the plan's target, stored as sent, when their energy (4P + 4C + 9F) is within 10
+    percent of the daily calories and the protein within the engine's bounds for the
+    goal (`protein_floor_g`-`protein_ceiling_g` in `diet/planner/policy.py`, 60-250 g);
+    otherwise 400 `bad_macro_split` and nothing is written. Not sent,
+    the split is derived from the calories and the goal, as before. It is set when the
+    plan is written (a draft keeps it when its first meals send it); no route edits the
+    split of a plan that exists.
 
     Sending a plan (BACKEND_BUGS B-132). A trainer plan replaces every active plan of
     the client whose dates overlap it — his automatic plan included — and it used to do
@@ -2051,8 +2061,10 @@ class TrainerDietPlanView(APIView):
       stays in force until the plan has meals.
 
     `diet_plan` is `{id, client_name, template_name, start_date, end_date, goal,
-    daily_calories, status, is_active, duration_days, duration_weeks, meals_count}`;
-    `status` is `draft`, `scheduled`, `active`, `ended` or `superseded`.
+    daily_calories, daily_targets, status, is_active, duration_days, duration_weeks,
+    meals_count}`; `status` is `draft`, `scheduled`, `active`, `ended` or `superseded`;
+    `daily_targets` is `{calories, protein, carbs, fat}`, the day's target the plan
+    holds — the trainer's split, or the goal's (B-137).
 
     `GET ?client_id=` — that client's plans you wrote, newest start first (ties by id),
     `{count, next, previous, results, adherence_withheld}`. Each row: `id`, `goal`,
@@ -2083,6 +2095,9 @@ class TrainerDietPlanView(APIView):
       `duplicate_food`, `unknown_food`, `declared_allergen` — as `trainer/meals/`.
     - 409 `duplicate_meal`, with `index` — two meals of `meals` in one slot.
     - 400 `client_activity_level_required` — see above.
+    - 400 `bad_macro_split` — `target_protein` / `target_carbs` / `target_fat` not all
+      three, not positive numbers, their energy more than 10 percent from the daily
+      calories, or the protein outside the goal's bounds (see above).
     - 400 `bad_body` — the body is not a JSON object.
     - 400 `validation_error` — `duration_weeks` is not a number (`field_errors`).
     - 403 `not_a_trainer` — the caller is neither a trainer nor an admin.
@@ -2142,6 +2157,10 @@ class TrainerDietPlanView(APIView):
             meals = _body(request).get('meals')
             if meals is not None:
                 meals = parse_meals(meals)
+            # The trainer's own macro split, all three or none (B-137).
+            from .trainer_services import parse_macro_split
+
+            macro_split = parse_macro_split(_body(request))
 
             # Create diet plan
             trainer_service = TrainerDietPlanService(request.user)
@@ -2154,6 +2173,7 @@ class TrainerDietPlanView(APIView):
                 daily_calories=_body(request).get('daily_calories'),
                 duration_days=_body(request).get('duration_days'),
                 meals=meals,
+                macro_split=macro_split,
             )
 
             sent = meals is not None
@@ -2174,6 +2194,14 @@ class TrainerDietPlanView(APIView):
                     'end_date': diet_plan.end_date,
                     'goal': diet_plan.goal,
                     'daily_calories': diet_plan.daily_calories,
+                    # The day's target as stored: the trainer's split, or the goal's
+                    # (B-137). The create answered no macros, so the app could not
+                    # show the split the client is held to.
+                    'daily_targets': {
+                        'calories': float(diet_plan.daily_calories or 0),
+                        **{key: float(value)
+                           for key, value in diet_plan.macro_targets().items()},
+                    },
                     'is_active': diet_plan.is_active,
                     'meals_count': len(meals) if sent else 0,
                     **{key: value for key, value in plan_row(diet_plan, timezone.localdate()).items()
@@ -3958,6 +3986,13 @@ class DietPlanMealsWithIngredientsView(APIView):
     `GET v1/plan/<plan_id>/meals-with-ingredients/?from=&to=` (YYYY-MM-DD, both
     optional); at most 60 meals, `truncated: true` when the plan holds more.
 
+    The answer: `{plan, meals, meals_count, truncated}`. `plan` is `{id, client_id,
+    goal, daily_calories, daily_targets: {calories, protein, carbs, fat}, start_date,
+    end_date, is_active, generation_strategy, template_name}`; `client_id` is the user
+    whose plan it is (BACKEND_BUGS B-140), so a trainer who opened a sent plan by id
+    knows the client to pass as `?for_client=`. `daily_targets` are the plan's stored
+    grams or, when none are stored, the goal's.
+
     Readable after the plan lapses (the owner, 2026-09-19): a frozen subscriber
     (`access: "frozen"` on subscriptions/current) still gets 200 here; every use
     route answers 403 `no_entitlement`. Refusals: `no_entitlement`,
@@ -4050,6 +4085,9 @@ class DietPlanMealsWithIngredientsView(APIView):
             payload = {
                 'plan': {
                     'id': plan.id,
+                    # Whose plan it is (BACKEND_BUGS B-140): a trainer opening a sent
+                    # plan by id had no client to send the picker's `?for_client=`.
+                    'client_id': plan.user_id,
                     'goal': plan.goal,
                     'daily_calories': plan.daily_calories,
                     'daily_targets': daily_targets, # <--- NEW FIELD

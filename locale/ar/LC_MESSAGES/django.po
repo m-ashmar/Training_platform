@@ -5884,3 +5884,31 @@ msgstr "يوجد دفع مفتوح لهذا البرنامج. أكمله، أو 
 #: releases/app_links.py
 msgid "Links that open the app are not set up on this server."
 msgstr "روابط فتح التطبيق غير مُعدّة على هذا الخادم."
+
+#. A trainer's macro split (BACKEND_BUGS B-137): the three grams come together or not at
+#. all (`bad_macro_split`). The field names are the API's and stay in Latin letters.
+#: diet/trainer_services.py
+msgid ""
+"Send target_protein, target_carbs and target_fat together, or none of them."
+msgstr "أرسل target_protein وtarget_carbs وtarget_fat معًا، أو لا ترسل أيًّا منها."
+
+#: diet/trainer_services.py
+msgid ""
+"target_protein, target_carbs and target_fat must be positive numbers of grams."
+msgstr "يجب أن تكون قيم target_protein وtarget_carbs وtarget_fat أعدادًا موجبة بالغرامات."
+
+#. The split's energy (4 kcal a gram of protein and carbohydrate, 9 of fat) is outside
+#. the owner's band around the plan's daily calories (`bad_macro_split`).
+#: diet/trainer_services.py
+#, python-format
+msgid ""
+"These macros come to %(energy)d kcal a day; they must be within %(band)d "
+"percent of the daily calories (%(calories)d kcal)."
+msgstr ""
+"مجموع هذه المغذيات %(energy)d سعرة حرارية في اليوم، ويجب أن يكون ضمن %(band)d "
+"بالمئة من السعرات اليومية (%(calories)d سعرة حرارية)."
+
+#: diet/trainer_services.py
+#, python-format
+msgid "Protein must be between %(low)d and %(high)d g a day for this goal."
+msgstr "يجب أن يكون البروتين بين %(low)d و%(high)d غرامًا في اليوم لهذا الهدف."

@@ -33,6 +33,47 @@ MAX_PLAN_MEALS = 500
 #: The longest plan in days (BACKEND_BUGS B-133): the 52 weeks `duration_weeks` has always
 #: allowed.
 MAX_PLAN_DAYS = 364
+#: A trainer's own macro split (BACKEND_BUGS B-137; the owner, 2026-09-28) must add up to
+#: the plan's calories within this share, either way: 4 kcal a gram of protein and of
+#: carbohydrate, 9 of fat.
+MACRO_SPLIT_ENERGY_BAND = 0.10
+#: The request fields of the split, and the engine's name for each macro.
+MACRO_SPLIT_FIELDS = (("target_protein", "protein"), ("target_carbs", "carb"),
+                      ("target_fat", "fat"))
+
+
+def parse_macro_split(body) -> Optional[Dict[str, float]]:
+    """The trainer's macro split from a request body, `{protein, carb, fat}` in grams, or
+    None when the body sends none of `target_protein`, `target_carbs`, `target_fat`.
+
+    All three or none: a split of one macro says nothing about the other two. Each is a
+    positive finite number of grams (not a boolean). Anything else is 400
+    `bad_macro_split`. Whether the three fit the plan's calories and goal is
+    `TrainerDietPlanService._plan_targets`'s to judge.
+    """
+    from .validators import _number
+
+    body = body if isinstance(body, dict) else {}
+    sent = {name: body.get(name) for name, _key in MACRO_SPLIT_FIELDS}
+    given = [name for name, value in sent.items() if value not in (None, '')]
+    if not given:
+        return None
+    if len(given) != len(MACRO_SPLIT_FIELDS):
+        raise ValidationError(
+            _("Send target_protein, target_carbs and target_fat together, or none of "
+              "them."), code="bad_macro_split")
+    split = {}
+    for name, key in MACRO_SPLIT_FIELDS:
+        try:
+            grams = _number(sent[name])
+        except (TypeError, ValueError):
+            grams = None
+        if grams is None or grams <= 0:
+            raise ValidationError(
+                _("target_protein, target_carbs and target_fat must be positive numbers "
+                  "of grams."), code="bad_macro_split")
+        split[key] = grams
+    return split
 
 
 class MealRefused(ValidationError):
@@ -87,6 +128,7 @@ class TrainerDietPlanService:
         *,
         duration_days=None,
         meals: Optional[List[Dict[str, Any]]] = None,
+        macro_split: Optional[Dict[str, float]] = None,
     ) -> DietPlan:
         """
         Create a new diet plan for a client using a template.
@@ -117,6 +159,10 @@ class TrainerDietPlanService:
             daily_calories: Daily calorie target (auto-calculated if None)
             duration_days: Duration in days; wins over `duration_weeks`
             meals: The plan's meals, to send it whole; None for a draft
+            macro_split: The trainer's own `{protein, carb, fat}` grams
+                (`parse_macro_split`, BACKEND_BUGS B-137), stored instead of the
+                goal's derived split; None derives it as before. Set here, while the
+                plan is written: no route edits the split of a plan once it exists.
 
         Returns:
             The DietPlan, carrying `superseded_plan_ids` (what this call retired) and
@@ -127,7 +173,8 @@ class TrainerDietPlanService:
         if not self._can_manage_client(client):
             raise ValidationError(_("You can only create diet plans for your assigned clients"), code="not_assigned_client")
 
-        daily_calories, resolved_goal, macros = self._plan_targets(client, goal, daily_calories)
+        daily_calories, resolved_goal, macros = self._plan_targets(
+            client, goal, daily_calories, macro_split)
         end_date, duration_weeks = self._plan_window(start_date, duration_weeks, duration_days)
 
         fields = dict(
@@ -169,9 +216,16 @@ class TrainerDietPlanService:
         diet_plan.will_replace_plan_ids = []
         return diet_plan
 
-    def _plan_targets(self, client, goal, daily_calories):
+    def _plan_targets(self, client, goal, daily_calories, macro_split=None):
         """`(daily_calories, goal, macro grams)` for a plan written for `client`: the
-        figure the trainer set, or the one computed from the client's profile."""
+        figure the trainer set, or the one computed from the client's profile.
+
+        The grams are the trainer's `macro_split` when given (BACKEND_BUGS B-137), else
+        the goal's split derived from the calories, as the engine builds to. A split is
+        refused, 400 `bad_macro_split`, when its energy (4P + 4C + 9F) is more than
+        `MACRO_SPLIT_ENERGY_BAND` from the calories, or its protein is outside the
+        engine's bounds for the goal (`protein_floor_g` .. `protein_ceiling_g`).
+        """
         # Calculate daily calories if not provided. Not from an activity level the client
         # never chose (the owner, 2026-09-20): the default would pass for sedentary.
         if daily_calories is None:
@@ -192,9 +246,33 @@ class TrainerDietPlanService:
         # ratio and disagreed with every generated plan about the same numbers.
         from diet.planner.policy import load_policy
         from diet.planner.targets import day_macro_grams
-        macros = day_macro_grams(float(daily_calories), load_policy(resolved_goal),
+        policy = load_policy(resolved_goal)
+        if macro_split is not None:
+            return daily_calories, resolved_goal, self._check_split(
+                macro_split, float(daily_calories), policy)
+        macros = day_macro_grams(float(daily_calories), policy,
                                  getattr(client, 'weight', None))
         return daily_calories, resolved_goal, macros
+
+    @staticmethod
+    def _check_split(split, daily_calories: float, policy) -> Dict[str, float]:
+        """The trainer's split, when it fits the calories and the goal; else 400
+        `bad_macro_split`. The owner's bounds (2026-09-28)."""
+        energy = 4 * split['protein'] + 4 * split['carb'] + 9 * split['fat']
+        if abs(energy - daily_calories) > MACRO_SPLIT_ENERGY_BAND * daily_calories:
+            raise ValidationError(
+                _("These macros come to %(energy)d kcal a day; they must be within "
+                  "%(band)d percent of the daily calories (%(calories)d kcal).")
+                % {"energy": round(energy), "band": round(MACRO_SPLIT_ENERGY_BAND * 100),
+                   "calories": round(daily_calories)},
+                code="bad_macro_split")
+        low, high = policy.protein_floor_g, policy.protein_ceiling_g
+        if not low <= split['protein'] <= high:
+            raise ValidationError(
+                _("Protein must be between %(low)d and %(high)d g a day for this goal.")
+                % {"low": round(low), "high": round(high)},
+                code="bad_macro_split")
+        return {'protein': split['protein'], 'carb': split['carb'], 'fat': split['fat']}
 
     @staticmethod
     def _plan_window(start_date, duration_weeks, duration_days=None):
