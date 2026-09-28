@@ -93,10 +93,28 @@ def platform_details() -> dict:
 
 
 def item_of(payment) -> dict:
-    """What was bought, in the pieces the app draws as "Premium · 30 يوماً"."""
+    """What was bought, in the pieces the app draws as "Premium · 30 يوماً".
+
+    A routine product's web-hub checkout bought a program, not a plan: its item adds
+    `product_id` and `product_title`, and its plan keys are empty (BACKEND_BUGS B-167).
+    A plan's item is exactly what it always was."""
     # What THIS payment bought, from its own snapshot: the subscription may be on
     # another plan by the time the receipt is reprinted (`Payment.plan_bought`).
-    return {**payment.plan_bought(), "money_type": payment.money_type}
+    item = {**payment.plan_bought(), "money_type": payment.money_type}
+    product = payment.product_bought()
+    if product is not None:
+        item.update(product)
+    return item
+
+
+def item_line(item) -> str:
+    """The item as one line of the PDF and the email: "Premium · 30 days", or the
+    program's title (a product has no length: it used to read " · None days")."""
+    if item.get("product_id") is not None:
+        return str(item.get("product_title") or "")
+    if item.get("duration_days"):
+        return f"{item['plan_name']} · {item['duration_days']} " + _("days")
+    return str(item.get("plan_name") or "")
 
 
 def upgrade_of(payment) -> dict | None:
@@ -182,7 +200,9 @@ def receipt_data(payment, *, invoice_number: str | None = None) -> dict:
     `exchange` is None for a same-currency purchase, which is most of them.
     """
     item = item_of(payment)
-    payer = payment.subscription.user
+    # The subscriber, or a routine product checkout's buyer (B-167): never
+    # `payment.subscription.user`, which a product's checkout does not have.
+    payer = payment.payer
     return {
         "payment_id": str(payment.id),
         "invoice_number": invoice_number or payment.invoice_number,
@@ -289,8 +309,7 @@ def render_pdf(data: dict, *, compress: bool = True) -> bytes:
     rows = [
         (_("Invoice number"), data["invoice_number"] or ""),
         (_("Date"), issued.strftime("%Y-%m-%d %H:%M") if issued else ""),
-        (_("Item"), f"{item['plan_name']} · {item['duration_days']} "
-                    + _("days")),
+        (_("Item"), item_line(item)),
         (_("Payment method"), data["method"]["name"]),
         (_("Payment reference"), data["reference"]),
         (_("Customer"), data["payer"]["name"]),

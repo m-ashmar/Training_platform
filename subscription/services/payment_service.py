@@ -332,6 +332,12 @@ class PaymentService:
                 payment.save(update_fields=['payout_settled_at', 'updated_at'])
                 logger.info("Payment %s completed (invoice %s): routine product %s delivered",
                             payment.id, payment.invoice_number, payment.routine_product_id)
+                # Its receipt email, as a plan's (the spec, section 7), which rides on
+                # `payment_completed` — not sent for a product. On commit, and robust:
+                # `queue_receipt` never raises, and an email never costs a completion
+                # (BACKEND_BUGS B-167).
+                transaction.on_commit(lambda: cls._queue_receipt_email(payment),
+                                      robust=True)
                 return payment
 
             # --- Activate / extend the subscription, and record what that bought ---
@@ -374,6 +380,13 @@ class PaymentService:
         transaction.on_commit(lambda: payment_completed.send(
             sender=cls, payment=payment, subscription=payment.subscription))
         return payment
+
+    @staticmethod
+    def _queue_receipt_email(payment) -> None:
+        """The receipt email of a routine product's checkout, on commit. Never raises."""
+        from notifications.channels.email import queue_receipt
+
+        queue_receipt(payment)
 
     @staticmethod
     def _notify_confirmed(recipient_id, payment_id) -> None:

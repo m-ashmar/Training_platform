@@ -17,8 +17,10 @@ Two ways in:
   `withdrawal_failed`) also queues an email: `NotificationService._dispatch_channels`
   calls `from_notification`.
 * Two emails have no inbox row of their own, and are queued where their event happens
-  with `queue`: the receipt, from `payment_completed`
-  (`notifications/listeners/email_listeners.py`), and the 7-day notice, from
+  with `queue`: the receipt (`queue_receipt`), from `payment_completed`
+  (`notifications/listeners/email_listeners.py`) and from the completion of a routine
+  product's web-hub checkout, which sends no `payment_completed`
+  (`PaymentService.complete_payment`), and the 7-day notice, from
   `subscription.send_renewal_reminders`.
 
 Built on the account emails' plumbing (`users/tasks.py`, `users/utils.py`): the same
@@ -182,21 +184,22 @@ def _notification_text(event_type: str, context: dict, recipient_id) -> tuple[st
 def _compose_receipt(delivery) -> Composed | None:
     """Payment confirmed, with the receipt the payment history offers, as a PDF."""
     from subscription.models import Payment
-    from subscription.receipts import receipt_data, render_pdf
+    from subscription.receipts import item_line, receipt_data, render_pdf
     from subscription.services.payment_service import PaymentService
 
     payment = (Payment.objects
-               .select_related("subscription", "subscription__plan", "subscription__user")
+               .select_related("subscription", "subscription__plan", "subscription__user",
+                               "buyer", "routine_product")
                .filter(pk=delivery.context.get("payment_id")).first())
+    # The payer: the subscriber, or a routine product checkout's buyer (B-167) — a
+    # product's checkout has no subscription to read a user from.
     if (payment is None or payment.status != "completed"
-            or payment.subscription.user_id != delivery.recipient_id):
+            or payment.payer_id != delivery.recipient_id):
         return None
     # The one generator of invoice numbers (see `PaymentReceiptView`).
     invoice = PaymentService.ensure_invoice_number(payment)
     data = receipt_data(payment, invoice_number=invoice)
-    item = data["item"]
-    what = (f"{item['plan_name']} · {item['duration_days']} " + _("days")
-            if item.get("duration_days") else str(item["plan_name"]))
+    what = item_line(data["item"])
     return Composed(
         title=_("Payment confirmed"),
         paragraphs=[_("We received your payment for %(item)s. Your receipt is attached "
@@ -363,6 +366,34 @@ def queue(recipient, kind: str, *, key: str, context: dict, notification=None):
         # publishes it again.
         transaction.on_commit(lambda: publish(delivery.pk), robust=True)
     return delivery
+
+
+def queue_receipt(payment):
+    """Owe the payer the receipt email for `payment`, once. NEVER raises.
+
+    The one door for the receipt email: `payment_completed` (a plan's payment,
+    `notifications/listeners/email_listeners.py`) and the completion of a routine
+    product's web-hub checkout, which sends no `payment_completed` (BACKEND_BUGS B-167:
+    its buyer got no receipt email at all). Keyed on the payment, so it is owed once
+    however often it is called, and not for a payment confirmed longer ago than
+    `RECEIPT_EMAIL_MAX_AGE`. Returns the `EmailDelivery`, or None."""
+    from subscription.receipts import issued_at
+
+    try:
+        if payment.status != "completed":
+            return None
+        confirmed = issued_at(payment)
+        if confirmed is not None and timezone.now() - confirmed > RECEIPT_EMAIL_MAX_AGE:
+            return None
+        payer = payment.payer
+        if payer is None:
+            return None
+        return queue(payer, "payment_receipt", key=f"payment_receipt:{payment.pk}",
+                     context={"payment_id": str(payment.pk)})
+    except Exception:
+        logger.exception("The receipt email for payment %s could not be queued",
+                         getattr(payment, "pk", None))
+        return None
 
 
 def publish(delivery_id) -> bool:

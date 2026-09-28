@@ -225,7 +225,11 @@ class PaymentSerializer(serializers.ModelSerializer):
         separator rather than being handed a sentence it cannot lay out RTL."""
         # The plan THIS payment bought, not the one the subscription is on now — a
         # plan change (B-047) must not rename every earlier row (`Payment.plan_bought`).
-        return obj.plan_bought()
+        # A routine product's checkout (the web hub) bought no plan: its item adds
+        # `product_id` and `product_title` (BACKEND_BUGS B-167); a plan's row is as it was.
+        item = obj.plan_bought()
+        product = obj.product_bought()
+        return {**item, **product} if product is not None else item
 
     def get_receipt_available(self, obj):
         """Whether `payments/{id}/receipt/` will answer. Only a completed payment has

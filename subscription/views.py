@@ -1042,6 +1042,11 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     marks the one event of a payment older than the history (its state then; `at` is
     the best time its row gave). Never the evidence or which operator. The list does not
     carry `events`. Identical on every build.
+
+    The caller's payments are their plan's AND their routine product checkouts from the
+    web hub (`api/v1/checkout/sessions/`; `subscription` is null on those, and `item`
+    adds `product_id` and `product_title`) — BACKEND_BUGS B-167: the product's rows used
+    to answer 404 and be missing from the list.
     """
     serializer_class = PaymentSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -1050,9 +1055,10 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         return PaymentDetailSerializer if self.action == 'retrieve' else PaymentSerializer
 
     def get_queryset(self):
-        return Payment.objects.filter(
-            subscription__user=self.request.user
-        ).select_related('subscription', 'subscription__plan')
+        return (Payment.objects.filter(paid_by(self.request.user))
+                .select_related('subscription', 'subscription__plan', 'buyer',
+                                'routine_product')
+                .order_by('-created_at', '-id'))
 
 class SubscriptionFeatureViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for subscription features"""
@@ -2099,6 +2105,10 @@ class PaymentReceiptView(APIView):
             "status": "paid",
             "item": {"plan_id", "plan_name", "plan_type", "duration_days",
                      "money_type"},                     draw as "Premium · 30 يوماً"
+                                                        a routine product's checkout (the
+                                                        web hub) adds "product_id" and
+                                                        "product_title" (the plan keys are
+                                                        null/empty): draw the title alone
             "amount": "2500.00", "currency": "SYP",     what was CHARGED, in the payer's currency
             "exchange": null | {                        null unless the plan was priced in
                 "price_of_record": "2.00",              the other currency; then what it
@@ -2137,8 +2147,10 @@ class PaymentReceiptView(APIView):
     | 404 | `not_found` | no such payment, or it belongs to someone else — the same answer either way, so the endpoint cannot be used to discover another customer's payment ids |
     | 404 | `receipt_not_available` | the payment exists and is the caller's, but is not `completed`: a checkout nobody paid has no receipt |
 
-    Who may read it: the payer, and a superuser. A trainer is not a party to their
-    client's plan payment and gets `not_found`.
+    Who may read it: the payer, and a superuser. The payer is the subscriber of a plan's
+    payment, or the buyer of a routine product's web-hub checkout (BACKEND_BUGS B-167:
+    that one answered `not_found` to its own buyer). A trainer is not a party to their
+    client's payment and gets `not_found`.
     """
     permission_classes = [permissions.IsAuthenticated]
     #: `pdf` has to be a format DRF knows, or content negotiation refuses the request
@@ -2149,9 +2161,11 @@ class PaymentReceiptView(APIView):
         from .receipts import receipt_data, render_pdf
 
         qs = Payment.objects.select_related('subscription', 'subscription__plan',
-                                            'subscription__user')
+                                            'subscription__user', 'buyer',
+                                            'routine_product')
         if not getattr(request.user, 'is_superuser', False):
-            qs = qs.filter(subscription__user=request.user)
+            # A plan's payment or a routine product's checkout (B-167): the payer's own.
+            qs = qs.filter(paid_by(request.user))
         try:
             payment = qs.get(id=payment_id)
         except (Payment.DoesNotExist, ValidationError, ValueError):

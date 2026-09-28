@@ -683,6 +683,28 @@ class Payment(RowValidationMixin, models.Model):
         return {'plan_id': plan.id, 'plan_name': plan.name,
                 'plan_type': plan.plan_type, 'duration_days': plan.duration_days}
 
+    def product_bought(self) -> dict | None:
+        """The routine product a web-hub checkout bought: `product_id`, `product_title`
+        (in the reader's language), or None on a plan's payment (BACKEND_BUGS B-167).
+
+        The title is the product's as it reads now, else the one its checkout's snapshot
+        kept (`metadata['product']`), the same fallback the session reads use
+        (`checkout_views._item`)."""
+        if self.routine_product_id is None:
+            return None
+        from django.utils.translation import get_language
+
+        language = get_language() or ''
+        product = self.routine_product
+        snapshot = (self.metadata or {}).get('product') or {}
+        if product is not None:
+            title = product.title_in(language)
+        elif language.startswith('ar'):
+            title = snapshot.get('title_ar') or snapshot.get('title_en') or ''
+        else:
+            title = snapshot.get('title_en') or snapshot.get('title_ar') or ''
+        return {'product_id': self.routine_product_id, 'product_title': title}
+
     @property
     def payer_id(self):
         """The person paying: the buyer of a product's checkout, else the subscriber."""
