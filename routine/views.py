@@ -617,6 +617,12 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     `assigned_to`; assign with `routines/{id}/assign_to_client/`.
 
     List filter: `?source_template=<template id>` — the copies generated from it.
+
+    Who a routine is for: `assigned_ids` (BACKEND_BUGS B-152) — user ids, the key to
+    match a client on. `assigned_usernames` is the same people by username, and
+    `assigned_to` is display text (`"samer (Client)"`), never an id. All three follow the
+    caller: the author or an admin sees every assignee, another trainer only their own
+    approved clients, a client only themselves.
     """
     queryset = Routine.objects.all()
     serializer_class = RoutineSerializer

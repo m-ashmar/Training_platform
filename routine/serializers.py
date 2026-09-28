@@ -542,9 +542,15 @@ class RoutineAssigneesMixin(serializers.Serializer):
     sees only their own approved clients among them; a client sees only themselves. The
     keys stay (`assigned_to`, `assigned_usernames`, `client_count`); their contents follow
     the caller.
+
+    `assigned_ids` (BACKEND_BUGS B-152, additive): the same people as user ids, under the
+    same rule. `assigned_to` is display text — `str(user)`, a username and a translated
+    user-type label — and stays exactly that; match a client to a routine on
+    `assigned_ids`.
     """
     assigned_to = serializers.SerializerMethodField()
     assigned_usernames = serializers.SerializerMethodField()
+    assigned_ids = serializers.SerializerMethodField()
     client_count = serializers.SerializerMethodField()
 
     def _visible_assignees(self, obj):
@@ -567,6 +573,10 @@ class RoutineAssigneesMixin(serializers.Serializer):
     def get_assigned_usernames(self, obj):
         """Retrieve assigned user names."""
         return [p.username for p in self._visible_assignees(obj)]
+
+    def get_assigned_ids(self, obj):
+        """The assignees the caller may know about, as user ids (B-152)."""
+        return [p.pk for p in self._visible_assignees(obj)]
 
     def get_client_count(self, obj):
         """Clients this routine is assigned to that the caller may know about."""
@@ -614,7 +624,7 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
             'id', 'name', 'description', 'difficulty_level', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
             'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles',
-            'source_template', 'product', 'created_by_id', 'day_names',
+            'source_template', 'product', 'created_by_id', 'day_names', 'assigned_ids',
         ]
         # `source_template`: the template this private copy was generated from, or null.
         # A copy, not a link — set by `templates/{id}/generate/`, never by a write here.
@@ -1558,6 +1568,7 @@ class TrainerRoutineSerializer(RoutineAssigneesMixin, serializers.ModelSerialize
             'id', 'name', 'description', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
             'client_count', 'completion_rate', 'source_template', 'created_by_id', 'day_names',
+            'assigned_ids',
         ]
         read_only_fields = ['created_at', 'updated_at', 'source_template']
 
