@@ -14,8 +14,8 @@ What it writes, in order (each step in its own transaction):
 |---|---|---|
 | channel capabilities | `policy/defaults.py` (the spec's table) | left alone |
 | quota features | `subscription/quota.py` FEATURES (as migration 0008 seeds them) | left alone |
-| subscription plans | `subscription/default_plans.py` | left alone; empty Arabic filled |
-| diet plan templates | `setup_diet_templates` | left alone; empty Arabic filled |
+| subscription plans | `subscription/default_plans.py` | left alone (found by key); empty Arabic filled; written only on a database with NO plans |
+| diet plan templates | `setup_diet_templates` | left alone; empty Arabic filled; written only on a database with NO templates |
 | achievements | `achievements/registry.py` | left alone (`sync_achievements` updates) |
 | social achievements | `create_achievements` | left alone |
 | starter exercises | `routine/data/exercise_catalogue.py` | left alone |
@@ -26,6 +26,13 @@ rows, a database whose data migrations were faked, or a flush (the thread-based 
 truncate every table) leaves them missing, and the platform then refuses things it should
 not — every quota check answers "feature row is missing" -> denied. Putting the rows back
 is this command's job; it never creates a second copy of one.
+
+The plans and the diet templates are the operator's once they exist (SIDE_BUGS S-236).
+The console renames, reprices and deletes them, and this command runs again on
+production before each store submission: re-creating whatever it could not find by
+name put a renamed plan back on sale at the placeholder price beside the operator's,
+and brought a deleted one back. So those two steps write their catalogue only into an
+EMPTY table, and report a default they cannot find on a table that has rows.
 
 The food catalogue is the one step that UPDATES existing rows: `load_food_catalogue`
 converges the catalogue on `diet/data/catalogue.py` by design (its docstring), and that
@@ -135,7 +142,11 @@ class Command(BaseCommand):
 
         outcomes = ensure_default_plans()
         created = [plan for plan, outcome in outcomes if outcome == "created"]
+        found = sum(1 for _plan, outcome in outcomes if outcome in ("found", "arabic added"))
         filled = sum(1 for _plan, outcome in outcomes if outcome == "arabic added")
+        missing = [plan.name_en for plan, outcome in outcomes if outcome == "missing"]
+        failed = [f"{plan.name_en} {outcome}" for plan, outcome in outcomes
+                  if outcome.startswith("failed")]
         notes = []
         if filled:
             notes.append(f"Arabic added to {filled}")
@@ -145,7 +156,12 @@ class Command(BaseCommand):
                          f"activated yet: subscription/default_plans.py)")
         if created:
             notes.append("prices are placeholders: set them in the console")
-        return len(created), len(outcomes) - len(created), "; ".join(notes)
+        if missing:
+            # S-236: once a database has plans, the catalogue is the operator's.
+            notes.append(f"{', '.join(missing)} not found and NOT re-created: this "
+                         f"database has plans (subscription/default_plans.py)")
+        notes.extend(failed)
+        return len(created), found, "; ".join(notes)
 
     def diet_templates(self):
         from diet.management.commands.setup_diet_templates import ARABIC
@@ -155,7 +171,12 @@ class Command(BaseCommand):
         before = DietPlanTemplate.objects.filter(name_en__in=names).count()
         call_command("setup_diet_templates", stdout=io.StringIO())
         after = DietPlanTemplate.objects.filter(name_en__in=names).count()
-        return after - before, before, ""
+        present = set(DietPlanTemplate.objects.filter(name_en__in=names)
+                      .values_list("name_en", flat=True))
+        missing = [name for name in names if name not in present]
+        note = (f"{len(missing)} not found and NOT re-created: this database has "
+                f"templates" if missing else "")
+        return after - before, before, note
 
     def achievements(self):
         """Create the registry's achievements that do not exist; never update one.

@@ -117,3 +117,132 @@ def test_s235_the_review_agent_cannot_sign_in_or_top_up_and_a_rotation_ends_old_
     assert profile.status == "suspended", out
     refreshed = _post(anonymous, "/api/auth/token/refresh/", {"refresh": old_refresh})
     assert refreshed.status_code == 401, refreshed.content
+
+
+# ============================================================================ S-236
+def _empty_the_catalogue_tables():
+    """What an empty production database holds of the plans and diet templates:
+    nothing. Deleted inside the test's transaction."""
+    from diet.models import DietPlanTemplate
+    from subscription.models import SubscriptionPlan
+
+    SubscriptionPlan.objects.all().delete()
+    DietPlanTemplate.objects.all().delete()
+
+
+def _plans():
+    from subscription.models import SubscriptionPlan
+
+    return sorted(((p.name_en, p.name_ar or "", p.price, p.is_active)
+                   for p in SubscriptionPlan.objects.all()), key=repr)
+
+
+@pytest.mark.django_db
+def test_s236_a_plan_renamed_in_english_only_neither_stops_the_bootstrap_nor_is_written_again():
+    """(a) The console edits the translated `name`; in an English console that is only
+    `name_en`. The next run died on the unique Arabic name at step 3."""
+    from achievements.models import Achievement
+    from subscription.models import SubscriptionPlan
+
+    _empty_the_catalogue_tables()
+    _bootstrap("--skip-food-catalogue")
+    premium = SubscriptionPlan.objects.get(name_en="Premium Plan")
+    premium.name_en = "Gold"
+    premium.save()
+    before = _plans()
+    Achievement.objects.all().delete()          # a later step, to see that it still runs
+
+    out = _bootstrap("--skip-food-catalogue")
+
+    assert "bootstrap complete" in out, out
+    assert _plans() == before, out
+    assert not SubscriptionPlan.objects.filter(name_en="Premium Plan").exists()
+    assert Achievement.objects.exists(), "the steps after the plans never ran"
+
+
+@pytest.mark.django_db
+def test_s236_a_renamed_and_repriced_plan_is_not_put_back_on_sale_at_the_placeholder_price():
+    """(b) Renamed in both languages and repriced: the next run put a second ACTIVE
+    'Premium Plan' on sale at 2,500 beside the operator's 'Gold' at 9,000."""
+    from subscription.models import SubscriptionPlan
+
+    _empty_the_catalogue_tables()
+    _bootstrap("--skip-food-catalogue")
+    premium = SubscriptionPlan.objects.get(name_en="Premium Plan")
+    premium.name_en, premium.name_ar, premium.price = "Gold", "الذهبية", Decimal("9000.00")
+    premium.save()
+    before = _plans()
+    active = SubscriptionPlan.objects.filter(is_active=True).count()
+
+    _bootstrap("--skip-food-catalogue")
+    call_command("setup_subscription_plans", stdout=io.StringIO())
+
+    assert _plans() == before
+    assert SubscriptionPlan.objects.filter(is_active=True).count() == active == 3
+    assert not SubscriptionPlan.objects.filter(price=Decimal("2500.00")).exists()
+
+
+@pytest.mark.django_db
+def test_s236_a_deleted_plan_or_template_does_not_come_back():
+    """(c) An unwanted default deleted in the console came back ACTIVE on the next
+    run; a diet template renamed or deleted came back as a second copy."""
+    from diet.models import DietPlanTemplate
+    from subscription.models import SubscriptionPlan
+
+    _empty_the_catalogue_tables()
+    _bootstrap("--skip-food-catalogue")
+    SubscriptionPlan.objects.filter(name_en="Professional Plan").delete()
+    DietPlanTemplate.objects.filter(name_en="4 Meals Only").delete()
+    renamed = DietPlanTemplate.objects.get(name_en="3 Meals Only")
+    renamed.name_en = "Three meals"
+    renamed.save()
+    templates = DietPlanTemplate.objects.count()
+
+    out = _bootstrap("--skip-food-catalogue")
+
+    assert not SubscriptionPlan.objects.filter(name_en="Professional Plan").exists()
+    assert SubscriptionPlan.objects.count() == 3
+    assert DietPlanTemplate.objects.count() == templates == 5
+    assert not DietPlanTemplate.objects.filter(name_en__in=["4 Meals Only",
+                                                            "3 Meals Only"]).exists()
+    assert "NOT re-created" in out, out
+
+
+@pytest.mark.django_db
+def test_s236_one_plan_that_cannot_be_written_is_reported_and_the_rest_still_run():
+    """A per-plan failure (its missing Arabic is already another plan's name) is a line
+    of the report, not the end of the bootstrap."""
+    from achievements.models import Achievement
+    from subscription.models import SubscriptionPlan
+
+    _empty_the_catalogue_tables()
+    _bootstrap("--skip-food-catalogue")
+    SubscriptionPlan.objects.filter(name_en="Premium Plan").update(name_ar=None)
+    SubscriptionPlan.objects.filter(name_en="Professional Plan").update(
+        name_ar="الخطة المميزة")
+    Achievement.objects.all().delete()
+
+    out = _bootstrap("--skip-food-catalogue")
+
+    assert "failed" in out and "Premium Plan" in out, out
+    assert Achievement.objects.exists(), "the steps after the plans never ran"
+    assert SubscriptionPlan.objects.get(name_en="Premium Plan").name_ar is None
+
+
+def test_s236_the_review_seed_finds_the_premium_plan_under_the_operators_name(
+        db, seeded_catalogue, review_env, make_user):
+    """seed_review_accounts refused ('no plan Premium Plan', go run bootstrap_platform)
+    once the operator had renamed it, and the bootstrap could not help."""
+    from subscription.models import Subscription, SubscriptionPlan
+    from users.management.commands.seed_review_accounts import Command
+
+    _bootstrap("--skip-food-catalogue")
+    premium = SubscriptionPlan.objects.get(name_en="Premium Plan")
+    premium.name_en, premium.name_ar = "Gold", "الذهبية"
+    premium.save()
+
+    command = Command()
+    command._check_prerequisites()              # refused before
+    command.users, command.log = {"client": make_user("s236_review_client")}, []
+    command._premium()
+    assert Subscription.objects.get(user=command.users["client"]).plan_id == premium.pk

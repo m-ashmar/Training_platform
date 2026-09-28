@@ -98,6 +98,13 @@ class SubscriptionPlan(RowValidationMixin, models.Model):
     #: the API, never hard-coded"). More than one may carry it — the app decides what
     #: to do with that; nothing here depends on it being unique.
     is_featured = models.BooleanField(default=False, db_index=True)
+    #: Which plan of the default catalogue this row is (`subscription/default_plans.py`
+    #: DEFAULT_PLANS `key`), or NULL for a plan an operator made. Not editable: an
+    #: operator renames, reprices or retires a default plan in the console, and the
+    #: launch commands still know it by this (SIDE_BUGS S-236 — found by its English
+    #: name, a renamed plan was written a second time at the placeholder price).
+    catalogue_key = models.CharField(max_length=32, unique=True, null=True, blank=True,
+                                     editable=False)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

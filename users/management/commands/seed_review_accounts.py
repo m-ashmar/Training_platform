@@ -294,13 +294,15 @@ class Command(BaseCommand):
     def _check_prerequisites(self):
         from diet.models import FoodItem
         from routine.models import Exercise
-        from subscription.default_plans import PREMIUM_PLAN_NAME
+        from subscription.default_plans import PREMIUM_PLAN_KEY, PREMIUM_PLAN_NAME
         from subscription.models import SubscriptionPlan
 
         keys = {key for day in PROGRAM.values() for key, *_rest in day}
         gaps = []
-        if not SubscriptionPlan.objects.filter(name_en=PREMIUM_PLAN_NAME).exists():
-            gaps.append(f"the plan {PREMIUM_PLAN_NAME!r}")
+        # By its key (SIDE_BUGS S-236): the operator may have renamed it in the console.
+        if not SubscriptionPlan.objects.filter(catalogue_key=PREMIUM_PLAN_KEY).exists():
+            gaps.append(f"the plan {PREMIUM_PLAN_NAME!r} (catalogue key "
+                        f"{PREMIUM_PLAN_KEY!r}, under whatever name)")
         if Exercise.objects.filter(catalogue_key__in=keys).count() != len(keys):
             gaps.append("the starter exercises")
         if not FoodItem.objects.exists():
@@ -566,11 +568,11 @@ class Command(BaseCommand):
         """The Premium entitlement, granted by the operator (`source=operator_grant`),
         the way the console's "activate" writes one: no payment row, because no money
         moved. Extended when fewer than GRANT_TOP_UP_DAYS remain."""
-        from subscription.default_plans import PREMIUM_PLAN_NAME
+        from subscription.default_plans import PREMIUM_PLAN_KEY
         from subscription.models import Subscription, SubscriptionPlan
 
         client = self.users["client"]
-        plan = SubscriptionPlan.objects.get(name_en=PREMIUM_PLAN_NAME)
+        plan = SubscriptionPlan.objects.get(catalogue_key=PREMIUM_PLAN_KEY)
         now = timezone.now()
         with transaction.atomic():
             subscription = (Subscription.objects.select_for_update(of=("self",))
