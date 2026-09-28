@@ -452,7 +452,15 @@ def readable_routines(requester, base_qs=None):
         ids = accessible_user_ids(requester)
         if ids is None:
             return qs
-        return qs.filter(Q(created_by=requester) | Q(assigned_to__id__in=ids)).distinct()
+        # "One of their clients is on it" as `pk IN (the routines those clients are
+        # on)`, never a join: a join to `assigned_to` repeats a routine once per
+        # matching assignee, and the `.distinct()` that folded them back ran over every
+        # selected column — the whole row, its annotations and its joined rows
+        # (BACKEND_BUGS B-136: that DISTINCT is what pushed the list past PostgreSQL's
+        # JIT threshold). Same rows, no DISTINCT.
+        on_it = (Routine.assigned_to.through.objects
+                 .filter(customuser_id__in=ids).values('routine_id'))
+        return qs.filter(Q(created_by=requester) | Q(pk__in=on_it))
     return qs.filter(assigned_to=requester)
 
 

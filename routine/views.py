@@ -628,31 +628,65 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             return [IsRoutineOwnerOrAssigned()]
         return super().get_permissions()
 
+    def _answers_trainer_rows(self):
+        """True when this request is answered by `TrainerRoutineSerializer`."""
+        return bool(getattr(self.request.user, 'is_trainer', False)
+                    and self.action in ('list', 'retrieve'))
+
     def get_queryset(self):
-        """Filter routines based on user role"""
+        """Filter routines based on user role.
+
+        One plain query per page (BACKEND_BUGS B-136): no GROUP BY, no DISTINCT, no join
+        to a to-many relation, no whole user row. The list used to join `assigned_to`
+        and `progress` under a GROUP BY for three `COUNT(DISTINCT ...)`, select two whole
+        user rows (the author, and a bought copy's product trainer, password hashes
+        included) and, for a trainer, `.distinct()` over all ~160 of those columns. The
+        planner's estimate for that fan-out passed `jit_above_cost`, and PostgreSQL
+        spent 3-20 s compiling a query whose nodes finished in 1.4 ms.
+        """
         user = self.request.user
-        
-        # Base optimization for all queries
+
         # `progress` is NOT prefetched: the serializer counted those rows in Python
         # "to avoid a DB hit", which forced every one of them into memory — twenty
         # routines x twenty clients x thirty days is 12,000 rows fetched to produce
-        # twenty percentages. They are counted in the query now.
-        # `purchase__product__trainer`: a bought copy's `product` (RoutineSerializer) in
-        # the same query; empty joins for every other routine.
-        queryset = self.queryset.select_related(
-            'created_by', 'purchase__product__trainer').prefetch_related(
+        # twenty percentages. They are counted in the query, each as a correlated
+        # subquery (the pattern of `serializers._used_by_counts`): one number per row,
+        # no join, so no GROUP BY and no fan-out. `client_count` is not annotated: the
+        # serializer answers it from the assignees the CALLER may know about
+        # (`RoutineAssigneesMixin`), and a count over every assignee was never read.
+        from django.db.models import Func, IntegerField, OuterRef, Subquery
+
+        from .models import RoutineProgress
+
+        def _progress_count(**only):
+            # `COUNT(id)` as a plain function over the filtered rows: an aggregate with
+            # no GROUP BY, so the subquery always answers exactly one row (0 for none).
+            rows = (RoutineProgress.objects.filter(routine=OuterRef('pk'), **only)
+                    .order_by()
+                    .annotate(n=Func(F('id'), function='COUNT',
+                                     output_field=IntegerField()))
+                    .values('n'))
+            return Subquery(rows, output_field=IntegerField())
+
+        # The author and a bought copy's product trainer are read for their names
+        # only (`created_by`'s text, `product.trainer.{id, name}`): fetched by id with
+        # the columns those names need, never the whole row. The trainer's rows
+        # (`TrainerRoutineSerializer`) show neither, so they skip the purchase joins.
+        names = CustomUser.objects.only('id', 'username', 'user_type', 'first_name',
+                                        'last_name')
+        queryset = self.queryset.prefetch_related(
             'routine_exercises__exercise__media',
             'assigned_to',
+            Prefetch('created_by', queryset=names),
         ).annotate(
-            client_count=models.Count('assigned_to', filter=models.Q(assigned_to__user_type='client'), distinct=True),
-            progress_total=models.Count('progress', distinct=True),
-            progress_done=models.Count('progress', filter=models.Q(progress__status='completed'), distinct=True)
-        # annotate() with an aggregate adds a GROUP BY, and Django then drops
-        # Meta.ordering from the SQL entirely — the query came back with GROUP BY and
-        # no ORDER BY at all. Paging a routine list in whatever order Postgres felt
-        # like meant page 2 could repeat a routine from page 1 and skip another
-        # outright. Re-apply the model's total order explicitly.
+            progress_total=_progress_count(),
+            progress_done=_progress_count(status='completed'),
+        # The model's total order, explicitly: when this was an aggregate, Django
+        # dropped Meta.ordering from the GROUP BY query and pages repeated rows.
         ).order_by('-created_at', '-id')
+        if not self._answers_trainer_rows():
+            queryset = queryset.select_related('purchase__product').prefetch_related(
+                Prefetch('purchase__product__trainer', queryset=names))
 
         # `?source_template=<id>`: the private copies written from one template, e.g.
         # "which of my clients got this program". Narrows; never widens what you see.
@@ -674,7 +708,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         """Use different serializers based on user role"""
-        if self.request.user.is_trainer and self.action in ['list', 'retrieve']:
+        if self._answers_trainer_rows():
             return TrainerRoutineSerializer
         return RoutineSerializer
 
