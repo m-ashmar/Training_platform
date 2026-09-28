@@ -471,7 +471,7 @@ class ProductBuyView(APIView):
     |---|---|---|
     | 400 | `app_channel_required` | no known `X-App-Channel` |
     | 403 | `not_available_on_channel` | this build may not buy programs (`play`, `ios`) |
-    | 400 | `validation_error` | `idempotency_key` missing or longer than 64 (`field_errors`) |
+    | 400 | `validation_error` | `idempotency_key` missing or longer than 64 (`field_errors`), or starting `checkout:` — the server's own keys (`field_errors.idempotency_key[0].code` is `idempotency_key_reserved`) |
     | 404 | `not_found` | no such product, or not one offered to the caller — a draft, one in review, a retired one, one whose program changed since its review, or one whose trainer is no longer verified (an owner or its trainer gets the rows below instead) |
     | 403 | `own_product` | the caller wrote it |
     | 403 | `clients_only` | the caller is not a client (the code the coaching and transfer routes answer for the same fact) |

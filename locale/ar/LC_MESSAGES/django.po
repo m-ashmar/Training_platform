@@ -5884,3 +5884,9 @@ msgstr "يوجد دفع مفتوح لهذا البرنامج. أكمله، أو 
 #: releases/app_links.py
 msgid "Links that open the app are not set up on this server."
 msgstr "روابط فتح التطبيق غير مُعدّة على هذا الخادم."
+
+#. A wallet buy whose idempotency key starts `checkout:`, the prefix a checkout's
+#. delivery writes (`idempotency_key_reserved`, SIDE_BUGS S-234).
+#: routine/product_serializers.py
+msgid "This key is reserved. Send the key your app made for this purchase."
+msgstr "هذا المفتاح محجوز. أرسل المفتاح الذي أنشأه تطبيقك لعملية الشراء هذه."

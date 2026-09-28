@@ -183,8 +183,19 @@ class CatalogueProductSerializer(serializers.Serializer):
 
 class BuySerializer(serializers.Serializer):
     """`idempotency_key`: the app's key for this purchase, 1-64 characters. A retry
-    with the same key answers the same purchase."""
+    with the same key answers the same purchase. A key starting `checkout:` (in any
+    case) is the server's own — a checkout's delivery writes one — and is refused with
+    the field code `idempotency_key_reserved` (SIDE_BUGS S-234)."""
     idempotency_key = serializers.CharField(max_length=64, min_length=1)
+
+    def validate_idempotency_key(self, value):
+        from .products import CHECKOUT_KEY_PREFIX
+
+        if value.lower().startswith(CHECKOUT_KEY_PREFIX):
+            raise serializers.ValidationError(
+                _("This key is reserved. Send the key your app made for this purchase."),
+                code="idempotency_key_reserved")
+        return value
 
 
 class TrainerProductWriteSerializer(serializers.Serializer):

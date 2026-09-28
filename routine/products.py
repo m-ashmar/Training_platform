@@ -105,6 +105,14 @@ logger = logging.getLogger(__name__)
 MAX_PROGRAM_DAYS = 365
 #: The longest reason an operator may give; the trainer is shown it.
 MAX_REASON = 1000
+#: The purchase key a checkout's delivery writes (`grant_checkout`: this prefix and the
+#: payment's id). A buyer's own keys share the column and its per-buyer uniqueness
+#: (`routine_purchase_key_per_buyer`), so no key a buyer sends may start with it
+#: (`BuySerializer`, field code `idempotency_key_reserved`). Otherwise a wallet buy
+#: keyed `checkout:<their session id>` made that checkout's delivery raise
+#: IntegrityError inside the completion, and every poller run stopped at that row:
+#: nobody's checkout after it was confirmed or expired (SIDE_BUGS S-234).
+CHECKOUT_KEY_PREFIX = "checkout:"
 
 
 # ---------------------------------------------------------------- refusals
@@ -650,7 +658,7 @@ def grant_checkout(payment) -> RoutinePurchase:
         exchange_rate=payment.exchange_rate, exchange_rate_value=payment.exchange_rate_value,
         commission_rate=rate, commission=commission, trainer_share=share,
         trainer_amount=Decimal("0.00"), trainer_currency=currency,
-        idempotency_key=f"checkout:{payment.pk}", paid_with=PaidWith.SHAMCASH,
+        idempotency_key=f"{CHECKOUT_KEY_PREFIX}{payment.pk}", paid_with=PaidWith.SHAMCASH,
         checkout_reference=payment.gateway_transaction_reference)
     _write_copy(product, buyer, purchase)
 
