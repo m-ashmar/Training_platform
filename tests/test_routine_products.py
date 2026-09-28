@@ -1011,3 +1011,38 @@ def test_the_detail_says_a_program_is_one_week_repeated(make_user, api):
     one = api(_client(make_user, "weeks1")).get(f"/api/v1/products/{product_id}/").json()
     assert (one["days"], one["weeks"], one["session_count"]) == (3, 4, 12)
     assert [day["day"] for day in one["preview"]] == [1, 2], "the first days of week 1"
+
+
+def test_the_buyers_ledger_row_names_the_program(make_user, api):
+    """BACKEND_BUGS B-169: a program's ledger rows named it by id only (metadata
+    `product_id`), so the wallet could not say what was bought. Each reader's row now
+    carries `product: {id, title}` in the request's language — read when the row is
+    read, so rows written before this carry it too. On 554c604 the key is absent."""
+    trainer, _template_, product_id = _published(make_user, api, "ledgerp")
+    buyer = _client(make_user, "ledgerp")
+    assert _buy(api, buyer, product_id).status_code == 200
+
+    def rows(user, language):
+        c = api(user)
+        c.defaults["HTTP_ACCEPT_LANGUAGE"] = language
+        return c.get("/api/wallet/transactions/").json()["results"]
+
+    (bought,) = rows(buyer, "ar")
+    assert bought["kind"] == "routine_product_purchase"
+    assert bought.get("product") == {"id": product_id, "title": "تأهيل الكتف في 4 أسابيع"}
+    (bought_en,) = rows(buyer, "en")
+    assert bought_en["product"] == {"id": product_id, "title": "Shoulder rehab in 4 weeks"}
+    (sold,) = rows(trainer, "ar")
+    assert sold["kind"] == "routine_product_sale"
+    assert sold["product"] == {"id": product_id, "title": "تأهيل الكتف في 4 أسابيع"}
+    assert buyer.username not in str(sold)
+
+    from wallet.models import Transaction
+
+    other = _client(make_user, "ledgerp_other")
+    other_wallet = _fund(other, "50.00")
+    Transaction.objects.create(source_wallet=other_wallet, destination_wallet=_fund(trainer, "0"),
+                               amount=D("1.00"), tx_type="transfer", actor=other,
+                               reference_id="ledgerp-plain")
+    (plain,) = rows(other, "ar")
+    assert "product" in plain and plain["product"] is None
