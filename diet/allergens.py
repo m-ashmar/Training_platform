@@ -147,6 +147,181 @@ _FALSE_MARKERS: dict[str, set[str]] = {
 
 _WORD_RE = re.compile(r"[a-z']+")
 
+#: "N/A" and "n.a." — "not applicable", written in the allergy field by a client who has
+#: none. Removed before the text is split on "/", which turned "N/A" into the two free
+#: terms `n` and `a` (SIDE_BUGS S-216).
+_NOT_APPLICABLE = re.compile(r"(?<![a-z])n\s*/\s*a(?![a-z])|(?<![a-z])n\.\s*a\.?(?![a-z])")
+
+
+# --- Arabic (SIDE_BUGS S-212, S-243) ------------------------------------------------
+#
+# The app is Arabic-first, and every table above is English: the word pattern is
+# `[a-z']`, so «فول سوداني» parsed to nothing and a client who wrote their peanut
+# allergy in Arabic was served peanut. The checker was inactive for them; the only thing
+# that noticed the text at all was `declares_allergy`'s unreadable-letter rule, which in
+# turn read «لا يوجد» ("none") as an allergy.
+#
+# Arabic is matched word by word after folding (`_ar_fold`: no diacritics or tatweel;
+# أ إ آ ٱ -> ا, ى -> ي, ة -> ه), and each word is also tried without the article and the
+# particles written joined to it (`_ar_forms`: «والفول» -> «فول»). The tables are written
+# in ordinary spelling and folded once, below, by the same function. Multi-word terms
+# are matched first, longest first, so «زبدة الفول السوداني» (peanut butter) is peanut
+# and not butter. The same rule as `_USER_SYNONYMS`: an everyday word that could mean
+# more than one allergen WIDENS to all of them («مكسرات», «فستق», «مأكولات بحرية»).
+_AR_SEAFOOD = {"fish", "shellfish", "mollusc"}
+_AR_NUTS = {"peanut", "tree_nut"}
+_AR_SYNONYMS_WRITTEN: dict[str, set[str]] = {
+    # Peanut. «فستق عبيد» is the Levantine name, «فول سوداني» the common one.
+    "فول سوداني": {"peanut"}, "فستق سوداني": {"peanut"}, "فستق عبيد": {"peanut"},
+    "زبدة فول سوداني": {"peanut"}, "زبدة فستق": _AR_NUTS,
+    # Nuts. «فستق» alone is pistachio in Syria and peanut elsewhere: widened.
+    "مكسرات": _AR_NUTS, "فستق": _AR_NUTS, "مكسرات شجرية": {"tree_nut"},
+    "فستق حلبي": {"tree_nut"}, "جوز": {"tree_nut"}, "عين جمل": {"tree_nut"},
+    "لوز": {"tree_nut"}, "كاجو": {"tree_nut"}, "بندق": {"tree_nut"},
+    "بيكان": {"tree_nut"}, "مكاديميا": {"tree_nut"}, "صنوبر": {"tree_nut"},
+    "كستناء": {"tree_nut"}, "زبدة لوز": {"tree_nut"}, "حليب لوز": {"tree_nut"},
+    "نوتيلا": {"tree_nut"}, "مرزبان": {"tree_nut"}, "برالين": {"tree_nut"},
+    # Milk.
+    "حليب": {"milk"}, "لبن": {"milk"}, "ألبان": {"milk"}, "جبن": {"milk"},
+    "جبنة": {"milk"}, "أجبان": {"milk"}, "زبدة": {"milk"}, "لبنة": {"milk"},
+    "قشطة": {"milk"}, "قشدة": {"milk"}, "كريمة": {"milk"}, "سمنة": {"milk"},
+    "لاكتوز": {"milk"}, "كازين": {"milk"}, "زبادي": {"milk"}, "حليب صويا": {"soy"},
+    # Egg.
+    "بيض": {"egg"}, "بيضة": {"egg"}, "مايونيز": {"egg"}, "مايونيزة": {"egg"},
+    # Fish.
+    "سمك": {"fish"}, "أسماك": {"fish"}, "سمكة": {"fish"}, "تونة": {"fish"},
+    "تونا": {"fish"}, "سلمون": {"fish"}, "سردين": {"fish"}, "أنشوجة": {"fish"},
+    "أنشوفة": {"fish"}, "هامور": {"fish"}, "بلطي": {"fish"}, "ماكريل": {"fish"},
+    "كافيار": {"fish"}, "سوشي": {"fish"}, "بطارخ": {"fish"},
+    # Seafood, and the crustaceans.
+    "مأكولات بحرية": _AR_SEAFOOD, "ثمار بحر": _AR_SEAFOOD, "فواكه بحر": _AR_SEAFOOD,
+    "قشريات": {"shellfish"}, "روبيان": {"shellfish"}, "ربيان": {"shellfish"},
+    "جمبري": {"shellfish"}, "قريدس": {"shellfish"}, "سلطعون": {"shellfish"},
+    "كابوريا": {"shellfish"}, "سرطان بحر": {"shellfish"}, "كركند": {"shellfish"},
+    "لوبستر": {"shellfish"}, "استاكوزا": {"shellfish"},
+    # Molluscs. «محار» is used for shellfish at large: widened, as "shellfish" is.
+    "محار": {"shellfish", "mollusc"}, "رخويات": {"mollusc"}, "بلح بحر": {"mollusc"},
+    "كاليماري": {"mollusc"}, "كالاماري": {"mollusc"}, "حبار": {"mollusc"},
+    "أخطبوط": {"mollusc"}, "سبيدج": {"mollusc"}, "حلزون": {"mollusc"},
+    "اسكالوب": {"mollusc"}, "بطلينوس": {"mollusc"},
+    # Soy.
+    "صويا": {"soy"}, "صوية": {"soy"}, "فول صويا": {"soy"}, "توفو": {"soy"},
+    "ميسو": {"soy"}, "تمبيه": {"soy"}, "إدامامي": {"soy"},
+    # Gluten, and coeliac disease («الداء الزلاقي», «داء السيلياك»).
+    "قمح": {"gluten"}, "غلوتين": {"gluten"}, "جلوتين": {"gluten"},
+    "غلوتين القمح": {"gluten"}, "طحين": {"gluten"}, "دقيق": {"gluten"},
+    "خبز": {"gluten"}, "شعير": {"gluten"}, "جاودار": {"gluten"}, "برغل": {"gluten"},
+    "سميد": {"gluten"}, "معكرونة": {"gluten"}, "مكرونة": {"gluten"},
+    "كسكس": {"gluten"}, "فريكة": {"gluten"}, "سيلياك": {"gluten"},
+    "زلاقي": {"gluten"}, "داء بطني": {"gluten"},
+    # Sesame. Za'atar is a sesame marker in English too.
+    "سمسم": {"sesame"}, "طحينة": {"sesame"}, "طحينية": {"sesame"},
+    "حلاوة طحينية": {"sesame"}, "زعتر": {"sesame"},
+    "خردل": {"mustard"}, "مسطردة": {"mustard"}, "مستردة": {"mustard"},
+    "كرفس": {"celery"}, "ترمس": {"lupin"},
+    "كبريتيت": {"sulphite"}, "كبريتات": {"sulphite"}, "سلفيت": {"sulphite"},
+    "كبريت": {"sulphite"},
+}
+
+#: Words that say there is NO allergy — «لا يوجد», «لا», «لا شيء», «ما في», «بدون» —
+#: and the words written around an allergy that are not its name («حساسية من ...»).
+#: `declares_allergy` counts Arabic text left over once these are gone; with nothing
+#: left, the client declared nothing, exactly as "no allergies" reads in English.
+_AR_NONE_WRITTEN = (
+    "لا", "لايوجد", "لاتوجد", "يوجد", "توجد", "ولا", "ما", "مافي", "ليس", "ليست",
+    "لست", "مش", "مو", "شيء", "شي", "شيئ", "أي", "أية", "أبدا", "إطلاقا", "بدون",
+    "خالي", "خالية", "خال", "حساسية", "حساسيات", "حساسيه", "تحسس", "معروفة",
+    "معروف", "حاليا", "من", "على", "ضد", "تجاه", "أو", "و", "نوع", "أنواع",
+)
+#: "I have" / "there is": part of a "none" only after a negation — «ما عندي»,
+#: «ليس لدي», «ما في» — and part of a declaration otherwise: «عندي حساسية» ("I have an
+#: allergy") names no allergen and still declares one.
+_AR_HAVE_WRITTEN = ("عندي", "لدي", "عندى", "في", "فيه", "عندنا", "لدينا")
+_AR_NEGATIONS_WRITTEN = ("لا", "ما", "ليس", "ليست", "لست", "مش", "مو", "ولا",
+                         "لايوجد", "لاتوجد", "مافي", "بدون")
+
+_AR_MARKS = re.compile(r"[ؐ-ًؚ-ٰٟۖ-ۭـ]")
+_AR_FOLD = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ة": "ه",
+                          "ی": "ي", "ک": "ك"})
+_AR_WORD_RE = re.compile(r"[ء-ي]+")
+#: The article, and the particles written joined to it: «ال», «بال», «وال», «لل»...
+_AR_PREFIXES = ("وبال", "وال", "فال", "بال", "كال", "لل", "ال")
+
+
+def _ar_fold(text: str) -> str:
+    """Arabic spelled one way: no diacritics or tatweel, one alef, ى -> ي, ة -> ه."""
+    return _AR_MARKS.sub("", text or "").translate(_AR_FOLD)
+
+
+def _ar_forms(word: str) -> Set[str]:
+    """A folded Arabic word, and the word without its joined «و» / «ف» and article.
+
+    `forms_of` for Arabic: «والحليب» -> {«والحليب», «الحليب», «حليب»}. The whole word is
+    always kept, so a word that merely begins with those letters («ألبان», «فستق») is
+    still found as written.
+    """
+    forms = {word}
+    stems = [word]
+    if len(word) > 2 and word[0] in "وف":
+        stems.append(word[1:])
+    for stem in stems:
+        forms.add(stem)
+        for prefix in _AR_PREFIXES:
+            if stem.startswith(prefix) and len(stem) - len(prefix) >= 2:
+                forms.add(stem[len(prefix):])
+                break
+    return forms
+
+
+def _ar_words(text: str) -> list[Set[str]]:
+    """The Arabic words of `text`, in order, each as its set of forms."""
+    return [_ar_forms(w) for w in _AR_WORD_RE.findall(_ar_fold(text))]
+
+
+_AR_SYNONYMS: dict[tuple[str, ...], set[str]] = {
+    tuple(_ar_fold(term).split()): tags for term, tags in _AR_SYNONYMS_WRITTEN.items()}
+#: Longest first, so a phrase wins over the single word it starts with.
+_AR_TERMS = sorted(_AR_SYNONYMS, key=len, reverse=True)
+_AR_NONE = frozenset(_ar_fold(w) for w in _AR_NONE_WRITTEN)
+_AR_HAVE = frozenset(_ar_fold(w) for w in _AR_HAVE_WRITTEN)
+_AR_NEGATIONS = frozenset(_ar_fold(w) for w in _AR_NEGATIONS_WRITTEN)
+
+
+def _arabic_allergens(raw: str | None) -> Set[str]:
+    """The canonical tags an Arabic allergy text names; empty when it names none."""
+    words = _ar_words(raw or "")
+    tags: Set[str] = set()
+    i = 0
+    while i < len(words):
+        for term in _AR_TERMS:
+            if i + len(term) <= len(words) and all(
+                    part in words[i + k] for k, part in enumerate(term)):
+                tags |= _AR_SYNONYMS[term]
+                i += len(term)
+                break
+        else:
+            i += 1
+    return tags
+
+
+def _arabic_says_something(raw: str | None) -> bool:
+    """Is there Arabic in `raw` beyond the words of "none" (`_AR_NONE`)?
+
+    «لا يوجد», «لا», «لا شيء», «ما في», «ما عندي حساسية», «ليس لدي حساسية» say nothing;
+    «عندي حساسية» ("I have an allergy") and a word the vocabulary does not know
+    («فراولة») do.
+    """
+    negated = False
+    for forms in _ar_words(raw or ""):
+        if forms & _AR_NEGATIONS:
+            negated = True
+        if forms & _AR_NONE:
+            continue
+        if negated and forms & _AR_HAVE:
+            continue
+        return True
+    return False
+
 
 def _norm(text: str) -> tuple[set[str], str]:
     """Lowercase word set plus the flattened string, for phrase markers."""
@@ -384,9 +559,16 @@ def parse_user_allergies(raw: str | None) -> Set[str]:
     Anything unrecognised is preserved as a ``free:<term>`` pseudo-tag so it is still
     matched against ingredient text rather than being silently dropped — the original
     implementation dropped every term after the first comma.
+
+    Arabic is read too (`_AR_SYNONYMS_WRITTEN`, SIDE_BUGS S-212): «فول سوداني» is
+    `peanut`, «حساسية من الحليب ومشتقاته» is `milk`. An Arabic word the table does not
+    know becomes no tag and no free term — the free terms are matched against the
+    food's ENGLISH text (`food_text`), where an Arabic word can never be found — and the
+    client still counts as declaring an allergy (`declares_allergy`), so nothing whose
+    tagging is incomplete reaches them.
     """
-    tags: Set[str] = set()
-    for chunk in re.split(r"[,;/&]|\band\b|\bplus\b", (raw or "").lower()):
+    tags: Set[str] = _arabic_allergens(raw)
+    for chunk in re.split(r"[,;/&،؛]|\band\b|\bplus\b", (raw or "").lower()):
         words = [w for w in _WORD_RE.findall(chunk) if w not in _QUALIFIERS]
         term = " ".join(words).strip()
         if not term:
