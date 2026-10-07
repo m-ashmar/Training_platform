@@ -181,3 +181,14 @@ def test_b162_a_stranger_cannot_report_what_they_cannot_see(make_user, api):
     refused = report(stranger)
     assert (refused.status_code, refused.json()["code"]) == (404, "target_not_found")
     assert report(client).status_code == 201
+
+
+def test_b162_a_new_client_sees_the_coachs_challenge_at_once(make_user, api):
+    """The list is cached 120 s per person; a relation approved after the person's
+    last read drops their cached list (`social/challenge_cache.py`)."""
+    trainer = make_user("b162n_t", user_type="trainer")
+    newcomer = make_user("b162n_c")
+    challenge_id = _create(api, trainer, audience="my_clients").json()["id"]
+    assert challenge_id not in _listed(api, newcomer)      # cached without it
+    _client_of(trainer, newcomer)
+    assert challenge_id in _listed(api, newcomer)
