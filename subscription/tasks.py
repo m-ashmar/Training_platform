@@ -16,6 +16,7 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 
 from training_platform.task_retries import no_retry_on_timeout
 
@@ -122,6 +123,12 @@ def settle_owed_payouts(batch_size=200):
             payment_completed.send(sender=PaymentService, payment=payment,
                                    subscription=payment.subscription)
             sent += 1
+        except SoftTimeLimitExceeded:
+            # The run overran its slot: `SoftTimeLimitExceeded` IS an `Exception`, so
+            # the catch below swallowed it and the loop ran on until the hard limit
+            # killed the child. It ends the run here, through `no_retry_on_timeout`;
+            # the next sweep picks up what is still owed.
+            raise
         except Exception:
             logger.exception("Owed payout for payment %s failed again; the next sweep retries",
                              payment.pk)
@@ -356,6 +363,9 @@ def poll_open_payments(now=None):
                 expected={'amount': payment.amount, 'currency': payment.currency,
                           'since': payment.created_at},
             )
+        except SoftTimeLimitExceeded:
+            # Not an unreachable gateway: the RUN is out of time. See the loop below.
+            raise
         except (PaymentGatewayError, Exception) as exc:   # noqa: BLE001
             # One unreachable gateway must not stop the queue, and an unanswered
             # checkout is left exactly as it was: the next run asks again.
@@ -432,6 +442,14 @@ def poll_open_payments(now=None):
         checked += 1
         try:
             outcome = poll_one(payment)
+        except SoftTimeLimitExceeded:
+            # THE RUN overran its slot, not this row (the wave-1 review, R-0).
+            # `SoftTimeLimitExceeded` is an `Exception`, so the catch below swallowed it
+            # and the loop went on asking the gateway until CELERY_TASK_TIME_LIMIT
+            # SIGKILLed the child — possibly between a COMMIT and its on-commit notice.
+            # Re-raised, it ends the run cleanly through `no_retry_on_timeout` (no
+            # autoretry); every row not reached is asked next minute.
+            raise
         except Exception:   # noqa: BLE001
             # ONE ROW NEVER STOPS THE RUN (SIDE_BUGS S-234). The service calls above
             # catch the refusals they expect; anything else — a program that cannot be
@@ -456,6 +474,8 @@ def poll_open_payments(now=None):
                 try:
                     Payment.objects.filter(pk=payment.pk, status='needs_review') \
                         .update(updated_at=now)
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:   # noqa: BLE001
                     logger.exception("poll: could not touch held payment %s", payment.id)
         if outcome == 'completed':
@@ -529,6 +549,8 @@ def poll_expired_checkouts(now=None):
                 expected={'amount': payment.amount, 'currency': payment.currency,
                           'since': payment.created_at},
             )
+        except SoftTimeLimitExceeded:
+            raise                         # the run is out of time: see the loop below
         except (PaymentGatewayError, Exception) as exc:   # noqa: BLE001
             logger.warning("late poll: gateway lookup failed for payment %s: %s",
                            payment.id, exc)
@@ -562,6 +584,10 @@ def poll_expired_checkouts(now=None):
         checked += 1
         try:
             completed += poll_one(payment)
+        except SoftTimeLimitExceeded:
+            # The run overran its slot, not this row: it ends here through
+            # `no_retry_on_timeout` (the wave-1 review, R-0; see `poll_open_payments`).
+            raise
         except Exception:   # noqa: BLE001
             # One row never stops the run (SIDE_BUGS S-234): see `poll_open_payments`.
             logger.exception("late poll: payment %s could not be processed; the run "
@@ -583,6 +609,11 @@ REFERENCE_IN_NOTE = re.compile(r'([A-Za-z]+)_(\d{10,})_([0-9A-Fa-f]{8})')
     retry_backoff=True,
     retry_backoff_max=600,
 )
+# An overrun ends the sweep once instead of retrying it: without this, a soft limit that
+# escaped the sweep was retried by `autoretry_for` up to three more 300-second slots,
+# each restarting the same read and overrunning at the same point
+# (training_platform/task_retries.py; the wave-1 review, R-0).
+@no_retry_on_timeout
 def sweep_unmatched_transfers(now=None):
     """Find the money no checkout claimed, and put it in front of an operator.
 
@@ -632,6 +663,8 @@ def sweep_unmatched_transfers(now=None):
     try:
         gateway = PaymentGatewayService('shamcash')
         txns, complete = gateway.list_transactions(now - lookback, now)
+    except SoftTimeLimitExceeded:
+        raise
     except (PaymentGatewayError, Exception) as exc:   # noqa: BLE001
         logger.warning("sweep: could not read the merchant account: %s", exc)
         return {'seen': 0, 'held': 0, 'queued': 0, 'complete': False}
@@ -725,6 +758,11 @@ def sweep_unmatched_transfers(now=None):
                 queued += 1
         except PaymentError as exc:
             logger.warning("sweep: transfer %s not queued: %s", fact['transaction_id'], exc)
+        except SoftTimeLimitExceeded:
+            # The sweep overran its slot, not this transfer: it ends here, through
+            # `no_retry_on_timeout` above, and is not retried. The `known` set makes the
+            # next run skip what this one already queued.
+            raise
         except Exception:   # noqa: BLE001
             # One transfer never stops the sweep (SIDE_BUGS S-234): a closed checkout
             # whose program cannot be written raised out of the loop on every run, and

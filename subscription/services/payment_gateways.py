@@ -14,6 +14,7 @@ import time
 from typing import Dict, Any, Optional, Tuple
 from decimal import Decimal
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
@@ -127,6 +128,12 @@ class PaymentGatewayService:
         self._start_read()
         try:
             result = self.gateway.fetch_payment_status(reference, expected=expected)
+        except SoftTimeLimitExceeded:
+            # The calling task's time ran out; nothing is known about the gateway, so
+            # nothing is recorded, and it is not wrapped: a `PaymentGatewayError` here
+            # read to the poller as an unreachable gateway, and its run went on
+            # (the wave-1 review, R-0).
+            raise
         except Exception as e:
             logger.error(f"Failed to fetch payment status: {str(e)}")
             self._record_read(raised=True)
@@ -139,6 +146,8 @@ class PaymentGatewayService:
         self._start_read()
         try:
             listed = self.gateway.list_transactions(start, end)
+        except SoftTimeLimitExceeded:
+            raise                         # the task's time, not the gateway: see above
         except Exception as e:
             logger.error(f"Failed to list transactions: {str(e)}")
             self._record_read(raised=True)

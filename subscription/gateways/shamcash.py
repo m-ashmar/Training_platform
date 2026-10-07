@@ -34,6 +34,7 @@ import time
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 from .base import PaymentGateway
@@ -248,6 +249,13 @@ class ShamCashGateway(PaymentGateway):
             }
             try:
                 envelope = self._get('/transactions', params)
+            except SoftTimeLimitExceeded:
+                # The Celery task asking ran out of time WHILE ShamCash was answering —
+                # the likeliest place for a poller's soft limit to land. It is not a
+                # lookup that failed: swallowed here it was recorded against ShamCash's
+                # health and answered 'unknown', and the poller went on to the next row
+                # until the hard limit killed its child (the wave-1 review, R-0).
+                raise
             except Exception as e:
                 logger.warning(f"ShamCash status lookup failed for {reference or 'the sweep'}: {e}")
                 self.last_read_error = str(e) or type(e).__name__
