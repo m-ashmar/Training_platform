@@ -85,7 +85,9 @@ def test_a_template_row_with_another_trainers_exercise_answers_does_not_exist(ma
 
     def post(exercise_id):
         return api(trainer).post(TEMPLATES, {
-            "name": "b139 tpl", "goal": "g", "days": 2,
+            # Shared setup, not an assertion: a template's goal is a closed list since
+            # 2026-10-07 (owner; 8f15972, RoutineTemplateSerializer.validate_goal).
+            "name": "b139 tpl", "goal": "strength", "days": 2,
             "exercises": [{"exercise_id": own.pk, "day": 1, "order": 1},
                           {"exercise_id": exercise_id, "day": 2, "order": 1}]},
             content_type=JSON)
