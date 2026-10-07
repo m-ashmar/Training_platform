@@ -187,6 +187,18 @@ def _export_columns(source, model) -> list[str]:
     ]
 
 
+def _export_links(source, model) -> list:
+    """The many-to-many relations the export attaches to each row, as lists of ids.
+
+    Every one when the source declares no `fields`; only the ones it names when it
+    does. A declared list is what the export holds (SIDE_BUGS S-214): the profile named
+    its columns, and every row still carried `groups` and `user_permissions` — the
+    console's permission ids, which are nothing the person wrote or was told."""
+    return [f for f in model._meta.get_fields()
+            if f.many_to_many and getattr(f, "concrete", False)
+            and (not source.fields or f.name in source.fields)]
+
+
 def section_pages(source, user, *, size: int | None = None):
     """Yield one registered source's rows for `user`, a page (a list of dicts) at a time,
     in the section's own order (the model's default ordering, as before).
@@ -199,11 +211,13 @@ def section_pages(source, user, *, size: int | None = None):
     """
     size = size or batch_rows()
     model = source.get_model()
-    names = _export_columns(source, model)
+    links = _export_links(source, model)
+    # A declared many-to-many is attached below, never read through `.values()`, which
+    # would join it and repeat the row once per related id.
+    names = [name for name in _export_columns(source, model)
+             if name not in {link.name for link in links}]
     # Once each, in order: an ordering through a join can repeat a row's key.
     ids = list(dict.fromkeys(source.queryset_for(user).values_list("pk", flat=True)))
-    links = [f for f in model._meta.get_fields()
-             if f.many_to_many and getattr(f, "concrete", False)]
     manager = model._default_manager
     for start in range(0, len(ids), size):
         page_ids = ids[start:start + size]

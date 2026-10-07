@@ -17,7 +17,18 @@ register(PersonalDataSource(
             "specific_injury", "injury_areas", "client_goals", "training_goal",
             "training_place", "training_days_per_week", "date_joined",
             # The "help us improve" answer and when it was given (BACKEND_BUGS B-084).
-            "ai_training_consent", "ai_training_consent_set_at"],
+            "ai_training_consent", "ai_training_consent_set_at",
+            # What the person chose or wrote that the list above left out (SIDE_BUGS
+            # S-214): their photo, language and reminder settings, their preferences,
+            # a trainer's whole professional card, and when they last signed in. The
+            # console's `groups` and `user_permissions` stay out: a declared list is
+            # what the export holds (`registry._export_links`).
+            "user_type", "profile_picture", "preferred_language", "preferred_timezone",
+            "workout_reminder_hour", "activity_level_answered_at", "client_preferences",
+            "trainer_bio", "trainer_specializations", "trainer_certifications",
+            "trainer_experience_years", "trainer_hourly_rate", "trainer_is_verified",
+            "trainer_is_available", "trainer_goal_focus", "trainer_injury_focus",
+            "trainer_training_places", "last_login"],
     on_erase="anonymise",
     anonymise={
         "is_active": False,
@@ -515,10 +526,15 @@ register(PersonalDataSource(label="exercises_created", model="routine.Exercise",
                                      "use them."),
                             recipients=("clients", "file_storage"),
                             data_types=("user_content", "photos_videos")))
-register(PersonalDataSource(label="routines_created", model="routine.Routine", user_field="created_by", on_erase="keep",
+# Both sides of a routine (SIDE_BUGS S-214): the trainer who wrote it and the client it
+# was written for. On `created_by` alone a client's own program — the routine their
+# coach wrote them and its exercises below — was in the trainer's export and missing
+# from theirs. Kept on erasure either way: nothing changes for the rows.
+register(PersonalDataSource(label="routines_created", model="routine.Routine",
+                            user_field=("created_by", "assigned_to"), on_erase="keep",
                             purpose=("Routines a trainer wrote, each one a client's own "
-                                     "copy. Kept, because the client's program is built on "
-                                     "it."),
+                                     "copy, and the routines written for the person. Kept, "
+                                     "because the client's program is built on it."),
                             recipients=("clients", "ai_provider"),
                             data_types=("user_content", "fitness")))
 register(PersonalDataSource(label="templates_created", model="routine.RoutineTemplate", user_field="created_by", on_erase="keep",
@@ -860,9 +876,11 @@ register(PersonalDataSource(label="exercise_media", model="routine.ExerciseMedia
                             recipients=("clients",),
                             data_types=("user_content",)))
 register(PersonalDataSource(label="routine_exercises", model="routine.RoutineExercise",
-                            user_field="routine__created_by", on_erase="keep",
+                            user_field=("routine__created_by", "routine__assigned_to"),
+                            on_erase="keep",
                             purpose=("The exercises, sets and reps of each routine a "
-                                     "trainer wrote. Kept with the routine."),
+                                     "trainer wrote, and of each routine written for the "
+                                     "person. Kept with the routine."),
                             recipients=("clients", "ai_provider"),
                             data_types=("user_content", "fitness")))
 register(PersonalDataSource(label="template_exercises", model="routine.RoutineTemplateExercise",

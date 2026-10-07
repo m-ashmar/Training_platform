@@ -84,12 +84,12 @@ def _stored_fields(model) -> list[str]:
 
 def _exported_fields(source, model) -> list[str]:
     """What `registry.section_pages` writes for one row: the export's columns, plus every
-    many-to-many as a list of ids."""
-    from training_platform.privacy.registry import _export_columns
+    many-to-many it attaches as a list of ids (every one, or the declared ones when the
+    source names its fields)."""
+    from training_platform.privacy.registry import _export_columns, _export_links
 
     names = list(_export_columns(source, model))
-    names += [f.name for f in model._meta.get_fields()
-              if f.many_to_many and getattr(f, "concrete", False) and f.name not in names]
+    names += [f.name for f in _export_links(source, model) if f.name not in names]
     return names
 
 
