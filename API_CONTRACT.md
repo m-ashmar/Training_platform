@@ -877,7 +877,8 @@ or a link to the web hub, on any build.
 `GET /api/routine/v1/analytics/recent-progress/`; `trainer_message` reads `chat/` and
 reports the same unread count as `GET /api/v1/chat/conversations/`; `ai_advice` appears
 only once the person has given AI consent (`/api/v1/ai-consent/`). The payload is cached
-per user, per build and per language for 120 s and retired at once when a workout
+per user, per build and per language for 120 s (or until the first `next` meal or
+workout of today's timeline turns due, when that is sooner — B-179, below) and retired at once when a workout
 session is started, changed or finished, a day closes, a chat message arrives or is
 taken back, the client reads the thread, a block is made or lifted, or the client's
 coaching relation changes.
@@ -891,7 +892,8 @@ keeps the card with `body: ""` and `deleted: true`, as the conversation list sho
 **What the home-records build added** (BACKEND_DELTA items 9 and 12, 2026-09-27).
 Additive: no route, section type, key or `code` renamed or removed; no new route.
 
-- **The day timeline** is `nutrition_today.timeline`, not a new section type: the
+- **The day timeline** (since 2026-09-28 ALSO answered as the `day_timeline` section, the
+  owner's decision — "What wiring the home found" below) is `nutrition_today.timeline`, not a new section type: the
   canvas's closed set of types has none for it, its «يومك» is the meal list with the
   workout placed among it, and a key inside the existing card is invisible to every
   installed build (a new type would also be skipped, but would move the section order
