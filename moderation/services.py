@@ -1,6 +1,6 @@
 """The public API of this app: what every OTHER app calls.
 
-Four functions, and nothing in this module imports a model at import time. `social`,
+A handful of functions, and nothing in this module imports a model at import time. `social`,
 `users` and `ai_assistant` all call in here, and two of them are imported BY the
 reporting views to decide what a reporter may see — importing their models at the top
 of this file closes that loop and breaks `manage.py check`. Models are imported inside
@@ -10,7 +10,8 @@ The rule the whole app exists to enforce: a block is symmetric in effect. `block
 returns both sides of every row the person appears in, so one row hides each of them
 from the other's feed, search, follower list, notifications, the signed-in list of
 available trainers and trainer matches, and closes the chat between them
-(`chat.permissions`). It does not end or hide an approved coaching — the trainer's own
+(`chat.permissions`) and a client's wallet transfer to the trainer, note and all
+(`wallet.views.ClientTransferToTrainerView`, `wallet/transfer_notes.py`). It does not end or hide an approved coaching — the trainer's own
 client list still shows a client who blocked them (`moderation/views.py`
 `BlockListCreateView`). Only the blocker can remove it.
 """
@@ -70,6 +71,24 @@ def is_blocked(a, b) -> bool:
     return Block.objects.filter(
         Q(blocker_id=a_id, blocked_id=b_id) | Q(blocker_id=b_id, blocked_id=a_id)
     ).exists()
+
+
+def blocked_between(a_field: str, b_field: str):
+    """`is_blocked` for every row of a queryset at once: an `Exists` that is true when
+    either of the two people the outer row names in `a_field` and `b_field` (user
+    foreign keys, e.g. "client_id", "trainer_id") has blocked the other.
+
+    For a read that holds rows between two people and must hide them while a block
+    stands, in the SAME query as the rows (`wallet/transfer_notes.py`): no second query,
+    and no need to know which of the two is reading.
+    """
+    from .models import Block
+
+    from django.db.models import Exists, OuterRef, Q
+
+    a, b = OuterRef(a_field), OuterRef(b_field)
+    return Exists(Block.objects.filter(
+        Q(blocker_id=a, blocked_id=b) | Q(blocker_id=b, blocked_id=a)))
 
 
 def open_report_count() -> int:
