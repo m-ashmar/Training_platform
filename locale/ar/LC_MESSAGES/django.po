@@ -5927,3 +5927,10 @@ msgstr "فقط المدرب يمكنه أن يجعل التحدي لعملائه
 #: social/views.py
 msgid "This challenge is open to its coach's clients only."
 msgstr "هذا التحدي مفتوح لعملاء المدرب فقط."
+
+#. `content_too_long` (SIDE_BUGS S-219): a post or comment over the limit, in
+#. characters.
+#: social/serializers.py
+#, python-format
+msgid "Keep it under %(limit)d characters."
+msgstr "الحد الأقصى %(limit)d حرفاً."

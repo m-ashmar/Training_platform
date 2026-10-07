@@ -18,6 +18,12 @@ from django.utils.translation import gettext_lazy
 from users.models import CustomUser
 from training_platform.model_validation import RowValidationMixin
 
+#: The longest post and comment the API takes, in characters (SIDE_BUGS S-219: there
+#: was no cap but the 15 MB request body). A post is a few paragraphs, a comment a
+#: reply; a direct chat message is 4000 (`chat/models.py MAX_BODY_CHARS`).
+POST_CONTENT_MAX_CHARS = 5000
+COMMENT_CONTENT_MAX_CHARS = 2000
+
 
 def _random_media_path(folder, filename):
     """Return `<folder>/<random>.<ext>`.
@@ -126,6 +132,8 @@ class Post(models.Model):
         db_index=True
     )
     title = models.CharField(max_length=200, blank=True)
+    #: At most `POST_CONTENT_MAX_CHARS` through the API (`PostSerializer`, SIDE_BUGS
+    #: S-219); the column itself stays a TextField, so no row written before is cut.
     content = models.TextField()
     visibility = models.CharField(
         max_length=20,
@@ -253,6 +261,7 @@ class Comment(models.Model):
         related_name='comments',
         db_index=True
     )
+    #: At most `COMMENT_CONTENT_MAX_CHARS` through the API (S-219).
     content = models.TextField()
     
     # Reply to another comment (nested comments)

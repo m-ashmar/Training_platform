@@ -2631,6 +2631,15 @@ no `code` renamed. `ChallengeViewSet`'s docstring carries the full contract.
   coaching counts) and anyone already in it (a client whose coaching ends stays): for
   anyone else it is absent from the list and its detail and actions answer 404, and
   `join/` answers `403 challenge_clients_only`.
+- **Fresh lists** (S-189, S-194). The challenges list is still cached 120 s per person,
+  but a challenge an operator hides, a creator's edit, close or delete, and anyone's
+  join or leave now reach every person's list at once.
+- **A total order** (S-218). The post list (`ordering` default and any `?ordering=`),
+  the comment list's `?ordering=` and the AI chat's `sessions/{id}/messages/` all end
+  their order in `-id`: rows sharing a timestamp or a like count no longer repeat or
+  vanish across pages. Same rows, same default order otherwise.
+- **Text caps** (S-219). A post's `content` takes at most 5000 characters, a comment's
+  2000 (create and edit): `400 validation_error`, field code `content_too_long`.
 
 **What wiring the train screens found** (BACKEND_BUGS B-106, B-109, B-110, B-112,
 2026-09-24). Additive under §6: new keys on existing answers, one query parameter, two

@@ -335,6 +335,26 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         })
 
 
+class TotalOrderingFilter(OrderingFilter):
+    """`OrderingFilter` whose order always ends in the primary key (SIDE_BUGS S-218).
+
+    A view's `ordering` and a caller's `?ordering=likes_count` REPLACE the model's
+    `Meta.ordering` (`-created_at, -id`), so the post list sorted on one non-unique
+    column and LIMIT/OFFSET (or a cursor) repeated and skipped rows sharing a value —
+    ten posts with 0 likes, or a fan-out batch sharing a timestamp. `-id` is appended
+    unless the order already names the key; the paginator reads this same order.
+    """
+
+    def get_ordering(self, request, queryset, view):
+        ordering = super().get_ordering(request, queryset, view)
+        if not ordering:
+            return ordering
+        ordering = list(ordering)
+        if not any(str(term).lstrip('-') in ('id', 'pk') for term in ordering):
+            ordering.append('-id')
+        return ordering
+
+
 def subquery_count(rows, group_by):
     """A per-row COUNT over `rows`, as ONE correlated subquery for the whole page.
 
@@ -357,8 +377,11 @@ def subquery_count(rows, group_by):
         0)
 
 
-def visible_posts_for(user):
+def visible_posts_for(user, *, hidden=None):
     """Every post `user` is allowed to see.
+
+    `hidden`: `blocked_ids(user)` when the caller has already read it, so a view that
+    needs the set itself does not read it twice (SIDE_BUGS S-219).
 
     ONE definition, because there were two and they disagreed. `Post.can_be_viewed_by`
     (social/models.py) encodes the rule including `is_hidden` and has never had a single
@@ -388,7 +411,8 @@ def visible_posts_for(user):
             | Q(visibility='followers', author__followers__follower=user)
         ) & Q(is_hidden=False)
         | Q(author=user)
-    ).exclude(author_id__in=blocked_ids(user)).filter(public_q('author')).distinct()
+    ).exclude(author_id__in=blocked_ids(user) if hidden is None else hidden).filter(
+        public_q('author')).distinct()
 
 
 class PostViewSet(viewsets.ModelViewSet):
@@ -419,17 +443,20 @@ class PostViewSet(viewsets.ModelViewSet):
     #: `IsOwnerOrReadOnly` refused everyone but the author and the like button returned
     #: 403 for every user on every post they did not write.
     interaction_actions = ('like',)
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    # A total order whatever `?ordering=` asks for (SIDE_BUGS S-218).
+    filter_backends = [DjangoFilterBackend, SearchFilter, TotalOrderingFilter]
     filterset_fields = ['author', 'post_type', 'visibility']
     search_fields = ['title', 'content']
     ordering_fields = ['created_at', 'updated_at', 'likes_count', 'comments_count']
-    ordering = ['-created_at']
+    ordering = ['-created_at', '-id']
     
     def get_queryset(self):
         user = self.request.user
         
-        # Get posts that user can view based on visibility AND moderation.
-        queryset = visible_posts_for(user)
+        # Get posts that user can view based on visibility AND moderation. The block
+        # set is read once, for this and the likes correction below (S-219).
+        hidden = blocked_ids(user)
+        queryset = visible_posts_for(user, hidden=hidden)
         
         # Handle author filtering
         author_id = self.request.query_params.get('author')
@@ -454,7 +481,6 @@ class PostViewSet(viewsets.ModelViewSet):
         # everyone, so after a block they promised rows the viewer's own like and
         # comment lists no longer return. The serializer subtracts these two; they are
         # annotated here so the correction costs the page one query, not one per post.
-        hidden = blocked_ids(user)
         if hidden:
             queryset = queryset.annotate(
                 hidden_likes=subquery_count(
@@ -670,7 +696,8 @@ class CommentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsOwnerOrReadOnly]
     interaction_actions = ('like',)
     pagination_class = CommentCursorPagination
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    # `?ordering=likes_count` keeps the `-id` tiebreak too (SIDE_BUGS S-218).
+    filter_backends = [DjangoFilterBackend, SearchFilter, TotalOrderingFilter]
     filterset_fields = ['post', 'author', 'parent_comment']
     search_fields = ['content']
     ordering_fields = ['created_at', 'updated_at', 'likes_count']
@@ -680,7 +707,10 @@ class CommentViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
-        
+        # Who this caller blocked or was blocked by: read ONCE, for the filter and the
+        # likes correction below (it was read twice, one query each — SIDE_BUGS S-219).
+        hidden = blocked_ids(user)
+
         # Base queryset with visibility permissions
         # select_related('author','post') is required: CommentSerializer nests the
         # author, so without it the endpoint issued ~1.2 queries per comment
@@ -693,7 +723,7 @@ class CommentViewSet(viewsets.ModelViewSet):
         ).filter(
             # Same rule as the post list, from the same function, so a hidden post's
             # thread cannot be read through the comment endpoint.
-            post__in=visible_posts_for(user),
+            post__in=visible_posts_for(user, hidden=hidden),
             is_hidden=False,
         ).filter(
             # Not while its author's account is suspended (decision 8).
@@ -703,13 +733,12 @@ class CommentViewSet(viewsets.ModelViewSet):
             # post clause hides a blocked person's posts; it does nothing about a
             # blocked person's comments on YOUR post, which is where the harassment
             # this feature exists for actually lands.
-            author_id__in=blocked_ids(user),
+            author_id__in=hidden,
         ).distinct()
 
         # Same correction as the post list, for the same reason: `Comment.likes_count`
         # is denormalised and counts a blocked person's like. One subquery for the
         # page, not one query per comment.
-        hidden = blocked_ids(user)
         if hidden:
             queryset = queryset.annotate(
                 hidden_likes=subquery_count(

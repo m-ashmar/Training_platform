@@ -9,9 +9,19 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
 from .models import (
+    COMMENT_CONTENT_MAX_CHARS, POST_CONTENT_MAX_CHARS,
     UserFollow, Post, PostLike, Comment, CommentLike,
     Challenge, ChallengeParticipation,
 )
+
+
+def _refuse_overlong(value, limit):
+    """Field code `content_too_long` (SIDE_BUGS S-219), the limit in the message."""
+    if value is not None and len(value) > limit:
+        raise serializers.ValidationError(
+            _('Keep it under %(limit)d characters.') % {'limit': limit},
+            code='content_too_long')
+    return value
 # The badges `/api/social/achievements/` serves are the `achievements` app's — the ONE
 # badge system this platform awards (`achievements/engine.py`). `social.Achievement` and
 # `social.UserAchievement` are tables nothing live writes (SIDE_BUGS S-127).
@@ -391,6 +401,8 @@ class PostSerializer(BannedTermsFilter, serializers.ModelSerializer):
     holds a term on the operators' list answers 400 `content_not_allowed` (top-level
     `code`, and `field_errors.<field>[0].code`) and writes nothing. Only the fields the
     request writes are checked. Same on every build (`moderation/ugc_filter.py`).
+    `content` over 5000 characters: 400 `validation_error`, field code
+    `content_too_long` (SIDE_BUGS S-219).
 
     **The share card** (2026-09-24, BACKEND_BUGS B-080). A post can carry the finished
     workout or the badge it shares — the card Write attaches and the Feed draws.
@@ -429,6 +441,11 @@ class PostSerializer(BannedTermsFilter, serializers.ModelSerializer):
         write_only=True, required=False, allow_null=True, min_value=1)
 
     banned_terms_fields = ('title', 'content')
+
+    def validate_content(self, value):
+        """At most `POST_CONTENT_MAX_CHARS` (5000): 400 `validation_error`, field code
+        `content_too_long` (SIDE_BUGS S-219)."""
+        return _refuse_overlong(value, POST_CONTENT_MAX_CHARS)
 
     class Meta:
         model = Post
@@ -589,9 +606,16 @@ class CommentSerializer(BannedTermsFilter, serializers.ModelSerializer):
 
     A create or edit whose `content` holds a banned term answers 400
     `content_not_allowed` and writes nothing (spec B1, `moderation/ugc_filter.py`).
+    `content` over 2000 characters: 400 `validation_error`, field code
+    `content_too_long` (SIDE_BUGS S-219).
     """
 
     banned_terms_fields = ('content',)
+
+    def validate_content(self, value):
+        """At most `COMMENT_CONTENT_MAX_CHARS` (2000): 400 `validation_error`, field code
+        `content_too_long` (SIDE_BUGS S-219)."""
+        return _refuse_overlong(value, COMMENT_CONTENT_MAX_CHARS)
 
     author = UserMinimalSerializer(read_only=True)
     # Same reason as `PostSerializer.likes_count`: the stored counter counts a blocked
