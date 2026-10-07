@@ -175,6 +175,30 @@ _NOT_APPLICABLE = re.compile(r"(?<![a-z])n\s*/\s*a(?![a-z])|(?<![a-z])n\.\s*a\.?
 # are matched first, longest first, so «زبدة الفول السوداني» (peanut butter) is peanut
 # and not butter. The same rule as `_USER_SYNONYMS`: an everyday word that could mean
 # more than one allergen WIDENS to all of them («مكسرات», «فستق», «مأكولات بحرية»).
+#
+# The fix run's review (R-7 «للوز», R-9 a word outside the table, R-10 more ways to
+# write "none"), measured on `tests/diet_quality.py measure(PROFILES, days=7)` with every
+# client the harness makes given that `allergies` text (a monkeypatched `_make_client`),
+# the seeded catalogue, 39ae624 against this code:
+#
+# | allergies                 | code | dish rate | distinct | max rep | drift worst | min portions |
+# |---------------------------|------|-----------|----------|---------|-------------|--------------|
+# | none (the gate's plain)   | both | 0.8512    | 64       | 8       | 2.181       | 2            |
+# | «حساسية للوز»             | old  | 0.8512    | 64       | 8       | 2.181       | 2            |
+# | «حساسية للوز»             | new  | 0.8333    | 52       | 9       | 1.841       | 2            |
+# | «حساسية للبنة»            | old  | 0.8512    | 64       | 8       | 2.181       | 2            |
+# | «حساسية للبنة»            | new  | 0.7798    | 42       | 9       | 2.118       | 1            |
+# | «حساسية من الفراولة»      | old  | 0.8512    | 64       | 8       | 2.181       | 2            |
+# | «حساسية من الفراولة»      | new  | 0.8155    | 58       | 9       | 1.816       | 3            |
+# | «لا أعاني من أي حساسية»   | both | 0.8512    | 64       | 8       | 2.181       | 2            |
+# | «فول سوداني»              | both | 0.8333    | 57       | 8       | 2.767       | 2            |
+#
+# The plain row is `tests/diet_quality_baseline.json` to the digit; nothing was
+# re-recorded. Every "old" allergic row is the plain one — the allergy was not applied —
+# and every "new" one is identical, metric for metric, to the English text's run
+# ("almonds", "milk", "strawberry allergy"): the Arabic client gets the English client's
+# plans. «لا أعاني» is unchanged because the shipped catalogue is completely tagged, so
+# the B4 exclusion it no longer triggers cost nothing on it.
 _AR_SEAFOOD = {"fish", "shellfish", "mollusc"}
 _AR_NUTS = {"peanut", "tree_nut"}
 _AR_SYNONYMS_WRITTEN: dict[str, set[str]] = {

@@ -2523,6 +2523,10 @@ docstrings carry the full contract (`diet/views.py FoodListView`,
   `{client_id, has_preferences, allergies, allergens, allergy_terms, liked_foods,
   disliked_foods}`: the client's own text, its tags, the words the vocabulary does not
   know, and `{id, name, name_ar, image_url}` food rows. Reading writes nothing.
+  An Arabic word the vocabulary does not know («الفراولة») is one of those words too
+  (fix run, 2026-10-07): it is matched against a food's Arabic name, so it can appear
+  in `allergy_terms`, in the picker's `excluded_terms` and, as `free:<word>`, in the
+  plan check's `declared_allergens`. No field or code changed.
 - **The client's week** (B-129). `GET trainer/clients/{client_id}/adherence/
   ?start_date=` — seven `days` (Saturday to Friday by default) with the client's own
   progress figures (ticked meals, calories and protein eaten and their targets, the
