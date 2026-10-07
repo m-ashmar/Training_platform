@@ -1046,13 +1046,16 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         can no longer reach them all — it only ever knew one key. Folding a version
         number into the key means a write orphans every variant in one step, and the
         orphans fall out on their own when their short TTL expires.
+
+        Joined by the version EVERY reader's list carries (`social/challenge_cache.py
+        EVERYONE`, SIDE_BUGS S-189 / S-194): a hidden, edited, closed or deleted
+        challenge, or anyone's join or leave, leaves every cached list at once.
         """
-        version_key = f"challenges_ver:{cls._challenges_cache_user_part(user)}"
-        version = cache.get(version_key)
-        if version is None:
-            version = 1
-            cache.set(version_key, version, timeout=None)
-        return version
+        from . import challenge_cache
+
+        mine = challenge_cache.version(
+            f"challenges_ver:{cls._challenges_cache_user_part(user)}")
+        return f"{mine}.{challenge_cache.version(challenge_cache.EVERYONE)}"
 
     @classmethod
     def _challenges_cache_key(cls, user, query_params=None):
@@ -1084,16 +1087,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
 
     @staticmethod
     def _bump_challenges_cache_version(version_key):
-        try:
-            try:
-                cache.incr(version_key)
-            except ValueError:
-                # No counter yet: seeding it at 2 skips whatever v1 entries exist.
-                cache.set(version_key, 2, timeout=None)
-        except Exception:
-            # Optional side effect: swallowing this silently is what made the
-            # surrounding failures invisible in logs. Control flow is unchanged.
-            logger.debug('suppressed non-fatal error', exc_info=True)
+        from .challenge_cache import bump
+
+        bump(version_key)
 
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)
@@ -1137,6 +1133,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 recount(challenge)
                 self._update_challenge_rankings(challenge)
+        # The save reached every cached list already; the close's `.update()` of
+        # `end_date` above goes around it (SIDE_BUGS S-194).
+        from .challenge_cache import bump_everyone
+
+        bump_everyone()
 
     def _refuse_changes_that_pick_a_result(self, before, data):
         """`challenge_over` / `end_date_in_past`; see the class docstring."""
@@ -1252,6 +1253,10 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             # `rank=NULL` — last place is a place, and the app reads the column.
             self._update_challenge_rankings(challenge)
             self._invalidate_challenges_cache(request)
+            # `participants_count` moved for every reader, not only the joiner (S-194).
+            from .challenge_cache import bump_everyone
+
+            bump_everyone()
             return Response(
                 {'message': _('Successfully joined challenge')},
                 status=status.HTTP_201_CREATED
@@ -1323,6 +1328,10 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             self._update_challenge_rankings(locked)
 
         self._invalidate_challenges_cache(request)
+        # `participants_count` moved for every reader (S-194).
+        from .challenge_cache import bump_everyone
+
+        bump_everyone()
         return Response({'message': _('You have left this challenge.'),
                          'code': 'left_challenge'})
 

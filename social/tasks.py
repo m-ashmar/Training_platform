@@ -170,6 +170,12 @@ def advance_challenge_phases():
     # (SIDE_BUGS S-044), and since the owner's F20 (2026-09-24) only once the standing
     # has been open for review for `Challenge.REVIEW_HOURS` after the end.
     settled = settle_winners(now=now)
+    if started or ended or streaks or settled:
+        # Those writes are `.update()`s, which no model signal sees: every reader's
+        # cached list still showed the old status (SIDE_BUGS S-194).
+        from .challenge_cache import bump_everyone
+
+        bump_everyone()
     return f"started={started} ended={ended} streaks={streaks} settled={settled}"
 
 

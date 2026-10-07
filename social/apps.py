@@ -17,3 +17,6 @@ class SocialConfig(AppConfig):
         # A suspension (or a reinstatement) re-ranks the running challenges the person
         # is in at once: the owner's decision 8, 2026-09-24 (`social/presence.py`).
         import social.presence  # noqa: F401
+        # Every reader's cached challenge list leaves when a challenge row changes
+        # (SIDE_BUGS S-189, S-194).
+        import social.challenge_cache  # noqa: F401
