@@ -7,10 +7,15 @@ Every test here fails on 39ae624.
 R-7 (HIGH): «ل» + the article before a word that begins with «ل» is written «للوز»
 («ل» + «اللوز»), and `_ar_forms` only stripped «لل», giving «وز». «حساسية للوز» read as
 no allergy, the checker was inactive, and Almonds (verified `tree_nut`) came back safe.
+
+R-10 (MEDIUM): `declares_allergy` read «لا أعاني من أي حساسية», «لا يوجد حساسية
+غذائية», «لا توجد أي حساسية تجاه الطعام», «ماعندي» and «سليم» as declaring an allergy
+(S-243 again, for those phrasings), and the client lost every incompletely tagged food.
 """
 import pytest
 
-from tests.test_allergen_safety import _catalogue_food, _client, _pool_ids
+from tests.test_allergen_safety import (  # noqa: F401  (`under_tagged` is a fixture)
+    _catalogue_food, _client, _flat, _food, _pool_ids, under_tagged)
 
 pytestmark = pytest.mark.django_db
 
@@ -66,3 +71,56 @@ def test_an_almond_allergy_written_for_almonds_gets_the_english_pool(seeded_cata
     assert served, "the pool is empty; nothing was measured"
     assert not FoodItem.objects.filter(id__in=served, name_en="Almonds").exists()
     assert arabic == _pool_ids(_client("w1r7en", "almonds"))
+
+
+# ------------------------------------------------ R-10: more ways to write "none"
+NONE_PHRASES = ["لا أعاني من أي حساسية", "لا يوجد حساسية غذائية",
+                "لا توجد أي حساسية تجاه الطعام", "ماعندي", "سليم", "معنديش",
+                "ماعندي حساسية", "لا أشكو من أي حساسية", "سليمة"]
+
+
+@pytest.mark.parametrize("raw", NONE_PHRASES)
+def test_more_ways_to_write_none_declare_no_allergy(raw):
+    from diet.allergens import declares_allergy, parse_user_allergies
+
+    assert parse_user_allergies(raw) == set()
+    assert declares_allergy(raw) is False
+
+
+@pytest.mark.parametrize("raw", ["أعاني من حساسية", "حساسية غذائية", "حساسية من الطعام",
+                                 "عندي حساسية غذائية", "لا أعرف"])
+def test_the_same_words_without_a_negation_still_declare(raw):
+    """«أعاني» ("I suffer") and «غذائية» ("food") are a "none" only after a negation:
+    «أعاني من حساسية» is "I suffer from an allergy", and keeps the completeness rule."""
+    from diet.allergens import declares_allergy
+
+    assert declares_allergy(raw) is True
+
+
+@pytest.mark.parametrize("raw, tags", [
+    ("ماعندي حساسية من الفول السوداني", {"peanut"}),
+    ("لا أعاني من أي حساسية إلا الحليب", {"milk"}),
+])
+def test_none_words_beside_a_named_allergen_are_still_that_allergen(raw, tags):
+    from diet.allergens import declares_allergy, parse_user_allergies
+
+    assert parse_user_allergies(raw) == tags
+    assert declares_allergy(raw) is True
+
+
+@pytest.mark.parametrize("allergies", ["لا أعاني من أي حساسية", "ماعندي", "سليم"])
+def test_a_client_who_wrote_none_this_way_keeps_the_whole_pool(under_tagged, allergies):
+    """The effect on 39ae624: the spec-B4 exclusion was on, and every incompletely
+    tagged food left this client's pool."""
+    from diet.planner.constraints import ClientConstraints
+
+    user = _client(f"w1r10{len(allergies)}", allergies)
+    limits = ClientConstraints.for_user(user)
+    assert not limits.requires_complete_tags
+    assert not limits.checks_allergens
+    unknown = _food("W1R10 Mystery Plate", kcal=120, protein=10, carbs=10, fat=4,
+                    source="unknown")
+    assert not limits.forbids(unknown)
+    pool = _pool_ids(user)
+    assert {f.id for f in under_tagged.values()} <= _flat(pool)
+    assert pool == _pool_ids(user, constraints=ClientConstraints())

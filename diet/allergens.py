@@ -240,13 +240,24 @@ _AR_NONE_WRITTEN = (
     "لست", "مش", "مو", "شيء", "شي", "شيئ", "أي", "أية", "أبدا", "إطلاقا", "بدون",
     "خالي", "خالية", "خال", "حساسية", "حساسيات", "حساسيه", "تحسس", "معروفة",
     "معروف", "حاليا", "من", "على", "ضد", "تجاه", "أو", "و", "نوع", "أنواع",
+    # "I haven't" written as one word, and "healthy" / "sound" (fix run, review R-10).
+    "ماعندي", "ماعنديش", "معنديش", "مافيش", "مفيش", "سليم", "سليمة",
 )
 #: "I have" / "there is": part of a "none" only after a negation — «ما عندي»,
 #: «ليس لدي», «ما في» — and part of a declaration otherwise: «عندي حساسية» ("I have an
 #: allergy") names no allergen and still declares one.
 _AR_HAVE_WRITTEN = ("عندي", "لدي", "عندى", "في", "فيه", "عندنا", "لدينا")
+#: Words that DESCRIBE an allergy without naming an allergen: "I suffer from", "food".
+#: Like `_AR_HAVE_WRITTEN`, part of a "none" only after a negation — «لا أعاني من أي
+#: حساسية», «لا يوجد حساسية غذائية», «لا توجد أي حساسية تجاه الطعام» declared an allergy
+#: on 39ae624 (review R-10) — and a declaration otherwise: «أعاني من حساسية» ("I suffer
+#: from an allergy") and «حساسية غذائية» ("a food allergy") still keep the
+#: completeness rule. With the article they match through `_ar_forms` («الطعام»).
+_AR_DESCRIBING_WRITTEN = ("أعاني", "أشكو", "غذائية", "غذائي", "غذاء", "أغذية", "طعام",
+                          "أطعمة", "أكل")
 _AR_NEGATIONS_WRITTEN = ("لا", "ما", "ليس", "ليست", "لست", "مش", "مو", "ولا",
-                         "لايوجد", "لاتوجد", "مافي", "بدون")
+                         "لايوجد", "لاتوجد", "مافي", "بدون",
+                         "ماعندي", "ماعنديش", "معنديش", "مافيش", "مفيش")
 
 _AR_MARKS = re.compile(r"[ؐ-ًؚ-ٰٟۖ-ۭـ]")
 _AR_FOLD = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ة": "ه",
@@ -307,6 +318,9 @@ _AR_SYNONYMS: dict[tuple[str, ...], set[str]] = {
 _AR_TERMS = sorted(_AR_SYNONYMS, key=len, reverse=True)
 _AR_NONE = frozenset(_ar_fold(w) for w in _AR_NONE_WRITTEN)
 _AR_HAVE = frozenset(_ar_fold(w) for w in _AR_HAVE_WRITTEN)
+_AR_DESCRIBING = frozenset(_ar_fold(w) for w in _AR_DESCRIBING_WRITTEN)
+#: What counts as part of a "none" once a negation has been read.
+_AR_NEGATABLE = _AR_HAVE | _AR_DESCRIBING
 _AR_NEGATIONS = frozenset(_ar_fold(w) for w in _AR_NEGATIONS_WRITTEN)
 
 
@@ -330,9 +344,10 @@ def _arabic_allergens(raw: str | None) -> Set[str]:
 def _arabic_says_something(raw: str | None) -> bool:
     """Is there Arabic in `raw` beyond the words of "none" (`_AR_NONE`)?
 
-    «لا يوجد», «لا», «لا شيء», «ما في», «ما عندي حساسية», «ليس لدي حساسية» say nothing;
-    «عندي حساسية» ("I have an allergy") and a word the vocabulary does not know
-    («فراولة») do.
+    «لا يوجد», «لا», «لا شيء», «ما في», «ما عندي حساسية», «ليس لدي حساسية», «ماعندي»,
+    «لا أعاني من أي حساسية», «لا يوجد حساسية غذائية» say nothing; «عندي حساسية» ("I have
+    an allergy"), «أعاني من حساسية», «حساسية غذائية» and a word the vocabulary does not
+    know («فراولة») do.
     """
     negated = False
     for forms in _ar_words(raw or ""):
@@ -340,7 +355,7 @@ def _arabic_says_something(raw: str | None) -> bool:
             negated = True
         if forms & _AR_NONE:
             continue
-        if negated and forms & _AR_HAVE:
+        if negated and forms & _AR_NEGATABLE:
             continue
         return True
     return False
