@@ -2165,7 +2165,8 @@ B-051, 2026-09-23).
   `validation_error`. Never a password, PIN, OTP or session. Identical on every build;
   encrypted at rest; exported and erased with the account.
 - What it does: a transfer with the right amount and a missing or mistyped reference,
-  sent FROM the address exactly one customer saved, holds that customer's checkout for
+  sent FROM the address exactly one customer saved and proved (2026-09-28, below),
+  holds that customer's checkout for
   review (`status: "needs_review"`, `review.reason: "reference_missing"`, the push
   `payment_needs_review`) — even when several checkouts fit the amount, and for a
   checkout closed within the last 72 hours. It never confirms a payment: only the
@@ -2182,6 +2183,36 @@ B-051, 2026-09-23).
   is `degraded`: nothing is expired, failed or refused because of it, the pollers keep
   asking, and a transfer already made is found when ShamCash answers again. Operators
   see the same state in the console (`/dj-admin/subscription/gatewayhealth/`).
+
+**Payments fix run, wave 1 (2026-09-28): product checkouts' reads, the receipt email,
+payment instructions by build, a proven payer address.** No route or `code` changed.
+
+- A routine product's web-hub checkout is its buyer's payment on every payment read
+  (BACKEND_BUGS B-167): `GET /api/subscription/v1/payments/` lists it,
+  `payments/{id}/` answers it with `events`, and `payments/{id}/receipt/` (JSON and
+  `?format=pdf`) is the buyer's (`payer` is the buyer). Its `subscription` is null and
+  its `item` adds `product_id` and `product_title` (the plan keys are null or empty:
+  draw the title alone). A plan's `item` is unchanged. Its confirmation now emails the
+  receipt as a plan's does.
+- `payments/{id}/receipt/` gains `email: {status, sent_at}` (B-171): `sent` (the email
+  with the PDF left, at `sent_at`), `queued`, `skipped`, `failed`, or `none` (never
+  owed: the payer muted `payment_confirmed` email, or their address is not verified).
+  Say «وصلك الإيصال بالبريد» only for `sent`. JSON only; the same on every build.
+- An OPEN payment's `amount` and `reference` (a payment instruction) are ABSENT from
+  `payments/{id}/status/` and from the rows of `payments/`, `payments/{id}/` and a
+  subscription's `payments` for a build that may not buy its kind of money (`play` and
+  `ios` for a plan or a routine product, or no `X-App-Channel`), as
+  `checkout/sessions/{id}/` already withholds them (SIDE_BUGS S-239, spec section 4).
+  The same money in such a row's `metadata` goes too: `metadata.product.price`, and
+  `metadata.upgrade` `new_price`, `credit`, `to_pay` and `parts`.
+  Completed, refunded or closed payments carry all of it on every build. A product
+  checkout's `metadata.product` never carries the sale's `commission_rate`.
+- The saved payer address (above) holds a checkout among several, or a closed one,
+  only once it is PROVEN: a transfer FROM it has confirmed one of the customer's own
+  checkouts by its reference (SIDE_BUGS S-241). Changing the address unproves it.
+  Until then a match is only written down for the operator, and the transfer is held
+  on the one checkout its amount fits, or queued. The signal now covers routine
+  product checkouts too (S-240). `payer-address/` answers the same body as before.
 
 **What wiring the trainer money screens found: escrow and the ledger's reads**
 (BACKEND_BUGS B-096, B-101, 2026-09-24). Additive; identical on every build (money that

@@ -913,10 +913,12 @@ register(PersonalDataSource(label="transfer_reviews", model="subscription.Transf
 # section 6: "Save the address, not the account"). Personal data and nothing else —
 # encrypted at rest, like a trainer's payout address — so it goes with the account. Used
 # only as evidence that a transfer came from this customer; the digest is a keyed hash
-# and is not exported.
+# and is not exported. `verified_at` (when a transfer from it first confirmed one of the
+# person's own checkouts, SIDE_BUGS S-241) is theirs and is exported.
 register(PersonalDataSource(label="payer_address", model="subscription.PayerAddress",
                             user_field="user",
-                            fields=["id", "address", "created_at", "updated_at"],
+                            fields=["id", "address", "verified_at", "created_at",
+                                    "updated_at"],
                             on_erase="delete",
                             purpose=("The ShamCash account address the person pays from "
                                      "(encrypted), so an operator can match a transfer "

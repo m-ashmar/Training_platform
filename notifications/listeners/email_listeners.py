@@ -17,7 +17,6 @@ fails the caller: an email must not cost a payout or a gateway's 200.
 import logging
 
 from django.dispatch import receiver
-from django.utils import timezone
 
 from subscription.services.payment_service import payment_completed
 
@@ -26,18 +25,13 @@ logger = logging.getLogger(__name__)
 
 @receiver(payment_completed, dispatch_uid="notifications.email_payment_receipt")
 def email_payment_receipt(sender, payment, subscription=None, **kwargs):
+    # The checks (completed, not confirmed too long ago, who the payer is) and the
+    # never-raise rule live in `queue_receipt`, which a routine product's checkout calls
+    # too: it sends no `payment_completed` (BACKEND_BUGS B-167).
     from notifications.channels import email
-    from subscription.receipts import issued_at
 
     try:
-        if payment.status != "completed":
-            return None
-        confirmed = issued_at(payment)
-        if confirmed is not None and timezone.now() - confirmed > email.RECEIPT_EMAIL_MAX_AGE:
-            return None
-        payer = (subscription or payment.subscription).user
-        return email.queue(payer, "payment_receipt", key=f"payment_receipt:{payment.pk}",
-                           context={"payment_id": str(payment.pk)})
+        return email.queue_receipt(payment)
     except Exception:
         logger.exception("The receipt email for payment %s could not be queued",
                          getattr(payment, "pk", None))

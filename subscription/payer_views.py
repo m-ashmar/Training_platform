@@ -17,7 +17,10 @@ class PayerAddressView(APIView):
     What it is for: when a transfer reaches our merchant account with the right amount
     and a missing or mistyped reference, a sender address that matches the one saved
     here points the operator's review queue at the caller's checkout (the checkout shows
-    `needs_review` with `review.reason` `reference_missing`, as it already can). It is
+    `needs_review` with `review.reason` `reference_missing`, as it already can) — once
+    the address is proven: once a transfer FROM it has confirmed one of the caller's
+    checkouts by its reference (SIDE_BUGS S-241; changing the address unproves it).
+    Until then a match is only noted for the operator. It is
     evidence for a person and nothing more: it NEVER confirms a payment on its own —
     only the reference with the exact amount does, or an operator — so the reference
     still belongs in the transfer's note. An address, never an account: no password,

@@ -190,13 +190,30 @@ class PaymentSerializer(serializers.ModelSerializer):
     The "مدفوعات سابقة" list on the Receipt screen draws one row per payment as
     `item` ("Premium · 30 يوماً"), the date and the amount, with a receipt to open —
     so this answers `item`, `completed_at`, `reference` and `receipt_available`
-    alongside the stored columns. All of them describe money ALREADY PAID, which is a
-    record and not a sale, so nothing here is removed on a store build.
+    alongside the stored columns. Money ALREADY PAID (or a checkout closed) is a record
+    and not a sale, so its row is the same on every build. An OPEN payment (`pending`,
+    `processing`, `authorized`, `needs_review`) is different: its `amount` and
+    `reference` are a payment instruction, and they are ABSENT from the row for a build
+    that may not buy its kind of money (`play`/`ios` for a plan or a routine product, or
+    no `X-App-Channel`; SIDE_BUGS S-239 — `subscription.utils.
+    payment_instruction_allowed`), and so is the same money in `metadata`:
+    `metadata.product.price`, and `metadata.upgrade` `new_price`, `credit`, `to_pay` and
+    `parts` (`INSTRUCTION_IN_METADATA`).
+
+    A routine product's web-hub checkout is the buyer's row too: `subscription` is null
+    and `item` adds `product_id` and `product_title` (BACKEND_BUGS B-167). Its
+    `metadata.product` never carries the sale's `commission_rate`.
     """
     item = serializers.SerializerMethodField()
     receipt_available = serializers.SerializerMethodField()
     reference = serializers.CharField(source='gateway_transaction_reference',
                                       read_only=True, allow_null=True)
+
+    #: The money an OPEN payment's `metadata` repeats, withheld with `amount` from a build
+    #: that may not buy it (SIDE_BUGS S-239): a product checkout's price of record
+    #: (`routine.products.checkout_terms`) and an upgrade's quote (`upgrade.as_record`).
+    INSTRUCTION_IN_METADATA = {'product': ('price',),
+                               'upgrade': ('new_price', 'credit', 'to_pay', 'parts')}
 
     class Meta:
         model = Payment
@@ -210,6 +227,8 @@ class PaymentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def to_representation(self, obj):
+        from .utils import payment_instruction_allowed
+
         data = super().to_representation(obj)
         # The review record is the operator's (who approved, which gateway transaction,
         # attached by whom): the customer's row carries only why and when (B-051).
@@ -218,6 +237,32 @@ class PaymentSerializer(serializers.ModelSerializer):
             review = meta['review']
             data['metadata'] = {**meta, 'review': {'reason': review.get('reason'),
                                                    'held_at': review.get('held_at')}}
+        # A routine product's checkout keeps the commission rate its sale is split at
+        # (`routine.products.checkout_terms`): the platform's and the trainer's business,
+        # never the buyer's row (BACKEND_BUGS B-167 brought these rows to the buyer).
+        meta = data.get('metadata')
+        if isinstance(meta, dict) and isinstance(meta.get('product'), dict):
+            data['metadata'] = {**meta, 'product': {
+                key: value for key, value in meta['product'].items()
+                if key != 'commission_rate'}}
+        # An OPEN payment's amount and reference are a payment instruction: absent for a
+        # build that may not buy its kind of money (SIDE_BUGS S-239), as
+        # `payments/{id}/status/` and `checkout/sessions/` answer. A paid or closed
+        # one is a record, on every build. The same money said again in `metadata` (a
+        # product's price, an upgrade's price, credit and amount to pay) goes with them.
+        if not payment_instruction_allowed(self.context.get('request'), obj,
+                                           cache=self.context.setdefault(
+                                               '_payment_instruction_allowed', {})):
+            data.pop('amount', None)
+            data.pop('reference', None)
+            meta = data.get('metadata')
+            if isinstance(meta, dict):
+                meta = dict(meta)
+                for part, keys in self.INSTRUCTION_IN_METADATA.items():
+                    if isinstance(meta.get(part), dict):
+                        meta[part] = {key: value for key, value in meta[part].items()
+                                      if key not in keys}
+                data['metadata'] = meta
         return data
 
     def get_item(self, obj):
@@ -225,7 +270,11 @@ class PaymentSerializer(serializers.ModelSerializer):
         separator rather than being handed a sentence it cannot lay out RTL."""
         # The plan THIS payment bought, not the one the subscription is on now — a
         # plan change (B-047) must not rename every earlier row (`Payment.plan_bought`).
-        return obj.plan_bought()
+        # A routine product's checkout (the web hub) bought no plan: its item adds
+        # `product_id` and `product_title` (BACKEND_BUGS B-167); a plan's row is as it was.
+        item = obj.plan_bought()
+        product = obj.product_bought()
+        return {**item, **product} if product is not None else item
 
     def get_receipt_available(self, obj):
         """Whether `payments/{id}/receipt/` will answer. Only a completed payment has

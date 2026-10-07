@@ -337,17 +337,18 @@ def poll_open_payments(now=None):
     # their own — only an exact transfer does anything to them — least recently asked
     # first, so every held row is reached in turn.
     held_batch = int(getattr(settings, 'PAYMENT_POLL_HELD_BATCH', 10))
-    rows += list(Payment.objects
-                 .filter(status__in=HELD_PAYMENT_STATUSES)
-                 .exclude(gateway_transaction_reference='')
-                 .exclude(gateway_transaction_reference__isnull=True)
-                 .select_related('subscription__user')
-                 .order_by('updated_at', 'id')[:held_batch])
+    held_rows = list(Payment.objects
+                     .filter(status__in=HELD_PAYMENT_STATUSES)
+                     .exclude(gateway_transaction_reference='')
+                     .exclude(gateway_transaction_reference__isnull=True)
+                     .select_related('subscription__user')
+                     .order_by('updated_at', 'id')[:held_batch])
+    rows += held_rows
+    held_ids = {payment.pk for payment in held_rows}
 
-    checked = completed = expired = failed = held = 0
-    for payment in rows:
-        checked += 1
-        result = None
+    def poll_one(payment):
+        """Ask about one checkout and act on the answer. Returns what happened to it:
+        'completed', 'held', 'failed', 'expired', or None (nothing changed)."""
         try:
             gateway = PaymentGatewayService(payment.payment_method)
             result = gateway.fetch_payment_status(
@@ -360,16 +361,18 @@ def poll_open_payments(now=None):
             # checkout is left exactly as it was: the next run asks again.
             logger.warning("poll: gateway lookup failed for payment %s: %s",
                            payment.id, exc)
-            continue
+            return None
 
         state = str((result or {}).get('status', '')).lower()
         if state in ('completed', 'success', 'succeeded', 'paid'):
             try:
-                PaymentService.complete_payment(payment.id, result, by=By.POLLER)
-                completed += 1
+                done = PaymentService.complete_payment(payment.id, result, by=By.POLLER)
             except (PaymentVerificationError, InvalidPaymentTransition) as exc:
                 logger.warning("poll: refused to complete payment %s: %s", payment.id, exc)
-            continue
+                return None
+            # A product's checkout whose program cannot be delivered is HELD by the
+            # completion instead (`checkout_refusal`), and is not a completion.
+            return 'completed' if getattr(done, 'status', None) == 'completed' else 'held'
         if state == 'needs_review':
             # The reference, with another amount or currency: held for an operator,
             # never dropped (B-051). Seeing the same transfer again is a no-op.
@@ -377,54 +380,92 @@ def poll_open_payments(now=None):
                 PaymentService.hold_for_review(payment.id, result,
                                                reason=result.get('reason') or 'amount_differs',
                                                by=By.POLLER)
-                held += 1
             except (PaymentVerificationError, InvalidPaymentTransition) as exc:
                 logger.warning("poll: could not hold payment %s for review: %s",
                                payment.id, exc)
-            continue
+                return None
+            return 'held'
         if payment.status == 'needs_review':
             # Money was seen for it: an operator decides, not the clock and not a
-            # gateway flag. Only an exact transfer (above) completes it meanwhile. Touched,
-            # so the held pass reaches the others before this one again.
-            Payment.objects.filter(pk=payment.pk).update(updated_at=now)
-            continue
+            # gateway flag. Only an exact transfer (above) completes it meanwhile.
+            return None
         if state in ('failed', 'declined', 'rejected'):
             try:
                 PaymentService.fail_payment(payment.id, 'The gateway declined it',
                                             by=By.POLLER)
-                failed += 1
             except InvalidPaymentTransition as exc:
                 logger.warning("poll: could not fail payment %s: %s", payment.id, exc)
-            continue
+                return None
+            return 'failed'
 
         if state == 'unknown':
             # The merchant account could not be read. That is evidence of nothing, so
             # nothing is closed on it: the next minute asks again.
-            continue
+            return None
         if payment.created_at > now - ttl_window:
-            continue                      # young enough to still be being paid
+            return None                   # young enough to still be being paid
         try:
             PaymentService.expire_payment(payment.id, 'Not completed within its window',
                                           by=By.POLLER)
         except InvalidPaymentTransition as exc:
             logger.warning("poll: could not expire payment %s: %s", payment.id, exc)
-            continue
-        expired += 1
+            return None
         # The payer: the subscriber, or a routine product checkout's buyer (the hub).
         recipient = payment.payer
-        if recipient is None:
-            continue
-        # The inbox row is always written; a muted type simply sends no push —
-        # `NotificationService` asks the preferences when it DELIVERS (B-014). This
-        # used to skip the call for a muted type, so a customer who silenced the push
-        # also lost the record that their checkout was closed (SIDE_BUGS S-133). Keyed
-        # on the payment, so a retry of this run cannot tell anyone twice.
-        NotificationService.create_and_send(
-            recipient=recipient, event_type="checkout_expired",
-            related_object_id=str(payment.id),
-            metadata={'context': {},
-                      'data': {'type': 'checkout_expired',
-                               'payment_id': str(payment.id)}})
+        if recipient is not None:
+            # The inbox row is always written; a muted type simply sends no push —
+            # `NotificationService` asks the preferences when it DELIVERS (B-014). This
+            # used to skip the call for a muted type, so a customer who silenced the
+            # push also lost the record that their checkout was closed (SIDE_BUGS
+            # S-133). Keyed on the payment, so a retry of this run cannot tell anyone
+            # twice.
+            NotificationService.create_and_send(
+                recipient=recipient, event_type="checkout_expired",
+                related_object_id=str(payment.id),
+                metadata={'context': {},
+                          'data': {'type': 'checkout_expired',
+                                   'payment_id': str(payment.id)}})
+        return 'expired'
+
+    checked = completed = expired = failed = held = 0
+    for payment in rows:
+        checked += 1
+        try:
+            outcome = poll_one(payment)
+        except Exception:   # noqa: BLE001
+            # ONE ROW NEVER STOPS THE RUN (SIDE_BUGS S-234). The service calls above
+            # catch the refusals they expect; anything else — a program that cannot be
+            # written, a notice that cannot be queued — was raised out of the loop, and
+            # rows are read oldest-first, so every run died at the same row and no
+            # checkout of ANY customer behind it was confirmed or expired for as long as
+            # its transfer stayed in the lookback. Logged with the payment, and the next
+            # row is asked about; this one is asked again next minute.
+            logger.exception("poll: payment %s could not be processed; the run goes on",
+                             payment.id)
+            outcome = None
+        finally:
+            if payment.pk in held_ids:
+                # EVERY row of the held pass is touched once it has been asked about,
+                # whatever the answer (SIDE_BUGS S-238). Only the branch that saw
+                # nothing used to touch it, so a held row whose near-miss transfer is
+                # still on the account, or whose program cannot be delivered
+                # (`checkout_refusal`, re-held on every ask), kept its place at the
+                # front of the pass — ordered by `updated_at` — and ten of them starved
+                # it for the whole lookback. A row that left `needs_review` is not
+                # touched: its state moved, and its event says when.
+                try:
+                    Payment.objects.filter(pk=payment.pk, status='needs_review') \
+                        .update(updated_at=now)
+                except Exception:   # noqa: BLE001
+                    logger.exception("poll: could not touch held payment %s", payment.id)
+        if outcome == 'completed':
+            completed += 1
+        elif outcome == 'held':
+            held += 1
+        elif outcome == 'failed':
+            failed += 1
+        elif outcome == 'expired':
+            expired += 1
 
     if checked >= batch + held_batch:
         logger.warning("poll: hit the %s-row cap; the rest waits for the next minute",
@@ -480,9 +521,8 @@ def poll_expired_checkouts(now=None):
                 .exclude(gateway_transaction_reference__isnull=True)
                 .order_by('-created_at', '-id')[:batch])
 
-    checked = completed = 0
-    for payment in rows:
-        checked += 1
+    def poll_one(payment) -> bool:
+        """Ask about one closed checkout; whether it completed."""
         try:
             result = PaymentGatewayService(payment.payment_method).fetch_payment_status(
                 payment.gateway_transaction_reference,
@@ -492,7 +532,7 @@ def poll_expired_checkouts(now=None):
         except (PaymentGatewayError, Exception) as exc:   # noqa: BLE001
             logger.warning("late poll: gateway lookup failed for payment %s: %s",
                            payment.id, exc)
-            continue
+            return False
         state = str((result or {}).get('status', '')).lower()
         if state == 'needs_review':
             # Almost-right money for a closed checkout is still money: held (B-051).
@@ -502,16 +542,30 @@ def poll_expired_checkouts(now=None):
                                                by=By.POLLER)
             except (PaymentVerificationError, InvalidPaymentTransition) as exc:
                 logger.warning("late poll: could not hold payment %s: %s", payment.id, exc)
-            continue
+            return False
         if state not in ('completed', 'success', 'succeeded', 'paid'):
-            continue
+            return False
         try:
-            PaymentService.complete_payment(payment.id, result, by=By.POLLER)
-            completed += 1
-            logger.warning("late poll: payment %s was paid after its checkout closed; "
-                           "completed", payment.id)
+            done = PaymentService.complete_payment(payment.id, result, by=By.POLLER)
         except (PaymentVerificationError, InvalidPaymentTransition) as exc:
             logger.warning("late poll: refused to complete payment %s: %s", payment.id, exc)
+            return False
+        if getattr(done, 'status', None) != 'completed':
+            # Held instead: a program that can no longer be delivered (`checkout_refusal`).
+            return False
+        logger.warning("late poll: payment %s was paid after its checkout closed; "
+                       "completed", payment.id)
+        return True
+
+    checked = completed = 0
+    for payment in rows:
+        checked += 1
+        try:
+            completed += poll_one(payment)
+        except Exception:   # noqa: BLE001
+            # One row never stops the run (SIDE_BUGS S-234): see `poll_open_payments`.
+            logger.exception("late poll: payment %s could not be processed; the run "
+                             "goes on", payment.id)
 
     if checked >= batch:
         logger.warning("late poll: hit the %s-row cap; older closed checkouts wait", batch)
@@ -544,8 +598,11 @@ def sweep_unmatched_transfers(now=None):
       * its note names a checkout paid or closed for good: queued against it
         (`duplicate_transfer` / `checkout_closed`) — money to hand back;
       * no usable reference, its exact amount and currency, and a sender whose ShamCash
-        address exactly one customer saved on their profile (`PayerAddress`, the spec's
-        second signal, section 6): that customer's checkout opened before it — open, or
+        address exactly one customer saved on their profile AND proved (`PayerAddress.
+        verified_at`: a transfer from it confirmed one of their checkouts by its
+        reference; SIDE_BUGS S-241 — an unproven address is evidence on the row and
+        decides nothing), the spec's second signal, section 6: that customer's
+        checkout opened before it — open, or
         closed within the late-money window — is held for review (`reference_missing`)
         with the match as evidence (`TransferReview.sender_match_payment_ids`, the
         event's `sender_address_matched`) and the other checkouts the amount fits as
@@ -668,6 +725,14 @@ def sweep_unmatched_transfers(now=None):
                 queued += 1
         except PaymentError as exc:
             logger.warning("sweep: transfer %s not queued: %s", fact['transaction_id'], exc)
+        except Exception:   # noqa: BLE001
+            # One transfer never stops the sweep (SIDE_BUGS S-234): a closed checkout
+            # whose program cannot be written raised out of the loop on every run, and
+            # no transfer after it reached the review queue. Logged with the transfer
+            # and its checkout; the next run tries it again.
+            logger.exception("sweep: transfer %s (payment %s) could not be processed; the "
+                             "sweep goes on", fact['transaction_id'],
+                             getattr(named, 'pk', None))
 
     if held or queued or settled:
         logger.warning("sweep: %s transfer(s) held a checkout for review, %s queued alone, "

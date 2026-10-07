@@ -291,6 +291,10 @@ class PaymentService:
                     return payment
 
             # --- Apply completion ---
+            # The reference this checkout asked for, read BEFORE the line below copies
+            # the transfer's over it: the proof of a saved payer address compares the
+            # two (S-241), and after the copy they are equal whatever the transfer said.
+            asked_reference = payment.gateway_transaction_reference
             cls._move(payment, 'completed', by=by, actor=actor,
                       evidence={**_gateway_facts(verified_data), **(evidence or {})})
             if verified_data.get('transaction_id'):
@@ -317,6 +321,18 @@ class PaymentService:
                     status='approved', payment=payment, resolved_at=timezone.now(),
                     resolution_note='Settled automatically: this transfer completed the payment')
 
+            # The payer's saved ShamCash address is PROVEN when this transfer came from
+            # it and confirmed their own checkout by its exact reference and amount — the
+            # gateway, the pollers, the sweep's settlement, "check my payment"; never an
+            # operator accepting a near miss or marking it paid. Only a proven address
+            # decides which checkout a reference-less transfer is held on (S-241).
+            if (by in (By.GATEWAY, By.POLLER, By.SWEEP, By.CUSTOMER)
+                    and asked_reference
+                    and str(verified_data.get('reference') or '') == asked_reference):
+                from ..payer_address import verify_sender
+
+                verify_sender(payment.payer_id, verified_data)
+
             if payment.routine_product_id is not None:
                 # --- A routine product: the buyer's copy and the sale's ledger rows ---
                 # In THIS transaction, under the payment lock: completion and delivery are
@@ -332,6 +348,12 @@ class PaymentService:
                 payment.save(update_fields=['payout_settled_at', 'updated_at'])
                 logger.info("Payment %s completed (invoice %s): routine product %s delivered",
                             payment.id, payment.invoice_number, payment.routine_product_id)
+                # Its receipt email, as a plan's (the spec, section 7), which rides on
+                # `payment_completed` — not sent for a product. On commit, and robust:
+                # `queue_receipt` never raises, and an email never costs a completion
+                # (BACKEND_BUGS B-167).
+                transaction.on_commit(lambda: cls._queue_receipt_email(payment),
+                                      robust=True)
                 return payment
 
             # --- Activate / extend the subscription, and record what that bought ---
@@ -374,6 +396,13 @@ class PaymentService:
         transaction.on_commit(lambda: payment_completed.send(
             sender=cls, payment=payment, subscription=payment.subscription))
         return payment
+
+    @staticmethod
+    def _queue_receipt_email(payment) -> None:
+        """The receipt email of a routine product's checkout, on commit. Never raises."""
+        from notifications.channels.email import queue_receipt
+
+        queue_receipt(payment)
 
     @staticmethod
     def _notify_confirmed(recipient_id, payment_id) -> None:

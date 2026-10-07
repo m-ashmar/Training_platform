@@ -158,8 +158,32 @@ def address_is_valid(normalised: str) -> bool:
     return bool(_ADDRESS.match(normalised)) and normalised.isascii()
 
 
+_DIGEST_SALT = "payouts.shamcash_address"
+
+
+def digest_keys() -> list[str]:
+    """The secret keys an address digest may have been made with: the current
+    `SECRET_KEY`, then every `SECRET_KEY_FALLBACKS` entry (a rotation's old key,
+    `DJANGO_OLD_SECRET_KEY_1`). The payer-address digests use the same list."""
+    return [settings.SECRET_KEY, *(getattr(settings, "SECRET_KEY_FALLBACKS", None) or [])]
+
+
 def address_digest(normalised: str) -> str:
-    return salted_hmac("payouts.shamcash_address", normalised).hexdigest()
+    """The digest a row is WRITTEN with: under the current key."""
+    return salted_hmac(_DIGEST_SALT, normalised).hexdigest()
+
+
+def address_digests(normalised: str) -> list[str]:
+    """Every digest a stored row of this address can carry — under the current key and
+    under each fallback — for MATCHING (SIDE_BUGS S-232). `salted_hmac` reads only
+    `SECRET_KEY`, so after a key rotation a row saved before it no longer matched: the
+    same address could be saved twice (the unique constraint compares digests) and a
+    confirmed withdrawal no longer verified the method it went to. The current key's
+    digest is first. `manage.py rekey_address_digests` rewrites old rows under the
+    current key before the old key is dropped."""
+    digests = [salted_hmac(_DIGEST_SALT, normalised, secret=key).hexdigest()
+               for key in digest_keys()]
+    return list(dict.fromkeys(digests))
 
 
 def grouped(normalised: str) -> str:
@@ -350,7 +374,11 @@ def add_method(trainer, *, kind, address="", address_confirm="", holder_name="",
     with transaction.atomic():
         _lock_trainer(trainer.pk)
         existing = PayoutMethod.objects.filter(trainer=trainer)
-        duplicate = (existing.filter(kind=kind, address_digest=fields["address_digest"])
+        # Under every key a stored row can carry (S-232): the unique constraint compares
+        # one digest, so an address saved before a key rotation is refused here, under
+        # the trainer's lock, or it would be saved twice.
+        duplicate = (existing.filter(kind=kind,
+                                     address_digest__in=address_digests(address))
                      if kind == MethodKind.SHAMCASH
                      else existing.filter(kind=kind, agent=fields["agent"])).first()
         if duplicate is not None:
@@ -767,7 +795,7 @@ def confirm(withdrawal_id, operator, note="") -> Withdrawal:
                 and withdrawal.method_id is not None):
             PayoutMethod.objects.filter(
                 pk=withdrawal.method_id, verified_at__isnull=True,
-                address_digest=address_digest(withdrawal.destination_address),
+                address_digest__in=address_digests(withdrawal.destination_address),
             ).update(verified_at=now)
         _event(withdrawal, from_state=State.SENT, to_state=State.CONFIRMED, actor=operator,
                role=ActorRole.OPERATOR,
