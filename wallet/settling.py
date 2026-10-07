@@ -12,9 +12,13 @@ later, and the legacy one-fee settlement), including the credit leg of a payout 
 crossed a currency. And a routine product's sale (escrow -> trainer, the rows read as
 `routine_product_sale`): a buyer can be refunded, and a refund takes the trainer's share
 back, which a share withdrawn at once would make impossible (the review, 2026-09-24).
-Nothing else: a client's direct transfer and a plan share are not released escrow, and
-the spec holds only that. A payout support has since REVERSED is
-not settling either — the money is no longer in the wallet.
+Nothing else: a plan share is not released escrow, and the spec holds only that. A
+client's direct payment to a trainer (`wallet/client/transfer/`) passes through escrow
+since it became a coaching payment (BACKEND_BUGS B-163) only to split off the commission
+in the same transaction; it is not a release of held money, and the design promises it
+reaches the trainer at once («يصل رامي فوراً»), so its row (`transfer_received`) does not
+settle. A payout support has since REVERSED is not settling either — the money is no
+longer in the wallet.
 
 HOW LONG. `PAYOUT_HOLD_DAYS` after the row was written (the release). 0 switches the
 hold off.
@@ -127,8 +131,9 @@ class WalletSettlingFields(serializers.Serializer):
     """`available`, `settling`, `settling_until` and `in_withdrawal` on a wallet read.
 
     For a trainer (BACKEND_BUGS B-097): `available` is what a withdrawal may take now
-    (`balance - settling`), `settling` the coaching payouts still inside the
-    `PAYOUT_HOLD_DAYS` window, `settling_until` when the next of them becomes available
+    (`balance - settling`), `settling` the rows of every kind in `SETTLING_KINDS` — a
+    coaching payout (`trainer_fee_payout`) and a program sale (`routine_product_sale`;
+    BACKEND_BUGS B-138) — still inside the `PAYOUT_HOLD_DAYS` window, `settling_until` when the next of them becomes available
     (ISO 8601, null when nothing settles), and `in_withdrawal` the money of the
     trainer's open withdrawal, which has already left `balance`. For anyone else
     nothing settles and nothing is withdrawn: `available` is the balance, the others
@@ -175,9 +180,10 @@ class WalletSettlingFields(serializers.Serializer):
 class TransactionSettlingFields(serializers.Serializer):
     """`available_at` and `settling` on a ledger row (BACKEND_BUGS B-097).
 
-    On a `trainer_fee_payout` row read from the trainer's side: when its money becomes
-    withdrawable (`created_at + PAYOUT_HOLD_DAYS`, ISO 8601) and whether that is still
-    ahead. Every other row: `null` and `false`. A payout support reversed is never
+    On a row of a kind in `SETTLING_KINDS` — a coaching payout (`trainer_fee_payout`)
+    or a program sale (`routine_product_sale`; BACKEND_BUGS B-138) — read from the
+    trainer's side: when its money becomes withdrawable (`created_at +
+    PAYOUT_HOLD_DAYS`, ISO 8601) and whether that is still ahead. Every other row: `null` and `false`. A payout support reversed is never
     settling. The reversed payouts inside the window are read in ONE query per response,
     and only when a page holds a payout still inside it, so the ledger stays at a
     constant number of queries whatever its length.

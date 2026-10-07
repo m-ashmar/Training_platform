@@ -4,6 +4,7 @@ from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditL
 # The settling window (BACKEND_BUGS B-097), as mixins so its fields stay out of the two
 # `Meta.fields` lists below: see wallet/settling.py.
 from .settling import TransactionSettlingFields, WalletSettlingFields
+from .transfer_notes import TransactionNoteFields
 # `withdrawal` on a ledger row (B-125); the module imports nothing of `wallet` at load.
 from payouts.ledger_fields import TransactionWithdrawalFields
 # `product` on a ledger row (B-169); the module imports nothing of `wallet` at load.
@@ -292,11 +293,16 @@ class _TransactionListSerializer(serializers.ListSerializer):
         prime_products = getattr(self.child, "prime_products", None)
         if prime_products is not None:
             prime_products(rows)
+        # The notes of the page's payments to a trainer (B-163), in one query too.
+        prime_notes = getattr(self.child, "prime_transfer_notes", None)
+        if prime_notes is not None:
+            prime_notes(rows)
         return super().to_representation(rows)
 
 
-class TransactionSerializer(TransactionProductFields, TransactionWithdrawalFields,
-                            TransactionSettlingFields, serializers.ModelSerializer):
+class TransactionSerializer(TransactionProductFields, TransactionNoteFields,
+                            TransactionWithdrawalFields, TransactionSettlingFields,
+                            serializers.ModelSerializer):
     """One row of "الحركات" on the Wallet screen.
 
     The stored columns say what the database did; `kind`, `reason`, `direction`,
@@ -398,6 +404,42 @@ class TransactionSerializer(TransactionProductFields, TransactionWithdrawalField
             obj, wallet, owner_ids=self.context.get("ledger_owner_ids"),
             users=self.context.get("counterparty_users"))
 
+    def to_representation(self, instance):
+        """A PERSON's read names nobody the row does not already name to them
+        (BACKEND_BUGS B-184).
+
+        The stored columns kept their keys — removing one would break a reader — but on a
+        read with a reader's `wallet` in context: `actor` is the reader's own id or the
+        row's `counterparty`'s, else null (an operator who reversed it, the server);
+        `source_wallet` / `destination_wallet` is the reader's own wallet id on their
+        side and null on the other; `source_owner` / `destination_owner` is shown on the
+        other side only when it is the `counterparty` — never the platform's escrow,
+        revenue or payout-clearing account, never a program's buyer; and `metadata` is
+        `wallet.activity.reader_metadata`, the keys the app reads, without other
+        accounts' ids or an operator's words. With no wallet in context (the console's
+        exports) every stored column is served as written.
+        """
+        from . import activity
+
+        data = super().to_representation(instance)
+        wallet = self._wallet
+        if wallet is None:
+            return data
+        counterparty = activity.counterparty_id(
+            instance, wallet, owner_ids=self.context.get("ledger_owner_ids"))
+        known = {wallet.owner_id, counterparty} - {None}
+        if instance.actor_id not in known:
+            data["actor"] = None
+        for side in ("source", "destination"):
+            other = getattr(instance, f"{side}_wallet")
+            if other is None or other.pk == wallet.id:
+                continue
+            data[f"{side}_wallet"] = None
+            if other.owner_id not in known:
+                data[f"{side}_owner"] = None
+        data["metadata"] = activity.reader_metadata(instance.metadata)
+        return data
+
     def get_source_owner(self, obj):
         if obj.source_wallet and obj.source_wallet.owner:
             return {
@@ -459,6 +501,11 @@ class TransferRequestSerializer(serializers.Serializer):
     trainer_id = serializers.IntegerField()
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=_MIN_AMOUNT)
     idempotency_key = serializers.CharField()
+    #: What the money is for, to the trainer ("جلسة الجمعة الإضافية"; BACKEND_BUGS
+    #: B-163). Optional, at most 140 characters, checked against the banned terms. Kept
+    #: beside the ledger (`CoachingTransfer.note`), never in it.
+    note = serializers.CharField(required=False, allow_blank=True, default="",
+                                 max_length=140)
 
 
 class ReversalRequestSerializer(serializers.Serializer):

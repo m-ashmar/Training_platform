@@ -5975,3 +5975,31 @@ msgstr ""
 msgid "Not allergen tags: %(bad)s. Use only these tags: %(vocabulary)s."
 msgstr ""
 "ليست وسوم مسببات حساسية: %(bad)s. استخدم هذه الوسوم فقط: %(vocabulary)s."
+
+#. The generic admin reversal refuses one leg of a routine product's sale
+#. (`routine_product_leg`, SIDE_BUGS S-237): undoing a sale is the purchase's refund.
+#: wallet/views.py
+msgid ""
+"This is one leg of a program sale and cannot be reversed on its own. Refund "
+"the purchase instead."
+msgstr ""
+"هذه إحدى حركات بيع برنامج ولا يمكن عكسها وحدها. استرجع ثمن الشراء بدلًا من "
+"ذلك."
+
+#. ensure/ from a phone other than the one the agent's signing key is paired on
+#. (`key_paired_elsewhere`, BACKEND_BUGS B-145): «جدّد المفتاح» moves it.
+#: wallet/views.py
+msgid ""
+"Your signing key is paired with another device. Pair this device to move the "
+"key to it."
+msgstr "مفتاح التوقيع لديك مقترن بجهاز آخر. اقرن هذا الجهاز لنقل المفتاح إليه."
+
+#. The generic admin reversal refuses the trainer's or the platform's leg of a
+#. client's payment to a trainer (`coaching_transfer_leg`, BACKEND_BUGS B-163).
+#: wallet/views.py
+msgid ""
+"This is one leg of a payment to a trainer and cannot be reversed on its own. "
+"Reverse the payment by its reference instead."
+msgstr ""
+"هذه إحدى حركات دفعة إلى مدرب ولا يمكن عكسها وحدها. اعكس الدفعة كاملة بمرجعها "
+"بدلًا من ذلك."

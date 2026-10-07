@@ -29,7 +29,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 | Key | Who | Kind | What they receive | Sources |
 |---|---|---|---|---|
-| `coach` | The client's trainer | person | While a coaching is approved: the profile a coach works from (name, email, photo, age, gender, height, weight, goals, activity level, training answers, health notes and injury areas), the client's training log, diet plan, nutrition record and food preferences, and their chat. A trainer with only a pending request sees a short row and never health notes (`users/trainer_requests.py`). A client's training and nutrition are the trainer's to read only through the approved relation (`CustomUser.can_access_user_data`). | `profile`, `workout_sessions`, `exercise_progress`, `routine_progress`, `day_outcomes`, `diet_plans`, `food_preferences`, `conversations`, `messages_sent`, `daily_progress`, `meals`, `meal_components`, `trainer_relations`, `coaching_periods`, `exercise_set_logs` |
+| `coach` | The client's trainer | person | While a coaching is approved: the profile a coach works from (name, email, photo, age, gender, height, weight, goals, activity level, training answers, health notes and injury areas), the client's training log, diet plan, nutrition record and food preferences, and their chat. A trainer with only a pending request sees a short row and never health notes (`users/trainer_requests.py`). A client's training and nutrition are the trainer's to read only through the approved relation (`CustomUser.can_access_user_data`). | `profile`, `workout_sessions`, `exercise_progress`, `routine_progress`, `day_outcomes`, `diet_plans`, `food_preferences`, `conversations`, `messages_sent`, `daily_progress`, `meals`, `meal_components`, `trainer_relations`, `coaching_periods`, `coaching_transfers`, `exercise_set_logs` |
 | `clients` | The trainer's clients | person | What a trainer writes for the clients they coach: routines, diet plans, chat messages, challenges they set, and the trainer's profile and prices on a build that may show them. | `profile`, `media_kit`, `conversations`, `messages_sent`, `exercises_created`, `routines_created`, `trainer_relations`, `coaching_periods`, `exercise_media`, `routine_exercises` |
 | `community` | Other signed-in users | person | What a person publishes: username, name and photo, posts, comments, likes, follows, challenges, leaderboard places and badges. Hidden from anyone they blocked or who blocked them (`moderation.services.blocked_ids`); a suspended account leaves every public surface. | `profile`, `media_kit`, `posts`, `comments`, `achievements_earned`, `social_achievements`, `challenges_created`, `challenge_participation`, `post_likes`, `comment_likes`, `follows`, `agent_profile`, `routine_products` |
 | `public` | Anyone, without signing in | person | The public trainer directory (`GET /api/v1/trainers/`, `trainers/public/`): a trainer's card — name, photo, bio, specialisations, certifications, experience and the proof numbers, the price only on a build that may show it. | `profile`, `media_kit` |
@@ -53,9 +53,9 @@ Who, besides those providers and the platform's operators, receives data, and wh
 | `other_personal` | Date of birth, age and gender | Other Data > Other Data Types | Personal info > Other info | `profile` |
 | `health` | Health information | Health & Fitness > Health | Health and fitness > Health info | `profile`, `diet_plans`, `food_preferences`, `performance_metrics`, `ai_training_data`, `goals`, `daily_advice` |
 | `fitness` | Fitness and training activity | Health & Fitness > Fitness | Health and fitness > Fitness info | `profile`, `workout_sessions`, `exercise_progress`, `routine_progress`, `day_outcomes`, `diet_plans`, `food_preferences`, `performance_metrics`, `behaviour_events`, `goals`, `dashboard`, `daily_advice`, `daily_progress`, `food_category_preferences`, `learned_food_weights`, `meal_swaps`, `meal_events`, `meals`, `meal_components`, `ai_insights`, `routines_created`, `challenge_participation`, `exercise_set_logs`, `routine_exercises` |
-| `purchases` | Purchase and payment history | Purchases > Purchase History | Financial info > Purchase history | `subscriptions`, `trainer_relations`, `coaching_periods`, `routine_purchases`, `transactions`, `idempotency_keys`, `payments`, `transfer_reviews`, `payment_events` |
+| `purchases` | Purchase and payment history | Purchases > Purchase History | Financial info > Purchase history | `subscriptions`, `trainer_relations`, `coaching_periods`, `routine_purchases`, `transactions`, `coaching_transfers`, `idempotency_keys`, `payments`, `transfer_reviews`, `payment_events` |
 | `financial` | Wallet and payout details | Financial Info > Other Financial Info | Financial info > Other financial info | `payout_methods`, `withdrawals`, `withdrawal_events`, `wallet`, `agent_profile`, `agent_receivable`, `agent_settlements`, `transactions`, `wallet_audit_log`, `transfer_reviews`, `payer_address` |
-| `messages` | Chat messages | User Content > Emails or Text Messages | Messages > Other in-app messages | `conversations`, `messages_sent` |
+| `messages` | Chat messages | User Content > Emails or Text Messages | Messages > Other in-app messages | `conversations`, `messages_sent`, `coaching_transfers` |
 | `ai_conversations` | Conversations with the AI coach | User Content > Other User Content | Messages > Other in-app messages | `chat_sessions`, `ai_training_data`, `ai_insights`, `assistant_messages` |
 | `photos_videos` | Photos and videos | User Content > Photos or Videos | Photos and videos > Photos, Videos | `profile`, `media_kit`, `posts`, `messages_sent`, `exercises_created`, `challenges_created`, `routine_products` |
 | `audio` | Voice notes | User Content > Audio Data | Audio > Voice or sound recordings | `messages_sent` |
@@ -142,6 +142,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 | `routine_products` | `routine.RoutineProduct` | `user_content`, `photos_videos` | `community`, `file_storage` | kept | - |
 | `routine_purchases` | `routine.RoutinePurchase` | `purchases` | nobody | kept | - |
 | `transactions` | `wallet.Transaction` | `purchases`, `financial` | `agent` | kept | - |
+| `coaching_transfers` | `wallet.CoachingTransfer` | `purchases`, `messages` | `coach` | anonymised | - |
 | `exchange_rates` | `wallet.ExchangeRate` | `staff_records` | nobody | kept | - |
 | `wallet_audit_log` | `wallet.WalletAuditLog` | `financial`, `connection` | nobody | kept | - |
 | `idempotency_keys` | `wallet.IdempotencyKey` | `purchases` | nobody | kept | 30 days |
@@ -1451,6 +1452,24 @@ Who, besides those providers and the platform's operators, receives data, and wh
 **On erasure.** Kept.
 
 **Retention.** Kept for good, and after erasure.
+
+### `coaching_transfers` — `wallet.CoachingTransfer`
+
+**Why.** A client's payment to a trainer from the wallet: the amount, the platform's commission, the trainer's share, and the note the client wrote to the trainer, which both of them see. The note is erased with either account; the rest is a record of money.
+
+**Whose.** Rows whose `client` or `trainer` is the account.
+
+**Who else receives it.** The client's trainer (`coach`).
+
+**Data types.** Purchase and payment history (`purchases`); Chat messages (`messages`).
+
+**Fields stored.** `id`, `client`, `trainer`, `amount`, `currency`, `commission_rate`, `commission`, `trainer_share`, `charge_reference`, `payout_reference`, `commission_reference`, `note`, `created_at`.
+
+**In the export.** `id`, `client`, `trainer`, `amount`, `currency`, `commission_rate`, `commission`, `trainer_share`, `charge_reference`, `note`, `created_at`. Not exported: `payout_reference`, `commission_reference`.
+
+**On erasure.** Anonymised: `note` are cleared or replaced; `client`, `trainer`, `amount`, `currency`, `commission_rate`, `commission`, `trainer_share`, `charge_reference`, `payout_reference`, `commission_reference`, `created_at` stay on the row.
+
+**Retention.** While the account exists.
 
 ### `exchange_rates` — `wallet.ExchangeRate`
 

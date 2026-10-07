@@ -1370,15 +1370,18 @@ first: 403 `not_available_on_channel` where `can_transfer_wallet` is off (the fi
 build), 400 `app_channel_required` with no known `X-App-Channel`. `setup/` shows the same
 in `refusal`. Every read and the payout methods are identical on every build.
 
-**The settling window (B-097).** A coaching payout — a `trainer_fee_payout` row — is
-"settling" for `hold_days` (3) after its release before it can be withdrawn; nothing
-else settles, and a payout support reversed is not settling. `GET /api/wallet/balance/`
+**The settling window (B-097).** A coaching payout — a `trainer_fee_payout` row — and
+a program sale — a `routine_product_sale` row (a buyer can be refunded, and the refund
+takes the trainer's share back; B-138) — are "settling" for `hold_days` (3) after their
+release before they can be withdrawn (`wallet.settling.SETTLING_KINDS`); nothing else
+settles (a client's payment to a trainer, `transfer_received`, is withdrawable at once),
+and a payout support reversed is not settling. `GET /api/wallet/balance/`
 gains `available` (`balance - settling`), `settling`, `settling_until` (when the next
 settling payout becomes available, ISO 8601, or null) and `in_withdrawal` (the open
 withdrawal's money, already out of `balance`); for a wallet no payout reached,
 `available` is the balance. Every `GET /api/wallet/transactions/` row gains
-`available_at` and `settling`: on a `trainer_fee_payout` row read by the trainer, when
-its money becomes withdrawable and whether that is still ahead; `null` / `false` on
+`available_at` and `settling`: on a `trainer_fee_payout` or `routine_product_sale` row
+read by the trainer, when its money becomes withdrawable and whether that is still ahead; `null` / `false` on
 every other row. Two new `kind`s: `withdrawal` (out, to payout clearing) and
 `withdrawal_returned` (in, a failed or cancelled withdrawal).
 
@@ -1591,6 +1594,7 @@ edit, and only the fields the request writes:
 | `POST` `/api/auth/user/update/`, `/api/auth/trainer/profile/` | `first_name`, `last_name`, and a trainer's `trainer_bio`, `trainer_specializations`, `trainer_certifications` |
 | `POST` `/api/auth/client/profile/` | `first_name`, `last_name` |
 | `POST` `/api/auth/register/` | `username` |
+| `POST` `/api/wallet/client/transfer/` | `note` (BACKEND_BUGS B-163; nothing moves) |
 
 A refused write answers **400 `content_not_allowed`** (the top-level `code`), with every
 refused field in `field_errors` carrying the same code:
@@ -1954,6 +1958,15 @@ show plan status, expiry and history, and history without receipts is not histor
   wallet the money passed through.
 - `GET /api/wallet/transactions/{reference_id}/` — one row, same shape.
   `404 not_found` for a reference that is not the caller's.
+- **A row names only what it already names to you** (BACKEND_BUGS B-184, both routes;
+  every key stays): `actor` is your own id or the `counterparty`'s, else null;
+  `source_wallet` / `destination_wallet` is your wallet's id on your side and null on
+  the other; `source_owner` / `destination_owner` on the other side is the
+  `counterparty`, or null — never the platform's escrow, revenue or payout-clearing
+  account, never a program's buyer; `metadata` carries only `title`, `product_title`,
+  `routine_name`, `product_id`, `month`, `withdrawal_id`, `withdrawal_number` and
+  `original_reference` when the row has them (`wallet.activity.READER_METADATA_KEYS`)
+  — no other account's id, no `purpose` (read `kind`), no operator's `reason`.
 
 #### Two currencies (2026-09-21)
 
@@ -2012,6 +2025,22 @@ operator maintains in the console. Four things the app needs:
   different currencies is `409 currency_mismatch` with `client_currency` and
   `trainer_currency`; a short wallet is `402 insufficient_balance` with `currency`
   (it was a bare 400; SIDE_BUGS S-160).
+- **A transfer to a trainer is a coaching payment, with a note** (BACKEND_BUGS B-163,
+  the owner 2026-09-28). `POST wallet/client/transfer/` takes an optional `note` (at
+  most 140 characters; a longer one is `400 validation_error`, a banned term `400
+  content_not_allowed`, and nothing moves; a different note under the same
+  `idempotency_key` is `422 idempotency_key_reused`). The client pays `amount`; the
+  platform keeps the coaching commission (`COACHING_COMMISSION_RATE`, 20%, copied onto
+  the transfer) and the trainer receives the rest at once — «تأخذ المنصة عمولتها منه
+  لا منك». Written as a coaching payout: client -> escrow, escrow -> trainer, escrow ->
+  platform, all `money_type` `COACHING_1TO1` (was `WALLET_MOVE`). The client's ledger
+  still shows one `trainer_transfer` row of `amount`, whose `reference_id` the transfer
+  answers; the trainer's one `transfer_received` row, of their share (not a settling
+  kind: withdrawable at once). Both rows of `wallet/transactions/` and `/{reference_id}/`
+  carry `note` (null without one; null on every other row). The note is kept beside
+  the ledger, never in it, and is erased with either person's account. The build must
+  allow both `WALLET_MOVE` and `COACHING_1TO1` (`403 not_available_on_channel`; every
+  default build allows both or neither).
 - **`PUT /api/wallet/currency/`** is also refused, `409
   currency_locked_open_checkout` with `currency`, while money priced in the current
   currency is on its way: a plan checkout still open or completed and not yet paid
@@ -2020,7 +2049,16 @@ operator maintains in the console. Four things the app needs:
 - **Support.** `POST wallet/admin/reversal/` refuses one leg of a currency exchange,
   `409 exchange_leg` with `exchange_reference` (SIDE_BUGS S-161), and any leg of a
   trainer's withdrawal, `409 withdrawal_leg` with `withdrawal` (the payouts review,
-  2026-09-24).
+  2026-09-24), and any leg of a routine product's sale or its refund — the checkout's
+  mint into escrow, the wallet sale's charge, the trainer's share, the commission —
+  `409 routine_product_leg` with `purchase` `{id, status, paid_with}` (null if the
+  purchase is gone; SIDE_BUGS S-237). Undoing a sale is the purchase's refund, or its
+  payment's for a checkout, which reverses every leg together. A client's payment to a
+  trainer (B-163) is reversed WHOLE by its `reference_id` (the client's leg): the
+  trainer's share and the commission go back to escrow and the amount to the client in
+  one transaction (`400 insufficient_balance` when the trainer no longer holds the
+  share; nothing moves); the trainer's leg or the commission alone is `409
+  coaching_transfer_leg` with `transfer_reference`.
   `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
   (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
   top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).
@@ -2064,9 +2102,20 @@ field and code; in short:
   `blocked_reason`, `next_settlement_on` (null unless an operator set one — nothing
   schedules settlements) and, per currency, caps, used today / this month, counts,
   remaining, `receivable`, `receivable_ceiling`, `receivable_room`, `max_topup`,
-  `blocked_reason`, `last_settlement`.
+  `blocked_reason`, `last_settlement`. Additive (2026-09-28): `currency`, the agent's
+  own wallet currency, so the app picks `currencies[currency]` without reading
+  `wallet/balance/` (BACKEND_BUGS B-144); `today` (YYYY-MM-DD) and `time_zone`
+  ("Asia/Damascus"), the server's day and zone that the caps and `since`/`until` are
+  read in (B-146). The top-level `status` is `AgentProfile.status`, the same value as
+  `profile.status` (B-148). The agent ledger's, receipts' and settlements' timestamps
+  and the key's `paired_at` / `last_signature_at` now carry the server's offset
+  (+03:00), like `wallet/transactions/`: the same instants.
 - `GET /api/wallet/agent/ledger/` — the agent's own top-ups, settlements and reversed
-  top-ups, newest first (`?since=&until=&kind=&currency=`); `GET
+  top-ups, newest first (`?since=&until=&kind=&currency=`). Additive (BACKEND_BUGS
+  B-147): a `reversal` row carries `reverses_reference_id`, the reference of the top-up
+  it took back (its own `reference_id` is the reversal's, which has no receipt), and a
+  `topup` row carries `reversed` (true once support reversed it); each is null on the
+  other kinds. `GET
   /api/wallet/agent/settlements/`; `GET /api/wallet/agent/receipts/{reference_id}/` — a
   top-up this agent made (`404 not_found` for anyone else's), with `receipt_number`,
   the client, the shop, `remaining_today`, `client_notified`, `reversed`.
@@ -2078,7 +2127,10 @@ field and code; in short:
   `revoked_at`, `topups_stopped`; `POST apikey/revoke/` deactivates the key without a
   replacement and stops the app's top-ups (`403 agent_key_revoked`) until a new key is
   paired. The signed endpoint refuses a key that is not the caller's (`401
-  agent_auth_invalid`).
+  agent_auth_invalid`). One agent, one device (BACKEND_BUGS B-145, the owner
+  2026-09-28): `ensure/` with a `device_name` other than the active key's is `409
+  key_paired_elsewhere` with `device_name` (the device the key is on), `fingerprint`
+  and `paired_at`, and nothing changes; `create/` moves the key on purpose.
 - A top-up to a suspended or erased account answers `404 not_found`, exactly as a
   missing one (`users.visibility`).
 
@@ -3006,7 +3058,7 @@ kept beside the code. The views' docstrings carry the full tables.
 | `POST wallet/agent/topup/`, `.../topup/proxy/` | `403 agent_not_active`; `400 target_not_a_client`; `429 daily_limit_exceeded` / `monthly_limit_exceeded` (the agent's cap in that currency — not the rate limiter, and `Retry-After` does not lift it) |
 | `POST wallet/agent/topup/`, `.../topup/proxy/` (plan step 9) | `429 per_transaction_limit_exceeded` (more than one top-up may be), `429 receivable_ceiling_exceeded` (the cash the agent holds for the platform, unsettled, would pass their ceiling; a settlement lifts it); all four cap refusals carry `limit`, `used` (null for the per-top-up cap), `remaining`, `currency` (B-124); `.../topup/proxy/` also `403 agent_key_revoked` (the agent revoked their key and has not paired a new one, B-117). A suspended or erased client is `404 not_found`, as a missing one (B-118) |
 | top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_key_reused` (the caller's own key was already spent on a different request of theirs; retrying never helps, and resending under a new key could move money twice — NOT the set, workout and chat writes' 409 `idempotency_conflict`, where the id is the other person's and a new id is the fix) |
-| `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved) |
+| `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved); `400 content_not_allowed` (the `note`, BACKEND_BUGS B-163) |
 | `POST wallet/admin/reversal/` | `400 insufficient_balance` (the wallet that received the money no longer holds it), `400 currency_mismatch` (a wallet changed currency), `400 reversal_refused` — these three were one `bad_request` |
 | `POST subscription/v1/subscriptions/` | `400 subscription_exists` (one per user: `change-plan/`, `upgrade/` or `renew/` instead); a `plan_id` naming no active plan stays `validation_error`, its field code now `invalid_plan` (was `invalid`) |
 | `PATCH subscription/v1/subscriptions/{id}/` | stays `validation_error` (the view named it); on an inactive subscription `field_errors.non_field_errors[0].code` is `subscription_inactive` (was `invalid`) |

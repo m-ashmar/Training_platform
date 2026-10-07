@@ -334,7 +334,10 @@ def key_body(api_key) -> dict:
 
 
 def _iso(value):
-    return value.isoformat() if value is not None else None
+    """ISO 8601 in the SERVER's zone (BACKEND_BUGS B-146): the same instant it always
+    was, now with the offset `wallet/transactions/` rows carry (+03:00), so the date
+    part of a row's `created_at` is the day `since` / `until` and the caps count it in."""
+    return timezone.localtime(value).isoformat() if value is not None else None
 
 
 # ------------------------------------------------------------------ the push
@@ -379,8 +382,12 @@ def person(user) -> dict | None:
 
 
 def account_body(profile) -> dict:
-    """`GET wallet/agent/me/` (BACKEND_BUGS B-113)."""
+    """`GET wallet/agent/me/` (BACKEND_BUGS B-113; `currency` B-144, `today` and
+    `time_zone` B-146)."""
+    from django.conf import settings
+
     from .currencies import CURRENCY_CODES
+    from .models import currency_for
 
     blocked = ("agent_not_active" if profile.status != "active"
                else "agent_key_revoked" if key_revoked(profile) else None)
@@ -418,6 +425,12 @@ def account_body(profile) -> dict:
         "can_top_up": blocked is None,
         "blocked_reason": blocked,
         "next_settlement_on": day.isoformat() if day else None,
+        # The agent's own wallet currency (B-144): which of `currencies` to draw first.
+        "currency": currency_for(profile.user_id),
+        # The server's day and zone (B-146): the caps' "today" and the day `since` /
+        # `until` on agent/ledger/ are read in.
+        "today": timezone.localdate().isoformat(),
+        "time_zone": settings.TIME_ZONE,
         "currencies": currencies,
     }
 
@@ -438,8 +451,19 @@ def _client_of(entry):
     return getattr(wallet, "owner", None)
 
 
+def _reversal_of(tx):
+    """The row that reversed `tx`, or None (read off `select_related`, no query)."""
+    from django.core.exceptions import ObjectDoesNotExist
+
+    try:
+        return tx.reversal
+    except ObjectDoesNotExist:
+        return None
+
+
 def entry_row(entry) -> dict:
-    """One row of the agent's ledger (BACKEND_BUGS B-114)."""
+    """One row of the agent's ledger (BACKEND_BUGS B-114; the link between a top-up and
+    its reversal, B-147)."""
     tx = entry.transaction
     return {
         "id": entry.pk,
@@ -452,6 +476,13 @@ def entry_row(entry) -> dict:
         "receipt_number": entry.receipt_number,
         "client": person(_client_of(entry)),
         "settlement": settlement_row(entry.settlement) if entry.settlement_id else None,
+        # B-147: a reversal row names the top-up it took back (whose receipt opens by
+        # that reference), and a top-up row says whether it was taken back.
+        "reverses_reference_id": (tx.reverses.reference_id
+                                  if entry.kind == "reversal" and tx is not None
+                                  and tx.reverses_id else None),
+        "reversed": (_reversal_of(tx) is not None
+                     if entry.kind == "topup" and tx is not None else None),
     }
 
 
