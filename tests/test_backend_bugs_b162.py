@@ -101,6 +101,11 @@ def test_b162_clients_only_challenge_refuses_a_stranger(make_user, api):
     open_one = _create(api, trainer, title="b162 open")
     assert open_one.status_code == 201, open_one.content
     assert open_one.json()["audience"] == "community"
+    # The stranger's list from above is cached for 120 s, and another person's create
+    # reaching it is SIDE_BUGS S-194 (its own test): this one asks afresh.
+    from django.core.cache import cache
+
+    cache.clear()
     assert open_one.json()["id"] in _listed(api, stranger)
 
 
