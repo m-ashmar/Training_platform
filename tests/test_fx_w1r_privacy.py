@@ -114,9 +114,6 @@ def test_r2_an_edit_in_the_window_is_kept_and_still_ends_under_the_first_key(
     out = io.StringIO()
     call_command("reencrypt_fields", stdout=out)
     assert fired, "the command never reached the person's row"
-    assert ("users.CustomUser.specific_injury: 1 re-encrypted, 0 plain text encrypted, "
-            "0 under an unknown key, 1 changed while this ran") in out.getvalue(), \
-        out.getvalue()
 
     settings.FIELD_ENCRYPTION_KEY = new  # the old key is dropped
     assert CustomUser.objects.get(pk=person.pk).specific_injury == \
@@ -124,6 +121,9 @@ def test_r2_an_edit_in_the_window_is_kept_and_still_ends_under_the_first_key(
     assert Fernet(new.encode()).decrypt(
         _raw(CustomUser, person.pk, "specific_injury").encode()) == \
         b"healed, cleared to train"
+    assert ("users.CustomUser.specific_injury: 1 re-encrypted, 0 plain text encrypted, "
+            "0 under an unknown key, 1 changed while this ran") in out.getvalue(), \
+        out.getvalue()
 
 
 @pytest.mark.django_db
