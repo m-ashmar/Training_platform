@@ -2758,8 +2758,10 @@ no `code` renamed. `ChallengeViewSet`'s docstring carries the full contract.
   ONE exercise, named by the new writable, nullable `exercise` (an exercise id the
   creator may read; served with read-only `exercise_name`), a day above 500 reps of it
   flagged for review — and `streak_days` — the CURRENT run of consecutive days with at
-  least one counted set (today, not over yet, breaks nothing; any other day without one
-  breaks it; the hourly phase task recounts it). Refusals on create and update, `400
+  least one counted set (today, not over yet, breaks nothing, nor does the window's
+  last day once the window is over: the run stands as it stood at the end instant; any
+  other day without one breaks it; the hourly phase task recounts it). Refusals on
+  create and update, `400
   validation_error` with the field code in `field_errors.exercise`:
   `exercise_required` (`exercise_reps` with no exercise) and `exercise_not_found`. An
   `exercise` sent with any other metric is stored null. «عدد التمارين» is `workouts`.

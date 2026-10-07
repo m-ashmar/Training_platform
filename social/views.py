@@ -875,8 +875,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     `exercise_name` (read-only, the caller's language); a day above 500 reps of it
     flags the participant for review — and `streak_days` — the CURRENT run of
     consecutive days with at least one counted set: today, not over yet, breaks
-    nothing; any other day without one breaks it, and the hourly phase task recounts
-    it so a broken run reads 0 within the hour. The artboard's «عدد التمارين» is
+    nothing, nor does the window's last day once the window is over (the run stands as
+    it stood at the end instant); any other day without one breaks it, and the hourly
+    phase task recounts it so a broken run reads 0 within the hour. The artboard's «عدد التمارين» is
     `workouts` (workouts finished, `status: "completed"`, with the F20 rules below);
     «مجموع الأوزان» is `volume_kg`, «عدد المجموعات» `sets`, «أيام التمرين»
     `training_days`. Create/update refusals (400 `validation_error`, the field code in

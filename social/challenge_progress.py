@@ -19,8 +19,10 @@ ever written by `update_progress`, so every challenge was a manual one.
 B-161). A STREAK DAY needs one counted set (not `MIN_SETS_PER_DAY`). The run is the one
 alive at the last day that can count — today, or the window's last day once it is
 over: it ends on that day when that day has a counted set; today, not over yet, does
-not break it (the run then ends yesterday); any other day without a counted set breaks
-it, so a person who stops training drops to 0. The clock moves that number without a
+not break it (the run then ends yesterday), and neither does the window's last day,
+which was not over when the window ended (the run stands as it stood at the end
+instant: `current_run`); any other day without a counted set breaks it, so a person
+who stops training drops to 0. The clock moves that number without a
 set being logged, so the hourly phase task recounts every running `streak_days`
 challenge (`recount_streaks`). Days before the window's first day never count.
 
@@ -211,13 +213,17 @@ def measure_challenge(challenge, user_ids) -> tuple[dict, dict]:
 def current_run(trained_days, first, last, today) -> int:
     """The streak (`streak_days`): consecutive days of `trained_days` ending at the last
     day that can count — `today`, or `last` (the window's last day) once it is over —
-    never before `first`. Today, not over yet, breaks nothing; any other day without a
-    counted set breaks the run. See the module docstring."""
+    never before `first`. Neither of the two breaks the run for want of a counted set:
+    today is not over yet, and the window's last day was not over when the window
+    ended — the app opens a challenge at the hour it is created and a close ends it at
+    the hour of the close, so the window ends PARTWAY through its last day. The run is
+    the one standing at the end instant, and the midnight after the end does not take
+    it away (it took a completed 7 of 7 to 0 at the first hourly recount after that
+    midnight, and the winner was settled on the 0: the wave-1 review, R-8). Any other
+    day without a counted set breaks the run. See the module docstring."""
     day = min(today, last)
     if day not in trained_days:
-        if day < today:
-            return 0                      # that day is over, and nothing was counted
-        day -= timedelta(days=1)
+        day -= timedelta(days=1)          # today, or the window's last day: no break
     run = 0
     while day >= first and day in trained_days:
         run += 1
