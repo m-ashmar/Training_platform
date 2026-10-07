@@ -2203,7 +2203,10 @@ payment instructions by build, a proven payer address.** No route or `code` chan
   subscription's `payments` for a build that may not buy its kind of money (`play` and
   `ios` for a plan or a routine product, or no `X-App-Channel`), as
   `checkout/sessions/{id}/` already withholds them (SIDE_BUGS S-239, spec section 4).
-  Completed, refunded or closed payments carry both on every build.
+  The same money in such a row's `metadata` goes too: `metadata.product.price`, and
+  `metadata.upgrade` `new_price`, `credit`, `to_pay` and `parts`.
+  Completed, refunded or closed payments carry all of it on every build. A product
+  checkout's `metadata.product` never carries the sale's `commission_rate`.
 - The saved payer address (above) holds a checkout among several, or a closed one,
   only once it is PROVEN: a transfer FROM it has confirmed one of the customer's own
   checkouts by its reference (SIDE_BUGS S-241). Changing the address unproves it.

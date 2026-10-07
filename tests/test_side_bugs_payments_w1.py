@@ -605,3 +605,44 @@ def test_s239_an_open_plan_checkout_on_a_store_build_and_the_record_once_paid(
         row = next(r for r in _rows(c.get(PAYMENTS, HTTP_X_APP_CHANNEL=channel))
                    if r["id"] == str(payment.pk))
         assert (row["amount"], row["reference"]) == ("13000.00", reference), channel
+
+
+def test_s239_the_money_an_open_rows_metadata_repeats_goes_with_its_amount(
+        make_user, api, shamcash, django_capture_on_commit_callbacks):
+    """`amount` and `reference` left a store build's row, but its `metadata` still said
+    the money: a product checkout's price of record, an upgrade's new price, credit and
+    amount to pay. And a product row (new to the buyer with B-167) carried the sale's
+    commission rate on every build."""
+    from subscription.models import Payment
+    from tests.test_backend_bugs_app_0923b import _plan as _priced_plan
+    from tests.test_plan_upgrade import _active_on, _buy as _buy_upgrade
+
+    _trainer, _buyer, c, _product_id, body = _product_session(make_user, api, "s239m")
+    snapshot = Payment.objects.get(pk=body["id"]).metadata["product"]
+    assert snapshot["price"] and snapshot["commission_rate"]
+    for channel in ("ios", "play"):
+        row = next(r for r in _rows(c.get(PAYMENTS, HTTP_X_APP_CHANNEL=channel))
+                   if r["id"] == body["id"])
+        detail = c.get(f"{PAYMENTS}{body['id']}/", HTTP_X_APP_CHANNEL=channel).json()
+        for read in (row, detail):
+            product = read["metadata"]["product"]
+            assert "price" not in product and "commission_rate" not in product, channel
+            assert product["title_en"] == snapshot["title_en"], "the rest is kept"
+    web = c.get(f"{PAYMENTS}{body['id']}/", HTTP_X_APP_CHANNEL="web").json()
+    assert web["metadata"]["product"]["price"] == snapshot["price"]
+    assert "commission_rate" not in web["metadata"]["product"], "never the buyer's"
+
+    basic = _priced_plan("s239m basic", "10000.00")
+    premium = _priced_plan("s239m premium", "20000.00")
+    cu, sub = _active_on(api, make_user, "s239m_up", basic,
+                         django_capture_on_commit_callbacks, days_left=20)
+    bought = _buy_upgrade(cu, sub, premium, amount="13333.33", currency="SYP")
+    assert bought.status_code == 200, bought.content
+    upgrade_id = str(bought.json()["payment_id"])
+    for channel in ("ios", "play"):
+        detail = cu.get(f"{PAYMENTS}{upgrade_id}/", HTTP_X_APP_CHANNEL=channel).json()
+        quote = detail["metadata"]["upgrade"]
+        assert not {"new_price", "credit", "to_pay", "parts"} & set(quote), channel
+        assert quote["days_left"] == 20 and "amount" not in detail, channel
+    apk = cu.get(f"{PAYMENTS}{upgrade_id}/", HTTP_X_APP_CHANNEL="apk").json()
+    assert (apk["metadata"]["upgrade"]["to_pay"], apk["amount"]) == ("13333.33", "13333.33")
