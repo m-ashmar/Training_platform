@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("routine", "0032_exercise_catalogue_key"),
+        ("routine", "0033_dayoutcome_quick_log"),
     ]
 
     operations = [
