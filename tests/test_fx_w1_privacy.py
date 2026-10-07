@@ -15,6 +15,8 @@ Each test is the proof for one notebook row and fails on the code before its fix
   outside `PaymentService`; a comment called behaviour events training data.
 * B-174 — production booted with no `PUBLIC_PAGES_BASE_URL`, and the legal links every
   build is handed followed whatever host a request reached.
+* S-233 — no command re-saved the encrypted columns, so an old FIELD_ENCRYPTION_KEY
+  could never be dropped.
 """
 from decimal import Decimal
 
@@ -225,3 +227,88 @@ def test_b174_production_refuses_to_boot_without_the_public_pages_host(base, nee
 
     booted = _production_boot(PUBLIC_PAGES_BASE_URL="https://yallagym.example", **bootable)
     assert booted.returncode == 0 and "BOOTED" in booted.stdout, booted.stderr[-2000:]
+
+
+# ================================================================================ S-233
+def _raw(model, pk, column):
+    """The stored text of an encrypted column, without the field's own decryption."""
+    from django.db import models
+    from django.db.models.functions import Cast
+
+    return (model._base_manager.filter(pk=pk)
+            .annotate(raw=Cast(column, output_field=models.TextField()))
+            .values_list("raw", flat=True).get())
+
+
+@pytest.mark.django_db
+def test_s233_a_rotation_rewrites_every_encrypted_value_so_the_old_key_can_go(
+        make_user, settings):
+    """The documented rotation was "prepend the new key, re-save the rows, drop the old
+    one", and nothing re-saved the rows: every value written under the old key kept
+    needing it, so it could never be dropped. After `reencrypt_fields` the old key is
+    removed and every value — on more than one model — still reads back."""
+    import io
+
+    from cryptography.fernet import Fernet
+    from django.core.management import call_command
+
+    from subscription.models import PayerAddress
+    from users.models import CustomUser
+
+    old, new = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+    settings.FIELD_ENCRYPTION_KEY = old
+    user = make_user("w1p_s233_rot", specific_injury="ACL reconstruction 2023",
+                     injury_areas=["knee", "lower_back"])
+    payer = PayerAddress.objects.create(user=user, address="0912345678",
+                                        address_digest="w1p" * 21 + "x")
+    assert Fernet(old.encode()).decrypt(
+        _raw(CustomUser, user.pk, "specific_injury").encode()) == b"ACL reconstruction 2023"
+
+    settings.FIELD_ENCRYPTION_KEY = f"{new},{old}"
+    out = io.StringIO()
+    call_command("reencrypt_fields", stdout=out)
+    assert "users.CustomUser.specific_injury: 1 re-encrypted" in out.getvalue(), \
+        out.getvalue()
+
+    settings.FIELD_ENCRYPTION_KEY = new  # the old key is dropped
+    user = CustomUser.objects.get(pk=user.pk)
+    assert user.specific_injury == "ACL reconstruction 2023"
+    assert user.injury_areas == ["knee", "lower_back"]
+    assert PayerAddress.objects.get(pk=payer.pk).address == "0912345678"
+    assert Fernet(new.encode()).decrypt(
+        _raw(PayerAddress, payer.pk, "address").encode()) == b"0912345678"
+
+
+@pytest.mark.django_db
+def test_s233_a_value_no_listed_key_opens_is_left_alone_and_fails_the_rotation(
+        make_user, settings):
+    """Re-saving through the field would have wrapped such a value in a second layer
+    (the field hands an unreadable token back unchanged), and a run that says nothing
+    lets the operator drop a key a row still needs. Plain text left from before a
+    column was encrypted is encrypted. A dry run writes nothing."""
+    import io
+
+    from cryptography.fernet import Fernet
+    from django.core.management import CommandError, call_command
+    from django.db import models
+
+    from users.models import CustomUser
+
+    lost, current = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+    settings.FIELD_ENCRYPTION_KEY = lost
+    orphan = make_user("w1p_s233_lost", specific_injury="old knee")
+    settings.FIELD_ENCRYPTION_KEY = current
+    legacy = make_user("w1p_s233_plain")
+    CustomUser.objects.filter(pk=legacy.pk).update(
+        specific_injury=models.Value("bad back", output_field=models.TextField()))
+    orphan_token = _raw(CustomUser, orphan.pk, "specific_injury")
+
+    with pytest.raises(CommandError, match=r"1 value\(s\)"):
+        call_command("reencrypt_fields", "--dry-run", stdout=io.StringIO())
+    assert _raw(CustomUser, legacy.pk, "specific_injury") == "bad back"
+
+    with pytest.raises(CommandError, match=rf"users.CustomUser.specific_injury pk={orphan.pk}"):
+        call_command("reencrypt_fields", stdout=io.StringIO())
+    assert _raw(CustomUser, orphan.pk, "specific_injury") == orphan_token
+    assert Fernet(current.encode()).decrypt(
+        _raw(CustomUser, legacy.pk, "specific_injury").encode()) == b"bad back"
