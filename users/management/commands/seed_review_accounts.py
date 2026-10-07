@@ -166,7 +166,7 @@ DAY_NAMES = {"1": "دفع · صدر وأكتاف", "2": "سحب · ظهر وذر
 TEMPLATE = {"name_en": "4-Day Strength Program", "name_ar": "برنامج القوة · 4 أيام",
             "description_en": "Strength and muscle building, four days a week.",
             "description_ar": "برنامج قوة وبناء عضل، أربعة أيام في الأسبوع.",
-            "goal": "Strength"}
+            "goal": "strength"}  # a ProductGoal code: the template route takes no other
 #: The weekdays `client` trained (Mon, Tue, Thu, Sat -> routine days 1-4).
 TRAINING_WEEKDAYS = {0: 1, 1: 2, 3: 3, 5: 4}
 

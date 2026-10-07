@@ -52,6 +52,23 @@ class PaidWith(models.TextChoices):
     SHAMCASH = "shamcash", "ShamCash checkout (reserved)"
 
 
+class ProductGoal(models.TextChoices):
+    """What a program is for: the CLOSED list (the owner, 2026-09-28; BACKEND_BUGS B-153).
+    It is the template's goal (`RoutineTemplate.goal`, TrainerRoutineForm's four chips),
+    read through `routine.products.goal_code`; the catalogue filters on it (`?goal=`)."""
+    BUILD_MUSCLE = "build_muscle", "Build muscle"
+    STRENGTH = "strength", "Strength"
+    FAT_LOSS = "fat_loss", "Fat loss"
+    REHAB = "rehab", "Rehab"
+
+
+class ProductPlace(models.TextChoices):
+    """Where a program is trained (the owner, 2026-09-28; BACKEND_BUGS B-153): set on the
+    product form, and the catalogue's «في المنزل» chip is `?place=home`."""
+    HOME = "home", "Home"
+    GYM = "gym", "Gym"
+
+
 #: Most free days a buyer may read before paying (the form's chips: 0, 1, 3, 7).
 MAX_PREVIEW_DAYS = 7
 #: The dearest a product may be, in either currency. A ceiling against a typo, not a
@@ -93,6 +110,10 @@ class RoutineProduct(models.Model):
     #: How many days of the program a buyer may read before paying.
     preview_days = models.PositiveSmallIntegerField(
         default=0, validators=[MaxValueValidator(MAX_PREVIEW_DAYS)])
+    #: Where the program is trained, `home` or `gym`; blank while the trainer has not
+    #: said (BACKEND_BUGS B-153). Set on the form with the rest of a draft.
+    place = models.CharField(max_length=8, choices=ProductPlace.choices, blank=True,
+                             default="")
     #: The cover, from the trainer's own Media Kit (a `MediaAsset` whose `person` is
     #: this trainer, an image). Not a copy: replacing that picture replaces the cover.
     cover = models.ForeignKey("mediakit.MediaAsset", null=True, blank=True,

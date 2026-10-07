@@ -5895,3 +5895,34 @@ msgstr "يجب أن يكون latest_for معرّفات تمارين مفصولة
 #, python-format
 msgid "Ask for at most %(max)d exercises at a time."
 msgstr "اطلب %(max)d تمرينًا على الأكثر في المرة الواحدة."
+
+#. A wallet buy whose idempotency key starts `checkout:`, the prefix a checkout's
+#. delivery writes (`idempotency_key_reserved`, SIDE_BUGS S-234).
+#: routine/product_serializers.py
+msgid "This key is reserved. Send the key your app made for this purchase."
+msgstr "هذا المفتاح محجوز. أرسل المفتاح الذي أنشأه تطبيقك لعملية الشراء هذه."
+
+#. The product form's place: where the program is trained (`bad_place`, B-153).
+#: routine/product_serializers.py
+msgid "Choose where the program is trained: home or gym."
+msgstr "اختر مكان التدريب في هذا البرنامج: المنزل أو النادي."
+
+#. The catalogue's ?goal= is not one of the closed list (`bad_goal`, B-153).
+#: routine/product_views.py
+msgid "goal must be one of build_muscle, strength, fat_loss, rehab."
+msgstr ""
+"يجب أن يكون goal واحدًا من build_muscle أو strength أو fat_loss أو rehab."
+
+#. The catalogue's ?place= is not home or gym (`bad_place`, B-153).
+#: routine/product_views.py
+msgid "place must be home or gym."
+msgstr "يجب أن يكون place إما home أو gym."
+
+#. The catalogue's ?search= holds a NUL character (`bad_search`, B-153).
+#: routine/product_views.py
+msgid "The search holds a character that cannot be searched for."
+msgstr "يحتوي البحث على حرف لا يمكن البحث عنه."
+
+#: routine/serializers.py
+msgid "Choose the program's goal: build muscle, strength, fat loss or rehab."
+msgstr "اختر هدف البرنامج: بناء عضل، قوة، خسارة دهون أو تأهيل."

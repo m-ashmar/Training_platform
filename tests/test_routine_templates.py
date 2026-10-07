@@ -179,7 +179,9 @@ def test_a_template_refuses_rows_no_routine_can_hold(make_user, api):
     url = "/api/routine/templates/"
 
     def post(rows, days=2):
-        return api(trainer).post(url, {"name": "Rows", "goal": "g", "days": days,
+        # Shared setup, not an assertion: the goal is a closed list since 2026-09-28
+        # (owner; `RoutineTemplateSerializer.validate_goal`), and "g" is not one of it.
+        return api(trainer).post(url, {"name": "Rows", "goal": "strength", "days": days,
                                        "exercises": rows}, content_type=JSON)
 
     def code(resp):

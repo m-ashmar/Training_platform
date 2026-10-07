@@ -145,7 +145,8 @@ def ready_programs(person, *, request, flags) -> dict | None:
     from routine.product_serializers import CatalogueProductSerializer
     from routine.product_views import _buyer_context
 
-    rows = list(products.catalogue_for(person)
+    # `with_buyers`: the row's `buyers`, annotated as the catalogue annotates it (B-154).
+    rows = list(products.with_buyers(products.catalogue_for(person))
                 .select_related('trainer', 'source_template', 'cover')
                 .order_by('-published_at', '-id')[:READY_PROGRAMS])
     if not rows:

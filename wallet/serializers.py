@@ -6,6 +6,8 @@ from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditL
 from .settling import TransactionSettlingFields, WalletSettlingFields
 # `withdrawal` on a ledger row (B-125); the module imports nothing of `wallet` at load.
 from payouts.ledger_fields import TransactionWithdrawalFields
+# `product` on a ledger row (B-169); the module imports nothing of `wallet` at load.
+from routine.ledger_fields import TransactionProductFields
 
 _MIN_AMOUNT = Decimal("0.01")
 
@@ -286,11 +288,15 @@ class _TransactionListSerializer(serializers.ListSerializer):
         prime_withdrawals = getattr(self.child, "prime_withdrawals", None)
         if prime_withdrawals is not None:
             prime_withdrawals(rows)
+        # The programs the page's rows paid for (B-169), in one query too.
+        prime_products = getattr(self.child, "prime_products", None)
+        if prime_products is not None:
+            prime_products(rows)
         return super().to_representation(rows)
 
 
-class TransactionSerializer(TransactionWithdrawalFields, TransactionSettlingFields,
-                            serializers.ModelSerializer):
+class TransactionSerializer(TransactionProductFields, TransactionWithdrawalFields,
+                            TransactionSettlingFields, serializers.ModelSerializer):
     """One row of "الحركات" on the Wallet screen.
 
     The stored columns say what the database did; `kind`, `reason`, `direction`,

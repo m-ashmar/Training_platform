@@ -866,3 +866,337 @@ def test_a_template_answers_its_weeks_and_its_session_count(make_user, api):
     listed = api(trainer).get("/api/routine/templates/my_templates/").json()["results"]
     row = next(r for r in listed if r["id"] == made.json()["id"])
     assert (row["days"], row["weeks"], row["session_count"]) == (3, 4, 12)
+
+
+# ============================================================ wave 1 (2026-09-28)
+def _listed_with_goal(make_user, api, tag, goal, **fields):
+    """A published product whose template's goal is `goal` (the template route's free
+    text: the app's code, or older words)."""
+    from routine import products
+    from routine.models import RoutineTemplate
+
+    trainer = _trainer(make_user, tag)
+    template = _template(trainer, tag)
+    RoutineTemplate.objects.filter(pk=template.pk).update(goal=goal)
+    product = _draft(api, trainer, template, **fields)
+    submitted = api(trainer).post(f"/api/v1/trainer/products/{product['id']}/submit/")
+    assert submitted.status_code == 200, submitted.content
+    products.approve(product["id"], _operator(make_user, tag))
+    return trainer, product["id"]
+
+
+def test_the_catalogue_carries_goal_and_filters_by_goal_and_search(make_user, api):
+    """BACKEND_BUGS B-153 (the owner, 2026-09-28): a closed goal list read from the
+    template, a place set on the product form, and `?goal=`, `?place=`, `?search=`.
+    On 554c604 a row carries neither key and every filter answers every row."""
+    _t1, rehab = _listed_with_goal(make_user, api, "g_rehab", "rehab", place="home",
+                                   title_en="Knee rehab at home", title_ar="تأهيل الركبة")
+    _t2, muscle = _listed_with_goal(make_user, api, "g_muscle", "build_muscle", place="gym",
+                                    title_en="Bench builder", title_ar="باني الصدر")
+    _t3, legacy = _listed_with_goal(make_user, api, "g_legacy", "Hypertrophy",
+                                    title_en="Classic split", title_ar="تقسيم كلاسيكي")
+    _t4, other = _listed_with_goal(make_user, api, "g_other", "Endurance",
+                                   title_en="Long runs", title_ar="جري طويل")
+    buyer = _client(make_user, "g_buyer")
+    c = api(buyer)
+
+    def ids(query=""):
+        resp = c.get(f"/api/v1/products/{query}")
+        assert resp.status_code == 200, resp.content
+        return {row["id"]: row for row in resp.json()["results"]}
+
+    rows = ids()
+    assert {pk: (row.get("goal"), row.get("place")) for pk, row in rows.items()} == {
+        rehab: ("rehab", "home"), muscle: ("build_muscle", "gym"),
+        legacy: ("build_muscle", None), other: (None, None)}
+    assert {"goal", "place"} <= set(rows[other])
+    detail = c.get(f"/api/v1/products/{rehab}/").json()
+    assert (detail.get("goal"), detail.get("place")) == ("rehab", "home")
+
+    assert set(ids("?goal=rehab")) == {rehab}
+    assert set(ids("?goal=build_muscle")) == {muscle, legacy}
+    assert set(ids("?goal=strength")) == set()
+    assert set(ids("?place=home")) == {rehab}
+    assert set(ids("?place=gym&goal=build_muscle")) == {muscle}
+    assert set(ids("?search=bench")) == {muscle}
+    assert set(ids("?search=الركبة")) == {rehab}
+    assert set(ids("?search=Rami Haddad")) == set(rows), "the trainer's full name"
+    assert set(ids("?search=%20%20")) == set(rows), "blank is no filter"
+    assert set(ids("?search=bench" + "%20" * 96 + "zzz")) == {muscle}, \
+        "read up to its first 100 characters"
+
+    for query, code in (("?goal=home", "bad_goal"), ("?goal=Rehab", "bad_goal"),
+                        ("?place=roof", "bad_place"), ("?search=a%00b", "bad_search")):
+        refused = c.get(f"/api/v1/products/{query}")
+        assert (refused.status_code, refused.json().get("code")) == (400, code), query
+
+
+def test_the_goal_reads_the_same_in_python_and_in_sql(make_user):
+    """B-153: the row's `goal` (`goal_code`) and the `?goal=` filter
+    (`goal_code_expression`) are one reading — the codes themselves, then the older
+    free text as the app reads it (`ProgramGoal.fromWire`), then the Arabic."""
+    from routine.models import RoutineTemplate
+    from routine.products import goal_code, goal_code_expression
+
+    trainer = _trainer(make_user, "goalsql")
+    expected = {
+        "build_muscle": "build_muscle", " Fat_Loss ": "fat_loss", "rehab": "rehab",
+        "strength": "strength", "Hypertrophy": "build_muscle",
+        "Strength & muscle": "build_muscle", "Fat burn": "fat_loss",
+        "Weight loss": "fat_loss", "Knee rehab": "rehab", "بناء عضل": "build_muscle",
+        "قوة": "strength", "خسارة دهون": "fat_loss", "تأهيل الكتف": "rehab",
+        "Endurance": None, "x_y": None,
+    }
+    assert goal_code("") is None and goal_code(None) is None
+    ids = {RoutineTemplate.objects.create(name=f"gs {n}", goal=text, days=1,
+                                          created_by=trainer).pk: text
+           for n, text in enumerate(expected)}
+    in_sql = dict(RoutineTemplate.objects.filter(pk__in=ids)
+                  .annotate(code=goal_code_expression("goal")).values_list("pk", "code"))
+    for pk, text in ids.items():
+        assert goal_code(text) == expected[text], text
+        assert in_sql[pk] == expected[text], text
+
+
+def test_the_trainer_sets_a_place_on_the_draft(make_user, api):
+    """B-153: the place is set on the product form (the owner, 2026-09-28)."""
+    trainer = _trainer(make_user, "place")
+    template = _template(trainer, "place")
+    product = _draft(api, trainer, template, place="home")
+    assert (product.get("place"), product.get("goal")) == ("home", "rehab")
+    url = f"/api/v1/trainer/products/{product['id']}/"
+    bad = api(trainer).patch(url, {"place": "beach"}, content_type=JSON)
+    assert bad.status_code == 400, bad.content
+    assert bad.json()["field_errors"]["place"][0]["code"] == "bad_place"
+    cleared = api(trainer).patch(url, {"place": None}, content_type=JSON)
+    assert (cleared.status_code, cleared.json()["place"]) == (200, None)
+    gym = api(trainer).patch(url, {"place": "gym"}, content_type=JSON)
+    assert gym.json()["place"] == "gym"
+
+
+def test_a_program_row_counts_its_confirmed_buyers(make_user, api):
+    """BACKEND_BUGS B-154 (the owner, privacy first, 2026-09-28): `buyers` on the
+    catalogue and detail rows counts confirmed purchases (a refunded one is out), and
+    is null until five people own the program. On 554c604 the key is absent."""
+    from routine import products
+
+    _trainer_, _template_, product_id = _published(make_user, api, "buyers")
+    reader = _client(make_user, "buyers_reader")
+
+    def buyers():
+        listed = api(reader).get("/api/v1/products/").json()["results"]
+        (row,) = [r for r in listed if r["id"] == product_id]
+        one = api(reader).get(f"/api/v1/products/{product_id}/", HTTP_X_APP_CHANNEL="ios")
+        assert "buyers" in row and "buyers" in one.json()
+        assert row["buyers"] == one.json()["buyers"], "the same on every read and build"
+        return row["buyers"]
+
+    assert buyers() is None
+    purchases = []
+    for n in range(5):
+        resp = _buy(api, _client(make_user, f"buyers{n}"), product_id)
+        assert resp.status_code == 200, resp.content
+        purchases.append(resp.json()["purchase"]["id"])
+        assert buyers() == (5 if n == 4 else None)
+
+    products.refund(purchases[0], _operator(make_user, "buyers_op"), "duplicate")
+    assert buyers() is None, "four owners: a refunded purchase is not a buyer"
+    assert _buy(api, _client(make_user, "buyers5"), product_id).status_code == 200
+    assert buyers() == 5
+
+    # The home `ready_programs` card IS the catalogue's row: the same count.
+    from training_platform.cache import private_cache
+
+    private_cache().clear()
+    home = api(reader).get("/api/v1/home").json()
+    (section,) = [s for s in home["sections"] if s["type"] == "ready_programs"]
+    (card,) = [p for p in section["data"]["programs"] if p["id"] == product_id]
+    assert card["buyers"] == 5
+    private_cache().clear()
+
+
+def test_the_buy_docstring_says_what_a_concurrent_repeat_answers():
+    """BACKEND_BUGS B-155: the docstring is the contract, and it did not say what a
+    second request with the same key answers while the first still runs. It waits on
+    the product's row lock and replays; `request_in_flight` is never answered here
+    (tests/test_zz_product_buy_race.py holds the behaviour)."""
+    import inspect
+
+    from routine.product_views import ProductBuyView
+
+    doc = " ".join((inspect.getdoc(ProductBuyView) or "").split())
+    assert "while the first is still running" in doc
+    assert "waits for the first to finish" in doc
+    assert "never answers `request_in_flight`" in doc
+
+
+def test_the_detail_says_a_program_is_one_week_repeated(make_user, api):
+    """BACKEND_BUGS B-156 (the owner, 2026-09-28: keep one repeated week, no model
+    change). The detail's contract says the program is week 1 repeated `weeks` times,
+    so the app draws `weeks` x the repeated week with the rest locked; the row carries
+    what that needs. On 554c604 the docstring says nothing of weeks."""
+    import inspect
+
+    from routine.product_views import ProductDetailView
+
+    doc = " ".join((inspect.getdoc(ProductDetailView) or "").split())
+    assert "ONE week of `days` training days that repeats `weeks` times" in doc
+    assert "no per-week titles and no week outline" in doc
+    assert "the rest of that week — and so of every week — is locked" in doc
+
+    _trainer_, _template_, product_id = _published(make_user, api, "weeks1", preview_days=2)
+    one = api(_client(make_user, "weeks1")).get(f"/api/v1/products/{product_id}/").json()
+    assert (one["days"], one["weeks"], one["session_count"]) == (3, 4, 12)
+    assert [day["day"] for day in one["preview"]] == [1, 2], "the first days of week 1"
+
+
+def test_the_buyers_ledger_row_names_the_program(make_user, api):
+    """BACKEND_BUGS B-169: a program's ledger rows named it by id only (metadata
+    `product_id`), so the wallet could not say what was bought. Each reader's row now
+    carries `product: {id, title}` in the request's language — read when the row is
+    read, so rows written before this carry it too. On 554c604 the key is absent."""
+    trainer, _template_, product_id = _published(make_user, api, "ledgerp")
+    buyer = _client(make_user, "ledgerp")
+    assert _buy(api, buyer, product_id).status_code == 200
+
+    def rows(user, language):
+        c = api(user)
+        c.defaults["HTTP_ACCEPT_LANGUAGE"] = language
+        return c.get("/api/wallet/transactions/").json()["results"]
+
+    (bought,) = rows(buyer, "ar")
+    assert bought["kind"] == "routine_product_purchase"
+    assert bought.get("product") == {"id": product_id, "title": "تأهيل الكتف في 4 أسابيع"}
+    (bought_en,) = rows(buyer, "en")
+    assert bought_en["product"] == {"id": product_id, "title": "Shoulder rehab in 4 weeks"}
+    (sold,) = rows(trainer, "ar")
+    assert sold["kind"] == "routine_product_sale"
+    assert sold["product"] == {"id": product_id, "title": "تأهيل الكتف في 4 أسابيع"}
+    assert buyer.username not in str(sold)
+
+    from wallet.models import Transaction
+
+    other = _client(make_user, "ledgerp_other")
+    other_wallet = _fund(other, "50.00")
+    Transaction.objects.create(source_wallet=other_wallet, destination_wallet=_fund(trainer, "0"),
+                               amount=D("1.00"), tx_type="transfer", actor=other,
+                               reference_id="ledgerp-plain")
+    (plain,) = rows(other, "ar")
+    assert "product" in plain and plain["product"] is None
+
+
+def test_the_purchased_push_row_says_routine_id_may_be_empty(
+        make_user, api, django_capture_on_commit_callbacks):
+    """BACKEND_BUGS B-170: the push sends `routine_id: ""` when the buyer's copy is not
+    found (FCM data is strings, so never null), and the contract row said only «their
+    own copy». On 554c604 the row does not say so."""
+    import re
+    from pathlib import Path
+
+    from notifications.domain.dispatcher import emit_event
+    from notifications.domain.product_events import RoutineProductPurchasedEvent
+    from notifications.models import Notification
+    from routine.models import Routine
+
+    contract = Path("API_CONTRACT.md").read_text(encoding="utf-8")
+    (row,) = re.findall(r"^\| `routine_product_purchased` \|.*$", contract, re.M)
+    assert '`""`' in row and "no copy exists" in row and "never null" in row, row
+
+    _trainer_, _template_, product_id = _published(make_user, api, "pushrid")
+    buyer = _client(make_user, "pushrid")
+    purchase_id = _buy(api, buyer, product_id).json()["purchase"]["id"]
+    Routine.objects.filter(purchase_id=purchase_id).update(purchase=None)
+    with django_capture_on_commit_callbacks(execute=True):
+        emit_event(RoutineProductPurchasedEvent(recipient_id=buyer.pk, product_id=product_id,
+                                                purchase_id=purchase_id))
+    notice = Notification.objects.filter(recipient=buyer,
+                                         event_type="routine_product_purchased").latest("id")
+    assert notice.metadata["data"]["routine_id"] == ""
+
+
+def test_a_purchase_costs_the_same_queries_whatever_the_programs_length(make_user, api):
+    """BACKEND_BUGS B-180: buying the seeded 4-week x 3-day program ran 148 queries and a
+    12-week x 5-day one 364, inside the sale's transaction: the assignment signal
+    scaffolded each program day with a COUNT and a get_or_create. The cost no longer
+    follows the program's length, and the buyer's copy still has one progress row per
+    program day with its exercise count. On 554c604 the two counts differ by ~200."""
+    from cachalot.api import cachalot_disabled
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from routine import products
+    from routine.models import Exercise, RoutineProgress, RoutineTemplate, RoutineTemplateExercise
+
+    def listed(tag, days, weeks):
+        trainer = _trainer(make_user, tag)
+        template = RoutineTemplate.objects.create(name=f"len {tag}", goal="strength",
+                                                  days=days, weeks=weeks, created_by=trainer)
+        moves = [Exercise.objects.create(name=f"len {tag} {n}", created_by=trainer)
+                 for n in range(6)]
+        RoutineTemplateExercise.objects.bulk_create([
+            RoutineTemplateExercise(template=template, exercise=move, day=day, order=n + 1,
+                                    sets=3, reps=10)
+            for day in range(1, days + 1) for n, move in enumerate(moves)])
+        product = _draft(api, trainer, template)
+        assert api(trainer).post(f"/api/v1/trainer/products/{product['id']}/submit/") \
+            .status_code == 200
+        products.approve(product["id"], _operator(make_user, tag))
+        return product["id"]
+
+    short, long_ = listed("len_short", 3, 4), listed("len_long", 5, 12)
+    # The first sale of a test creates the escrow and revenue wallets and warms the
+    # policy reads; it is not what is measured.
+    warm = listed("len_warm", 2, 1)
+    assert _buy(api, _client(make_user, "len_warm"), warm, key="warm").status_code == 200
+    costs, bought = {}, {}
+    for name, product_id in (("short", short), ("long", long_)):
+        buyer = _client(make_user, f"len_{name}")
+        c = api(buyer)
+        with cachalot_disabled(), CaptureQueriesContext(connection) as queries:
+            resp = c.post(f"/api/v1/products/{product_id}/buy/", {"idempotency_key": name},
+                          content_type=JSON)
+        assert resp.status_code == 200, resp.content
+        costs[name] = len(queries)
+        bought[name] = (buyer, resp.json()["purchase"]["routine_id"])
+
+    assert abs(costs["long"] - costs["short"]) <= 5, costs
+    for name, days in (("short", 12), ("long", 60)):
+        buyer, routine_id = bought[name]
+        rows = RoutineProgress.objects.filter(user=buyer, routine_id=routine_id)
+        assert rows.count() == days, (name, rows.count())
+        assert set(rows.values_list("total_exercises", flat=True)) == {6}
+        assert set(rows.values_list("status", flat=True)) == {"not_started"}
+        assert sorted(rows.values_list("day", flat=True)) == list(range(1, days + 1))
+
+
+# ============================================================ the template's goal is closed
+@pytest.mark.parametrize("sent,stored", [("strength", "strength"), ("Fat_Loss", "fat_loss"),
+                                         (" rehab ", "rehab")])
+def test_a_template_goal_is_one_of_the_four_codes_in_any_case(make_user, api, sent, stored):
+    """The owner, 2026-09-28: the template's goal is the closed list the catalogue
+    filters on, so every program sold from a template carries a goal chip."""
+    trainer = _trainer(make_user, f"goal_ok_{stored}")
+    made = api(trainer).post("/api/routine/templates/", {
+        "name": "Goal", "goal": sent, "days": 3, "exercises": []}, content_type=JSON)
+    assert made.status_code == 201, made.content
+    assert made.json()["goal"] == stored
+
+
+@pytest.mark.parametrize("sent", ["Hypertrophy", "تضخيم", "", "build muscle"])
+def test_a_template_goal_outside_the_list_is_bad_goal(make_user, api, sent):
+    trainer = _trainer(make_user, f"goal_bad_{abs(hash(sent)) % 10000}")
+    made = api(trainer).post("/api/routine/templates/", {
+        "name": "Goal", "goal": sent, "days": 3, "exercises": []}, content_type=JSON)
+    assert made.status_code == 400, made.content
+    assert made.json()["field_errors"]["goal"][0]["code"] in ("bad_goal", "blank")
+
+
+def test_a_template_goal_cannot_be_patched_out_of_the_list(make_user, api):
+    trainer = _trainer(make_user, "goal_patch")
+    made = api(trainer).post("/api/routine/templates/", {
+        "name": "Goal", "goal": "rehab", "days": 3, "exercises": []}, content_type=JSON)
+    assert made.status_code == 201, made.content
+    patched = api(trainer).patch(f"/api/routine/templates/{made.json()['id']}/",
+                                 {"goal": "Endurance"}, content_type=JSON)
+    assert patched.status_code == 400, patched.content
+    assert patched.json()["field_errors"]["goal"][0]["code"] == "bad_goal"

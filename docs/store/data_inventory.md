@@ -1389,9 +1389,9 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Posts, comments and other content you create (`user_content`); Photos and videos (`photos_videos`).
 
-**Fields stored.** `id`, `trainer`, `source_template`, `title_ar`, `title_en`, `description_ar`, `description_en`, `price`, `currency`, `preview_days`, `cover`, `status`, `submitted_at`, `template_version`, `review_decision`, `review_reason`, `reviewed_at`, `reviewed_by`, `published_at`, `retired_at`, `created_at`, `updated_at`.
+**Fields stored.** `id`, `trainer`, `source_template`, `title_ar`, `title_en`, `description_ar`, `description_en`, `price`, `currency`, `preview_days`, `place`, `cover`, `status`, `submitted_at`, `template_version`, `review_decision`, `review_reason`, `reviewed_at`, `reviewed_by`, `published_at`, `retired_at`, `created_at`, `updated_at`.
 
-**In the export.** `id`, `title_ar`, `title_en`, `description_ar`, `description_en`, `price`, `currency`, `preview_days`, `status`, `review_decision`, `review_reason`, `submitted_at`, `published_at`, `retired_at`, `created_at`. Not exported: `trainer`, `source_template`, `cover`, `template_version`, `reviewed_at`, `reviewed_by`, `updated_at`.
+**In the export.** `id`, `title_ar`, `title_en`, `description_ar`, `description_en`, `price`, `currency`, `preview_days`, `place`, `status`, `review_decision`, `review_reason`, `submitted_at`, `published_at`, `retired_at`, `created_at`. Not exported: `trainer`, `source_template`, `cover`, `template_version`, `reviewed_at`, `reviewed_by`, `updated_at`.
 
 **On erasure.** Kept.
 

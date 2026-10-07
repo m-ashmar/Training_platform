@@ -101,10 +101,49 @@ from .product_models import (
 logger = logging.getLogger(__name__)
 
 #: The longest program a product may sell, in training days — a routine of the buyer's
-#: gets one day per session, and a day costs about five queries to scaffold.
+#: gets one day per session. A limit on what a program may be, no longer on what a sale
+#: costs: the copy and its progress rows are written in bulk, so a purchase runs the
+#: same number of queries whatever the program's length (BACKEND_BUGS B-180).
 MAX_PROGRAM_DAYS = 365
 #: The longest reason an operator may give; the trainer is shown it.
 MAX_REASON = 1000
+#: The purchase key a checkout's delivery writes (`grant_checkout`: this prefix and the
+#: payment's id). A buyer's own keys share the column and its per-buyer uniqueness
+#: (`routine_purchase_key_per_buyer`), so no key a buyer sends may start with it
+#: (`BuySerializer`, field code `idempotency_key_reserved`). Otherwise a wallet buy
+#: keyed `checkout:<their session id>` made that checkout's delivery raise
+#: IntegrityError inside the completion, and every poller run stopped at that row:
+#: nobody's checkout after it was confirmed or expired (SIDE_BUGS S-234).
+CHECKOUT_KEY_PREFIX = "checkout:"
+#: A program's buyer count is shown (`buyers` on the catalogue and detail rows) only
+#: once this many people own it: below that, a count of 1 or 2 would all but name who
+#: bought (the owner, privacy first, 2026-09-28; BACKEND_BUGS B-154).
+BUYERS_SHOWN_FROM = 5
+
+
+def buyers_shown(count) -> int | None:
+    """`count` confirmed buyers as a row shows them: the number from
+    `BUYERS_SHOWN_FROM` up, None below it."""
+    return count if count is not None and count >= BUYERS_SHOWN_FROM else None
+
+
+def with_buyers(queryset):
+    """`queryset` of products with `buyers_count` (their confirmed purchases) annotated,
+    for `CatalogueProductSerializer`'s `buyers` — every surface that draws the
+    catalogue's row annotates it the same way (`ProductCatalogueView`, the home
+    `ready_programs` cards)."""
+    from django.db.models import Count, Q
+
+    return queryset.annotate(buyers_count=Count(
+        "purchases", filter=Q(purchases__status=PurchaseStatus.CONFIRMED)))
+
+
+def confirmed_buyers(product) -> int:
+    """How many people own `product`: its confirmed purchases, however they paid (a
+    refunded one is not a sale). One confirmed purchase per buyer is the database's
+    rule (`routine_purchase_one_confirmed`), so purchases are buyers."""
+    return RoutinePurchase.objects.filter(product=product,
+                                          status=PurchaseStatus.CONFIRMED).count()
 
 
 # ---------------------------------------------------------------- refusals
@@ -190,6 +229,51 @@ def net_of(price, rate=None):
     if price is None:
         return None, None
     return split(Decimal(price), commission_rate() if rate is None else rate)
+
+
+#: The closed list's codes, as the template route stores them (TrainerRoutineForm
+#: writes exactly these).
+GOAL_CODES = ("build_muscle", "strength", "fat_loss", "rehab")
+#: How a template goal that is NOT one of the codes reads — the older free text,
+#: exactly as the app reads it (`ProgramGoal.fromWire`: "Hypertrophy", "Strength"), and
+#: the Arabic words: in order, the first word the lower-cased goal contains decides. A
+#: goal matching none is no goal: the program is listed under «الكل» only.
+GOAL_WORDS = (
+    ("hyper", "build_muscle"), ("muscle", "build_muscle"), ("عضل", "build_muscle"),
+    ("strength", "strength"), ("قوة", "strength"),
+    ("fat", "fat_loss"), ("loss", "fat_loss"), ("دهون", "fat_loss"), ("تنحيف", "fat_loss"),
+    ("rehab", "rehab"), ("تأهيل", "rehab"),
+)
+
+
+def goal_code(text) -> str | None:
+    """The closed-list goal (`ProductGoal`) a template's free-text `goal` means, or None:
+    the code itself (trimmed, any case), else `GOAL_WORDS`. `goal_code_expression` is
+    the same reading in SQL."""
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return None
+    if lowered in GOAL_CODES:
+        return lowered
+    for word, code in GOAL_WORDS:
+        if word in lowered:
+            return code
+    return None
+
+
+def goal_code_expression(field="source_template__goal"):
+    """`goal_code` of `field` as a SQL expression, for a filter on it (`?goal=`)."""
+    from django.db.models import Case, CharField, Value, When
+    from django.db.models.functions import Lower, StrIndex, Trim
+    from django.db.models.lookups import Exact, GreaterThan
+
+    lowered = Lower(Trim(field))
+    exact = [When(Exact(lowered, Value(code)), then=Value(code)) for code in GOAL_CODES]
+    # "contains" as a position (`StrIndex` > 0), not LIKE: no character of a word is
+    # ever a wildcard.
+    contains = [When(GreaterThan(StrIndex(lowered, Value(word)), 0), then=Value(code))
+                for word, code in GOAL_WORDS]
+    return Case(*exact, *contains, default=Value(None), output_field=CharField())
 
 
 def catalogue_for(user):
@@ -650,7 +734,7 @@ def grant_checkout(payment) -> RoutinePurchase:
         exchange_rate=payment.exchange_rate, exchange_rate_value=payment.exchange_rate_value,
         commission_rate=rate, commission=commission, trainer_share=share,
         trainer_amount=Decimal("0.00"), trainer_currency=currency,
-        idempotency_key=f"checkout:{payment.pk}", paid_with=PaidWith.SHAMCASH,
+        idempotency_key=f"{CHECKOUT_KEY_PREFIX}{payment.pk}", paid_with=PaidWith.SHAMCASH,
         checkout_reference=payment.gateway_transaction_reference)
     _write_copy(product, buyer, purchase)
 
@@ -850,12 +934,16 @@ def _notify_on_commit(what, product, *, purchase=None, reason="") -> None:
 
 
 __all__ = [
-    "AlreadyOwned", "CheckoutOpen", "IdempotencyKeyReused", "MAX_PREVIEW_DAYS",
+    "AlreadyOwned", "BUYERS_SHOWN_FROM", "CHECKOUT_KEY_PREFIX", "CheckoutOpen", "GOAL_CODES",
+    "GOAL_WORDS",
+    "IdempotencyKeyReused", "MAX_PREVIEW_DAYS",
     "MAX_PROGRAM_DAYS", "PreviewCoversProgram", "ProductAlreadyRetired", "ProductIncomplete",
     "ProductNotEditable", "ProductNotForSale", "ProductNotSubmittable", "ProductRefusal",
     "ProgramTooLong", "ReviewConflict", "TrainerNotVerified", "approve", "buy",
-    "catalogue_for", "checkout_refusal", "checkout_terms", "grant_checkout",
+    "buyers_shown", "catalogue_for", "checkout_refusal", "checkout_terms",
+    "confirmed_buyers", "goal_code",
+    "goal_code_expression", "grant_checkout",
     "lock_for_checkout", "net_of", "open_checkout_for", "owned_purchase", "preview_of",
     "program_days", "refund", "refund_checkout", "reject", "retire", "submit",
-    "visible_product",
+    "visible_product", "with_buyers",
 ]

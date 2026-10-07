@@ -521,6 +521,12 @@ class WalletTransactionsView(generics.ListAPIView):
     ShamCash address, or the agent's shop name); `null` on every other row
     (`payouts/ledger_fields.py`, BACKEND_BUGS B-125). One query per page.
 
+    A row that moved a routine product's money — the buyer's
+    `routine_product_purchase`, the trainer's `routine_product_sale`, a refund —
+    carries `product`: `{id, title}`, the program, its title in the request's language
+    (the other one when that is empty); `null` on every other row
+    (`routine/ledger_fields.py`, BACKEND_BUGS B-169). One query per page.
+
     Each row also carries `available_at` and `settling` (BACKEND_BUGS B-097;
     `wallet.settling.TransactionSettlingFields`): on a `trainer_fee_payout` row read by
     the trainer, when its money becomes withdrawable and whether that is still ahead;
