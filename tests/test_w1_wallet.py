@@ -6,6 +6,9 @@ fails on 554c604.
 | Test | Row |
 |---|---|
 | `test_s237_*` | the generic admin reversal took one leg of a program sale |
+| `test_b145_*` | ensure/ from another phone was answered "already paired" |
+| `test_b144_*`, `test_b146_*`, `test_b148_*` | agent/me/: currency, the server's day, the status docstring |
+| `test_b147_*` | a reversal row of the agent ledger did not name the top-up it took back |
 """
 from decimal import Decimal
 
@@ -214,3 +217,66 @@ def test_b148_agent_me_docstring_names_the_profile_status():
     doc = AgentMeView.__doc__
     assert "`status` is the account's" not in doc
     assert "AgentProfile.status" in doc
+
+
+# ===========================================================================
+# B-147: a reversal row of the agent ledger names the top-up it took back
+# ===========================================================================
+LEDGER = "/api/wallet/agent/ledger/"
+
+
+def test_b147_a_reversal_row_names_the_top_up_it_took_back(make_user, api):
+    """A `reversal` row carried the REVERSAL's reference, whose receipt answers 404, and
+    nothing linked it to the top-up; the top-up row never said it had been taken back.
+    Now the reversal row names the top-up (whose receipt opens) and the top-up row says
+    `reversed`, and the page still costs the same number of queries."""
+    from cachalot.api import cachalot_disabled
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    agent, _profile = _agent(make_user, "w1b147_a", daily_limit=D("100000"),
+                             monthly_limit=D("100000"), receivable_ceiling=D("100000"))
+    client = make_user("w1b147_c")
+    operator = make_user("w1b147_op", user_type="admin")
+
+    def top_up(key, amount="300.00"):
+        resp = api(agent).post("/api/wallet/agent/topup/proxy/", {
+            "client_identifier": str(client.id), "amount": amount, "currency": "SYP",
+            "idempotency_key": key}, content_type=JSON)
+        assert resp.status_code == 200, resp.content
+        return resp.json()["reference_id"]
+
+    def reverse(ref, key):
+        resp = api(operator).post(REVERSAL, {"reference_id": ref, "idempotency_key": key},
+                                  content_type=JSON)
+        assert resp.status_code == 200, resp.content
+        return resp.json()
+
+    kept = top_up("w1b147-1")
+    taken = top_up("w1b147-2", "500.00")
+    reverse(taken, "w1b147-r2")
+
+    rows = api(agent).get(LEDGER).json()["results"]
+    assert [r["kind"] for r in rows] == ["reversal", "topup", "topup"]
+    back, taken_row, kept_row = rows
+    assert back["reverses_reference_id"] == taken
+    assert back["reference_id"] != taken
+    assert (taken_row["reference_id"], taken_row["reversed"]) == (taken, True)
+    assert (kept_row["reference_id"], kept_row["reversed"]) == (kept, False)
+    assert taken_row["reverses_reference_id"] is None
+    assert back["reversed"] is None
+    receipt = api(agent).get(f"/api/wallet/agent/receipts/{back['reverses_reference_id']}/")
+    assert receipt.status_code == 200, receipt.content
+    assert receipt.json()["reversed"] is True
+
+    def cost():
+        with cachalot_disabled(), CaptureQueriesContext(connection) as queries:
+            assert api(agent).get(LEDGER).status_code == 200
+        return len(queries)
+
+    cost()      # warm per-process caches
+    small = cost()
+    for n in range(3):
+        reverse(top_up(f"w1b147-more-{n}"), f"w1b147-more-r{n}")
+    assert len(api(agent).get(LEDGER).json()["results"]) == 9
+    assert cost() == small, "the link between a top-up and its reversal costs a query a row"

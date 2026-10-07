@@ -451,8 +451,19 @@ def _client_of(entry):
     return getattr(wallet, "owner", None)
 
 
+def _reversal_of(tx):
+    """The row that reversed `tx`, or None (read off `select_related`, no query)."""
+    from django.core.exceptions import ObjectDoesNotExist
+
+    try:
+        return tx.reversal
+    except ObjectDoesNotExist:
+        return None
+
+
 def entry_row(entry) -> dict:
-    """One row of the agent's ledger (BACKEND_BUGS B-114)."""
+    """One row of the agent's ledger (BACKEND_BUGS B-114; the link between a top-up and
+    its reversal, B-147)."""
     tx = entry.transaction
     return {
         "id": entry.pk,
@@ -465,6 +476,13 @@ def entry_row(entry) -> dict:
         "receipt_number": entry.receipt_number,
         "client": person(_client_of(entry)),
         "settlement": settlement_row(entry.settlement) if entry.settlement_id else None,
+        # B-147: a reversal row names the top-up it took back (whose receipt opens by
+        # that reference), and a top-up row says whether it was taken back.
+        "reverses_reference_id": (tx.reverses.reference_id
+                                  if entry.kind == "reversal" and tx is not None
+                                  and tx.reverses_id else None),
+        "reversed": (_reversal_of(tx) is not None
+                     if entry.kind == "topup" and tx is not None else None),
     }
 
 

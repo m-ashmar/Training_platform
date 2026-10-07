@@ -2022,7 +2022,11 @@ field and code; in short:
   and the key's `paired_at` / `last_signature_at` now carry the server's offset
   (+03:00), like `wallet/transactions/`: the same instants.
 - `GET /api/wallet/agent/ledger/` — the agent's own top-ups, settlements and reversed
-  top-ups, newest first (`?since=&until=&kind=&currency=`); `GET
+  top-ups, newest first (`?since=&until=&kind=&currency=`). Additive (BACKEND_BUGS
+  B-147): a `reversal` row carries `reverses_reference_id`, the reference of the top-up
+  it took back (its own `reference_id` is the reversal's, which has no receipt), and a
+  `topup` row carries `reversed` (true once support reversed it); each is null on the
+  other kinds. `GET
   /api/wallet/agent/settlements/`; `GET /api/wallet/agent/receipts/{reference_id}/` — a
   top-up this agent made (`404 not_found` for anyone else's), with `receipt_number`,
   the client, the shop, `remaining_today`, `client_notified`, `reversed`.

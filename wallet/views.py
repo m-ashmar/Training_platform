@@ -1538,6 +1538,12 @@ class AgentLedgerView(generics.ListAPIView):
     `{number, amount, currency, receivable_before, receivable_after, note, settled_at}`
     on a settlement (null otherwise).
 
+    Also (BACKEND_BUGS B-147, additive): `reverses_reference_id` — on a `reversal` row,
+    the reference of the top-up it took back, which `receipts/{reference_id}/` opens (the
+    row's own `reference_id` is the reversal's, which has no receipt); null on every
+    other row. `reversed` — on a `topup` row, whether support has since reversed it;
+    null on a settlement or reversal row. Read in the page's one query.
+
     Refusals: 400 `bad_date` (+ `field`), `date_range_reversed`, `bad_kind`
     (+ `kind_options`), `currency_unsupported` (+ `currency_options`; the code
     `wallet/currency/` answers for the same fact); 401; 403 `agents_only`.
@@ -1556,7 +1562,10 @@ class AgentLedgerView(generics.ListAPIView):
         profile = ensure_agent_profile(self.request.user)
         rows = (AgentReceivableEntry.objects.filter(agent=profile)
                 .select_related("transaction__destination_wallet__owner",
-                                "transaction__source_wallet__owner", "settlement")
+                                "transaction__source_wallet__owner", "settlement",
+                                # B-147: the link between a top-up and its reversal,
+                                # both ways, in the same query.
+                                "transaction__reverses", "transaction__reversal")
                 .order_by("-created_at", "-id"))
         since, until, kinds, currencies = getattr(self, "_filters", (None, None, [], []))
         if since is not None:
