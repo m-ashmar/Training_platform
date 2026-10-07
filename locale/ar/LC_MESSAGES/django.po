@@ -5884,3 +5884,25 @@ msgstr "يوجد دفع مفتوح لهذا البرنامج. أكمله، أو 
 #: releases/app_links.py
 msgid "Links that open the app are not set up on this server."
 msgstr "روابط فتح التطبيق غير مُعدّة على هذا الخادم."
+
+#. A challenge metric (BACKEND_BUGS B-161): the reps of ONE exercise, the
+#. CreateChallenge artboard's «تكرارات تمرين».
+#: social/models.py
+msgid "Reps of one exercise"
+msgstr "تكرارات تمرين"
+
+#. A challenge metric (BACKEND_BUGS B-161): the current run of consecutive days
+#. trained, the CreateChallenge artboard's «أيام متتالية».
+#: social/models.py
+msgid "Days in a row"
+msgstr "أيام متتالية"
+
+#. A challenge's `exercise` names no exercise its creator may use (B-161).
+#: social/serializers.py
+msgid "No such exercise."
+msgstr "هذا التمرين غير موجود."
+
+#. An `exercise_reps` challenge with no exercise (B-161, `exercise_required`).
+#: social/serializers.py
+msgid "Name the exercise whose reps this challenge counts."
+msgstr "اختر التمرين الذي يحسب هذا التحدي تكراراته."

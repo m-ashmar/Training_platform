@@ -57,11 +57,11 @@ def apply_review(participations, state) -> int:
             ids = [pk for pk, _user in by_challenge[challenge_id]]
             over = {}
             if state == ChallengeParticipation.REVIEW_CLEAR and challenge.auto_counted:
-                from .challenge_progress import measure_for_review
+                from .challenge_progress import measure_challenge
 
-                over = measure_for_review(
-                    challenge.metric, [user for _pk, user in by_challenge[challenge_id]],
-                    challenge.start_date, challenge.end_date)[1]
+                # Its metric, window and (for `exercise_reps`, B-161) its exercise.
+                over = measure_challenge(
+                    challenge, [user for _pk, user in by_challenge[challenge_id]])[1]
             # Row by row through `save()`, as every console action here: a bulk
             # UPDATE skips the model (tests/test_regression_gate.py).
             for row in ChallengeParticipation.objects.filter(pk__in=ids).order_by('id'):

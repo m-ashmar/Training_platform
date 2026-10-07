@@ -1097,7 +1097,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Posts, comments and other content you create (`user_content`); Photos and videos (`photos_videos`).
 
-**Fields stored.** `id`, `title`, `title_en`, `title_ar`, `description`, `description_en`, `description_ar`, `challenge_type`, `creator`, `start_date`, `end_date`, `status`, `target_value`, `unit`, `rules`, `metric`, `max_participants`, `participants_count`, `reward_description`, `image`, `is_hidden`, `winner_checked_at`, `settled_active_participants`, `created_at`, `updated_at`.
+**Fields stored.** `id`, `title`, `title_en`, `title_ar`, `description`, `description_en`, `description_ar`, `challenge_type`, `creator`, `start_date`, `end_date`, `status`, `target_value`, `unit`, `rules`, `metric`, `exercise`, `max_participants`, `participants_count`, `reward_description`, `image`, `is_hidden`, `winner_checked_at`, `settled_active_participants`, `created_at`, `updated_at`.
 
 **In the export.** Every field.
 

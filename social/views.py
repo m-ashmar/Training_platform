@@ -831,12 +831,29 @@ class ChallengeViewSet(viewsets.ModelViewSet):
 
     Auth required. Nothing differs by build. A challenge row (list, detail, create,
     update) is `ChallengeSerializer`; since 2026-09-24 it also carries `metric` —
-    `manual` | `volume_kg` | `sets` | `workouts` | `training_days`, writable, default
-    `manual` — and `auto_counted` (read-only, `metric != "manual"`): when true the
+    `manual` | `volume_kg` | `sets` | `workouts` | `training_days` | `exercise_reps` |
+    `streak_days` (the last two since B-161, below), writable, default `manual` — and
+    `auto_counted` (read-only, `metric != "manual"`): when true the
     server counts the participants' progress from the training they log
     (`social/challenge_progress.py`), `update_progress` refuses a hand-typed number
     (`progress_auto_counted`), and the app shows «ابدأ تمرين اليوم» instead of the
     log sheet (BACKEND_BUGS B-075).
+
+    **The metrics** (the CreateChallenge artboard; the owner, 2026-09-28, BACKEND_BUGS
+    B-161). Two more values of `metric`, additive: `exercise_reps` — the reps of ONE
+    exercise, named by `exercise` (an exercise id: a catalogue one or one of the
+    creator's own; writable, nullable, REQUIRED for this metric), served with
+    `exercise_name` (read-only, the caller's language); a day above 500 reps of it
+    flags the participant for review — and `streak_days` — the CURRENT run of
+    consecutive days with at least one counted set: today, not over yet, breaks
+    nothing; any other day without one breaks it, and the hourly phase task recounts
+    it so a broken run reads 0 within the hour. The artboard's «عدد التمارين» is
+    `workouts` (workouts finished, `status: "completed"`, with the F20 rules below);
+    «مجموع الأوزان» is `volume_kg`, «عدد المجموعات» `sets`, «أيام التمرين»
+    `training_days`. Create/update refusals (400 `validation_error`, the field code in
+    `field_errors.exercise`): `exercise_required` — `metric` `exercise_reps` with no
+    exercise; `exercise_not_found` — an id that does not exist, is inactive or is
+    another trainer's own. `exercise` sent with any other metric is stored null.
 
     `user_progress` — `{current_value, progress_percentage, rank, review_state,
     review_reason}` of the caller, or null when they have not joined. `rank` is
@@ -891,14 +908,15 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     PUT/PATCH (the creator, or staff) — what decides a standing is fixed where
     changing it would let a result be picked after the fact (F20). Both answer 400
     with the top-level `code` and the field error beside it (`field_errors`):
-      `challenge_over` — `metric`, `start_date`, `end_date` or `target_value` of a
-          challenge that is over (ended or closed). Nothing recounts a finished
-          challenge, so switching a manual one to an auto-counted metric after the
-          end would have ranked its self-reported numbers.
+      `challenge_over` — `metric`, `start_date`, `end_date`, `target_value` or
+          `exercise` of a challenge that is over (ended or closed). Nothing recounts a
+          finished challenge, so switching a manual one to an auto-counted metric after
+          the end would have ranked its self-reported numbers.
       `end_date_in_past` — an `end_date` earlier than now. Ending early is a close
           (`status: "completed"`), which moves the end to the moment of the close, so
           the review window runs from when it really ended.
-    Changing `metric` or the dates of a RUNNING challenge still recounts everyone.
+    Changing `metric`, `exercise` or the dates of a RUNNING challenge still recounts
+    everyone.
 
     The banned-terms filter (spec B1, 2026-09-27): a POST/PUT/PATCH whose `title`,
     `description`, `rules`, `reward_description` or `unit` holds a term on the
@@ -912,7 +930,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     (`retry_after_seconds` in the body).
     """
     #: What a finished challenge keeps: `challenge_over` if a PATCH changes one.
-    FIXED_ONCE_OVER = ('metric', 'start_date', 'end_date', 'target_value')
+    FIXED_ONCE_OVER = ('metric', 'start_date', 'end_date', 'target_value', 'exercise')
 
     serializer_class = ChallengeSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -929,13 +947,15 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             # Not one an operator hid (SIDE_BUGS S-065) — for everyone, its creator
             # included, the way a hidden post is served to nobody.
             Challenge.objects.filter(is_hidden=False)
-            .select_related('creator')
+            .select_related('creator', 'exercise')
             .only(
                 'id', 'title', 'description', 'challenge_type',
                 'target_value', 'unit', 'start_date', 'end_date',
                 'max_participants', 'participants_count', 'status',
                 'created_at', 'rules', 'reward_description', 'image', 'metric',
                 'winner_checked_at',
+                # `exercise_name` (B-161), read with the row.
+                'exercise', 'exercise__id', 'exercise__name',
                 'creator__id', 'creator__username', 'creator__email',
                 'creator__user_type', 'creator__profile_picture', 'creator__is_staff',
                 # `ranked` reads it (F20): deferred, it cost one query per row.
@@ -1075,7 +1095,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         before = serializer.instance
         self._refuse_changes_that_pick_a_result(before, serializer.validated_data)
         was_over = before.lifecycle_status == 'completed'
-        measured = (before.metric, before.start_date, before.end_date)
+        measured = (before.metric, before.start_date, before.end_date, before.exercise_id)
         target = before.target_value
         challenge = serializer.save()
         now = timezone.now()
@@ -1092,7 +1112,8 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         # participant's number is recounted (one grouped query) and the standing
         # re-ranked, rather than waiting for each of them to log again (B-075).
         if (challenge.auto_counted and challenge.is_active
-                and (challenge.metric, challenge.start_date, challenge.end_date) != measured):
+                and (challenge.metric, challenge.start_date, challenge.end_date,
+                     challenge.exercise_id) != measured):
             from .challenge_progress import recount
 
             with transaction.atomic():

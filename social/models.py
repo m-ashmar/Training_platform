@@ -380,16 +380,32 @@ class Challenge(models.Model):
     #: it (`progress_auto_counted`). The 09-community design counts progress
     #: automatically wherever it can be measured (BACKEND_BUGS B-075); `challenge_type`
     #: and `unit` are free descriptions and cannot say which number that is.
+    #:
+    #: The owner's decision of 2026-09-28 (BACKEND_BUGS B-161) added two, for the
+    #: CreateChallenge artboard: `exercise_reps` (the reps of ONE exercise, named in
+    #: `exercise`, which it requires) and `streak_days` (the CURRENT run of consecutive
+    #: days with a counted set). «عدد التمارين» is `workouts` (workouts finished).
     METRIC_MANUAL = 'manual'
+    METRIC_EXERCISE_REPS = 'exercise_reps'
+    METRIC_STREAK_DAYS = 'streak_days'
     METRIC_CHOICES = [
         (METRIC_MANUAL, gettext_lazy('Logged by hand')),
         ('volume_kg', gettext_lazy('Weight lifted (kg)')),
         ('sets', gettext_lazy('Sets logged')),
         ('workouts', gettext_lazy('Workouts finished')),
         ('training_days', gettext_lazy('Days trained')),
+        (METRIC_EXERCISE_REPS, gettext_lazy('Reps of one exercise')),
+        (METRIC_STREAK_DAYS, gettext_lazy('Days in a row')),
     ]
     metric = models.CharField(max_length=20, choices=METRIC_CHOICES, default=METRIC_MANUAL)
-    
+
+    #: The exercise whose reps an `exercise_reps` challenge counts (B-161); null for
+    #: every other metric. A catalogue exercise or one of the creator's own. SET_NULL:
+    #: an exercise deleted later leaves the challenge, its standing frozen as it stood
+    #: (`challenge_progress.recount` does not recount a challenge that lost it).
+    exercise = models.ForeignKey('routine.Exercise', on_delete=models.SET_NULL,
+                                 null=True, blank=True, related_name='challenges')
+
     # Participation
     max_participants = models.PositiveIntegerField(null=True, blank=True)
     participants_count = models.PositiveIntegerField(default=0)

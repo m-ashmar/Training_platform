@@ -11,7 +11,18 @@ ever written by `update_progress`, so every challenge was a manual one.
     sets           how many sets they logged
     training_days  how many different days they logged a set on
     workouts       how many workout sessions they finished (`status='completed'`)
+    exercise_reps  Σ reps of the sets they logged of ONE exercise (`Challenge.exercise`)
+    streak_days    the CURRENT run of consecutive days with a counted set (see below)
     manual         nothing: `update_progress` is how the number moves (the default)
+
+`exercise_reps` and `streak_days` are the owner's decision of 2026-09-28 (BACKEND_BUGS
+B-161). A STREAK DAY needs one counted set (not `MIN_SETS_PER_DAY`). The run is the one
+alive at the last day that can count — today, or the window's last day once it is
+over: it ends on that day when that day has a counted set; today, not over yet, does
+not break it (the run then ends yesterday); any other day without a counted set breaks
+it, so a person who stops training drops to 0. The clock moves that number without a
+set being logged, so the hourly phase task recounts every running `streak_days`
+challenge (`recount_streaks`). Days before the window's first day never count.
 
 A set belongs to the day it was trained on (`ExerciseSetLog.date`, the copy of its
 progress row's day); the window is the challenge's start and end dates in the server's
@@ -141,7 +152,12 @@ REVIEW_THRESHOLDS = {
     'sets': 45,
     'volume_kg': 20000,
     'workouts': MAX_WORKOUTS_PER_DAY,
+    # Reps of the challenge's one exercise in a day (owner, 2026-09-28, B-161).
+    'exercise_reps': 500,
 }
+
+#: The metrics counted from set logs (the other counted one, `workouts`, from sessions).
+SET_METRICS = ('volume_kg', 'sets', 'training_days', 'exercise_reps', 'streak_days')
 
 
 class _CountsUntil(Func):
@@ -178,18 +194,43 @@ def credible_sets(logged):
 
 
 # ------------------------------------------------------------------ the number itself
-def measure(metric, user_ids, start, end) -> dict:
+def measure(metric, user_ids, start, end, *, exercise_id=None) -> dict:
     """{user_id: value} for `metric` over [start, end], in ONE query.
 
     People with nothing in the window are absent from the answer (read them as 0).
     """
-    return measure_for_review(metric, user_ids, start, end)[0]
+    return measure_for_review(metric, user_ids, start, end, exercise_id=exercise_id)[0]
 
 
-def measure_for_review(metric, user_ids, start, end) -> tuple[dict, dict]:
+def measure_challenge(challenge, user_ids) -> tuple[dict, dict]:
+    """`measure_for_review` for one challenge: its metric, window and exercise."""
+    return measure_for_review(challenge.metric, user_ids, challenge.start_date,
+                              challenge.end_date, exercise_id=challenge.exercise_id)
+
+
+def current_run(trained_days, first, last, today) -> int:
+    """The streak (`streak_days`): consecutive days of `trained_days` ending at the last
+    day that can count — `today`, or `last` (the window's last day) once it is over —
+    never before `first`. Today, not over yet, breaks nothing; any other day without a
+    counted set breaks the run. See the module docstring."""
+    day = min(today, last)
+    if day not in trained_days:
+        if day < today:
+            return 0                      # that day is over, and nothing was counted
+        day -= timedelta(days=1)
+    run = 0
+    while day >= first and day in trained_days:
+        run += 1
+        day -= timedelta(days=1)
+    return run
+
+
+def measure_for_review(metric, user_ids, start, end, *,
+                       exercise_id=None) -> tuple[dict, dict]:
     """({user_id: value}, {user_id: the LATEST day over `REVIEW_THRESHOLDS`}), ONE query.
 
-    Someone with no day over a threshold is absent from the second dict.
+    Someone with no day over a threshold is absent from the second dict. `exercise_id`
+    is the exercise an `exercise_reps` challenge counts; without one it counts nothing.
 
     The query hands back per-day rows, at most `MAX_SETS_PER_DAY` sets per person per
     day (a window function numbers them; the SQL drops the rest), or one row per
@@ -230,11 +271,17 @@ def measure_for_review(metric, user_ids, start, end) -> tuple[dict, dict]:
                 flagged[uid] = max(day, flagged.get(uid, day))
         return {uid: float(value) for uid, value in values.items()}, flagged
 
-    if metric not in ('volume_kg', 'sets', 'training_days'):
+    if metric not in SET_METRICS:
         return {}, {}
-    credible = credible_sets(ExerciseSetLog.objects.filter(
-        user_exercise_progress__user_id__in=ids,
-        date__gte=timezone.localdate(start), date__lte=timezone.localdate(end)))
+    first, last = timezone.localdate(start), timezone.localdate(end)
+    logged = ExerciseSetLog.objects.filter(
+        user_exercise_progress__user_id__in=ids, date__gte=first, date__lte=last)
+    if metric == Challenge.METRIC_EXERCISE_REPS:
+        if exercise_id is None:
+            return {}, {}
+        # Only that exercise's sets, so the per-day set cap is counted within it.
+        logged = logged.filter(user_exercise_progress__exercise_id=exercise_id)
+    credible = credible_sets(logged)
     volume = Case(When(weight__gt=0, then=ExpressionWrapper(
                       F('weight') * F('reps'), output_field=FloatField())),
                   default=Value(0.0), output_field=FloatField())
@@ -243,21 +290,37 @@ def measure_for_review(metric, user_ids, start, end) -> tuple[dict, dict]:
             .annotate(owner=F('user_exercise_progress__user_id'), kg=volume,
                       nth=Window(RowNumber(), partition_by=day, order_by=F('id').asc()),
                       day_sets=Window(Count('id'), partition_by=day),
-                      day_kg=Window(Sum(volume), partition_by=day))
+                      day_kg=Window(Sum(volume), partition_by=day),
+                      day_reps=Window(Sum('reps'), partition_by=day))
             .filter(nth__lte=MAX_SETS_PER_DAY)
             .order_by()
-            .values_list('owner', 'date', 'kg', 'day_sets', 'day_kg'))
+            .values_list('owner', 'date', 'kg', 'reps', 'day_sets', 'day_kg', 'day_reps'))
     days = {}
-    for uid, date, kg, day_sets, day_kg in rows:
-        entry = days.setdefault((uid, date), [0, 0.0, day_sets or 0, float(day_kg or 0)])
+    for uid, date, kg, reps, day_sets, day_kg, day_reps in rows:
+        entry = days.setdefault((uid, date), [0, 0.0, 0, day_sets or 0,
+                                              float(day_kg or 0), day_reps or 0])
         entry[0] += 1
         entry[1] += float(kg or 0)
-    for (uid, day), (sets, kg, all_sets, all_kg) in days.items():
+        entry[2] += reps or 0
+    if metric == Challenge.METRIC_STREAK_DAYS:
+        # A day with a counted set is a streak day; no day is over a threshold.
+        trained = {}
+        for uid, date in days:
+            trained.setdefault(uid, set()).add(date)
+        today = timezone.localdate()
+        for uid, dates in trained.items():
+            run = current_run(dates, first, last, today)
+            if run:
+                values[uid] = float(run)
+        return values, {}
+    for (uid, day), (sets, kg, reps, all_sets, all_kg, all_reps) in days.items():
         if metric == 'sets':
             value, over = sets, all_sets > REVIEW_THRESHOLDS['sets']
         elif metric == 'volume_kg':
             value = min(kg, MAX_VOLUME_KG_PER_DAY)
             over = all_kg > REVIEW_THRESHOLDS['volume_kg']
+        elif metric == Challenge.METRIC_EXERCISE_REPS:
+            value, over = reps, all_reps > REVIEW_THRESHOLDS['exercise_reps']
         else:
             value, over = (1 if sets >= MIN_SETS_PER_DAY else 0), False
         values[uid] = values.get(uid, 0.0) + value
@@ -320,13 +383,15 @@ def reapply_target(challenge) -> int:
         return len(changed)
 
 
-def recount(challenge, user_ids=None) -> bool:
+def recount(challenge, user_ids=None, *, moved_users=None) -> bool:
     """Recount `user_ids` (default: everyone counted) of one running challenge.
 
     Under the challenge's row lock, measuring inside it. Writes only the rows whose
     number or review moved (one bulk UPDATE) and does NOT re-rank: the caller does,
     once, after whatever else it changed (`social/standing.py write_places`). Returns
-    whether any row moved. A manual, hidden or not-running challenge is left alone.
+    whether any row moved; `moved_users`, when given, gains the people whose row did.
+    A manual, hidden or not-running challenge is left alone, and so is an
+    `exercise_reps` one whose exercise was deleted (its standing stays as it stood).
 
     Everyone who has not dropped out is counted, a DISQUALIFIED participant included
     (their number stays true for the operator who may clear them). A participant with
@@ -344,12 +409,13 @@ def recount(challenge, user_ids=None) -> bool:
         locked = Challenge.objects.select_for_update().filter(pk=challenge.pk).first()
         if locked is None or not locked.counting_open():
             return False
+        if locked.metric == Challenge.METRIC_EXERCISE_REPS and locked.exercise_id is None:
+            return False
         rows = participating(ChallengeParticipation.objects.filter(challenge=locked))
         if user_ids is not None:
             rows = rows.filter(user_id__in=list(user_ids))
         rows = list(rows)
-        values, over = measure_for_review(locked.metric, [row.user_id for row in rows],
-                                          locked.start_date, locked.end_date)
+        values, over = measure_challenge(locked, [row.user_id for row in rows])
         moved = []
         fields = ['current_value', 'progress_percentage', 'status', 'completed_at',
                   'review_state', 'review_reason']
@@ -367,6 +433,8 @@ def recount(challenge, user_ids=None) -> bool:
                 moved.append(row)
         if moved:
             ChallengeParticipation.objects.bulk_update(moved, fields)
+            if moved_users is not None:
+                moved_users.update(row.user_id for row in moved)
         return bool(moved)
 
 
@@ -417,6 +485,48 @@ def recount_for_user(user_id) -> int:
         for other in sorted(touched):
             ChallengeViewSet.invalidate_challenges_cache_for(other)
             bump_stamp(other)
+    return moved
+
+
+def recount_streaks(now=None) -> int:
+    """Recount every `streak_days` challenge that is still counting (B-161).
+
+    A streak is the CURRENT run, so a day that passes without a set moves it with no
+    write to trigger a recount; the hourly phase task (`social/tasks.py
+    advance_challenge_phases`) calls this so a run broken at midnight reads 0 within
+    the hour. One grouped recount per challenge, re-ranked when it moved, and the
+    cached lists of the people whose number or place moved dropped. One challenge's
+    failure does not stop the others. Returns how many challenges moved.
+    """
+    from home.views import bump_stamp
+
+    from .models import Challenge
+    from .standing import write_places
+    from .views import ChallengeViewSet
+
+    now = now or timezone.now()
+    ids = list(Challenge.objects
+               .filter(metric=Challenge.METRIC_STREAK_DAYS, is_hidden=False,
+                       winner_checked_at__isnull=True, start_date__lte=now,
+                       end_date__gte=now - timedelta(hours=LATE_HOURS))
+               .exclude(status='cancelled').order_by('id').values_list('pk', flat=True))
+    moved = 0
+    for pk in ids:
+        touched = set()
+        try:
+            with transaction.atomic():
+                challenge = Challenge.objects.filter(pk=pk).first()
+                if challenge is None or not recount(challenge, moved_users=touched):
+                    continue
+                write_places(challenge, moved_users=touched)
+        except Exception:
+            logger.warning("could not recount the streaks of challenge %s", pk,
+                           exc_info=True)
+            continue
+        moved += 1
+        for user_id in sorted(touched):
+            ChallengeViewSet.invalidate_challenges_cache_for(user_id)
+            bump_stamp(user_id)
     return moved
 
 

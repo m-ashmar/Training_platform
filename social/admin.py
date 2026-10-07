@@ -19,6 +19,9 @@ class ChallengeAdmin(TranslationAdmin):
     list_filter = ['challenge_type', 'status']
     search_fields = ['title', 'description']
     readonly_fields = ['created_at']
+    # The exercise an `exercise_reps` challenge counts (B-161): an id box, not a
+    # dropdown of the whole catalogue.
+    raw_id_fields = ['exercise']
 
 
 @admin.register(Achievement)

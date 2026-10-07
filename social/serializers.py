@@ -670,12 +670,46 @@ class CommentSerializer(BannedTermsFilter, serializers.ModelSerializer):
         return False
 
 
+class ChallengeExerciseField(serializers.PrimaryKeyRelatedField):
+    """`exercise` on a challenge (BACKEND_BUGS B-161): the id of an active exercise the
+    challenge's creator may read — the ONE rule for that, `routine/permissions.py
+    visible_exercises_for` (a trainer: the catalogue and their own; a client: the
+    catalogue, their coach's and their routines'). Anything else, a missing id
+    included, is the field code `exercise_not_found`: another trainer's private
+    exercise is answered exactly like one that does not exist."""
+
+    def get_queryset(self):
+        from routine.models import Exercise
+        from routine.permissions import visible_exercises_for
+
+        parent = self.parent
+        creator = getattr(getattr(parent, 'instance', None), 'creator', None)
+        if creator is None:
+            request = parent.context.get('request') if parent is not None else None
+            creator = getattr(request, 'user', None)
+        return visible_exercises_for(creator, Exercise.objects.filter(is_active=True))
+
+    def to_internal_value(self, data):
+        try:
+            return super().to_internal_value(data)
+        except serializers.ValidationError:
+            raise serializers.ValidationError(
+                _('No such exercise.'), code='exercise_not_found')
+
+
 class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
     """Serializer for community challenges
 
     A create or edit whose `title`, `description`, `rules`, `reward_description` or
     `unit` holds a banned term answers 400 `content_not_allowed` naming the field, and
     writes nothing (spec B1, `moderation/ugc_filter.py`).
+
+    `metric` `exercise_reps` counts the reps of ONE exercise (BACKEND_BUGS B-161):
+    `exercise` (an exercise id, writable, nullable) names it and is required for that
+    metric — 400 `validation_error` with the field code `exercise_required` when the
+    challenge would be left without one, `exercise_not_found` for an id the creator
+    cannot use. For any other metric `exercise` is stored null whatever is sent.
+    `exercise_name` (read-only) is its name in the caller's language, or null.
 
     `creator` is `{id, username, user_type, profile_picture}`, or null when the creator's
     account is not publicly visible — suspended or erased (the owner's decision 8,
@@ -709,6 +743,9 @@ class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
     #: `ChallengeViewSet.get_queryset`; counted here only for a row read elsewhere.
     winner_min_participants = serializers.SerializerMethodField()
     active_participants = serializers.SerializerMethodField()
+    #: The exercise an `exercise_reps` challenge counts (B-161); see the docstring.
+    exercise = ChallengeExerciseField(required=False, allow_null=True)
+    exercise_name = serializers.SerializerMethodField()
 
     banned_terms_fields = ('title', 'description', 'rules', 'reward_description', 'unit')
 
@@ -722,8 +759,36 @@ class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
             'is_joined', 'user_progress', 'is_active', 'metric', 'auto_counted',
             'ranked', 'counting', 'review_hours', 'winner_final',
             'winner_min_participants', 'active_participants',
+            'exercise', 'exercise_name',
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'participants_count']
+
+    def validate(self, attrs):
+        """An `exercise_reps` challenge names its exercise; no other metric keeps one
+        (B-161). Judged on the challenge as it will be: a PATCH of `metric` alone to
+        `exercise_reps` needs an exercise already there."""
+        attrs = super().validate(attrs)
+        instance = self.instance
+        if instance is not None and 'metric' not in attrs and 'exercise' not in attrs:
+            # An edit of the text or the target: what is counted is not being changed,
+            # and an exercise deleted since (SET_NULL) must not lock the title.
+            return attrs
+        metric = attrs.get('metric', instance.metric if instance is not None
+                           else Challenge.METRIC_MANUAL)
+        exercise = attrs['exercise'] if 'exercise' in attrs else (
+            instance.exercise if instance is not None else None)
+        if metric == Challenge.METRIC_EXERCISE_REPS:
+            if exercise is None:
+                raise serializers.ValidationError({'exercise': ErrorDetail(
+                    _('Name the exercise whose reps this challenge counts.'),
+                    code='exercise_required')})
+        elif exercise is not None:
+            attrs['exercise'] = None
+        return attrs
+
+    def get_exercise_name(self, obj):
+        exercise = obj.exercise if obj.exercise_id else None
+        return exercise.name if exercise is not None else None
 
     def validate_status(self, value):
         """Only a CLOSE is a decision. 'upcoming' and 'active' follow from the dates, so
