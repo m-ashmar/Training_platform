@@ -1,8 +1,9 @@
 """`GET /api/v1/home` — the one screen the app opens on.
 
-The section types are the design canvas's closed set (BuildGuide layer 4); the builders
-live in `home/sections.py` (the training client's own state) and `home/first_day.py`
-(the first-day list and the two store-sensitive slots).
+The section types are the design canvas's closed set (BuildGuide layer 4), plus the
+owner's `day_timeline` (2026-09-28: the «يومك» rail as a section, so the order can be the
+artboard's); the builders live in `home/sections.py` (the training client's own state)
+and `home/first_day.py` (the first-day list and the two store-sensitive slots).
 """
 from __future__ import annotations
 
@@ -32,17 +33,25 @@ CACHE_SECONDS = 120
 #: mode flag. A type that is not in this tuple is never sent.
 SECTION_ORDER = (
     'workout_hero',        # the active day …
-    'find_trainer_hero',   # … or the first day
+    'find_trainer_hero',   # … or the first day — never both, but for one state below
     'setup_checklist',
     'trainer_message',
-    'nutrition_today',
-    'week_stats',
+    'day_timeline',        # «يومك», the rail …
+    'week_stats',          # … then «هذا الأسبوع» …
+    'nutrition_today',     # … then «سعرات اليوم» (`Home.html`, BACKEND_BUGS B-176)
     'ai_advice',
     'challenge_rank',
     'featured_trainers',
     'ready_programs',
     'media_banner',
 )
+
+#: The one state that answers both heroes, and the order it answers them in: a client
+#: with no coach whose day is REFUSED — a former client whose coaching ended and who
+#: keeps the coach's routine readable and unstartable (the owner, 2026-09-28,
+#: BACKEND_BUGS B-182). The find-a-trainer hero leads; the day stays readable behind it.
+REFUSED_DAY_ORDER = ('find_trainer_hero',) + tuple(
+    name for name in SECTION_ORDER if name != 'find_trainer_hero')
 
 
 def _stamp_key(user_id) -> str:
@@ -120,9 +129,12 @@ class HomeView(APIView):
         {"role": "client",                    the account's shell: client | trainer |
                                               agent | admin (admin is the operator)
          "as_of": "2026-09-20T18:04:11Z",     when this payload was built
-         "refresh_after_seconds": 120,        do not ask again sooner than this; on a
-                                              page served from the cache it is the
-                                              time LEFT (1-120), not a fresh 120
+         "refresh_after_seconds": 120,        do not ask again sooner than this: 120,
+                                              or less when a meal or the workout on
+                                              today's timeline turns due sooner (the
+                                              seconds until then, B-179); on a page
+                                              served from the cache it is the time
+                                              LEFT (1-120), not a fresh number
          "sections": [{"type": "...", "data": {...}}, ...]}
 
     A section object is `{"type", "data"}` and nothing else. A section with nothing to
@@ -133,7 +145,12 @@ class HomeView(APIView):
 
     THE CLOSED SET OF TYPES, in the order they are answered. The two artboards are two
     lists out of this one set: a client with a coach gets the first group, a client
-    without one gets the first-day group, and the state is what decides.
+    without one gets the first-day group, and the state is what decides. There is ONE
+    hero: `workout_hero` when a routine is assigned, else `find_trainer_hero`. The one
+    state that answers both is a client with no coach whose day is `refused` (a former
+    client whose coaching ended, who keeps the coach's routine readable): then
+    `find_trainer_hero` comes FIRST and `workout_hero` right after it, every other
+    section in its usual place (the owner, 2026-09-28, BACKEND_BUGS B-182).
 
     ``workout_hero`` — today's training. Omitted when no active routine is assigned::
 
@@ -175,8 +192,13 @@ class HomeView(APIView):
         session answers `continue` with its `session_id`, not `refused`. Which day of the routine today is,
         is counted from `Routine.start_date` over `Routine.days`.
 
-    ``find_trainer_hero`` — the first day. Only for a client with no coach, and only
-    once they have chosen a goal::
+    ``find_trainer_hero`` — the first day. Only for a client with no coach, only once
+    they have chosen a goal, and only when there is no `workout_hero` to lead — a
+    client with no coach who bought a programme is training, and gets the day's hero
+    alone (BACKEND_BUGS B-182; the checklist's `coach` step and `featured_trainers`
+    still carry the call to find a coach). The exception is a day that cannot be
+    started: with `workout_hero.cta.state` `refused` this hero is sent too, and LEADS
+    the list (see above)::
 
         {"goal": "build_muscle",              the stored code, never a label
          "matches": 3}                        trainers available who suit that goal
@@ -210,10 +232,11 @@ class HomeView(APIView):
         `deleted` is `true`, the tombstone `GET /api/v1/chat/conversations/` shows for
         the same thread, and `unread_count` still counts the messages before it.
 
-        `kind` is the message's own: `text`, `image`, `voice` or `video` — branch on
-        it, and draw a value you do not know as a placeholder. A photo or a video is
-        opened in the thread, which serves its media. A VOICE note plays on the card,
-        so `kind: "voice"` — and only that kind — adds three keys beside the rest::
+        `kind` is the message's own: `text`, `image`, `voice`, `video` or `program` —
+        branch on it, and draw a value you do not know as a placeholder. A photo or a
+        video is opened in the thread, which serves its media. A VOICE note plays on
+        the card, so `kind: "voice"` — and only that kind — adds three keys beside the
+        rest::
 
             "message": {"id": 92, "kind": "voice", "body": "", "deleted": false,
                         "sent_at": "...",
@@ -232,6 +255,54 @@ class HomeView(APIView):
         caption, often empty. `body` is cut at 200 characters, the same preview the
         conversation list sends. `unread_count` is the same number
         `GET /api/v1/chat/conversations/` reports, by construction.
+
+        A coach's PROGRAM card names its routine on the card («حدّث برنامجك ·
+        <routine>»), so `kind: "program"` — and only that kind — adds one key
+        (BACKEND_BUGS B-175)::
+
+            "message": {"id": 93, "kind": "program", "body": "…", "deleted": false,
+                        "sent_at": "...",
+                        "program": {"routine_id": 12, "template_id": 3 | null,
+                                    "name": "Upper body", "day": 2 | null,
+                                    "day_name": "…" | null, "exercises": 6 | null,
+                                    "changes": {…} | null} | null}
+
+        `program` is the thread's own `program` for the same message
+        (`GET /api/v1/chat/conversations/{id}/messages/`), by the same rule: null when
+        the card was taken back, its routine was deleted, or the routine is no longer
+        one this client may read (taken off them). A frozen or ended coaching still
+        reads it — reading is not training.
+
+    ``day_timeline`` — the artboard's «يومك» rail, as a section of its own, so the
+    order can be the artboard's: the rail, then `week_stats`, then `nutrition_today`
+    (the calories card) — BACKEND_BUGS B-176, the owner, 2026-09-28. Omitted exactly
+    when `nutrition_today` is (no plan covering today, no diet entitlement), and when
+    the day has nothing on it (the timeline would be `[]`)::
+
+        {"date": "2026-09-20",
+         "timeline": [ … `nutrition_today.timeline`, the same entries … ]}
+
+        One builder, one list: the entries, their order and their states are exactly
+        `nutrition_today.timeline`'s (below), which stays for the builds already
+        installed. A build that draws this section draws the rail from it and not a
+        second time from `nutrition_today`.
+
+    ``week_stats`` — the three tiles. Omitted for someone who has never trained::
+
+        {"workouts": {"done": 4, "planned": 6},       this week, Saturday to today;
+                                              `planned` is how many days of this week
+                                              the routine's cycle asks for work, and is
+                                              null when no routine is assigned
+         "volume_kg": {"logged": 14250.0, "previous": 13200.0, "change_percent": 8.0},
+         "streak": {"current": 12, "longest": 20},
+         "approximate": false}                a day was filled in afterwards, so the
+                                              numbers are the best that can be said
+
+        `done` counts days finished with nothing missing — the platform's own
+        definition of a training day, the one the streak counts. `volume_kg.logged` is
+        the seven days ending today, the same window and the same number
+        `GET /api/routine/v1/analytics/recent-progress/` reports, from the same cache
+        entry; `previous` is the seven days before those.
 
     ``nutrition_today`` — the day's meals and the day's totals. Omitted with no plan
     covering today, and omitted when the subscription never entitled diet — never a 403
@@ -255,9 +326,10 @@ class HomeView(APIView):
 
         ``timeline`` — the artboard's «يومك»: the same meals, with today's workout
         placed among them by time. Always present in this section (`[]` on a day with
-        no meals and no training), and nowhere else: a day with no diet section has no
-        timeline, because without the meals it would only repeat the hero. Two kinds
-        of entry, in the day's order::
+        no meals and no training), and answered again as the `day_timeline` section
+        (above) — the same list: a day with no diet section has no timeline, because
+        without the meals it would only repeat the hero. Two kinds of entry, in the
+        day's order::
 
             {"kind": "meal", "at": "08:00:00" | null, "state": "done",
              "meal_id": 31, "meal_type": "Breakfast", "name": "…", "calories": 520.0}
@@ -274,8 +346,11 @@ class HomeView(APIView):
         timeline cannot disagree. The workout's: `done` once the day is closed (the
         hero's `outcome`); `now` while it is under way (a session open on it, or a set
         already logged) or once its time has come; `next` before that. More than one
-        entry can be `now` when an earlier one was left undone: the «الآن» pill
-        belongs to the LAST `now`.
+        entry can be `now` when an earlier one was left undone, and a meal with no time
+        is `now` all day and sorts last (BACKEND_BUGS B-178): the «الآن» pill belongs
+        to the last `now` entry that has a time (`at` not null); only when no timed
+        entry is `now`, to the last untimed `now`. Every other `now` entry is drawn lit,
+        without the pill.
 
         The workout entry is the hero's own day — the same routine, day of the cycle,
         counts and refusal — and is left out on a rest day and outside the routine's
@@ -285,23 +360,6 @@ class HomeView(APIView):
         be reminded to train (`workout_reminder_hour`, 18 unless they changed it). A
         meal with no time sorts last; the workout goes after every timed meal at or
         before its own time. Times are wall-clock times of the day, as a meal's is.
-
-    ``week_stats`` — the three tiles. Omitted for someone who has never trained::
-
-        {"workouts": {"done": 4, "planned": 6},       this week, Saturday to today;
-                                              `planned` is how many days of this week
-                                              the routine's cycle asks for work, and is
-                                              null when no routine is assigned
-         "volume_kg": {"logged": 14250.0, "previous": 13200.0, "change_percent": 8.0},
-         "streak": {"current": 12, "longest": 20},
-         "approximate": false}                a day was filled in afterwards, so the
-                                              numbers are the best that can be said
-
-        `done` counts days finished with nothing missing — the platform's own
-        definition of a training day, the one the streak counts. `volume_kg.logged` is
-        the seven days ending today, the same window and the same number
-        `GET /api/routine/v1/analytics/recent-progress/` reports, from the same cache
-        entry; `previous` is the seven days before those.
 
     ``ai_advice`` — the smart note. Omitted without AI consent, and omitted when the
     week has nothing worth saying::
@@ -345,10 +403,12 @@ class HomeView(APIView):
         today the two price keys are ABSENT — never null, never zero.
 
     ``ready_programs`` — the programmes on sale (routine products, plan step 10), newest
-    listing first, at most four. Only for a client with no coach. **Left out entirely
-    on a build that may not show prices** (`play`, `ios`, and a caller that declares no
-    channel) — those builds read the programmes on `GET /api/v1/products/`, without a
-    price or a buy action::
+    listing first, at most four. For every client, with a coach or without one (the
+    owner, 2026-09-28: it was first-day only before); a programme this client already
+    bought stays in the row with `owned: true` and `can_buy: false`. **Left out
+    entirely on a build that may not show prices** (`play`, `ios`, and a caller that
+    declares no channel) — those builds read the programmes on `GET /api/v1/products/`,
+    without a price or a buy action::
 
         {"programs": [{"id": 5,                    the PRODUCT (`/api/v1/products/5/`)
                        "name": "Strength for beginners", "description": "…",
@@ -416,7 +476,9 @@ class HomeView(APIView):
     One build of the screen is a bounded batch of queries with no N+1
     (`tests/test_home.py` asserts the number and that it does not follow the data), and
     the result is cached per user, per build and per language for 120 s (private cache,
-    DB3). The entry is retired the moment a workout session is started, changed or
+    DB3) — or until the first `next` entry of today's timeline turns due, when that is
+    sooner, so a meal or the workout never stays `upcoming`/`next` past its time
+    (BACKEND_BUGS B-179; midnight is not a boundary). The entry is retired the moment a workout session is started, changed or
     finished, a day closes, a chat message arrives or is taken back, the client reads
     the thread, a block is made or lifted between the client and anyone, or the
     client's coaching relation changes (`training_platform/signals.py`). Everything
@@ -454,11 +516,16 @@ class HomeView(APIView):
         except Exception:
             cached = None
         if cached is not None:
-            return Response(_with_time_left(cached))
+            served = _with_time_left(cached)
+            if served is not None:
+                return Response(served)
 
         payload = self.build(request, person, channel=channel)
         try:
-            private_cache().set(key, payload, CACHE_SECONDS)
+            # The page's OWN life: 120 s, or less when a meal or the workout turns due
+            # sooner (`_time_to_live`, BACKEND_BUGS B-179).
+            private_cache().set(key, payload,
+                                payload.get('refresh_after_seconds') or CACHE_SECONDS)
         except Exception:
             # A cache that cannot be written is not an outage; the screen is built.
             logger.warning("Could not cache the home screen for user %s", person.pk,
@@ -467,9 +534,10 @@ class HomeView(APIView):
 
     def build(self, request, person, *, channel) -> dict:
         """Every section, in order, with the ones that have nothing to say left out."""
+        built_at = timezone.now()
         answer = {
             'role': person.user_type,
-            'as_of': timezone.now(),
+            'as_of': built_at,
             'refresh_after_seconds': CACHE_SECONDS,
             'sections': [],
         }
@@ -497,51 +565,106 @@ class HomeView(APIView):
         plan = sections.active_diet_plan(person, on_date)
         coached = relation is not None
         # One reading of the clock for every state that depends on it: a meal and the
-        # workout beside it in the timeline are judged against the same minute.
-        clock = timezone.localtime().time()
+        # workout beside it in the timeline are judged against the same minute, and it
+        # is the moment `as_of` names, so the page's life is counted from it.
+        clock = timezone.localtime(built_at).time()
 
         hero = sections.workout_hero(person, routine, week, on_date=on_date,
                                      refusal=refusal)
+        refused_day = (not coached and hero is not None
+                       and hero['cta']['state'] == 'refused')
+        nutrition = sections.nutrition_today(
+            person, plan, on_date=on_date, request=request, clock=clock,
+            # Asked only when the section exists: the timeline lives inside it.
+            workout=(sections.timeline_workout(person, routine, hero,
+                                               on_date=on_date, clock=clock)
+                     if plan is not None else None))
         built = {
             'workout_hero': hero,
             'trainer_message': sections.trainer_message(person, relation, request=request),
-            'nutrition_today': sections.nutrition_today(
-                person, plan, on_date=on_date, request=request, clock=clock,
-                # Asked only when the section exists: the timeline lives inside it.
-                workout=(sections.timeline_workout(person, routine, hero,
-                                                   on_date=on_date, clock=clock)
-                         if plan is not None else None)),
+            'day_timeline': sections.day_timeline(nutrition),
+            'nutrition_today': nutrition,
             'week_stats': sections.week_stats(person, routine, week, week_payload,
                                               on_date=on_date),
             'ai_advice': sections.ai_advice(person, on_date=on_date),
             'challenge_rank': sections.challenge_rank(person),
             # The first-day list. The artboard shows these to a client who has no coach
             # yet and none of them to one who has, so the state decides, not a flag.
-            'find_trainer_hero': None if coached else first_day.find_trainer_hero(person),
+            # The find-a-trainer hero is a HERO: a client with no coach who is already
+            # training (a programme they bought) has the day's hero, and the two
+            # artboards never stack two (BACKEND_BUGS B-182). Only a day that cannot be
+            # started — the coaching ended and the routine is `refused` — keeps it, in
+            # the lead (`REFUSED_DAY_ORDER`, the owner, 2026-09-28).
+            'find_trainer_hero': (None if coached or (hero is not None and not refused_day)
+                                  else first_day.find_trainer_hero(person)),
             'setup_checklist': None if coached else first_day.setup_checklist(
                 person, routine=routine, plan=plan, coached=coached),
             'featured_trainers': None if coached else first_day.featured_trainers(
                 person, request=request, flags=flags),
-            'ready_programs': None if coached else first_day.ready_programs(
-                person, request=request, flags=flags),
+            # The programmes on sale are for every client, coached or not (the owner,
+            # 2026-09-28): the build decides whether the section exists, and an owned
+            # programme's card says `owned: true`, `can_buy: false`.
+            'ready_programs': first_day.ready_programs(person, request=request,
+                                                       flags=flags),
             'media_banner': first_day.media_banner(request=request, flags=flags),
         }
+        order = (REFUSED_DAY_ORDER if refused_day and built['find_trainer_hero']
+                 else SECTION_ORDER)
         answer['sections'] = [{'type': name, 'data': built[name]}
-                              for name in SECTION_ORDER if built.get(name)]
+                              for name in order if built.get(name)]
+        answer['refresh_after_seconds'] = _time_to_live(nutrition, on_date=on_date,
+                                                        built_at=built_at)
         return answer
 
 
-def _with_time_left(payload: dict) -> dict:
-    """The cached page, with `refresh_after_seconds` counted from when it was BUILT.
+def _time_to_live(nutrition, *, on_date, built_at) -> int:
+    """How long the page just built stays TRUE: `CACHE_SECONDS`, or the seconds until
+    the first entry of today's timeline that is still `next` turns due, when that comes
+    sooner (at least 1).
+
+    Every time-of-day state on the page — a meal's `upcoming`, the workout's `next` —
+    is read off the clock once, when the page is built. A page cached for the full
+    120 s kept a meal due inside that window `upcoming` until the entry expired
+    (BACKEND_BUGS B-179). The timeline holds every one of them (each meal, renamed, and
+    the workout), so it is the one list to read. Midnight is deliberately not a
+    boundary: a new day is a new page within 120 s anyway, and a page whose life
+    depended on the date would make every test that runs near midnight flaky.
+    """
+    import math
+    from datetime import datetime, time as clock_time
+
+    life = CACHE_SECONDS
+    for entry in (nutrition or {}).get('timeline') or ():
+        at = entry.get('at')
+        if entry.get('state') != 'next' or at is None:
+            continue
+        if isinstance(at, str):
+            at = clock_time.fromisoformat(at)
+        due = timezone.make_aware(datetime.combine(on_date, at))
+        life = min(life, max(1, math.ceil((due - built_at).total_seconds())))
+    return life
+
+
+def _with_time_left(payload: dict) -> dict | None:
+    """The cached page, with `refresh_after_seconds` counted from when it was BUILT, or
+    None when the page has outlived its own life and must be built again.
 
     It used to say `CACHE_SECONDS` on every answer, so a page served from a cache entry
     already 119 seconds old told the app to wait another 120 — up to four minutes
     between the change and the screen (BACKEND_BUGS B-043). The entry itself is not
     touched: this copy only corrects the one number that describes it.
+
+    The life is the page's OWN `refresh_after_seconds` as built (`_time_to_live`: 120,
+    or less when a meal or the workout turns due sooner, B-179), not a fixed 120. The
+    cache would drop the entry at that moment too; asking here as well means the page
+    is judged by the same clock that dated it (`as_of`), whatever the cache's own.
     """
     built = payload.get('as_of')
     if not hasattr(built, 'tzinfo'):
         return payload
+    life = payload.get('refresh_after_seconds') or CACHE_SECONDS
     age = (timezone.now() - built).total_seconds()
-    left = max(1, int(CACHE_SECONDS - age))
+    if age >= life:
+        return None
+    left = max(1, int(life - age))
     return {**payload, 'refresh_after_seconds': left}

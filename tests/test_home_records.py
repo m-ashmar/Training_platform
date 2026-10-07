@@ -30,8 +30,8 @@ import pytest
 from django.utils import timezone
 
 from tests.test_chat_media import voice
-from tests.test_home import (JSON, _close_day, _coached, _data, _freeze, _home, _log_sets,
-                             _message, _program, _subscribe, _types)
+from tests.test_home import (JSON, SECTION_TYPES, _close_day, _coached, _data, _freeze,
+                             _home, _log_sets, _message, _program, _subscribe, _types)
 from tests.test_home import a_cold_cache, owners_rules  # noqa: F401 — autouse here too
 
 pytestmark = pytest.mark.django_db
@@ -219,11 +219,9 @@ def test_the_timeline_is_additive(make_user, api):
     _meals(client)
 
     body = _home(api, client)
-    # The canvas's closed set of types, as it stood before the timeline.
-    assert set(_types(body)) <= {
-        "workout_hero", "find_trainer_hero", "setup_checklist", "trainer_message",
-        "nutrition_today", "week_stats", "ai_advice", "challenge_rank",
-        "featured_trainers", "ready_programs", "media_banner"}, _types(body)
+    # The canvas's closed set of types — shared setup (`tests/test_home.py
+    # SECTION_TYPES`), which the owner's `day_timeline` joined on 2026-09-28 (B-176).
+    assert set(_types(body)) <= SECTION_TYPES, _types(body)
     nutrition = _data(body, "nutrition_today")
     assert set(nutrition) == {"diet_plan_id", "date", "goal", "meals", "totals",
                               "readable_only", "timeline"}

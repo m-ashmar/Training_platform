@@ -3,7 +3,8 @@
 The artboard `screens/03-home-trainers/HomeNew.png`: a hero that names the goal they
 chose and how many trainers suit it, a three-step checklist, the suggested trainers,
 the ready-made programmes (with the free trial workout among them), and the app's own
-banner. The canvas is explicit that this is not a second screen — "the two home
+banner. The programmes and the banner are answered to a coached client too (the owner,
+2026-09-28, for the programmes). The canvas is explicit that this is not a second screen — "the two home
 artboards are just two different lists" — so these are ordinary sections and the
 person's STATE decides which of them the one endpoint answers.
 
@@ -33,6 +34,12 @@ def find_trainer_hero(person) -> dict | None:
     TRAINING_GOALS`), never a label, and the app writes "build muscle" in the reader's
     language. Left out when they never answered the goal question: there is nothing to
     say, and the checklist below already asks them to finish their profile.
+
+    The view asks for it only when no day hero leads: a client with no coach who is
+    already training (a programme they bought) gets the day's hero alone, and this one
+    is kept, in the lead, only beside a day that cannot be started (`refused`: the
+    coaching ended). BACKEND_BUGS B-182 and the owner, 2026-09-28 (`home/views.py
+    REFUSED_DAY_ORDER`).
 
     No price anywhere in this section, on any build.
     """

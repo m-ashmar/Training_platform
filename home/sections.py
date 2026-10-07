@@ -3,8 +3,10 @@
 The closed set of section types is the design canvas's
 (`yalla_gym/design/yalla-gym-design/docs/BuildGuide.md`, layer 4), not this file's
 invention. The ones here are the sections of the active-client artboard `Home.png`:
-`workout_hero`, `week_stats`, `nutrition_today`, `trainer_message`, `ai_advice` and
-`challenge_rank`. The first-day artboard's sections live in `home/first_day.py`.
+`workout_hero`, `day_timeline` (its «يومك» rail, a 12th type the owner added on
+2026-09-28 so the artboard's order can be answered), `week_stats`, `nutrition_today`,
+`trainer_message`, `ai_advice` and `challenge_rank`. The first-day artboard's sections
+live in `home/first_day.py`.
 
 Three rules hold in every builder, and the view relies on all three:
 
@@ -446,8 +448,9 @@ def trainer_message(person, relation, *, request) -> dict | None:
     `image`, `voice` or `video` (BACKEND_BUGS B-091), or `program` (a coach's program
     card, 2026-09-27). A photo, voice note, video or program card sent without a
     caption has an empty `body`; the card says what it is from `kind` and opens the
-    thread, which is where its media and its program card are served — a voice note is
-    the one exception, below. Nothing the app already reads moved.
+    thread, which is where its media and its program card are served — a voice note
+    plays on the card and a program card names its routine, below. Nothing the app
+    already reads moved.
 
     A VOICE note is the exception the artboard draws (`Home.png`: the coach's note plays
     on the card), so `kind: "voice"` adds three keys — `voice_fields` — and only that
@@ -456,6 +459,12 @@ def trainer_message(person, relation, *, request) -> dict | None:
     in the thread), `duration_seconds` (what the container declared, or null) and
     `state`. The URL outlives the 120 s the home is cached for by the signature's own
     life (an hour on GCS).
+
+    A PROGRAM card (`kind: "program"`) adds one key, and only that kind carries it:
+    `program`, the thread's own card for the same message (`program_fields`,
+    BACKEND_BUGS B-175) — `{routine_id, template_id, name, day, day_name, exercises,
+    changes}` — or null when the card was taken back or its routine is gone or no
+    longer readable by this client.
 
     `POST /api/notifications/message-client/` does NOT write a chat message (it only
     pushes a notification), so a coach who used that route does not appear here. That
@@ -469,7 +478,7 @@ def trainer_message(person, relation, *, request) -> dict | None:
     if is_blocked(person, relation.trainer_id):
         return None
 
-    from chat.models import KIND_VOICE, Message
+    from chat.models import KIND_PROGRAM, KIND_VOICE, Message
     from chat.serializers import person_card, conversation_queryset
 
     thread = (conversation_queryset(person)
@@ -479,7 +488,7 @@ def trainer_message(person, relation, *, request) -> dict | None:
         return None
     last = (Message.objects.filter(pk=thread['last_message_id'])
             .values('id', 'sender_id', 'kind', 'body', 'created_at', 'deleted_at',
-                    'attachment', 'duration_seconds')
+                    'attachment', 'duration_seconds', 'routine_id')
             .first())
     if last is None:
         return None
@@ -492,8 +501,9 @@ def trainer_message(person, relation, *, request) -> dict | None:
 
     message = {
         'id': last['id'],
-        # `text`, `image`, `voice` or `video` (B-091). A photo or a video stays in the
-        # thread; a voice note plays on the card (`voice_fields`).
+        # `text`, `image`, `voice`, `video` (B-091) or `program`. A photo or a video
+        # stays in the thread; a voice note plays on the card (`voice_fields`); a
+        # program card names its routine (`program_fields`, B-175).
         'kind': last['kind'],
         'body': '' if deleted else last['body'][:MESSAGE_PREVIEW_CHARS],
         'deleted': deleted,
@@ -501,6 +511,8 @@ def trainer_message(person, relation, *, request) -> dict | None:
     }
     if last['kind'] == KIND_VOICE:
         message.update(voice_fields(last, request, deleted=deleted))
+    elif last['kind'] == KIND_PROGRAM:
+        message['program'] = program_fields(person, last, deleted=deleted)
     return {
         'conversation_id': thread['id'],
         'unread_count': thread['unread_count'],
@@ -534,6 +546,31 @@ def voice_fields(row, request, *, deleted) -> dict:
     return {'audio_url': media_url(row['attachment'], request),
             'duration_seconds': row['duration_seconds'],
             'state': VOICE_READY}
+
+
+def program_fields(person, row, *, deleted) -> dict | None:
+    """`program` of a coach's program card, from a `.values()` row holding `id` and
+    `routine_id`: the thread's own card (`chat/serializers.py program_card`, BACKEND_BUGS
+    B-175), or None.
+
+    None when the card was taken back, names no routine (it was deleted), or names one
+    this client may no longer read — `readable_routine_ids`, the rule the thread and
+    the routine routes apply, so a routine taken off the client never lends its name to
+    the home card. The message is read again only for this kind, with its routine: two
+    small queries (the row, and who may read it).
+    """
+    if deleted or not row.get('routine_id'):
+        return None
+    from chat.models import Message
+    from chat.serializers import program_card, readable_routine_ids
+
+    message = (Message.objects.select_related('routine')
+               .filter(pk=row['id']).first())
+    if message is None or message.routine_id is None:
+        return None
+    if message.routine_id not in readable_routine_ids(person, [message]):
+        return None
+    return program_card(message)
 
 
 def ai_advice(person, *, on_date) -> dict | None:
@@ -794,6 +831,22 @@ def nutrition_today(person, plan, *, on_date, request, workout=None,
     }
 
 
+def day_timeline(nutrition) -> dict | None:
+    """The artboard's «يومك» rail as a section of its own: `{date, timeline}`.
+
+    `Home.html` draws the rail, then the week tiles, then the calories card; the rail
+    lived only inside `nutrition_today`, so the calories card was forced between the
+    rail and the week and the server's order could not be the artboard's (BACKEND_BUGS
+    B-176, the owner, 2026-09-28). It is the SAME list `nutrition_today.timeline`
+    carries — one builder (`_timeline`), one rule: no diet section, no rail — and that
+    key stays for the builds already installed. Left out when the day has nothing on it
+    (no meal today and no training): a section with nothing to say is not sent.
+    """
+    if not nutrition or not nutrition.get('timeline'):
+        return None
+    return {'date': nutrition['date'], 'timeline': nutrition['timeline']}
+
+
 def _meal_state(meal, now) -> str:
     """`eaten`, `now` or `upcoming`.
 
@@ -852,7 +905,6 @@ def challenge_rank(person) -> dict | None:
            # returns only the columns it lists, annotations included.
            .values('place', 'standing', 'challenge_id', 'current_value', 'progress_percentage',
                    'challenge__end_date', 'challenge__unit', 'challenge__target_value',
-                   'challenge__participants_count',
                    'challenge__title_ar', 'challenge__title_en')
            .order_by('challenge__end_date', 'challenge_id').first())
     if row is None:

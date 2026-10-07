@@ -578,7 +578,10 @@ use them, never store them. A message taken back serves `media: null` and
 `program: null`. The conversation list's `last_message` carries `kind` and never the
 media or the card; the home card's `trainer_message` carries `kind`, and for a VOICE note
 only it also carries `audio_url`, `duration_seconds` and `state` (2026-09-27), signed the
-same way and served only to the client of the thread.
+same way and served only to the client of the thread. For a PROGRAM card only, the home
+card carries `program` (2026-09-28, BACKEND_BUGS B-175): the thread's own `program` for
+the same message, by the same rule (null when taken back, deleted, or no longer readable
+by the client).
 
 **Video poster frames** (2026-09-27). `media.poster_url` is a video's poster: one JPEG
 frame near its start (at most 720 px a side, no metadata), cut AFTER the send by a
@@ -858,8 +861,9 @@ which is what lets an old build survive a new section.
 `{"role", "as_of", "refresh_after_seconds", "sections": [{"type", "data"}]}`. A section
 is `{"type", "data"}` and nothing else, and one with nothing to say is left out rather
 than sent empty. `refresh_after_seconds` is how long until the page may change: 120 on a
-freshly built page, and the time LEFT (1-120, counted from `as_of`) on one served from
-the cache (BACKEND_BUGS B-043). In the `workout_hero` week strip a day before the
+freshly built page — or fewer, the seconds until the first `next` entry of today's
+timeline turns due, when that is sooner (BACKEND_BUGS B-179, 2026-09-28) — and the time
+LEFT (counted from `as_of`) on one served from the cache (BACKEND_BUGS B-043). In the `workout_hero` week strip a day before the
 routine starts or after it ends is `rest` and is not counted in `week_stats.workouts
 .planned` (B-045); `counts.estimated_minutes` is null when the coach set no duration
 (B-044); `challenge_rank.participants` is counted by the same rule as `rank` (B-046). `role` is the account's shell (`client`, `trainer`, `agent`, `admin` —
@@ -868,7 +872,8 @@ routine starts or after it ends is `rest` and is not counted in `week_stats.work
 
 The closed set of types: `workout_hero`, `week_stats`, `nutrition_today`,
 `trainer_message`, `ai_advice`, `challenge_rank`, `find_trainer_hero`,
-`setup_checklist`, `featured_trainers`, `ready_programs`, `media_banner`. The two home
+`setup_checklist`, `featured_trainers`, `ready_programs`, `media_banner`, and
+`day_timeline` (the owner, 2026-09-28 — below). The two home
 artboards are two lists out of that one set — a client with no coach gets the first-day
 sections — and every `data` shape, every code and everything that differs by build is
 written out in the docstring of `home/views.py HomeView`, which is the contract.
@@ -886,7 +891,8 @@ or a link to the web hub, on any build.
 `GET /api/routine/v1/analytics/recent-progress/`; `trainer_message` reads `chat/` and
 reports the same unread count as `GET /api/v1/chat/conversations/`; `ai_advice` appears
 only once the person has given AI consent (`/api/v1/ai-consent/`). The payload is cached
-per user, per build and per language for 120 s and retired at once when a workout
+per user, per build and per language for 120 s (or until the first `next` meal or
+workout of today's timeline turns due, when that is sooner — B-179, below) and retired at once when a workout
 session is started, changed or finished, a day closes, a chat message arrives or is
 taken back, the client reads the thread, a block is made or lifted, or the client's
 coaching relation changes.
@@ -900,7 +906,8 @@ keeps the card with `body: ""` and `deleted: true`, as the conversation list sho
 **What the home-records build added** (BACKEND_DELTA items 9 and 12, 2026-09-27).
 Additive: no route, section type, key or `code` renamed or removed; no new route.
 
-- **The day timeline** is `nutrition_today.timeline`, not a new section type: the
+- **The day timeline** (since 2026-09-28 ALSO answered as the `day_timeline` section, the
+  owner's decision — "What wiring the home found" below) is `nutrition_today.timeline`, not a new section type: the
   canvas's closed set of types has none for it, its «يومك» is the meal list with the
   workout placed among it, and a key inside the existing card is invisible to every
   installed build (a new type would also be skipped, but would move the section order
@@ -909,7 +916,11 @@ Additive: no route, section type, key or `code` renamed or removed; no new route
   routine_id, routine_name, day, muscles, exercises, sets, estimated_minutes}` (+
   `session_id` while a session on it is open, + `refusal` when the hero's button is
   `refused`). `state` `done | now | next`, a meal's being its card's `state` renamed;
-  `at_source` `session | reminder_hour`. No diet section, no timeline.
+  `at_source` `session | reminder_hour`. No diet section, no timeline. The «الآن» pill
+  belongs to the last `now` entry that has a time (`at` not null); only when no timed
+  entry is `now`, to the last untimed `now` (2026-09-28, BACKEND_BUGS B-178: an untimed
+  meal is `now` all day and sorts last, so "the last `now`" gave it the pill over a
+  workout under way).
 - **`ready_programs` cards are the routine products on sale** — each is the
   `GET /api/v1/products/` row, plus the section's old keys from the product (`id` is
   now the PRODUCT's; `name`, `description`, `goal`, `days_per_cycle`, `exercises`,
@@ -919,9 +930,39 @@ Additive: no route, section type, key or `code` renamed or removed; no new route
 - **`trainer_message` of `kind: "voice"`** adds `audio_url` (PRIVATE: signed and
   expiring, like the thread's `media.url`), `duration_seconds` and `state`
   (`ready | unavailable`). Only that kind carries them.
+- **`trainer_message` of `kind: "program"`** (2026-09-28, BACKEND_BUGS B-175) adds
+  `program`: `{routine_id, template_id, name, day, day_name, exercises, changes}` — the
+  thread's own card for the same message — or null when the card was taken back, its
+  routine deleted, or the routine is no longer one the client may read. Only that kind
+  carries it; a text message still has exactly its five keys.
 - **`PATCH/PUT workout-sessions/{id}/` that finishes a session** (and a `POST` of one
   already `completed`) answers `personal_records` — see "What wiring the train screens
   found" below.
+
+**What wiring the home found, 2026-09-28** (BACKEND_BUGS B-175, B-176, B-178, B-179,
+B-182; the owner's decisions of that day). Additive: no route, key or `code` renamed or
+removed; no new route.
+
+- **`day_timeline`, a 12th section type** (B-176): `{date, timeline}`, the SAME list as
+  `nutrition_today.timeline` (one builder, one rule: no diet section, no rail; left out
+  when the day is empty), answered where `Home.html` draws the rail. The order is now
+  `workout_hero`, `find_trainer_hero`, `setup_checklist`, `trainer_message`,
+  `day_timeline`, `week_stats`, `nutrition_today`, `ai_advice`, `challenge_rank`,
+  `featured_trainers`, `ready_programs`, `media_banner` — `nutrition_today` (the
+  calories card) moved after `week_stats`. `nutrition_today.timeline` stays for the
+  builds already installed, which skip the type they do not know.
+- **One hero** (B-182): `find_trainer_hero` is not sent beside a `workout_hero` — a
+  client with no coach who bought a programme gets the day's hero alone. The one state
+  that answers both is a client with no coach whose day is `refused` (a former client
+  whose coaching ended): `find_trainer_hero` then comes FIRST, `workout_hero` right
+  after it.
+- **`ready_programs` for a coached client too** (the owner): same build gating (absent
+  where prices may not show), same place; a programme already bought is `owned: true`,
+  `can_buy: false`.
+- **The page lives until its next state change** (B-179): a fresh page's
+  `refresh_after_seconds` (and its cache entry) is 120, or the seconds until the first
+  `next` meal or workout on today's timeline turns due when that is sooner, so a meal
+  due inside the window is `now` once its time comes. Midnight is not a boundary.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
