@@ -159,11 +159,24 @@ def advance_challenge_phases():
     started, ended = Challenge.advance_stored_phases(now=now)
     if started or ended:
         logger.info("challenges started: %s, ended: %s", started, ended)
+    # A streak is the CURRENT run of days (BACKEND_BUGS B-161): a day that ends without
+    # a set breaks it with nothing logged to trigger a recount, so the clock does it.
+    # Before the settlement, so a streak broken on the window's last day is settled on
+    # its true number.
+    from .challenge_progress import recount_streaks
+
+    streaks = recount_streaks(now=now)
     # The Challenge Winner badge counts a first place only once the challenge is over
     # (SIDE_BUGS S-044), and since the owner's F20 (2026-09-24) only once the standing
     # has been open for review for `Challenge.REVIEW_HOURS` after the end.
     settled = settle_winners(now=now)
-    return f"started={started} ended={ended} settled={settled}"
+    if started or ended or streaks or settled:
+        # Those writes are `.update()`s, which no model signal sees: every reader's
+        # cached list still showed the old status (SIDE_BUGS S-194).
+        from .challenge_cache import bump_everyone
+
+        bump_everyone()
+    return f"started={started} ended={ended} streaks={streaks} settled={settled}"
 
 
 #: Challenges settled per hourly run. The rest wait an hour: a settlement is a re-rank

@@ -335,6 +335,26 @@ class UserFollowViewSet(viewsets.ModelViewSet):
         })
 
 
+class TotalOrderingFilter(OrderingFilter):
+    """`OrderingFilter` whose order always ends in the primary key (SIDE_BUGS S-218).
+
+    A view's `ordering` and a caller's `?ordering=likes_count` REPLACE the model's
+    `Meta.ordering` (`-created_at, -id`), so the post list sorted on one non-unique
+    column and LIMIT/OFFSET (or a cursor) repeated and skipped rows sharing a value —
+    ten posts with 0 likes, or a fan-out batch sharing a timestamp. `-id` is appended
+    unless the order already names the key; the paginator reads this same order.
+    """
+
+    def get_ordering(self, request, queryset, view):
+        ordering = super().get_ordering(request, queryset, view)
+        if not ordering:
+            return ordering
+        ordering = list(ordering)
+        if not any(str(term).lstrip('-') in ('id', 'pk') for term in ordering):
+            ordering.append('-id')
+        return ordering
+
+
 def subquery_count(rows, group_by):
     """A per-row COUNT over `rows`, as ONE correlated subquery for the whole page.
 
@@ -357,8 +377,11 @@ def subquery_count(rows, group_by):
         0)
 
 
-def visible_posts_for(user):
+def visible_posts_for(user, *, hidden=None):
     """Every post `user` is allowed to see.
+
+    `hidden`: `blocked_ids(user)` when the caller has already read it, so a view that
+    needs the set itself does not read it twice (SIDE_BUGS S-219).
 
     ONE definition, because there were two and they disagreed. `Post.can_be_viewed_by`
     (social/models.py) encodes the rule including `is_hidden` and has never had a single
@@ -388,7 +411,8 @@ def visible_posts_for(user):
             | Q(visibility='followers', author__followers__follower=user)
         ) & Q(is_hidden=False)
         | Q(author=user)
-    ).exclude(author_id__in=blocked_ids(user)).filter(public_q('author')).distinct()
+    ).exclude(author_id__in=blocked_ids(user) if hidden is None else hidden).filter(
+        public_q('author')).distinct()
 
 
 class PostViewSet(viewsets.ModelViewSet):
@@ -419,17 +443,20 @@ class PostViewSet(viewsets.ModelViewSet):
     #: `IsOwnerOrReadOnly` refused everyone but the author and the like button returned
     #: 403 for every user on every post they did not write.
     interaction_actions = ('like',)
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    # A total order whatever `?ordering=` asks for (SIDE_BUGS S-218).
+    filter_backends = [DjangoFilterBackend, SearchFilter, TotalOrderingFilter]
     filterset_fields = ['author', 'post_type', 'visibility']
     search_fields = ['title', 'content']
     ordering_fields = ['created_at', 'updated_at', 'likes_count', 'comments_count']
-    ordering = ['-created_at']
+    ordering = ['-created_at', '-id']
     
     def get_queryset(self):
         user = self.request.user
         
-        # Get posts that user can view based on visibility AND moderation.
-        queryset = visible_posts_for(user)
+        # Get posts that user can view based on visibility AND moderation. The block
+        # set is read once, for this and the likes correction below (S-219).
+        hidden = blocked_ids(user)
+        queryset = visible_posts_for(user, hidden=hidden)
         
         # Handle author filtering
         author_id = self.request.query_params.get('author')
@@ -454,7 +481,6 @@ class PostViewSet(viewsets.ModelViewSet):
         # everyone, so after a block they promised rows the viewer's own like and
         # comment lists no longer return. The serializer subtracts these two; they are
         # annotated here so the correction costs the page one query, not one per post.
-        hidden = blocked_ids(user)
         if hidden:
             queryset = queryset.annotate(
                 hidden_likes=subquery_count(
@@ -670,7 +696,8 @@ class CommentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsOwnerOrReadOnly]
     interaction_actions = ('like',)
     pagination_class = CommentCursorPagination
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    # `?ordering=likes_count` keeps the `-id` tiebreak too (SIDE_BUGS S-218).
+    filter_backends = [DjangoFilterBackend, SearchFilter, TotalOrderingFilter]
     filterset_fields = ['post', 'author', 'parent_comment']
     search_fields = ['content']
     ordering_fields = ['created_at', 'updated_at', 'likes_count']
@@ -680,7 +707,10 @@ class CommentViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
-        
+        # Who this caller blocked or was blocked by: read ONCE, for the filter and the
+        # likes correction below (it was read twice, one query each — SIDE_BUGS S-219).
+        hidden = blocked_ids(user)
+
         # Base queryset with visibility permissions
         # select_related('author','post') is required: CommentSerializer nests the
         # author, so without it the endpoint issued ~1.2 queries per comment
@@ -693,7 +723,7 @@ class CommentViewSet(viewsets.ModelViewSet):
         ).filter(
             # Same rule as the post list, from the same function, so a hidden post's
             # thread cannot be read through the comment endpoint.
-            post__in=visible_posts_for(user),
+            post__in=visible_posts_for(user, hidden=hidden),
             is_hidden=False,
         ).filter(
             # Not while its author's account is suspended (decision 8).
@@ -703,13 +733,12 @@ class CommentViewSet(viewsets.ModelViewSet):
             # post clause hides a blocked person's posts; it does nothing about a
             # blocked person's comments on YOUR post, which is where the harassment
             # this feature exists for actually lands.
-            author_id__in=blocked_ids(user),
+            author_id__in=hidden,
         ).distinct()
 
         # Same correction as the post list, for the same reason: `Comment.likes_count`
         # is denormalised and counts a blocked person's like. One subquery for the
         # page, not one query per comment.
-        hidden = blocked_ids(user)
         if hidden:
             queryset = queryset.annotate(
                 hidden_likes=subquery_count(
@@ -831,12 +860,42 @@ class ChallengeViewSet(viewsets.ModelViewSet):
 
     Auth required. Nothing differs by build. A challenge row (list, detail, create,
     update) is `ChallengeSerializer`; since 2026-09-24 it also carries `metric` —
-    `manual` | `volume_kg` | `sets` | `workouts` | `training_days`, writable, default
-    `manual` — and `auto_counted` (read-only, `metric != "manual"`): when true the
+    `manual` | `volume_kg` | `sets` | `workouts` | `training_days` | `exercise_reps` |
+    `streak_days` (the last two since B-161, below), writable, default `manual` — and
+    `auto_counted` (read-only, `metric != "manual"`): when true the
     server counts the participants' progress from the training they log
     (`social/challenge_progress.py`), `update_progress` refuses a hand-typed number
     (`progress_auto_counted`), and the app shows «ابدأ تمرين اليوم» instead of the
     log sheet (BACKEND_BUGS B-075).
+
+    **The metrics** (the CreateChallenge artboard; the owner, 2026-09-28, BACKEND_BUGS
+    B-161). Two more values of `metric`, additive: `exercise_reps` — the reps of ONE
+    exercise, named by `exercise` (an exercise id: a catalogue one or one of the
+    creator's own; writable, nullable, REQUIRED for this metric), served with
+    `exercise_name` (read-only, the caller's language); a day above 500 reps of it
+    flags the participant for review — and `streak_days` — the CURRENT run of
+    consecutive days with at least one counted set: today, not over yet, breaks
+    nothing; any other day without one breaks it, and the hourly phase task recounts
+    it so a broken run reads 0 within the hour. The artboard's «عدد التمارين» is
+    `workouts` (workouts finished, `status: "completed"`, with the F20 rules below);
+    «مجموع الأوزان» is `volume_kg`, «عدد المجموعات» `sets`, «أيام التمرين»
+    `training_days`. Create/update refusals (400 `validation_error`, the field code in
+    `field_errors.exercise`): `exercise_required` — `metric` `exercise_reps` with no
+    exercise; `exercise_not_found` — an id that does not exist, is inactive or is
+    another trainer's own. `exercise` sent with any other metric is stored null.
+
+    **Who may join** (the CreateChallenge artboard's «من يستطيع الانضمام»; the owner,
+    2026-09-28, BACKEND_BUGS B-162). `audience` — `community` (default: everyone) |
+    `my_clients`, writable on create and update. Only a creator who is a TRAINER may
+    set `my_clients`: anyone else gets 400 `validation_error` with the field code
+    `audience_trainers_only` in `field_errors.audience`. A `my_clients` challenge is
+    shown only to its creator, staff, the creator's clients (an approved relation with
+    them — a frozen coaching still counts) and anyone already in it (a client whose
+    coaching ends mid-challenge stays in the standing and keeps seeing it): for
+    everyone else it is not in the list, and its detail, `leaderboard/`, `leave/` and
+    `update_progress/` answer 404 as for a challenge that does not exist; `join/`
+    answers 403 `challenge_clients_only`. The Challenge Winner badge still needs
+    `winner_min_participants` active participants. Nothing differs by build.
 
     `user_progress` — `{current_value, progress_percentage, rank, review_state,
     review_reason}` of the caller, or null when they have not joined. `rank` is
@@ -891,14 +950,15 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     PUT/PATCH (the creator, or staff) — what decides a standing is fixed where
     changing it would let a result be picked after the fact (F20). Both answer 400
     with the top-level `code` and the field error beside it (`field_errors`):
-      `challenge_over` — `metric`, `start_date`, `end_date` or `target_value` of a
-          challenge that is over (ended or closed). Nothing recounts a finished
-          challenge, so switching a manual one to an auto-counted metric after the
-          end would have ranked its self-reported numbers.
+      `challenge_over` — `metric`, `start_date`, `end_date`, `target_value` or
+          `exercise` of a challenge that is over (ended or closed). Nothing recounts a
+          finished challenge, so switching a manual one to an auto-counted metric after
+          the end would have ranked its self-reported numbers.
       `end_date_in_past` — an `end_date` earlier than now. Ending early is a close
           (`status: "completed"`), which moves the end to the moment of the close, so
           the review window runs from when it really ended.
-    Changing `metric` or the dates of a RUNNING challenge still recounts everyone.
+    Changing `metric`, `exercise` or the dates of a RUNNING challenge still recounts
+    everyone.
 
     The banned-terms filter (spec B1, 2026-09-27): a POST/PUT/PATCH whose `title`,
     `description`, `rules`, `reward_description` or `unit` holds a term on the
@@ -912,7 +972,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     (`retry_after_seconds` in the body).
     """
     #: What a finished challenge keeps: `challenge_over` if a PATCH changes one.
-    FIXED_ONCE_OVER = ('metric', 'start_date', 'end_date', 'target_value')
+    FIXED_ONCE_OVER = ('metric', 'start_date', 'end_date', 'target_value', 'exercise')
 
     serializer_class = ChallengeSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -929,13 +989,15 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             # Not one an operator hid (SIDE_BUGS S-065) — for everyone, its creator
             # included, the way a hidden post is served to nobody.
             Challenge.objects.filter(is_hidden=False)
-            .select_related('creator')
+            .select_related('creator', 'exercise')
             .only(
                 'id', 'title', 'description', 'challenge_type',
                 'target_value', 'unit', 'start_date', 'end_date',
                 'max_participants', 'participants_count', 'status',
                 'created_at', 'rules', 'reward_description', 'image', 'metric',
-                'winner_checked_at',
+                'winner_checked_at', 'audience',
+                # `exercise_name` (B-161), read with the row.
+                'exercise', 'exercise__id', 'exercise__name',
                 'creator__id', 'creator__username', 'creator__email',
                 'creator__user_type', 'creator__profile_picture', 'creator__is_staff',
                 # `ranked` reads it (F20): deferred, it cost one query per row.
@@ -957,6 +1019,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             .annotate(active_participants_anno=active_participants_count())
         )
         user = getattr(self, 'request', None).user if getattr(self, 'request', None) else None
+        # A `my_clients` challenge is hidden from everyone but its creator's clients
+        # (the owner, 2026-09-28, B-162): not listed, and 404 on every route that names
+        # it — except `join`, which answers 403 `challenge_clients_only` itself.
+        if getattr(self, 'action', None) != 'join':
+            qs = qs.filter(Challenge.visible_to_q(user))
         if user and user.is_authenticated:
             part_qs = ChallengeParticipation.objects.filter(user=user, challenge=OuterRef('pk'))
             qs = qs.annotate(
@@ -1008,13 +1075,16 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         can no longer reach them all — it only ever knew one key. Folding a version
         number into the key means a write orphans every variant in one step, and the
         orphans fall out on their own when their short TTL expires.
+
+        Joined by the version EVERY reader's list carries (`social/challenge_cache.py
+        EVERYONE`, SIDE_BUGS S-189 / S-194): a hidden, edited, closed or deleted
+        challenge, or anyone's join or leave, leaves every cached list at once.
         """
-        version_key = f"challenges_ver:{cls._challenges_cache_user_part(user)}"
-        version = cache.get(version_key)
-        if version is None:
-            version = 1
-            cache.set(version_key, version, timeout=None)
-        return version
+        from . import challenge_cache
+
+        mine = challenge_cache.version(
+            f"challenges_ver:{cls._challenges_cache_user_part(user)}")
+        return f"{mine}.{challenge_cache.version(challenge_cache.EVERYONE)}"
 
     @classmethod
     def _challenges_cache_key(cls, user, query_params=None):
@@ -1046,16 +1116,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
 
     @staticmethod
     def _bump_challenges_cache_version(version_key):
-        try:
-            try:
-                cache.incr(version_key)
-            except ValueError:
-                # No counter yet: seeding it at 2 skips whatever v1 entries exist.
-                cache.set(version_key, 2, timeout=None)
-        except Exception:
-            # Optional side effect: swallowing this silently is what made the
-            # surrounding failures invisible in logs. Control flow is unchanged.
-            logger.debug('suppressed non-fatal error', exc_info=True)
+        from .challenge_cache import bump
+
+        bump(version_key)
 
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)
@@ -1075,7 +1138,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         before = serializer.instance
         self._refuse_changes_that_pick_a_result(before, serializer.validated_data)
         was_over = before.lifecycle_status == 'completed'
-        measured = (before.metric, before.start_date, before.end_date)
+        measured = (before.metric, before.start_date, before.end_date, before.exercise_id)
         target = before.target_value
         challenge = serializer.save()
         now = timezone.now()
@@ -1092,12 +1155,18 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         # participant's number is recounted (one grouped query) and the standing
         # re-ranked, rather than waiting for each of them to log again (B-075).
         if (challenge.auto_counted and challenge.is_active
-                and (challenge.metric, challenge.start_date, challenge.end_date) != measured):
+                and (challenge.metric, challenge.start_date, challenge.end_date,
+                     challenge.exercise_id) != measured):
             from .challenge_progress import recount
 
             with transaction.atomic():
                 recount(challenge)
                 self._update_challenge_rankings(challenge)
+        # The save reached every cached list already; the close's `.update()` of
+        # `end_date` above goes around it (SIDE_BUGS S-194).
+        from .challenge_cache import bump_everyone
+
+        bump_everyone()
 
     def _refuse_changes_that_pick_a_result(self, before, data):
         """`challenge_over` / `end_date_in_past`; see the class docstring."""
@@ -1136,12 +1205,24 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           `403` `{"error", "code": "challenge_disqualified"}` — an operator
                 disqualified you from this challenge (owner, 2026-09-24, F20); checked
                 before anything else
+          `403` `{"error", "code": "challenge_clients_only"}` — an `audience:
+                "my_clients"` challenge and you are not its creator's client (no
+                approved relation with them; a frozen coaching still counts) — the
+                owner, 2026-09-28, BACKEND_BUGS B-162. Checked right after the above
           `404` — no such challenge, or one an operator hid
         """
         challenge = self.get_object()
 
         if self._is_disqualified(request.user, challenge):
             return self._disqualified_response()
+
+        # Its creator's clients only (B-162). Before "not running": a challenge someone
+        # may not see tells them nothing about its dates.
+        if not challenge.visible_to(request.user):
+            return Response(
+                {'error': _("This challenge is open to its coach's clients only."),
+                 'code': 'challenge_clients_only'},
+                status=status.HTTP_403_FORBIDDEN)
 
         # A challenge you can still take part in. `join` checked capacity only, while
         # `update_progress` checked `is_active` — so a client could join one that ended
@@ -1201,6 +1282,10 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             # `rank=NULL` — last place is a place, and the app reads the column.
             self._update_challenge_rankings(challenge)
             self._invalidate_challenges_cache(request)
+            # `participants_count` moved for every reader, not only the joiner (S-194).
+            from .challenge_cache import bump_everyone
+
+            bump_everyone()
             return Response(
                 {'message': _('Successfully joined challenge')},
                 status=status.HTTP_201_CREATED
@@ -1272,6 +1357,10 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             self._update_challenge_rankings(locked)
 
         self._invalidate_challenges_cache(request)
+        # `participants_count` moved for every reader (S-194).
+        from .challenge_cache import bump_everyone
+
+        bump_everyone()
         return Response({'message': _('You have left this challenge.'),
                          'code': 'left_challenge'})
 

@@ -2750,6 +2750,37 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   username, user_type, first_name, last_name, profile_picture_url, followers_count,
   is_following, member_since}`. `by_username/` is unchanged (exact, case-sensitive).
 
+**What the fix run changed in the community** (BACKEND_BUGS B-161, B-162; SIDE_BUGS
+S-189, S-194, S-218, S-219; the owner's decisions of 2026-09-28). Additive: no route,
+no `code` renamed. `ChallengeViewSet`'s docstring carries the full contract.
+
+- **Two more counted metrics** (B-161). `metric` gains `exercise_reps` — the reps of
+  ONE exercise, named by the new writable, nullable `exercise` (an exercise id the
+  creator may read; served with read-only `exercise_name`), a day above 500 reps of it
+  flagged for review — and `streak_days` — the CURRENT run of consecutive days with at
+  least one counted set (today, not over yet, breaks nothing; any other day without one
+  breaks it; the hourly phase task recounts it). Refusals on create and update, `400
+  validation_error` with the field code in `field_errors.exercise`:
+  `exercise_required` (`exercise_reps` with no exercise) and `exercise_not_found`. An
+  `exercise` sent with any other metric is stored null. «عدد التمارين» is `workouts`.
+- **Who may join** (B-162). Challenge rows gain writable `audience`: `community`
+  (default) | `my_clients`. Only a trainer creator may set `my_clients` (`400
+  validation_error`, field code `audience_trainers_only`). Such a challenge is shown
+  only to its creator, staff, the creator's clients (an approved relation; a frozen
+  coaching counts) and anyone already in it (a client whose coaching ends stays): for
+  anyone else it is absent from the list and its detail and actions answer 404,
+  `join/` answers `403 challenge_clients_only`, and `POST /api/v1/reports/` naming it
+  answers `404 target_not_found`.
+- **Fresh lists** (S-189, S-194). The challenges list is still cached 120 s per person,
+  but a challenge an operator hides, a creator's edit, close or delete, and anyone's
+  join or leave now reach every person's list at once.
+- **A total order** (S-218). The post list (`ordering` default and any `?ordering=`),
+  the comment list's `?ordering=` and the AI chat's `sessions/{id}/messages/` all end
+  their order in `-id`: rows sharing a timestamp or a like count no longer repeat or
+  vanish across pages. Same rows, same default order otherwise.
+- **Text caps** (S-219). A post's `content` takes at most 5000 characters, a comment's
+  2000 (create and edit): `400 validation_error`, field code `content_too_long`.
+
 **What wiring the train screens found** (BACKEND_BUGS B-106, B-109, B-110, B-112,
 2026-09-24). Additive under §6: new keys on existing answers, one query parameter, two
 new codes; no route, key or `code` changed. One new column (`routine/0028`,

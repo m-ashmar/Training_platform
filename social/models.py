@@ -8,6 +8,7 @@ content sharing, community interactions, and social feeds.
 """
 
 from django.db import models
+from django.db.models import Q
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes.fields import GenericForeignKey
 from datetime import timedelta
@@ -16,6 +17,12 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy
 from users.models import CustomUser
 from training_platform.model_validation import RowValidationMixin
+
+#: The longest post and comment the API takes, in characters (SIDE_BUGS S-219: there
+#: was no cap but the 15 MB request body). A post is a few paragraphs, a comment a
+#: reply; a direct chat message is 4000 (`chat/models.py MAX_BODY_CHARS`).
+POST_CONTENT_MAX_CHARS = 5000
+COMMENT_CONTENT_MAX_CHARS = 2000
 
 
 def _random_media_path(folder, filename):
@@ -125,6 +132,8 @@ class Post(models.Model):
         db_index=True
     )
     title = models.CharField(max_length=200, blank=True)
+    #: At most `POST_CONTENT_MAX_CHARS` through the API (`PostSerializer`, SIDE_BUGS
+    #: S-219); the column itself stays a TextField, so no row written before is cut.
     content = models.TextField()
     visibility = models.CharField(
         max_length=20,
@@ -252,6 +261,7 @@ class Comment(models.Model):
         related_name='comments',
         db_index=True
     )
+    #: At most `COMMENT_CONTENT_MAX_CHARS` through the API (S-219).
     content = models.TextField()
     
     # Reply to another comment (nested comments)
@@ -380,16 +390,46 @@ class Challenge(models.Model):
     #: it (`progress_auto_counted`). The 09-community design counts progress
     #: automatically wherever it can be measured (BACKEND_BUGS B-075); `challenge_type`
     #: and `unit` are free descriptions and cannot say which number that is.
+    #:
+    #: The owner's decision of 2026-09-28 (BACKEND_BUGS B-161) added two, for the
+    #: CreateChallenge artboard: `exercise_reps` (the reps of ONE exercise, named in
+    #: `exercise`, which it requires) and `streak_days` (the CURRENT run of consecutive
+    #: days with a counted set). «عدد التمارين» is `workouts` (workouts finished).
     METRIC_MANUAL = 'manual'
+    METRIC_EXERCISE_REPS = 'exercise_reps'
+    METRIC_STREAK_DAYS = 'streak_days'
     METRIC_CHOICES = [
         (METRIC_MANUAL, gettext_lazy('Logged by hand')),
         ('volume_kg', gettext_lazy('Weight lifted (kg)')),
         ('sets', gettext_lazy('Sets logged')),
         ('workouts', gettext_lazy('Workouts finished')),
         ('training_days', gettext_lazy('Days trained')),
+        (METRIC_EXERCISE_REPS, gettext_lazy('Reps of one exercise')),
+        (METRIC_STREAK_DAYS, gettext_lazy('Days in a row')),
     ]
     metric = models.CharField(max_length=20, choices=METRIC_CHOICES, default=METRIC_MANUAL)
-    
+
+    #: The exercise whose reps an `exercise_reps` challenge counts (B-161); null for
+    #: every other metric. A catalogue exercise or one of the creator's own. SET_NULL:
+    #: an exercise deleted later leaves the challenge, its standing frozen as it stood
+    #: (`challenge_progress.recount` does not recount a challenge that lost it).
+    exercise = models.ForeignKey('routine.Exercise', on_delete=models.SET_NULL,
+                                 null=True, blank=True, related_name='challenges')
+
+    #: Who may see and join it (the owner's decision of 2026-09-28, BACKEND_BUGS B-162;
+    #: the CreateChallenge artboard's «من يستطيع الانضمام: عملائي فقط / كل المجتمع»).
+    #: `community` (the default, and every challenge written before this column):
+    #: everyone. `my_clients`: only a TRAINER creator may set it; the challenge is shown
+    #: and open to the creator's clients (`visible_to_q`), hidden from everyone else.
+    AUDIENCE_COMMUNITY = 'community'
+    AUDIENCE_MY_CLIENTS = 'my_clients'
+    AUDIENCE_CHOICES = [
+        (AUDIENCE_COMMUNITY, gettext_lazy('The whole community')),
+        (AUDIENCE_MY_CLIENTS, gettext_lazy('My clients only')),
+    ]
+    audience = models.CharField(max_length=12, choices=AUDIENCE_CHOICES,
+                                default=AUDIENCE_COMMUNITY)
+
     # Participation
     max_participants = models.PositiveIntegerField(null=True, blank=True)
     participants_count = models.PositiveIntegerField(default=0)
@@ -459,6 +499,38 @@ class Challenge(models.Model):
     
     #: Statuses a person sets. Everything else follows from the dates.
     TERMINAL_STATUSES = ('completed', 'cancelled')
+
+    @classmethod
+    def visible_to_q(cls, user):
+        """The challenges `user` may see, by `audience` (BACKEND_BUGS B-162).
+
+        A `community` challenge: everyone. A `my_clients` one: its creator, staff, the
+        creator's CLIENTS — an APPROVED relation with the creator, the one predicate
+        that decides "this trainer's client" (`users.TrainerClientRelation`, never the
+        `assigned_trainer` pointer); a frozen coaching is still an approved relation, so
+        a frozen client still counts (the owner) — and anyone already taking part: a
+        client whose coaching ends mid-challenge stays in it, and keeps seeing it.
+        The operator's `is_hidden` is a separate filter, applied by every reader.
+        """
+        community = Q(audience=cls.AUDIENCE_COMMUNITY)
+        if user is None or not getattr(user, 'is_authenticated', False):
+            return community
+        if user.is_staff or getattr(user, 'is_admin', False):
+            return Q()
+        from users.models import TrainerClientRelation
+
+        coaches = (TrainerClientRelation.objects
+                   .filter(client=user, status='approved').values('trainer_id'))
+        joined = ChallengeParticipation.objects.filter(user=user).values('challenge_id')
+        return (community | Q(creator=user) | Q(creator_id__in=coaches)
+                | Q(pk__in=joined))
+
+    def visible_to(self, user) -> bool:
+        """`visible_to_q` for this one row (one query at most)."""
+        if self.audience == self.AUDIENCE_COMMUNITY:
+            return True
+        return type(self).objects.filter(pk=self.pk).filter(
+            self.visible_to_q(user)).exists()
 
     @property
     def lifecycle_status(self):

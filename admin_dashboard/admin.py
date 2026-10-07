@@ -594,6 +594,9 @@ class ChallengeAdmin(admin.ModelAdmin):
     list_display = ('title', 'creator', 'challenge_type', 'status', 'is_hidden', 'start_date', 'end_date', 'participant_count')
     list_filter = ('challenge_type', 'status', 'is_hidden', 'start_date', 'end_date')
     search_fields = ('title', 'creator__username')
+    # The exercise an `exercise_reps` challenge counts (B-161): an id box, not a
+    # dropdown of the whole catalogue.
+    raw_id_fields = ('exercise',)
     # A challenge is user-written and shown to everyone: an operator hides one the way
     # they hide a post (SIDE_BUGS S-065).
     actions = [_set_field_action('hide_challenges', 'Hide selected challenges',

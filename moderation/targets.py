@@ -122,10 +122,12 @@ def _fetch_coach_message(viewer, target_id):
 def _fetch_challenge(viewer, target_id):
     from social.models import Challenge
 
-    # Every challenge the list serves is visible to every signed-in person
-    # (`social.views.ChallengeViewSet`); one an operator has hidden is not, and so is
-    # not reportable either.
-    return Challenge.objects.filter(pk=target_id, is_hidden=False).first()
+    # The challenges the list serves this person (`social.views.ChallengeViewSet`):
+    # not one an operator has hidden, and not a coach's clients-only one they are not
+    # a client of (`Challenge.visible_to_q`, BACKEND_BUGS B-162) — what they cannot
+    # see is not reportable either, and is answered like an id that does not exist.
+    return (Challenge.objects.filter(Challenge.visible_to_q(viewer))
+            .filter(pk=target_id, is_hidden=False).first())
 
 
 def _author_of_chat_message(row):

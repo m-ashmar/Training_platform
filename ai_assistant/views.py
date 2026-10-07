@@ -38,7 +38,10 @@ class ChatMessageCursorPagination(CursorPagination):
     page_size = 30
     page_size_query_param = 'page_size'
     max_page_size = 100
-    ordering = '-created_at'  # Newest messages first
+    # Newest messages first, `-id` breaking ties (SIDE_BUGS S-218): a user message and
+    # its reply can share a timestamp, and without a tiebreak a page boundary between
+    # them repeated one and skipped the other.
+    ordering = ('-created_at', '-id')
 
 
 class ChatSessionCursorPagination(ChatMessageCursorPagination):
@@ -156,7 +159,7 @@ class ChatMessageListView(generics.ListAPIView):
         return ChatMessage.objects.filter(
             session__session_id=session_id,
             session__user=self.request.user
-        ).order_by('-created_at')
+        ).order_by('-created_at', '-id')
 
     def list(self, request, *args, **kwargs):
         from .store_safe import build_of_request, payment_talk_blocked, store_safe_reply_ids
