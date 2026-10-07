@@ -9,6 +9,7 @@ fails on 554c604.
 | `test_b145_*` | ensure/ from another phone was answered "already paired" |
 | `test_b144_*`, `test_b146_*`, `test_b148_*` | agent/me/: currency, the server's day, the status docstring |
 | `test_b147_*` | a reversal row of the agent ledger did not name the top-up it took back |
+| `test_b163_*` | the transfer's note was dropped; the transfer is now a coaching payment (owner) |
 """
 from decimal import Decimal
 

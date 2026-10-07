@@ -12,9 +12,13 @@ later, and the legacy one-fee settlement), including the credit leg of a payout 
 crossed a currency. And a routine product's sale (escrow -> trainer, the rows read as
 `routine_product_sale`): a buyer can be refunded, and a refund takes the trainer's share
 back, which a share withdrawn at once would make impossible (the review, 2026-09-24).
-Nothing else: a client's direct transfer and a plan share are not released escrow, and
-the spec holds only that. A payout support has since REVERSED is
-not settling either — the money is no longer in the wallet.
+Nothing else: a plan share is not released escrow, and the spec holds only that. A
+client's direct payment to a trainer (`wallet/client/transfer/`) passes through escrow
+since it became a coaching payment (BACKEND_BUGS B-163) only to split off the commission
+in the same transaction; it is not a release of held money, and the design promises it
+reaches the trainer at once («يصل رامي فوراً»), so its row (`transfer_received`) does not
+settle. A payout support has since REVERSED is not settling either — the money is no
+longer in the wallet.
 
 HOW LONG. `PAYOUT_HOLD_DAYS` after the row was written (the release). 0 switches the
 hold off.
