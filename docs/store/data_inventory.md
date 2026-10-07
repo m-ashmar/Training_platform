@@ -4,7 +4,7 @@
 
 What the platform's server holds about a person, why, who else receives it, what the person can download and what happens when they delete their account (spec §9 B3). `privacy_labels.md` (Apple's App Privacy answers and Google's Data safety answers) and the privacy-policy drafts in `docs/legal/` are written from it, and must list the same data.
 
-89 sources, in the order they are registered.
+90 sources, in the order they are registered.
 
 ## What every source has in common
 
@@ -62,7 +62,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 | `user_content` | Posts, comments and other content you create | User Content > Other User Content | App activity > Other user-generated content | `profile`, `posts`, `comments`, `trainer_saved_meals`, `trainer_saved_meal_items`, `exercises_created`, `routines_created`, `templates_created`, `challenges_created`, `routine_products`, `exercise_media`, `routine_exercises`, `template_exercises` |
 | `support` | Reports and requests you send us | User Content > Customer Support | App activity > Other user-generated content | `reports_made`, `account_deletion_requests` |
 | `documents` | Identity and qualification documents | Other Data > Other Data Types | Files and docs > Files and docs | `verification_documents`, `verification_decisions`, `verification_application` |
-| `app_activity` | App activity | Usage Data > Product Interaction | App activity > App interactions | `activity_log`, `sessions`, `behaviour_events`, `notifications`, `notification_emails`, `achievements_earned`, `achievement_progress`, `social_achievements`, `ai_usage_cost`, `notification_preferences`, `challenge_participation`, `post_likes`, `comment_likes`, `follows`, `trainer_relations`, `trainer_request_outcomes`, `blocks`, `ai_consent`, `subscription_usage` |
+| `app_activity` | App activity | Usage Data > Product Interaction | App activity > App interactions | `activity_log`, `sessions`, `behaviour_events`, `notifications`, `notification_emails`, `achievements_earned`, `achievement_progress`, `social_achievements`, `ai_usage_cost`, `notification_preferences`, `challenge_participation`, `post_likes`, `comment_likes`, `follows`, `trainer_relations`, `trainer_request_outcomes`, `coaching_endings`, `blocks`, `ai_consent`, `subscription_usage` |
 | `connection` | IP address and device details | Diagnostics > Other Diagnostic Data | Device or other IDs > Device or other IDs | `activity_log`, `sessions`, `agent_profile`, `wallet_audit_log` |
 | `credentials` | Sign-in codes | not declared: Security secrets (one-time codes, reset tokens, API keys), stored hashed or encrypted and used only to sign in; neither form has a category for them. | not declared | `otp_verifications`, `password_reset_tokens`, `agent_api_keys` |
 | `staff_records` | Operator records | not declared: About the platform's own operators, who work in the web console, not the app. No app user gives this data. | not declared | `console_logins`, `exchange_rates`, `capability_changes`, `theme_changes`, `app_releases_published`, `legal_documents_published` |
@@ -129,6 +129,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 | `follows` | `social.UserFollow` | `app_activity` | `community` | deleted | - |
 | `trainer_relations` | `users.TrainerClientRelation` | `app_activity`, `purchases` | `coach`, `clients` | deleted | - |
 | `trainer_request_outcomes` | `users.TrainerRequestOutcome` | `app_activity` | nobody | deleted | 180 days |
+| `coaching_endings` | `users.CoachingEnding` | `app_activity` | nobody | anonymised | - |
 | `otp_verifications` | `users.OTPVerification` | `credentials` | `email_provider` | deleted | 1 days |
 | `password_reset_tokens` | `users.PasswordResetToken` | `credentials` | `email_provider` | deleted | 1 days |
 | `reports_made` | `moderation.Report` | `support` | nobody | anonymised | - |
@@ -1214,6 +1215,24 @@ Who, besides those providers and the platform's operators, receives data, and wh
 **On erasure.** Deleted.
 
 **Retention.** Purged nightly: 180 days after `responded_at`.
+
+### `coaching_endings` — `users.CoachingEnding`
+
+**Why.** Why a coaching ended, as the client or the trainer chose it on leaving, for the platform's operators.
+
+**Whose.** Rows whose `trainer` or `client` is the account.
+
+**Who else receives it.** Nobody outside the platform.
+
+**Data types.** App activity (`app_activity`).
+
+**Fields stored.** `id`, `trainer`, `client`, `ended_by`, `reason`, `scheduled`, `created_at`.
+
+**In the export.** `id`, `trainer`, `client`, `ended_by`, `scheduled`, `created_at`. Not exported: `reason`.
+
+**On erasure.** Anonymised: `trainer`, `client` are cleared or replaced; `ended_by`, `reason`, `scheduled`, `created_at` stay on the row.
+
+**Retention.** While the account exists.
 
 ### `otp_verifications` — `users.OTPVerification`
 

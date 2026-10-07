@@ -104,6 +104,13 @@ def _clients_only():
                      'code': 'clients_only'}, status=status.HTTP_403_FORBIDDEN)
 
 
+def _body_value(request, name):
+    """`name` from the body, or None — also when the body is not an object (a JSON list
+    or string), where `request.data.get` would raise."""
+    data = request.data
+    return data.get(name) if hasattr(data, 'get') else None
+
+
 class CustomLoginView(LoginView):
     """`POST /api/auth/login/` `{email, password}` — 200 `{access, refresh, key, user}`.
 
@@ -602,7 +609,9 @@ class TrainerProfileView(APIView):
     `GET` 200: the profile (`TrainerProfileSerializer`), including the read-only
     `verification_status` (`not_started` | `pending` | `rejected` | `verified`; the
     application itself is `GET /api/v1/trainer/verification/`). `POST` (JSON or
-    multipart, a partial update of the writable fields) 200 `{message}`.
+    multipart, a partial update of the writable fields) 200: the saved profile, read
+    back from the database in the shape `GET` answers, plus `message` (additive,
+    BACKEND_BUGS B-173; it answered `{message}` alone before).
 
     | status | `code` | when |
     |---|---|---|
@@ -630,7 +639,12 @@ class TrainerProfileView(APIView):
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        return Response({'message': _('Trainer profile updated successfully!')}, status=status.HTTP_200_OK)
+        # Read back what was stored and answer it as GET does, so the app needs no
+        # second request to see it (BACKEND_BUGS B-173, as `user/update/` does, B-057).
+        request.user.refresh_from_db()
+        saved = TrainerProfileSerializer(request.user).data
+        return Response({**saved, 'message': _('Trainer profile updated successfully!')},
+                        status=status.HTTP_200_OK)
 
 class TrainerClientsView(APIView):
     """GET /api/auth/trainer/clients/ — the clients assigned to this trainer.
@@ -860,6 +874,12 @@ class UnassignClientView(APIView):
     Before the first program (month 1 only held) the client is released and refunded;
     409 `refund_failed` when that refund cannot be made, and nothing changes.
 
+    Optional `reason` — why, from the remove sheet: `not_committed`, `no_reply`,
+    `roster_full` or `other` (BACKEND_BUGS B-160, additive). Kept for the platform's
+    operators only (`users.CoachingEnding`, read-only in the console), never shown to the
+    client; recorded when the coaching ends now or when its end is scheduled, never on a
+    409. An unknown value is kept as none, never refused; the answer does not change.
+
     | status | `code` | when |
     |---|---|---|
     | `400` | `client_id_required` | no `client_id`, with `field` |
@@ -915,8 +935,15 @@ class UnassignClientView(APIView):
                     locked = (TrainerClientRelation.objects.select_for_update(of=('self',))
                               .get(pk=relation.pk))
                     month = running_month(locked)
+                    from .models import CoachingEnding
                     if month is not None:
                         if str(request.data.get('at_period_end')).lower() in ('1', 'true', 'yes'):
+                            if not locked.ends_at_period_end:
+                                # Written when the end is SCHEDULED (B-160): the relation
+                                # ends later, in the renewal run. A repeat writes nothing.
+                                CoachingEnding.record(
+                                    trainer=request.user, client=client, ended_by='trainer',
+                                    reason=_body_value(request, 'reason'), scheduled=True)
                             locked.ends_at_period_end = True
                             locked.save(update_fields=['ends_at_period_end', 'updated_at'])
                             return Response({
@@ -955,7 +982,10 @@ class UnassignClientView(APIView):
                     # another trainer.
                     TrainerClientRelation.objects.filter(
                         trainer=request.user, client=client).delete()
-                
+                    CoachingEnding.record(trainer=request.user, client=client,
+                                          ended_by='trainer',
+                                          reason=_body_value(request, 'reason'))
+
                 # Emit domain event — notification handled at delivery boundary
                 _event = TrainerUnassignmentEvent(
                     actor_id=request.user.id,
@@ -1744,6 +1774,12 @@ class ClientUnassignTrainerView(APIView):
     
     Endpoint: POST /api/auth/client/unassign-trainer/
 
+    Body (all optional): `reason` — why they leave, from the leave sheet: `price`,
+    `slow_replies`, `other_specialty` or `other` (BACKEND_BUGS B-159, additive). Kept for
+    the platform's operators only (`users.CoachingEnding`, read-only in the console);
+    the trainer never sees it. An unknown value is kept as none, never refused, and the
+    answer does not change.
+
     | status | `code` | when |
     |---|---|---|
     | `400` | `no_assigned_trainer` | the client has no trainer to leave |
@@ -1796,8 +1832,14 @@ class ClientUnassignTrainerView(APIView):
                          'code': 'refund_failed'},
                         status=status.HTTP_409_CONFLICT
                     )
-                TrainerClientRelation.objects.filter(
-                    trainer=trainer, client=request.user).delete()
+                # The ending and its reason, in the transaction that ends it (B-159).
+                from .models import CoachingEnding
+                with transaction.atomic():
+                    TrainerClientRelation.objects.filter(
+                        trainer=trainer, client=request.user).delete()
+                    CoachingEnding.record(trainer=trainer, client=request.user,
+                                          ended_by='client',
+                                          reason=_body_value(request, 'reason'))
             except TrainerClientRelation.DoesNotExist:
                 # Relation may not exist, but we still proceed to clear assigned_trainer
                 # Optional side effect: swallowing this silently is what made the
@@ -2138,6 +2180,11 @@ class ClientPendingTrainerInvitesView(APIView):
     `agreed_currency` names the trainer's currency. Both null on a build that may not
     show a coaching fee.
 
+    Additive (BACKEND_BUGS B-165): `trainer_is_verified` (bool — the platform verified
+    the trainer's documents; the name the other trainer payloads use) and
+    `trainer_profile_picture` (a URL, or null when the trainer has no picture). No
+    gender: the owner decided (2026-09-28) that no payload exposes a trainer's gender.
+
     An invitation from a trainer whose account is suspended or erased is not listed
     (the owner's decision 8, 2026-09-24: a suspended trainer is never offered; accepting
     one answered 409 `trainer_unavailable` anyway). It is listed again if the account is
@@ -2149,6 +2196,8 @@ class ClientPendingTrainerInvitesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from training_platform.media_storage import media_url
+
         from .models import TrainerClientRelation
         from .visibility import public_q
 
@@ -2174,6 +2223,10 @@ class ClientPendingTrainerInvitesView(APIView):
             # The trainer's note with this invitation (B-093); every row here is one
             # the trainer sent, so the row's note is theirs.
             'note': '' if r.trainer_id in blocked else r.client_note,
+            # The Invitations card's «مدرب موثّق» / «غير موثّق بعد» and its picture
+            # (B-165), from the trainer row already joined: no query per row.
+            'trainer_is_verified': bool(r.trainer.trainer_is_verified),
+            'trainer_profile_picture': media_url(r.trainer.profile_picture, request) or None,
         } for r in rows]})
 
 

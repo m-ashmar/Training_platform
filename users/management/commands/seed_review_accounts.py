@@ -16,7 +16,7 @@ contains no real person's details." So, by role:
 |---|---|
 | `client` | the reviewer's client: Premium (an operator grant), coached by `trainer` (an approved month, paid from the wallet), a routine with two weeks of sessions and set logs, a 7-day meal plan, wallet history (an agent top-up, the coaching month), a running challenge |
 | `trainer` | verified by an operator decision; three approved clients (`client`, `client2`, `client3`) and one pending request (`prospect`); a template and a routine per client |
-| `agent` | an agent with the platform's default caps (`AGENT_DEFAULT_*`), who made the top-ups |
+| `agent` | the agent who made the top-ups, with the platform's default caps (`AGENT_DEFAULT_*`); nobody signs in as it and it tops nobody up (below) |
 | `client2`, `client3` | the trainer's other two clients |
 | `prospect` | a client whose request is waiting for the trainer |
 
@@ -32,9 +32,19 @@ holds the source to it).
 * `REVIEW_ACCOUNTS_EMAIL` (or `--email`): a mailbox the owner controls. With `{role}` in
   it, the role is put there (`review-{role}@x.com` -> `review-client@x.com`); without,
   it is plus-addressed (`review@x.com` -> `review+client@x.com`). Six distinct addresses.
-* `REVIEW_ACCOUNTS_PASSWORD`: one password for the six, checked against
-  `AUTH_PASSWORD_VALIDATORS`. Not an argument, deliberately: an argument is visible in
-  the process list and saved in shell history. Run again with a new value to rotate it.
+* `REVIEW_ACCOUNTS_PASSWORD`: one password for the five accounts a reviewer may sign in
+  to, checked against `AUTH_PASSWORD_VALIDATORS`. Not an argument, deliberately: an
+  argument is visible in the process list and saved in shell history. Run again with a
+  new value to rotate it; a rotation also signs out every session taken with the old one
+  (the account's refresh tokens are blacklisted, as a password reset does).
+
+**The agent is not a way in (SIDE_BUGS S-235).** The review notes give Apple and Google
+two addresses and this password, and the agent's address follows from theirs. An agent
+who can sign in mints wallet money for any client (a top-up creates it and books a
+receivable), so the review agent has NO password (`set_unusable_password`), and its
+profile is `suspended` once the seed's own top-ups are made — both re-applied on every
+run, so an operator who switched it back on finds it off again after the next one.
+Nobody is given the agent; the top-ups it made stay in the clients' history.
 
 The command refuses, before writing anything, when either is missing, when the
 password is weak, when an address or username already belongs to an account that is
@@ -130,11 +140,13 @@ PEOPLE = {
                      training_place="home", training_days_per_week=3),
 }
 COACHED = ("client", "client2", "client3")
+#: The roles nobody signs in to (S-235, the module docstring).
+NO_SIGN_IN = ("agent",)
 
 #: Money, per currency the platform may run in (`PLATFORM_CURRENCY`): the trainer's
 #: monthly fee, and what the agent tops each client up with before they ask — enough for
-#: month 1 and, for `client`, a renewal. Well inside the default agent caps, so the
-#: reviewer can still make a top-up of their own from the agent account the same day.
+#: month 1 and, for `client`, a renewal. Inside the default agent caps; the agent is
+#: suspended right after (`_retire_agent`), so nobody tops anyone up from it.
 MONEY = {
     "SYP": {"fee": Decimal("20000.00"),
             "topups": {"client": Decimal("50000.00"), "client2": Decimal("25000.00"),
@@ -219,6 +231,7 @@ class Command(BaseCommand):
             self._verify_trainer()
             self._agent()
             self._top_ups()
+            self._retire_agent()
             self._coaching()
             self._routines()
             self._premium()
@@ -281,13 +294,15 @@ class Command(BaseCommand):
     def _check_prerequisites(self):
         from diet.models import FoodItem
         from routine.models import Exercise
-        from subscription.default_plans import PREMIUM_PLAN_NAME
+        from subscription.default_plans import PREMIUM_PLAN_KEY, PREMIUM_PLAN_NAME
         from subscription.models import SubscriptionPlan
 
         keys = {key for day in PROGRAM.values() for key, *_rest in day}
         gaps = []
-        if not SubscriptionPlan.objects.filter(name_en=PREMIUM_PLAN_NAME).exists():
-            gaps.append(f"the plan {PREMIUM_PLAN_NAME!r}")
+        # By its key (SIDE_BUGS S-236): the operator may have renamed it in the console.
+        if not SubscriptionPlan.objects.filter(catalogue_key=PREMIUM_PLAN_KEY).exists():
+            gaps.append(f"the plan {PREMIUM_PLAN_NAME!r} (catalogue key "
+                        f"{PREMIUM_PLAN_KEY!r}, under whatever name)")
         if Exercise.objects.filter(catalogue_key__in=keys).count() != len(keys):
             gaps.append("the starter exercises")
         if not FoodItem.objects.exists():
@@ -326,6 +341,9 @@ class Command(BaseCommand):
         with transaction.atomic():
             user = CustomUser.objects.filter(username=f"review_{role}",
                                              groups=group).first()
+            # The agent gets no password at all (S-235, the module docstring): None
+            # makes it unusable, so no password signs in to it.
+            password = None if role in NO_SIGN_IN else self.password
             if user is None:
                 profile = dict(PEOPLE[role])
                 profile["date_of_birth"] = datetime.strptime(
@@ -335,14 +353,23 @@ class Command(BaseCommand):
                 # PERSON proves an address is theirs.
                 user = CustomUser.objects.create_user(
                     email=self.addresses[role], username=f"review_{role}",
-                    password=self.password, preferred_language="ar", **profile)
+                    password=password, preferred_language="ar", **profile)
                 user.groups.add(group)
                 self._note(f"account {role}", "created")
                 return user
-            if not user.check_password(self.password):
-                user.set_password(self.password)
+            if password is None:
+                if user.has_usable_password():
+                    user.set_unusable_password()
+                    user.save(update_fields=["password"])
+                    _end_sessions(user)
+                    self._note(f"account {role}", "password removed; signed out")
+                else:
+                    self._note(f"account {role}", "found")
+            elif not user.check_password(password):
+                user.set_password(password)
                 user.save(update_fields=["password"])
-                self._note(f"account {role}", "password changed")
+                _end_sessions(user)
+                self._note(f"account {role}", "password changed; signed out")
             else:
                 self._note(f"account {role}", "found")
             return user
@@ -385,6 +412,21 @@ class Command(BaseCommand):
         profile.save(update_fields=["display_name", "city", "area", "is_listed",
                                     "updated_at"])
         self._note("agent profile", "created with the default caps")
+
+    def _retire_agent(self):
+        """After the seed's own top-ups, the agent tops nobody up: its profile is
+        suspended (`agent_not_active` on every top-up route). Re-applied on every run.
+        A `banned` agent is left banned."""
+        from wallet import agents
+        from wallet.models import AgentProfile
+
+        with transaction.atomic():
+            profile = agents.lock_profile(AgentProfile.objects.get(user=self.users["agent"]))
+            if profile.status != "active":
+                return self._note("agent suspended", "found")
+            profile.status = "suspended"
+            profile.save(update_fields=["status", "updated_at"])
+        self._note("agent suspended", "after its top-ups")
 
     # ----------------------------------------------------------------- money
     def _money(self):
@@ -526,11 +568,11 @@ class Command(BaseCommand):
         """The Premium entitlement, granted by the operator (`source=operator_grant`),
         the way the console's "activate" writes one: no payment row, because no money
         moved. Extended when fewer than GRANT_TOP_UP_DAYS remain."""
-        from subscription.default_plans import PREMIUM_PLAN_NAME
+        from subscription.default_plans import PREMIUM_PLAN_KEY
         from subscription.models import Subscription, SubscriptionPlan
 
         client = self.users["client"]
-        plan = SubscriptionPlan.objects.get(name_en=PREMIUM_PLAN_NAME)
+        plan = SubscriptionPlan.objects.get(catalogue_key=PREMIUM_PLAN_KEY)
         now = timezone.now()
         with transaction.atomic():
             subscription = (Subscription.objects.select_for_update(of=("self",))
@@ -657,6 +699,18 @@ class Command(BaseCommand):
             recount(challenge, joined)
             standing.write_places(challenge)
             self._note("challenge joined", f"{len(joined)} participant(s)")
+
+
+def _end_sessions(user):
+    """Blacklist every refresh token `user` still holds, as a password reset does: a
+    changed or removed password must not leave the sessions taken with the old one
+    working. An access token still runs out on its own short lifetime."""
+    from rest_framework_simplejwt.token_blacklist.models import (BlacklistedToken,
+                                                                 OutstandingToken)
+
+    for token in OutstandingToken.objects.filter(user=user, expires_at__gt=timezone.now(),
+                                                 blacklistedtoken__isnull=True):
+        BlacklistedToken.objects.get_or_create(token=token)
 
 
 def _placeholder_document(slot: str, index: int) -> bytes:

@@ -84,6 +84,11 @@ class Command(BaseCommand):
         ]
         
         created_count = 0
+        # The six are written into an EMPTY table only (SIDE_BUGS S-236): once there
+        # are templates they are the operator's, and this runs again on production
+        # (`bootstrap_platform`), where re-creating one the operator renamed or deleted
+        # put a second copy back in the trainer's picker.
+        had_templates = DietPlanTemplate.objects.exists()
         for template_data in templates_data:
             # Keyed on `name_en`. `name` is a modeltranslation virtual field and
             # `DietPlanTemplate` has no unique key at all, so running this under an
@@ -95,6 +100,10 @@ class Command(BaseCommand):
             template = DietPlanTemplate.objects.filter(
                 name_en=template_data['name']).first()
             created = template is None
+            if created and had_templates:
+                self.stdout.write(f"  Not found, not re-created (this database has "
+                                  f"templates): {template_data['name']}")
+                continue
             name_ar, description_ar = ARABIC[template_data['name']]
             if created:
                 template = DietPlanTemplate.objects.create(

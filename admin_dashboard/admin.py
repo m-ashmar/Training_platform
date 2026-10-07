@@ -764,6 +764,34 @@ class TrainerClientRelationAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+# Why coachings end (BACKEND_BUGS B-159, B-160): the reasons the leave and remove sheets
+# collect, for the operators — the only people who ever see them (the owner,
+# 2026-09-28). Append-only, so read-only here: nobody adds, edits or deletes one.
+from users.models import CoachingEnding  # noqa: E402
+
+
+@admin.register(CoachingEnding, site=admin_site)
+class CoachingEndingAdmin(admin.ModelAdmin):
+    list_display = ('created_at', 'ended_by', 'reason', 'scheduled', 'trainer', 'client')
+    list_filter = ('ended_by', 'reason', 'scheduled')
+    list_select_related = ('trainer', 'client')
+    search_fields = ('trainer__email', 'client__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('trainer', 'client', 'ended_by', 'reason', 'scheduled', 'created_at')
+    fields = readonly_fields
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 admin_site.register(DeviceToken)
 
 admin_site.register(Exercise, ExerciseAdmin)

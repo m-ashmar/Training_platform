@@ -288,6 +288,13 @@ def test_the_bootstrap_seeds_the_quota_features_migration_0008_seeds():
 
 # ============================================================ seed_review_accounts
 ROLES = ("client", "trainer", "agent", "client2", "client3", "prospect")
+#: The roles that sign in with the review password. SIDE_BUGS S-235 (2026-09-28, a
+#: deliberate contract change): the review `agent` has NO password and its profile is
+#: suspended after the seed's top-ups, because its address follows from the two the
+#: review notes hand out and an agent who signs in mints wallet money.
+#: `tests/test_side_bugs_s235_s236.py` holds the agent to that; every other role is
+#: still held here to the password it was given.
+SIGNS_IN = tuple(role for role in ROLES if role != "agent")
 
 
 @pytest.fixture
@@ -426,7 +433,8 @@ def test_seed_builds_what_the_reviewers_need_and_a_second_run_changes_nothing(
     assert set(people) == set(ROLES), first
     for role, user in people.items():
         assert user.email == f"store-review+{role}@yalla-review.test"
-        assert user.check_password(review_env) and user.email_verified and user.is_active
+        assert (user.check_password(review_env) or role not in SIGNS_IN) \
+            and user.email_verified and user.is_active
         assert user.age and user.age >= 14
     client, trainer, agent = people["client"], people["trainer"], people["agent"]
     assert (client.user_type, trainer.user_type, agent.user_type) == ("client", "trainer", "agent")

@@ -595,6 +595,22 @@ register(PersonalDataSource(label="trainer_request_outcomes", model="users.Train
                                      "figure."),
                             recipients=(),
                             data_types=("app_activity",)))
+# Why each coaching ended, from the leave and remove sheets (BACKEND_BUGS B-159, B-160).
+# The owner (2026-09-28): seen by the platform's operators only, never by the other
+# person — so nobody outside receives it — and on erasure the row is KEPT, anonymised:
+# the links to both people go, who ended it, the reason and the date stay. The export
+# leaves the reason out: a trainer's reason is about the client and is never shown to
+# the client, and one field list serves both people's exports.
+register(PersonalDataSource(label="coaching_endings", model="users.CoachingEnding",
+                            user_field=("trainer", "client"),
+                            fields=["id", "trainer", "client", "ended_by", "scheduled",
+                                    "created_at"],
+                            on_erase="anonymise",
+                            anonymise={"trainer": None, "client": None},
+                            purpose=("Why a coaching ended, as the client or the trainer "
+                                     "chose it on leaving, for the platform's operators."),
+                            recipients=(),
+                            data_types=("app_activity",)))
 # Short-lived credentials: deleted on erasure, and expired rows purged on a schedule.
 register(PersonalDataSource(label="otp_verifications", model="users.OTPVerification", user_field="user",
                             retention_days=1,

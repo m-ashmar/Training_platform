@@ -931,6 +931,74 @@ class TrainerRequestOutcome(models.Model):
         return (self.responded_at - self.requested_at).total_seconds()
 
 
+class CoachingEnding(models.Model):
+    """Why a coaching ended, for the operators (BACKEND_BUGS B-159, B-160).
+
+    The leave sheets ask for a reason — the client's «(اختياري، يساعدنا)», the trainer's
+    «يراه فريق المنصة فقط» — and the relation row is deleted when the coaching ends, so
+    this is the only place it can be kept. One row per ending, written in the same
+    transaction that ends it (`record`): the client leaving
+    (`client/unassign-trainer/`), the trainer ending it now, or the trainer SCHEDULING
+    the end at the month's close (`scheduled`; the relation ends later, in the renewal
+    run, and writes nothing more).
+
+    The owner (2026-09-28): the reason codes are the ones drawn on each sheet; the row
+    is seen by OPERATORS only — the console, read-only — never by the trainer, and a
+    trainer's reason is never shown to the client; nothing counts them yet. The reason
+    is optional: an unknown one is stored as NULL (and logged), never refused, so it
+    never stands between anyone and leaving.
+
+    Append-only: nothing edits a row, except an erasure, which removes the link to BOTH
+    people and keeps who ended it, the reason and the date (`training_platform/privacy/
+    sources.py`).
+    """
+    ENDED_BY_CHOICES = [('client', 'Client'), ('trainer', 'Trainer')]
+    #: The client's leave sheet.
+    CLIENT_REASONS = ('price', 'slow_replies', 'other_specialty', 'other')
+    #: The trainer's remove sheet.
+    TRAINER_REASONS = ('not_committed', 'no_reply', 'roster_full', 'other')
+    REASON_CHOICES = [
+        ('price', 'Price (client)'),
+        ('slow_replies', 'Slow replies (client)'),
+        ('other_specialty', 'Wants another specialty (client)'),
+        ('not_committed', 'Not committed (trainer)'),
+        ('no_reply', 'Does not reply (trainer)'),
+        ('roster_full', 'Roster full (trainer)'),
+        ('other', 'Other'),
+    ]
+
+    trainer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                null=True, blank=True,
+                                related_name='coaching_endings_as_trainer')
+    client = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                               null=True, blank=True,
+                               related_name='coaching_endings_as_client')
+    ended_by = models.CharField(max_length=8, choices=ENDED_BY_CHOICES)
+    reason = models.CharField(max_length=16, choices=REASON_CHOICES, null=True, blank=True)
+    #: The trainer scheduled the end for the close of the running month (the relation
+    #: was still approved when this was written).
+    scheduled = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f"{self.trainer_id} / {self.client_id}: ended by {self.ended_by} ({self.reason})"
+
+    @classmethod
+    def record(cls, *, trainer, client, ended_by, reason, scheduled=False):
+        """Write one ending. `reason` is the body's value as sent: kept when it is one of
+        `ended_by`'s own codes, NULL otherwise (an unknown value is logged)."""
+        allowed = cls.CLIENT_REASONS if ended_by == 'client' else cls.TRAINER_REASONS
+        code = reason if isinstance(reason, str) and reason in allowed else None
+        if code is None and reason not in (None, ''):
+            logger.info("Coaching ending: unknown %s reason %r stored as none",
+                        ended_by, str(reason)[:32])
+        return cls.objects.create(trainer=trainer, client=client, ended_by=ended_by,
+                                  reason=code, scheduled=scheduled)
+
+
 class CoachingPeriod(models.Model):
     """One month of one-to-one coaching, and what happened to the money for it.
 

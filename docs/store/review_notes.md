@@ -108,20 +108,22 @@ The password is read from the environment only — never an argument, never in a
 Run it again shortly before each submission: it extends the Premium grant when fewer
 than 30 days are left and makes a new 7-day meal plan when none covers today; nothing
 else changes on a second run. `{role}` is replaced by the role; without it the address
-is plus-addressed (`review+client@...`).
+is plus-addressed (`review+client@...`). A new password rotates it and signs out every
+session taken with the old one.
 
 | Role | What the reviewer finds |
 |---|---|
 | `client` | Samer Haddad (invented). Premium plan granted by an operator for 90 days (no payment row: no money moved). Coached by `trainer`: month 1 approved, paid from the wallet, paid out when the program was assigned. The trainer's 4-day strength program; two weeks of sessions and set logs (one day skipped). A 7-day meal plan. Wallet: an agent top-up and the coaching month. Joined the trainer's "100 sets in two weeks" challenge |
 | `trainer` | Rami Mansour (invented). Verified by an operator decision on placeholder images that say they are not identity documents. Three approved clients (`client`, `client2`, `client3`), one pending request (`prospect`), a template and each client's own routine. Marked "not accepting new clients", so no real person can ask this demo trainer for coaching |
-| `agent` | An agent with the default limits, who made the top-ups. Not on the public agents list |
+| `agent` | The agent who made the top-ups. Not on the public agents list. It has no password and its profile is suspended after those top-ups (every run re-applies both): its address follows from the two given to the reviewers, and an agent who can sign in mints wallet money (SIDE_BUGS S-235) |
 | `client2` | Laila Issa (invented), a coached client who started this week |
 | `client3` | Karim Youssef (invented), a coached client who started this week |
 | `prospect` | Maya Khalil (invented), whose request is waiting for the trainer |
 
 Every name is invented and every phone number is the model's placeholder. Give the
-reviewers `client` and `trainer`; `agent` only if Google asks how top-ups work (an
-agent cannot top up from the iOS app, §4).
+reviewers `client` and `trainer`, and no other account. If Google asks how top-ups
+work, describe them (§4); nobody can sign in to `agent` (an agent cannot top up from
+the iOS app either, §4).
 
 Nothing on the server treats these accounts differently (rule zero): the group that
 marks them is read by the seed command alone, and a test holds every other file to it

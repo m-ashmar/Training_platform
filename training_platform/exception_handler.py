@@ -165,9 +165,12 @@ def _client_input_error(exc, context):
         if "NUL (0x00)" in message or "\x00" in message:
             return exceptions.ValidationError(
                 {NON_FIELD: [_("Text may not contain null bytes.")]})
-        if _NOT_A_NUMBER.match(message):
-            return exceptions.ValidationError(
-                {NON_FIELD: [_("Must be a whole number.")]})
+    # A TypeError too (BACKEND_BUGS B-166): for a JSON list or object reaching
+    # `.get(id=...)`, `IntegerField.get_prep_value` re-raises this same message with the
+    # original's type, TypeError, and that one escaped as a 500.
+    if isinstance(exc, (ValueError, TypeError)) and _NOT_A_NUMBER.match(message):
+        return exceptions.ValidationError(
+            {NON_FIELD: [_("Must be a whole number.")]})
     return None
 
 

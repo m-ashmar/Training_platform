@@ -7,7 +7,9 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         # The catalogue lives in `subscription/default_plans.py`, shared with
-        # `bootstrap_platform`. It is keyed on the ENGLISH name: this used
+        # `bootstrap_platform`. It finds a plan by its `catalogue_key` (adopting one from
+        # before the key by its ENGLISH name), and writes the catalogue only into an
+        # empty table (SIDE_BUGS S-236). It used to be
         # `get_or_create(name=...)`, and `name` is translated, so under an Arabic locale
         # the lookup went to `name_ar`, found nothing and wrote a second set of plans
         # (the trap `setup_diet_templates` documents). It also writes the Arabic name and
@@ -25,6 +27,12 @@ class Command(BaseCommand):
             elif outcome == 'arabic added':
                 self.stdout.write(self.style.WARNING(
                     f'⚠ {plan.name_en} already exists; its empty Arabic was filled in'))
+            elif outcome == 'missing':
+                self.stdout.write(self.style.WARNING(
+                    f'⚠ {plan.name_en} not found and NOT re-created: this database has '
+                    f'plans, and they are the operator\'s (SIDE_BUGS S-236)'))
+            elif outcome.startswith('failed'):
+                self.stdout.write(self.style.ERROR(f'✗ {plan.name_en} {outcome}'))
             else:
                 self.stdout.write(self.style.WARNING(f'⚠ {plan.name_en} already exists'))
 
