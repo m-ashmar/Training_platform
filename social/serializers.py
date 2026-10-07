@@ -711,6 +711,10 @@ class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
     cannot use. For any other metric `exercise` is stored null whatever is sent.
     `exercise_name` (read-only) is its name in the caller's language, or null.
 
+    `audience` — `community` (default) | `my_clients` (BACKEND_BUGS B-162): only a
+    trainer creator may set `my_clients` (field code `audience_trainers_only`); who
+    then sees it is `Challenge.visible_to_q`.
+
     `creator` is `{id, username, user_type, profile_picture}`, or null when the creator's
     account is not publicly visible — suspended or erased (the owner's decision 8,
     2026-09-24): the challenge stays, its participants keep it, and nobody is shown the
@@ -759,7 +763,7 @@ class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
             'is_joined', 'user_progress', 'is_active', 'metric', 'auto_counted',
             'ranked', 'counting', 'review_hours', 'winner_final',
             'winner_min_participants', 'active_participants',
-            'exercise', 'exercise_name',
+            'exercise', 'exercise_name', 'audience',
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'participants_count']
 
@@ -785,6 +789,22 @@ class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
         elif exercise is not None:
             attrs['exercise'] = None
         return attrs
+
+    def validate_audience(self, value):
+        """`my_clients` is a TRAINER creator's choice (the owner, 2026-09-28, B-162):
+        field code `audience_trainers_only` for anyone else. The creator is the
+        challenge's, on an edit by staff too."""
+        if value != Challenge.AUDIENCE_MY_CLIENTS:
+            return value
+        creator = getattr(self.instance, 'creator', None)
+        if creator is None:
+            request = self.context.get('request')
+            creator = getattr(request, 'user', None)
+        if not getattr(creator, 'is_trainer', False):
+            raise serializers.ValidationError(
+                _('Only a trainer can open a challenge to their clients only.'),
+                code='audience_trainers_only')
+        return value
 
     def get_exercise_name(self, obj):
         exercise = obj.exercise if obj.exercise_id else None

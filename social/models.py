@@ -8,6 +8,7 @@ content sharing, community interactions, and social feeds.
 """
 
 from django.db import models
+from django.db.models import Q
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes.fields import GenericForeignKey
 from datetime import timedelta
@@ -406,6 +407,20 @@ class Challenge(models.Model):
     exercise = models.ForeignKey('routine.Exercise', on_delete=models.SET_NULL,
                                  null=True, blank=True, related_name='challenges')
 
+    #: Who may see and join it (the owner's decision of 2026-09-28, BACKEND_BUGS B-162;
+    #: the CreateChallenge artboard's «من يستطيع الانضمام: عملائي فقط / كل المجتمع»).
+    #: `community` (the default, and every challenge written before this column):
+    #: everyone. `my_clients`: only a TRAINER creator may set it; the challenge is shown
+    #: and open to the creator's clients (`visible_to_q`), hidden from everyone else.
+    AUDIENCE_COMMUNITY = 'community'
+    AUDIENCE_MY_CLIENTS = 'my_clients'
+    AUDIENCE_CHOICES = [
+        (AUDIENCE_COMMUNITY, gettext_lazy('The whole community')),
+        (AUDIENCE_MY_CLIENTS, gettext_lazy('My clients only')),
+    ]
+    audience = models.CharField(max_length=12, choices=AUDIENCE_CHOICES,
+                                default=AUDIENCE_COMMUNITY)
+
     # Participation
     max_participants = models.PositiveIntegerField(null=True, blank=True)
     participants_count = models.PositiveIntegerField(default=0)
@@ -475,6 +490,38 @@ class Challenge(models.Model):
     
     #: Statuses a person sets. Everything else follows from the dates.
     TERMINAL_STATUSES = ('completed', 'cancelled')
+
+    @classmethod
+    def visible_to_q(cls, user):
+        """The challenges `user` may see, by `audience` (BACKEND_BUGS B-162).
+
+        A `community` challenge: everyone. A `my_clients` one: its creator, staff, the
+        creator's CLIENTS — an APPROVED relation with the creator, the one predicate
+        that decides "this trainer's client" (`users.TrainerClientRelation`, never the
+        `assigned_trainer` pointer); a frozen coaching is still an approved relation, so
+        a frozen client still counts (the owner) — and anyone already taking part: a
+        client whose coaching ends mid-challenge stays in it, and keeps seeing it.
+        The operator's `is_hidden` is a separate filter, applied by every reader.
+        """
+        community = Q(audience=cls.AUDIENCE_COMMUNITY)
+        if user is None or not getattr(user, 'is_authenticated', False):
+            return community
+        if user.is_staff or getattr(user, 'is_admin', False):
+            return Q()
+        from users.models import TrainerClientRelation
+
+        coaches = (TrainerClientRelation.objects
+                   .filter(client=user, status='approved').values('trainer_id'))
+        joined = ChallengeParticipation.objects.filter(user=user).values('challenge_id')
+        return (community | Q(creator=user) | Q(creator_id__in=coaches)
+                | Q(pk__in=joined))
+
+    def visible_to(self, user) -> bool:
+        """`visible_to_q` for this one row (one query at most)."""
+        if self.audience == self.AUDIENCE_COMMUNITY:
+            return True
+        return type(self).objects.filter(pk=self.pk).filter(
+            self.visible_to_q(user)).exists()
 
     @property
     def lifecycle_status(self):

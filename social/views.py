@@ -855,6 +855,19 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     exercise; `exercise_not_found` — an id that does not exist, is inactive or is
     another trainer's own. `exercise` sent with any other metric is stored null.
 
+    **Who may join** (the CreateChallenge artboard's «من يستطيع الانضمام»; the owner,
+    2026-09-28, BACKEND_BUGS B-162). `audience` — `community` (default: everyone) |
+    `my_clients`, writable on create and update. Only a creator who is a TRAINER may
+    set `my_clients`: anyone else gets 400 `validation_error` with the field code
+    `audience_trainers_only` in `field_errors.audience`. A `my_clients` challenge is
+    shown only to its creator, staff, the creator's clients (an approved relation with
+    them — a frozen coaching still counts) and anyone already in it (a client whose
+    coaching ends mid-challenge stays in the standing and keeps seeing it): for
+    everyone else it is not in the list, and its detail, `leaderboard/`, `leave/` and
+    `update_progress/` answer 404 as for a challenge that does not exist; `join/`
+    answers 403 `challenge_clients_only`. The Challenge Winner badge still needs
+    `winner_min_participants` active participants. Nothing differs by build.
+
     `user_progress` — `{current_value, progress_percentage, rank, review_state,
     review_reason}` of the caller, or null when they have not joined. `rank` is
     counted live by the one rule every standing surface reads (`social/standing.py`,
@@ -953,7 +966,7 @@ class ChallengeViewSet(viewsets.ModelViewSet):
                 'target_value', 'unit', 'start_date', 'end_date',
                 'max_participants', 'participants_count', 'status',
                 'created_at', 'rules', 'reward_description', 'image', 'metric',
-                'winner_checked_at',
+                'winner_checked_at', 'audience',
                 # `exercise_name` (B-161), read with the row.
                 'exercise', 'exercise__id', 'exercise__name',
                 'creator__id', 'creator__username', 'creator__email',
@@ -977,6 +990,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
             .annotate(active_participants_anno=active_participants_count())
         )
         user = getattr(self, 'request', None).user if getattr(self, 'request', None) else None
+        # A `my_clients` challenge is hidden from everyone but its creator's clients
+        # (the owner, 2026-09-28, B-162): not listed, and 404 on every route that names
+        # it — except `join`, which answers 403 `challenge_clients_only` itself.
+        if getattr(self, 'action', None) != 'join':
+            qs = qs.filter(Challenge.visible_to_q(user))
         if user and user.is_authenticated:
             part_qs = ChallengeParticipation.objects.filter(user=user, challenge=OuterRef('pk'))
             qs = qs.annotate(
@@ -1157,12 +1175,24 @@ class ChallengeViewSet(viewsets.ModelViewSet):
           `403` `{"error", "code": "challenge_disqualified"}` — an operator
                 disqualified you from this challenge (owner, 2026-09-24, F20); checked
                 before anything else
+          `403` `{"error", "code": "challenge_clients_only"}` — an `audience:
+                "my_clients"` challenge and you are not its creator's client (no
+                approved relation with them; a frozen coaching still counts) — the
+                owner, 2026-09-28, BACKEND_BUGS B-162. Checked right after the above
           `404` — no such challenge, or one an operator hid
         """
         challenge = self.get_object()
 
         if self._is_disqualified(request.user, challenge):
             return self._disqualified_response()
+
+        # Its creator's clients only (B-162). Before "not running": a challenge someone
+        # may not see tells them nothing about its dates.
+        if not challenge.visible_to(request.user):
+            return Response(
+                {'error': _("This challenge is open to its coach's clients only."),
+                 'code': 'challenge_clients_only'},
+                status=status.HTTP_403_FORBIDDEN)
 
         # A challenge you can still take part in. `join` checked capacity only, while
         # `update_progress` checked `is_active` — so a client could join one that ended

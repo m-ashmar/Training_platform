@@ -5906,3 +5906,24 @@ msgstr "هذا التمرين غير موجود."
 #: social/serializers.py
 msgid "Name the exercise whose reps this challenge counts."
 msgstr "اختر التمرين الذي يحسب هذا التحدي تكراراته."
+
+#. A challenge's audience (BACKEND_BUGS B-162), the CreateChallenge artboard's
+#. «من يستطيع الانضمام: كل المجتمع».
+#: social/models.py
+msgid "The whole community"
+msgstr "كل المجتمع"
+
+#. A challenge's audience (BACKEND_BUGS B-162): «عملائي فقط».
+#: social/models.py
+msgid "My clients only"
+msgstr "عملائي فقط"
+
+#. `audience_trainers_only` (B-162): someone who is not a trainer chose «عملائي فقط».
+#: social/serializers.py
+msgid "Only a trainer can open a challenge to their clients only."
+msgstr "فقط المدرب يمكنه أن يجعل التحدي لعملائه فقط."
+
+#. `challenge_clients_only` (B-162): joining a coach's clients-only challenge.
+#: social/views.py
+msgid "This challenge is open to its coach's clients only."
+msgstr "هذا التحدي مفتوح لعملاء المدرب فقط."

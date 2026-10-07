@@ -2624,6 +2624,13 @@ no `code` renamed. `ChallengeViewSet`'s docstring carries the full contract.
   validation_error` with the field code in `field_errors.exercise`:
   `exercise_required` (`exercise_reps` with no exercise) and `exercise_not_found`. An
   `exercise` sent with any other metric is stored null. «عدد التمارين» is `workouts`.
+- **Who may join** (B-162). Challenge rows gain writable `audience`: `community`
+  (default) | `my_clients`. Only a trainer creator may set `my_clients` (`400
+  validation_error`, field code `audience_trainers_only`). Such a challenge is shown
+  only to its creator, staff, the creator's clients (an approved relation; a frozen
+  coaching counts) and anyone already in it (a client whose coaching ends stays): for
+  anyone else it is absent from the list and its detail and actions answer 404, and
+  `join/` answers `403 challenge_clients_only`.
 
 **What wiring the train screens found** (BACKEND_BUGS B-106, B-109, B-110, B-112,
 2026-09-24). Additive under §6: new keys on existing answers, one query parameter, two
