@@ -9,6 +9,8 @@ Each test is the proof for one notebook row and fails on the code before its fix
 * S-214 — the profile export left out the photo, language, preferences, a trainer's
   card and the last sign-in, and carried the console's permission ids; a client's own
   program was only in their trainer's export.
+* S-231 — a test moved a privacy source to the end of the registry, and every later
+  test rendered the data inventory in another order.
 """
 from decimal import Decimal
 
@@ -129,3 +131,21 @@ def test_s214_a_clients_export_carries_the_program_their_trainer_wrote_for_them(
     coach = export_user_data(trainer)["sections"]
     assert {r["id"] for r in coach["routines_created"]} == {mine.pk, theirs.pk}, \
         "the trainer still gets every routine they wrote"
+
+
+# ================================================================================ S-231
+def test_s231_the_mediakit_audit_test_leaves_the_registry_in_its_order():
+    """`test_s028_the_privacy_audit_walks_mediakit_too` popped MediaAsset and re-added
+    it, which moved it to the END of the registry for every later test in the process:
+    the export, the erasure and `manage.py data_inventory` all walk the registry in
+    order, and the inventory then no longer matched the committed file. Run as a
+    module attribute, so pytest does not collect it a second time here."""
+    from tests import test_side_bugs_round2 as round2
+    from training_platform.privacy.registry import registry
+
+    before = list(registry)
+    held = registry
+    round2.test_s028_the_privacy_audit_walks_mediakit_too()
+
+    assert list(registry) == before, "the registry came back in another order"
+    assert registry is held, "the registry is the same dict every module imported"
