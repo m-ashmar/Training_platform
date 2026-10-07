@@ -1903,6 +1903,15 @@ show plan status, expiry and history, and history without receipts is not histor
   wallet the money passed through.
 - `GET /api/wallet/transactions/{reference_id}/` — one row, same shape.
   `404 not_found` for a reference that is not the caller's.
+- **A row names only what it already names to you** (BACKEND_BUGS B-184, both routes;
+  every key stays): `actor` is your own id or the `counterparty`'s, else null;
+  `source_wallet` / `destination_wallet` is your wallet's id on your side and null on
+  the other; `source_owner` / `destination_owner` on the other side is the
+  `counterparty`, or null — never the platform's escrow, revenue or payout-clearing
+  account, never a program's buyer; `metadata` carries only `title`, `product_title`,
+  `routine_name`, `product_id`, `month`, `withdrawal_id`, `withdrawal_number` and
+  `original_reference` when the row has them (`wallet.activity.READER_METADATA_KEYS`)
+  — no other account's id, no `purpose` (read `kind`), no operator's `reason`.
 
 #### Two currencies (2026-09-21)
 

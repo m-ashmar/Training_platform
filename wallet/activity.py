@@ -288,6 +288,26 @@ def counterparty_of(tx, wallet, *, owner_ids=None, users=None) -> dict | None:
     return describe(counterparty_users([user_id]).get(user_id))
 
 
+#: The `metadata` keys a PERSON is served on their own ledger rows (BACKEND_BUGS B-184).
+#: Everything else in the stored blob is the money code's bookkeeping — `purpose` (read
+#: it as `kind`), other accounts' ids (`client_id`, `trainer_id`, `agent_id`: the
+#: `counterparty` names who the row was with), `purchase_id`, `relation_id`,
+#: `period_id`, `hold_reference`, the transfer markers — or an OPERATOR's words (a
+#: reversal's or a refund's `reason`, written for support, never for the customer).
+#: These are the keys the app reads, and the reversed row's own reference.
+READER_METADATA_KEYS = frozenset({
+    "title", "product_title", "routine_name", "product_id", "month",
+    "withdrawal_id", "withdrawal_number", "original_reference",
+})
+
+
+def reader_metadata(metadata) -> dict:
+    """The part of a row's stored `metadata` its owner is served (`READER_METADATA_KEYS`)."""
+    if not isinstance(metadata, dict):
+        return {}
+    return {key: value for key, value in metadata.items() if key in READER_METADATA_KEYS}
+
+
 def reason_of(kind: str) -> str:
     label = KIND_LABELS.get(kind)
     return str(label) if label is not None else kind

@@ -398,6 +398,42 @@ class TransactionSerializer(TransactionNoteFields, TransactionWithdrawalFields,
             obj, wallet, owner_ids=self.context.get("ledger_owner_ids"),
             users=self.context.get("counterparty_users"))
 
+    def to_representation(self, instance):
+        """A PERSON's read names nobody the row does not already name to them
+        (BACKEND_BUGS B-184).
+
+        The stored columns kept their keys — removing one would break a reader — but on a
+        read with a reader's `wallet` in context: `actor` is the reader's own id or the
+        row's `counterparty`'s, else null (an operator who reversed it, the server);
+        `source_wallet` / `destination_wallet` is the reader's own wallet id on their
+        side and null on the other; `source_owner` / `destination_owner` is shown on the
+        other side only when it is the `counterparty` — never the platform's escrow,
+        revenue or payout-clearing account, never a program's buyer; and `metadata` is
+        `wallet.activity.reader_metadata`, the keys the app reads, without other
+        accounts' ids or an operator's words. With no wallet in context (the console's
+        exports) every stored column is served as written.
+        """
+        from . import activity
+
+        data = super().to_representation(instance)
+        wallet = self._wallet
+        if wallet is None:
+            return data
+        counterparty = activity.counterparty_id(
+            instance, wallet, owner_ids=self.context.get("ledger_owner_ids"))
+        known = {wallet.owner_id, counterparty} - {None}
+        if instance.actor_id not in known:
+            data["actor"] = None
+        for side in ("source", "destination"):
+            other = getattr(instance, f"{side}_wallet")
+            if other is None or other.pk == wallet.id:
+                continue
+            data[f"{side}_wallet"] = None
+            if other.owner_id not in known:
+                data[f"{side}_owner"] = None
+        data["metadata"] = activity.reader_metadata(instance.metadata)
+        return data
+
     def get_source_owner(self, obj):
         if obj.source_wallet and obj.source_wallet.owner:
             return {

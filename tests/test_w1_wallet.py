@@ -11,6 +11,7 @@ fails on 554c604.
 | `test_b147_*` | a reversal row of the agent ledger did not name the top-up it took back |
 | `test_b163_*` | the transfer's note was dropped; the transfer is now a coaching payment (owner) |
 | `test_b138_*` | the settling docstrings and contract named one of the two settling kinds |
+| `test_b184_*` | a person's ledger row served platform accounts, operators and internal ids |
 """
 from decimal import Decimal
 
@@ -516,3 +517,81 @@ def test_b138_every_settling_kind_is_named_in_the_ledger_contract():
                for kind in sorted(SETTLING_KINDS) if kind not in text]
     assert not missing, missing
     assert "nothing else settles" not in paragraph.split("routine_product_sale")[0]
+
+
+# ===========================================================================
+# B-184: a person's ledger row names only what it already names to them
+# ===========================================================================
+
+def test_b184_a_ledger_row_names_no_platform_account_operator_or_internal_id(
+        make_user, api, settings):
+    """Verified before fixing: a client's coaching hold row served `destination_owner`
+    `{id, username: "platform_escrow_syp", user_type: "agent"}` and escrow's wallet id,
+    the trainer's payout row named escrow the same way plus `period_id`,
+    `hold_reference`, `client_id`; a reversed top-up served the OPERATOR's id as `actor`
+    and their internal `reason` in `metadata`. Every key stays; the values a person is
+    not party to are null or left out. The console's exports still read every column."""
+    from tests.test_coaching_months import _accepted, _deliver_first_program
+    from wallet.models import Transaction, Wallet
+    from wallet.serializers import TransactionSerializer
+    from wallet.utils import ledger_owner_emails
+
+    settings.COACHING_COMMISSION_RATE = D("0.20")
+    trainer, client, _relation = _accepted(make_user, api, "w1b184")
+    _deliver_first_program(api, trainer, client)
+    agent, _profile = _agent(make_user, "w1b184_a", daily_limit=D("100000"),
+                             monthly_limit=D("100000"), receivable_ceiling=D("100000"))
+    operator = make_user("w1b184_op", user_type="admin")
+    top = api(agent).post("/api/wallet/agent/topup/proxy/", {
+        "client_identifier": str(client.id), "amount": "50.00", "currency": "SYP",
+        "idempotency_key": "w1b184-1"}, content_type=JSON).json()["reference_id"]
+    assert api(operator).post(REVERSAL, {"reference_id": top, "idempotency_key": "w1b184-r",
+                                         "reason": "internal: fraud ticket 88"},
+                              content_type=JSON).status_code == 200
+
+    from django.contrib.auth import get_user_model
+
+    platform_ids = set(get_user_model().objects.filter(email__in=ledger_owner_emails())
+                       .values_list("id", flat=True))
+    internal = {"purpose", "client_id", "trainer_id", "agent_id", "purchase_id",
+                "relation_id", "period_id", "hold_reference", "reason"}
+    seen = {}
+    for reader in (client, trainer):
+        mine = Wallet.objects.get(owner=reader).pk
+        rows = api(reader).get(TRANSACTIONS).json()["results"]
+        assert rows
+        for row in rows:
+            seen[(reader.username, row["kind"])] = row
+            known = {reader.pk, (row["counterparty"] or {}).get("id")}
+            assert row["actor"] in known | {None}, row
+            assert {row["source_wallet"], row["destination_wallet"]} <= {mine, None}, row
+            for side in ("source_owner", "destination_owner"):
+                owner = row[side]
+                assert owner is None or owner["id"] in known, row
+                assert owner is None or owner["id"] not in platform_ids, row
+            assert not internal & set(row["metadata"]), row
+            detail = api(reader).get(f"{TRANSACTIONS}{row['reference_id']}/").json()
+            assert {k: detail[k] for k in ("actor", "source_wallet", "destination_wallet",
+                                           "source_owner", "destination_owner",
+                                           "metadata")} == \
+                {k: row[k] for k in ("actor", "source_wallet", "destination_wallet",
+                                     "source_owner", "destination_owner", "metadata")}
+
+    hold = seen[(client.username, "trainer_fee_hold")]
+    assert hold["destination_owner"] is None and hold["destination_wallet"] is None
+    assert hold["source_owner"]["id"] == client.pk
+    assert hold["counterparty"]["id"] == trainer.pk
+    back = seen[(client.username, "reversal")]
+    assert back["actor"] is None, "the operator who reversed it is not named"
+    assert back["metadata"] == {"original_reference": top}
+    topup = seen[(client.username, "agent_topup")]
+    assert topup["actor"] == agent.pk == topup["counterparty"]["id"]
+    payout = seen[(trainer.username, "trainer_fee_payout")]
+    assert payout["source_owner"] is None and payout["metadata"] == {"month": 1}
+    assert payout["destination_owner"]["id"] == trainer.pk
+
+    # The console's exports (no reader) still read every stored column as written.
+    raw = TransactionSerializer(Transaction.objects.get(reference_id=back["reference_id"]),
+                                context={}).data
+    assert raw["actor"] == operator.pk
+    assert raw["metadata"]["reason"] == "internal: fraud ticket 88"

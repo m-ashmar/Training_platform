@@ -493,6 +493,18 @@ class WalletTransactionsView(generics.ListAPIView):
     `TransactionSerializer` row (`kind`, `reason`, `direction`, `signed_amount`,
     `counterparty`, amount, currency, `money_type`, reference, metadata).
 
+    WHAT A ROW NAMES (BACKEND_BUGS B-184). Only what it already names to the reader:
+    `actor` is the reader's own id or the `counterparty`'s, else null;
+    `source_wallet` / `destination_wallet` is the reader's own wallet id on their side,
+    null on the other; `source_owner` / `destination_owner` on the other side is the
+    `counterparty` or null — never the platform's escrow, revenue or payout-clearing
+    account (`platform_escrow_syp` used to be served on every coaching row), never a
+    program's buyer; `metadata` carries only `wallet.activity.READER_METADATA_KEYS`
+    (`title`, `product_title`, `routine_name`, `product_id`, `month`, `withdrawal_id`,
+    `withdrawal_number`, `original_reference`) — no other account's id, no `purpose`
+    (read `kind`), and never an operator's `reason` for a reversal or refund. Every key
+    is still there; the console's exports read every stored column as written.
+
     Optional filters (BACKEND_BUGS B-101; `wallet.ledger_reads` has the rules), all
     ANDed, and without any of them the call is exactly what it was:
 
@@ -643,7 +655,8 @@ class WalletTransactionDetailView(generics.RetrieveAPIView):
     The same shape as a row of the list (`TransactionSerializer`), so the activity
     detail sheet needs no second contract: `kind`, `reason`, `direction`,
     `signed_amount`, `counterparty`, the amount and currency, `money_type`, the
-    reference and the raw `metadata`.
+    reference and `metadata` — naming only what the row already names to the reader,
+    exactly as a row of the list does (BACKEND_BUGS B-184; `WalletTransactionsView`).
 
     Looked up by `reference_id` — the ledger's own public identifier, which is what
     every row, receipt and support conversation already quotes — and scoped to the
