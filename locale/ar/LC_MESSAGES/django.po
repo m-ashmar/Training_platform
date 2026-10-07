@@ -5910,3 +5910,7 @@ msgstr "يجب أن يكون place إما home أو gym."
 #: routine/product_views.py
 msgid "The search holds a character that cannot be searched for."
 msgstr "يحتوي البحث على حرف لا يمكن البحث عنه."
+
+#: routine/serializers.py
+msgid "Choose the program's goal: build muscle, strength, fat loss or rehab."
+msgstr "اختر هدف البرنامج: بناء عضل، قوة، خسارة دهون أو تأهيل."

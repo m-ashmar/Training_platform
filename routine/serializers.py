@@ -1948,6 +1948,12 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     counts once however many copies they hold; a copy nobody is on counts nobody.
     Only the template's author and an admin read the number; everyone else reading a
     public template gets null — how a trainer's program sells is their business.
+
+    `goal` is one of the CLOSED list `build_muscle` | `strength` | `fat_loss` | `rehab`
+    (the owner, 2026-09-28; `routine.product_models.ProductGoal`), the four chips of the
+    template form and the goals the catalogue filters on. Any case is accepted and the
+    code is stored; anything else answers 400 `validation_error` with
+    `field_errors.goal[0].code` = `bad_goal`, the code the catalogue's `?goal=` answers.
     """
     exercises = RoutineTemplateExerciseSerializer(source='routinetemplateexercise_set', many=True)
     created_by = serializers.SerializerMethodField()
@@ -1989,6 +1995,17 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
         model = RoutineTemplate
         fields = ['id', 'name', 'description', 'goal', 'days', 'weeks', 'session_count',
                   'is_public', 'created_by', 'created_at', 'exercises', 'used_by_count']
+
+    def validate_goal(self, value):
+        """One of the four goal codes, stored as the code (the owner, 2026-09-28)."""
+        from .product_models import ProductGoal
+
+        code = (value or '').strip().lower()
+        if code not in ProductGoal.values:
+            raise serializers.ValidationError(
+                _("Choose the program's goal: build muscle, strength, fat loss or rehab."),
+                code='bad_goal')
+        return code
 
     def validate(self, attrs):
         """Every row must be one a client's routine can hold.

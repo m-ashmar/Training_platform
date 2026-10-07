@@ -1167,3 +1167,36 @@ def test_a_purchase_costs_the_same_queries_whatever_the_programs_length(make_use
         assert set(rows.values_list("total_exercises", flat=True)) == {6}
         assert set(rows.values_list("status", flat=True)) == {"not_started"}
         assert sorted(rows.values_list("day", flat=True)) == list(range(1, days + 1))
+
+
+# ============================================================ the template's goal is closed
+@pytest.mark.parametrize("sent,stored", [("strength", "strength"), ("Fat_Loss", "fat_loss"),
+                                         (" rehab ", "rehab")])
+def test_a_template_goal_is_one_of_the_four_codes_in_any_case(make_user, api, sent, stored):
+    """The owner, 2026-09-28: the template's goal is the closed list the catalogue
+    filters on, so every program sold from a template carries a goal chip."""
+    trainer = _trainer(make_user, f"goal_ok_{stored}")
+    made = api(trainer).post("/api/routine/templates/", {
+        "name": "Goal", "goal": sent, "days": 3, "exercises": []}, content_type=JSON)
+    assert made.status_code == 201, made.content
+    assert made.json()["goal"] == stored
+
+
+@pytest.mark.parametrize("sent", ["Hypertrophy", "تضخيم", "", "build muscle"])
+def test_a_template_goal_outside_the_list_is_bad_goal(make_user, api, sent):
+    trainer = _trainer(make_user, f"goal_bad_{abs(hash(sent)) % 10000}")
+    made = api(trainer).post("/api/routine/templates/", {
+        "name": "Goal", "goal": sent, "days": 3, "exercises": []}, content_type=JSON)
+    assert made.status_code == 400, made.content
+    assert made.json()["field_errors"]["goal"][0]["code"] in ("bad_goal", "blank")
+
+
+def test_a_template_goal_cannot_be_patched_out_of_the_list(make_user, api):
+    trainer = _trainer(make_user, "goal_patch")
+    made = api(trainer).post("/api/routine/templates/", {
+        "name": "Goal", "goal": "rehab", "days": 3, "exercises": []}, content_type=JSON)
+    assert made.status_code == 201, made.content
+    patched = api(trainer).patch(f"/api/routine/templates/{made.json()['id']}/",
+                                 {"goal": "Endurance"}, content_type=JSON)
+    assert patched.status_code == 400, patched.content
+    assert patched.json()["field_errors"]["goal"][0]["code"] == "bad_goal"
