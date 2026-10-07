@@ -280,3 +280,207 @@ def test_b147_a_reversal_row_names_the_top_up_it_took_back(make_user, api):
         reverse(top_up(f"w1b147-more-{n}"), f"w1b147-more-r{n}")
     assert len(api(agent).get(LEDGER).json()["results"]) == 9
     assert cost() == small, "the link between a top-up and its reversal costs a query a row"
+
+
+# ===========================================================================
+# B-163: a client's payment to a trainer carries a note and is a coaching payment
+# ===========================================================================
+TRANSFER = "/api/wallet/client/transfer/"
+TRANSACTIONS = "/api/wallet/transactions/"
+NOTE = "جلسة الجمعة الإضافية"
+
+
+def _pair(make_user, name, balance="8000.00"):
+    from tests.test_routine_products import _fund
+
+    client = make_user(f"{name}_c")
+    trainer = make_user(f"{name}_t", user_type="trainer")
+    _fund(client, balance, "client")
+    _fund(trainer, "0.00", "trainer")
+    return client, trainer
+
+
+def _send(api, client, trainer, key, amount="5000.00", **extra):
+    return api(client).post(TRANSFER, {"trainer_id": trainer.id, "amount": amount,
+                                       "idempotency_key": key, **extra},
+                            content_type=JSON)
+
+
+def _row(api, user, reference_id=None):
+    rows = api(user).get(TRANSACTIONS).json()["results"]
+    if reference_id is None:
+        return rows
+    (row,) = [r for r in rows if r["reference_id"] == reference_id]
+    return row
+
+
+def test_b163_the_transfer_note_reaches_the_trainers_row(make_user, api, settings):
+    """SendMoney's note ('جلسة الجمعة الإضافية') was dropped by the serializer, and a
+    note holding a banned term was answered 200. Now it is shown to both people on their
+    own row, a banned one moves nothing, and — the owner, 2026-09-28 — the payment is a
+    coaching payment: the platform keeps its 20% and the trainer gets the rest."""
+    from wallet.models import CoachingTransfer, Transaction, Wallet
+    from wallet.utils import get_escrow_wallet, get_platform_revenue_wallet
+
+    settings.COACHING_COMMISSION_RATE = D("0.20")
+    client, trainer = _pair(make_user, "w1b163")
+    escrow, platform = get_escrow_wallet("SYP"), get_platform_revenue_wallet("SYP")
+    escrow_before, platform_before = escrow.balance, platform.balance
+
+    sent = _send(api, client, trainer, "w1b163-1", note=NOTE)
+    assert sent.status_code == 200, sent.content
+    ref = sent.json()["reference_id"]
+    assert sent.json()["client_balance"] == "3000.00"
+
+    # The money: the client paid 5,000; the trainer got 4,000, the platform 1,000.
+    assert Wallet.objects.get(owner=trainer).balance == D("4000.00")
+    platform.refresh_from_db()
+    escrow.refresh_from_db()
+    assert platform.balance - platform_before == D("1000.00")
+    assert escrow.balance == escrow_before, "escrow nets to zero inside the transfer"
+    record = CoachingTransfer.objects.get(charge_reference=ref)
+    assert (record.amount, record.commission_rate, record.commission, record.trainer_share,
+            record.note) == (D("5000.00"), D("0.2000"), D("1000.00"), D("4000.00"), NOTE)
+    legs = {tx.reference_id: tx for tx in Transaction.objects.filter(reference_id__in=[
+        record.charge_reference, record.payout_reference, record.commission_reference])}
+    assert len(legs) == 3
+    assert {tx.money_type for tx in legs.values()} == {"COACHING_1TO1"}
+    fee = legs[record.commission_reference]
+    assert (fee.metadata["purpose"], fee.metadata["rate"]) == ("coaching_commission", "0.20")
+    assert all(NOTE not in str(tx.metadata) for tx in legs.values()), \
+        "the note never enters the append-only ledger"
+
+    # Both people read the note on their own row; the kinds are what they were.
+    mine = _row(api, client, ref)
+    assert (mine["kind"], mine["amount"], mine["note"], mine["counterparty"]["id"]) == \
+        ("trainer_transfer", "5000.00", NOTE, trainer.id)
+    (theirs,) = _row(api, trainer)
+    assert (theirs["kind"], theirs["amount"], theirs["note"], theirs["counterparty"]["id"],
+            theirs["settling"]) == ("transfer_received", "4000.00", NOTE, client.id, False)
+    assert api(client).get(f"{TRANSACTIONS}{ref}/").json()["note"] == NOTE
+    assert api(trainer).get(f"{TRANSACTIONS}{theirs['reference_id']}/").json()["note"] == NOTE
+
+    # A note with a banned term is refused before anything moves, under its own code.
+    spam = _send(api, client, trainer, "w1b163-2", amount="100.00",
+                 note="كلمني على wa.me/963900000000")
+    assert _code(spam) == (400, "content_not_allowed"), spam.content
+    assert "note" in spam.json()["field_errors"]
+    assert Wallet.objects.get(owner=client).balance == D("3000.00")
+    assert CoachingTransfer.objects.filter(client=client).count() == 1
+    # Too long is a validation error; another note under a spent key is another request.
+    assert _code(_send(api, client, trainer, "w1b163-3", amount="100.00",
+                       note="x" * 141)) == (400, "validation_error")
+    assert _code(_send(api, client, trainer, "w1b163-1", note="غير ذلك")) == \
+        (422, "idempotency_key_reused")
+    # Without a note: null on both rows, and nothing else changes.
+    bare = _send(api, client, trainer, "w1b163-4", amount="100.00")
+    assert bare.status_code == 200, bare.content
+    assert _row(api, client, bare.json()["reference_id"])["note"] is None
+
+
+def test_b163_a_page_of_transfers_reads_its_notes_in_one_query(make_user, api, settings):
+    """The note is joined to the rows the way the withdrawal block is: one query per
+    page, whatever the number of transfers on it."""
+    from cachalot.api import cachalot_disabled
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    settings.COACHING_COMMISSION_RATE = D("0.20")
+    client, trainer = _pair(make_user, "w1b163q", balance="10000.00")
+
+    def cost(user):
+        with cachalot_disabled(), CaptureQueriesContext(connection) as queries:
+            assert api(user).get(TRANSACTIONS).status_code == 200
+        return len(queries)
+
+    assert _send(api, client, trainer, "w1b163q-0", amount="100.00",
+                 note="حصة 0").status_code == 200
+    for user in (client, trainer):
+        cost(user)
+    small = {user.pk: cost(user) for user in (client, trainer)}
+    for n in range(1, 5):
+        assert _send(api, client, trainer, f"w1b163q-{n}", amount="100.00",
+                     note=f"حصة {n}").status_code == 200
+    assert [r["note"] for r in _row(api, trainer)] == [f"حصة {n}" for n in range(4, -1, -1)]
+    for user in (client, trainer):
+        assert cost(user) == small[user.pk], "reading notes grew with the page"
+
+
+def test_b163_the_note_goes_with_either_account_and_the_money_record_stays(
+        make_user, api, settings, django_capture_on_commit_callbacks):
+    """The note is user-written text: unlike the ledger, it is erased with the account
+    of either person, while the record of the money stays."""
+    from training_platform.privacy.registry import erase_user_data
+    from wallet.models import CoachingTransfer, Transaction
+
+    settings.COACHING_COMMISSION_RATE = D("0.20")
+    client, trainer = _pair(make_user, "w1b163e")
+    ref = _send(api, client, trainer, "w1b163e-1", note=NOTE).json()["reference_id"]
+
+    with django_capture_on_commit_callbacks(execute=True):
+        erase_user_data(client)
+    record = CoachingTransfer.objects.get(charge_reference=ref)
+    assert record.note == ""
+    assert record.amount == D("5000.00")
+    assert Transaction.objects.filter(reference_id=ref).exists()
+    (theirs,) = _row(api, trainer)
+    assert theirs["note"] is None
+
+
+def test_b163_support_reverses_a_payment_to_a_trainer_whole(make_user, api, settings):
+    """Three legs now: reversing the trainer's leg or the commission alone would leave
+    escrow — which holds other clients' coaching money — paying for the other, so each
+    is refused; the payment's own reference puts every leg back together."""
+    from wallet.models import CoachingTransfer, Transaction, Wallet
+    from wallet.utils import get_escrow_wallet, get_platform_revenue_wallet
+
+    settings.COACHING_COMMISSION_RATE = D("0.20")
+    operator = make_user("w1b163r_op", user_type="admin")
+    client, trainer = _pair(make_user, "w1b163r")
+    escrow, platform = get_escrow_wallet("SYP"), get_platform_revenue_wallet("SYP")
+    escrow_before, platform_before = escrow.balance, platform.balance
+    ref = _send(api, client, trainer, "w1b163r-1", note=NOTE).json()["reference_id"]
+    record = CoachingTransfer.objects.get(charge_reference=ref)
+    for n, leg in enumerate((record.payout_reference, record.commission_reference)):
+        resp = api(operator).post(REVERSAL, {"reference_id": leg,
+                                             "idempotency_key": f"w1b163r-leg-{n}"},
+                                  content_type=JSON)
+        assert _code(resp) == (409, "coaching_transfer_leg"), resp.content
+        assert resp.json()["transfer_reference"] == ref
+    assert not Transaction.objects.filter(tx_type="reversal",
+                                          reverses__reference_id__in=[
+                                              ref, record.payout_reference,
+                                              record.commission_reference]).exists()
+
+    whole = api(operator).post(REVERSAL, {"reference_id": ref, "idempotency_key": "w1b163r-all"},
+                               content_type=JSON)
+    assert whole.status_code == 200, whole.content
+    assert Wallet.objects.get(owner=client).balance == D("8000.00")
+    assert Wallet.objects.get(owner=trainer).balance == D("0.00")
+    escrow.refresh_from_db()
+    platform.refresh_from_db()
+    assert (escrow.balance, platform.balance) == (escrow_before, platform_before)
+    assert Transaction.objects.filter(tx_type="reversal", reverses__reference_id__in=[
+        ref, record.payout_reference, record.commission_reference]).count() == 3
+    assert _code(api(operator).post(REVERSAL, {"reference_id": ref,
+                                               "idempotency_key": "w1b163r-again"},
+                                    content_type=JSON)) == (409, "already_reversed")
+
+
+def test_b163_a_build_that_may_not_pay_for_coaching_may_not_pay_a_trainer(make_user, api):
+    """The money is coaching money now, so the build's coaching flag is asked as well as
+    its wallet flag — and nothing but the build decides."""
+    from policy.defaults import DEFAULT_FLAGS
+    from policy.models import ChannelCapabilities
+    from wallet.models import Wallet
+
+    client, trainer = _pair(make_user, "w1b163p")
+    flags = {**DEFAULT_FLAGS["apk"], "can_pay_coaching_in_app": False}
+    rows = ChannelCapabilities.objects.filter(channel="apk")
+    if rows.exists():
+        rows.update(can_pay_coaching_in_app=False)
+    else:
+        ChannelCapabilities.objects.create(channel="apk", min_version="0.0.0", **flags)
+    resp = _send(api, client, trainer, "w1b163p-1", amount="100.00")
+    assert _code(resp) == (403, "not_available_on_channel"), resp.content
+    assert Wallet.objects.get(owner=client).balance == D("8000.00")

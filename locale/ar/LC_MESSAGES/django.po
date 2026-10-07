@@ -5902,3 +5902,13 @@ msgid ""
 "Your signing key is paired with another device. Pair this device to move the key "
 "to it."
 msgstr "مفتاح التوقيع لديك مقترن بجهاز آخر. اقرن هذا الجهاز لنقل المفتاح إليه."
+
+#. The generic admin reversal refuses the trainer's or the platform's leg of a
+#. client's payment to a trainer (`coaching_transfer_leg`, BACKEND_BUGS B-163).
+#: wallet/views.py
+msgid ""
+"This is one leg of a payment to a trainer and cannot be reversed on its own. "
+"Reverse the payment by its reference instead."
+msgstr ""
+"هذه إحدى حركات دفعة إلى مدرب ولا يمكن عكسها وحدها. اعكس الدفعة كاملة بمرجعها "
+"بدلًا من ذلك."

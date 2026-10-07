@@ -4,6 +4,7 @@ from .models import Wallet, Transaction, AgentProfile, AgentAPIKey, WalletAuditL
 # The settling window (BACKEND_BUGS B-097), as mixins so its fields stay out of the two
 # `Meta.fields` lists below: see wallet/settling.py.
 from .settling import TransactionSettlingFields, WalletSettlingFields
+from .transfer_notes import TransactionNoteFields
 # `withdrawal` on a ledger row (B-125); the module imports nothing of `wallet` at load.
 from payouts.ledger_fields import TransactionWithdrawalFields
 
@@ -286,10 +287,15 @@ class _TransactionListSerializer(serializers.ListSerializer):
         prime_withdrawals = getattr(self.child, "prime_withdrawals", None)
         if prime_withdrawals is not None:
             prime_withdrawals(rows)
+        # The notes of the page's payments to a trainer (B-163), in one query too.
+        prime_notes = getattr(self.child, "prime_transfer_notes", None)
+        if prime_notes is not None:
+            prime_notes(rows)
         return super().to_representation(rows)
 
 
-class TransactionSerializer(TransactionWithdrawalFields, TransactionSettlingFields,
+class TransactionSerializer(TransactionNoteFields, TransactionWithdrawalFields,
+                            TransactionSettlingFields,
                             serializers.ModelSerializer):
     """One row of "الحركات" on the Wallet screen.
 
@@ -453,6 +459,11 @@ class TransferRequestSerializer(serializers.Serializer):
     trainer_id = serializers.IntegerField()
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=_MIN_AMOUNT)
     idempotency_key = serializers.CharField()
+    #: What the money is for, to the trainer ("جلسة الجمعة الإضافية"; BACKEND_BUGS
+    #: B-163). Optional, at most 140 characters, checked against the banned terms. Kept
+    #: beside the ledger (`CoachingTransfer.note`), never in it.
+    note = serializers.CharField(required=False, allow_blank=True, default="",
+                                 max_length=140)
 
 
 class ReversalRequestSerializer(serializers.Serializer):

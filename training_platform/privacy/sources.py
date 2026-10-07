@@ -734,6 +734,22 @@ register(PersonalDataSource(label="transactions", model="wallet.Transaction", us
                                      "ledger."),
                             recipients=("agent",),
                             data_types=("purchases", "financial")))
+# A client's direct payment to a trainer (BACKEND_BUGS B-163, the owner 2026-09-28): the
+# split of a record of money, which is kept, and the client's optional line to the
+# trainer, which is user-written text and goes with EITHER person's account. The note
+# is why this is not the ledger: the ledger is append-only and kept through an erasure.
+register(PersonalDataSource(
+    label="coaching_transfers", model="wallet.CoachingTransfer",
+    user_field=("client", "trainer"),
+    fields=["id", "client", "trainer", "amount", "currency", "commission_rate",
+            "commission", "trainer_share", "charge_reference", "note", "created_at"],
+    on_erase="anonymise", anonymise={"note": ""},
+    purpose=("A client's payment to a trainer from the wallet: the amount, the platform's "
+             "commission, the trainer's share, and the note the client wrote to the "
+             "trainer, which both of them see. The note is erased with either account; "
+             "the rest is a record of money."),
+    recipients=("coach",),
+    data_types=("purchases", "messages")))
 # Which operator set which USD/SYP rate, and when. Names an operator, never a customer,
 # and it is the evidence that every converted purchase was struck at a rate a named
 # person chose. Kept — the row is append-only and past money depends on it.

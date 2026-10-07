@@ -1536,6 +1536,7 @@ edit, and only the fields the request writes:
 | `POST` `/api/auth/user/update/`, `/api/auth/trainer/profile/` | `first_name`, `last_name`, and a trainer's `trainer_bio`, `trainer_specializations`, `trainer_certifications` |
 | `POST` `/api/auth/client/profile/` | `first_name`, `last_name` |
 | `POST` `/api/auth/register/` | `username` |
+| `POST` `/api/wallet/client/transfer/` | `note` (BACKEND_BUGS B-163; nothing moves) |
 
 A refused write answers **400 `content_not_allowed`** (the top-level `code`), with every
 refused field in `field_errors` carrying the same code:
@@ -1957,6 +1958,22 @@ operator maintains in the console. Four things the app needs:
   different currencies is `409 currency_mismatch` with `client_currency` and
   `trainer_currency`; a short wallet is `402 insufficient_balance` with `currency`
   (it was a bare 400; SIDE_BUGS S-160).
+- **A transfer to a trainer is a coaching payment, with a note** (BACKEND_BUGS B-163,
+  the owner 2026-09-28). `POST wallet/client/transfer/` takes an optional `note` (at
+  most 140 characters; a longer one is `400 validation_error`, a banned term `400
+  content_not_allowed`, and nothing moves; a different note under the same
+  `idempotency_key` is `422 idempotency_key_reused`). The client pays `amount`; the
+  platform keeps the coaching commission (`COACHING_COMMISSION_RATE`, 20%, copied onto
+  the transfer) and the trainer receives the rest at once — «تأخذ المنصة عمولتها منه
+  لا منك». Written as a coaching payout: client -> escrow, escrow -> trainer, escrow ->
+  platform, all `money_type` `COACHING_1TO1` (was `WALLET_MOVE`). The client's ledger
+  still shows one `trainer_transfer` row of `amount`, whose `reference_id` the transfer
+  answers; the trainer's one `transfer_received` row, of their share (not a settling
+  kind: withdrawable at once). Both rows of `wallet/transactions/` and `/{reference_id}/`
+  carry `note` (null without one; null on every other row). The note is kept beside
+  the ledger, never in it, and is erased with either person's account. The build must
+  allow both `WALLET_MOVE` and `COACHING_1TO1` (`403 not_available_on_channel`; every
+  default build allows both or neither).
 - **`PUT /api/wallet/currency/`** is also refused, `409
   currency_locked_open_checkout` with `currency`, while money priced in the current
   currency is on its way: a plan checkout still open or completed and not yet paid
@@ -1969,7 +1986,12 @@ operator maintains in the console. Four things the app needs:
   mint into escrow, the wallet sale's charge, the trainer's share, the commission —
   `409 routine_product_leg` with `purchase` `{id, status, paid_with}` (null if the
   purchase is gone; SIDE_BUGS S-237). Undoing a sale is the purchase's refund, or its
-  payment's for a checkout, which reverses every leg together.
+  payment's for a checkout, which reverses every leg together. A client's payment to a
+  trainer (B-163) is reversed WHOLE by its `reference_id` (the client's leg): the
+  trainer's share and the commission go back to escrow and the amount to the client in
+  one transaction (`400 insufficient_balance` when the trainer no longer holds the
+  share; nothing moves); the trainer's leg or the commission alone is `409
+  coaching_transfer_leg` with `transfer_reference`.
   `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
   (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
   top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).
@@ -2938,7 +2960,7 @@ kept beside the code. The views' docstrings carry the full tables.
 | `POST wallet/agent/topup/`, `.../topup/proxy/` | `403 agent_not_active`; `400 target_not_a_client`; `429 daily_limit_exceeded` / `monthly_limit_exceeded` (the agent's cap in that currency — not the rate limiter, and `Retry-After` does not lift it) |
 | `POST wallet/agent/topup/`, `.../topup/proxy/` (plan step 9) | `429 per_transaction_limit_exceeded` (more than one top-up may be), `429 receivable_ceiling_exceeded` (the cash the agent holds for the platform, unsettled, would pass their ceiling; a settlement lifts it); all four cap refusals carry `limit`, `used` (null for the per-top-up cap), `remaining`, `currency` (B-124); `.../topup/proxy/` also `403 agent_key_revoked` (the agent revoked their key and has not paired a new one, B-117). A suspended or erased client is `404 not_found`, as a missing one (B-118) |
 | top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_key_reused` (the caller's own key was already spent on a different request of theirs; retrying never helps, and resending under a new key could move money twice — NOT the set, workout and chat writes' 409 `idempotency_conflict`, where the id is the other person's and a new id is the fix) |
-| `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved) |
+| `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved); `400 content_not_allowed` (the `note`, BACKEND_BUGS B-163) |
 | `POST wallet/admin/reversal/` | `400 insufficient_balance` (the wallet that received the money no longer holds it), `400 currency_mismatch` (a wallet changed currency), `400 reversal_refused` — these three were one `bad_request` |
 | `POST subscription/v1/subscriptions/` | `400 subscription_exists` (one per user: `change-plan/`, `upgrade/` or `renew/` instead); a `plan_id` naming no active plan stays `validation_error`, its field code now `invalid_plan` (was `invalid`) |
 | `PATCH subscription/v1/subscriptions/{id}/` | stays `validation_error` (the view named it); on an inactive subscription `field_errors.non_field_errors[0].code` is `subscription_inactive` (was `invalid`) |

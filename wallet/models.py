@@ -728,6 +728,57 @@ class AgentReceivable(AgentProfile):
         verbose_name_plural = "agent receivables (cash held for the platform)"
 
 
+class CoachingTransfer(models.Model):
+    """A client's direct payment to a trainer from the wallet (`POST wallet/client/
+    transfer/`, the design's SendMoney; BACKEND_BUGS B-163).
+
+    THE OWNER, 2026-09-28: a direct transfer is a COACHING payment. The platform keeps
+    its coaching commission (`COACHING_COMMISSION_RATE`, copied here when the money
+    moved — a later change of the rate never touches it) and the trainer gets the rest,
+    as ledger legs written the way a coaching month's are (`users.coaching.pay_out`):
+
+        client -> escrow            the amount              (the client's one row)
+        escrow -> trainer           amount - commission     (the trainer's one row)
+        escrow -> platform revenue  the commission          ('coaching_commission')
+
+    all COACHING_1TO1, in one transaction with every wallet locked at once in ascending
+    id, so escrow nets to zero in it. This row records which three references they are
+    and the split, the way `CoachingPeriod` does for a month and `RoutinePurchase` for a
+    sale: support undoes a transfer by its charge's reference and every leg goes back
+    together (`AdminReversalView`).
+
+    `note` is the client's optional line to the trainer ("جلسة الجمعة الإضافية"). It is
+    user-written text, so it is NOT in the ledger, which is append-only and kept through
+    an erasure: it lives here, is shown to both people on their own row, and is ERASED
+    with either person's account (`training_platform/privacy/sources.py`,
+    `coaching_transfers`). The rest of the row is a record of money and is kept.
+    """
+    client = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                               null=True, related_name="coaching_transfers_sent")
+    trainer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                null=True, related_name="coaching_transfers_received")
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=8)
+    #: The coaching commission rate when the money moved: a snapshot, never re-read.
+    commission_rate = models.DecimalField(max_digits=5, decimal_places=4)
+    commission = models.DecimalField(max_digits=14, decimal_places=2)
+    trainer_share = models.DecimalField(max_digits=14, decimal_places=2)
+    #: The client's leg; the reference the transfer answered and support quotes.
+    charge_reference = models.CharField(max_length=36, unique=True)
+    #: The trainer's leg and the platform's ("" when that part was nothing).
+    payout_reference = models.CharField(max_length=36, blank=True, default="")
+    commission_reference = models.CharField(max_length=36, blank=True, default="")
+    NOTE_MAX_LENGTH = 140
+    note = models.CharField(max_length=NOTE_MAX_LENGTH, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"CoachingTransfer({self.charge_reference}, {self.amount} {self.currency})"
+
+
 class AlreadyReversed(Exception):
     """This transaction has been reversed. Money must not move a second time."""
 

@@ -839,24 +839,48 @@ class AgentTopUpView(APIView):
 
 
 class ClientTransferToTrainerView(APIView):
-    """`POST /api/wallet/client/transfer/` — a client sends money to a trainer.
+    """`POST /api/wallet/client/transfer/` — a client pays a trainer from the wallet
+    (the design's SendMoney: «للرسوم الإضافية أو الجلسات الخاصة التي اتفقتما عليها»).
 
-    Body: `trainer_id`, `amount`, `idempotency_key`. Headers: `X-App-Channel`.
+    Body: `trainer_id`, `amount`, `idempotency_key`, and optionally `note` (BACKEND_BUGS
+    B-163) — a line to the trainer of at most 140 characters ("جلسة الجمعة الإضافية").
+    Headers: `X-App-Channel`.
 
-    200 `{reference_id, client_balance, trainer_balance}`. Refusals (branch on `code`):
+    200 `{reference_id, client_balance, trainer_balance}`. `reference_id` is the
+    client's own ledger row (the one `wallet/transactions/{reference_id}/` opens).
+
+    A COACHING PAYMENT (the owner, 2026-09-28; BACKEND_BUGS B-163). The client pays
+    `amount`; the platform keeps its coaching commission (`COACHING_COMMISSION_RATE`,
+    20%, copied onto the transfer when it is made) and the trainer receives the rest at
+    once — «تأخذ المنصة عمولتها منه لا منك». Written exactly as a coaching month is
+    paid out (`users.coaching.pay_out`): client -> escrow `amount`, escrow -> trainer
+    the share, escrow -> platform revenue the commission (`coaching_commission`), all
+    `COACHING_1TO1`, in one transaction (`wallet.models.CoachingTransfer` records the
+    three). The client's ledger shows one row, `trainer_transfer`, of `amount`; the
+    trainer's one row, `transfer_received`, of their share — the kinds they always
+    were. The share is not held back: it is withdrawable at once (not a settling kind).
+    Transfers made before this were one WALLET_MOVE row, client -> trainer, and stay so.
+
+    The note is shown to both people as `note` on their own row of `wallet/transactions/`
+    and `/{reference_id}/`. It is user-written text, so it is checked against the
+    banned terms (`400 content_not_allowed`, nothing moves) and kept beside the ledger,
+    never in it: it is erased with either person's account, while the ledger is kept.
+
+    Refusals (branch on `code`):
 
     | Status | `code` | Meaning |
     |---|---|---|
     | 400 | `app_channel_required` | no known `X-App-Channel` |
-    | 403 | `not_available_on_channel` | this build may not move wallet money |
-    | 400 | `validation_error` | a body field is missing or malformed (`field_errors`) |
+    | 403 | `not_available_on_channel` | this build may not move wallet money, or may not pay for coaching (both are asked: the money moved is coaching money) |
+    | 400 | `validation_error` | a body field is missing or malformed (`field_errors`; a `note` over 140 characters is one) |
     | 403 | `clients_only` | the caller is not a client (the code the coaching and diet routes answer for the same fact) |
     | 404 | `not_found` | `trainer_id` names no trainer |
     | 409 | `currency_mismatch` | the two trade in different currencies (nothing is converted on a transfer); `client_currency` and `trainer_currency` say which |
+    | 400 | `content_not_allowed` | the `note` holds a banned term (`field_errors.note`); nothing moved |
     | 402 | `insufficient_balance` | the client's wallet holds less than `amount`; `currency` is its currency |
     | 400 | `transfer_refused` | the ledger refused the movement for any other reason; nothing moved |
     | 409 | `request_in_flight` | the first request with this `idempotency_key` is still running |
-    | 422 | `idempotency_key_reused` | the key was used for a different request |
+    | 422 | `idempotency_key_reused` | the key was used for a different request (a different `note` is a different request) |
     | 429 | `throttled` | the rate limiter (`Retry-After`) |
 
     `clients_only`, `transfer_refused`, `request_in_flight` and `idempotency_key_reused`
@@ -869,6 +893,9 @@ class ClientTransferToTrainerView(APIView):
         # Before anything else: a build that may not move wallet money is told so with
         # the same code whatever it sent. See policy/services.py.
         require_purchase_allowed(request, MoneyType.WALLET_MOVE)
+        # And the money it moves is coaching money (B-163): a build that may not pay
+        # for coaching may not pay a trainer this way either. Decided by the build only.
+        require_purchase_allowed(request, MoneyType.COACHING_1TO1)
 
         serializer = TransferRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -892,13 +919,20 @@ class ClientTransferToTrainerView(APIView):
                              "trainer_currency": trainer_currency},
                             status=status.HTTP_409_CONFLICT)
 
+        # The note is user-written text the trainer will read (B-163): the banned terms
+        # refuse it before the key is reserved, so a corrected note can reuse the key.
+        note = (serializer.validated_data.get("note") or "").strip()
+        from moderation.ugc_filter import refuse_banned_text
+
+        refuse_banned_text({"note": note})
+
         idem_key = serializer.validated_data["idempotency_key"]
         try:
             idem, replay = idempotency.reserve(
                 request.user, idem_key,
                 idempotency.fingerprint(
                     op="transfer", trainer=trainer.id,
-                    amount=serializer.validated_data["amount"],
+                    amount=serializer.validated_data["amount"], note=note,
                 ),
             )
         except idempotency.IdempotencyConflict as exc:
@@ -914,8 +948,8 @@ class ClientTransferToTrainerView(APIView):
 
         amount = serializer.validated_data["amount"]
         try:
-            tx = move_funds_atomic(client_wallet, trainer_wallet, amount, actor_id=request.user.id, tx_type="transfer",
-                                   money_type=MoneyType.WALLET_MOVE, metadata={"trainer_id": trainer.id})
+            charge = _pay_trainer(request.user, trainer, client_wallet, trainer_wallet,
+                                  amount, note)
         except InsufficientBalance:
             idempotency.release(idem)
             return Response({"error": _("Insufficient wallet balance."),
@@ -937,11 +971,121 @@ class ClientTransferToTrainerView(APIView):
                              "code": "transfer_refused"}, status=status.HTTP_400_BAD_REQUEST)
         client_wallet.refresh_from_db()
         trainer_wallet.refresh_from_db()
-        resp = {"reference_id": tx.reference_id, "client_balance": str(client_wallet.balance), "trainer_balance": str(trainer_wallet.balance)}
+        resp = {"reference_id": charge.reference_id, "client_balance": str(client_wallet.balance), "trainer_balance": str(trainer_wallet.balance)}
         idempotency.complete(idem, resp)
 
-        audit("wallet.transfer.success", request, {"reference_id": tx.reference_id, "trainer_id": trainer.id, "amount": float(amount)})
+        # Never the note: the audit log is kept through an erasure, the note is not.
+        audit("wallet.transfer.success", request, {"reference_id": charge.reference_id, "trainer_id": trainer.id, "amount": float(amount)})
         return Response(resp, status=status.HTTP_200_OK)
+
+
+def _pay_trainer(client, trainer, client_wallet, trainer_wallet, amount, note):
+    """A client's direct payment to a trainer, written as a coaching payout (BACKEND_BUGS
+    B-163; see `ClientTransferToTrainerView` and `wallet.models.CoachingTransfer`).
+
+    Returns the client's leg. Raises what `move_funds_atomic` raises, with nothing
+    moved. The three legs carry `coaching_transfer` ("charge" / "payout" /
+    "commission"), and the two after the charge `transfer_reference` (the charge's), so
+    a row says by itself that it is one leg of a transfer: the generic admin reversal
+    reads that and never takes one leg alone (`_coaching_transfer_leg`).
+
+    Calls `move_funds_atomic` through this module, like the view always did.
+    """
+    from users.coaching import commission_rate, lock_wallets, split
+
+    from .models import CoachingTransfer
+    from .utils import get_escrow_wallet, get_platform_revenue_wallet
+
+    money = client_wallet.currency
+    rate = commission_rate()
+    commission, share = split(amount, rate)
+    common = {"trainer_id": trainer.id, "client_id": client.id}
+    kind = MoneyType.COACHING_1TO1
+    with transaction.atomic():
+        escrow = get_escrow_wallet(money)
+        platform = get_platform_revenue_wallet(money)
+        # The client's user row, then every wallet in ascending id, all at once: the
+        # lock order of a coaching renewal (`users/coaching.py`).
+        lock_wallets(client.id, [client_wallet, escrow, trainer_wallet, platform])
+        charge = move_funds_atomic(
+            client_wallet, escrow, amount, actor_id=client.id, tx_type="transfer",
+            currency=money, money_type=kind,
+            metadata={**common, "coaching_transfer": "charge", "rate": str(rate)})
+        legs = {"transfer_reference": charge.reference_id}
+        payout = fee = None
+        if share > 0:
+            payout = move_funds_atomic(
+                escrow, trainer_wallet, share, actor_id=client.id, tx_type="transfer",
+                currency=money, money_type=kind,
+                metadata={**common, "coaching_transfer": "payout", **legs})
+        if commission > 0:
+            fee = move_funds_atomic(
+                escrow, platform, commission, actor_id=client.id, tx_type="transfer",
+                currency=money, money_type=kind,
+                metadata={"purpose": "coaching_commission", "rate": str(rate), **common,
+                          "coaching_transfer": "commission", **legs})
+        CoachingTransfer.objects.create(
+            client=client, trainer=trainer, amount=amount, currency=money,
+            commission_rate=rate, commission=commission, trainer_share=share,
+            charge_reference=charge.reference_id,
+            payout_reference=payout.reference_id if payout else "",
+            commission_reference=fee.reference_id if fee else "", note=note)
+    return charge
+
+
+def _coaching_transfer_leg(original):
+    """409 `coaching_transfer_leg` when `original` is the trainer's or the platform's leg
+    of a client's coaching transfer (B-163), else None. Decided on what the row says of
+    itself, which never changes. The CHARGE — the client's leg, the reference the
+    transfer answered — is not refused: reversing it puts the whole transfer back
+    (`_reverse_coaching_transfer`)."""
+    metadata = original.metadata if isinstance(original.metadata, dict) else {}
+    if metadata.get("coaching_transfer") not in ("payout", "commission"):
+        return None
+    return Response({"error": _("This is one leg of a payment to a trainer and cannot be "
+                                "reversed on its own. Reverse the payment by its "
+                                "reference instead."),
+                     "code": "coaching_transfer_leg",
+                     "transfer_reference": metadata.get("transfer_reference")},
+                    status=status.HTTP_409_CONFLICT)
+
+
+def _reverse_coaching_transfer(charge, *, actor_id, reason):
+    """Put a client's coaching transfer back, every leg together, in one transaction:
+    the trainer's share and the platform's commission back to escrow, then the whole
+    amount back to the client. Returns the reversal of the charge. Raises what
+    `move_funds_atomic` raises (`InsufficientBalance` when the trainer has spent the
+    share, `AlreadyReversed`), with nothing moved."""
+    from users.coaching import lock_wallets
+
+    from .models import CoachingTransfer
+
+    record = CoachingTransfer.objects.filter(charge_reference=charge.reference_id).first()
+    if record is not None:
+        refs = [r for r in (record.payout_reference, record.commission_reference) if r]
+        legs = Transaction.objects.filter(reference_id__in=refs)
+    else:
+        # Written in the same transaction as the legs, so never missing; if it were,
+        # the legs still name their charge, and the charge is never reversed alone.
+        legs = Transaction.objects.filter(
+            metadata__transfer_reference=charge.reference_id,
+            metadata__coaching_transfer__in=["payout", "commission"])
+    legs = list(legs.select_related("source_wallet", "destination_wallet").order_by("id"))
+    escrow = charge.destination_wallet
+    common = {"reason": reason}
+    with transaction.atomic():
+        lock_wallets(actor_id, [charge.source_wallet, escrow,
+                                *(leg.destination_wallet for leg in legs)])
+        for leg in legs:
+            move_funds_atomic(leg.destination_wallet, escrow, leg.amount, actor_id=actor_id,
+                              tx_type="reversal", reverses=leg, currency=leg.currency,
+                              money_type=leg.money_type,
+                              metadata={"original_reference": leg.reference_id, **common})
+        return move_funds_atomic(escrow, charge.source_wallet, charge.amount,
+                                 actor_id=actor_id, tx_type="reversal", reverses=charge,
+                                 currency=charge.currency, money_type=charge.money_type,
+                                 metadata={"original_reference": charge.reference_id,
+                                           **common})
 
 
 def _program_sale_leg(original):
@@ -985,6 +1129,7 @@ class AdminReversalView(APIView):
     | 409 | `exchange_leg` | it is one half of a currency exchange (see below); `exchange_reference` names the pair |
     | 409 | `withdrawal_leg` | it is one leg of a trainer's withdrawal (see below); `withdrawal` `{id, number, state}` names it, or is null if no withdrawal names the row any more |
     | 409 | `routine_product_leg` | it is one leg of a routine product's sale or of its refund (see below); `purchase` `{id, status, paid_with}` names it, or is null if no purchase has that id any more |
+    | 409 | `coaching_transfer_leg` | it is the trainer's or the platform's leg of a client's payment to a trainer (see below); `transfer_reference` is the payment's own reference, which reverses it whole |
     | 400 | `insufficient_balance` | the wallet that received the money no longer holds it, so it cannot be taken back |
     | 400 | `currency_mismatch` | a wallet on either side changed currency since the row was written |
     | 400 | `reversal_refused` | the ledger refused the reversal for any other reason; nothing moved |
@@ -1025,6 +1170,18 @@ class AdminReversalView(APIView):
     refused: undoing a sale is the purchase's refund (`/dj-admin/routine/
     routinepurchase/`, «refund») or, for a checkout, its payment's refund, which reverses
     every leg together and revokes the buyer's copy.
+
+    A CLIENT'S PAYMENT TO A TRAINER IS REVERSED WHOLE (BACKEND_BUGS B-163). Since the
+    owner made it a coaching payment (2026-09-28) it is three legs, like a coaching
+    payout: client -> escrow, escrow -> trainer the share, escrow -> platform the
+    commission (`ClientTransferToTrainerView`). Reversing its `reference_id` — the
+    client's leg, the reference the client was given — puts every leg back in one
+    transaction (the share and the commission to escrow, the amount to the client) and
+    answers the client's leg's reversal; `insufficient_balance` when the trainer no
+    longer holds the share, and nothing moves. The trainer's leg or the commission
+    alone is `409 coaching_transfer_leg`: either alone would leave escrow paying for the
+    other. A transfer made before (one WALLET_MOVE row, client -> trainer) is reversed
+    as it always was.
 
     A reversed AGENT top-up also comes off the agent's receivable (the cash they hold
     for the platform; plan step 9), in the same transaction: the agent hands the cash
@@ -1075,6 +1232,10 @@ class AdminReversalView(APIView):
         sale_leg = _program_sale_leg(original)
         if sale_leg is not None:
             return sale_leg
+        # And one leg of a client's payment to a trainer (B-163): only the whole of it.
+        transfer_leg = _coaching_transfer_leg(original)
+        if transfer_leg is not None:
+            return transfer_leg
 
         idem_key = serializer.validated_data["idempotency_key"]
         try:
@@ -1100,14 +1261,20 @@ class AdminReversalView(APIView):
             with transaction.atomic():
                 if agent_profile is not None:
                     agent_profile = agents.lock_profile(agent_profile)
-                tx = move_funds_atomic(
-                    original.destination_wallet, original.source_wallet, original.amount,
-                    actor_id=request.user.id, tx_type="reversal",
-                    # The kind of money that is going back is the kind that came.
-                    money_type=original.money_type,
-                    metadata={"original_reference": original.reference_id,
-                              "reason": serializer.validated_data.get("reason", "")},
-                    reverses=original)
+                if (original.metadata or {}).get("coaching_transfer") == "charge":
+                    # A client's payment to a trainer (B-163): every leg goes back.
+                    tx = _reverse_coaching_transfer(
+                        original, actor_id=request.user.id,
+                        reason=serializer.validated_data.get("reason", ""))
+                else:
+                    tx = move_funds_atomic(
+                        original.destination_wallet, original.source_wallet,
+                        original.amount, actor_id=request.user.id, tx_type="reversal",
+                        # The kind of money that is going back is the kind that came.
+                        money_type=original.money_type,
+                        metadata={"original_reference": original.reference_id,
+                                  "reason": serializer.validated_data.get("reason", "")},
+                        reverses=original)
                 if agent_profile is not None:
                     agents.post_reversal(agent_profile, tx)
         except AlreadyReversed:
