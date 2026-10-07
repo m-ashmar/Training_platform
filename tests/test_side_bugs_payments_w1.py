@@ -443,6 +443,30 @@ def test_s241_an_operators_approval_proves_nothing_and_a_new_address_is_unproven
     assert _proven(sub.user) is None, "another address is unproven"
 
 
+def test_s241_only_the_checkouts_own_reference_proves_the_address(
+        make_user, api, shamcash, django_capture_on_commit_callbacks):
+    """The proof compared the transfer's reference with the checkout's AFTER the
+    completion had copied the transfer's over it, so any reference at all proved the
+    address. A completion whose transfer names ANOTHER reference proves nothing; one
+    that names the checkout's own does (the control)."""
+    from subscription import payer_address
+    from subscription.services.payment_service import By, PaymentService
+
+    plan = _plan("s241e", "8181.00")
+    for name, own in (("s241e_other", False), ("s241e_own", True)):
+        _c, sub, payment = _open_checkout(api, make_user, name, plan)
+        payer_address.save(sub.user, VICTIM_ADDRESS, VICTIM_ADDRESS)
+        reference = (payment.gateway_transaction_reference if own
+                     else "SHAMCASH_1700000000000_0000000000ab")
+        with django_capture_on_commit_callbacks(execute=True):
+            done = PaymentService.complete_payment(payment.pk, {
+                "amount": "8181.00", "currency": "SYP", "status": "completed",
+                "transaction_id": f"tx-{name}", "event_id": f"tx-{name}",
+                "reference": reference, "sender": VICTIM_ADDRESS}, by=By.POLLER)
+        assert done.status == "completed"
+        assert (_proven(sub.user) is not None) is own, name
+
+
 # ============================================================ S-240
 BUYER_ADDRESS = "b0b0cafe55556666"
 

@@ -291,6 +291,10 @@ class PaymentService:
                     return payment
 
             # --- Apply completion ---
+            # The reference this checkout asked for, read BEFORE the line below copies
+            # the transfer's over it: the proof of a saved payer address compares the
+            # two (S-241), and after the copy they are equal whatever the transfer said.
+            asked_reference = payment.gateway_transaction_reference
             cls._move(payment, 'completed', by=by, actor=actor,
                       evidence={**_gateway_facts(verified_data), **(evidence or {})})
             if verified_data.get('transaction_id'):
@@ -323,9 +327,8 @@ class PaymentService:
             # operator accepting a near miss or marking it paid. Only a proven address
             # decides which checkout a reference-less transfer is held on (S-241).
             if (by in (By.GATEWAY, By.POLLER, By.SWEEP, By.CUSTOMER)
-                    and payment.gateway_transaction_reference
-                    and str(verified_data.get('reference') or '')
-                    == payment.gateway_transaction_reference):
+                    and asked_reference
+                    and str(verified_data.get('reference') or '') == asked_reference):
                 from ..payer_address import verify_sender
 
                 verify_sender(payment.payer_id, verified_data)
