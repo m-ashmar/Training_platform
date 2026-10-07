@@ -314,7 +314,8 @@ def test_only_what_is_on_sale_is_a_card(make_user, api):
     # A public template that is not listed, a draft, a retired product, and a product
     # whose program changed after its review: none of them is on sale.
     lister = make_user("hr_rp_only_t", user_type="trainer", trainer_is_verified=True)
-    RoutineTemplate.objects.create(name="just public", goal="Strength", days=3,
+    # A code: the model takes only the closed goal list (wave-1 review R-5, 2026-10-07).
+    RoutineTemplate.objects.create(name="just public", goal="strength", days=3,
                                    created_by=lister, is_public=True)
     _t1, _tpl1, draft_id = _product(make_user, api, "draft")
     RoutineProduct.objects.filter(pk=draft_id).update(status="draft")

@@ -2024,6 +2024,11 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     """
     exercises = RoutineTemplateExerciseSerializer(source='routinetemplateexercise_set', many=True)
     created_by = serializers.SerializerMethodField()
+    #: Declared, not generated: the model field has the four codes as `choices` (wave-1
+    #: review R-5), and the generated `ChoiceField` would refuse " Fat_Loss " with
+    #: `invalid_choice` before `validate_goal` lower-cases it — breaking "any case is
+    #: accepted" and the shipped `bad_goal` code.
+    goal = serializers.CharField(max_length=100)
     #: BACKEND_BUGS B-100 (additive). `weeks` is writable: how many weeks the program
     #: runs, 1-52, or null while the trainer has not said — `days` is its week, and the
     #: rows cannot say how often that week repeats. `session_count` is read-only:

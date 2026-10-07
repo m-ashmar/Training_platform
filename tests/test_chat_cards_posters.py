@@ -163,7 +163,8 @@ def test_a_template_card_names_the_clients_own_copy_of_it(api, pair, conversatio
     from routine.models import Routine, RoutineTemplate
 
     trainer, client = pair
-    template = RoutineTemplate.objects.create(name="ccp tpl", goal="Strength", days=3,
+    # A code: the model takes only the closed goal list (wave-1 review R-5, 2026-10-07).
+    template = RoutineTemplate.objects.create(name="ccp tpl", goal="strength", days=3,
                                               created_by=trainer)
     old = _program(trainer, client, name="old copy", template=template)
     Routine.objects.filter(pk=old.pk).update(is_active=False)
@@ -187,9 +188,10 @@ def test_every_refusal_names_its_own_code_and_writes_nothing(api, make_user, pai
     stranger = make_user("ccp_other_trainer", user_type="trainer")
     theirs = Routine.objects.create(name="ccp theirs", days=3, created_by=stranger)
     theirs.assigned_to.add(client)
-    uncopied = RoutineTemplate.objects.create(name="ccp uncopied", goal="x", days=3,
+    # Codes: the model takes only the closed goal list (wave-1 review R-5, 2026-10-07).
+    uncopied = RoutineTemplate.objects.create(name="ccp uncopied", goal="strength", days=3,
                                               created_by=trainer)
-    their_template = RoutineTemplate.objects.create(name="ccp their tpl", goal="x",
+    their_template = RoutineTemplate.objects.create(name="ccp their tpl", goal="strength",
                                                     days=3, created_by=stranger)
 
     cases = [

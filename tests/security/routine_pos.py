@@ -23,7 +23,7 @@ mine=Exercise.objects.create(name='MyTrainersLift', description='x', created_by=
 other=Exercise.objects.create(name='OtherTrainerLift', description='x', created_by=trB)
 rt=Routine.objects.create(name='R', created_by=trA, days=1); rt.assigned_to.add(cli)
 RoutineExercise.objects.create(routine=rt, exercise=other, day=1)  # assigned via routine
-tpl=RoutineTemplate.objects.create(name='A-TPL', created_by=trA, is_public=True, goal='hypertrophy')
+tpl=RoutineTemplate.objects.create(name='A-TPL', created_by=trA, is_public=True, goal='build_muscle')  # a code: the closed goal list (R-5, 2026-10-07)
 
 def chk(label, cond): print(f"  {'PASS' if cond else '*** REGRESSION ***'}  {label}")
 body=auth(cli).get('/api/routine/exercises/').content.decode()

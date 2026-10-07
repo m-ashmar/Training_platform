@@ -205,7 +205,9 @@ def test_an_empty_template_is_not_a_program(make_user, api):
     from routine.models import RoutineTemplate
 
     trainer, client, relation = _accepted(make_user, api, "rt_empty")
-    empty = RoutineTemplate.objects.create(name="Empty", goal="g", days=1, created_by=trainer)
+    # A code: the model takes only the closed goal list (wave-1 review R-5, 2026-10-07).
+    empty = RoutineTemplate.objects.create(name="Empty", goal="rehab", days=1,
+                                           created_by=trainer)
     resp = _generate(api, trainer, empty, client_id=client.pk)
     assert (resp.status_code, resp.json()["code"]) == (400, "template_empty")
     assert relation.periods.get().status == "held"

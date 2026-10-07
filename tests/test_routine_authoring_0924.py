@@ -258,7 +258,8 @@ def test_b108_the_count_costs_no_query_per_template(make_user, api):
     trainer, client = _trainer_and_client(make_user, "b108q")
 
     def add(n):
-        template = RoutineTemplate.objects.create(name=f"ra b108q {n}", goal="x", days=1,
+        # A code: the model takes only the closed goal list (wave-1 review R-5).
+        template = RoutineTemplate.objects.create(name=f"ra b108q {n}", goal="rehab", days=1,
                                                   created_by=trainer)
         routine = _routine(trainer, f"b108q {n}", days=1, client=client)
         routine.source_template = template
@@ -728,7 +729,8 @@ def test_b108_the_count_is_fresh_after_a_program_is_generated(make_user, api):
     from routine.models import RoutineTemplate, RoutineTemplateExercise
 
     trainer, client = _trainer_and_client(make_user, "b108fresh")
-    template = RoutineTemplate.objects.create(name="ra b108 fresh", goal="x", days=1,
+    # A code: the model takes only the closed goal list (wave-1 review R-5, 2026-10-07).
+    template = RoutineTemplate.objects.create(name="ra b108 fresh", goal="rehab", days=1,
                                               created_by=trainer)
     RoutineTemplateExercise.objects.create(template=template, day=1, order=1,
                                            exercise=_exercise(trainer, "ra b108 fresh"))

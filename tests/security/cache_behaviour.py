@@ -37,7 +37,7 @@ FoodItem.objects.create(name='Chicken',category=cat,calories=165,protein=31,carb
 SubscriptionPlan.objects.create(name='Pro',plan_type='premium',description='d',price=Decimal('10'),duration_days=30)
 Exercise.objects.create(name='GlobalSquat',description='x')
 Exercise.objects.create(name='A-PRIVATE-LIFT',description='x',created_by=trA)
-RoutineTemplate.objects.create(name='A-TPL',created_by=trA,is_public=False,goal='hypertrophy')
+RoutineTemplate.objects.create(name='A-TPL',created_by=trA,is_public=False,goal='build_muscle')  # a code: the closed goal list (R-5, 2026-10-07)
 P=F=0
 def chk(label, cond):
     global P,F

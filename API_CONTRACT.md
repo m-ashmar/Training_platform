@@ -927,6 +927,11 @@ Additive: no route, section type, key or `code` renamed or removed; no new route
   `trial` = a free preview exists) and `equipment` (codes), `no_equipment`, and
   `money_type: "ROUTINE_PRODUCT"` beside `price`. The section is still ABSENT on a
   build whose `can_show_prices` is off (`play`, `ios`, no channel), per the BuildGuide.
+  `goal` is the row's own (2026-10-07, wave-1 review R-5): one of the four codes
+  `build_muscle` / `strength` / `fat_loss` / `rehab`, or null — the same value
+  `GET /api/v1/products/` answers; the card no longer writes the template's raw text
+  over it. A template's `goal` is that closed list on every write — the template
+  route, both operator consoles and `POST templates/{id}/copy/`.
 - **`trainer_message` of `kind: "voice"`** adds `audio_url` (PRIVATE: signed and
   expiring, like the thread's `media.url`), `duration_seconds` and `state`
   (`ready | unavailable`). Only that kind carries them.
@@ -3013,7 +3018,7 @@ English). Prefix `/api/routine/`.
 | `GET analytics/summary/`, `completion/`, `streaks/`, `adherence/`, `strength/`, `trends/` | 403 `user_not_accessible`; 404 `user_not_found` (`summary`, `streaks`, `adherence`, `strength`); 400 `bad_period` (`summary`, `trends` — `adherence` already had it) |
 | `GET analytics/admin_dashboard/` | 403 `not_a_trainer` |
 | `POST templates/{id}/generate/` | 400 `client_id_required`, `bad_date`, `end_before_start`, `bad_days`, `days_out_of_range` (+ `max`); 403 `not_your_client` (single `client_id` too); 404 `client_not_found` |
-| `POST templates/{id}/copy/` | 400 `template_not_public` |
+| `POST templates/{id}/copy/` | 400 `template_not_public`; 400 `validation_error` with `field_errors.goal` when the source is a template stored before the closed goal list whose text reads as none of the four (2026-10-07; one that reads as a code is copied with that code) |
 | `GET templates/my_templates/` | 403 `not_a_trainer` |
 | `DELETE templates/{id}/` | 409 `template_listed_for_sale` — a routine product of yours is in review or published on it; retire it first (plan step 10) |
 | `POST/DELETE exercises/{id}/image/` | 400 `image_required`; 404 `no_image` (DELETE, the exercise has no picture; gains `error`) |

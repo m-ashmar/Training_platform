@@ -4266,9 +4266,18 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
         Copying your own template answered 400 "Cannot copy your own template", so a
         trainer could not make a variant of their own program to reuse.
+
+        The copy's `goal` is one of the four codes (`ProductGoal`), like every template
+        (wave-1 review R-5: it copied the source's text unchecked, so a console's
+        "Hypertrophy" spread). A template stored before the closed list is copied with
+        the code its text reads as (`routine.products.goal_code`, the catalogue's
+        reading); one whose text reads as none answers 400 `validation_error` with
+        `field_errors.goal` and copies nothing — its author sets a goal first.
         """
         from django.conf import settings
         from django.utils.translation import override
+
+        from .products import goal_code
 
         template = self.get_object()
         if not template.is_public and template.created_by_id != request.user.id:
@@ -4285,7 +4294,9 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                 **names,
                 **{f'description_{language}': getattr(template, f'description_{language}', '')
                    or '' for language, _label in settings.LANGUAGES},
-                goal=template.goal,
+                # The code, never the source's raw text; text that reads as no code is
+                # kept so the model's choices refuse it (400, rolled back).
+                goal=goal_code(template.goal) or template.goal,
                 days=template.days,
                 weeks=template.weeks,
                 is_public=False,  # Always private when copied
