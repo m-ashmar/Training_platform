@@ -11,6 +11,8 @@ Each test is the proof for one notebook row and fails on the code before its fix
   program was only in their trainer's export.
 * S-231 — a test moved a privacy source to the end of the registry, and every later
   test rendered the data inventory in another order.
+* S-225 — the code emails' footer printed no year; a dead helper wrote a payment
+  outside `PaymentService`; a comment called behaviour events training data.
 """
 from decimal import Decimal
 
@@ -149,3 +151,50 @@ def test_s231_the_mediakit_audit_test_leaves_the_registry_in_its_order():
 
     assert list(registry) == before, "the registry came back in another order"
     assert registry is held, "the registry is the same dict every module imported"
+
+
+# ================================================================================ S-225
+@pytest.mark.django_db
+@pytest.mark.parametrize("send", ["send_otp_email", "send_password_reset_email"])
+def test_s225_the_account_emails_print_the_year_in_their_footer(make_user, send):
+    """`{{ "now"|date:"Y" }}` runs the `date` filter on the STRING "now", which is no
+    date, so both code emails went out with "© " and no year. The notice email used the
+    `{% now %}` tag and was right."""
+    from django.core import mail
+
+    from users import utils
+
+    user = make_user(f"w1p_s225_{send}")
+    mail.outbox = []
+
+    getattr(utils, send)(user, "482913")
+
+    sent = [m for m in mail.outbox if user.email in m.to]
+    assert len(sent) == 1, [m.subject for m in mail.outbox]
+    html = next(body for body, kind in sent[0].alternatives if kind == "text/html")
+    assert f"&copy; {timezone.localtime().year} " in html, html[-600:]
+
+
+def test_s225_the_helpers_write_no_payment_outside_the_service():
+    """`subscription.utils.cancel_subscription` had no caller and wrote a `Payment` with
+    `status='cancelled'` itself, with no `PaymentEvent` — the one thing only
+    `PaymentService` may do. Dead, and a trap for whoever finds it: gone."""
+    from pathlib import Path
+
+    from subscription import utils
+
+    assert not hasattr(utils, "cancel_subscription")
+    source = Path(utils.__file__).read_text()
+    assert "Payment.objects.create(" not in source
+
+
+def test_s225_behaviour_events_are_not_called_training_data():
+    """The owner's rule (2026-09-24): only what a person opted into ("help us improve",
+    off by default) may train a model. The behaviour-event model said it was collected
+    for "future model training", which is what a later reader would build on."""
+    import inspect
+
+    from ai_assistant import models
+
+    assert "future model training" not in inspect.getsource(models)
+    assert "NOT training data" in models.UserBehaviorEvent.__doc__

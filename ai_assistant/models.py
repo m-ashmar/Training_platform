@@ -2,8 +2,9 @@
 models.py — AI Assistant Data Models
 
 Six models for chat, training data collection, behavior tracking, cached insights,
-and usage cost monitoring. Designed to serve as both operational storage and a
-training data pipeline for a future custom fitness AI model.
+and usage cost monitoring. Only `AITrainingData` is training data: anonymous copies
+written while the person has "help us improve" on (off by default). Nothing else here
+is ever used to train a model.
 """
 
 import uuid
@@ -219,8 +220,11 @@ class UserBehaviorEvent(models.Model):
     """
     Tracks user actions across the entire platform via Django signals.
 
-    Creates the behavioral dataset for pattern learning and proactive
-    engagement (future model training).
+    What the AI coach's notes about a person's habits are computed from (`UserInsight`,
+    proactive engagement), and nothing more: these rows are NOT training data and never
+    feed a model. Training uses only the anonymous `AITrainingData` copies, written
+    while the person has opted in (SIDE_BUGS S-225; the privacy registry's
+    `behaviour_events` purpose says the same).
     """
 
     EVENT_TYPES = [
