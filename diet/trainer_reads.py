@@ -42,7 +42,7 @@ from rest_framework.views import APIView
 from subscription.permissions import HasDietAccess
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 
-from .allergens import ALLERGENS, parse_user_allergies
+from .allergens import ALLERGENS, declared_terms
 from .models import DailyProgress, DietPlan, FoodItem, Meal, UserFoodPreference
 from .services.meal_payload import day_targets, food_names, meal_payload, target_payload
 
@@ -139,8 +139,11 @@ class ClientFoodMarks:
 
         ids = set(self.disliked_ids)
         if self.checker.active:
+            # `name_ar` too: an Arabic allergy word is matched against it (review R-9),
+            # and a deferred column would cost one query per row.
             for food in (queryset.select_related(None).order_by().only(
-                    'id', 'name_en', 'allergens', 'allergen_source', 'ingredients_text')
+                    'id', 'name_en', 'name_ar', 'allergens', 'allergen_source',
+                    'ingredients_text')
                     .iterator(chunk_size=500)):
                 if self.checker.check_food(food).verdict == VIOLATION:
                     ids.add(food.pk)
@@ -164,8 +167,10 @@ class TrainerClientPreferencesView(APIView):
       An everyday word widens: "nuts" is `peanut` and `tree_nut`. The app draws the
       words from the tag.
     - `allergy_terms` — the words the client wrote that the vocabulary does not know
-      ("kiwi"), sorted. They are matched against food names too: the trainer's write
-      refuses a food that names one (`declared_allergen`).
+      ("kiwi", «الفراولة»), sorted. They are matched against food names too — an
+      English word against the English name and ingredients, an Arabic word against the
+      Arabic name: the trainer's write refuses a food that names one
+      (`declared_allergen`).
     - `liked_foods` / `disliked_foods` — `{id, name, name_ar, image_url}` rows, in the
       catalogue's order (the English name, then id).
     - `has_preferences` — false while the client has told us nothing: no allergies, no
@@ -190,7 +195,8 @@ class TrainerClientPreferencesView(APIView):
             prefs = (UserFoodPreference.objects.filter(user=client)
                      .prefetch_related('liked_foods', 'disliked_foods').first())
             allergies = (prefs.allergies or '') if prefs is not None else ''
-            tags = parse_user_allergies(allergies)
+            # What the checker refuses with (`declared_terms`), Arabic words included.
+            tags = declared_terms(allergies)
             liked = food_rows(prefs.liked_foods.all()) if prefs else []
             disliked = food_rows(prefs.disliked_foods.all()) if prefs else []
             return Response({

@@ -258,6 +258,18 @@ _AR_DESCRIBING_WRITTEN = ("أعاني", "أشكو", "غذائية", "غذائي"
 _AR_NEGATIONS_WRITTEN = ("لا", "ما", "ليس", "ليست", "لست", "مش", "مو", "ولا",
                          "لايوجد", "لاتوجد", "مافي", "بدون",
                          "ماعندي", "ماعنديش", "معنديش", "مافيش", "مفيش")
+#: Words written around an allergy that name no food, so they are never a free term
+#: (`arabic_free_terms`): "with", "except", "very", "mild", "its derivatives", "I don't
+#: know"... Unlike the lists above they do not make a text say "none": a word that is
+#: here and nowhere else still counts in `declares_allergy`.
+_AR_FUNCTION_WRITTEN = (
+    "مع", "عن", "إلى", "إلا", "غير", "سوى", "كل", "جميع", "كافة", "جدا", "كثير", "كثيرا",
+    "قليل", "قليلا", "شديدة", "شديد", "بسيطة", "بسيط", "خفيفة", "خفيف", "قوية", "قوي",
+    "مثل", "خاصة", "خصوصا", "أيضا", "فقط", "بعض", "أنا", "هو", "هي", "هذا", "هذه",
+    "الذي", "التي", "عند", "عندما", "إذا", "لما", "يسبب", "تسبب", "أعراض", "مرض",
+    "مشتقات", "مشتقاته", "مشتقاتها", "منتجات", "يحتوي", "تحتوي", "أعرف", "متأكد",
+    "أحب", "أتناول", "يمكنني", "أستطيع",
+)
 
 _AR_MARKS = re.compile(r"[ؐ-ًؚ-ٰٟۖ-ۭـ]")
 _AR_FOLD = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ة": "ه",
@@ -322,12 +334,26 @@ _AR_DESCRIBING = frozenset(_ar_fold(w) for w in _AR_DESCRIBING_WRITTEN)
 #: What counts as part of a "none" once a negation has been read.
 _AR_NEGATABLE = _AR_HAVE | _AR_DESCRIBING
 _AR_NEGATIONS = frozenset(_ar_fold(w) for w in _AR_NEGATIONS_WRITTEN)
+#: An Arabic word with any of these forms is never a free term.
+_AR_NOT_A_FOOD = (_AR_NONE | _AR_NEGATABLE | _AR_NEGATIONS
+                  | frozenset(_ar_fold(w) for w in _AR_FUNCTION_WRITTEN))
 
 
-def _arabic_allergens(raw: str | None) -> Set[str]:
-    """The canonical tags an Arabic allergy text names; empty when it names none."""
-    words = _ar_words(raw or "")
+def _read_arabic(raw: str | None) -> tuple[Set[str], list[str]]:
+    """(the canonical tags an Arabic allergy text names, the words it names nothing with).
+
+    The second list holds every Arabic word no table term took — the vocabulary does
+    not know it — as the client wrote it (diacritics and tatweel removed, letters
+    unfolded), in order, without duplicates.
+    """
+    plain = _AR_MARKS.sub("", raw or "")
+    # `_AR_FOLD` maps one letter to one letter, so a span of the folded text is the
+    # same span of the written one.
+    spans = [(m.group(), plain[m.start():m.end()])
+             for m in _AR_WORD_RE.finditer(plain.translate(_AR_FOLD))]
+    words = [_ar_forms(folded) for folded, _written in spans]
     tags: Set[str] = set()
+    unknown: list[str] = []
     i = 0
     while i < len(words):
         for term in _AR_TERMS:
@@ -337,8 +363,34 @@ def _arabic_allergens(raw: str | None) -> Set[str]:
                 i += len(term)
                 break
         else:
+            if spans[i][1] not in unknown:
+                unknown.append(spans[i][1])
             i += 1
-    return tags
+    return tags, unknown
+
+
+def _arabic_allergens(raw: str | None) -> Set[str]:
+    """The canonical tags an Arabic allergy text names; empty when it names none."""
+    return _read_arabic(raw)[0]
+
+
+def arabic_free_terms(raw: str | None) -> Set[str]:
+    """The Arabic words of an allergy text that name a food the vocabulary does not know.
+
+    Fix run, review R-9: «حساسية من الفراولة» ("strawberry allergy") named no tag and no
+    free term, so the checker was inactive for that client and Strawberries came back
+    SAFE — while "strawberry allergy" in English was refused. Every Arabic word that no
+    table term took and that is not a word of "none", "I have", a negation, a word
+    describing an allergy or a function word (`_AR_NOT_A_FOOD`) is kept here, as the
+    client wrote it, and `AllergenChecker` matches it against the food's ARABIC name
+    (`mentions_term`). Word by word: «زيت الزيتون» refuses every oil as well as the
+    olive, the safe direction, as an ambiguous English word widens.
+
+    Not part of `parse_user_allergies`, whose free terms are matched against the
+    English text; `declared_terms` is the two together.
+    """
+    _tags, unknown = _read_arabic(raw)
+    return {w for w in unknown if not (_ar_forms(_ar_fold(w)) & _AR_NOT_A_FOOD)}
 
 
 def _arabic_says_something(raw: str | None) -> bool:
@@ -402,8 +454,23 @@ def word_forms(text: str) -> Set[str]:
     return forms
 
 
+def _mentions_arabic(term: str, text: str) -> bool:
+    """Does `text` hold the Arabic words of `term`, in order, each in any of its forms
+    (`_ar_forms`: with or without the article and the particles joined to it)?"""
+    wanted = _ar_words(term)
+    if not wanted:
+        return False
+    words = _ar_words(text)
+    return any(all(wanted[k] & words[i + k] for k in range(len(wanted)))
+               for i in range(len(words) - len(wanted) + 1))
+
+
 def mentions_term(term: str, text: str) -> bool:
     """Does `text` name `term`, whichever of them is written in the plural?
+
+    An Arabic term (`arabic_free_terms`) is matched word by word on the Arabic words of
+    `text`, both sides folded and in every form `_ar_forms` gives: «الفراولة» names
+    «فراولة», «للفراولة» names «الفراولة» (fix run, review R-9).
 
     The free-text allergy path matched with a raw `term in text.lower()` substring, and
     English morphology then decided whether a client was protected: a client who typed
@@ -418,6 +485,8 @@ def mentions_term(term: str, text: str) -> bool:
     term = (term or "").strip().lower()
     if not term:
         return False
+    if _AR_WORD_RE.search(_ar_fold(term)):
+        return _mentions_arabic(term, text)
     if " " in term:
         # A phrase is matched as written; there is no useful word form for it.
         return term in (text or "").lower()
@@ -636,10 +705,12 @@ def parse_user_allergies(raw: str | None) -> Set[str]:
 
     Arabic is read too (`_AR_SYNONYMS_WRITTEN`, SIDE_BUGS S-212): «فول سوداني» is
     `peanut`, «حساسية من الحليب ومشتقاته» is `milk`. An Arabic word the table does not
-    know becomes no tag and no free term — the free terms are matched against the
-    food's ENGLISH text (`food_text`), where an Arabic word can never be found — and the
-    client still counts as declaring an allergy (`declares_allergy`), so nothing whose
-    tagging is incomplete reaches them.
+    know becomes no tag and no free term HERE — these free terms are matched against
+    the food's ENGLISH text (`food_text`), where an Arabic word can never be found — and
+    the client still counts as declaring an allergy (`declares_allergy`), so nothing
+    whose tagging is incomplete reaches them. Since the fix run (review R-9) such a word
+    is a free term of `declared_terms`, which the checker matches against the food's
+    Arabic name.
     """
     tags: Set[str] = _arabic_allergens(raw)
     text = _NOT_APPLICABLE.sub(" ", (raw or "").lower())
@@ -661,6 +732,19 @@ def parse_user_allergies(raw: str | None) -> Set[str]:
         else:
             tags.add(f"free:{term}")
     return tags
+
+
+def declared_terms(raw: str | None) -> Set[str]:
+    """Everything an allergy text declares: `parse_user_allergies` (the tags, and the
+    English words the vocabulary does not know as ``free:<term>``) plus the Arabic words
+    it does not know (`arabic_free_terms`), as ``free:<word>``.
+
+    What `AllergenChecker` refuses with, and what the trainer is shown as the client's
+    `allergy_terms` (`diet/trainer_reads.py`), so the two cannot disagree. A ``free:``
+    term in English is matched against the food's English name and ingredients, one in
+    Arabic against its Arabic name (`mentions_term`).
+    """
+    return parse_user_allergies(raw) | {f"free:{w}" for w in arabic_free_terms(raw)}
 
 
 def label(tag: str) -> str:

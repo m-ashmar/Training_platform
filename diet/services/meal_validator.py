@@ -4,11 +4,11 @@ from dataclasses import dataclass, field
 from typing import Iterable, List, Set, Tuple
 
 from ..allergens import (
+    declared_terms,
     food_allergen_tags,
     food_text,
     label,
     mentions_term,
-    parse_user_allergies,
 )
 from ..models import FoodItem
 
@@ -79,7 +79,10 @@ class AllergenChecker:
     """
 
     def __init__(self, user_allergies: str | None):
-        self.user_tags: Set[str] = parse_user_allergies(user_allergies)
+        # `declared_terms`: the tags and English free terms of `parse_user_allergies`,
+        # and the Arabic words the vocabulary does not know (fix run, review R-9) —
+        # «حساسية من الفراولة» left this checker inactive and Strawberries SAFE.
+        self.user_tags: Set[str] = declared_terms(user_allergies)
         self.canonical = {t for t in self.user_tags if not t.startswith("free:")}
         self.free_terms = {t[5:] for t in self.user_tags if t.startswith("free:")}
 
@@ -112,7 +115,11 @@ class AllergenChecker:
         #    by WORD and singular — not by substring. `t in text.lower()` let English
         #    morphology decide who was protected: "strawberry" was served Strawberries
         #    and "bananas" was served Banana, each with the plan reporting `is_safe`.
-        matched += sorted(t for t in self.free_terms if mentions_term(t, text))
+        #    An Arabic term is matched against the ARABIC name (`mentions_term` reads
+        #    only the Arabic words of the text for it): «فراولة» is Strawberries'
+        #    `name_ar`, and no English text will ever hold it.
+        named = f"{text} {getattr(food, 'name_ar', '') or ''}"
+        matched += sorted(t for t in self.free_terms if mentions_term(t, named))
 
         if matched:
             return IngredientVerdict(name, VIOLATION, sorted(set(matched)), source)
