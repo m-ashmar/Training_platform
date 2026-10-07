@@ -214,8 +214,9 @@ _AR_SYNONYMS_WRITTEN: dict[str, set[str]] = {
     # Soy.
     "صويا": {"soy"}, "صوية": {"soy"}, "فول صويا": {"soy"}, "توفو": {"soy"},
     "ميسو": {"soy"}, "تمبيه": {"soy"}, "إدامامي": {"soy"},
-    # Gluten, and coeliac disease («الداء الزلاقي», «داء السيلياك»).
-    "قمح": {"gluten"}, "غلوتين": {"gluten"}, "جلوتين": {"gluten"},
+    # Gluten, and coeliac disease («الداء الزلاقي», «داء السيلياك»). «حنطة» is wheat
+    # as much as «قمح» is.
+    "قمح": {"gluten"}, "حنطة": {"gluten"}, "غلوتين": {"gluten"}, "جلوتين": {"gluten"},
     "غلوتين القمح": {"gluten"}, "طحين": {"gluten"}, "دقيق": {"gluten"},
     "خبز": {"gluten"}, "شعير": {"gluten"}, "جاودار": {"gluten"}, "برغل": {"gluten"},
     "سميد": {"gluten"}, "معكرونة": {"gluten"}, "مكرونة": {"gluten"},
@@ -466,8 +467,9 @@ def food_allergen_tags(food) -> Set[str]:
     declared allergens against exactly this set — so the plan generator's filter, the
     trainer write's `declared_allergen` refusal, the catalogue row's `allergens` and the
     trainer picker's per-client marks (BACKEND_BUGS B-127) cannot disagree. A stored
-    value that is not the vocabulary is read, not dropped (`_read_stored`), and
-    `FoodItem.clean` refuses it on write (`validate_tags`).
+    value that is not the vocabulary is read, not dropped (`_read_stored`), and the
+    consoles' food form refuses it on write (`diet/admin.py FoodItemAdminForm`, through
+    `validate_tags`).
     """
     stored, _wellformed = _read_stored(getattr(food, "allergens", None))
     return stored | infer_allergens(food_text(food))
@@ -485,9 +487,9 @@ def food_allergen_tags(food) -> Set[str]:
 #: was never populated. Neither says what is NOT in the food.
 GAP_UNVERIFIED = "unverified_source"
 #: `allergens` is not a list of vocabulary tags — `["nuts"]`, `"peanut"`, `null`.
-#: `food_allergen_tags` reads what it can of such a value (`_read_stored`), and
-#: `FoodItem.clean` refuses it on write; a row stored that way before either is still
-#: not vouched for.
+#: `food_allergen_tags` reads what it can of such a value (`_read_stored`), and the
+#: consoles' food form refuses it on write (`FoodItemAdminForm`); a row stored that way
+#: before either is still not vouched for.
 GAP_MALFORMED = "malformed_tags"
 #: The row's own English name or ingredient list implies a tag its stored list lacks.
 #: The checker still catches THAT allergen (it unions the two), but a curation that
@@ -643,8 +645,10 @@ def validate_tags(tags) -> list:
     value is a list of `ALLERGENS` keys and nothing else. A value that is not a list at
     all (a string, a number, null) is returned whole.
 
-    `FoodItem.clean` calls it (SIDE_BUGS S-215), so the console and every `full_clean`
-    refuse free text on write; it was defined for that and never called.
+    It was defined for that and never called (SIDE_BUGS S-215). The food form of both
+    consoles calls it (`diet/admin.py FoodItemAdminForm.clean_allergens`), so free text
+    is refused where an operator writes the field. Not `FoodItem.clean`, which every
+    save runs: a row stored malformed before the rule would become unsaveable.
     """
     if not isinstance(tags, (list, tuple)):
         return [tags]

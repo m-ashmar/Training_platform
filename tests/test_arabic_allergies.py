@@ -48,6 +48,7 @@ pytestmark = pytest.mark.django_db
     ("قريدس", {"shellfish"}),
     ("صويا", {"soy"}),
     ("قمح", {"gluten"}),
+    ("حساسية من الحنطة", {"gluten"}),                 # wheat, the other common word
     ("الغلوتين", {"gluten"}),
     ("سمسم", {"sesame"}),
     ("طحينة", {"sesame"}),
