@@ -50,6 +50,13 @@ DATABASES = {
         "PASSWORD": os.environ.get("DB_PASSWORD", "postgres"),
         "HOST": os.environ.get("DB_HOST", "localhost"),
         "PORT": os.environ.get("DB_PORT", "5433"),
+        # JIT off, as production must have it (DEPLOY_CHECKLIST.md §2.2): a planner
+        # estimate on the shared test server, whose tables fill up over a full run,
+        # crossed the JIT thresholds and turned a query of milliseconds into seconds of
+        # compilation (BACKEND_BUGS B-136), and the diet week's 20 s bound failed on
+        # every full gate while passing alone (SIDE_BUGS S-245). No pooler here, so the
+        # connection option is safe.
+        "OPTIONS": {"options": "-c jit=off"},
     }
 }
 
