@@ -294,7 +294,8 @@ class FoodListView(APIView):
     `excluded` is true exactly when the trainer's meal write would refuse this food for
     this client (`declared_allergen`); `excluded_allergens` the client's declared tags it
     carries, `excluded_terms` the client's own words for allergies the vocabulary does
-    not know ("kiwi") that its name names; `allergen_verdict` is `violation`, `safe` or
+    not know ("kiwi" in its English name, «الفراولة» in its Arabic one) that its name
+    names; `allergen_verdict` is `violation`, `safe` or
     `unverified` (nothing matched but the food's allergen data is not curated: the plan
     check reports it for review, the write accepts it); `liked` / `disliked` from the
     client's preferences. With it, `hide_conflicts=true` drops every excluded or
