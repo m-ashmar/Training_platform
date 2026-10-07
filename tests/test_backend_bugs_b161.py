@@ -171,3 +171,47 @@ def test_b161_a_missed_day_breaks_the_streak_and_the_hourly_run_notices(make_use
     advance_challenge_phases()
     assert _value(challenge_id, lapsed)[0] == 0.0
     assert _value(challenge_id, gap)[0] == 1.0
+
+
+def test_b161_the_exercise_name_is_read_with_the_row_and_its_loss_locks_nothing(
+        make_user, api):
+    """`exercise_name` costs no query per row of the list, and an exercise deleted
+    later (SET_NULL) leaves the challenge editable and its standing as it stood."""
+    from cachalot.api import cachalot_disabled
+    from django.core.cache import cache
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    trainer = make_user("b161n_t", user_type="trainer", trainer_is_verified=True)
+    client = make_user("b161n_c")
+    first = _global_exercise("b161 dip")
+    made = _create(api, trainer, metric="exercise_reps", exercise=first.pk)
+    assert made.status_code == 201, made.content
+    api(client).get("/api/social/challenges/")  # warm the per-process caches
+
+    cache.clear()
+    with cachalot_disabled(), CaptureQueriesContext(connection) as one_row:
+        listed = api(client).get("/api/social/challenges/")
+    assert listed.status_code == 200, listed.content
+    for n in range(3):
+        more = _create(api, trainer, metric="exercise_reps", title=f"b161 more {n}",
+                       exercise=_global_exercise(f"b161 row {n}").pk)
+        assert more.status_code == 201, more.content
+    cache.clear()
+    with cachalot_disabled(), CaptureQueriesContext(connection) as four_rows:
+        listed = api(client).get("/api/social/challenges/")
+    rows = listed.json()["results"]
+    assert {r["exercise_name"] for r in rows} == {
+        "b161 dip", "b161 row 0", "b161 row 1", "b161 row 2"}
+    assert len(four_rows) == len(one_row), "exercise_name costs a query per row"
+
+    # The exercise goes; the challenge stays, its title still editable, nothing counted.
+    _sets(client, first, timezone.localdate(), 2, reps=10, weight=None)
+    _join(api, client, made.json()["id"])
+    assert _value(made.json()["id"], client)[0] == 20.0
+    first.delete()
+    renamed = api(trainer).patch(f"/api/social/challenges/{made.json()['id']}/",
+                                 {"title": "b161 renamed"}, content_type=JSON)
+    assert renamed.status_code == 200, renamed.content
+    assert (renamed.json()["exercise"], renamed.json()["exercise_name"]) == (None, None)
+    assert _value(made.json()["id"], client)[0] == 20.0
