@@ -85,6 +85,11 @@ def _prod_env(**overrides):
             "client_email": "media@example.iam.gserviceaccount.com",
             "private_key": "-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----\n",
         }),
+        # Deliberate contract change (fx/w1-privacy, BACKEND_BUGS B-174, the owner's
+        # decision of 2026-09-28): production refuses to boot without an https base for
+        # the public pages, so this environment, which passes every other check,
+        # carries one.
+        "PUBLIC_PAGES_BASE_URL": "https://yallagym.example",
     }
     env.update(overrides)
     return {k: v for k, v in env.items() if v is not None}

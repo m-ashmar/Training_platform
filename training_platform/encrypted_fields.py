@@ -15,7 +15,11 @@ to garbage.
 Key handling:
   FIELD_ENCRYPTION_KEY holds one or more urlsafe-base64 32-byte keys, comma separated.
   The FIRST key encrypts; every key can decrypt. That ordering is what makes rotation
-  possible without downtime — prepend the new key, re-save the rows, drop the old one.
+  possible without downtime — prepend the new key and deploy, run
+  `python manage.py reencrypt_fields` (it rewrites every encrypted column under the
+  first key and refuses to report success while a value needs a key the list lacks),
+  then drop the old key and deploy again. Until 2026-09-28 no command did the middle
+  step, so an old key could never be dropped (SIDE_BUGS S-233).
 
 Legacy rows: decryption falls back to returning the stored value unchanged when it is
 not a valid token. Without that, the row a user wrote yesterday raises on read the
@@ -31,10 +35,45 @@ import logging
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.core.signals import setting_changed
 from django.db import models
+from django.dispatch import receiver
 from django.utils.functional import cached_property
 
 logger = logging.getLogger(__name__)
+
+
+def encrypted_columns():
+    """Every installed model with encrypted columns, as `[(model, [field, ...]), ...]`.
+
+    Derived from the models, so a column put behind `EncryptedTextField` (or the code
+    list) later is rotated by `manage.py reencrypt_fields` without anyone listing it."""
+    from django.apps import apps
+
+    found = []
+    for model in apps.get_models():
+        if model._meta.proxy or not model._meta.managed:
+            continue
+        # LOCAL columns: a multi-table child lists its parent's too, and the parent's
+        # table is walked once, as the parent.
+        fields = [f for f in model._meta.local_concrete_fields
+                  if isinstance(f, EncryptedTextField)]
+        if fields:
+            found.append((model, fields))
+    return found
+
+
+@receiver(setting_changed)
+def _forget_ciphers(*, setting, **kwargs):
+    """Each field caches its cipher; a changed key must reach the next read and write.
+
+    A deploy restarts the process, so this matters to a test (or a shell) that changes
+    FIELD_ENCRYPTION_KEY, which otherwise kept encrypting under the first key it saw."""
+    if setting != "FIELD_ENCRYPTION_KEY":
+        return
+    for _model, fields in encrypted_columns():
+        for field in fields:
+            field.__dict__.pop("cipher", None)
 
 
 def _build_cipher() -> MultiFernet | None:

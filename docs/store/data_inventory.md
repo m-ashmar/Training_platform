@@ -177,9 +177,9 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Fields stored.** `id`, `password`, `is_superuser`, `username`, `email`, `date_joined`, `phone_number`, `first_name`, `last_name`, `ai_training_consent`, `ai_training_consent_set_at`, `profile_picture`, `user_type`, `is_active`, `email_verified`, `is_staff`, `preferred_language`, `preferred_timezone`, `workout_reminder_hour`, `height`, `weight`, `age`, `gender`, `specific_injury`, `activity_level`, `activity_level_answered_at`, `date_of_birth`, `training_goal`, `training_place`, `training_days_per_week`, `injury_areas`, `trainer_bio`, `trainer_specializations`, `trainer_certifications`, `trainer_experience_years`, `trainer_hourly_rate`, `trainer_is_verified`, `trainer_is_available`, `trainer_goal_focus`, `trainer_injury_focus`, `trainer_training_places`, `assigned_trainer`, `client_goals`, `client_preferences`, `created_at`, `updated_at`, `last_login`, `groups`, `user_permissions`.
 
-**In the export.** `id`, `username`, `email`, `phone_number`, `first_name`, `last_name`, `age`, `date_of_birth`, `gender`, `height`, `weight`, `activity_level`, `specific_injury`, `injury_areas`, `client_goals`, `training_goal`, `training_place`, `training_days_per_week`, `date_joined`, `ai_training_consent`, `ai_training_consent_set_at`, `groups`, `user_permissions`. Not exported: `password`, `is_superuser`, `profile_picture`, `user_type`, `is_active`, `email_verified`, `is_staff`, `preferred_language`, `preferred_timezone`, `workout_reminder_hour`, `activity_level_answered_at`, `trainer_bio`, `trainer_specializations`, `trainer_certifications`, `trainer_experience_years`, `trainer_hourly_rate`, `trainer_is_verified`, `trainer_is_available`, `trainer_goal_focus`, `trainer_injury_focus`, `trainer_training_places`, `assigned_trainer`, `client_preferences`, `created_at`, `updated_at`, `last_login`.
+**In the export.** `id`, `username`, `email`, `phone_number`, `first_name`, `last_name`, `age`, `date_of_birth`, `gender`, `height`, `weight`, `activity_level`, `specific_injury`, `injury_areas`, `client_goals`, `training_goal`, `training_place`, `training_days_per_week`, `date_joined`, `ai_training_consent`, `ai_training_consent_set_at`, `user_type`, `profile_picture`, `preferred_language`, `preferred_timezone`, `workout_reminder_hour`, `activity_level_answered_at`, `client_preferences`, `trainer_bio`, `trainer_specializations`, `trainer_certifications`, `trainer_experience_years`, `trainer_hourly_rate`, `trainer_is_verified`, `trainer_is_available`, `trainer_goal_focus`, `trainer_injury_focus`, `trainer_training_places`, `last_login`. Not exported: `password`, `is_superuser`, `is_active`, `email_verified`, `is_staff`, `assigned_trainer`, `created_at`, `updated_at`, `groups`, `user_permissions`.
 
-**On erasure.** Anonymised: `is_active`, `email`, `username`, `phone_number`, `first_name`, `last_name`, `specific_injury`, `client_goals`, `date_of_birth`, `injury_areas`, `training_goal`, `training_place`, `training_days_per_week`, `assigned_trainer`, `profile_picture`, `ai_training_consent`, `ai_training_consent_set_at` are cleared or replaced; `password`, `is_superuser`, `date_joined`, `user_type`, `email_verified`, `is_staff`, `preferred_language`, `preferred_timezone`, `workout_reminder_hour`, `height`, `weight`, `age`, `gender`, `activity_level`, `activity_level_answered_at`, `trainer_bio`, `trainer_specializations`, `trainer_certifications`, `trainer_experience_years`, `trainer_hourly_rate`, `trainer_is_verified`, `trainer_is_available`, `trainer_goal_focus`, `trainer_injury_focus`, `trainer_training_places`, `client_preferences`, `created_at`, `updated_at`, `last_login`, `groups`, `user_permissions` stay on the row.
+**On erasure.** Anonymised: `is_active`, `email`, `username`, `phone_number`, `first_name`, `last_name`, `specific_injury`, `client_goals`, `date_of_birth`, `injury_areas`, `training_goal`, `training_place`, `training_days_per_week`, `height`, `weight`, `age`, `gender`, `activity_level`, `activity_level_answered_at`, `client_preferences`, `trainer_bio`, `trainer_specializations`, `trainer_certifications`, `trainer_experience_years`, `trainer_hourly_rate`, `trainer_goal_focus`, `trainer_injury_focus`, `trainer_training_places`, `assigned_trainer`, `profile_picture`, `ai_training_consent`, `ai_training_consent_set_at` are cleared or replaced; `password`, `is_superuser`, `date_joined`, `user_type`, `email_verified`, `is_staff`, `preferred_language`, `preferred_timezone`, `workout_reminder_hour`, `trainer_is_verified`, `trainer_is_available`, `created_at`, `updated_at`, `last_login`, `groups`, `user_permissions` stay on the row.
 
 **Retention.** While the account exists.
 
@@ -1055,9 +1055,9 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 ### `routines_created` — `routine.Routine`
 
-**Why.** Routines a trainer wrote, each one a client's own copy. Kept, because the client's program is built on it.
+**Why.** Routines a trainer wrote, each one a client's own copy, and the routines written for the person. Kept, because the client's program is built on it.
 
-**Whose.** Rows whose `created_by` is the account.
+**Whose.** Rows whose `created_by` or `assigned_to` is the account.
 
 **Who else receives it.** The trainer's clients (`clients`); The AI service provider (`ai_provider`).
 
@@ -1671,9 +1671,9 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 ### `routine_exercises` — `routine.RoutineExercise`
 
-**Why.** The exercises, sets and reps of each routine a trainer wrote. Kept with the routine.
+**Why.** The exercises, sets and reps of each routine a trainer wrote, and of each routine written for the person. Kept with the routine.
 
-**Whose.** Rows whose `routine__created_by` is the account.
+**Whose.** Rows whose `routine__created_by` or `routine__assigned_to` is the account.
 
 **Who else receives it.** The trainer's clients (`clients`); The AI service provider (`ai_provider`).
 

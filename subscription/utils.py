@@ -3,7 +3,7 @@ from django.utils.translation import gettext as _
 from django.db import transaction
 from datetime import timedelta
 from .models import (Subscription, SubscriptionPlan, Payment, SubscriptionUsage,
-                     SubscriptionFeature, plan_snapshot)
+                     SubscriptionFeature)
 
 
 def checkout_ttl() -> timedelta:
@@ -114,48 +114,6 @@ def activate_subscription(subscription_id):
         "activate_subscription is disabled; activation happens only via "
         "PaymentService.complete_payment after verified payment."
     )
-
-def cancel_subscription(subscription_id, immediate=False, reason=""):
-    """
-    Cancel a subscription.
-    
-    Args:
-        subscription_id: UUID of the subscription
-        immediate: If True, cancel immediately. If False, disable auto-renewal
-        reason: Reason for cancellation
-    
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    try:
-        with transaction.atomic():
-            subscription = Subscription.objects.get(id=subscription_id)
-            
-            if immediate:
-                subscription.status = 'cancelled'
-                subscription.cancelled_at = timezone.now()
-            else:
-                subscription.auto_renew = False
-            
-            subscription.save()
-            
-            # Log the cancellation
-            Payment.objects.create(
-                subscription=subscription,
-                amount=0,
-                currency=subscription.plan.currency,
-                status='cancelled',
-                description=f"Subscription cancelled: {reason}",
-                # The plan that was cancelled (`Payment.plan_bought`): the row can move
-                # to another plan later, and the history must not rename this one.
-                metadata={'reason': reason, 'immediate': immediate,
-                          'plan': plan_snapshot(subscription.plan)}
-            )
-            
-            return True
-            
-    except Subscription.DoesNotExist:
-        return False
 
 def renew_subscription(subscription_id):
     """

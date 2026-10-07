@@ -48,7 +48,7 @@ so; a kind with none in either language answers 404.
 
 | Setting | What it does |
 |---|---|
-| `PUBLIC_PAGES_BASE_URL` | The hub domain (e.g. `https://yallagym.com`) the links are built on. Unset, they use the host the request came to |
+| `PUBLIC_PAGES_BASE_URL` | The hub domain (e.g. `https://yallagym.com`) the links are built on. Required in production, as an https URL: boot refuses without it (B-174). Unset in development, they use the host the request came to |
 | `PLATFORM_CONTACT_EMAIL` | The contact address printed on every legal page. Empty prints none |
 | `PLATFORM_NAME` | The trading name on the pages; empty means "Yalla Gym" / «يلا جيم» |
 | `PLATFORM_LEGAL_NAME` | The registered company name (receipts); the drafts ask for it too |

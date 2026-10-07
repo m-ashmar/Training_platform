@@ -634,6 +634,10 @@ def _prod_env():
         # copies are keyed with it); generated, never a literal.
         "AI_TRAINING_PSEUDONYM_KEY": secrets.token_hex(32),
         "MEDIA_BACKEND": "gcs", "GS_BUCKET_NAME": "yalla-gym-media",
+        # Deliberate contract change (fx/w1-privacy, BACKEND_BUGS B-174, the owner's
+        # decision of 2026-09-28): production refuses to boot without an https base for
+        # the public pages; required, so this environment carries one.
+        "PUBLIC_PAGES_BASE_URL": "https://yallagym.example",
     }
 
 

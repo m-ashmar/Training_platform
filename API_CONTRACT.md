@@ -1650,7 +1650,8 @@ can_view_entitlements, can_view_wallet, can_transfer_wallet, links}` — all boo
 app opens them and they can move without a release:
 `{"privacy_policy": {"ar": url, "en": url}, "terms_of_use": {...}, "account_deletion":
 {...}}`, absolute URLs ending `?lang=ar|en` (see "Public pages" below). The same for every
-channel and version; the base is `PUBLIC_PAGES_BASE_URL`, else the API's own host.
+channel and version; the base is `PUBLIC_PAGES_BASE_URL` (production refuses to boot
+without an https one, B-174), else, in development, the API's own host.
 
 The flags are enforced by the server, not only rendered by the app:
 

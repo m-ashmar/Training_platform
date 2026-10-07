@@ -241,7 +241,7 @@ go in `fly.toml [env]`, but a secret there is readable in the repository.
 ### 3.9 Public pages, app links, identity, console
 | Variable | | Default | What |
 |---|---|---|---|
-| `PUBLIC_PAGES_BASE_URL` | | the API host | Where the privacy policy, terms and account-deletion page are reached, e.g. `https://yallagym.com`. The capabilities answer hands these URLs to every build |
+| `PUBLIC_PAGES_BASE_URL` | R | | Where the privacy policy, terms and account-deletion page are reached, e.g. `https://yallagym.com`. The capabilities answer hands these URLs to every build, and the store listings name the same pages. Boot refuses it unset, not https, or a local address (B-174) |
 | `APP_LINKS_ANDROID_PACKAGES` | | | Comma separated package names. Empty: `/.well-known/assetlinks.json` answers 404 `app_links_not_configured` |
 | `APP_LINKS_ANDROID_SHA256_FINGERPRINTS` | | | The SHA-256 of every release-signing certificate (the direct APK's key, and Play's app-signing key once there is a Play build) |
 | `APP_LINKS_IOS_TEAM_ID`, `APP_LINKS_IOS_BUNDLE_IDS` | | | For `/.well-known/apple-app-site-association` |
@@ -279,7 +279,7 @@ to a database dump: a dump plus `FIELD_ENCRYPTION_KEY` is plaintext health data.
 
 | Key | Protects | If LOST | If LEAKED | Rotation |
 |---|---|---|---|---|
-| `FIELD_ENCRYPTION_KEY` | Health data columns (injuries, notes) at rest, in the database and in every backup | That data is unreadable for ever, in production and in every backup | A database dump or backup becomes readable: rotate, then treat it as a data breach | Prepend the new key (`new,old`): new writes use it, both read. Rows written under the old key keep needing it. No command yet re-saves every row, so NEVER drop an old key (SIDE_BUGS S-233) |
+| `FIELD_ENCRYPTION_KEY` | Health data columns (injuries, notes) at rest, in the database and in every backup | That data is unreadable for ever, in production and in every backup | A database dump or backup becomes readable: rotate, then treat it as a data breach | Prepend the new key (`new,old`) and deploy: new writes use it, both read. Then `fly ssh console -C "python manage.py reencrypt_fields"` rewrites every encrypted column under the new key (`--dry-run` counts first). Drop the old key and deploy only after it ends with "Every encrypted value is under the first key.": it exits non-zero, naming the rows, while any value needs a key the list lacks (SIDE_BUGS S-233). A backup taken before the rotation still needs the old key: keep it in the vault as long as such a backup is kept |
 | `AI_TRAINING_PSEUDONYM_KEY` | The link from an anonymous AI training copy to its person, used only to delete the copies when the person turns "help us improve" off | Existing copies can no longer be found to delete | Copies could be re-linked to people | NEVER while copies exist. Delete every copy first |
 | `DJANGO_SECRET_KEY` | Sessions, sign-up and reset code hashes, the OTP email seal, the agents' API secrets (when `AGENT_APIKEY_ENC_KEY` is unset), the keyed digests of saved ShamCash payer and payout addresses | Pending codes and resets die (minutes). Agents' API secrets become unreadable. Saved address digests stop matching | Sessions and reset tokens forgeable: rotate at once | Put the old value in `DJANGO_OLD_SECRET_KEY_1`, set the new one, deploy. The OTP seal, agent secrets and the address digests honour the old key (SIDE_BUGS S-232). Before dropping `DJANGO_OLD_SECRET_KEY_1`, run `manage.py rekey_address_digests` once on the new key, so the saved address digests are rewritten under it |
 | `AGENT_APIKEY_ENC_KEY` | Agents' API secrets at rest | Every agent needs a new API key | Rotate, then re-issue agents' keys | Changing it makes existing agent secrets unreadable: re-issue |
@@ -478,7 +478,7 @@ fly scale count web=1 worker=1 beat=1 -a <app>-staging
 | `SENTRY_ENVIRONMENT` | `staging` |
 | `GATEWAY_MODE` | `sandbox`, with `SHAMCASH_SANDBOX_*` set and `SHAMCASH_API_TOKEN` UNSET (boot refuses sandbox when the production token is present) |
 | `DJANGO_ALLOWED_HOSTS` | `<app>-staging.fly.dev` |
-| `PUBLIC_PAGES_BASE_URL` | the staging host |
+| `PUBLIC_PAGES_BASE_URL` | `https://<app>-staging.fly.dev` (required: boot refuses it unset or not https) |
 | `APP_LINKS_*` | unset: the association files answer 404, so staging never claims the real app's links |
 | Everything else | as production, with staging's own values |
 

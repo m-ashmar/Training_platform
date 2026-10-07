@@ -431,11 +431,18 @@ def test_s028_the_privacy_audit_walks_mediakit_too():
     # module.
     from training_platform.privacy.registry import audit_coverage, registry
 
-    removed = registry.pop("mediakit.MediaAsset")
+    # Restored IN ITS PLACE, not re-added (SIDE_BUGS S-231). `registry[key] = removed`
+    # put MediaAsset at the end of the dict, and every later test in the process then
+    # exported, erased and wrote the data inventory in a different order from the
+    # committed `docs/store/data_inventory.md` (the order-dependent `test_store_docs`
+    # failures). The same dict object is refilled, because other modules hold it.
+    original = dict(registry)
+    registry.pop("mediakit.MediaAsset")
     try:
         assert "mediakit.MediaAsset" in audit_coverage()
     finally:
-        registry["mediakit.MediaAsset"] = removed
+        registry.clear()
+        registry.update(original)
 
     assert audit_coverage() == [], "the registry itself has a gap"
 

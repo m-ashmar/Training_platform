@@ -517,6 +517,29 @@ def heavy_work_problems(memory=None) -> list:
     return problems
 
 
+def _public_pages_base_problem(value):
+    """Why `PUBLIC_PAGES_BASE_URL` cannot be the public pages' base, or None.
+
+    It must be an absolute https URL with a host that is not this machine: the store
+    listings and every build open the privacy policy, terms and account-deletion page
+    there (`legal/links.py`)."""
+    from urllib.parse import urlsplit
+
+    base = (value or "").strip()
+    if not base:
+        return ("PUBLIC_PAGES_BASE_URL is not set — the privacy policy, terms and "
+                "account-deletion links every build is handed would follow whatever host "
+                "a request reached; set it to the hub domain, e.g. https://yallagym.com")
+    parts = urlsplit(base)
+    if parts.scheme != "https" or not parts.hostname:
+        return (f"PUBLIC_PAGES_BASE_URL is {base!r} — it must be an https URL with a "
+                "host, e.g. https://yallagym.com")
+    if parts.hostname in ("localhost", "127.0.0.1", "::1") \
+            or parts.hostname.endswith(".localhost"):
+        return f"PUBLIC_PAGES_BASE_URL is {base!r} — a local address in production"
+    return None
+
+
 def enforce_production_safety():
     """
     Runtime invariant checks. Any violation crashes the process.
@@ -614,6 +637,16 @@ def enforce_production_safety():
         _bad = [v for v in (_vals or []) if v and (('*' in v) or ('localhost' in v) or ('127.0.0.1' in v))]
         if _bad:
             errors.append(f"{_name} contains wildcard/localhost entries in production: {_bad}")
+
+    # --- The public pages' host (BACKEND_BUGS B-174, the owner's decision of 2026-09-28) ---
+    # The capabilities answer hands every build the privacy policy, terms and
+    # account-deletion URLs (legal/links.py), and the store listings name the same
+    # pages. Unset, the links followed whichever allowed host a request reached — the
+    # API's own address, not the hub domain the listing names — so production refuses
+    # to boot without an https base.
+    _pages_problem = _public_pages_base_problem(globals().get("PUBLIC_PAGES_BASE_URL"))
+    if _pages_problem:
+        errors.append(_pages_problem)
 
     # --- Object storage ---
     # 'local' is the filesystem backend, and it cannot be production. A machine's own
