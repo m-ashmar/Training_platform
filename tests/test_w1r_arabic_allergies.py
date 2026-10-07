@@ -2,9 +2,9 @@
 
 `tests/test_arabic_allergies.py` proves the S-212 / S-243 fix; the adversarial review of
 that fix (merge/w1, 39ae624) found three ways it still read an Arabic allergy wrong.
-Each finding's tests fail on 39ae624. The controls among them pass on both, and say so:
-words that read right already, the same words without a negation, the English free
-terms, and the query guard.
+Each finding's tests fail on 39ae624 (`declared_terms` is new, so every test of it
+does). The controls among them pass on both: words that read right already, the same
+words without a negation, and the matches that must stay misses.
 
 R-7 (HIGH): «ل» + the article before a word that begins with «ل» is written «للوز»
 («ل» + «اللوز»), and `_ar_forms` only stripped «لل», giving «وز». «حساسية للوز» read as
