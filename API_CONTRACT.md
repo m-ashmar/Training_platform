@@ -2629,8 +2629,9 @@ no `code` renamed. `ChallengeViewSet`'s docstring carries the full contract.
   validation_error`, field code `audience_trainers_only`). Such a challenge is shown
   only to its creator, staff, the creator's clients (an approved relation; a frozen
   coaching counts) and anyone already in it (a client whose coaching ends stays): for
-  anyone else it is absent from the list and its detail and actions answer 404, and
-  `join/` answers `403 challenge_clients_only`.
+  anyone else it is absent from the list and its detail and actions answer 404,
+  `join/` answers `403 challenge_clients_only`, and `POST /api/v1/reports/` naming it
+  answers `404 target_not_found`.
 - **Fresh lists** (S-189, S-194). The challenges list is still cached 120 s per person,
   but a challenge an operator hides, a creator's edit, close or delete, and anyone's
   join or leave now reach every person's list at once.

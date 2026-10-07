@@ -161,3 +161,23 @@ def test_b162_a_client_whose_coaching_ends_stays_in_the_standing(make_user, api)
     again = api(client).post(f"/api/social/challenges/{challenge_id}/join/", {},
                              content_type=JSON)
     assert again.status_code == 200, again.content
+
+
+def test_b162_a_stranger_cannot_report_what_they_cannot_see(make_user, api):
+    """`POST /api/v1/reports/` resolves a challenge the way the list does: a coach's
+    clients-only challenge is `404 target_not_found` for a stranger, reportable by a
+    client."""
+    trainer = make_user("b162r_t", user_type="trainer")
+    client = make_user("b162r_c")
+    stranger = make_user("b162r_s")
+    _client_of(trainer, client)
+    challenge_id = _create(api, trainer, audience="my_clients").json()["id"]
+
+    def report(who):
+        return api(who).post("/api/v1/reports/",
+                             {"target_type": "challenge", "target_id": challenge_id,
+                              "reason": "harassment"}, content_type=JSON)
+
+    refused = report(stranger)
+    assert (refused.status_code, refused.json()["code"]) == (404, "target_not_found")
+    assert report(client).status_code == 201
