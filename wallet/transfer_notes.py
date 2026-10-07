@@ -34,14 +34,24 @@ def transfer_reference(tx, wallet) -> str | None:
 
 def notes_by_reference(refs) -> dict:
     """`{charge_reference: note}` for `refs`, in one query (none when `refs` is empty).
-    A transfer sent without a note, or whose note was erased, is not in it."""
+    A transfer sent without a note, or whose note was erased, is not in it — nor one
+    between two people of whom either has blocked the other, for as long as the block
+    stands (the review of wave 1, 2026-10-07): a block closes one-to-one text, and an
+    invitation's note is hidden the same way (`users.views` ClientPendingTrainerInvites).
+    The note is only ever shown to one of the two people, so the block between THEM is
+    the one that counts, read in the same query (`moderation.services.blocked_between`).
+    """
+    from moderation.services import blocked_between
+
     from .models import CoachingTransfer
 
     refs = {r for r in refs if r}
     if not refs:
         return {}
     return dict(CoachingTransfer.objects.filter(charge_reference__in=refs)
-                .exclude(note="").values_list("charge_reference", "note"))
+                .exclude(note="")
+                .exclude(blocked_between("client_id", "trainer_id"))
+                .values_list("charge_reference", "note"))
 
 
 class TransactionNoteFields(serializers.Serializer):
@@ -49,7 +59,8 @@ class TransactionNoteFields(serializers.Serializer):
 
     On a client's payment to a trainer, read by either of the two people from their own
     row: the line the client wrote to the trainer, or null when they wrote none (or it
-    was erased with an account). Null on every other row.
+    was erased with an account, or either of the two has blocked the other since — it
+    shows again if the block is lifted). Null on every other row.
     """
 
     NOTE_FIELDS = ("note",)

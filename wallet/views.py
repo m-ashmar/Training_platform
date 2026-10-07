@@ -876,7 +876,14 @@ class ClientTransferToTrainerView(APIView):
     Headers: `X-App-Channel`.
 
     200 `{reference_id, client_balance, trainer_balance}`. `reference_id` is the
-    client's own ledger row (the one `wallet/transactions/{reference_id}/` opens).
+    client's own ledger row (the one `wallet/transactions/{reference_id}/` opens);
+    `client_balance` is the caller's wallet after the payment. `trainer_balance` is NOT
+    the trainer's wallet: it is what THIS payment gave the trainer — `amount` less the
+    platform's commission, the `amount` of the trainer's `transfer_received` row ("0.00"
+    when the commission took it all). It was the trainer's whole balance, which told
+    any client the trainer's earnings for 0.01 (the review of wave 1, 2026-10-07); the
+    key is kept because the contract is additive. A replay of a request answered before
+    the change answers what it answered then.
 
     A COACHING PAYMENT (the owner, 2026-09-28; BACKEND_BUGS B-163). The client pays
     `amount`; the platform keeps its coaching commission (`COACHING_COMMISSION_RATE`,
@@ -895,6 +902,14 @@ class ClientTransferToTrainerView(APIView):
     banned terms (`400 content_not_allowed`, nothing moves) and kept beside the ledger,
     never in it: it is erased with either person's account, while the ledger is kept.
 
+    A BLOCK CLOSES IT (`moderation.services`; the review of wave 1, 2026-10-07). A
+    transfer is a line of text and a name in front of the other person, so when either
+    of the two has blocked the other it is refused, `403 user_blocked`, before anything
+    moves or the key is reserved — the answer `client/request-trainer/`, `follows/` and
+    `notifications/message-client/` give, the same in both directions. And a note sent
+    before the block is not shown while it stands: `note` reads null on both rows
+    (`wallet/transfer_notes.py`), as an invitation's note does.
+
     Refusals (branch on `code`):
 
     | Status | `code` | Meaning |
@@ -904,6 +919,7 @@ class ClientTransferToTrainerView(APIView):
     | 400 | `validation_error` | a body field is missing or malformed (`field_errors`; a `note` over 140 characters is one) |
     | 403 | `clients_only` | the caller is not a client (the code the coaching and diet routes answer for the same fact) |
     | 404 | `not_found` | `trainer_id` names no trainer |
+    | 403 | `user_blocked` | either of the two has blocked the other (it does not say which); nothing moved |
     | 409 | `currency_mismatch` | the two trade in different currencies (nothing is converted on a transfer); `client_currency` and `trainer_currency` say which |
     | 400 | `content_not_allowed` | the `note` holds a banned term (`field_errors.note`); nothing moved |
     | 402 | `insufficient_balance` | the client's wallet holds less than `amount`; `currency` is its currency |
@@ -935,6 +951,16 @@ class ClientTransferToTrainerView(APIView):
                              "code": "clients_only"}, status=status.HTTP_403_FORBIDDEN)
 
         trainer = get_object_or_404(User, id=serializer.validated_data["trainer_id"], user_type="trainer")
+
+        # A block closes this channel (the review of wave 1): the note and the client's
+        # name both land in front of the trainer, so a blocked pair cannot transfer at
+        # all. Before the key is reserved and before any wallet is touched; one answer
+        # whichever side blocked (`moderation.exceptions.UserIsBlocked`).
+        from moderation.exceptions import UserIsBlocked
+        from moderation.services import is_blocked
+
+        if is_blocked(request.user, trainer):
+            raise UserIsBlocked()
 
         # Before the key is reserved: a transfer converts nothing, so two people in
         # different currencies cannot send each other money, and the app is told so
@@ -981,8 +1007,8 @@ class ClientTransferToTrainerView(APIView):
 
         amount = serializer.validated_data["amount"]
         try:
-            charge = _pay_trainer(request.user, trainer, client_wallet, trainer_wallet,
-                                  amount, note)
+            charge, share = _pay_trainer(request.user, trainer, client_wallet,
+                                         trainer_wallet, amount, note)
         except InsufficientBalance:
             idempotency.release(idem)
             return Response({"error": _("Insufficient wallet balance."),
@@ -1003,8 +1029,11 @@ class ClientTransferToTrainerView(APIView):
             return Response({"error": _("Request could not be completed."),
                              "code": "transfer_refused"}, status=status.HTTP_400_BAD_REQUEST)
         client_wallet.refresh_from_db()
-        trainer_wallet.refresh_from_db()
-        resp = {"reference_id": charge.reference_id, "client_balance": str(client_wallet.balance), "trainer_balance": str(trainer_wallet.balance)}
+        # `trainer_balance` is this payment's share, never the trainer's wallet: the
+        # payer has no business reading another person's balance (see the docstring).
+        resp = {"reference_id": charge.reference_id,
+                "client_balance": str(client_wallet.balance),
+                "trainer_balance": str(share)}
         idempotency.complete(idem, resp)
 
         # Never the note: the audit log is kept through an erasure, the note is not.
@@ -1016,7 +1045,8 @@ def _pay_trainer(client, trainer, client_wallet, trainer_wallet, amount, note):
     """A client's direct payment to a trainer, written as a coaching payout (BACKEND_BUGS
     B-163; see `ClientTransferToTrainerView` and `wallet.models.CoachingTransfer`).
 
-    Returns the client's leg. Raises what `move_funds_atomic` raises, with nothing
+    Returns `(charge, share)`: the client's leg, and what the trainer received (the
+    response's `trainer_balance`). Raises what `move_funds_atomic` raises, with nothing
     moved. The three legs carry `coaching_transfer` ("charge" / "payout" /
     "commission"), and the two after the charge `transfer_reference` (the charge's), so
     a row says by itself that it is one leg of a transfer: the generic admin reversal
@@ -1063,7 +1093,7 @@ def _pay_trainer(client, trainer, client_wallet, trainer_wallet, amount, note):
             charge_reference=charge.reference_id,
             payout_reference=payout.reference_id if payout else "",
             commission_reference=fee.reference_id if fee else "", note=note)
-    return charge
+    return charge, share
 
 
 def _coaching_transfer_leg(original):

@@ -1561,7 +1561,10 @@ other a trainer request (`user_blocked`, 403, on `client/request-trainer/` and
 after it (same code on `trainer/respond-to-request/` and `client/respond-to-invite/`).
 In the chat neither can start a thread with the other (404) or write in an existing one
 (403 `blocked`, and the row reads `can_send: false, refusal: "blocked"`); the thread
-stays readable. `notifications/message-client/` answers 403 `user_blocked`.
+stays readable. `notifications/message-client/` answers 403 `user_blocked`, and so
+does a client's `POST wallet/client/transfer/` to a trainer of the pair (nothing moves);
+the `note` of a transfer made before the block reads null on both people's ledger rows
+while the block stands (the review of wave 1, 2026-10-07).
 
 Neither can follow the other: `user_blocked` (403) on `POST /api/social/follows/` and
 `POST /api/social/follows/follow_user/`, with no push sent. A follow made before the
@@ -2038,8 +2041,13 @@ operator maintains in the console. Four things the app needs:
   still shows one `trainer_transfer` row of `amount`, whose `reference_id` the transfer
   answers; the trainer's one `transfer_received` row, of their share (not a settling
   kind: withdrawable at once). Both rows of `wallet/transactions/` and `/{reference_id}/`
-  carry `note` (null without one; null on every other row). The note is kept beside
-  the ledger, never in it, and is erased with either person's account. The build must
+  carry `note` (null without one; null while either of the two has blocked the other;
+  null on every other row). The note is kept beside the ledger, never in it, and is
+  erased with either person's account. A pair of whom either has blocked the other
+  cannot transfer: `403 user_blocked`, nothing moves. The 200's `trainer_balance` is
+  what THIS payment gave the trainer (the `amount` of their `transfer_received` row),
+  never the trainer's wallet balance, which it was until the review of wave 1
+  (2026-10-07); the key is kept. The build must
   allow both `WALLET_MOVE` and `COACHING_1TO1` (`403 not_available_on_channel`; every
   default build allows both or neither).
 - **`PUT /api/wallet/currency/`** is also refused, `409
@@ -3090,7 +3098,7 @@ kept beside the code. The views' docstrings carry the full tables.
 | `POST wallet/agent/topup/`, `.../topup/proxy/` | `403 agent_not_active`; `400 target_not_a_client`; `429 daily_limit_exceeded` / `monthly_limit_exceeded` (the agent's cap in that currency — not the rate limiter, and `Retry-After` does not lift it) |
 | `POST wallet/agent/topup/`, `.../topup/proxy/` (plan step 9) | `429 per_transaction_limit_exceeded` (more than one top-up may be), `429 receivable_ceiling_exceeded` (the cash the agent holds for the platform, unsettled, would pass their ceiling; a settlement lifts it); all four cap refusals carry `limit`, `used` (null for the per-top-up cap), `remaining`, `currency` (B-124); `.../topup/proxy/` also `403 agent_key_revoked` (the agent revoked their key and has not paired a new one, B-117). A suspended or erased client is `404 not_found`, as a missing one (B-118) |
 | top-ups, `POST wallet/client/transfer/`, `POST wallet/admin/reversal/` | `409 request_in_flight` (the first request with this `idempotency_key` is still running — the code `users` answers for the same fact); `422 idempotency_key_reused` (the caller's own key was already spent on a different request of theirs; retrying never helps, and resending under a new key could move money twice — NOT the set, workout and chat writes' 409 `idempotency_conflict`, where the id is the other person's and a new id is the fix) |
-| `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved); `400 content_not_allowed` (the `note`, BACKEND_BUGS B-163) |
+| `POST wallet/client/transfer/` | `403 clients_only` (the code the diet and coaching routes answer); `400 transfer_refused` (the ledger refused, nothing moved); `400 content_not_allowed` (the `note`, BACKEND_BUGS B-163); `403 user_blocked` (either of the two has blocked the other; nothing moved — the review of wave 1, 2026-10-07) |
 | `POST wallet/admin/reversal/` | `400 insufficient_balance` (the wallet that received the money no longer holds it), `400 currency_mismatch` (a wallet changed currency), `400 reversal_refused` — these three were one `bad_request` |
 | `POST subscription/v1/subscriptions/` | `400 subscription_exists` (one per user: `change-plan/`, `upgrade/` or `renew/` instead); a `plan_id` naming no active plan stays `validation_error`, its field code now `invalid_plan` (was `invalid`) |
 | `PATCH subscription/v1/subscriptions/{id}/` | stays `validation_error` (the view named it); on an inactive subscription `field_errors.non_field_errors[0].code` is `subscription_inactive` (was `invalid`) |
