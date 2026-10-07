@@ -98,11 +98,12 @@ class FoodItemAdminForm(forms.ModelForm):
     that runs on every save (`validate_row`), so a row stored malformed before this rule
     would become unsaveable on any write, the review tick included. Such a row is still
     read whole (`diet.allergens._read_stored`) and kept from allergic clients (B4).
-    """
 
-    class Meta:
-        model = FoodItem
-        fields = '__all__'
+    No `Meta`, like the admin's own default `forms.ModelForm`: `ModelAdmin.get_form`
+    supplies the model and the fields per request. A `Meta` with `fields = '__all__'`
+    built every field of `FoodItem` at import, and `image_url`'s URLField raised
+    RemovedInDjango60Warning at start-up (`tests/test_django_lts.py`).
+    """
 
     def clean_allergens(self):
         from django.utils.translation import gettext
