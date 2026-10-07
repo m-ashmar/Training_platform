@@ -2766,11 +2766,18 @@ no `code` renamed. `ChallengeViewSet`'s docstring carries the full contract.
   ONE exercise, named by the new writable, nullable `exercise` (an exercise id the
   creator may read; served with read-only `exercise_name`), a day above 500 reps of it
   flagged for review — and `streak_days` — the CURRENT run of consecutive days with at
-  least one counted set (today, not over yet, breaks nothing; any other day without one
-  breaks it; the hourly phase task recounts it). Refusals on create and update, `400
+  least one counted set (today, not over yet, breaks nothing, nor does the window's
+  last day once the window is over: the run stands as it stood at the end instant; any
+  other day without one breaks it; the hourly phase task recounts it). Refusals on
+  create and update, `400
   validation_error` with the field code in `field_errors.exercise`:
   `exercise_required` (`exercise_reps` with no exercise) and `exercise_not_found`. An
   `exercise` sent with any other metric is stored null. «عدد التمارين» is `workouts`.
+  A private exercise (`created_by` set) is accepted only in its own author's
+  `my_clients` challenge — anywhere else, a client naming their coach's included, it
+  is `exercise_not_found`, and so is a PATCH moving such a challenge's `audience` back
+  to `community` (the wave-1 review, R-3 and R-11: nobody outside the coach's clients
+  can log a set of it, and strangers were served its name).
 - **Who may join** (B-162). Challenge rows gain writable `audience`: `community`
   (default) | `my_clients`. Only a trainer creator may set `my_clients` (`400
   validation_error`, field code `audience_trainers_only`). Such a challenge is shown

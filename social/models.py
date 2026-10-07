@@ -410,7 +410,8 @@ class Challenge(models.Model):
     metric = models.CharField(max_length=20, choices=METRIC_CHOICES, default=METRIC_MANUAL)
 
     #: The exercise whose reps an `exercise_reps` challenge counts (B-161); null for
-    #: every other metric. A catalogue exercise or one of the creator's own. SET_NULL:
+    #: every other metric. A catalogue exercise, or a trainer creator's own in their
+    #: `my_clients` challenge (`ChallengeSerializer._private_exercise_refused`). SET_NULL:
     #: an exercise deleted later leaves the challenge, its standing frozen as it stood
     #: (`challenge_progress.recount` does not recount a challenge that lost it).
     exercise = models.ForeignKey('routine.Exercise', on_delete=models.SET_NULL,

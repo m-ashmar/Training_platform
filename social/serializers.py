@@ -700,7 +700,11 @@ class ChallengeExerciseField(serializers.PrimaryKeyRelatedField):
     visible_exercises_for` (a trainer: the catalogue and their own; a client: the
     catalogue, their coach's and their routines'). Anything else, a missing id
     included, is the field code `exercise_not_found`: another trainer's private
-    exercise is answered exactly like one that does not exist."""
+    exercise is answered exactly like one that does not exist.
+
+    Readable by the creator is not enough: who the challenge is FOR decides too, and
+    that is `ChallengeSerializer.validate` (`_private_exercise_refused`), which sees
+    the audience."""
 
     def get_queryset(self):
         from routine.models import Exercise
@@ -734,6 +738,14 @@ class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
     challenge would be left without one, `exercise_not_found` for an id the creator
     cannot use. For any other metric `exercise` is stored null whatever is sent.
     `exercise_name` (read-only) is its name in the caller's language, or null.
+    A catalogue exercise suits any challenge; a PRIVATE one (`created_by` set) only its
+    own author's `my_clients` challenge — the people who can see that challenge are the
+    ones who can log a set of it. Anything else is `exercise_not_found`, the answer for
+    an exercise that does not exist (the wave-1 review, R-3 and R-11: a trainer's own
+    exercise in a community challenge nobody but their clients could move or win, and
+    a client publishing their coach's private exercise to every stranger). Judged on
+    the challenge as it will be, so moving such a challenge's `audience` back to
+    `community` is refused the same way, on the field `exercise`.
 
     `audience` — `community` (default) | `my_clients` (BACKEND_BUGS B-162): only a
     trainer creator may set `my_clients` (field code `audience_trainers_only`); who
@@ -794,25 +806,53 @@ class ChallengeSerializer(BannedTermsFilter, serializers.ModelSerializer):
     def validate(self, attrs):
         """An `exercise_reps` challenge names its exercise; no other metric keeps one
         (B-161). Judged on the challenge as it will be: a PATCH of `metric` alone to
-        `exercise_reps` needs an exercise already there."""
+        `exercise_reps` needs an exercise already there. A private exercise is kept
+        only in its author's `my_clients` challenge (`_private_exercise_refused`)."""
         attrs = super().validate(attrs)
         instance = self.instance
-        if instance is not None and 'metric' not in attrs and 'exercise' not in attrs:
-            # An edit of the text or the target: what is counted is not being changed,
-            # and an exercise deleted since (SET_NULL) must not lock the title.
-            return attrs
-        metric = attrs.get('metric', instance.metric if instance is not None
-                           else Challenge.METRIC_MANUAL)
+        counted = instance is None or 'metric' in attrs or 'exercise' in attrs
+        # An edit of the text or the target leaves what is counted alone, and an
+        # exercise deleted since (SET_NULL) must not lock the title.
+        if counted:
+            metric = attrs.get('metric', instance.metric if instance is not None
+                               else Challenge.METRIC_MANUAL)
+            exercise = attrs['exercise'] if 'exercise' in attrs else (
+                instance.exercise if instance is not None else None)
+            if metric == Challenge.METRIC_EXERCISE_REPS:
+                if exercise is None:
+                    raise serializers.ValidationError({'exercise': ErrorDetail(
+                        _('Name the exercise whose reps this challenge counts.'),
+                        code='exercise_required')})
+            elif exercise is not None:
+                attrs['exercise'] = None
+        if (counted or 'audience' in attrs) and self._private_exercise_refused(attrs):
+            raise serializers.ValidationError({'exercise': ErrorDetail(
+                _('No such exercise.'), code='exercise_not_found')})
+        return attrs
+
+    def _private_exercise_refused(self, attrs) -> bool:
+        """Would the challenge, as it will be, carry a private exercise (`created_by`
+        set) outside its author's own `my_clients` challenge? See the class docstring.
+
+        Only the creator's clients can read a trainer's exercise, so only they can log
+        a set of it (`routine/serializers.py ReadableExerciseField`), and the count
+        reads nothing else (`challenge_progress.measure_for_review`): in a community
+        challenge every other participant is held at 0, and every stranger is served
+        the id and name of an exercise the exercise routes answer them 404 for."""
+        instance = self.instance
         exercise = attrs['exercise'] if 'exercise' in attrs else (
             instance.exercise if instance is not None else None)
-        if metric == Challenge.METRIC_EXERCISE_REPS:
-            if exercise is None:
-                raise serializers.ValidationError({'exercise': ErrorDetail(
-                    _('Name the exercise whose reps this challenge counts.'),
-                    code='exercise_required')})
-        elif exercise is not None:
-            attrs['exercise'] = None
-        return attrs
+        if exercise is None or exercise.created_by_id is None:
+            return False                   # nothing named, or the shared catalogue
+        audience = attrs.get('audience', instance.audience if instance is not None
+                             else Challenge.AUDIENCE_COMMUNITY)
+        creator = getattr(instance, 'creator', None)
+        if creator is None:
+            request = self.context.get('request')
+            creator = getattr(request, 'user', None)
+        return not (audience == Challenge.AUDIENCE_MY_CLIENTS
+                    and creator is not None
+                    and exercise.created_by_id == creator.pk)
 
     def validate_audience(self, value):
         """`my_clients` is a TRAINER creator's choice (the owner, 2026-09-28, B-162):
