@@ -361,7 +361,9 @@ class WalletBalanceView(APIView):
     the history are visible on every build).
 
     Also `available`, `settling`, `settling_until` and `in_withdrawal` (BACKEND_BUGS
-    B-097; `wallet.settling.WalletSettlingFields`): a coaching payout is `settling` for
+    B-097; `wallet.settling.WalletSettlingFields`): every row of a kind in
+    `wallet.settling.SETTLING_KINDS` — a coaching payout (`trainer_fee_payout`) and a
+    program sale (`routine_product_sale`; BACKEND_BUGS B-138) — is `settling` for
     `PAYOUT_HOLD_DAYS` after its release, `available` is `balance - settling` (what a
     withdrawal may take), `settling_until` is when the next settling payout becomes
     available (ISO 8601, or null), and `in_withdrawal` is the money of the trainer's
@@ -522,10 +524,18 @@ class WalletTransactionsView(generics.ListAPIView):
     (`payouts/ledger_fields.py`, BACKEND_BUGS B-125). One query per page.
 
     Each row also carries `available_at` and `settling` (BACKEND_BUGS B-097;
-    `wallet.settling.TransactionSettlingFields`): on a `trainer_fee_payout` row read by
-    the trainer, when its money becomes withdrawable and whether that is still ahead;
+    `wallet.settling.TransactionSettlingFields`): on a row of a kind in
+    `wallet.settling.SETTLING_KINDS` read by the trainer it paid — a coaching payout
+    (`trainer_fee_payout`) or a program sale (`routine_product_sale`; BACKEND_BUGS
+    B-138) — when its money becomes withdrawable and whether that is still ahead;
     `null` / `false` on every other row. A trainer's withdrawal reads as `kind`
     `withdrawal`, and its money coming back as `withdrawal_returned`.
+
+    And `note` (BACKEND_BUGS B-163; `wallet.transfer_notes`): on a client's payment to a
+    trainer, read by either of the two from their own row (`trainer_transfer` for the
+    client, `transfer_received` for the trainer), the line the client wrote to the
+    trainer, or null when there is none or it was erased with an account; null on
+    every other row. One query per page.
 
     A record of money that already moved: no channel header, identical on every build.
     """

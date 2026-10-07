@@ -1315,15 +1315,18 @@ first: 403 `not_available_on_channel` where `can_transfer_wallet` is off (the fi
 build), 400 `app_channel_required` with no known `X-App-Channel`. `setup/` shows the same
 in `refusal`. Every read and the payout methods are identical on every build.
 
-**The settling window (B-097).** A coaching payout — a `trainer_fee_payout` row — is
-"settling" for `hold_days` (3) after its release before it can be withdrawn; nothing
-else settles, and a payout support reversed is not settling. `GET /api/wallet/balance/`
+**The settling window (B-097).** A coaching payout — a `trainer_fee_payout` row — and
+a program sale — a `routine_product_sale` row (a buyer can be refunded, and the refund
+takes the trainer's share back; B-138) — are "settling" for `hold_days` (3) after their
+release before they can be withdrawn (`wallet.settling.SETTLING_KINDS`); nothing else
+settles (a client's payment to a trainer, `transfer_received`, is withdrawable at once),
+and a payout support reversed is not settling. `GET /api/wallet/balance/`
 gains `available` (`balance - settling`), `settling`, `settling_until` (when the next
 settling payout becomes available, ISO 8601, or null) and `in_withdrawal` (the open
 withdrawal's money, already out of `balance`); for a wallet no payout reached,
 `available` is the balance. Every `GET /api/wallet/transactions/` row gains
-`available_at` and `settling`: on a `trainer_fee_payout` row read by the trainer, when
-its money becomes withdrawable and whether that is still ahead; `null` / `false` on
+`available_at` and `settling`: on a `trainer_fee_payout` or `routine_product_sale` row
+read by the trainer, when its money becomes withdrawable and whether that is still ahead; `null` / `false` on
 every other row. Two new `kind`s: `withdrawal` (out, to payout clearing) and
 `withdrawal_returned` (in, a failed or cancelled withdrawal).
 

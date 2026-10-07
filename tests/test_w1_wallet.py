@@ -10,6 +10,7 @@ fails on 554c604.
 | `test_b144_*`, `test_b146_*`, `test_b148_*` | agent/me/: currency, the server's day, the status docstring |
 | `test_b147_*` | a reversal row of the agent ledger did not name the top-up it took back |
 | `test_b163_*` | the transfer's note was dropped; the transfer is now a coaching payment (owner) |
+| `test_b138_*` | the settling docstrings and contract named one of the two settling kinds |
 """
 from decimal import Decimal
 
@@ -485,3 +486,33 @@ def test_b163_a_build_that_may_not_pay_for_coaching_may_not_pay_a_trainer(make_u
     resp = _send(api, client, trainer, "w1b163p-1", amount="100.00")
     assert _code(resp) == (403, "not_available_on_channel"), resp.content
     assert Wallet.objects.get(owner=client).balance == D("8000.00")
+
+
+# ===========================================================================
+# B-138: every settling kind is named where the ledger's contract is written
+# ===========================================================================
+
+def test_b138_every_settling_kind_is_named_in_the_ledger_contract():
+    """The docstrings and the contract said only a `trainer_fee_payout` row settles;
+    `wallet.settling.SETTLING_KINDS` also holds `routine_product_sale`, and the app
+    shows «قيد التسوية» on a sale too. Every kind the code settles is now named in every
+    place that describes the window."""
+    import re
+    from pathlib import Path
+
+    from wallet.settling import (SETTLING_KINDS, TransactionSettlingFields,
+                                 WalletSettlingFields)
+    from wallet.views import WalletBalanceView, WalletTransactionsView
+
+    contract = (Path(__file__).resolve().parent.parent / "API_CONTRACT.md").read_text()
+    paragraph = re.search(r"\*\*The settling window \(B-097\)\.\*\*(.*?)\n\n", contract,
+                          re.S).group(1)
+    places = {"WalletTransactionsView": WalletTransactionsView.__doc__,
+              "WalletBalanceView": WalletBalanceView.__doc__,
+              "TransactionSettlingFields": TransactionSettlingFields.__doc__,
+              "WalletSettlingFields": WalletSettlingFields.__doc__,
+              "API_CONTRACT.md (the settling window)": paragraph}
+    missing = [(place, kind) for place, text in places.items()
+               for kind in sorted(SETTLING_KINDS) if kind not in text]
+    assert not missing, missing
+    assert "nothing else settles" not in paragraph.split("routine_product_sale")[0]
