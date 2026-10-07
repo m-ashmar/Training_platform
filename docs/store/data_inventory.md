@@ -4,7 +4,7 @@
 
 What the platform's server holds about a person, why, who else receives it, what the person can download and what happens when they delete their account (spec §9 B3). `privacy_labels.md` (Apple's App Privacy answers and Google's Data safety answers) and the privacy-policy drafts in `docs/legal/` are written from it, and must list the same data.
 
-90 sources, in the order they are registered.
+91 sources, in the order they are registered.
 
 ## What every source has in common
 
