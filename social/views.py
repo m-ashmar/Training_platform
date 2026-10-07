@@ -870,8 +870,9 @@ class ChallengeViewSet(viewsets.ModelViewSet):
 
     **The metrics** (the CreateChallenge artboard; the owner, 2026-09-28, BACKEND_BUGS
     B-161). Two more values of `metric`, additive: `exercise_reps` — the reps of ONE
-    exercise, named by `exercise` (an exercise id: a catalogue one or one of the
-    creator's own; writable, nullable, REQUIRED for this metric), served with
+    exercise, named by `exercise` (an exercise id: a catalogue one, or a trainer
+    creator's own in their `my_clients` challenge; writable, nullable, REQUIRED for
+    this metric), served with
     `exercise_name` (read-only, the caller's language); a day above 500 reps of it
     flags the participant for review — and `streak_days` — the CURRENT run of
     consecutive days with at least one counted set: today, not over yet, breaks
@@ -883,7 +884,11 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     `training_days`. Create/update refusals (400 `validation_error`, the field code in
     `field_errors.exercise`): `exercise_required` — `metric` `exercise_reps` with no
     exercise; `exercise_not_found` — an id that does not exist, is inactive or is
-    another trainer's own. `exercise` sent with any other metric is stored null.
+    another trainer's own, or a private exercise (`created_by` set: the creator's own,
+    a client's coach's) in any challenge but its author's `my_clients` one — a PATCH
+    of `audience` back to `community` on such a challenge included, the code then
+    still in `field_errors.exercise`. `exercise` sent with any other metric is stored
+    null.
 
     **Who may join** (the CreateChallenge artboard's «من يستطيع الانضمام»; the owner,
     2026-09-28, BACKEND_BUGS B-162). `audience` — `community` (default: everyone) |

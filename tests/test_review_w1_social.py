@@ -96,3 +96,102 @@ def test_r8_a_streak_that_ended_partway_through_its_last_day_keeps_its_run(make_
     recount(challenge)
     kept.refresh_from_db()
     assert (kept.current_value, kept.status) == (8.0, "completed")
+
+
+# ------------------------------------------------------------------- R-11 and R-3
+def _create(api, creator, **body):
+    now = timezone.now()
+    payload = {"title": "w1rs challenge", "description": "reps of one exercise",
+               "challenge_type": "strength",
+               "start_date": (now - timedelta(days=1)).isoformat(),
+               "end_date": (now + timedelta(days=10)).isoformat(),
+               "target_value": 100, "unit": "reps", "metric": "exercise_reps"}
+    payload.update(body)
+    return api(creator).post("/api/social/challenges/", payload, content_type=JSON)
+
+
+def _code(response):
+    assert response.status_code == 400, response.content
+    return response.json()["field_errors"]["exercise"][0]["code"]
+
+
+def _names_listed(api, person):
+    body = api(person).get("/api/social/challenges/").json()
+    rows = body["results"] if isinstance(body, dict) else body
+    return {row["exercise_name"] for row in rows}
+
+
+def test_r11_a_trainers_own_exercise_counts_only_in_their_clients_only_challenge(
+        make_user, api):
+    """Nobody but the trainer's clients can log a set of the trainer's own exercise, so
+    a community challenge on it held every other participant at 0. It is refused there
+    as an exercise that does not exist, on create, on a PATCH naming it, and on a PATCH
+    moving the clients-only challenge that has it out to the community."""
+    from social.models import Challenge
+
+    trainer = make_user("w1rs11_t", user_type="trainer", trainer_is_verified=True)
+    stranger = make_user("w1rs11_s")
+    secret = _exercise("w1rs11 secret move", author=trainer)
+    shared = _exercise("w1rs11 catalogue move")
+
+    assert _code(_create(api, trainer, exercise=secret.pk)) == "exercise_not_found"
+    assert _code(_create(api, trainer, exercise=secret.pk, audience="community")) == \
+        "exercise_not_found"
+    assert not Challenge.objects.filter(exercise=secret).exists()
+    assert "w1rs11 secret move" not in _names_listed(api, stranger)
+
+    # For the trainer's clients only: the people who can log it.
+    mine = _create(api, trainer, exercise=secret.pk, audience="my_clients")
+    assert mine.status_code == 201, mine.content
+    assert (mine.json()["exercise"], mine.json()["audience"]) == (secret.pk, "my_clients")
+    url = f"/api/social/challenges/{mine.json()['id']}/"
+
+    # Moving it out to the community, with the exercise it has: refused, nothing written.
+    out = api(trainer).patch(url, {"audience": "community"}, content_type=JSON)
+    assert _code(out) == "exercise_not_found"
+    assert Challenge.objects.get(pk=mine.json()["id"]).audience == "my_clients"
+    assert "w1rs11 secret move" not in _names_listed(api, stranger)
+
+    # With a catalogue exercise in the same edit it may go; then the private one may
+    # not come back while it is a community challenge.
+    moved = api(trainer).patch(url, {"audience": "community", "exercise": shared.pk},
+                               content_type=JSON)
+    assert moved.status_code == 200, moved.content
+    assert (moved.json()["audience"], moved.json()["exercise"]) == ("community", shared.pk)
+    back = api(trainer).patch(url, {"exercise": secret.pk}, content_type=JSON)
+    assert _code(back) == "exercise_not_found"
+    assert Challenge.objects.get(pk=mine.json()["id"]).exercise_id == shared.pk
+
+    # A community challenge on a catalogue exercise is as it was.
+    plain = _create(api, trainer, exercise=shared.pk)
+    assert plain.status_code == 201, plain.content
+
+
+def test_r3_a_client_cannot_publish_their_coachs_private_exercise(make_user, api):
+    """A client may read their coach's private exercises, and could name one in a
+    community challenge: every stranger was then served its id and name, while the
+    exercise route answers that stranger 404. A client cannot open a clients-only
+    challenge, so a private exercise is never theirs to name."""
+    from social.models import Challenge
+    from users.models import TrainerClientRelation
+
+    coach = make_user("w1rs3_coach", user_type="trainer", trainer_is_verified=True)
+    client = make_user("w1rs3_client")
+    stranger = make_user("w1rs3_stranger")
+    TrainerClientRelation.objects.create(
+        trainer=coach, client=client, status="approved", initiated_by="client",
+        responded_at=timezone.now() - timedelta(days=5))
+    secret = _exercise("w1rs3 secret tempo squat", author=coach)
+    assert api(stranger).get(f"/api/routine/exercises/{secret.pk}/").status_code == 404
+
+    refused = _create(api, client, exercise=secret.pk)
+    assert _code(refused) == "exercise_not_found"
+    assert not Challenge.objects.filter(exercise=secret).exists()
+    assert "w1rs3 secret tempo squat" not in _names_listed(api, stranger)
+
+    # The catalogue is the client's to use, as before.
+    shared = _exercise("w1rs3 catalogue squat")
+    made = _create(api, client, exercise=shared.pk)
+    assert made.status_code == 201, made.content
+    detail = api(stranger).get(f"/api/social/challenges/{made.json()['id']}/").json()
+    assert detail["exercise_name"] == "w1rs3 catalogue squat"
