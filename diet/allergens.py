@@ -267,6 +267,17 @@ def _ar_forms(word: str) -> Set[str]:
     `forms_of` for Arabic: «والحليب» -> {«والحليب», «الحليب», «حليب»}. The whole word is
     always kept, so a word that merely begins with those letters («ألبان», «فستق») is
     still found as written.
+
+    Two spellings the article rule alone misses (fix run, review R-7):
+
+    * «ل» + the article before a word that itself begins with «ل» drops the alif AND one
+      lam: «ل» + «اللوز» is written «للوز», «ل» + «اللبن» is «للبن». Stripping «لل»
+      gives «وز» / «بن», so the word itself (`stem[1:]`) is kept as well: «حساسية للوز»
+      read as no allergy at all and Almonds was served to that client.
+    * «ل» / «ب» joined to a noun WITHOUT the article: «لحليب البقر», «بسمك». Only when
+      at least three letters are left, so «لبن», «بيض», «لوز» are never cut to two.
+
+    Every extra form only widens what a word can be matched as; the whole word stays.
     """
     forms = {word}
     stems = [word]
@@ -277,7 +288,11 @@ def _ar_forms(word: str) -> Set[str]:
         for prefix in _AR_PREFIXES:
             if stem.startswith(prefix) and len(stem) - len(prefix) >= 2:
                 forms.add(stem[len(prefix):])
+                if prefix == "لل":
+                    forms.add(stem[1:])
                 break
+        if stem[:1] in ("ل", "ب") and len(stem) - 1 >= 3:
+            forms.add(stem[1:])
     return forms
 
 
