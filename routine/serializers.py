@@ -302,6 +302,41 @@ def _absolute_picture(user, request):
     return url
 
 
+class AuthorableExerciseField(serializers.PrimaryKeyRelatedField):
+    """An exercise the CALLER may write into a routine or a template (BACKEND_BUGS
+    B-139): a trainer's own or the shared catalogue's; an admin's, any.
+
+    The rule is `routine.permissions.visible_exercises_for` as it reads for an author,
+    and an id outside it — another trainer's private exercise — is refused exactly like
+    an id that does not exist: 400 `does_not_exist` on the field, the same sentence. The
+    routine path refused it with a sentence of its own and the template path with an
+    English one, and either told a trainer which of another trainer's ids were real (the
+    S-056 defect, on the write routes).
+
+    Without a request in the context there is no caller to decide for: the serializer
+    was built by trusted code, and the field reads every exercise as it always did.
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault('queryset', Exercise.objects.all())
+        super().__init__(**kwargs)
+
+    def get_queryset(self):
+        from .permissions import visible_exercises_for
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if request is None or user is None:
+            return Exercise.objects.all()
+        if getattr(user, 'is_trainer', False):
+            return visible_exercises_for(user)          # their own + the catalogue
+        if getattr(user, 'is_admin', False) or getattr(user, 'is_staff', False):
+            return Exercise.objects.all()
+        # Nobody else writes routines or templates (their permissions refuse first);
+        # never a client's wider READING rule.
+        return Exercise.objects.none()
+
+
 class RoutineExerciseSerializer(serializers.ModelSerializer):
     """
     Serializer for routine exercises.
@@ -327,13 +362,22 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
                       The server never re-resolves it.
 
     Every code above is on its field (`field_errors.<field>[0].code`).
+
+    **The row's refusals (BACKEND_BUGS B-139)**, each on its field:
+
+    `exercise_id`  `does_not_exist` — no such exercise, OR one the caller may not put in
+                   a routine (another trainer's private exercise). The two answer the
+                   same sentence, so the answer tells nobody which ids exist
+                   (`AuthorableExerciseField`).
+    `exercise`     `exercise_retired` — an exercise taken out of use (the code the
+                   template path answers for the same fault).
+    `routine`      `not_routine_owner` — a routine another trainer wrote (the code
+                   `routines/{id}/copy_week/` answers for the same fault).
+    `day`          `day_out_of_range` — a day past the routine's `days`, on a create or
+                   an edit (the code `update_progress` and `bulk-complete` answer).
     """
     exercise = ExerciseSerializer(read_only=True)
-    exercise_id = serializers.PrimaryKeyRelatedField(
-        queryset=Exercise.objects.all(),
-        source='exercise',
-        write_only=True
-    )
+    exercise_id = AuthorableExerciseField(source='exercise', write_only=True)
     routine = serializers.PrimaryKeyRelatedField(queryset=Routine.objects.all())
     # Declared, so the refusal names its own code rather than `min_value` / `max_value`.
     superset_group = serializers.IntegerField(required=False, allow_null=True)
@@ -413,23 +457,19 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
         if user.is_trainer:
             # 1. Validation: Trainer owns the routine
             # Check if routine exists (for updates) or is being set
-            if routine and routine.created_by != user:
-                raise serializers.ValidationError({
-                    "routine": _("You can only add exercises to routines you created.")
-                })
-            
-            # 2. Validation: Exercise is accessible (Global or Own)
-            if exercise:
-                is_own = exercise.created_by == user
-                is_global = exercise.created_by is None
-                if not (is_own or is_global):
-                    raise serializers.ValidationError({
-                        "exercise": _("You can only assign your own exercises or global exercises.")
-                    })
-                if not exercise.is_active:
-                    raise serializers.ValidationError({
-                        "exercise": _("That exercise has been retired and cannot be added.")
-                    })
+            if routine and routine.created_by_id != user.id:
+                raise serializers.ValidationError({"routine": [serializers.ErrorDetail(
+                    _("You can only add exercises to routines you created."),
+                    code='not_routine_owner')]})
+
+            # 2. The exercise is the trainer's own or the catalogue's: `exercise_id`
+            # (`AuthorableExerciseField`) has already answered anything else exactly
+            # like an id that does not exist. It used to be refused HERE with its own
+            # sentence, which told a trainer that another trainer's id was real.
+            if exercise is not None and not exercise.is_active:
+                raise serializers.ValidationError({"exercise": [serializers.ErrorDetail(
+                    _("That exercise has been retired and cannot be added."),
+                    code='exercise_retired')]})
 
         # Checked here rather than on the model: `days` belongs to the routine, so a
         # trainer shortening a routine would otherwise invalidate rows already written
@@ -438,10 +478,9 @@ class RoutineExerciseSerializer(serializers.ModelSerializer):
         day = attrs.get('day', getattr(self.instance, 'day', None))
         routine = routine or getattr(self.instance, 'routine', None)
         if day is not None and routine is not None and day > routine.days:
-            raise serializers.ValidationError({
-                "day": _("Day %(day)s exceeds the routine's %(days)s days.")
-                       % {"day": day, "days": routine.days}
-            })
+            raise serializers.ValidationError({"day": [serializers.ErrorDetail(
+                _("Day %(day)s exceeds the routine's %(days)s days.")
+                % {"day": day, "days": routine.days}, code='day_out_of_range')]})
 
         return self._validate_load(attrs)
 
@@ -503,9 +542,15 @@ class RoutineAssigneesMixin(serializers.Serializer):
     sees only their own approved clients among them; a client sees only themselves. The
     keys stay (`assigned_to`, `assigned_usernames`, `client_count`); their contents follow
     the caller.
+
+    `assigned_ids` (BACKEND_BUGS B-152, additive): the same people as user ids, under the
+    same rule. `assigned_to` is display text — `str(user)`, a username and a translated
+    user-type label — and stays exactly that; match a client to a routine on
+    `assigned_ids`.
     """
     assigned_to = serializers.SerializerMethodField()
     assigned_usernames = serializers.SerializerMethodField()
+    assigned_ids = serializers.SerializerMethodField()
     client_count = serializers.SerializerMethodField()
 
     def _visible_assignees(self, obj):
@@ -528,6 +573,10 @@ class RoutineAssigneesMixin(serializers.Serializer):
     def get_assigned_usernames(self, obj):
         """Retrieve assigned user names."""
         return [p.username for p in self._visible_assignees(obj)]
+
+    def get_assigned_ids(self, obj):
+        """The assignees the caller may know about, as user ids (B-152)."""
+        return [p.pk for p in self._visible_assignees(obj)]
 
     def get_client_count(self, obj):
         """Clients this routine is assigned to that the caller may know about."""
@@ -575,7 +624,7 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
             'id', 'name', 'description', 'difficulty_level', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
             'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles',
-            'source_template', 'product', 'created_by_id', 'day_names',
+            'source_template', 'product', 'created_by_id', 'day_names', 'assigned_ids',
         ]
         # `source_template`: the template this private copy was generated from, or null.
         # A copy, not a link — set by `templates/{id}/generate/`, never by a write here.
@@ -918,9 +967,27 @@ class UserExerciseProgressDetailSerializer(UserExerciseProgressSerializer):
     Used for read operations (GET).
     """
     exercise = ExerciseSerializer(read_only=True)
+    top_set = serializers.SerializerMethodField()
 
     class Meta(UserExerciseProgressSerializer.Meta):
-        fields = UserExerciseProgressSerializer.Meta.fields
+        fields = UserExerciseProgressSerializer.Meta.fields + ['top_set']
+
+    def get_top_set(self, obj):
+        """That day's «أفضل مجموعة» (BACKEND_BUGS B-181): the set with the highest weight
+        x reps, among equals the heavier weight — the owner's rule, and the same key and
+        shape as `routine/strength.py` answers on `analytics/strength/`. `{weight, reps,
+        volume_kg}`, or null when no set of the day has both a weight and reps. Reads
+        the prefetched `set_logs` (the viewset prefetches them for list and detail)."""
+        from .strength import _set_volume_key, _top_set_payload
+
+        best = None
+        for log in obj.set_logs.all():
+            if not log.weight or not log.reps or log.weight <= 0 or log.reps <= 0:
+                continue
+            if best is None or (_set_volume_key(log.weight, log.reps)
+                                > _set_volume_key(*best)):
+                best = (log.weight, log.reps)
+        return _top_set_payload(*best) if best is not None else None
 
 
 
@@ -930,6 +997,11 @@ class DayOutcomeSerializer(serializers.ModelSerializer):
     """What one training day planned against what was done (routine/outcomes.py).
 
     Read-only everywhere: these rows are written when a day closes, never by a client.
+
+    `quick_log` (BACKEND_BUGS B-157, additive): the day was logged after the fact in one
+    go («سجّل دفعة واحدة») — `update_progress` with `quick_log: true`, or
+    `bulk-complete` — rather than live. It is the coach's quick-log badge; `via` still
+    says what closed the day.
     """
     missed_reps = serializers.SerializerMethodField()
 
@@ -942,7 +1014,7 @@ class DayOutcomeSerializer(serializers.ModelSerializer):
             'planned_volume_kg', 'logged_volume_kg',
             'exercises_planned', 'exercises_full', 'exercises_partial',
             'exercises_untouched', 'exercises_skipped',
-            'prescription_exact', 'detail',
+            'prescription_exact', 'detail', 'quick_log',
         ]
         read_only_fields = fields
 
@@ -1017,6 +1089,10 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
             'planned_sets': planned,
             'logged_sets': getattr(obj, 'outcome_logged_sets', 0),
             'missed_sets': getattr(obj, 'outcome_missed_sets', 0),
+            # Additive (BACKEND_BUGS B-157): the coach's quick-log badge, and `via`,
+            # which the viewset's docstring already promised and this never carried.
+            'quick_log': getattr(obj, 'outcome_quick_log', None),
+            'via': getattr(obj, 'outcome_via', None),
         }
 
     def get_completion_percentage(self, obj):
@@ -1519,6 +1595,7 @@ class TrainerRoutineSerializer(RoutineAssigneesMixin, serializers.ModelSerialize
             'id', 'name', 'description', 'is_active', 'days', 'start_date', 'end_date',
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
             'client_count', 'completion_rate', 'source_template', 'created_by_id', 'day_names',
+            'assigned_ids',
         ]
         read_only_fields = ['created_at', 'updated_at', 'source_template']
 
@@ -1885,23 +1962,13 @@ class RoutineTemplateExerciseSerializer(serializers.ModelSerializer):
     Output: Nested exercise details for listing
     """
     exercise = ExerciseSerializer(read_only=True)
-    exercise_id = serializers.PrimaryKeyRelatedField(queryset=Exercise.objects.all(), source='exercise', write_only=True)
-
-    def validate_exercise_id(self, exercise):
-        """Your own exercises, or the global ones. Not another trainer's private one.
-
-        The routine path enforces this and the template path did not, so a trainer
-        could put a competitor's private exercise into a template and push it to a
-        client, exposing its name, description and media.
-        """
-        request = self.context.get('request')
-        user = getattr(request, 'user', None)
-        if exercise.created_by_id is None or (user and exercise.created_by_id == user.id):
-            return exercise
-        if user is not None and (user.is_staff or getattr(user, 'is_admin', False)):
-            return exercise
-        raise serializers.ValidationError(
-            "That exercise belongs to another trainer. Use your own or a global exercise.")
+    #: Your own exercises, or the global ones; never another trainer's private one.
+    #: The template path once took any id, so a trainer could put a competitor's private
+    #: exercise into a template and push it to a client, exposing its name, description
+    #: and media. Then it refused one with an English sentence of its own, which told
+    #: the trainer the id was real: now `does_not_exist`, exactly like a missing id
+    #: (BACKEND_BUGS B-139, `AuthorableExerciseField`).
+    exercise_id = AuthorableExerciseField(source='exercise', write_only=True)
 
     class Meta:
         model = RoutineTemplateExercise

@@ -205,6 +205,30 @@ def _date_or_none(value):
         return None
 
 
+class _WholeNumberFilter(django_filters.NumberFilter):
+    """A whole number or a 400. `NumberFilter` parses a Decimal, and an integer column
+    takes `int()` of it — so `?routine=1.5` would have read routine 1."""
+    field_class = django_forms.IntegerField
+
+
+class ExerciseFilter(django_filters.FilterSet):
+    """`?target_muscle=<key>&exclude=<id>` on the exercise list (BACKEND_BUGS B-158).
+
+    Both narrow the rows `visible_exercises_for` already allows, so neither can widen
+    them. `target_muscle` is one of `Exercise.target_muscle`'s stored keys (`Biceps`,
+    `Front Quads`, ...); anything else answers 400 `invalid_choice` on the field.
+    `exclude` is a plain number, never a lookup of the exercise row (the S-119 oracle):
+    an id that does not exist excludes nothing.
+    """
+    target_muscle = django_filters.ChoiceFilter(
+        choices=Exercise._meta.get_field('target_muscle').choices)
+    exclude = _WholeNumberFilter(field_name='pk', exclude=True)
+
+    class Meta:
+        model = Exercise
+        fields = ['target_muscle', 'exclude']
+
+
 class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     """ViewSet for managing exercises.
@@ -213,11 +237,19 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     already decoding as many images as its memory holds (`training_platform/
     image_budget.py`): nothing was saved; send it again after `Retry-After` seconds
     (`retry_after_seconds` in the body).
+
+    List filters (BACKEND_BUGS B-158): `?target_muscle=<key>` — only that muscle's
+    exercises (400 `validation_error`, `field_errors.target_muscle[0].code`
+    `invalid_choice`, for a value that is not one of the keys); `?exclude=<id>` — leave
+    that exercise out (the one being replaced). Both only narrow what the caller may
+    already read.
     """
     queryset = Exercise.objects.all()
     serializer_class = ExerciseSerializer
     permission_classes = [IsAdminOrOwnerOrReadOnly]
     pagination_class = StandardResultsSetPagination
+    filter_backends = [DjangoFilterBackend]
+    filterset_class = ExerciseFilter
 
     def get_queryset(self):
         """Filter exercises based on user role with optimized queries.
@@ -617,6 +649,12 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     `assigned_to`; assign with `routines/{id}/assign_to_client/`.
 
     List filter: `?source_template=<template id>` — the copies generated from it.
+
+    Who a routine is for: `assigned_ids` (BACKEND_BUGS B-152) — user ids, the key to
+    match a client on. `assigned_usernames` is the same people by username, and
+    `assigned_to` is display text (`"samer (Client)"`), never an id. All three follow the
+    caller: the author or an admin sees every assignee, another trainer only their own
+    approved clients, a client only themselves.
     """
     queryset = Routine.objects.all()
     serializer_class = RoutineSerializer
@@ -628,31 +666,65 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             return [IsRoutineOwnerOrAssigned()]
         return super().get_permissions()
 
+    def _answers_trainer_rows(self):
+        """True when this request is answered by `TrainerRoutineSerializer`."""
+        return bool(getattr(self.request.user, 'is_trainer', False)
+                    and self.action in ('list', 'retrieve'))
+
     def get_queryset(self):
-        """Filter routines based on user role"""
+        """Filter routines based on user role.
+
+        One plain query per page (BACKEND_BUGS B-136): no GROUP BY, no DISTINCT, no join
+        to a to-many relation, no whole user row. The list used to join `assigned_to`
+        and `progress` under a GROUP BY for three `COUNT(DISTINCT ...)`, select two whole
+        user rows (the author, and a bought copy's product trainer, password hashes
+        included) and, for a trainer, `.distinct()` over all ~160 of those columns. The
+        planner's estimate for that fan-out passed `jit_above_cost`, and PostgreSQL
+        spent 3-20 s compiling a query whose nodes finished in 1.4 ms.
+        """
         user = self.request.user
-        
-        # Base optimization for all queries
+
         # `progress` is NOT prefetched: the serializer counted those rows in Python
         # "to avoid a DB hit", which forced every one of them into memory — twenty
         # routines x twenty clients x thirty days is 12,000 rows fetched to produce
-        # twenty percentages. They are counted in the query now.
-        # `purchase__product__trainer`: a bought copy's `product` (RoutineSerializer) in
-        # the same query; empty joins for every other routine.
-        queryset = self.queryset.select_related(
-            'created_by', 'purchase__product__trainer').prefetch_related(
+        # twenty percentages. They are counted in the query, each as a correlated
+        # subquery (the pattern of `serializers._used_by_counts`): one number per row,
+        # no join, so no GROUP BY and no fan-out. `client_count` is not annotated: the
+        # serializer answers it from the assignees the CALLER may know about
+        # (`RoutineAssigneesMixin`), and a count over every assignee was never read.
+        from django.db.models import Func, IntegerField, OuterRef, Subquery
+
+        from .models import RoutineProgress
+
+        def _progress_count(**only):
+            # `COUNT(id)` as a plain function over the filtered rows: an aggregate with
+            # no GROUP BY, so the subquery always answers exactly one row (0 for none).
+            rows = (RoutineProgress.objects.filter(routine=OuterRef('pk'), **only)
+                    .order_by()
+                    .annotate(n=Func(F('id'), function='COUNT',
+                                     output_field=IntegerField()))
+                    .values('n'))
+            return Subquery(rows, output_field=IntegerField())
+
+        # The author and a bought copy's product trainer are read for their names
+        # only (`created_by`'s text, `product.trainer.{id, name}`): fetched by id with
+        # the columns those names need, never the whole row. The trainer's rows
+        # (`TrainerRoutineSerializer`) show neither, so they skip the purchase joins.
+        names = CustomUser.objects.only('id', 'username', 'user_type', 'first_name',
+                                        'last_name')
+        queryset = self.queryset.prefetch_related(
             'routine_exercises__exercise__media',
             'assigned_to',
+            Prefetch('created_by', queryset=names),
         ).annotate(
-            client_count=models.Count('assigned_to', filter=models.Q(assigned_to__user_type='client'), distinct=True),
-            progress_total=models.Count('progress', distinct=True),
-            progress_done=models.Count('progress', filter=models.Q(progress__status='completed'), distinct=True)
-        # annotate() with an aggregate adds a GROUP BY, and Django then drops
-        # Meta.ordering from the SQL entirely — the query came back with GROUP BY and
-        # no ORDER BY at all. Paging a routine list in whatever order Postgres felt
-        # like meant page 2 could repeat a routine from page 1 and skip another
-        # outright. Re-apply the model's total order explicitly.
+            progress_total=_progress_count(),
+            progress_done=_progress_count(status='completed'),
+        # The model's total order, explicitly: when this was an aggregate, Django
+        # dropped Meta.ordering from the GROUP BY query and pages repeated rows.
         ).order_by('-created_at', '-id')
+        if not self._answers_trainer_rows():
+            queryset = queryset.select_related('purchase__product').prefetch_related(
+                Prefetch('purchase__product__trainer', queryset=names))
 
         # `?source_template=<id>`: the private copies written from one template, e.g.
         # "which of my clients got this program". Narrows; never widens what you see.
@@ -674,7 +746,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         """Use different serializers based on user role"""
-        if self.request.user.is_trainer and self.action in ['list', 'retrieve']:
+        if self._answers_trainer_rows():
             return TrainerRoutineSerializer
         return RoutineSerializer
 
@@ -1045,19 +1117,33 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def update_progress(self, request, pk=None):
-        """POST /api/routine/routines/{id}/update_progress/ — set a day's status for today.
+        """POST /api/routine/routines/{id}/update_progress/ — set a day's status for a date
+        (today unless `date` says otherwise).
 
-        Body: `day`, `status` (`not_started | in_progress | completed | skipped`), and
-        `confirm_unlogged` (bool). Completing a day does not require every set to be
+        Body: `day`, `status` (`not_started | in_progress | completed | skipped`),
+        `confirm_unlogged` (bool), and two optional keys (BACKEND_BUGS B-157, additive):
+
+        `date`       `YYYY-MM-DD`, the calendar day being closed — a LogDay for
+                     yesterday closes yesterday, measured against the sets logged THAT
+                     day. Inside the training window, like `set-logs/sync/`: 400
+                     `bad_date`, `date_in_future`, `date_too_old`. Not sent: today.
+        `quick_log`  `true` when the day was logged after the fact in one go
+                     («سجّل دفعة واحدة») rather than live. Kept on the day's outcome as
+                     `outcome.quick_log`, and no later close takes it away
+                     (`bulk-complete` sets it too). It changes nothing else: `via`, the
+                     unlogged-sets warning and the streak rules are the same.
+
+        Completing a day does not require every set to be
         logged, but the person must be warned first (owner, 2026-09-19): while any
-        prescribed set of that day is unlogged today, `completed` answers
+        prescribed set of that day is unlogged on that date, `completed` answers
         409 `unlogged_sets` with `{prescribed, logged, unlogged}`, and the app sends the
         same request again with `confirm_unlogged: true` once the person has seen it.
         Closing a day (`completed` or `skipped`) answers `outcome`: what the day planned
         against what was done — `planned_sets`, `logged_sets`, `missed_sets`,
         `planned_reps`, `logged_reps`, `complete`, `confirmed_unlogged` (the owner,
-        2026-09-20). A day closed with sets missing does not count as a training day and
-        breaks the streak; `analytics/adherence/` reads these rows.
+        2026-09-20), `quick_log` (B-157) and `date`. A day closed with sets missing does
+        not count as a training day and breaks the streak; `analytics/adherence/` reads
+        these rows.
 
         Other codes (every refusal names its own since the owner's decision of
         2026-09-24; the ones marked new answered `bad_request` / `permission_denied`):
@@ -1069,6 +1155,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         | 400 | `bad_status` | `status` is not one of the four |
         | 400 | `day_out_of_range` (new) | `day` is outside 1..the routine's days |
         | 400 | `day_has_no_exercises` (new) | that day of the routine has no exercises |
+        | 400 | `bad_date` / `date_in_future` / `date_too_old` | `date` is not a date, is after today, or is before the training window (B-157) |
         | 403 | `routine_not_yours` (new) | the routine is not assigned to you |
         | 403 | `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` | with `trainer_id`, while the coaching this routine came from is unpaid or over — readable, not trainable (the owner) |
         | 404 | `not_found` | no such routine, or not one you can see |
@@ -1082,7 +1169,16 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         if user not in routine.assigned_to.all():
             return Response({"error": _("You are not authorized to update this routine."),
                              "code": "routine_not_yours"}, status=403)
-        _require_can_train(user, routine)
+        # The day being closed (B-157). Without it this route could only close TODAY,
+        # so a LogDay for yesterday was measured against today's sets (409, 0 logged)
+        # and, once confirmed, wrote a 0-of-N day today.
+        on = None
+        if request.data.get('date') not in (None, ''):
+            refused = _backlog_date_refused(request.data.get('date'))
+            if refused is not None:
+                return refused
+            on = _date_or_none(request.data.get('date'))
+        _require_can_train(user, routine, on)
 
         if not day or not status:
             return Response({"error": _("Day and status are required."),
@@ -1114,14 +1210,16 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             return _day_refused(routine, day_number)
 
         confirmed = _truthy(request.data.get('confirm_unlogged'))
-        counts = _day_set_counts(routine, user, day_number) if status in ('completed', 'skipped') else None
+        counts = (_day_set_counts(routine, user, day_number, date=on)
+                  if status in ('completed', 'skipped') else None)
         if status == 'completed' and not confirmed and counts['unlogged']:
             return Response({
                 'error': _('Some sets of this day are not logged yet.'),
                 'code': 'unlogged_sets', **counts}, status=409)
 
         try:
-            updated_progress = routine.update_progress(user=user, day=day_number, status=status)
+            updated_progress = routine.update_progress(user=user, day=day_number, status=status,
+                                                       progress_date=on)
         except ValueError as e:
             # `Routine.update_progress` raises it for one reason only: the day is outside
             # 1..days (a row left on a day the routine no longer has).
@@ -1138,9 +1236,10 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             via = ('skipped' if status == 'skipped'
                    else 'confirmed_unlogged' if counts['unlogged'] else 'completed')
             outcome = record_day_quietly(
-                user, routine, day_number, via=via,
+                user, routine, day_number, on, via=via,
                 # Only a completed day is ever warned: a skipped one saw nothing.
-                confirmed_unlogged=(status == 'completed' and bool(counts['unlogged'])))
+                confirmed_unlogged=(status == 'completed' and bool(counts['unlogged'])),
+                quick_log=_truthy(request.data.get('quick_log')))
 
         body = {"message": _("Progress updated successfully"),
                 "updated_progress": updated_progress}
@@ -1211,12 +1310,6 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         # Placeholder for notification logic
         logger.info(f"Notification sent to client {client.id} about routine {routine.id} unassignment")
         pass
-
-
-class _WholeNumberFilter(django_filters.NumberFilter):
-    """A whole number or a 400. `NumberFilter` parses a Decimal, and an integer column
-    takes `int()` of it — so `?routine=1.5` would have read routine 1."""
-    field_class = django_forms.IntegerField
 
 
 class RoutineExerciseFilter(django_filters.FilterSet):
@@ -1292,7 +1385,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
 
     Every row carries `outcome` since 2026-09-20: what that day actually came to, or
     null while the day is still open. `{complete, via, missed_sets, planned_sets,
-    logged_sets}` — `via` says what closed it (`completed`, `confirmed_unlogged`,
+    logged_sets, confirmed_unlogged, quick_log}` — `quick_log` (B-157) is true for a day
+    logged after the fact in one go, the coach's quick-log badge; `via` says what closed it (`completed`, `confirmed_unlogged`,
     `skipped`, `bulk_complete`, `session`, `auto`, `unclosed`), and `complete` is false
     for a day closed with sets still missing, which is the day that breaks the streak
     (the owner, 2026-09-20). The full per-exercise breakdown of one day is on
@@ -1368,6 +1462,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
             outcome_missed_sets=Subquery(outcome.values('missed_sets')[:1]),
             outcome_complete=Subquery(outcome.values('complete')[:1]),
             outcome_confirmed_unlogged=Subquery(outcome.values('confirmed_unlogged')[:1]),
+            outcome_quick_log=Subquery(outcome.values('quick_log')[:1]),
+            outcome_via=Subquery(outcome.values('via')[:1]),
         )
         
         if user.is_admin:
@@ -4297,6 +4393,17 @@ class ProgressExists(APIException):
         return self.default_code
 
 
+class UserExerciseProgressFilter(django_filters.FilterSet):
+    """`?exercise=<id>&date=YYYY-MM-DD` — `exercise` as a NUMBER, never a lookup of the
+    exercise row (SIDE_BUGS S-164, the S-119 oracle; see `UserExerciseProgressViewSet`)."""
+    exercise = _WholeNumberFilter(field_name='exercise_id')
+    date = django_filters.DateFilter(field_name='date')
+
+    class Meta:
+        model = UserExerciseProgress
+        fields = ['exercise', 'date']
+
+
 class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing UserExerciseProgress objects (per-user, per-exercise progress).
@@ -4310,12 +4417,76 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     that does not exist (SIDE_BUGS S-056); `date_in_future` / `date_too_old` on `date`
     outside the training window (SIDE_BUGS S-112). 400 `progress_exists` with the
     existing row's `id` for a second row on the same exercise and day.
+
+    **List filters.** `?exercise=<id>` and `?date=YYYY-MM-DD` narrow the rows the caller
+    may read. `exercise` is a plain whole number (SIDE_BUGS S-164): it was checked
+    against EVERY exercise, so a missing id answered 400 "Select a valid choice" while
+    another trainer's private exercise answered an empty 200, and exercise ids could be
+    probed. Both are an empty page now; a value that is not a whole number is 400
+    `validation_error` on `exercise`.
+
+    `?latest_for=<id>,<id>,...&before=YYYY-MM-DD` (BACKEND_BUGS B-181; «آخر مرة» beside
+    each exercise of a day, in ONE call instead of one per exercise): the newest TRAINED
+    row (`skipped` false, `completed_sets` > 0) of each named exercise dated before
+    `before` (any date when it is not sent) — one row per exercise for a client; for a
+    trainer, one per exercise per client they may read. At most 50 ids. 400
+    `bad_exercise_id` (+ `field`: `latest_for`) for an id that is not a whole number
+    from 1, 400 `too_many_exercise_ids` (+ `max`), 400 `bad_date` (+ `field`: `before`).
+    An id that names nothing, or nothing the caller may read, simply has no row.
+
+    Every list and detail row carries `top_set` (B-181): that day's «أفضل مجموعة» by the
+    owner's rule (the highest weight x reps, among equals the heavier weight;
+    `routine/strength.py`) as `{weight, reps, volume_kg}`, or null when no set of that day
+    has both a weight and reps — so «آخر مرة» needs no `daily-summary/` call per date.
     """
     queryset = UserExerciseProgress.objects.all()
     serializer_class = UserExerciseProgressSerializer
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['exercise', 'date']
+    filterset_class = UserExerciseProgressFilter
+
+    #: How many exercises one `?latest_for=` may name: a day, not the library.
+    LATEST_FOR_MAX = 50
+
+    def list(self, request, *args, **kwargs):
+        raw = request.query_params.get('latest_for')
+        if raw is None:
+            return super().list(request, *args, **kwargs)
+        ids = []
+        for part in raw.split(','):
+            number = _int_or_none(part.strip())
+            if number is None or number < 1 or str(number) != part.strip():
+                return Response({'error': _('latest_for must be exercise ids separated by '
+                                            'commas.'),
+                                 'code': 'bad_exercise_id', 'field': 'latest_for'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            ids.append(number)
+        if len(set(ids)) > self.LATEST_FOR_MAX:
+            return Response({'error': _('Ask for at most %(max)d exercises at a time.')
+                             % {'max': self.LATEST_FOR_MAX},
+                             'code': 'too_many_exercise_ids', 'max': self.LATEST_FOR_MAX},
+                            status=status.HTTP_400_BAD_REQUEST)
+        trained = Q(exercise_id__in=set(ids), skipped=False, completed_sets__gt=0)
+        before = request.query_params.get('before')
+        if before is not None:
+            day = _date_or_none(before)
+            if day is None:
+                return Response({'error': _('date must be in YYYY-MM-DD format.'),
+                                 'code': 'bad_date', 'field': 'before'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            trained &= Q(date__lt=day)
+        queryset = self.filter_queryset(self.get_queryset())
+        # The newest row per (person, exercise), chosen in a narrow subquery — only the
+        # key columns are DISTINCT ON'd — and read back through the scoped queryset, so
+        # the page keeps its ordinary order and joins.
+        newest = (queryset.filter(trained)
+                  .order_by('user_id', 'exercise_id', '-date', '-id')
+                  .distinct('user_id', 'exercise_id').values('pk'))
+        queryset = queryset.filter(pk__in=newest)
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(queryset, many=True).data)
 
     def get_serializer_class(self):
         """
@@ -4347,6 +4518,8 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         # and another for that exercise's media. Twenty-five rows was fifty queries
         # for one page.
         base = self.queryset.select_related('exercise').prefetch_related('exercise__media')
+        if self.action in ('list', 'retrieve'):
+            base = base.prefetch_related('set_logs')        # each row's `top_set`
         if user.is_admin:
             return base.all()
         elif user.is_trainer:
@@ -4528,8 +4701,9 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             # Logging a whole day closes it, so what it planned against what was done is
             # kept (the owner, 2026-09-20). This path records no set logs, so the day's
             # reps are not known and the week is shown as approximate.
+            # A whole day logged at once is a quick log by definition (B-157).
             from .outcomes import record_day_quietly
-            record_day_quietly(user, routine, day, date, via='bulk_complete')
+            record_day_quietly(user, routine, day, date, via='bulk_complete', quick_log=True)
         return Response({'results': results, 'errors': errors, 'count': len(results)})
 
 

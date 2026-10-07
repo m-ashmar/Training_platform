@@ -26,6 +26,10 @@ consumers keep working; new ones read `code` and `field_errors`.
       "field_errors": {"email": [{"message": "...", "code": "invalid"}]},
       "email":        ["..."]                      <- original DRF field errors
     }
+
+A field holding a list of rows (a nested `many=True` serializer, e.g. a template's
+`exercises`) lists each refused row's errors in row order, each entry also carrying
+`index` (the row, from 0) and `field` (its key): `field_errors.exercises[0].code`.
 """
 
 from __future__ import annotations
@@ -69,6 +73,23 @@ def _collect_field_errors(data) -> dict:
             out[field] = [
                 {"message": str(e), "code": getattr(e, "code", "invalid")}
                 for e in errors
+                if not isinstance(e, (dict, list))
+            ]
+        elif isinstance(errors, dict) and errors and all(
+                str(k).isdigit() and isinstance(v, dict) for k, v in errors.items()):
+            # A list of nested rows (`many=True`): DRF answers `{"<row>": {key: [...]}}`
+            # for the rows it refused. The branch below kept only list values, so a
+            # refused row reached the app with no `field_errors` entry at all
+            # (BACKEND_BUGS B-139: a template row naming another trainer's exercise).
+            # Flattened in row order, each entry saying which row (`index`, from 0) and
+            # which of its keys (`field`), so `field_errors.<field>[0].code` reads it.
+            out[field] = [
+                {"message": str(e), "code": getattr(e, "code", "invalid"),
+                 "index": int(index), "field": key}
+                for index, row in sorted(errors.items(), key=lambda item: int(item[0]))
+                for key, row_errors in row.items()
+                for e in (row_errors if isinstance(row_errors, (list, tuple))
+                          else [row_errors])
                 if not isinstance(e, (dict, list))
             ]
         elif isinstance(errors, dict):

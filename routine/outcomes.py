@@ -16,6 +16,10 @@ day is closed by ANY path:
     the recalculation completing a day     via='auto'      (routine/models.py)
     the nightly sweep, for a day opened and never closed   via='unclosed'
 
+`quick_log` marks a day logged after the fact in one go (BACKEND_BUGS B-157):
+`update_progress` with `quick_log: true`, and every `bulk-complete`. It is kept on the
+row whatever `via` ends up saying, and no later close removes it.
+
 The plan columns are a SNAPSHOT: they are frozen on the first write, because the trainer
 edits `RoutineExercise` in place and an edit must not rewrite last week. The logged
 columns are refreshed by later writes for the same day, so sets synced after the close
@@ -255,12 +259,19 @@ def day_counts(routine, user, day, date=None, plan=None) -> dict:
 
 @transaction.atomic
 def record_day(user, routine, day, date=None, *, via, confirmed_unlogged=False,
-               session=None, prescription_exact=True):
+               session=None, prescription_exact=True, quick_log=False):
     """Write (or refresh) the outcome of one closed training day. Returns the row.
 
     Called inside the caller's transaction, after the write that closed the day. It
     costs two or three queries and never raises into the caller: a day is recorded, or
     the training still stands and the miss is logged.
+
+    `quick_log` (BACKEND_BUGS B-157): the day was logged after the fact in one go. Kept
+    like `confirmed_unlogged` — OR-ed, so a later close that does not say it (a plain
+    `update_progress`, a set synced afterwards, the recalculation) never takes it away.
+    It is not a `via`: `record_day` keeps the strongest `via`, and `completed` outranks
+    `bulk_complete`, so a quick-log reason would have been masked by the very close that
+    set it.
     """
     from .models import DayOutcome
 
@@ -297,6 +308,7 @@ def record_day(user, routine, day, date=None, *, via, confirmed_unlogged=False,
         user=user, routine=routine, day=day, date=date,
         defaults={**planned, **logged, 'via': via,
                   'confirmed_unlogged': bool(confirmed_unlogged),
+                  'quick_log': bool(quick_log),
                   'missed_sets': max(counts['prescribed'] - counts['logged'], 0),
                   'complete': counts['unlogged'] == 0 and via != 'skipped',
                   'workout_session': session})
@@ -314,6 +326,7 @@ def record_day(user, routine, day, date=None, *, via, confirmed_unlogged=False,
     if _rank(via) < _rank(outcome.via):
         outcome.via = via
     outcome.confirmed_unlogged = outcome.confirmed_unlogged or bool(confirmed_unlogged)
+    outcome.quick_log = outcome.quick_log or bool(quick_log)
     # `skipped` outranks the working reasons, which is right while nothing was done and
     # wrong the moment something is: a day marked skipped in the morning and trained in
     # the evening would have stayed incomplete for ever, because `complete` refuses the
@@ -324,7 +337,7 @@ def record_day(user, routine, day, date=None, *, via, confirmed_unlogged=False,
     if session is not None and outcome.workout_session_id is None:
         outcome.workout_session = session
     outcome.save(update_fields=[*logged, 'missed_sets', 'via', 'confirmed_unlogged',
-                                'complete', 'workout_session', 'updated_at'])
+                                'quick_log', 'complete', 'workout_session', 'updated_at'])
     return outcome
 
 
