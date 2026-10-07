@@ -107,6 +107,8 @@ local/test database), merged with wave 1.
 | B-172 | A derived username with a banned term or a reserved platform name becomes user/userN, never refused |
 | B-174 | Production refuses to boot without an https `PUBLIC_PAGES_BASE_URL` |
 | B-176 | A 12th home section `day_timeline` in the artboard's order; `nutrition_today.timeline` kept |
+| Template goal (2026-10-07) | `POST/PATCH /api/routine/templates/` take `goal` only as one of the four codes (any case, the code stored); anything else 400 `bad_goal` (`8f15972` on `fx/w1-programs`) |
+| Development data (2026-10-07) | Every row in the development database (programs, templates, users, everything) is throwaway: the owner drops it himself before launch, and production starts empty (`bootstrap_platform`). So a fix needs no data migration or compatibility for rows written during development |
 
 **Waves** (each: worktree builders from one base, tests proven on the old code, merged one
 branch at a time, then ONE full gate + the smoke; a review of the merged diff after):
