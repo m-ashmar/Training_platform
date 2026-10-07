@@ -195,6 +195,22 @@ Worktrees are how several agents build at once. The setup is done for you; what 
   taking every database down (SIDE_BUGS S-244). One `--create-db` at a time. A run that
   fails with "the database system is in recovery mode" is this, not your code: wait for
   `pg_isready` and run again.
+- **The scratchpad is pruned.** It lives under `/private/tmp`, and macOS deletes its files
+  after about three idle days (2026-09-28 -> 2026-10-07: every brief, log and old-code
+  tree was gone, only the directories were left). Never trust an old-code tree you did
+  not extract in this run: `rm -rf` it and `git archive` the base again.
+- **A dependency upgrade can ship its own migrations.** The Django 5.2 upgrade brought
+  `token_blacklist 0013` with djangorestframework-simplejwt, and the app session's
+  `yalla_app_dev` ran without it for a week. After any change to the lock, run
+  `manage.py showmigrations | grep "\[ \]"` against every development database, not only
+  against the test database the gate builds.
+- **Serving the API to a phone.** The desktop app's preview launcher cannot read the
+  project's `.venv` under `~/Desktop` (macOS privacy), so it cannot start Daphne; run
+  `.venv/bin/daphne -b 0.0.0.0 -p 8020 training_platform.asgi:application` from a shell
+  instead. Port 8000 is taken by another macOS account's unrelated `runserver`. The app
+  bakes the address in at build time (`--dart-define=API_BASE_URL=http://<mac LAN ip>:8020`),
+  and only a DEBUG APK may use plain http (`usesCleartextTraffic` is in the debug manifest
+  only). Sign-up codes go to the server's console log (`settings_local` email backend).
 - `tests/security/*.py` used to hardcode the main checkout's path, so from a worktree they
   exercised the main tree and passed on a broken branch. If you see that pattern anywhere
   else, it is a bug, not a convention.
