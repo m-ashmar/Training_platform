@@ -241,7 +241,7 @@ go in `fly.toml [env]`, but a secret there is readable in the repository.
 ### 3.9 Public pages, app links, identity, console
 | Variable | | Default | What |
 |---|---|---|---|
-| `PUBLIC_PAGES_BASE_URL` | | the API host | Where the privacy policy, terms and account-deletion page are reached, e.g. `https://yallagym.com`. The capabilities answer hands these URLs to every build |
+| `PUBLIC_PAGES_BASE_URL` | R | | Where the privacy policy, terms and account-deletion page are reached, e.g. `https://yallagym.com`. The capabilities answer hands these URLs to every build, and the store listings name the same pages. Boot refuses it unset, not https, or a local address (B-174) |
 | `APP_LINKS_ANDROID_PACKAGES` | | | Comma separated package names. Empty: `/.well-known/assetlinks.json` answers 404 `app_links_not_configured` |
 | `APP_LINKS_ANDROID_SHA256_FINGERPRINTS` | | | The SHA-256 of every release-signing certificate (the direct APK's key, and Play's app-signing key once there is a Play build) |
 | `APP_LINKS_IOS_TEAM_ID`, `APP_LINKS_IOS_BUNDLE_IDS` | | | For `/.well-known/apple-app-site-association` |
@@ -478,7 +478,7 @@ fly scale count web=1 worker=1 beat=1 -a <app>-staging
 | `SENTRY_ENVIRONMENT` | `staging` |
 | `GATEWAY_MODE` | `sandbox`, with `SHAMCASH_SANDBOX_*` set and `SHAMCASH_API_TOKEN` UNSET (boot refuses sandbox when the production token is present) |
 | `DJANGO_ALLOWED_HOSTS` | `<app>-staging.fly.dev` |
-| `PUBLIC_PAGES_BASE_URL` | the staging host |
+| `PUBLIC_PAGES_BASE_URL` | `https://<app>-staging.fly.dev` (required: boot refuses it unset or not https) |
 | `APP_LINKS_*` | unset: the association files answer 404, so staging never claims the real app's links |
 | Everything else | as production, with staging's own values |
 

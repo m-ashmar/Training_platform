@@ -13,6 +13,8 @@ Each test is the proof for one notebook row and fails on the code before its fix
   test rendered the data inventory in another order.
 * S-225 — the code emails' footer printed no year; a dead helper wrote a payment
   outside `PaymentService`; a comment called behaviour events training data.
+* B-174 — production booted with no `PUBLIC_PAGES_BASE_URL`, and the legal links every
+  build is handed followed whatever host a request reached.
 """
 from decimal import Decimal
 
@@ -198,3 +200,28 @@ def test_s225_behaviour_events_are_not_called_training_data():
 
     assert "future model training" not in inspect.getsource(models)
     assert "NOT training data" in models.UserBehaviorEvent.__doc__
+
+
+# ================================================================================ B-174
+@pytest.mark.parametrize("base, needle", [
+    ("", "PUBLIC_PAGES_BASE_URL is not set"),
+    ("http://yallagym.example", "must be an https URL"),
+    ("yallagym.example", "must be an https URL"),
+    ("https://localhost:8000", "a local address in production"),
+])
+def test_b174_production_refuses_to_boot_without_the_public_pages_host(base, needle):
+    """Unset, the capabilities links (privacy policy, terms, account deletion) were built
+    on whatever allowed host a request reached — the API's own address, not the hub
+    domain the store listing names. The owner (2026-09-28): production refuses to boot
+    without an https base. The shared production environment is otherwise bootable."""
+    from tests.test_media_storage import GCS_KEY_JSON, _production_boot
+
+    bootable = dict(MEDIA_BACKEND="gcs", GS_BUCKET_NAME="yalla-gym-media",
+                    GS_CREDENTIALS_JSON=GCS_KEY_JSON)
+    refused = _production_boot(PUBLIC_PAGES_BASE_URL=base, **bootable)
+
+    assert refused.returncode != 0 and "BOOTED" not in refused.stdout, refused.stdout
+    assert needle in refused.stderr, refused.stderr[-2000:]
+
+    booted = _production_boot(PUBLIC_PAGES_BASE_URL="https://yallagym.example", **bootable)
+    assert booted.returncode == 0 and "BOOTED" in booted.stdout, booted.stderr[-2000:]

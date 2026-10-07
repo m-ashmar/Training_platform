@@ -72,6 +72,10 @@ def _prod_env(**overrides):
         "AI_TRAINING_PSEUDONYM_KEY": secrets.token_hex(32),
         "MEDIA_BACKEND": "gcs", "GS_BUCKET_NAME": "yalla-gym-media",
         "GS_CREDENTIALS_JSON": _GCS_KEY,
+        # Deliberate contract change (fx/w1-privacy, BACKEND_BUGS B-174, the owner's
+        # decision of 2026-09-28): production refuses to boot without an https base for
+        # the public pages, so this environment, which passes every check, carries one.
+        "PUBLIC_PAGES_BASE_URL": "https://yallagym.example",
     }
     for name, value in overrides.items():
         if value is None:

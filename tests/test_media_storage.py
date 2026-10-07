@@ -378,6 +378,11 @@ def _production_boot(**overrides):
         # copies are keyed with it, and production refuses to boot without it. Generated,
         # for the same reason as the key above.
         "AI_TRAINING_PSEUDONYM_KEY": secrets.token_hex(32),
+        # Deliberate contract change (fx/w1-privacy, BACKEND_BUGS B-174, the owner's
+        # decision of 2026-09-28): production refuses to boot without an https base for
+        # the public pages, so this environment carries one and these tests still fail
+        # only on what they are about.
+        "PUBLIC_PAGES_BASE_URL": "https://yallagym.example",
     }
     env.update(overrides)
     code = ("import training_platform.settings_production as s; "

@@ -233,7 +233,8 @@ OPS_CONSOLE_BASE_URL = get_env("OPS_CONSOLE_BASE_URL", "")
 # Where the public pages — the privacy policy, the terms, the account-deletion page
 # (legal/) — are reached from outside, e.g. https://yallagym.com when the hub domain serves
 # or forwards `/legal/...`. The capabilities answer hands these URLs to every build
-# (legal/links.py). Empty means the host the API request came to.
+# (legal/links.py). Empty means the host the API request came to — in development only:
+# production refuses to boot without an https value (BACKEND_BUGS B-174).
 PUBLIC_PAGES_BASE_URL = get_env("PUBLIC_PAGES_BASE_URL", "")
 # Returning from the web payment hub to the app (the payments spec, section 5): the
 # Android App Links and iOS Universal Links association files at /.well-known/
