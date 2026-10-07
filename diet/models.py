@@ -1540,11 +1540,22 @@ class Recipe(models.Model):
         return self.name
 
     def allergen_tags(self):
-        """Union of every ingredient's allergens — composition, not the dish name."""
+        """Every allergen this dish carries, sorted: each line's food as the allergen
+        checker reads it (`food_allergen_tags`: its stored tags AND what its name and
+        ingredient list imply), plus what the dish's own text implies (`dish_text`:
+        `Chicken Satay`, "drizzle with tahini").
+
+        It read the lines' stored lists alone (SIDE_BUGS S-215), so it disagreed with
+        the checker: a line `Crispy Chickpea Bites` with no stored tags carries gluten,
+        and a free-text tag was passed through as if it were one of the vocabulary.
+        """
+        from diet.allergens import dish_text, food_allergen_tags, infer_allergens
+
         tags = set()
         for line in self.ingredients.select_related('food'):
-            tags.update(getattr(line.food, 'allergens', None) or [])
-        return sorted(tags)
+            if line.food is not None:
+                tags |= food_allergen_tags(line.food)
+        return sorted(tags | infer_allergens(dish_text(self)))
 
 
 class RecipeIngredient(models.Model):

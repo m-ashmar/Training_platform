@@ -32,7 +32,7 @@ from training_platform.query_params import int_param
 
 from .models import DietPlan
 from .trainer_plans import coaching_refusal, parse_meals, review, saved_plan_meals
-from .trainer_services import MealRefused, TrainerDietPlanService
+from .trainer_services import MealRefused, TrainerDietPlanService, parse_macro_split
 from .views import BadInput, _body, _id, _trainer_read_refusal, meal_refusal, service_refusal
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,8 @@ _REVIEW_CONTRACT = """
     - `plan` — `{id, status, client_id, goal, start_date, end_date, duration_days}`;
       `id` and `status` are null for a plan not yet sent.
     - `target` — `{calories, protein, carbs, fat}` a day: the plan's own (the calories
-      the trainer set, the macro grams the engine derives from them).
+      the trainer set; the macro grams the trainer set, BACKEND_BUGS B-137, or else
+      the ones the engine derives from the calories and the goal).
     - `tolerance_percent` — `{calories: 10.0, protein: 15.0, carbs: 20.0, fat: 20.0}`,
       read from the engine's policy for the plan's goal (`diet/planner/policy.py`), never
       a second number.
@@ -141,9 +142,11 @@ class TrainerDraftPlanReviewView(APIView):
     __doc__ = """
     `POST v1/trainer/diet-plans/review/` — the review of a plan NOT YET SENT (BACKEND_BUGS
     B-131): the body `POST trainer/diet-plans/` takes — `client_id`, `start_date`,
-    `meals` required; `duration_days` / `duration_weeks`, `goal`, `daily_calories` as
-    there (`template_id` is not needed). Nothing is written. The meals are checked as
-    the send checks them, except that a declared allergen is REPORTED here
+    `meals` required; `duration_days` / `duration_weeks`, `goal`, `daily_calories` and
+    the macro split `target_protein`, `target_carbs`, `target_fat` (grams, all three or
+    none, BACKEND_BUGS B-137) as there (`template_id` is not needed); a split sent is the
+    review's `target`, judged by the create's rules. Nothing is written. The meals are
+    checked as the send checks them, except that a declared allergen is REPORTED here
     (`check.allergens`), where the send refuses it with `declared_allergen`.
     200 with the answer below.
     """ + _REVIEW_CONTRACT + """
@@ -152,7 +155,10 @@ class TrainerDraftPlanReviewView(APIView):
     - 400 `missing_fields` (with `fields`); `bad_client_id`; `bad_date` (`start_date`);
       `bad_duration`; `bad_meals`; `batch_too_large` (with `limit`);
       `client_activity_level_required` (no `daily_calories` and the client has not
-      chosen an activity level); `bad_body`; `validation_error` (`duration_weeks` is
+      chosen an activity level); `bad_macro_split` (the split is not all three positive
+      numbers of grams, its energy 4P + 4C + 9F is more than 10 percent from the daily
+      calories, or its protein is outside the goal's bounds); `bad_body`;
+      `validation_error` (`duration_weeks` is
       not a number, `field_errors`); and in `meals`, with `index`: `missing_fields`,
       `bad_date`, `bad_time`, `bad_meal_type`, `date_outside_plan`, `no_food_items`,
       `bad_food_items`, `bad_food_item`, `bad_quantity`, `duplicate_food`,
@@ -196,7 +202,7 @@ class TrainerDraftPlanReviewView(APIView):
 
             goal = DietPlan.normalise_goal(body.get('goal'))
             daily_calories, goal, macros = service._plan_targets(
-                client, goal, body.get('daily_calories'))
+                client, goal, body.get('daily_calories'), parse_macro_split(body))
             end_date, _weeks = service._plan_window(
                 start_date, int_param(request.data, 'duration_weeks', default=4, minimum=1, maximum=52),
                 body.get('duration_days'))
