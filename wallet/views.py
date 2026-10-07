@@ -955,7 +955,11 @@ class ClientTransferToTrainerView(APIView):
                 request.user, idem_key,
                 idempotency.fingerprint(
                     op="transfer", trainer=trainer.id,
-                    amount=serializer.validated_data["amount"], note=note,
+                    amount=serializer.validated_data["amount"],
+                    # Only when there is one: a transfer without a note hashes exactly
+                    # as it did before notes existed, so a retry across a release still
+                    # replays instead of answering 422.
+                    **({"note": note} if note else {}),
                 ),
             )
         except idempotency.IdempotencyConflict as exc:
