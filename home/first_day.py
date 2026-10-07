@@ -127,7 +127,11 @@ def ready_programs(person, *, request, flags) -> dict | None:
 
       name, description        the product's title and description, in the reader's
                                language (the other one when that is empty)
-      goal, days_per_cycle     the program's template: its goal, training days a week
+      goal                     the row's own, untouched: one of the four `ProductGoal`
+                               codes, or null (wave-1 review R-5: the card wrote the
+                               template's raw text over it, "Hypertrophy" beside the
+                               catalogue's `build_muscle`)
+      days_per_cycle           the program's template: its training days a week
       exercises                rows the program's week holds
       trial                    true when the first `preview_days` days can be read free
                                before buying (`GET /api/v1/products/{id}/` answers them)
@@ -169,7 +173,6 @@ def ready_programs(person, *, request, flags) -> dict | None:
         card = dict(card)
         card.update({
             'name': card['title'],
-            'goal': template.goal,
             'days_per_cycle': template.days,
             'exercises': exercises,
             'trial': bool(product.preview_days),

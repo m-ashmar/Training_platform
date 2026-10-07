@@ -948,9 +948,15 @@ def test_the_goal_reads_the_same_in_python_and_in_sql(make_user):
         "Endurance": None, "x_y": None,
     }
     assert goal_code("") is None and goal_code(None) is None
-    ids = {RoutineTemplate.objects.create(name=f"gs {n}", goal=text, days=1,
-                                          created_by=trainer).pk: text
-           for n, text in enumerate(expected)}
+    # Each text is written past the model, as a row stored before the closed list holds
+    # it: the model now refuses all but the four codes on save (wave-1 review R-5,
+    # 2026-10-07), and those older rows are what the free-text reading is for.
+    ids = {}
+    for n, text in enumerate(expected):
+        row = RoutineTemplate.objects.create(name=f"gs {n}", goal="rehab", days=1,
+                                             created_by=trainer)
+        RoutineTemplate.objects.filter(pk=row.pk).update(goal=text)
+        ids[row.pk] = text
     in_sql = dict(RoutineTemplate.objects.filter(pk__in=ids)
                   .annotate(code=goal_code_expression("goal")).values_list("pk", "code"))
     for pk, text in ids.items():

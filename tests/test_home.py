@@ -261,8 +261,9 @@ def _public_template(trainer, tag):
     from routine.models import (Exercise, RoutineProduct, RoutineTemplate,
                                 RoutineTemplateExercise)
 
+    # A code: the model takes only the closed goal list (wave-1 review R-5, 2026-10-07).
     template = RoutineTemplate.objects.create(
-        name=f"ready {tag}", description="a ready programme", goal="Strength",
+        name=f"ready {tag}", description="a ready programme", goal="strength",
         days=3, created_by=trainer, is_public=True)
     exercise = Exercise.objects.create(name=f"tmpl ex {tag}", created_by=trainer)
     RoutineTemplateExercise.objects.create(template=template, exercise=exercise,

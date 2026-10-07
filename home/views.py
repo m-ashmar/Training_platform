@@ -412,7 +412,7 @@ class HomeView(APIView):
 
         {"programs": [{"id": 5,                    the PRODUCT (`/api/v1/products/5/`)
                        "name": "Strength for beginners", "description": "…",
-                       "goal": "Strength", "days_per_cycle": 3, "exercises": 18,
+                       "goal": "strength", "days_per_cycle": 3, "exercises": 18,
                        "trial": true,              `preview_days` > 0: the first days
                                                    can be read free before buying
                        "preview_days": 1,
@@ -436,7 +436,11 @@ class HomeView(APIView):
         `exercises` (rows in that week), `trial` — and `equipment` (the codes of
         `routine.models.EQUIPMENT_CHOICES` its exercises name, in that order, `[]` when
         none says), `no_equipment` (true only when EVERY exercise says `bodyweight`)
-        and `money_type: "ROUTINE_PRODUCT"` beside `price`. `weeks` and
+        and `money_type: "ROUTINE_PRODUCT"` beside `price`. `description` and `goal`
+        are the row's own values: `goal` is one of the four `ProductGoal` codes
+        (`build_muscle`, `strength`, `fat_loss`, `rehab`) or null, as on
+        `/api/v1/products/` (wave-1 review R-5: the card answered the template's raw
+        text, "Hypertrophy", where the catalogue answered `build_muscle`). `weeks` and
         `session_count` are null while the trainer has not said how many weeks it
         runs. Before products existed `id` was a public template's; no route took it
         from this card.

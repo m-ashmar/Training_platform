@@ -171,7 +171,8 @@ def test_d9_public_templates_do_not_name_a_suspended_trainer(
     tag = uuid.uuid4().hex[:6]
     trainer = make_user(f"d9_tr_{tag}", user_type="trainer")
     viewer = make_user(f"d9_c_{tag}")
-    RoutineTemplate.objects.create(name=f"d9 plan {tag}", goal="Strength", days=3,
+    # A code: the model takes only the closed goal list (wave-1 review R-5, 2026-10-07).
+    RoutineTemplate.objects.create(name=f"d9 plan {tag}", goal="strength", days=3,
                                    created_by=trainer, is_public=True)
     with django_capture_on_commit_callbacks(execute=True):
         trainer.is_active = False

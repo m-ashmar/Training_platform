@@ -22,7 +22,7 @@ Exercise.objects.create(name='TRAINER-A-SECRET-LIFT', description='private', cre
 Exercise.objects.create(name='GlobalPushup', description='global')   # created_by = NULL
 
 # trainer A's PUBLIC template
-tpl = RoutineTemplate.objects.create(name='A-PUBLIC-TEMPLATE', created_by=trA, is_public=True, goal='hypertrophy')
+tpl = RoutineTemplate.objects.create(name='A-PUBLIC-TEMPLATE', created_by=trA, is_public=True, goal='build_muscle')  # a code: the closed goal list (R-5, 2026-10-07)
 
 print("FINDING 1: does a CLIENT see another trainer's private exercise?")
 rb = auth(cli).get('/api/routine/exercises/')

@@ -15,6 +15,9 @@ import contextlib as _contextlib
 import threading as _threading
 import logging
 from training_platform.model_validation import RowValidationMixin
+# The template's goal is this closed list (`RoutineTemplate.goal`). `product_models`
+# imports nothing from this module, so loading it first is safe.
+from .product_models import ProductGoal
 
 logger = logging.getLogger(__name__)
 
@@ -1268,8 +1271,17 @@ class ExerciseSetLog(RowValidationMixin, models.Model):
 class RoutineTemplate(RowValidationMixin, models.Model):
     """
     RoutineTemplate: reusable structure for common training splits, saved by trainers.
-    Trainers can organize by goal (hypertrophy, strength, etc.).
-    
+
+    `goal` is the CLOSED list (`product_models.ProductGoal`: `build_muscle`, `strength`,
+    `fat_loss`, `rehab`; the owner, 2026-09-28 and 2026-10-07). The template route
+    lower-cases what it is sent and refuses the rest (`bad_goal`); here, the field's
+    choices refuse anything else on EVERY write — both operator consoles (their form
+    is a picker of the four) and the copy route, which the route's check never saw
+    (wave-1 review R-5: a console's "Hypertrophy" reached the home card as raw text
+    while the catalogue said `build_muscle`). A row stored before the rule keeps its
+    text and is read through `routine.products.goal_code`, but cannot be saved again
+    until its goal is one of the four (development data; the owner, 2026-10-07).
+
     Visibility Rules:
     - Public templates: Visible to all authenticated users
     - Private templates: Only visible to the creator (trainer)
@@ -1279,7 +1291,10 @@ class RoutineTemplate(RowValidationMixin, models.Model):
     """
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
-    goal = models.CharField(max_length=100, help_text="e.g. Hypertrophy, Strength, Endurance")
+    goal = models.CharField(
+        max_length=100, choices=ProductGoal.choices,
+        help_text="What the program is for: build muscle, strength, fat loss or rehab "
+                  "(the catalogue's goal filter)")
     days = models.PositiveIntegerField(default=3, help_text="Number of days in the template plan")
     #: How many weeks the program runs, as the trainer declares it (BACKEND_BUGS B-100).
     #: `days` is the week the program repeats — its training days, in order — and

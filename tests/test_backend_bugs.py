@@ -670,10 +670,11 @@ def test_b001_a_trainer_shows_a_few_public_routines_on_their_page(make_user, api
     from routine.models import RoutineTemplate
 
     trainer = make_user("bb1_pub", user_type="trainer")
+    # Codes: the model takes only the closed goal list (wave-1 review R-5, 2026-10-07).
     for i in range(8):
-        RoutineTemplate.objects.create(name=f"bb1 public {i}", goal="Strength", days=3,
+        RoutineTemplate.objects.create(name=f"bb1 public {i}", goal="strength", days=3,
                                        created_by=trainer, is_public=True)
-    RoutineTemplate.objects.create(name="bb1 private tpl", goal="Strength", days=3,
+    RoutineTemplate.objects.create(name="bb1 private tpl", goal="strength", days=3,
                                    created_by=trainer, is_public=False)
     body = api().get(f"/api/v1/trainers/{trainer.pk}/").json()
     names = [r["name"] for r in body["public_routines"]]
