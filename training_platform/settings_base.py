@@ -492,6 +492,71 @@ OPENAI_MODEL = get_env("OPENAI_MODEL", "gpt-4o-mini")
 AI_PROVIDER = get_env("AI_PROVIDER", "openai")
 HUGGINGFACE_API_TOKEN = get_env("HUGGINGFACE_API_TOKEN", "")
 
+# The AI coach's model endpoint (`ai_assistant/services/chat_service.py`, the one place
+# a model is called). The coach speaks the OpenAI Chat Completions protocol, which
+# most providers and self-hosted servers (vLLM, Ollama) also answer, so the provider
+# is configuration, not code:
+#
+#   AI_API_KEY           the provider's key. Falls back to OPENAI_API_KEY, so an
+#                        environment written before this setting keeps working.
+#   AI_BASE_URL          the provider's address, ending in `/v1`. Empty = the client
+#                        library's default (OpenAI's own API).
+#   AI_ASSISTANT_MODEL   the model's name at that provider.
+#   AI_EXTRA_BODY        optional JSON object merged into every request, for a switch
+#                        the protocol has no field for (turning a model's "thinking"
+#                        phase off is spelled differently by every provider).
+#   AI_PRICE_INPUT_PER_1M_USD / AI_PRICE_OUTPUT_PER_1M_USD
+#                        the model's price per million tokens, both or neither. They
+#                        feed the daily cost ceiling below; without them a model the
+#                        price table does not know is counted at the table's default.
+#
+# No key at all is a supported state, not an error: the app boots and the coach answers
+# every turn with the `config_error` code instead of calling anything.
+AI_API_KEY = get_env("AI_API_KEY", "") or OPENAI_API_KEY
+AI_BASE_URL = get_env("AI_BASE_URL", "").strip()
+
+
+def _ai_extra_body():
+    """`AI_EXTRA_BODY` as a dict. Malformed JSON stops the boot: a typo here would
+    otherwise be a silently ignored switch, found only on the provider's invoice."""
+    import json
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    raw = get_env("AI_EXTRA_BODY", "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"AI_EXTRA_BODY is not valid JSON: {exc}") from None
+    if not isinstance(value, dict):
+        raise ImproperlyConfigured("AI_EXTRA_BODY must be a JSON object, e.g. {}")
+    return value
+
+
+def _ai_price_per_1m_usd():
+    """The configured model's price as `{"input": ..., "output": ...}` strings, or None.
+    One without the other stops the boot: half a price is a wrong cost ceiling."""
+    from decimal import Decimal, InvalidOperation
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    names = ("AI_PRICE_INPUT_PER_1M_USD", "AI_PRICE_OUTPUT_PER_1M_USD")
+    raw = [get_env(name, "").strip() for name in names]
+    if not any(raw):
+        return None
+    if not all(raw):
+        raise ImproperlyConfigured(f"Set both {names[0]} and {names[1]}, or neither.")
+    for name, value in zip(names, raw):
+        try:
+            if Decimal(value) < 0:
+                raise InvalidOperation
+        except InvalidOperation:
+            raise ImproperlyConfigured(f"{name} must be a number >= 0, got {value!r}") from None
+    return {"input": raw[0], "output": raw[1]}
+
+
 AI_ASSISTANT_CONFIG = {
     "MODEL": get_env("AI_ASSISTANT_MODEL", "gpt-4o-mini"),
     "MAX_RESPONSE_TOKENS": 2000,
@@ -507,6 +572,9 @@ AI_ASSISTANT_CONFIG = {
     "HISTORY_BUDGET": 3000,
     "TOOL_RESULTS_BUDGET": 2000,
     "MAX_INPUT_LENGTH": 2000,
+    # Provider-specific request switches and the model's price: see the notes above.
+    "EXTRA_BODY": _ai_extra_body(),
+    "PRICE_PER_1M_USD": _ai_price_per_1m_usd(),
 }
 
 # ========================

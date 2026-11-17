@@ -21,6 +21,37 @@ PRICING = {
     "gpt-5-nano": {"input": Decimal("0.10"), "output": Decimal("0.40")},
 }
 
+#: What a model this table does not know is counted at.
+DEFAULT_PRICING_MODEL = "gpt-4o-mini"
+_UNPRICED_WARNED: set = set()
+
+
+def pricing_for(model: str, config: dict) -> dict:
+    """The per-1M-token price the cost ceiling counts `model` at.
+
+    The configured price wins (`AI_ASSISTANT_CONFIG['PRICE_PER_1M_USD']`, from
+    `AI_PRICE_INPUT_PER_1M_USD` / `AI_PRICE_OUTPUT_PER_1M_USD`): the provider is
+    configuration now, and a price belongs beside the model it is the price of rather
+    than in a table of one vendor's names. Then the table. A model that is in neither
+    is counted at `DEFAULT_PRICING_MODEL`'s price, as it always was — but no longer
+    silently: `DAILY_COST_LIMIT_USD` is enforced on these numbers, so a wrong price is
+    a wrong ceiling, and the log says which model has none.
+    """
+    configured = config.get('PRICE_PER_1M_USD')
+    if configured:
+        return {"input": Decimal(str(configured["input"])),
+                "output": Decimal(str(configured["output"]))}
+    if model in PRICING:
+        return PRICING[model]
+    if model not in _UNPRICED_WARNED:
+        # Once per process: a tracker is built for every socket and every hourly task.
+        _UNPRICED_WARNED.add(model)
+        logger.warning(
+            "No price configured for AI model %r: counting it at %s prices. Set "
+            "AI_PRICE_INPUT_PER_1M_USD and AI_PRICE_OUTPUT_PER_1M_USD.",
+            model, DEFAULT_PRICING_MODEL)
+    return PRICING[DEFAULT_PRICING_MODEL]
+
 
 class CostTracker:
     """Track and aggregate AI usage costs."""
@@ -28,7 +59,7 @@ class CostTracker:
     def __init__(self):
         config = getattr(settings, 'AI_ASSISTANT_CONFIG', {})
         self.model = config.get('MODEL', 'gpt-4o-mini')
-        self.pricing = PRICING.get(self.model, PRICING["gpt-4o-mini"])
+        self.pricing = pricing_for(self.model, config)
 
     def estimate_cost(self, input_tokens: int, output_tokens: int) -> Decimal:
         """Estimate cost in USD for a single interaction."""

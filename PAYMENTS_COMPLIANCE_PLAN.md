@@ -306,7 +306,12 @@ is locked (spec §8); the numbers above are the defaults.
    (`social/standing.py MIN_PARTICIPANTS_FOR_WINNER`, counted at the settlement and
    recorded on `Challenge.settled_active_participants`; below 5 the challenge settles
    with no winner). The AI provider question (OpenAI not serving Syria, a possible move to
-   Gemini) is POSTPONED by the owner: nothing was built.
+   Gemini) is POSTPONED by the owner: nothing was built. (2026-11-17: the provider is
+   now configuration, not code — `AI_API_KEY`, `AI_BASE_URL`, `AI_ASSISTANT_MODEL`,
+   `AI_EXTRA_BODY`; with no key the coach answers `config_error` instead of killing its
+   socket; `manage.py ai_coach_eval` compares models on a fixed set of Arabic questions.
+   WHICH provider is still the owner's decision, and naming it changes
+   `privacy/disclosure.py` `ai_provider`, the inventory and the policy.)
 
 9. **Left by the builds of 2026-09-24 (evening)** (trainer money, agents, routine
    products, the program builder, trainer nutrition; each branch reviewed adversarially

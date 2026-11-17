@@ -213,10 +213,24 @@ go in `fly.toml [env]`, but a secret there is readable in the repository.
 | `FIREBASE_CREDENTIALS_JSON` | | | yes | `"$(base64 -i service-account.json)"`. Unset: the app boots with push off and logs a warning; set to something unusable: boot fails |
 | `FIREBASE_PROJECT_ID` | | from the key | | |
 | `FIREBASE_CREDENTIALS_PATH` | | | | Development only; a path cannot reach a Fly machine |
-| `OPENAI_API_KEY` | | | yes | The AI features' provider key |
-| `AI_PROVIDER`, `OPENAI_MODEL`, `AI_ASSISTANT_MODEL` | | `openai`, `gpt-4o-mini` | | The provider's name is never shown to users (owner, 2026-09-24) |
+| `AI_API_KEY` | | `OPENAI_API_KEY` | yes | The AI coach's provider key. Unset (and no `OPENAI_API_KEY`): the app boots with the coach off, and every turn on `ws/ai/chat/` answers `config_error` |
+| `OPENAI_API_KEY` | | | yes | The older name of the same key; read when `AI_API_KEY` is unset |
+| `AI_BASE_URL` | | the client library's (OpenAI) | | The provider's address, ending in `/v1`. Any service or self-hosted server that speaks the OpenAI Chat Completions protocol |
+| `AI_ASSISTANT_MODEL` | | `gpt-4o-mini` | | The model's name at that provider. The provider's name is never shown to users (owner, 2026-09-24) |
+| `AI_EXTRA_BODY` | | | | A JSON object merged into every request, for a provider-specific switch such as turning a model's "thinking" off. Malformed: boot fails |
+| `AI_PRICE_INPUT_PER_1M_USD`, `AI_PRICE_OUTPUT_PER_1M_USD` | | the price table's | | The model's price, both or neither; the daily cost ceiling counts on it. One without the other: boot fails |
+| `AI_PROVIDER`, `OPENAI_MODEL` | | `openai`, `gpt-4o-mini` | | Read by nothing; kept so an existing environment still loads |
 | `HUGGINGFACE_API_TOKEN` | | | yes | Only for the Hugging Face provider |
 | `AI_TRAINING_RETENTION_DAYS` | | `365` | | Anonymous training copies are purged after this |
+
+Before a provider or model goes live, compare it on the coach's own questions:
+`python manage.py ai_coach_eval --user <a test account> --out report.md` (its docstring
+says what it measures and what it writes to that account). A new provider also changes
+`training_platform/privacy/disclosure.py` `ai_provider`, then the data inventory and
+the privacy policy (`docs/store/privacy_labels.md`).
+
+| Variable | | Default | Secret | What |
+|---|---|---|---|---|
 | `EDAMAM_APP_ID`, `EDAMAM_APP_KEY` | | | yes | Only with `DIET_EXTERNAL_FOOD_SEARCH=True` |
 | `DIET_EXTERNAL_FOOD_SEARCH`, `DIET_PLANNER_STRICT` | | `False` | | |
 
