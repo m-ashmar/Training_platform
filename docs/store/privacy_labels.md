@@ -23,8 +23,8 @@ Marks used below:
 |---|---|---|
 | Advertising, ad SDKs, tracking, data brokers | None. No ad or tracking SDK, pixel or attribution service in the backend (searched for Facebook, AppsFlyer, Adjust, Mixpanel, Segment, Amplitude, Google Analytics, AdMob, IDFA / advertising IDs, Branch, OneSignal, PostHog: no match outside tests). No data is sold or given to anyone for their own use. | `requirements.txt`; the only external script in any page is chart.js in one operator console page |
 | Health data used for advertising or data mining (Apple 5.1.3) | No. It is used to plan and track the person's own training and nutrition, shown to their own trainer, and sent to the AI provider only after consent. | `data_inventory.md`, recipients table |
-| Who else receives data | The person's trainer, other users (only what the person publishes), and service providers that process it for the platform: Fly.io, the database and Redis providers, Google Cloud Storage, Firebase Cloud Messaging, the email provider, ShamCash, the AI provider (after consent), Sentry (optional). | `training_platform/privacy/disclosure.py` |
-| Encrypted in transit | Yes, on the server: HTTP is redirected to HTTPS and HSTS is sent. **[APP]** the release build calls only `https://` and `wss://` addresses. | `settings_production.py` (`SECURE_SSL_REDIRECT`, `SECURE_HSTS_SECONDS`), `fly.toml` (`force_https`) |
+| Who else receives data | The person's trainer, other users (only what the person publishes), and service providers that process it for the platform: the hosting provider (Hetzner; the database and Redis run on its server), the file storage provider (Hetzner Object Storage), Firebase Cloud Messaging, the email provider, ShamCash, the AI provider (after consent), Sentry (optional). | `training_platform/privacy/disclosure.py` |
+| Encrypted in transit | Yes, on the server: HTTP is redirected to HTTPS and HSTS is sent. **[APP]** the release build calls only `https://` and `wss://` addresses. | `settings_production.py` (`SECURE_SSL_REDIRECT`, `SECURE_HSTS_SECONDS`), `deploy/caddy/Caddyfile` (Caddy serves HTTPS only and redirects HTTP), `fly.toml` (`force_https`) |
 | Encrypted at rest (beyond the provider's disk encryption) | Encrypted columns: a client's injury note and injury areas, the note sent with a coaching request, a trainer's ShamCash address and holder name (and each withdrawal's copy of them), an agent's API secret. Hashed: passwords, sign-up codes, reset codes. Identity documents sit in a private bucket and are served only as five-minute signed links. | `training_platform/encrypted_fields.py`, `users/models.py`, `payouts/models.py`, `wallet/models.py` `AgentAPIKey`, `trainer_verification/storage.py` |
 | Account deletion in the app | Yes: `DELETE /api/privacy/erase/?confirm=ERASE` (preview with `GET`). **[APP]** reachable at Me > Privacy and data > Delete my account, as the web page says. | `training_platform/privacy/views.py` |
 | Account deletion without the app | Yes: `https://<PUBLIC_PAGES_BASE_URL>/legal/delete-account/?lang=ar` (and `?lang=en`). The app receives the same URL as `links.account_deletion` from `GET /api/v1/config/capabilities`. | `legal/views.py`, `legal/links.py` |
@@ -39,7 +39,7 @@ Marks used below:
 |---|---|---|
 | `SENTRY_DSN` | **[OWNER]** unset or set | When set: server error reports, without personal data (`send_default_pii=False`). Declare Apple "Diagnostics > Crash Data" (not linked, App Functionality) only if the app also sends crash reports **[APP]**; the server's own error reports are not data the app collects from the device. |
 | `DIET_EXTERNAL_FOOD_SEARCH` | off | When on, the text of a food search is sent to Edamam, with no account identifier and not stored by the platform. Consider Apple "Search History" (not linked) / Google "App activity > In-app search history". |
-| The AI provider (`OPENAI_API_KEY`) | OpenAI | A new provider changes `disclosure.py` `ai_provider`, then the inventory and the policy. Its terms must forbid using the data for its own purposes, or Google's "shared" answer changes to Yes. **[OWNER]** |
+| The AI provider (`AI_BASE_URL`, `AI_ASSISTANT_MODEL`, `AI_API_KEY`) | Cloudflare Workers AI, running the open model Gemma (the owner, 2026-11-17) | A new provider changes `disclosure.py` `ai_provider`, then the inventory and the policy. Its terms must forbid using the data for its own purposes, or Google's "shared" answer changes to Yes. **[OWNER]** |
 | `firebase_messaging` in the app | not in `pubspec.yaml` on 2026-09-27 **[APP]** | When push is wired, the push token is collected (already declared below as Device ID). |
 
 ## 3. Apple: App Privacy
@@ -109,7 +109,7 @@ Judgment calls, for the owner to confirm or change:
 
 **Shared: No, for every type.** Google counts as "sharing" a transfer to a third party
 for its own use. Every recipient here is either a service provider processing for the
-platform (Fly.io, the database provider, Google Cloud Storage, Firebase, the email
+platform (the hosting provider, the file storage provider, Firebase, the email
 provider, ShamCash, the AI provider) or another user shown data by the person's own
 action (publishing a post, asking a trainer to coach them), which Google excludes.
 **[OWNER]** keep the AI provider's terms on file: if they allow the provider to use the

@@ -18,8 +18,8 @@ What the platform's server holds about a person, why, who else receives it, what
 
 | Provider | What it does |
 |---|---|
-| Fly.io | Runs the servers (`fly.toml`, region Amsterdam). Every request and every stored row passes through it. |
-| The PostgreSQL and Redis providers | Hold the database and the caches. Chosen by the owner at deployment. |
+| The hosting provider | Runs the servers. Every request and every stored row passes through it. On the single-server deployment (`deploy/`) it is Hetzner, in Germany; `fly.toml` describes the same processes on Fly.io (Amsterdam). |
+| The PostgreSQL and Redis providers | Hold the database and the caches. On the single-server deployment both run on the hosting provider's server and there is no separate provider; otherwise chosen by the owner at deployment. |
 | Sentry (optional) | Server error reports, only when `SENTRY_DSN` is set, and with `send_default_pii=False` (no email, no request body, no IP). |
 | AWS Secrets Manager (optional) | Holds the server's own secrets when `AWS_SECRET_NAME` is set. No personal data. |
 
@@ -34,10 +34,10 @@ Who, besides those providers and the platform's operators, receives data, and wh
 | `community` | Other signed-in users | person | What a person publishes: username, name and photo, posts, comments, likes, follows, challenges, leaderboard places and badges. Hidden from anyone they blocked or who blocked them (`moderation.services.blocked_ids`); a suspended account leaves every public surface. | `profile`, `media_kit`, `posts`, `comments`, `achievements_earned`, `social_achievements`, `challenges_created`, `challenge_participation`, `post_likes`, `comment_likes`, `follows`, `agent_profile`, `routine_products` |
 | `public` | Anyone, without signing in | person | The public trainer directory (`GET /api/v1/trainers/`, `trainers/public/`): a trainer's card — name, photo, bio, specialisations, certifications, experience and the proof numbers, the price only on a build that may show it. | `profile`, `media_kit` |
 | `agent` | The agent who tops a wallet up | person | The client's name and account number and the amount, on the top-up and its receipt (`wallet/agents.py person`). Agents are accounts the platform creates, never self-registered. | `transactions` |
-| `ai_provider` | The AI service provider | service provider | Only after the person grants AI consent (`moderation.AIConsent`; every AI route refuses without it): the messages of the conversation, and what the coach reads to answer — the profile (name, age, gender, height, weight, BMI, goals, injury note, activity level, the trainer's name), workouts and set logs, the routine, the diet plan and meals, and the coach's own notes about the person (`ai_assistant/services/context_compiler.py`, `ai_assistant/tools/`). The app names no provider (the owner's decision, 2026-09-24); the one configured is OpenAI (`OPENAI_API_KEY`, `OPENAI_MODEL`). Nothing else is sent to an AI: diet plans are built by the platform's own rules. | `profile`, `workout_sessions`, `exercise_progress`, `routine_progress`, `day_outcomes`, `diet_plans`, `daily_progress`, `meals`, `meal_components`, `ai_insights`, `routines_created`, `assistant_messages`, `exercise_set_logs`, `routine_exercises` |
+| `ai_provider` | The AI service provider | service provider | Only after the person grants AI consent (`moderation.AIConsent`; every AI route refuses without it): the messages of the conversation, and what the coach reads to answer — the profile (name, age, gender, height, weight, BMI, goals, injury note, activity level, the trainer's name), workouts and set logs, the routine, the diet plan and meals, and the coach's own notes about the person (`ai_assistant/services/context_compiler.py`, `ai_assistant/tools/`). The app names no provider (the owner's decision, 2026-09-24). The provider is configuration (`AI_BASE_URL`, `AI_ASSISTANT_MODEL`, `AI_API_KEY`); the owner chose Gemma, an open model, served by Cloudflare Workers AI (2026-11-17), whose terms say it neither stores the content nor trains on it. Nothing else is sent to an AI: diet plans are built by the platform's own rules. | `profile`, `workout_sessions`, `exercise_progress`, `routine_progress`, `day_outcomes`, `diet_plans`, `daily_progress`, `meals`, `meal_components`, `ai_insights`, `routines_created`, `assistant_messages`, `exercise_set_logs`, `routine_exercises` |
 | `push_provider` | Google Firebase Cloud Messaging | service provider | The device's push token and the title and text of each push (`notifications/channels/fcm.py`), which can carry a person's name and the first words of a chat message. | `devices`, `messages_sent`, `notifications` |
 | `email_provider` | The email delivery provider | service provider | The email address and the sign-up or password-reset code — the only emails the server sends (`users/utils.py`). The provider is the owner's choice (`EMAIL_HOST`). | `profile`, `notification_emails`, `otp_verifications`, `password_reset_tokens` |
-| `file_storage` | Google Cloud Storage | service provider | The files people upload: profile photos, trainers' media, chat photos, voice notes and videos, post and challenge images, and trainers' verification documents (a separate private bucket). Production refuses to start without it (`MEDIA_BACKEND=gcs`, `settings_production.py`). | `profile`, `media_kit`, `verification_documents`, `posts`, `messages_sent`, `exercises_created`, `challenges_created`, `routine_products` |
+| `file_storage` | The file storage provider | service provider | The files people upload: profile photos, trainers' media, chat photos, voice notes and videos, post and challenge images, and trainers' verification documents (under a private prefix, or in a bucket of their own). Production refuses to start without object storage (`MEDIA_BACKEND`, `settings_production.py`): an S3-compatible store (`s3`), which is Hetzner Object Storage on the single-server deployment, or Google Cloud Storage (`gcs`). Objects are private and are read through signed URLs that expire. | `profile`, `media_kit`, `verification_documents`, `posts`, `messages_sent`, `exercises_created`, `challenges_created`, `routine_products` |
 | `payment_gateway` | ShamCash | service provider | For a payment: its reference, amount and currency (`subscription/gateways/shamcash.py`); the platform reads the transfers its own merchant account received. For a trainer's withdrawal: the trainer's ShamCash address and the amount, which an operator sends through ShamCash. | `payout_methods`, `withdrawals`, `payments` |
 
 ## Data types, as the stores name them
@@ -169,7 +169,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Whose.** The account's own row.
 
-**Who else receives it.** The client's trainer (`coach`); The trainer's clients (`clients`); Other signed-in users (`community`); Anyone, without signing in (`public`); The AI service provider (`ai_provider`); The email delivery provider (`email_provider`); Google Cloud Storage (`file_storage`).
+**Who else receives it.** The client's trainer (`coach`); The trainer's clients (`clients`); Other signed-in users (`community`); Anyone, without signing in (`public`); The AI service provider (`ai_provider`); The email delivery provider (`email_provider`); The file storage provider (`file_storage`).
 
 **Data types.** Name (`name`); Email address (`email`); Phone number (`phone`); Account identifiers (`user_ids`); Date of birth, age and gender (`other_personal`); Health information (`health`); Fitness and training activity (`fitness`); Photos and videos (`photos_videos`); Posts, comments and other content you create (`user_content`).
 
@@ -205,7 +205,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Whose.** Rows whose `person` is the account.
 
-**Who else receives it.** Anyone, without signing in (`public`); Other signed-in users (`community`); The trainer's clients (`clients`); Google Cloud Storage (`file_storage`).
+**Who else receives it.** Anyone, without signing in (`public`); Other signed-in users (`community`); The trainer's clients (`clients`); The file storage provider (`file_storage`).
 
 **Data types.** Photos and videos (`photos_videos`).
 
@@ -223,7 +223,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Whose.** Rows whose `application__trainer` is the account.
 
-**Who else receives it.** Google Cloud Storage (`file_storage`).
+**Who else receives it.** The file storage provider (`file_storage`).
 
 **Data types.** Identity and qualification documents (`documents`).
 
@@ -459,7 +459,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Whose.** Rows whose `author` is the account.
 
-**Who else receives it.** Other signed-in users (`community`); Google Cloud Storage (`file_storage`).
+**Who else receives it.** Other signed-in users (`community`); The file storage provider (`file_storage`).
 
 **Data types.** Posts, comments and other content you create (`user_content`); Photos and videos (`photos_videos`).
 
@@ -621,7 +621,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Whose.** Rows whose `sender` is the account.
 
-**Who else receives it.** The client's trainer (`coach`); The trainer's clients (`clients`); Google Firebase Cloud Messaging (`push_provider`); Google Cloud Storage (`file_storage`).
+**Who else receives it.** The client's trainer (`coach`); The trainer's clients (`clients`); Google Firebase Cloud Messaging (`push_provider`); The file storage provider (`file_storage`).
 
 **Data types.** Chat messages (`messages`); Photos and videos (`photos_videos`); Voice notes (`audio`).
 
@@ -1039,7 +1039,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Whose.** Rows whose `created_by` is the account.
 
-**Who else receives it.** The trainer's clients (`clients`); Google Cloud Storage (`file_storage`).
+**Who else receives it.** The trainer's clients (`clients`); The file storage provider (`file_storage`).
 
 **Data types.** Posts, comments and other content you create (`user_content`); Photos and videos (`photos_videos`).
 
@@ -1093,7 +1093,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Whose.** Rows whose `creator` is the account.
 
-**Who else receives it.** Other signed-in users (`community`); Google Cloud Storage (`file_storage`).
+**Who else receives it.** Other signed-in users (`community`); The file storage provider (`file_storage`).
 
 **Data types.** Posts, comments and other content you create (`user_content`); Photos and videos (`photos_videos`).
 
@@ -1385,7 +1385,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Whose.** Rows whose `trainer` is the account.
 
-**Who else receives it.** Other signed-in users (`community`); Google Cloud Storage (`file_storage`).
+**Who else receives it.** Other signed-in users (`community`); The file storage provider (`file_storage`).
 
 **Data types.** Posts, comments and other content you create (`user_content`); Photos and videos (`photos_videos`).
 
