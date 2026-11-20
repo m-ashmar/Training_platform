@@ -1,6 +1,13 @@
 # Deploy Pipeline — Training Platform
 
 ## Platform
+**The first deployment is one Hetzner server, not Fly.io** (2026-11-20: Fly.io, Google
+Cloud and the managed databases refuse a Syrian company). It is `deploy/` (Docker
+Compose: Postgres, Redis, web, worker, beat, Caddy) with media in an S3-compatible
+bucket; the runbook is `DEPLOY_CHECKLIST.md` section 12. `fly.toml` stays, and
+`tests/test_single_server_deploy.py` keeps the two process lists identical: change a
+command in one and it fails until the other says the same.
+
 **Fly.io** — containerized Django (ASGI/Daphne) via Docker.
 
 - App name: `training-platform-api`

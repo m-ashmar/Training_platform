@@ -4,6 +4,11 @@ The runbook for putting the API on Fly.io, written from the final configuration 
 2026-09-28 (Django 5.2 LTS, three process groups, object-storage media, no volume). Read
 it top to bottom the first time; later deploys are section 5 alone.
 
+**The first deployment is NOT on Fly.io.** Fly.io, Google Cloud and the managed
+database services bill through processors that refuse a Syrian company, so it runs on
+one Hetzner server from `deploy/` (section 12), with an S3-compatible bucket for media.
+Sections 3, 4, 6, 7, 8 and 9 hold for both; section 12 says what replaces the rest.
+
 `enforce_production_safety()` (`training_platform/settings_production.py`) stops the
 process at boot when the configuration cannot work. It prints every problem at once, as
 `PRODUCTION SAFETY CHECK FAILED:` followed by one line per problem. When a deploy fails,
@@ -22,6 +27,7 @@ read that block first: it names the variable.
 | 9 | Backup and restore |
 | 10 | Staging |
 | 11 | CI, the image, the lock |
+| 12 | One server instead of Fly.io (`deploy/`): what replaces sections 2, 5 and 10 |
 
 ## 1. What the owner chooses first
 
@@ -88,7 +94,8 @@ already names a database. The broker's server MUST be `maxmemory-policy noevicti
 
 ### 2.4 Media buckets and the service account
 Production refuses to boot on the local filesystem backend (`MEDIA_BACKEND` must be
-`gcs`).
+`gcs` or `s3`). This section is Google Cloud Storage; an S3-compatible store is section
+12.2.
 
 ```bash
 gcloud storage buckets create gs://<bucket> --location=europe-west4 \
@@ -178,9 +185,16 @@ go in `fly.toml [env]`, but a secret there is readable in the repository.
 ### 3.5 Media
 | Variable | | Default | Secret | What |
 |---|---|---|---|---|
-| `MEDIA_BACKEND` | R | `local` (refused) | | Must be `gcs` |
-| `GS_BUCKET_NAME` | R | | | |
-| `GS_CREDENTIALS_JSON` | R | | yes | The service account key file, as JSON text |
+| `MEDIA_BACKEND` | R | `local` (refused) | | `gcs` (Google Cloud Storage) or `s3` (any S3-compatible store) |
+| `GS_BUCKET_NAME` | R* | | | With `gcs` |
+| `GS_CREDENTIALS_JSON` | R* | | yes | With `gcs`. The service account key file, as JSON text |
+| `S3_BUCKET_NAME` | R* | | | With `s3`. The bucket must be private |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | R* | | yes | With `s3`. The bucket's key pair; never the process's ambient AWS identity |
+| `S3_ENDPOINT_URL` | | AWS | | With `s3`. The store's address, `https://` only (Hetzner: `https://<location>.your-objectstorage.com`) |
+| `S3_REGION_NAME` | | | | With `s3`. Hetzner: the location code (`fsn1`, `nbg1`, `hel1`) |
+| `S3_ADDRESSING_STYLE` | | `virtual` | | `virtual` (`bucket.host/key`) or `path` (`host/bucket/key`) |
+| `S3_LOCATION` | | bucket root | | A prefix inside the bucket |
+| `VERIFICATION_S3_BUCKET_NAME` | R* | the media bucket | | Required when `MEDIA_PUBLIC_APP_CONTENT=True` |
 | `GS_PROJECT_ID` | | from the key | | |
 | `GS_LOCATION` | | bucket root | | A prefix inside the bucket |
 | `GS_CREDENTIALS_SECRET_NAME` | | `GS_CREDENTIALS_JSON` | | Only to read the key under another name |
@@ -213,10 +227,24 @@ go in `fly.toml [env]`, but a secret there is readable in the repository.
 | `FIREBASE_CREDENTIALS_JSON` | | | yes | `"$(base64 -i service-account.json)"`. Unset: the app boots with push off and logs a warning; set to something unusable: boot fails |
 | `FIREBASE_PROJECT_ID` | | from the key | | |
 | `FIREBASE_CREDENTIALS_PATH` | | | | Development only; a path cannot reach a Fly machine |
-| `OPENAI_API_KEY` | | | yes | The AI features' provider key |
-| `AI_PROVIDER`, `OPENAI_MODEL`, `AI_ASSISTANT_MODEL` | | `openai`, `gpt-4o-mini` | | The provider's name is never shown to users (owner, 2026-09-24) |
+| `AI_API_KEY` | | `OPENAI_API_KEY` | yes | The AI coach's provider key. Unset (and no `OPENAI_API_KEY`): the app boots with the coach off, and every turn on `ws/ai/chat/` answers `config_error` |
+| `OPENAI_API_KEY` | | | yes | The older name of the same key; read when `AI_API_KEY` is unset |
+| `AI_BASE_URL` | | the client library's (OpenAI) | | The provider's address, ending in `/v1`. Any service or self-hosted server that speaks the OpenAI Chat Completions protocol |
+| `AI_ASSISTANT_MODEL` | | `gpt-4o-mini` | | The model's name at that provider. The provider's name is never shown to users (owner, 2026-09-24) |
+| `AI_EXTRA_BODY` | | | | A JSON object merged into every request, for a provider-specific switch such as turning a model's "thinking" off. Malformed: boot fails |
+| `AI_PRICE_INPUT_PER_1M_USD`, `AI_PRICE_OUTPUT_PER_1M_USD` | | the price table's | | The model's price, both or neither; the daily cost ceiling counts on it. One without the other: boot fails |
+| `AI_PROVIDER`, `OPENAI_MODEL` | | `openai`, `gpt-4o-mini` | | Read by nothing; kept so an existing environment still loads |
 | `HUGGINGFACE_API_TOKEN` | | | yes | Only for the Hugging Face provider |
 | `AI_TRAINING_RETENTION_DAYS` | | `365` | | Anonymous training copies are purged after this |
+
+Before a provider or model goes live, compare it on the coach's own questions:
+`python manage.py ai_coach_eval --user <a test account> --out report.md` (its docstring
+says what it measures and what it writes to that account). A new provider also changes
+`training_platform/privacy/disclosure.py` `ai_provider`, then the data inventory and
+the privacy policy (`docs/store/privacy_labels.md`).
+
+| Variable | | Default | Secret | What |
+|---|---|---|---|---|
 | `EDAMAM_APP_ID`, `EDAMAM_APP_KEY` | | | yes | Only with `DIET_EXTERNAL_FOOD_SEARCH=True` |
 | `DIET_EXTERNAL_FOOD_SEARCH`, `DIET_PLANNER_STRICT` | | `False` | | |
 
@@ -350,19 +378,14 @@ A beat entry naming an unregistered task is skipped silently, so the last line m
 1 or more.
 
 **Prove the bucket, first deploy only**, before anyone uploads. The suite runs on the
-filesystem backend, so this is the first time the GCS path runs:
+filesystem backend, so this is the first time the object-storage path runs:
 ```bash
-fly ssh console -C "python manage.py shell -c \"
-from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
-from training_platform.media_storage import media_url
-name = default_storage.save('healthcheck/probe.txt', ContentFile(b'ok'))
-print(type(default_storage).__name__)          # SignedGoogleCloudStorage
-print(media_url(default_storage.open(name)))   # a URL with X-Goog-Signature=...
-default_storage.delete(name)\""
+fly ssh console -C "python manage.py check_media_storage"
 ```
-The class must be the GCS one, the URL must carry a signature, and fetching it must
-return the bytes while the same URL without its query string answers 403.
+For the media storage and for the verification-document storage it uploads a probe,
+reads it back through a signed URL, requires the SAME address without its signature to
+be refused, and deletes it. It exits non-zero and names the step that failed. A bucket
+that serves the unsigned read is public: fix that before anything is uploaded.
 
 **The journeys, on STAGING only** (it writes a checkout, a post):
 ```bash
@@ -499,3 +522,73 @@ Then section 6 (`bootstrap_platform`, `seed_review_accounts`) and section 7, inc
   does not backfill posters for videos already marked ready.
 - `collectstatic` runs at build time under `settings_build`; nothing else in the build
   needs a secret.
+
+## 12. One server instead of Fly.io (`deploy/`)
+
+The same image and the same three processes, on one machine with Docker Compose:
+Postgres and Redis beside the app, Caddy in front for HTTPS, media in an S3-compatible
+bucket. What it does NOT give: a second machine (a server failure is an outage until it
+is rebuilt), a managed database with point-in-time recovery, or zero-downtime deploys.
+It is the right size for staging and a soft launch.
+
+| File | What |
+|---|---|
+| `deploy/docker-compose.yml` | `db`, `redis`, `migrate` (runs once, before anything serves), `web`, `worker`, `beat`, `caddy`. Only Caddy publishes ports |
+| `deploy/caddy/Caddyfile` | HTTPS for `API_DOMAIN`, certificates from Let's Encrypt ONLY (Caddy's default fallback, ZeroSSL, refuses Syria) |
+| `deploy/setup.sh` | Asks for what only the owner knows, generates every key on the server, writes `deploy/.env` (mode 600). Never overwrites it |
+| `deploy/env.example` | The shape of that file |
+
+### 12.1 Before the server
+- A DNS `A` record for the API host pointing at the server. In Cloudflare it must be
+  **DNS only** (grey cloud): Let's Encrypt validates over port 80, and a proxy in
+  front would also make `NUM_PROXIES` 2.
+- The server's firewall allows TCP 22, 80 and 443 and nothing else. Postgres and Redis
+  are not published, and a published Docker port bypasses `ufw`, which is why the
+  compose file publishes only Caddy.
+- The sending domain is verified at the email provider (section 2.5). Use port 587,
+  the default: Hetzner blocks outgoing 25 and 465 on new accounts.
+
+### 12.2 The bucket
+Create it PRIVATE, in the same location as the server, and make one key pair for it
+(Hetzner: the project's Security page, "S3 credentials"; the secret is shown once).
+`MEDIA_BACKEND=s3` is set by the compose file. Nothing writes a public ACL, URLs are
+SigV4 signatures that expire (`MEDIA_SIGNED_URL_TTL`), and uploads are sent without the
+optional checksum trailer newer AWS SDKs add, which Hetzner's store refused in 2025
+(`training_platform/s3_storage.py`). Section 7's `check_media_storage` is the proof.
+
+### 12.3 Deploy
+```bash
+git clone --branch spec/payments-compliance <repository> yallagym && cd yallagym/deploy
+./setup.sh                      # once. Then save a copy of deploy/.env in the vault
+docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
+docker compose build web        # ~10 minutes the first time
+docker compose up -d            # migrate, then web, worker, beat, caddy
+docker compose ps -a            # migrate: Exited (0). Everything else: Up / healthy
+```
+Later deploys: `git pull && docker compose build web && docker compose up -d`. The
+containers are replaced one after another, so expect a few seconds of refused
+connections; a failed migration stops there with the old containers still running.
+
+Commands that sections 6 and 7 write as `fly ssh console -C "<command>"` are
+`docker compose exec -u appuser web <command>` here (`-u appuser`: `exec` does not go
+through the entrypoint, so without it the command would run as root):
+```bash
+docker compose exec -u appuser web python manage.py bootstrap_platform
+docker compose exec -u appuser web python manage.py check_catalogue
+docker compose exec -u appuser web python manage.py check_media_storage
+docker compose exec -u appuser web python manage.py createsuperuser
+docker compose logs -f --tail=100 web worker beat
+```
+
+### 12.4 What is different from Fly.io
+| | Fly.io (sections 2, 5, 10) | One server |
+|---|---|---|
+| Secrets | `fly secrets set`, write-only | `deploy/.env`, mode 600, readable by root on the server. The vault copy is still the one that matters (section 4) |
+| Database | Managed, PITR | The `pgdata` volume. Turn on the provider's server backups, AND take section 9's `pg_dump` off the server: `docker compose exec -T db pg_dump -U yallagym --format=custom yallagym > yallagym-$(date -u +%F).dump` |
+| Redis | Managed, `noeviction` | The `redis` service, started with `--maxmemory-policy noeviction` and a password |
+| TLS | Fly's edge | Caddy, Let's Encrypt only. The certificate lives in the `caddy_data` volume |
+| Client IP | `NUM_PROXIES=1` (Fly's edge) | `NUM_PROXIES=1` (Caddy). 2 if a CDN is put in front |
+| Staging and production | Two apps | Two servers, each with its OWN `deploy/.env`: never copy keys between them |
+
+Not automated yet: the off-server database dump (a cron job on the host), and a
+restore drill on this layout.

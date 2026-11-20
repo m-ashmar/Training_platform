@@ -15,9 +15,12 @@ enforced here rather than remembered by callers:
      `training_platform.gcs_storage.PrivateDocumentGoogleCloudStorage`: a private
      prefix in `VERIFICATION_GS_BUCKET_NAME` (the media bucket unless one is named, and
      production refuses to boot with the media bucket when that bucket serves public
-     app content — `settings_production.enforce_production_safety`).
+     app content — `settings_production.enforce_production_safety`);
+   * on an S3-compatible store (`MEDIA_BACKEND=s3`) it is
+     `training_platform.s3_storage.PrivateDocumentS3Storage`, with the same private
+     prefix and the same rule, in `VERIFICATION_S3_BUCKET_NAME`.
 
-   Neither backend has a public URL: `public_url()` raises, so
+   No backend has a public URL: `public_url()` raises, so
    `media_url(..., public=True)` fails closed instead of handing out a permanent link.
 
 2. **Short-lived signed URLs.** Every URL expires `VERIFICATION_DOCUMENT_URL_TTL`

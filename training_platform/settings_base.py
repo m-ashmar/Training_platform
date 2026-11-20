@@ -10,6 +10,7 @@ from pathlib import Path
 import os
 import logging
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from .settings_secrets import require_env, get_env, get_int_env, get_secret, get_bool_env_optional
 
@@ -492,8 +493,75 @@ OPENAI_MODEL = get_env("OPENAI_MODEL", "gpt-4o-mini")
 AI_PROVIDER = get_env("AI_PROVIDER", "openai")
 HUGGINGFACE_API_TOKEN = get_env("HUGGINGFACE_API_TOKEN", "")
 
+# The AI coach's model endpoint (`ai_assistant/services/chat_service.py`, the one place
+# a model is called). The coach speaks the OpenAI Chat Completions protocol, which
+# most providers and self-hosted servers (vLLM, Ollama) also answer, so the provider
+# is configuration, not code:
+#
+#   AI_API_KEY           the provider's key. Falls back to OPENAI_API_KEY, so an
+#                        environment written before this setting keeps working.
+#   AI_BASE_URL          the provider's address, ending in `/v1`. Empty = the client
+#                        library's default (OpenAI's own API).
+#   AI_ASSISTANT_MODEL   the model's name at that provider.
+#   AI_EXTRA_BODY        optional JSON object merged into every request, for a switch
+#                        the protocol has no field for (turning a model's "thinking"
+#                        phase off is spelled differently by every provider).
+#   AI_PRICE_INPUT_PER_1M_USD / AI_PRICE_OUTPUT_PER_1M_USD
+#                        the model's price per million tokens, both or neither. They
+#                        feed the daily cost ceiling below; without them a model the
+#                        price table does not know is counted at the table's default.
+#
+# No key at all is a supported state, not an error: the app boots and the coach answers
+# every turn with the `config_error` code instead of calling anything.
+AI_API_KEY = get_env("AI_API_KEY", "") or OPENAI_API_KEY
+AI_BASE_URL = get_env("AI_BASE_URL", "").strip()
+
+
+def _ai_extra_body():
+    """`AI_EXTRA_BODY` as a dict. Malformed JSON stops the boot: a typo here would
+    otherwise be a silently ignored switch, found only on the provider's invoice."""
+    import json
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    raw = get_env("AI_EXTRA_BODY", "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"AI_EXTRA_BODY is not valid JSON: {exc}") from None
+    if not isinstance(value, dict):
+        raise ImproperlyConfigured("AI_EXTRA_BODY must be a JSON object, e.g. {}")
+    return value
+
+
+def _ai_price_per_1m_usd():
+    """The configured model's price as `{"input": ..., "output": ...}` strings, or None.
+    One without the other stops the boot: half a price is a wrong cost ceiling."""
+    from decimal import Decimal, InvalidOperation
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    names = ("AI_PRICE_INPUT_PER_1M_USD", "AI_PRICE_OUTPUT_PER_1M_USD")
+    raw = [get_env(name, "").strip() for name in names]
+    if not any(raw):
+        return None
+    if not all(raw):
+        raise ImproperlyConfigured(f"Set both {names[0]} and {names[1]}, or neither.")
+    for name, value in zip(names, raw):
+        try:
+            if Decimal(value) < 0:
+                raise InvalidOperation
+        except InvalidOperation:
+            raise ImproperlyConfigured(f"{name} must be a number >= 0, got {value!r}") from None
+    return {"input": raw[0], "output": raw[1]}
+
+
 AI_ASSISTANT_CONFIG = {
-    "MODEL": get_env("AI_ASSISTANT_MODEL", "gpt-4o-mini"),
+    # `or`, not a default argument: an env file line `AI_ASSISTANT_MODEL=` sets the
+    # variable to the empty string, and an empty model name is refused by every provider.
+    "MODEL": get_env("AI_ASSISTANT_MODEL", "").strip() or "gpt-4o-mini",
     "MAX_RESPONSE_TOKENS": 2000,
     "TEMPERATURE": 0.7,
     "MAX_TOOL_CALLS_PER_TURN": 5,
@@ -507,6 +575,9 @@ AI_ASSISTANT_CONFIG = {
     "HISTORY_BUDGET": 3000,
     "TOOL_RESULTS_BUDGET": 2000,
     "MAX_INPUT_LENGTH": 2000,
+    # Provider-specific request switches and the model's price: see the notes above.
+    "EXTRA_BODY": _ai_extra_body(),
+    "PRICE_PER_1M_USD": _ai_price_per_1m_usd(),
 }
 
 # ========================
@@ -1182,6 +1253,10 @@ MEDIA_URL_TTL = int(get_env('MEDIA_URL_TTL', 24 * 3600))
 #            serves 404 for everything the first one stored, and the volume is 1 GB.
 #            `enforce_production_safety()` refuses to boot on it.
 #   'gcs'    Google Cloud Storage (the owner, 2026-09-19: video lives on GCS).
+#   's3'     any S3-compatible object store (Hetzner Object Storage on the first
+#            deployment, because Google Cloud refuses a Syrian billing account). The
+#            same private objects and expiring signed URLs:
+#            training_platform/s3_storage.py.
 MEDIA_BACKEND = get_env('MEDIA_BACKEND', 'local').strip().lower()
 
 GS_BUCKET_NAME = get_env('GS_BUCKET_NAME', '')
@@ -1193,6 +1268,19 @@ GS_PROJECT_ID = get_env('GS_PROJECT_ID', '')
 # credential is needed — when MEDIA_BACKEND is 'local'.
 GS_CREDENTIALS_SECRET_NAME = get_env('GS_CREDENTIALS_SECRET_NAME', 'GS_CREDENTIALS_JSON')
 GS_LOCATION = get_env('GS_LOCATION', '')
+
+# The S3-compatible store (MEDIA_BACKEND=s3). The address is the provider's S3 endpoint
+# (https://fsn1.your-objectstorage.com for a Hetzner bucket in Falkenstein, and the
+# region is then that location code, `fsn1`); empty means AWS itself. The key pair is
+# two secrets, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, read lazily through
+# `get_secret` in training_platform/s3_storage.py, never here.
+S3_BUCKET_NAME = get_env('S3_BUCKET_NAME', '')
+S3_ENDPOINT_URL = get_env('S3_ENDPOINT_URL', '').strip().rstrip('/')
+S3_REGION_NAME = get_env('S3_REGION_NAME', '').strip()
+# A prefix inside the bucket, like GS_LOCATION.
+S3_LOCATION = get_env('S3_LOCATION', '')
+# 'virtual' (https://bucket.host/key) or 'path' (https://host/bucket/key).
+S3_ADDRESSING_STYLE = get_env('S3_ADDRESSING_STYLE', 'virtual').strip().lower()
 
 # How long a signed URL to a private object lives. Short: the app asks the API for an
 # object and gets a URL it uses immediately, so an hour is already generous, and a URL
@@ -1264,17 +1352,24 @@ CHAT_VOICE_MAX_BYTES = int(get_env('CHAT_VOICE_MAX_BYTES', 10 * 1024 * 1024))
 # With no bucket configured nothing on GCS is allowed. Adding a third party — a video
 # site, say — is a product decision the owner makes here, never a coach's, and it is
 # the only way in.
-def _exercise_media_allowed_hosts(configured, bucket):
+def _exercise_media_allowed_hosts(configured, bucket, s3_bucket='', s3_endpoint=''):
     listed = tuple(part.strip().lower() for part in (configured or '').split(',')
                    if part.strip())
     bucket = (bucket or '').strip().strip('/').lower()
     ours = (f'storage.googleapis.com/{bucket}', f'{bucket}.storage.googleapis.com') \
         if bucket else ()
+    # The S3 store, by the same rule: the project's BUCKET at that provider, in both
+    # address styles, never the provider's bare host (which serves everyone's buckets).
+    s3_bucket = (s3_bucket or '').strip().strip('/').lower()
+    s3_host = urlsplit(s3_endpoint or '').netloc.lower()
+    if s3_bucket and s3_host:
+        ours += (f'{s3_host}/{s3_bucket}', f'{s3_bucket}.{s3_host}')
     return listed + ours
 
 
 EXERCISE_MEDIA_ALLOWED_HOSTS = _exercise_media_allowed_hosts(
-    get_env('EXERCISE_MEDIA_ALLOWED_HOSTS', ''), GS_BUCKET_NAME)
+    get_env('EXERCISE_MEDIA_ALLOWED_HOSTS', ''), GS_BUCKET_NAME,
+    S3_BUCKET_NAME, S3_ENDPOINT_URL)
 
 # WHERE the evidence of a REFUSED upload is kept (training_platform.file_security).
 # A prefix, not a path: the sample is written through the DEFAULT media storage below,
@@ -1327,6 +1422,8 @@ PRIVATE_MEDIA_URL = '/private-media/'
 # (settings_production.enforce_production_safety), because a bucket-level public grant
 # would cover identity cards too.
 VERIFICATION_GS_BUCKET_NAME = get_env('VERIFICATION_GS_BUCKET_NAME', '')
+# The same, on the S3 store.
+VERIFICATION_S3_BUCKET_NAME = get_env('VERIFICATION_S3_BUCKET_NAME', '')
 # How long one signed document URL lives, in seconds. Short: the app and the console ask
 # for a fresh one every time they draw the page.
 VERIFICATION_DOCUMENT_URL_TTL = int(get_env('VERIFICATION_DOCUMENT_URL_TTL', 300))
@@ -1347,16 +1444,21 @@ STORAGES = {
     'default': {'BACKEND': (
         'training_platform.gcs_storage.SignedGoogleCloudStorage'
         if MEDIA_BACKEND == 'gcs'
+        else 'training_platform.s3_storage.SignedS3Storage'
+        if MEDIA_BACKEND == 's3'
         else 'django.core.files.storage.FileSystemStorage'
         if USE_EXTERNAL_MEDIA_STORAGE
         else 'training_platform.media_storage.SignedMediaStorage'
     )},
     # Identity documents and certificates (trainer_verification/storage.py). NEVER the
     # media storage above: a private root outside MEDIA_ROOT on the filesystem, a private
-    # prefix in VERIFICATION_GS_BUCKET_NAME on GCS, and five-minute signed URLs on both.
+    # prefix in VERIFICATION_GS_BUCKET_NAME on GCS (VERIFICATION_S3_BUCKET_NAME on an S3
+    # store), and five-minute signed URLs on all three.
     'verification_documents': {'BACKEND': (
         'training_platform.gcs_storage.PrivateDocumentGoogleCloudStorage'
         if MEDIA_BACKEND == 'gcs'
+        else 'training_platform.s3_storage.PrivateDocumentS3Storage'
+        if MEDIA_BACKEND == 's3'
         else 'trainer_verification.storage.PrivateDocumentStorage'
     )},
     # Compressed + hashed filenames, so static assets can be cached immutably and a

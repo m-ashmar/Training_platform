@@ -35,7 +35,7 @@
 # 5.2 is the LTS line: security fixes until April 2028. 5.1 stopped receiving them in
 # December 2025 (and 5.1.3 had missed every later 5.1 security release). Do not move to
 # 6.x without its own migration work: the next LTS after 5.2 is 6.2.
-Django==5.2.17
+Django==5.2.19
 djangorestframework==3.18.1
 django-cors-headers==4.9.0
 django-filter==26.1
@@ -100,7 +100,7 @@ python-bidi==0.6.11
 # Image Processing
 # Pillow decodes every image a user uploads (training_platform/file_security.py), so it
 # is kept on the newest release; tests/test_django_lts.py holds its floor.
-Pillow==12.3.0
+Pillow==13.0.0
 
 # Object storage. Media lives in Google Cloud Storage in production (the owner,
 # 2026-09-19: video lives on GCS) and on the filesystem in development and in the test

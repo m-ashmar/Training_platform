@@ -144,6 +144,17 @@ One about email (found building `build/email-channel`, 2026-09-27):
   the outbox by recipient or subject, not by length. A receiver added to
   `payment_completed` must never raise: the payout receiver shares that signal.
 
+Two about the environment (found building `deploy/`, 2026-11-20):
+
+- **An EMPTY variable is not an unset one.** `get_env("X", "default")` answers `""` for
+  a line `X=` in an env file, and the default is gone (an empty `AI_ASSISTANT_MODEL`
+  was an empty model name on every request). A setting whose empty value is nonsense
+  reads `get_env("X", "").strip() or "default"`; `deploy/setup.sh` writes an optional
+  variable only when it has a value.
+- **`.dockerignore` patterns are anchored at the root.** `.env` there does not match
+  `deploy/.env`; a secrets file in a new directory needs its own line (or `**/`), or
+  `COPY . .` bakes it into the image (`tests/test_single_server_deploy.py`).
+
 Three more about a public HTML page (found building `legal/`, 2026-09-27):
 
 - **`Content-Language` is written by `LanguageResolutionMiddleware` AFTER the view**, from

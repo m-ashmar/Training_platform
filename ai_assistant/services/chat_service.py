@@ -3,6 +3,12 @@ chat_service.py — Core GPT orchestration with function calling.
 
 Manages the full chat loop: context compilation → GPT call → tool execution →
 streaming response. Designed for async usage from the WebSocket consumer.
+
+The model is reached through the OpenAI Chat Completions protocol, and WHICH provider
+answers is configuration: `AI_API_KEY`, `AI_BASE_URL`, `AI_ASSISTANT_MODEL` and
+`AI_EXTRA_BODY` (`settings_base.py`, "AI Integration"). With no key the coach is off:
+every turn answers `config_error`. `manage.py ai_coach_eval` runs a fixed set of
+Arabic questions through this service to compare one provider or model with another.
 """
 
 import asyncio
@@ -82,14 +88,49 @@ class ChatService:
         self.max_tool_calls = config.get('MAX_TOOL_CALLS_PER_TURN', 5)
         self.openai_timeout = 30
 
-        self.api_key = getattr(settings, 'OPENAI_API_KEY', '')
-        self.client = openai.AsyncOpenAI(api_key=self.api_key)
+        # Which provider answers is configuration (`settings_base.py`, "AI Integration"):
+        # a key, an address and a model name. `AI_API_KEY` falls back to the older
+        # `OPENAI_API_KEY`, here as well as in settings, so a test or a caller that
+        # overrides only the old name still decides the key.
+        self.api_key = (getattr(settings, 'AI_API_KEY', '')
+                        or getattr(settings, 'OPENAI_API_KEY', ''))
+        self.base_url = getattr(settings, 'AI_BASE_URL', '') or None
+        #: Sent with every completion, for switches the protocol has no field for.
+        self.extra_body = config.get('EXTRA_BODY') or None
+        #: None when no provider is configured — the coach is then off, and
+        #: `chat_stream` says so with `config_error` instead of calling anything.
+        self.client = self._build_client()
 
         self.context_compiler = ContextCompiler()
         self.memory_service = MemoryService()
         self.sanitizer = InputSanitizer()
         self.data_collector = DataCollector()
         self.cost_tracker = CostTracker()
+
+    def _build_client(self):
+        """The provider client, or None when there are no credentials to build one.
+
+        The pinned client library refuses to be constructed without a key
+        (`OpenAIError: Missing credentials`). This service is built in the socket
+        consumer's `__init__`, so that refusal used to escape there: with no key in the
+        environment — a deploy with the AI coach deliberately off, or a test machine —
+        every connection to the coach's socket died on an unhandled exception instead
+        of answering. No key is a state the settings promise to survive ("a missing key
+        disables the feature"), so it is answered here: no client, and every turn gets
+        the `config_error` frame the app already knows.
+
+        The library, not this method, decides what counts as credentials (it also
+        reads its own environment variables), so the constructor is always called and
+        only its refusal is caught.
+        """
+        kwargs = {"api_key": self.api_key}
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        try:
+            return openai.AsyncOpenAI(**kwargs)
+        except openai.OpenAIError as exc:
+            logger.warning("AI coach is off: no provider client could be built (%s)", exc)
+            return None
 
     async def chat_stream(self, user, message: str, session_id=None):
         """
@@ -161,6 +202,19 @@ class ChatService:
             }
             return
 
+        # No provider configured (`_build_client`): the coach is off. Said here — after
+        # the gates that cost nothing, before the insights are computed and the session
+        # row is written — so a refused turn leaves nothing behind, and with the same
+        # frame an invalid key gets, which the app already handles.
+        if self.client is None:
+            logger.warning("AI coach turn refused: no AI provider is configured")
+            yield {
+                "type": "error",
+                "content": str(_("AI service is temporarily unavailable. Please contact support.")),
+                "code": "config_error",
+            }
+            return
+
         # 3. Ensure insights exist (cold start)
         yield {"type": "status", "content": str(_("Getting ready...")),
                "code": "getting_ready"}
@@ -201,15 +255,23 @@ class ChatService:
             try:
                 yield self._iteration_status(iteration)
 
+                request = {
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": self.max_response_tokens,
+                    "temperature": self.temperature,
+                    "stream": True,
+                }
+                # The tools are left out of the last pass so the model has to answer.
+                # Left OUT, not sent as null: OpenAI reads the two alike, but a
+                # compatible server is free to reject `"tools": null` as a malformed
+                # list, and an absent field means the same thing to all of them.
+                if schemas and iteration < self.max_tool_calls:
+                    request["tools"] = schemas
+                if self.extra_body:
+                    request["extra_body"] = self.extra_body
                 response = await asyncio.wait_for(
-                    self.client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        tools=schemas if iteration < self.max_tool_calls else None,
-                        max_tokens=self.max_response_tokens,
-                        temperature=self.temperature,
-                        stream=True,
-                    ),
+                    self.client.chat.completions.create(**request),
                     timeout=self.openai_timeout,
                 )
 
@@ -311,7 +373,7 @@ class ChatService:
                 }
                 return
             except openai.AuthenticationError:
-                logger.critical("OpenAI API key is invalid or expired")
+                logger.critical("The AI provider's API key is invalid or expired")
                 yield {
                     "type": "error",
                     "content": str(_("AI service is temporarily unavailable. Please contact support.")),
@@ -326,7 +388,7 @@ class ChatService:
                 }
                 return
             except Exception as e:
-                logger.exception(f"OpenAI API error: {e}")
+                logger.exception(f"AI provider API error: {e}")
                 yield {
                     "type": "error",
                     "content": str(_("Something went wrong. Please try again.")),

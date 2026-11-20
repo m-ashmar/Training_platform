@@ -176,38 +176,53 @@ jobs:
         with:
           python-version: '3.12'
 
-      # `safety check` scans what is installed, so it must be the lock — the versions
-      # the image ships — before the scanners are added beside it.
-      - name: Install dependencies
+      # Bandit and Semgrep read source and import nothing, so the application's own
+      # dependencies are not installed in this job. Safety reads the lock file itself
+      # (below), from its own environment.
+      - name: Install the scanners
         run: |
-          pip install --require-hashes -r requirements.lock
-          pip install bandit safety semgrep
+          pip install bandit semgrep
 
       # Layer 1: Static Analysis — Bandit (Python security linter)
+      # `_excluded/` is not part of the codebase (CLAUDE.md) and is never in the image
+      # (.dockerignore). One old script in it tripped a High finding, which stopped this
+      # job at its first step: Safety, Semgrep and the secret scan below never ran.
       - name: Bandit Security Scan
         run: |
           bandit -r . \
-            --exclude './.venv,./tests,./node_modules' \
+            --exclude './.venv,./tests,./node_modules,./_excluded' \
             -f json -o bandit-report.json \
             --severity-level medium || true
           bandit -r . \
-            --exclude './.venv,./tests,./node_modules' \
+            --exclude './.venv,./tests,./node_modules,./_excluded' \
             --severity-level high
 
       # Layer 2: Dependency Vulnerability Scan — Safety
       # `|| true` meant a known-vulnerable dependency merged without objection. The
       # report stays informational; the check itself now gates.
+      #
+      # Safety runs from its OWN virtual environment and is pointed at the lock file.
+      # Installed beside the lock it crashed before scanning anything, so this layer
+      # had never run: the lock ships httpx2, Authlib (Safety's HTTP client) uses httpx2
+      # whenever it can import it, and Safety hands it a timeout object made by httpx
+      # ("TypeError: 'Timeout' object cannot be interpreted as an integer"). Reading
+      # requirements.lock also scans exactly what the image installs, without the
+      # scanners' own dependencies mixed in.
       - name: Safety Dependency Check
         run: |
-          safety check --full-report
+          python -m venv "$RUNNER_TEMP/safety"
+          "$RUNNER_TEMP/safety/bin/pip" install --quiet safety
+          "$RUNNER_TEMP/safety/bin/safety" check -r requirements.lock --full-report
 
       # Layer 3: Pattern-based Analysis — Semgrep
+      # `_excluded` is left out for the reason Bandit leaves it out, above.
       - name: Semgrep Security Scan
         run: |
           semgrep --config=auto \
             --exclude='*.pyc' \
             --exclude='.venv' \
             --exclude='node_modules' \
+            --exclude='_excluded' \
             --error \
             --severity ERROR
 
