@@ -10,6 +10,7 @@ from pathlib import Path
 import os
 import logging
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from .settings_secrets import require_env, get_env, get_int_env, get_secret, get_bool_env_optional
 
@@ -558,7 +559,9 @@ def _ai_price_per_1m_usd():
 
 
 AI_ASSISTANT_CONFIG = {
-    "MODEL": get_env("AI_ASSISTANT_MODEL", "gpt-4o-mini"),
+    # `or`, not a default argument: an env file line `AI_ASSISTANT_MODEL=` sets the
+    # variable to the empty string, and an empty model name is refused by every provider.
+    "MODEL": get_env("AI_ASSISTANT_MODEL", "").strip() or "gpt-4o-mini",
     "MAX_RESPONSE_TOKENS": 2000,
     "TEMPERATURE": 0.7,
     "MAX_TOOL_CALLS_PER_TURN": 5,
@@ -1250,6 +1253,10 @@ MEDIA_URL_TTL = int(get_env('MEDIA_URL_TTL', 24 * 3600))
 #            serves 404 for everything the first one stored, and the volume is 1 GB.
 #            `enforce_production_safety()` refuses to boot on it.
 #   'gcs'    Google Cloud Storage (the owner, 2026-09-19: video lives on GCS).
+#   's3'     any S3-compatible object store (Hetzner Object Storage on the first
+#            deployment, because Google Cloud refuses a Syrian billing account). The
+#            same private objects and expiring signed URLs:
+#            training_platform/s3_storage.py.
 MEDIA_BACKEND = get_env('MEDIA_BACKEND', 'local').strip().lower()
 
 GS_BUCKET_NAME = get_env('GS_BUCKET_NAME', '')
@@ -1261,6 +1268,19 @@ GS_PROJECT_ID = get_env('GS_PROJECT_ID', '')
 # credential is needed — when MEDIA_BACKEND is 'local'.
 GS_CREDENTIALS_SECRET_NAME = get_env('GS_CREDENTIALS_SECRET_NAME', 'GS_CREDENTIALS_JSON')
 GS_LOCATION = get_env('GS_LOCATION', '')
+
+# The S3-compatible store (MEDIA_BACKEND=s3). The address is the provider's S3 endpoint
+# (https://fsn1.your-objectstorage.com for a Hetzner bucket in Falkenstein, and the
+# region is then that location code, `fsn1`); empty means AWS itself. The key pair is
+# two secrets, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, read lazily through
+# `get_secret` in training_platform/s3_storage.py, never here.
+S3_BUCKET_NAME = get_env('S3_BUCKET_NAME', '')
+S3_ENDPOINT_URL = get_env('S3_ENDPOINT_URL', '').strip().rstrip('/')
+S3_REGION_NAME = get_env('S3_REGION_NAME', '').strip()
+# A prefix inside the bucket, like GS_LOCATION.
+S3_LOCATION = get_env('S3_LOCATION', '')
+# 'virtual' (https://bucket.host/key) or 'path' (https://host/bucket/key).
+S3_ADDRESSING_STYLE = get_env('S3_ADDRESSING_STYLE', 'virtual').strip().lower()
 
 # How long a signed URL to a private object lives. Short: the app asks the API for an
 # object and gets a URL it uses immediately, so an hour is already generous, and a URL
@@ -1332,17 +1352,24 @@ CHAT_VOICE_MAX_BYTES = int(get_env('CHAT_VOICE_MAX_BYTES', 10 * 1024 * 1024))
 # With no bucket configured nothing on GCS is allowed. Adding a third party — a video
 # site, say — is a product decision the owner makes here, never a coach's, and it is
 # the only way in.
-def _exercise_media_allowed_hosts(configured, bucket):
+def _exercise_media_allowed_hosts(configured, bucket, s3_bucket='', s3_endpoint=''):
     listed = tuple(part.strip().lower() for part in (configured or '').split(',')
                    if part.strip())
     bucket = (bucket or '').strip().strip('/').lower()
     ours = (f'storage.googleapis.com/{bucket}', f'{bucket}.storage.googleapis.com') \
         if bucket else ()
+    # The S3 store, by the same rule: the project's BUCKET at that provider, in both
+    # address styles, never the provider's bare host (which serves everyone's buckets).
+    s3_bucket = (s3_bucket or '').strip().strip('/').lower()
+    s3_host = urlsplit(s3_endpoint or '').netloc.lower()
+    if s3_bucket and s3_host:
+        ours += (f'{s3_host}/{s3_bucket}', f'{s3_bucket}.{s3_host}')
     return listed + ours
 
 
 EXERCISE_MEDIA_ALLOWED_HOSTS = _exercise_media_allowed_hosts(
-    get_env('EXERCISE_MEDIA_ALLOWED_HOSTS', ''), GS_BUCKET_NAME)
+    get_env('EXERCISE_MEDIA_ALLOWED_HOSTS', ''), GS_BUCKET_NAME,
+    S3_BUCKET_NAME, S3_ENDPOINT_URL)
 
 # WHERE the evidence of a REFUSED upload is kept (training_platform.file_security).
 # A prefix, not a path: the sample is written through the DEFAULT media storage below,
@@ -1395,6 +1422,8 @@ PRIVATE_MEDIA_URL = '/private-media/'
 # (settings_production.enforce_production_safety), because a bucket-level public grant
 # would cover identity cards too.
 VERIFICATION_GS_BUCKET_NAME = get_env('VERIFICATION_GS_BUCKET_NAME', '')
+# The same, on the S3 store.
+VERIFICATION_S3_BUCKET_NAME = get_env('VERIFICATION_S3_BUCKET_NAME', '')
 # How long one signed document URL lives, in seconds. Short: the app and the console ask
 # for a fresh one every time they draw the page.
 VERIFICATION_DOCUMENT_URL_TTL = int(get_env('VERIFICATION_DOCUMENT_URL_TTL', 300))
@@ -1415,16 +1444,21 @@ STORAGES = {
     'default': {'BACKEND': (
         'training_platform.gcs_storage.SignedGoogleCloudStorage'
         if MEDIA_BACKEND == 'gcs'
+        else 'training_platform.s3_storage.SignedS3Storage'
+        if MEDIA_BACKEND == 's3'
         else 'django.core.files.storage.FileSystemStorage'
         if USE_EXTERNAL_MEDIA_STORAGE
         else 'training_platform.media_storage.SignedMediaStorage'
     )},
     # Identity documents and certificates (trainer_verification/storage.py). NEVER the
     # media storage above: a private root outside MEDIA_ROOT on the filesystem, a private
-    # prefix in VERIFICATION_GS_BUCKET_NAME on GCS, and five-minute signed URLs on both.
+    # prefix in VERIFICATION_GS_BUCKET_NAME on GCS (VERIFICATION_S3_BUCKET_NAME on an S3
+    # store), and five-minute signed URLs on all three.
     'verification_documents': {'BACKEND': (
         'training_platform.gcs_storage.PrivateDocumentGoogleCloudStorage'
         if MEDIA_BACKEND == 'gcs'
+        else 'training_platform.s3_storage.PrivateDocumentS3Storage'
+        if MEDIA_BACKEND == 's3'
         else 'trainer_verification.storage.PrivateDocumentStorage'
     )},
     # Compressed + hashed filenames, so static assets can be cached immutably and a

@@ -415,6 +415,31 @@ def _gcs_key_problem(name):
     return None
 
 
+def _s3_key_problem(name):
+    """Why one half of the S3 key pair is unusable, or None when it is fine.
+
+    Read the way `training_platform.s3_storage._key` reads it, for the reason given on
+    `_gcs_key_problem`: the boot check and the storage must never disagree about where
+    a secret lives. There is no shape to check beyond "present and not blank": the pair
+    is two opaque strings, and whether the store accepts them is a network question
+    that `manage.py check_media_storage` answers after the deploy.
+    """
+    from django.core.exceptions import ImproperlyConfigured
+
+    from .settings_secrets import get_secret
+
+    if not os.environ.get(name) and not os.environ.get("AWS_SECRET_NAME"):
+        return (f"{name} is not set and there is no secret store to read it from "
+                "— MEDIA_BACKEND=s3 can neither store a file nor sign a URL")
+    try:
+        value = get_secret(name)
+    except ImproperlyConfigured as exc:
+        return f"{name} could not be read — media cannot be stored or signed: {exc}"
+    if not str(value or "").strip():
+        return f"{name} is blank — media cannot be stored or signed"
+    return None
+
+
 #: Domains no provider will send for: the development placeholder settings_base ships
 #: (`noreply@trainingplatform.com` — the From every email had until 2026-09-27) and the
 #: names reserved for documentation (RFC 2606).
@@ -620,13 +645,45 @@ def enforce_production_safety():
     # filesystem is lost when it stops, and a volume attaches to ONE machine while the
     # web group runs several, so a picture uploaded through machine A is a 404 through
     # machine B; video does not fit on one at all. fly.toml mounts no volume. The
-    # deploy sets MEDIA_BACKEND=gcs (the owner, 2026-09-19). Refused at boot rather than
+    # deploy sets MEDIA_BACKEND=gcs (the owner, 2026-09-19) or MEDIA_BACKEND=s3 (any
+    # S3-compatible store: what the single-server deploy in deploy/ uses, so that a
+    # rebuilt or replaced server still has every upload). Refused at boot rather than
     # discovered from uploads that vanish.
     _media_backend = (globals().get("MEDIA_BACKEND") or "local").lower()
-    if _media_backend != "gcs":
+    if _media_backend == "s3":
+        _s3_bucket = globals().get("S3_BUCKET_NAME")
+        if not _s3_bucket:
+            errors.append("S3_BUCKET_NAME is not set — MEDIA_BACKEND=s3 cannot store anything")
+        # The address is where every upload and every signed URL goes. Plain http would
+        # carry members' photos and the signature itself in the clear, and a signed URL
+        # is a bearer token for as long as it lives.
+        _s3_endpoint = globals().get("S3_ENDPOINT_URL") or ""
+        if _s3_endpoint and not _s3_endpoint.lower().startswith("https://"):
+            errors.append(
+                f"S3_ENDPOINT_URL is {_s3_endpoint!r} — it must be an https:// address "
+                "(empty means AWS itself)")
+        _s3_style = globals().get("S3_ADDRESSING_STYLE") or "virtual"
+        if _s3_style not in ("virtual", "path"):
+            errors.append(
+                f"S3_ADDRESSING_STYLE is {_s3_style!r} — it must be 'virtual' or 'path'")
+        # Both halves of the key pair, READ from wherever `s3_storage` will read them
+        # (SIDE_BUGS S-148: "a secret store is configured" proved nothing for GCS).
+        for _s3_secret in ("S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
+            _s3_problem = _s3_key_problem(_s3_secret)
+            if _s3_problem:
+                errors.append(_s3_problem)
+        # Identity documents, by the same rule as on GCS below: a public media bucket
+        # must not be the bucket that holds them.
+        _s3_docs_bucket = globals().get("VERIFICATION_S3_BUCKET_NAME") or _s3_bucket
+        if globals().get("MEDIA_PUBLIC_APP_CONTENT") and _s3_docs_bucket == _s3_bucket:
+            errors.append(
+                "MEDIA_PUBLIC_APP_CONTENT makes the media bucket public, and trainer "
+                "identity documents would be stored in it — set "
+                "VERIFICATION_S3_BUCKET_NAME to a private bucket")
+    elif _media_backend != "gcs":
         errors.append(
             f"MEDIA_BACKEND is {_media_backend!r} — production must use object storage "
-            "('gcs'); the local filesystem backend loses every upload"
+            "('gcs' or 's3'); the local filesystem backend loses every upload"
         )
     else:
         if not globals().get("GS_BUCKET_NAME"):
