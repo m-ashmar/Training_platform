@@ -184,14 +184,17 @@ jobs:
           pip install bandit safety semgrep
 
       # Layer 1: Static Analysis — Bandit (Python security linter)
+      # `_excluded/` is not part of the codebase (CLAUDE.md) and is never in the image
+      # (.dockerignore). One old script in it tripped a High finding, which stopped this
+      # job at its first step: Safety, Semgrep and the secret scan below never ran.
       - name: Bandit Security Scan
         run: |
           bandit -r . \
-            --exclude './.venv,./tests,./node_modules' \
+            --exclude './.venv,./tests,./node_modules,./_excluded' \
             -f json -o bandit-report.json \
             --severity-level medium || true
           bandit -r . \
-            --exclude './.venv,./tests,./node_modules' \
+            --exclude './.venv,./tests,./node_modules,./_excluded' \
             --severity-level high
 
       # Layer 2: Dependency Vulnerability Scan — Safety
