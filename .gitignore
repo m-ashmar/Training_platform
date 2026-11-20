@@ -102,3 +102,8 @@ logs/
 # once through a `git add -A`; this keeps it out.
 /mobile/
 /flutter/
+
+# The single-server deployment: its secrets, and the temporary file setup.sh writes
+# them through.
+deploy/.env
+deploy/.env.*

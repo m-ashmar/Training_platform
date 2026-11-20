@@ -1,0 +1,44 @@
+# HTTPS in front of Daphne, on the single-server deployment (deploy/docker-compose.yml).
+#
+# Caddy obtains and renews the certificate by itself. Three things are set on purpose:
+#
+#   * LET'S ENCRYPT ONLY. Left alone, Caddy asks Let's Encrypt and falls back to ZeroSSL
+#     when that fails. ZeroSSL refuses Syria, and a certificate that one day renews
+#     through the fallback is an outage with no warning. `cert_issuer` names the whole
+#     list of issuers, so one entry means one issuer: a failed renewal is retried
+#     against Let's Encrypt, and logged.
+#   * The email is INSIDE that issuer and there is no global `email` line. Caddy adds
+#     its ZeroSSL default only when a global email is set; leaving it out is a second
+#     guard against the fallback coming back.
+#   * NO HTTP/3. Only TCP 80 and 443 are published; advertising a UDP port that is not
+#     open makes clients try it first and wait.
+#
+# API_DOMAIN and ACME_EMAIL come from deploy/.env through docker-compose.yml.
+#
+# Check it, and see the single issuer, before the first start and after any change:
+#   docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
+#   docker compose run --rm --no-deps caddy caddy adapt --config /etc/caddy/Caddyfile --pretty
+#       (under "issuers": one entry, "module": "acme", the Let's Encrypt address)
+# Apply a change without restarting (it closes open WebSockets; the app reconnects):
+#   docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+{
+	cert_issuer acme {
+		dir https://acme-v02.api.letsencrypt.org/directory
+		email {$ACME_EMAIL}
+	}
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$API_DOMAIN} {
+	# JSON compresses well and mobile data is the users' cost. WebSockets are untouched.
+	encode zstd gzip
+
+	# Everything goes to Daphne: the API, the WebSockets (ws/...), the operator console
+	# and /static/ (WhiteNoise). Caddy ignores any X-Forwarded-For a client sends and
+	# writes the address it saw, which is what NUM_PROXIES=1 counts on, and it sets
+	# X-Forwarded-Proto, which SECURE_PROXY_SSL_HEADER reads. No body-size limit is set
+	# here: the app refuses an oversized body itself (MAX_REQUEST_BODY_BYTES).
+	reverse_proxy web:8000
+}

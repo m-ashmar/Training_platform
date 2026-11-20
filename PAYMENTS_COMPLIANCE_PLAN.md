@@ -310,8 +310,17 @@ is locked (spec §8); the numbers above are the defaults.
    now configuration, not code — `AI_API_KEY`, `AI_BASE_URL`, `AI_ASSISTANT_MODEL`,
    `AI_EXTRA_BODY`; with no key the coach answers `config_error` instead of killing its
    socket; `manage.py ai_coach_eval` compares models on a fixed set of Arabic questions.
-   WHICH provider is still the owner's decision, and naming it changes
-   `privacy/disclosure.py` `ai_provider`, the inventory and the policy.)
+   The owner chose Gemma, an open model, on 2026-11-17, served by Cloudflare Workers AI
+   on the first deployment; `privacy/disclosure.py` `ai_provider`, the inventory and the
+   policy drafts say so. Another provider changes those three again.)
+   HOSTING (2026-11-20): Fly.io, Google Cloud and the managed databases bill through
+   processors that refuse a Syrian company, so the first deployment is ONE Hetzner
+   server from `deploy/` (Docker Compose: Postgres, Redis, web, worker, beat, Caddy with
+   Let's Encrypt only) and media is an S3-compatible bucket (`MEDIA_BACKEND=s3`,
+   `training_platform/s3_storage.py`, Hetzner Object Storage). `DEPLOY_CHECKLIST.md`
+   section 12 is its runbook; `fly.toml` and the GCS backend stay, unused for now.
+   Still owed on that layout: an off-server database dump on a schedule, and a restore
+   drill.
 
 9. **Left by the builds of 2026-09-24 (evening)** (trainer money, agents, routine
    products, the program builder, trainer nutrition; each branch reviewed adversarially
