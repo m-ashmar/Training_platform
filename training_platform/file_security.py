@@ -1127,7 +1127,7 @@ def _ogg_duration(file):
     file.seek(start)
     tail = file.read(size - start)
     ends_at = look = len(tail)
-    for _ in range(OGG_MAX_CANDIDATES):
+    for _candidate in range(OGG_MAX_CANDIDATES):
         at = tail.rfind(_OGG_MAGIC, 0, look)
         if at < 0:
             return None
@@ -1194,7 +1194,7 @@ def _matroska_duration(file):
     file.seek(0)
     head = file.read(MATROSKA_HEAD_BYTES)
     at, end, in_segment = 0, len(head), False
-    for _ in range(MATROSKA_MAX_ELEMENTS):
+    for _step in range(MATROSKA_MAX_ELEMENTS):
         if at >= end:
             return None
         element = _ebml_element(head, at)
@@ -1223,7 +1223,7 @@ def _matroska_duration(file):
 def _matroska_info_duration(head, at, end):
     """The seconds an `Info` element's children declare, or None."""
     scale, duration = 1_000_000, None
-    for _ in range(MATROSKA_MAX_ELEMENTS):
+    for _step in range(MATROSKA_MAX_ELEMENTS):
         element = _ebml_element(head, at) if at < end else None
         if element is None or element[2] is None or element[2] > end:
             break
