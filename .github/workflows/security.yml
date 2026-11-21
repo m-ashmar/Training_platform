@@ -272,9 +272,10 @@ jobs:
           pem=$(git grep --no-color -nIE -A1 -e '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----' \
               -- . ':(exclude)_excluded') && rc=0 || rc=$?
           [ "$rc" -le 1 ] || { echo "::error::The secret scan did not run (git grep exit $rc)."; exit 2; }
+          # Keep the place (file:line), drop the key.
           body=$(printf '%s\n' "$pem" \
               | grep -E -e '-[0-9]+-[[:space:]]*[A-Za-z0-9+/]{40,}={0,2}[[:space:]]*$' \
-              | sed -E 's/-([0-9]+)-[[:space:]]*[A-Za-z0-9+/]+={0,2}[[:space:]]*$/:\1/') || true
+              | sed -E 's|-([0-9]+)-[[:space:]]*[A-Za-z0-9+/]+={0,2}[[:space:]]*$|:\1|') || true
           if [ -n "$hits$body" ]; then
             printf '%s\n' "$hits" | cut -d: -f1,2 | grep -v '^$' || true
             printf '%s\n' "$body" | grep -v '^$' || true
