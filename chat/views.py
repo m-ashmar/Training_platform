@@ -330,21 +330,27 @@ class MediaMessageView(APIView):
     | 400 | `mime_detection_failed`, `file_validation_error` | the image guard itself failed on the file |
     | 503 | `upload_busy` | a photo, while the server is already decoding as many images as its memory holds (`training_platform/image_budget.py`): nothing was decoded, stored or counted against the allowance; send it again after `Retry-After` seconds (`retry_after_seconds` in the body) |
 
+    Every refusal is the API's one envelope, `{detail, error, code, field_errors?}`
+    (`training_platform/exception_handler.py`). A refusal of the exercise or of the
+    upload guard — `exercise_only_on_video`, `unknown_exercise`, and
+    `media_file_required` with every 400 after it in the table — carries its sentence
+    in `field_errors.non_field_errors` too, and in the top-level `non_field_errors`
+    (BACKEND_BUGS B-149: they used to come as `{error, code}` alone). Branch on the
+    top-level `code`.
+
     Nothing here differs by build: a message is not a product.
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        from django.core.exceptions import ValidationError as DjangoValidationError
-
-        try:
-            message, created = services.send_media_message(
-                request.user, request.data, request.FILES.get('file'))
-        except DjangoValidationError as refused:
-            return Response({'error': refused.messages[0],
-                             'code': getattr(refused, 'code', None) or 'invalid_media'},
-                            status=status.HTTP_400_BAD_REQUEST)
+        # The upload guard's refusals are Django ValidationErrors carrying their code;
+        # they reach the API's exception handler like every other refusal
+        # (`training_platform/exception_handler.py`), which keeps that code and writes
+        # the one envelope. They were rendered here by hand as `{error, code}`, with no
+        # `field_errors` (BACKEND_BUGS B-149).
+        message, created = services.send_media_message(
+            request.user, request.data, request.FILES.get('file'))
         return Response(MessageSerializer(message, context={'request': request}).data,
                         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 

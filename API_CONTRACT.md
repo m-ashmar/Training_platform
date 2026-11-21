@@ -650,7 +650,11 @@ refused here —, `corrupt_image`, `invalid_aspect_ratio` (over 10:1), `unreadab
 `image_too_many_pixels`, and `mime_detection_failed` / `file_validation_error` when the
 guard itself fails), and for a photo `upload_busy` (503, 2026-09-27: every image-decode
 slot of the server is taken — nothing was stored or counted; send it again after
-`Retry-After`). The push quotes the caption, or says "Photo" / "Voice note" /
+`Retry-After`). Every refusal is the API's one envelope: a refusal of the exercise or of
+the upload guard (`exercise_only_on_video`, `unknown_exercise`, `media_file_required` and
+the guards' codes) also carries its sentence in `field_errors.non_field_errors` and the
+top-level `non_field_errors` (additive, 2026-11-21, BACKEND_BUGS B-149; it used to be
+`{detail, error, code}` alone) — branch on `code`. The push quotes the caption, or says "Photo" / "Voice note" /
 "Video" in the recipient's language — never a link. A chat video's poster frame comes
 later, from a worker (above); a WebM or Ogg file declares no duration, so
 `duration_seconds` may be null.

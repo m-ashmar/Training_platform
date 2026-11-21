@@ -397,8 +397,8 @@ def send_media_message(sender, data, upload):
     (`chat.media.queue_poster`, 2026-09-27), so the request never decodes a frame.
 
     Raises DRF exceptions for the refusals the text send shares and for the quota, and
-    Django's `ValidationError` (with its `code`) for the upload's own — the view
-    renders both.
+    Django's `ValidationError` (with its `code`) for the upload's own — the API's
+    exception handler renders both, the latter keeping its code (BACKEND_BUGS B-149).
     """
     from rest_framework.exceptions import NotFound
 

@@ -254,6 +254,39 @@ def test_a_bad_form_names_its_code(api, pair, conversation):
     assert wrong_kind.json()['code'] == 'validation_error'
 
 
+def test_a_guard_refusal_carries_the_api_envelope(api, pair, conversation, settings,
+                                                  media_root):
+    """BACKEND_BUGS B-149: the upload guard's 400s were written by hand in the view as
+    `{error, code}`, so this one route answered two envelope shapes — every other
+    refusal of the API (and this route's own `validation_error`) carries
+    `field_errors`. They now reach the API's exception handler, which keeps the
+    guard's own `code` and writes the one envelope."""
+    from routine.models import Exercise
+
+    _trainer, client = pair
+    squat = Exercise.objects.create(name="Squat")
+    settings.MEDIA_VIDEO_MAX_SECONDS = 10
+    not_audio = SimpleUploadedFile("note.m4a", b"MZ\x90\x00" + b"\x00" * 200,
+                                   content_type="audio/mp4")
+    cases = [
+        ('voice', not_audio, {}, 'media_not_audio'),
+        ('video', video(30.0), {}, 'media_video_too_long'),
+        ('video', None, {}, 'media_file_required'),
+        ('image', photo_with_gps(), {'exercise_id': squat.pk}, 'exercise_only_on_video'),
+    ]
+    for kind, file, extra, code in cases:
+        refused = _post(api, client, conversation, kind, file, **extra)
+        assert refused.status_code == 400, (code, refused.content)
+        body = refused.json()
+        assert body['code'] == code, body
+        assert body['detail'] and body['error'] == body['detail'], body
+        assert 'field_errors' in body, f"{code}: no field_errors in {body}"
+        [entry] = body['field_errors']['non_field_errors']
+        assert entry['message'] == body['detail'], body
+        assert body['non_field_errors'] == [body['detail']], body
+    assert not _stored_files(media_root)
+
+
 # ---------------------------------------------------------------- privacy
 def test_only_the_two_people_in_the_thread_ever_get_the_media(api, make_user, pair,
                                                               conversation):
