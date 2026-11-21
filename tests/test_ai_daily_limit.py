@@ -64,7 +64,11 @@ def _limit_in_a_new_process(value=None):
     if value is not None:
         env["AI_MAX_MESSAGES_PER_DAY"] = value
     env["DJANGO_SETTINGS_MODULE"] = "training_platform.settings_local"
-    code = ("from django.conf import settings; "
+    # settings_local loads the checkout's .env; this process's environment (inherited,
+    # less the one variable) already carries the rest of it, and a line in a
+    # developer's .env must not stand in for the default under test.
+    code = ("import dotenv; dotenv.load_dotenv = lambda *a, **k: False; "
+            "from django.conf import settings; "
             "print('LIMIT', repr(settings.AI_ASSISTANT_CONFIG['MAX_MESSAGES_PER_DAY']))")
     ran = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env,
                          capture_output=True, text=True, timeout=120)
