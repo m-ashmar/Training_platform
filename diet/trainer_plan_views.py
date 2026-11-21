@@ -104,7 +104,10 @@ class TrainerPlanReviewView(APIView):
     - 403 `not_a_trainer` — the caller is not a trainer (an admin included).
     - 403 `not_plan_owner` — another trainer wrote it (the engine's plans too);
       `not_assigned_client` — the client is no longer yours; `plan_superseded` — a
-      newer plan replaced it: the trainer plan reads' own reasons.
+      newer plan replaced it: the trainer plan reads' own reasons. `plan_superseded` is
+      403 here and on the plan reads; the same code is 400 on a trainer's meal write
+      (`trainer/meals/`) and 409 on the client's `client/meals/<meal_id>/complete/`.
+      Each status is shipped and stays (BACKEND_BUGS B-142): branch on the code.
     - 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` — see above.
     - 403 `no_entitlement` / `feature_not_in_plan`.
     - 404 `not_found` — no such plan.

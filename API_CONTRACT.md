@@ -844,6 +844,14 @@ holds.
 **Whose plan (B-140).** The `plan` block of `plan/{id}/meals-with-ingredients/` gains
 `client_id`, the user whose plan it is.
 
+**One code, three statuses (B-142).** `plan_superseded` (a newer plan replaced this
+one) is 400 on a trainer's meal write (`trainer/meals/`, `trainer/meals/{meal_id}/`),
+403 on the trainer's plan reads (`nutrition/plan/{plan_id}/`,
+`meals/{meal_id}/components/`, `plan/{plan_id}/meals-with-ingredients/`) and the review
+(`trainer/diet-plans/{plan_id}/review/`), and 409 on the client's
+`client/meals/{meal_id}/complete/`. Each status is shipped and stays: branch on `code`,
+never on the status. Each view's docstring says so; nothing changed on the wire.
+
 New codes: `bad_macro_split` (400, above). `bad_meals` (400: `meals` is not a non-empty
 list, or an item is not an object). Reused with their meaning: `bad_duration` (now also
 `duration_days`),
@@ -2998,7 +3006,7 @@ of its codes.
 | `diet/v1/trainer/templates/` | 403 `not_a_trainer` |
 | `diet/v1/trainer/diet-plans/` | 400 `missing_fields` (with `fields`), `bad_client_id`, `bad_template_id`, `bad_date`, `bad_body`, `bad_macro_split` (also `trainer/diet-plans/review/`, BACKEND_BUGS B-137); 403 `not_a_trainer` |
 | `diet/v1/trainer/meals/`, `.../{meal_id}/` | 400 `missing_fields` (with `fields`), `bad_diet_plan_id`, `bad_date`, `bad_body`; 403 `not_a_trainer` |
-| `diet/v1/nutrition/plan/{plan_id}/`, `diet/v1/meals/{meal_id}/components/`, `diet/v1/plan/{plan_id}/meals-with-ingredients/` | 403 to a trainer: `not_plan_owner`, `not_assigned_client` or `plan_superseded` (the trainer service's own reason), `not_assigned_view` for any other |
+| `diet/v1/nutrition/plan/{plan_id}/`, `diet/v1/meals/{meal_id}/components/`, `diet/v1/plan/{plan_id}/meals-with-ingredients/` | 403 to a trainer: `not_plan_owner`, `not_assigned_client` or `plan_superseded` (the trainer service's own reason), `not_assigned_view` for any other. `plan_superseded` is 400 on `trainer/meals/` and 409 on `client/meals/{meal_id}/complete/` (BACKEND_BUGS B-142): branch on the code |
 | `diet/v1/client/meals/{meal_id}/` | 403 `clients_only` |
 | `analytics/sessions/end_session/` | 400 `missing_session_id` |
 | `analytics/dashboard/platform_stats/` | 403 `admins_only` |

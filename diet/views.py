@@ -2333,6 +2333,13 @@ class TrainerMealView(APIView):
       `no_food_items`, `bad_food_items`, `bad_food_item`, `bad_quantity`,
       `duplicate_food`, `unknown_food`, `declared_allergen`, `plan_superseded` — the
       trainer service's refusals, `error` says which.
+    - `plan_superseded` — the plan is no longer followed: a newer plan replaced it. It
+      is 400 HERE, on a meal write (POST, PUT and DELETE alike). The same code is 403 on
+      the trainer's plan reads (`nutrition/plan/<plan_id>/`, `meals/<meal_id>/components/`,
+      `plan/<plan_id>/meals-with-ingredients/`) and on the review
+      (`trainer/diet-plans/<plan_id>/review/`), and 409 on the client's
+      `client/meals/<meal_id>/complete/`. Each of the three statuses is shipped and stays
+      (BACKEND_BUGS B-142): branch on `code`, never on the status.
     - 400 `bad_body` — the body is not a JSON object.
     - 403 `not_a_trainer` — the caller is neither a trainer nor an admin.
     - 403 `not_plan_owner` / `not_assigned_client` — another trainer wrote the plan,
@@ -2684,6 +2691,9 @@ class DietPlanNutritionView(APIView):
     reading a plan another trainer wrote, of a client no longer theirs, or one the client
     no longer follows (it answered the status default `permission_denied` until the
     owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    `plan_superseded` is 403 on this read; the same code is 400 on a trainer's meal
+    write (`trainer/meals/`) and 409 on the client's `client/meals/<meal_id>/complete/`.
+    Each status is shipped and stays (BACKEND_BUGS B-142): branch on the code.
     404 `not_found` — no such plan, or not yours (a client, an agent), or a trainer's draft
     not yet sent (a client; BACKEND_BUGS B-132); 500 `server_error`.
     """
@@ -2874,6 +2884,9 @@ class MealComponentsView(APIView):
     reading a plan another trainer wrote, of a client no longer theirs, or one the client
     no longer follows (it answered the status default `permission_denied` until the
     owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    `plan_superseded` is 403 on this read; the same code is 400 on a trainer's meal
+    write (`trainer/meals/`) and 409 on the client's `client/meals/<meal_id>/complete/`.
+    Each status is shipped and stays (BACKEND_BUGS B-142): branch on the code.
     404 `not_found` — no such meal, or not yours; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
@@ -3140,6 +3153,9 @@ class MealCompletionView(APIView):
       subscription is refused here: completing is a use, not a read).
     - 404 `not_found` — no such meal or component, or not this client's.
     - 409 `plan_superseded` — the meal is on a plan that has been replaced; refresh.
+      The same code is 403 on the trainer's plan reads and review, and 400 on the
+      trainer's meal writes (`trainer/meals/`): each status is shipped and stays
+      (BACKEND_BUGS B-142), so branch on the code, never on the status.
     - 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
@@ -4004,6 +4020,9 @@ class DietPlanMealsWithIngredientsView(APIView):
     reading a plan another trainer wrote, of a client no longer theirs, or one the client
     no longer follows (it answered the status default `permission_denied` until the
     owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    `plan_superseded` is 403 on this read; the same code is 400 on a trainer's meal
+    write (`trainer/meals/`) and 409 on the client's `client/meals/<meal_id>/complete/`.
+    Each status is shipped and stays (BACKEND_BUGS B-142): branch on the code.
     404 `not_found` — no such plan, or not yours, or (to a client) a trainer's draft not
     yet sent (BACKEND_BUGS B-132); 500 `server_error`.
     """
