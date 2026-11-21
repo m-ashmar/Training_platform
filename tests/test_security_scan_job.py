@@ -312,10 +312,13 @@ def test_each_checked_false_positive_is_annotated_on_the_line_semgrep_reads(path
 
 
 def test_every_nosemgrep_names_one_rule_and_gives_its_reason():
-    """A bare `nosemgrep` silences every rule on its line, today's and tomorrow's."""
+    """A bare `nosemgrep` silences every rule on its line, today's and tomorrow's.
+    (Documentation may show the form in prose; it annotates nothing.)"""
     annotation = re.compile(r"#\s*nosem(?:grep)?\b(.*)$")
     bad = []
     for name, text in _tracked_text(skip=("_excluded/", "tests/")):
+        if name.endswith(".md"):
+            continue
         lines = text.splitlines()
         for i, line in enumerate(lines):
             m = annotation.search(line)
