@@ -456,7 +456,8 @@ def trainer_message(person, relation, *, request) -> dict | None:
     on the card), so `kind: "voice"` adds three keys — `voice_fields` — and only that
     kind carries them: `audio_url` (signed and expiring, the same `media_url()` the
     thread's `media.url` is, handed only to this client, who is one of the two people
-    in the thread), `duration_seconds` (what the container declared, or null) and
+    in the thread), `duration_seconds` (what the container declared, or what a worker
+    measured after the send when it declared nothing; null until then, B-177) and
     `state`. The URL outlives the 120 s the home is cached for by the signature's own
     life (an hour on GCS).
 

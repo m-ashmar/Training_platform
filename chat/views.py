@@ -172,7 +172,10 @@ class ConversationMessagesView(APIView):
     message and a program card and `{url, duration_seconds, width, height, poster_url}`
     on the others, where `url` and `poster_url` are signed and expire (use them now,
     never store them) and `poster_url` is a video's poster frame, null until a worker
-    has cut it; `exercise` is `{id, name}` on a video that names its move, else null
+    has cut it; `duration_seconds` (a voice note's or video's length) is what its
+    container declares, or — for one that declares none, a WebM recorded live — null
+    until a worker has measured it (`MediaMessageView`); `exercise` is `{id, name}` on
+    a video that names its move, else null
     (see `MediaMessageView` and `MessageSerializer`). `program` is the card
     `{routine_id, template_id, name, day, day_name, exercises, changes}` on a program
     card the CALLER may still read — the rule of `GET /api/routine/routines/{id}/`, so a
@@ -277,8 +280,12 @@ class MediaMessageView(APIView):
     it is quarantined; a video is identified from its own bytes and capped at
     `MEDIA_VIDEO_MAX_BYTES` (64 MB) and `MEDIA_VIDEO_MAX_SECONDS` (90 s) — the media
     kit's numbers; a voice note the same way, under `CHAT_VOICE_MAX_BYTES` (10 MB) and
-    the same 90 s. The stored file is private: its URL is signed, expires, and appears
-    only in answers the two people in this conversation receive.
+    the same 90 s. The 90 s holds for every container that declares its length where
+    it can be read without decoding — an MP4/MOV/M4A, an Ogg (Opus or Vorbis), a WebM
+    with Info/Duration (Ogg and WebM since BACKEND_BUGS B-177; before, only their size
+    was capped) — and the answer's `media.duration_seconds` is that length. The stored
+    file is private: its URL is signed, expires, and appears only in answers the two
+    people in this conversation receive.
 
     A DAILY ALLOWANCE per sender: `CHAT_MEDIA_DAILY_COUNT` files (60) and
     `CHAT_MEDIA_DAILY_BYTES` (512 MB) over any rolling 24 hours, counting every photo,
@@ -303,6 +310,12 @@ class MediaMessageView(APIView):
     Where the worker has no ffmpeg, or cannot read the video, it stays null for good;
     draw a placeholder.
 
+    A voice note or video whose container declares NO length (a WebM a browser recorded
+    live: no Info/Duration) is answered with `media.duration_seconds: null`, and a
+    worker measures it with ffprobe after the send (`chat.tasks.fill_media_duration`,
+    BACKEND_BUGS B-177); both sockets then hear `message.updated` and every later read
+    carries it. Where the worker has no ffprobe it stays null: play it with no clock.
+
     Every refusal, and its `code`, in the order it is decided — this is every code the
     route can answer:
 
@@ -324,8 +337,8 @@ class MediaMessageView(APIView):
     | 403 | `coaching_frozen`, `coaching_unpaid`, `coaching_ended` | the coaching cannot be used (with `trainer_id`); the thread stays readable |
     | 429 | `media_quota_exceeded` | the sender's daily allowance is spent (above) |
     | 400 | `media_file_required` | no `file` part |
-    | 400 | `media_not_a_video`, `media_video_too_large`, `media_video_too_long`, `empty_file` | a video the guard refused: not MP4/MOV/WebM by its bytes, over 64 MB, declaring over 90 s, or empty |
-    | 400 | `media_not_audio`, `media_audio_too_large`, `media_audio_too_long`, `empty_file` | a voice note the guard refused: not M4A/Ogg/WebM by its bytes, over 10 MB, declaring over 90 s, or empty |
+    | 400 | `media_not_a_video`, `media_video_too_large`, `media_video_too_long`, `empty_file` | a video the guard refused: not MP4/MOV/WebM by its bytes, over 64 MB, declaring over 90 s (an MP4/MOV, or a WebM with Info/Duration), or empty |
+    | 400 | `media_not_audio`, `media_audio_too_large`, `media_audio_too_long`, `empty_file` | a voice note the guard refused: not M4A/Ogg/WebM by its bytes, over 10 MB, declaring over 90 s (an M4A, an Ogg, or a WebM with Info/Duration), or empty |
     | 400 | `file_too_large`, `empty_file`, `dangerous_extension`, `invalid_mime_type`, `corrupt_image`, `invalid_aspect_ratio`, `unreadable_image`, `unsupported_format`, `image_dimensions_too_large`, `image_too_many_pixels` | a photo the platform's image guard refused, respectively: over 5 MB; empty; a file name ending in an executable's extension; not JPEG/PNG/GIF/WebP by its bytes (a HEIC is refused here); broken at its header; longer than 10:1 on one side; broken past its header (a truncated or half-downloaded photo); a format the re-encoder does not write; over 10,000 px a side; over 40 MP (or an animation over its frame budget) |
     | 400 | `mime_detection_failed`, `file_validation_error` | the image guard itself failed on the file |
     | 503 | `upload_busy` | a photo, while the server is already decoding as many images as its memory holds (`training_platform/image_budget.py`): nothing was decoded, stored or counted against the allowance; send it again after `Retry-After` seconds (`retry_after_seconds` in the body) |
