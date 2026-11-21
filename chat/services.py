@@ -394,7 +394,9 @@ def send_media_message(sender, data, upload):
     if the row cannot be written, the file is removed again (`chat.media.discard`), so
     a refusal or a race never leaves bytes that nothing points at. A video's poster
     frame is not cut here: it is queued for a worker once the row commits
-    (`chat.media.queue_poster`, 2026-09-27), so the request never decodes a frame.
+    (`chat.media.queue_poster`, 2026-09-27), so the request never decodes a frame; nor
+    is the length of a voice note or video whose container declared none — a worker
+    measures it (`chat.media.queue_duration`, BACKEND_BUGS B-177).
 
     Raises DRF exceptions for the refusals the text send shares and for the quota, and
     Django's `ValidationError` (with its `code`) for the upload's own — the API's
@@ -403,7 +405,7 @@ def send_media_message(sender, data, upload):
     from rest_framework.exceptions import NotFound
 
     from . import media
-    from .models import KIND_VIDEO
+    from .models import KIND_VIDEO, KIND_VOICE
     from .serializers import MediaMessageSerializer
 
     raw = data if hasattr(data, 'get') else {}
@@ -452,13 +454,18 @@ def send_media_message(sender, data, upload):
         raise
 
     _announce(conversation, message)
+    message_id = message.pk
     if kind == KIND_VIDEO:
         # The poster frame is a worker's job, never this request's: queued once the
         # row is committed (at once here, where nothing wraps the send in a wider
         # transaction), after `message.new` went out with `poster_url: null`. The
         # worker announces the frame with `message.updated` (`chat.tasks`).
-        message_id = message.pk
         transaction.on_commit(lambda: media.queue_poster(message_id))
+    if kind in (KIND_VOICE, KIND_VIDEO) and message.duration_seconds is None:
+        # A container that declared no length (a WebM recorded live): a worker measures
+        # it with ffprobe once the row commits, and announces it the same way
+        # (`chat.tasks.fill_media_duration`, BACKEND_BUGS B-177).
+        transaction.on_commit(lambda: media.queue_duration(message_id))
     return message, True
 
 

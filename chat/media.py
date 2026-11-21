@@ -42,7 +42,14 @@ worker cuts one JPEG near the start with ffmpeg (`mediakit.tasks`, the media kit
 helpers) and stores it beside the video, private and signed the same way. Until then —
 and for good where the worker has no ffmpeg or cannot read the video — `poster_url` is
 null and the app draws its own placeholder. Nothing on the request decodes a frame.
-A WebM's `duration_seconds` is still what the container declares, or null.
+
+A voice note's or video's `duration_seconds` is what its container declares, read on
+the request without decoding (`probe_declared_duration`: an MP4/M4A's `mvhd`, an Ogg's
+last page, a WebM's Info/Duration), and the 90 s cap applies to each. A container that
+declares nothing — a WebM a browser recorded live — is measured after the send instead
+(BACKEND_BUGS B-177): `queue_duration` hands it to `chat.tasks.fill_media_duration`
+once the row commits, a worker measures it with ffprobe and announces it with
+`message.updated`. Until then, and for good where the worker has no ffprobe, it is null.
 """
 from __future__ import annotations
 
@@ -236,6 +243,20 @@ def queue_poster(message_id) -> None:
         cut_video_poster.delay(message_id)
     except Exception:       # noqa: BLE001 — the video is sent whatever happens here
         logger.warning("could not queue the poster of chat video %s", message_id,
+                       exc_info=True)
+
+
+def queue_duration(message_id) -> None:
+    """Hand a stored voice note or video whose container declared no length to the
+    worker that measures it (`chat.tasks.fill_media_duration`, BACKEND_BUGS B-177).
+    Called on COMMIT, and never raises: a broker that cannot take the message costs the
+    length, not the message (`duration_seconds` stays null)."""
+    try:
+        from .tasks import fill_media_duration
+
+        fill_media_duration.delay(message_id)
+    except Exception:       # noqa: BLE001 — the message is sent whatever happens here
+        logger.warning("could not queue the length of chat message %s", message_id,
                        exc_info=True)
 
 
