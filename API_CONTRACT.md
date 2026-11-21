@@ -379,6 +379,12 @@ in its class docstring. Two worth naming here:
 | `message_not_found` | `POST feedback/` (404) and the socket's `feedback` frame | No assistant message of yours by that id |
 | `ai_consent_required` | every `/api/ai/` route except `data/` (`GET` and `DELETE`) and `training-consent/`, and the socket | The AI coach has not been allowed to read this person's data |
 
+The daily message allowance is **10 per person per day** by default (the owner,
+2026-11-21; it was 50), the same on every plan with the coach and set on the server by
+`AI_MAX_MESSAGES_PER_DAY`. The message after the last one is refused with the `error`
+frame `code: "rate_limit"` (`remaining: 0`, `resets_at`), uncharged; `usage/today/`
+answers the same number as `ai_messages.limit`. No `code` changed.
+
 A turn that ends in an `error` frame is **not** charged against the daily message
 allowance; each turn closes with `{"type": "rate_limit", "remaining", "resets_at"}`
 carrying what is actually left. `resets_at` is the next midnight in the server's time
@@ -1938,7 +1944,8 @@ show plan status, expiry and history, and history without receipts is not histor
   `completed_at`, `reference` and `receipt_available` — the "مدفوعات سابقة" list.
 - `GET /api/subscription/v1/usage/today/` — `{quotas: [{feature, used, limit,
   resets_at}]}` for `daily_meals` and, on a plan with the AI coach, `ai_messages`
-  (the same counter the WebSocket enforces). `limit: 0` is unlimited; no subscription
+  (the same counter and the same allowance the WebSocket enforces: 10 a day by default
+  since 2026-11-21, `AI_MAX_MESSAGES_PER_DAY`). `limit: 0` is unlimited; no subscription
   is `{quotas: []}`, not an error. A pure read: it creates no usage row.
 - `subscriptions/current/` gains `plan_duration_days` (what a renewal adds, and the
   denominator of the days-left gauge — `start_date` cannot serve, a renewal moves only

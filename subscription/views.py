@@ -1101,18 +1101,19 @@ class SubscriptionUsageViewSet(viewsets.ReadOnlyModelViewSet):
 
             {"quotas": [
                {"feature": "daily_meals",  "used": 2,  "limit": 5,  "resets_at": ...},
-               {"feature": "ai_messages",  "used": 12, "limit": 50, "resets_at": ...}]}
+               {"feature": "ai_messages",  "used": 4,  "limit": 10, "resets_at": ...}]}
 
         `limit: 0` means unlimited. `daily_meals` is the diet plan builds the plan
         allows in the client's own calendar day; `ai_messages` appears only for a plan
         that includes the AI coach and is the SAME counter the WebSocket enforces
         (`ai_assistant.consumers`), so the number on the screen is the number the user
-        will hit. A caller with no live subscription gets `{"quotas": []}` — an empty
-        screen, not an error: there is nothing to have used.
+        will hit. Its `limit` is the coach's daily allowance, the same on every plan
+        with the coach: 10 by default (the owner, 2026-11-21; the server's
+        `AI_MAX_MESSAGES_PER_DAY`), read through `daily_message_limit`, the reader the
+        socket refuses with. A caller with no live subscription gets `{"quotas": []}` —
+        an empty screen, not an error: there is nothing to have used.
         """
         from datetime import datetime, time, timedelta
-
-        from django.conf import settings as dj_settings
 
         from .quota import QuotaUnavailable, snapshot
 
@@ -1126,17 +1127,18 @@ class SubscriptionUsageViewSet(viewsets.ReadOnlyModelViewSet):
 
         subscription = request.user.subscription
         if subscription.has_ai_advice:
+            from ai_assistant.consumers import daily_limit_key, daily_message_limit
             from training_platform.cache import ratelimit_cache
 
-            limit = getattr(dj_settings, 'AI_ASSISTANT_CONFIG', {}).get(
-                'MAX_MESSAGES_PER_DAY', 50)
-            # The consumer's own key, to the character: a screen that counted
-            # differently from the thing that refuses would be worse than no screen.
+            # The consumer's own allowance and its own key, from the functions it
+            # refuses with: a screen that counted differently from the thing that
+            # refuses would be worse than no screen.
+            limit = daily_message_limit()
             today = timezone.localdate()
             used = 0
             try:
                 used = int(ratelimit_cache().get(
-                    f"ai_chat_limit:{request.user.id}:{today.isoformat()}") or 0)
+                    daily_limit_key(request.user.id, today)) or 0)
             except Exception:
                 logger.warning("could not read the AI message counter for user %s",
                                request.user.id, exc_info=True)

@@ -50,7 +50,8 @@ async def main():
     import training_platform.cache as C
     rl=C.ratelimit_cache()
     key=f"ai_chat_limit:{u.id}:{timezone.localdate().isoformat()}"
-    rl.set(key, 49, 3600)     # 1 message left of 50
+    from ai_assistant.consumers import daily_message_limit
+    rl.set(key, daily_message_limit() - 1, 3600)     # 1 message left of today's allowance
     a=WebsocketCommunicator(application, f'/ws/ai/chat/?token={tok}')
     b=WebsocketCommunicator(application, f'/ws/ai/chat/?token={tok}')
     for cm in (a,b):
