@@ -352,8 +352,9 @@ def frame_payload(message, *, checked=False) -> dict:
         `readable_routine_ids`, the rule a read of the thread applies, and the card
         rides along only if both may still read it. A routine taken off the client
         since then leaves this frame's card null for both, as the client's own read
-        does; the trainer's next read draws it again. Three small queries, and only for
-        a program card: a photo, voice note or video costs none.
+        does; the trainer's next read draws it again. A few small queries (the pair,
+        then the read rule for each), and only for a program card: a photo, voice note
+        or video costs none.
     """
     from .serializers import readable_routine_ids
 
