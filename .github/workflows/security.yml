@@ -216,6 +216,12 @@ jobs:
 
       # Layer 3: Pattern-based Analysis — Semgrep
       # `_excluded` is left out for the reason Bandit leaves it out, above.
+      # Its rules read every tracked text file, documentation included: a socket address
+      # written with the plain ws scheme fails detect-insecure-websocket even in prose
+      # (write `wss://<host>/...`). A checked false positive is answered AT ITS PLACE:
+      # the reason in a comment, then a line `nosemgrep: <the full rule id>` just before
+      # the finding (see the Dockerfile, wallet/models.py move_funds_atomic,
+      # users/migrations/0026). Never exclude a code directory to silence one.
       - name: Semgrep Security Scan
         run: |
           semgrep --config=auto \
@@ -232,13 +238,47 @@ jobs:
         with:
           extra_args: --only-verified
 
-      # Layer 5: Zero hardcoded secrets verification
+      # Layer 5: committed key SHAPES. TruffleHog (above) reports only a key its provider
+      # confirms is live; this fails on the shape of one, live or not.
+      #
+      # It used to run `grep -rn "$PATTERNS"` with PATTERNS="a|b|c": plain grep reads `|`
+      # as a literal, so it searched for the whole string and could never fail. Each
+      # pattern is now the SHAPE of a credential, never a bare word, so the production
+      # settings' check for a `django-insecure` key, a placeholder (`...`, `not-a-key`)
+      # and a variable's name match none of them: an OpenAI project key, an older `sk-`
+      # key, a Hugging Face token, a generated Django key, an AWS access key id, a GitHub
+      # token, and a PEM private key with its base64 body, written on one line (a JSON or
+      # .env value with \n escapes) or over several. It reads every TRACKED file (git grep
+      # reads what `git ls-files` lists, binary files skipped) except `_excluded/`, and
+      # prints where a key is, never the key. tests/test_security_scan_job.py runs this
+      # script on keys it builds at run time, and on this repository.
       - name: Verify No Hardcoded Secrets
         run: |
-          echo "Checking for hardcoded secrets patterns..."
-          PATTERNS="sk-proj-|hf_V|django-insecure|txwswzyykyowghxa|3d9ebc3df89fa042"
-          if grep -rn "$PATTERNS" --include="*.py" .; then
-            echo "::error::Hardcoded secrets detected in Python files!"
+          echo "Checking every tracked file for key-shaped strings..."
+          # git grep answers 0 = found, 1 = nothing; anything else means the scan did not
+          # run, and that must fail the job rather than read as clean.
+          hits=$(git grep --no-color -nIE \
+              -e 'sk-proj-[A-Za-z0-9_-]{20,}' \
+              -e '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9]{32,}' \
+              -e '(^|[^A-Za-z0-9_])hf_[A-Za-z0-9]{30,}' \
+              -e 'django-insecure-[a-z0-9!@#$%^&*(=+_)-]{30,}' \
+              -e '(^|[^A-Za-z0-9])AKIA[0-9A-Z]{16}' \
+              -e '(^|[^A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{36}' \
+              -e 'github_pat_[A-Za-z0-9_]{30,}' \
+              -e '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----(\\n|[[:space:]])*[A-Za-z0-9+/]{40,}' \
+              -- . ':(exclude)_excluded') && rc=0 || rc=$?
+          [ "$rc" -le 1 ] || { echo "::error::The secret scan did not run (git grep exit $rc)."; exit 2; }
+          # A PEM private key over several lines: its header, then a line of base64.
+          pem=$(git grep --no-color -nIE -A1 -e '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----' \
+              -- . ':(exclude)_excluded') && rc=0 || rc=$?
+          [ "$rc" -le 1 ] || { echo "::error::The secret scan did not run (git grep exit $rc)."; exit 2; }
+          body=$(printf '%s\n' "$pem" \
+              | grep -E -e '-[0-9]+-[[:space:]]*[A-Za-z0-9+/]{40,}={0,2}[[:space:]]*$' \
+              | sed -E 's/-([0-9]+)-[[:space:]]*[A-Za-z0-9+/]+={0,2}[[:space:]]*$/:\1/') || true
+          if [ -n "$hits$body" ]; then
+            printf '%s\n' "$hits" | cut -d: -f1,2 | grep -v '^$' || true
+            printf '%s\n' "$body" | grep -v '^$' || true
+            echo "::error::A key-shaped string is committed at the place(s) above. Remove it, rotate that key, and keep secrets in the server's deploy/.env only."
             exit 1
           fi
           echo "No hardcoded secrets found."
