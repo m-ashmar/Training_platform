@@ -11,6 +11,10 @@ A second workstream shares this branch: the backend changes the v2 app designs a
 (media slots, onboarding fields, trainer matching and proof, chat, home, ...). Its state
 and order live in `BACKEND_DELTA.md`, not here.
 
+**Where things stand (2026-11-22):** Road to 10 phase 0 is the work now (its section below);
+the fix run is paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to
+resume).
+
 ## Build order
 
 | # | Step | Status | Where / what is left |
@@ -80,7 +84,40 @@ and S-245 came from the gate itself.
    JIT slowdown, mitigated in production by the runbook; B-137 trainer macro split).
 4. BACKEND_DELTA item 20 gaps.
 
-## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — resume here
+## Road to 10, the server part (owner's order 2026-11-22) — resume here FIRST
+
+The app session's plan `yalla_gym/app/ROAD_TO_10.md` (app repo, from commit `62c5b58`; read it, never
+edit it) Part 2 lists 26 server items S0.1 to S3.8, each with what the server does today, what is
+asked and what the app will read. The owner paused the fix run for it: phase 0 first, then the fix
+run resumes (next section), then the later Road to 10 phases as the owner orders.
+
+**Owner decisions (2026-11-22, in the backend session), on the decisions the app session drafted in
+ROAD_TO_10 Part 3:**
+
+| Decision | The owner's word | What the server does |
+|---|---|---|
+| D2, a request with a short wallet | **No**: a client cannot send a request with too little balance | S2.5 is NOT built; the 402 `insufficient_balance` refusal stays |
+| D12, "do not renew after this month" | Yes | S2.7 (money: lock order and idempotency as `trainer_relations.py` demands) |
+| D1, verified trainers only | **Not now**: unverified trainers stay listed | S2.6 is NOT built; the directory, matches and `featured_trainers` keep today's rule |
+| D3 to D11, D13 to D16, D18 | Yes, as ROAD_TO_10 states them after `62c5b58` (D11: any member may host a challenge; D18: body measurements only, the two-currency wallet of 2026-09-21 stands) | as the items say |
+| D17 | The owner's own (every account has its QR; only the agent reads it) | — |
+| D19, a plan paid from the wallet | Open, the owner's alone | not built |
+
+**Phase 0** (the app does its own phase 0 in parallel; S0.1 first, the app deletes its own schedule
+arithmetic when it lands). Each landed item: its route, fields and codes in the view docstring and
+API_CONTRACT.md, the row's Status and Backend note when it is a BACKEND_BUGS row, and a message to
+the app session ("Frontend handoff and app build") with the route, fields and codes.
+
+| Item | Row | State |
+|---|---|---|
+| S0.1 one rule for today's programme day (D15: the next day not done; past its dates = `finished`) and a schedule read; `week_of` bounded | B-197 | TODO |
+| S0.2 the home hero's `counts.estimated_minutes` is that day's (the same number S0.1 answers) | B-196 | TODO |
+| S0.3 a trainer with an empty first name is not listed (directory, matches, `featured_trainers`) | B-198 | TODO |
+| S0.4 the account pages answer a trainer correctly (notification kinds, inbox, export, blocked, the delete-account refusal while coaching, no AI consent rows) | — | TODO |
+| S0.5 the gateway list says per gateway `available`, `kind` (`automatic` or `reviewed`) and the hours for `reviewed` (D5) | — | TODO |
+| S0.6 home's cached page is dropped after the person's own action (plan built, request sent or answered, top-up credited, programme bought, subscription changed) | — | TODO |
+
+## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, resume after Road to 10 phase 0
 
 **Review first.** Every open BACKEND_BUGS row B-136..B-183 was verified against the code
 (refute-first, probes on cloned databases), and every refutation or severity change was
@@ -112,13 +149,40 @@ local/test database), merged with wave 1.
 
 **GitHub's line merged in (2026-11-21).** The deployed line (GitHub's `spec/payments-compliance`, PR #2 merge `f77b3e1`: Django 5.2.19, Pillow 13, `deploy/`, S3 media, the AI provider settings, security CI) and the fix run's 107 local commits were merged (`e452d21`); `ccd5da0` makes deploy/setup.sh write `PUBLIC_PAGES_BASE_URL` (required in production since B-174, which the live server's deploy/.env lacked) and the app-link identifiers, with a test that boots production on setup.sh's file and the compose environment alone. Full gate on `ccd5da0`: 2900 passed, 0 failed. Pushed. The server update needs one line added to deploy/.env first: DEPLOY_CHECKLIST.md §12.3.
 
+**PAUSED 2026-11-22 (owner): Road to 10 phase 0 goes first, then the fix run resumes here.** The
+owner's list of 2026-11-21 for this run: wave-2 rows B-142, B-143, B-149, B-150, B-168, B-177, then
+B-190, B-195; the small items (Semgrep false positives and the secret-scan step that never matched,
+the AI coach limit 50 -> 10, the nightly database copy with a restore drill, the deploy-key steps for
+a private repository); then wave 3. Everything below is on local branches cut from `ccd5da0`, in the
+worktree named, NOT merged and NOT pushed:
+
+| Branch (worktree `.claude/worktrees/…`) | Holds | Left |
+|---|---|---|
+| `fx/w2-diet` (`wf_45b02467-91e-1`) | B-142, B-143 (docs naming the shipped statuses and verdicts), B-195 (`allergens`/`allergy_terms` on the client's own preferences read); report done | review |
+| `fx/w2-chat` (`wf_45b02467-91e-2`) | B-150 (`frame_payload`), B-149 (the API envelope on media refusals), B-177 (Ogg/WebM length read on the request, 90 s cap, a worker fills a missing length); report done | review: B-177 parses untrusted bytes, fuzz it |
+| `fx/w2-small` (`wf_45b02467-91e-3`) | B-168 (docs), B-190 (`utc_offset_minutes` on agent/me), coach limit 10 from one optional `AI_MAX_MESSAGES_PER_DAY`; report done | review |
+| `fx/w2-ci` (`wf_45b02467-91e-4`) | wss:// in the docs, nosemgrep with reasons on the Dockerfile and the two raw queries, the secret step rewritten to key shapes over tracked files (`tests/test_security_scan_job.py`); the builder ran out of usage before its report | review against the brief; the proof is GitHub's CI run after the push |
+| `fx/w2-backups` (`wf_45b02467-91e-5`) | WIP: `backups/` app (streamed authenticated encryption, store, retention, drill, health, model + migration 0001), `deploy/backup.sh`, `deploy/restore-drill.sh`, `deploy/cron/yallagym`, setup.sh writes `BACKUP_ENCRYPTION_KEY` | every test of its brief, DEPLOY_CHECKLIST §3/§9/§12 docs, the deploy-key steps, boot refusing a half-set configuration, then review |
+
+To resume: the briefs and the three finished reports are in the backend session's directory
+(`~/.claude/projects/-Users-mac-Desktop-Git-t2-Training-platform/741ec8b2-f2c0-4b8b-a55f-bdc282a3d595/fx-w2/`,
+`reports_w2_first.json`; wave-3 briefs in `fx-w3/`), with its last workflow script
+(`workflows/scripts/fix-run-wave-2-resume-*.js`: finish backups, one adversarial reviewer per
+branch, repairs in the same worktrees). Test databases `test_tp_w2_<area>` (and `test_tp_w2old_<area>`
+for the old-code proof) exist; run Python with the private venv `741ec8b2-…/venv-merged` (the
+merged lock). Then merge one branch at a time onto `spec/payments-compliance` (it has moved: the app
+session commits BACKEND_BUGS rows there), fill Status and Backend note, ONE full gate with
+`--create-db` (backups adds a migration), push on the owner's word, and give the server steps (the coach
+limit drops to 10 by itself; `BACKUP_*` stays unset until the owner makes the bucket). New rows since:
+B-196 and B-198 go into the next run (they are Road to 10 S0.2 and S0.3), B-197 is S0.1.
+
 **Waves** (each: worktree builders from one base, tests proven on the old code, merged one
 branch at a time, then ONE full gate + the smoke; a review of the merged diff after):
 
 | Wave | Builders (rows) | State |
 |---|---|---|
 | 1 | payments (B-167, S-232, S-234b, S-238..S-241, B-171), programs (S-234a, B-153..B-156, B-169, B-170, B-180), routine-core (B-136, B-139, B-152, B-157, B-158, B-181 = S-164), diet (S-212, S-215, S-216, S-243, B-137, B-140), accounts (S-235, S-236, S-242, B-159, B-160, B-165, B-166, B-173), home (B-175, B-176, B-178, B-179, B-182, S-193), wallet (B-138, B-144..B-148, B-163, B-184, S-237), privacy (S-213, S-214, S-225, S-231, S-233, B-174), social (B-161, B-162, B-164, S-189, S-194, S-218, S-219) | MERGED 2026-10-07 (`merge/w1`): 57 rows fixed, B-164 and S-193 closed, each test proven on the old code. Six builders lost their login mid-run on 2026-09-28 and were resumed in their worktrees. Migrations renumbered at the merge: routine 0033 quick_log -> 0034 place -> 0035 goal choices, subscription 0019 catalogue_key -> 0020 payer proof. The merged-wave review (5 lenses, verified) confirmed 12 findings (2 HIGH: Arabic allergies written «للوز», a challenge streak broken after its window); all 12 fixed in the repair pass `fx/w1r-*` before landing. Full gate on `82ef697`: 2849 passed, 0 failed (JIT off: the diet week passes). Template goals closed (owner 2026-10-07) |
-| 2 | payments2 (S-052, S-180, S-184, S-185, S-228..S-230), routine2 (S-114, S-165..S-168, S-176, S-177, S-183), diet2 (S-198, S-217, B-142, B-143), accounts2 (S-106, S-181, S-200..S-202, S-223), wallet2 (S-162, S-179, S-221, S-222), platform (S-054, S-178, S-186, S-197, S-199, S-203, S-220, S-224), chat-media (B-149, B-150, B-177, S-187, S-188, S-211, S-226), notifications (B-168, S-196, S-206..S-208), ai-achievements (S-190..S-192, S-195, S-204, S-205) | briefs written; the older SIDE rows are re-verified before fixing |
+| 2 | payments2 (S-052, S-180, S-184, S-185, S-228..S-230), routine2 (S-114, S-165..S-168, S-176, S-177, S-183), diet2 (S-198, S-217, B-142, B-143), accounts2 (S-106, S-181, S-200..S-202, S-223), wallet2 (S-162, S-179, S-221, S-222), platform (S-054, S-178, S-186, S-197, S-199, S-203, S-220, S-224), chat-media (B-149, B-150, B-177, S-187, S-188, S-211, S-226), notifications (B-168, S-196, S-206..S-208), ai-achievements (S-190..S-192, S-195, S-204, S-205) | The owner's BACKEND_BUGS subset (B-142, B-143, B-149, B-150, B-168, B-177, B-190, B-195) is built on `fx/w2-*`, unmerged, PAUSED for Road to 10 (see above). The SIDE rows are not started; the older ones are re-verified before fixing |
 | 3 | routine3 (S-169..S-175, S-227), BACKEND_DELTA item 20 (verify each gap first), every BACKEND_BUGS row filed after B-184, what the wave reviews find | TODO |
 
 ## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
