@@ -2539,7 +2539,12 @@ docstrings carry the full contract (`diet/views.py FoodListView`,
   food for that client. `&hide_conflicts=true` drops excluded and disliked rows,
   `&liked_only=true` keeps the liked ones; `count` follows. 400 `bad_for_client`,
   `bad_hide_conflicts`, `bad_liked_only`, `missing_fields` (`fields: ["for_client"]`,
-  a flag without it).
+  a flag without it). `allergen_verdict` is ONE food's verdict, `safe` / `unverified`
+  / `violation`; the review's `check.allergens.verdict` is the whole plan's,
+  `nothing_declared` / `clear` / `unverified` / `violation` (B-143). A client who
+  declared nothing reads `safe` on every picker row, an uncurated food included, and
+  `nothing_declared` on the review. Two sets, documented in both docstrings; no value
+  changed.
 - **The client's tastes** (B-128). `GET trainer/clients/{client_id}/preferences/` —
   `{client_id, has_preferences, allergies, allergens, allergy_terms, liked_foods,
   disliked_foods}`: the client's own text, its tags, the words the vocabulary does not

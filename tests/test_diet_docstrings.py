@@ -165,3 +165,58 @@ def test_plan_superseded_answers_the_statuses_the_docstrings_name(make_user, api
     completion = api(client).post(f"/api/diet/v1/client/meals/{meal.id}/complete/", {},
                                   content_type=JSON)
     assert refused(completion) == (409, "plan_superseded")
+
+
+# ===================================================================== B-143
+def test_the_picker_verdict_documents_nothing_declared():
+    """The picker's row names the review's set and the case where the two meet (a
+    client who declared nothing); the review names the row's set."""
+    from diet.trainer_plan_views import _REVIEW_CONTRACT
+    from diet.views import FoodListView
+
+    picker = [c for c in _chunks(inspect.getdoc(FoodListView))
+              if "`allergen_verdict` is" in c]
+    assert picker, "FoodListView no longer defines allergen_verdict"
+    row = picker[0]
+    for needle in ("`safe`", "`unverified`", "`violation`", "`nothing_declared`",
+                   "`clear`", "declared nothing", "every row", "review"):
+        assert needle in row, f"FoodListView's allergen_verdict does not name {needle}"
+
+    review = [c for c in _chunks(inspect.cleandoc(_REVIEW_CONTRACT))
+              if "`allergens.verdict` is" in c]
+    assert review, "_REVIEW_CONTRACT no longer defines allergens.verdict"
+    for needle in ("`nothing_declared`", "`clear`", "`safe`", "`for_client.allergen_verdict`",
+                   "food/list/", "declared nothing"):
+        assert needle in review[0], f"the review contract does not name {needle}"
+
+
+@pytest.mark.django_db
+def test_a_client_who_declared_nothing_reads_safe_on_every_picker_row(make_user, api):
+    """What the docstring now says, held: with nothing declared, an UNCURATED food reads
+    `safe` on the picker (there is nothing to check it against) and the review of a plan
+    holding it reads `nothing_declared`; once the client declares an allergy the same
+    food reads `unverified` on both sides."""
+    from diet.models import UserFoodPreference
+
+    trainer, client = _pair(make_user, "b143")
+    uncurated = _food("b143 uncurated", source="unknown")
+    t = api(trainer)
+    UserFoodPreference.objects.update_or_create(user=client, defaults={"allergies": ""})
+
+    def picker_verdict():
+        response = t.get(LIST, {"search": "FXW2 b143", "for_client": client.pk})
+        assert response.status_code == 200, response.content[:400]
+        (row,) = [r for r in response.json()["results"] if r["id"] == uncurated.id]
+        return row["for_client"]["allergen_verdict"]
+
+    plan = _send(t, client, timezone.localdate() + timedelta(days=1), uncurated)
+
+    def review_verdict():
+        response = t.get(f"/api/diet/v1/trainer/diet-plans/{plan.id}/review/")
+        assert response.status_code == 200, response.content[:400]
+        return response.json()["check"]["allergens"]["verdict"]
+
+    assert (picker_verdict(), review_verdict()) == ("safe", "nothing_declared")
+
+    UserFoodPreference.objects.filter(user=client).update(allergies="sesame")
+    assert (picker_verdict(), review_verdict()) == ("unverified", "unverified")

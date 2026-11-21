@@ -65,7 +65,11 @@ _REVIEW_CONTRACT = """
       foods: [{food_id, name, name_ar, dates}]}}`. `allergens.verdict` is
       `nothing_declared`, `clear`, `unverified` (no declared allergen found, but a
       food's allergen data is not verified: not the same as safe) or `violation`;
-      `dislikes.verdict` is `clear` or `present`.
+      `dislikes.verdict` is `clear` or `present`. `allergens.verdict` judges the whole
+      plan. The food picker's `for_client.allergen_verdict` (`food/list/?for_client=`)
+      judges one food and is spelled `safe` / `unverified` / `violation` (BACKEND_BUGS
+      B-143): a client who declared nothing reads `nothing_declared` here and `safe` on
+      every picker row, and a plan whose every row reads `safe` is `clear` here.
 
     Health data (the allergies) goes to the client's APPROVED trainer only: a trainer
     of this client (the approved relation, `can_access_user_data`), and not while the

@@ -298,7 +298,16 @@ class FoodListView(APIView):
     names; `allergen_verdict` is `violation`, `safe` or
     `unverified` (nothing matched but the food's allergen data is not curated: the plan
     check reports it for review, the write accepts it); `liked` / `disliked` from the
-    client's preferences. With it, `hide_conflicts=true` drops every excluded or
+    client's preferences.
+    `allergen_verdict` is ONE food's verdict for this client (BACKEND_BUGS B-143). A
+    client who declared nothing gets `safe` on every row, an uncurated food included:
+    there is nothing to check it against, so `unverified` is never answered then. The
+    review (`trainer/diet-plans/<plan_id>/review/`) judges the whole PLAN in its own
+    words, `check.allergens.verdict`: `nothing_declared` (the client declared nothing —
+    here, `safe` on every row), `clear` (every food positively cleared: `safe` on each of
+    its rows), `unverified` or `violation`. Two sets for two questions; neither is an
+    alias of the other.
+    With `for_client`, `hide_conflicts=true` drops every excluded or
     disliked row and `liked_only=true` keeps only the client's liked foods; `count` and
     the pages follow. The marks cost the same few queries whatever the page size.
 
