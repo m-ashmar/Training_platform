@@ -993,7 +993,7 @@ anything to buy, on any build:
 
 | preference `event_type` | the email |
 |---|---|
-| `payment_confirmed` | the payment's receipt as a PDF attachment (the same document as `payments/{id}/receipt/?format=pdf`). Email only: there is no push of this type |
+| `payment_confirmed` | the payment's receipt as a PDF attachment (the same document as `payments/{id}/receipt/?format=pdf`). A plan's payment also sends the push `payment_confirmed` (§4), and this row governs both: `channels.fcm` the push, `channels.email` the email. A routine product's web-hub checkout sends this email too, but its pushes are `routine_product_purchased` / `routine_product_sold`, never `payment_confirmed` (BACKEND_BUGS B-168) |
 | `subscription_expiring` | once per cover, when its end comes within 7 days. The 3-day push is unchanged and sends no email |
 | `subscription_expired` | once per cover, with its first lapsed notice (not on each reminder step) |
 | `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed` | with each push; the number and the amount |
@@ -1002,7 +1002,8 @@ Preferences govern the email as they govern the push: `channels.email: false` on
 row (or on `all`) stops its email, `is_enabled: false` stops push and email, and the
 inbox row is written either way. `GET preferences/event_types/` answers additively
 `{"event_types": [...], "email_event_types": [the six above]}`; `payment_confirmed` is a
-valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`).
+valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`). Each of the
+six is a push type too, so each is in `event_types` as well.
 
 | Method | Path | Auth | View |
 |---|---|---|---|

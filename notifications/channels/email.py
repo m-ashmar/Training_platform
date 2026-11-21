@@ -266,8 +266,11 @@ def _withdrawal_composer(event_type: str):
 
 
 #: Every email this channel can send. The `preference` of the receipt is
-#: `payment_confirmed`, the spec's name for the event: until a push of that type exists,
-#: only the `all` preference row reaches it.
+#: `payment_confirmed`, the spec's name for the event and the name of the push a plan's
+#: payment sends beside it: the `all` row and then that type's own row govern the email
+#: (`channels.email`), as they govern the push (`channels.fcm`). A routine product's
+#: checkout sends this email under the same row; its pushes are
+#: `routine_product_purchased` / `routine_product_sold` (BACKEND_BUGS B-168).
 KINDS = {kind.name: kind for kind in (
     EmailKind("payment_receipt", "payment_confirmed", _compose_receipt),
     EmailKind("subscription_expiring", "subscription_expiring", _compose_expiring),
