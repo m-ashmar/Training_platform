@@ -42,7 +42,7 @@ from rest_framework.views import APIView
 from subscription.permissions import HasDietAccess
 from training_platform.api_exceptions import PASSTHROUGH_EXCEPTIONS
 
-from .allergens import ALLERGENS, declared_terms
+from .allergens import ALLERGENS, allergy_reading
 from .models import DailyProgress, DietPlan, FoodItem, Meal, UserFoodPreference
 from .services.meal_payload import day_targets, food_names, meal_payload, target_payload
 
@@ -170,7 +170,9 @@ class TrainerClientPreferencesView(APIView):
       ("kiwi", «الفراولة»), sorted. They are matched against food names too — an
       English word against the English name and ingredients, an Arabic word against the
       Arabic name: the trainer's write refuses a food that names one
-      (`declared_allergen`).
+      (`declared_allergen`). The client's own `GET v1/preferences/` answers these
+      same two fields, from the same function (`diet/allergens.py allergy_reading`,
+      BACKEND_BUGS B-195), so the two reads of one text never disagree.
     - `liked_foods` / `disliked_foods` — `{id, name, name_ar, image_url}` rows, in the
       catalogue's order (the English name, then id).
     - `has_preferences` — false while the client has told us nothing: no allergies, no
@@ -195,8 +197,6 @@ class TrainerClientPreferencesView(APIView):
             prefs = (UserFoodPreference.objects.filter(user=client)
                      .prefetch_related('liked_foods', 'disliked_foods').first())
             allergies = (prefs.allergies or '') if prefs is not None else ''
-            # What the checker refuses with (`declared_terms`), Arabic words included.
-            tags = declared_terms(allergies)
             liked = food_rows(prefs.liked_foods.all()) if prefs else []
             disliked = food_rows(prefs.disliked_foods.all()) if prefs else []
             return Response({
@@ -205,8 +205,10 @@ class TrainerClientPreferencesView(APIView):
                 # says nothing: this is whether they have told us anything.
                 'has_preferences': bool(allergies.strip() or liked or disliked),
                 'allergies': allergies,
-                'allergens': sorted(t for t in tags if not t.startswith('free:')),
-                'allergy_terms': sorted(t[5:] for t in tags if t.startswith('free:')),
+                # What the checker refuses with (`declared_terms`), Arabic words
+                # included: `allergens` and `allergy_terms`, from the one function the
+                # client's own `preferences/` read answers them with (B-195).
+                **allergy_reading(allergies),
                 'liked_foods': liked,
                 'disliked_foods': disliked,
             })

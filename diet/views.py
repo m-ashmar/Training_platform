@@ -16,6 +16,7 @@ from django.db import transaction
 from django.db.models import Count
 from django.utils.translation import gettext as _, gettext_lazy
 from .tasks import generate_rule_based_plan
+from .allergens import allergy_reading
 from .exceptions import ConstraintViolationError, PersistenceError
 from .engine.rule_based_planner import RuleBasedPlanner
 from .services.rule_based_planner import NoServableMealError
@@ -1073,6 +1074,20 @@ class UserPreferencesView(APIView):
     `GET v1/preferences/` — the caller's liked/disliked foods, the five macro-choice
     lists, `allergies` and `local_ratio`.
 
+    Beside `allergies` (the text as the client wrote it, "" when none), the server's
+    reading of it (BACKEND_BUGS B-195, additive): `allergens` — the tags of the 14-tag
+    vocabulary (`diet/allergens.py`) it names, sorted: `peanut`, `tree_nut`, `milk`,
+    `egg`, `fish`, `shellfish`, `mollusc`, `soy`, `gluten`, `sesame`, `mustard`,
+    `celery`, `lupin`, `sulphite` (an everyday word widens: "nuts" is `peanut` and
+    `tree_nut`; «حساسية للوز» is `tree_nut`) — and `allergy_terms` — the words it names
+    that the vocabulary does not know, English ("kiwi") or Arabic («الفراولة»), sorted.
+    Both are empty for blank text and for "none" in either language («لا يوجد»,
+    «ماعندي»). They are what the plan generator, the trainer's meal write and the swap
+    refuse with, and EXACTLY the two fields the client's trainer reads
+    (`trainer/clients/{client_id}/preferences/`, B-128): one function answers both, so
+    tick the Allergies chips from `allergens` instead of parsing the text again. The
+    writes below answer no preferences object, so nothing else changed.
+
     `POST` — either one food (`action`: `like` | `dislike`, `food_id`), or any of the
     bulk fields: `liked_foods`, `disliked_foods`, `protein_choices`, `carb_choices`,
     `fat_choices`, `vegetable_choices`, `fruit_choices` (lists of food ids),
@@ -1131,6 +1146,9 @@ class UserPreferencesView(APIView):
                     for food in preferences.disliked_foods.all()
                 ],
                 'allergies': preferences.allergies,
+                # The server's reading of that text, from the one function the trainer's
+                # read of this client answers it with (BACKEND_BUGS B-195, B-128).
+                **allergy_reading(preferences.allergies),
                 'protein_choices': [
                     {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.protein_choices.all()

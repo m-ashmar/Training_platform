@@ -719,6 +719,17 @@ every 200 of `GET` and `POST preferences/` (where the tastes and allergies are s
 the 200 of `plans/generate/`, both 201s of `plans/generate-rule/`, and
 `plans/tasks/{task_id}/` once `plan_id` is there. The same on every build.
 
+**The client's allergies as the server reads them** (BACKEND_BUGS B-195, 2026-11-21,
+additive): `GET preferences/` answers, beside `allergies` (the text as typed),
+`allergens` — the canonical tags it names, sorted («حساسية للوز» is `tree_nut`, "nuts"
+is `peanut` and `tree_nut`) — and `allergy_terms` — the words it names that the
+vocabulary does not know, English or Arabic, sorted; both empty for blank text and
+for "none" in either language («لا يوجد»). Exactly the two fields of the trainer's
+`trainer/clients/{client_id}/preferences/` (B-128), from one function
+(`diet/allergens.py allergy_reading`), so the Allergies screen ticks its chips from
+the server's reading instead of parsing the text again. The writes answer no
+preferences object and are unchanged.
+
 No plan is generated from an activity level the client never chose (the owner,
 2026-09-20): `plans/generate/` and `plans/generate-rule/` answer 400
 `activity_level_required` (`field: "activity_level"`) until it is written, and a trainer's
@@ -2552,7 +2563,9 @@ docstrings carry the full contract (`diet/views.py FoodListView`,
   An Arabic word the vocabulary does not know («الفراولة») is one of those words too
   (fix run, 2026-10-07): it is matched against a food's Arabic name, so it can appear
   in `allergy_terms`, in the picker's `excluded_terms` and, as `free:<word>`, in the
-  plan check's `declared_allergens`. No field or code changed.
+  plan check's `declared_allergens`. No field or code changed. The client's own
+  `GET preferences/` answers the same `allergens` and `allergy_terms` (B-195,
+  2026-11-21), from the same function.
 - **The client's week** (B-129). `GET trainer/clients/{client_id}/adherence/
   ?start_date=` — seven `days` (Saturday to Friday by default) with the client's own
   progress figures (ticked meals, calories and protein eaten and their targets, the
