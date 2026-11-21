@@ -493,9 +493,9 @@ def webm_bytes(*, ticks=None, scale=1_000_000, cluster_first=False) -> bytes:
             + _ebml(b"\x18\x53\x80\x67", body, unknown_size=True))
 
 
-def test_the_declared_length_of_an_ogg_and_a_webm_is_read_without_decoding():
-    from training_platform.file_security import (OGG_MAX_CANDIDATES,
-                                                 probe_declared_duration)
+def test_the_declared_length_of_an_ogg_and_a_webm_is_read_without_decoding(monkeypatch):
+    from training_platform import file_security
+    from training_platform.file_security import probe_declared_duration
 
     def read(data, container):
         return probe_declared_duration(io.BytesIO(data), container)
@@ -515,9 +515,15 @@ def test_the_declared_length_of_an_ogg_and_a_webm_is_read_without_decoding():
     # Four bytes "OggS" inside the last page's audio are not a page.
     fake = whole[:-200] + b"OggS" + b"\x5a" * 196
     assert read(fake, 'ogg') == 7.0
-    # Bounded: a tail of nothing but false starts gives up, it does not walk them all.
-    flood = whole[:200] + b"OggS" * (OGG_MAX_CANDIDATES * 50)
-    assert read(flood, 'ogg') is None
+    # Bounded: a tail of nothing but false starts gives up, it does not walk them all
+    # (the head's page, then at most OGG_MAX_CANDIDATES in the tail).
+    walked = []
+    real_page = file_security._ogg_page
+    monkeypatch.setattr(file_security, '_ogg_page',
+                        lambda *a: walked.append(1) or real_page(*a))
+    assert read(whole[:200] + b"OggS" * 3200, 'ogg') is None
+    assert len(walked) <= file_security.OGG_MAX_CANDIDATES + 1, len(walked)
+    monkeypatch.undo()
     # A codec whose clock the reader does not know is left to the worker.
     flac = whole.replace(b"OpusHead", b"\x7fFLAC\x01\x00\x00", 1)
     assert read(flac, 'ogg') is None
@@ -575,7 +581,9 @@ def test_an_ogg_voice_note_carries_its_length(api, pair, conversation, tmp_path,
     from chat import media
 
     queued = []
-    monkeypatch.setattr(media, 'queue_duration', queued.append)
+    # `raising=False`: so that, on the code before B-177 (which had no worker), this
+    # fails on the missing length and not on the stand-in.
+    monkeypatch.setattr(media, 'queue_duration', queued.append, raising=False)
     trainer, client = pair
     for name, args in (("opus.ogg", ('-c:a', 'libopus')),
                        ("vorbis.ogg", ('-c:a', 'libvorbis')),
